@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -50,6 +50,10 @@ pub struct Hub {
     roots: RootCertStore,
     bypass: Mutex<BypassRules>,
     rules: Mutex<Vec<Rule>>,
+    /// Session-only. Off skips every rule without rewriting the text.
+    apply_rules: AtomicBool,
+    /// Session-only. Off drops `break` and `break-res` and keeps the other rules.
+    apply_breaks: AtomicBool,
     upstream: Mutex<Option<Upstream>>,
     /// Idle plaintext origin sockets, used only on the proxy runtime.
     pool: tokio::sync::Mutex<HashMap<(String, u16), Vec<TcpStream>>>,
@@ -105,6 +109,8 @@ impl Hub {
             roots,
             bypass: Mutex::new(BypassRules::default()),
             rules: Mutex::new(Vec::new()),
+            apply_rules: AtomicBool::new(true),
+            apply_breaks: AtomicBool::new(true),
             upstream: Mutex::new(None),
             pool: tokio::sync::Mutex::new(HashMap::new()),
             h2_pool: Mutex::new(HashMap::new()),
@@ -120,6 +126,14 @@ impl Hub {
         *self.rules.lock().unwrap_or_else(|err| err.into_inner()) = rules::parse_rules(text);
     }
 
+    pub fn set_rules_enabled(&self, enabled: bool) {
+        self.apply_rules.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn set_breaks_enabled(&self, enabled: bool) {
+        self.apply_breaks.store(enabled, Ordering::Relaxed);
+    }
+
     pub fn set_upstream(&self, text: &str) {
         *self.upstream.lock().unwrap_or_else(|err| err.into_inner()) = parse_upstream(text);
     }
@@ -133,21 +147,35 @@ impl Hub {
     }
 
     fn plan(&self, host: &str, path: &str) -> rules::Effect {
+        if !self.apply_rules.load(Ordering::Relaxed) {
+            return rules::Effect::default();
+        }
         let rules = self
             .rules
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .clone();
-        rules::effect(&rules, host, path)
+        let effect = rules::effect(&rules, host, path);
+        if self.apply_breaks.load(Ordering::Relaxed) {
+            effect
+        } else {
+            rules::without_breaks(effect)
+        }
     }
 
     fn note_rules(&self, id: u64, host: &str, path: &str) {
+        if !self.apply_rules.load(Ordering::Relaxed) {
+            return;
+        }
         let rules = self
             .rules
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .clone();
-        let hit = rules::hit_summary(&rules, host, path);
+        let mut hit = rules::hit_summary(&rules, host, path);
+        if !self.apply_breaks.load(Ordering::Relaxed) {
+            hit = rules::without_break_labels(&hit);
+        }
         if !hit.is_empty() {
             self.with_session(|session| session.set_rule_hit(id, hit));
             self.touch();
@@ -4278,6 +4306,48 @@ mod tests {
         assert!(text.contains("Upgrade: websocket"));
         assert!(text.contains("Connection: Upgrade"));
         assert!(text.ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    fn rule_switches_skip_matching_without_rewriting_the_text() {
+        let dir = std::env::temp_dir().join(format!("zniff-mute-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Hub::new(ca).unwrap();
+        hub.set_rules("delay example.com 1s\nbreak example.com");
+        assert!(matches!(
+            hub.plan("example.com", "/").action,
+            Some(Action::BreakRequest)
+        ));
+        hub.set_breaks_enabled(false);
+        let kept = hub.plan("example.com", "/");
+        assert!(kept.action.is_none());
+        assert!(!kept.delay.is_zero());
+        hub.set_rules_enabled(false);
+        assert_eq!(hub.plan("example.com", "/"), rules::Effect::default());
+        assert_eq!(
+            hub.rules.lock().unwrap_or_else(|err| err.into_inner()).len(),
+            2
+        );
+        let id = hub.with_session(|session| {
+            session.open(FlowDraft {
+                protocol: Protocol::Http11,
+                method: "GET".into(),
+                host: "example.com".into(),
+                path: "/".into(),
+                url: "http://example.com/".into(),
+                request_headers: Vec::new(),
+            })
+        });
+        hub.note_rules(id, "example.com", "/");
+        assert!(hub.with_session(|session| session.get(id).unwrap().rule_hit.is_empty()));
+        hub.set_rules_enabled(true);
+        hub.note_rules(id, "example.com", "/");
+        assert_eq!(
+            hub.with_session(|session| session.get(id).unwrap().rule_hit.clone()),
+            "delay"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

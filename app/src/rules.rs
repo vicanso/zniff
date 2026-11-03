@@ -195,6 +195,26 @@ pub fn hit_summary(rules: &[Rule], host: &str, path: &str) -> String {
     labels.join(" ")
 }
 
+/// Drops a request or response pause. Delay, headers, CORS, replace, and map stay.
+pub fn without_breaks(mut effect: Effect) -> Effect {
+    if matches!(
+        effect.action,
+        Some(Action::BreakRequest | Action::BreakResponse)
+    ) {
+        effect.action = None;
+    }
+    effect
+}
+
+/// `hit_summary` with the pause labels removed.
+pub fn without_break_labels(summary: &str) -> String {
+    summary
+        .split_whitespace()
+        .filter(|label| *label != "break" && *label != "break-res")
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[cfg(test)]
 pub fn first_match<'a>(rules: &'a [Rule], host: &str, path: &str) -> Option<&'a Rule> {
     rules.iter().find(|rule| rule.matches(host, path))
@@ -741,6 +761,20 @@ break example.com/api
             ),
             "delay replace break"
         );
+        assert_eq!(without_break_labels("delay replace break"), "delay replace");
+        assert_eq!(without_break_labels("break-res"), "");
+        let paused = effect(
+            &parse_rules(
+                "delay example.com 1s\nheader example.com res set X-Test 1\nbreak example.com",
+            ),
+            "example.com",
+            "/",
+        );
+        assert!(matches!(paused.action, Some(Action::BreakRequest)));
+        let kept = without_breaks(paused);
+        assert!(kept.action.is_none());
+        assert!(!kept.delay.is_zero());
+        assert_eq!(kept.response_headers.len(), 1);
         assert_eq!(stopped, "break example.com/pay\n");
         assert!(append_break_line("", "has space", "/pay").is_none());
     }

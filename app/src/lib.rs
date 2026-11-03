@@ -913,6 +913,8 @@ fn flow_list(
     let row_controls = controls.clone();
     let rules_controls = controls.clone();
     let column_controls = controls.clone();
+    let rules_on = signal(true);
+    let breaks_on = signal(true);
     let upstream_controls = controls;
     view()
         .w(move || px(width.get()))
@@ -951,6 +953,8 @@ fn flow_list(
                     rules_controls,
                     upstream_controls,
                     width,
+                    rules_on,
+                    breaks_on,
                 )),
         )
         .child(filter_chips(filter))
@@ -1128,6 +1132,8 @@ fn capture_config(
     rules_controls: Arc<Controls>,
     upstream_controls: Arc<Controls>,
     width: Signal<f32>,
+    rules_on: Signal<bool>,
+    breaks_on: Signal<bool>,
 ) -> impl IntoElement {
     let bypass_for_panel = bypass_text;
     let rules_for_panel = rules_text;
@@ -1141,6 +1147,8 @@ fn capture_config(
             bypass_for_panel,
             rules_for_panel,
             upstream_for_panel,
+            rules_on,
+            breaks_on,
         ))
         .child(config_panel(
             bypass_for_panel,
@@ -1150,6 +1158,8 @@ fn capture_config(
             rules_controls,
             upstream_controls,
             width,
+            rules_on,
+            breaks_on,
         ))
 }
 
@@ -1159,10 +1169,16 @@ fn config_set(bypass: Signal<String>, rules: Signal<String>, upstream: Signal<St
         || !upstream.get().trim().is_empty()
 }
 
+fn capture_muted(rules_on: Signal<bool>, breaks_on: Signal<bool>) -> bool {
+    !rules_on.get() || !breaks_on.get()
+}
+
 fn config_trigger(
     bypass_text: Signal<String>,
     rules_text: Signal<String>,
     upstream_text: Signal<String>,
+    rules_on: Signal<bool>,
+    breaks_on: Signal<bool>,
 ) -> impl IntoElement {
     let border_bypass = bypass_text;
     let border_rules = rules_text;
@@ -1183,7 +1199,9 @@ fn config_trigger(
         .rounded(px(CONTROL_RADIUS))
         .border_1()
         .border_color(move || {
-            if config_set(border_bypass, border_rules, border_upstream) {
+            if capture_muted(rules_on, breaks_on) {
+                status_warn_fg()
+            } else if config_set(border_bypass, border_rules, border_upstream) {
                 accent_blue_border()
             } else {
                 border_control()
@@ -1194,20 +1212,28 @@ fn config_trigger(
         .cursor(Cursor::Pointer)
         .active(|style| style.opacity(0.75))
         .child(when(
-            move || config_set(dot_bypass, dot_rules, dot_upstream),
+            move || config_set(dot_bypass, dot_rules, dot_upstream) || capture_muted(rules_on, breaks_on),
             move || {
                 view()
                     .w(px(6.0))
                     .h(px(6.0))
                     .rounded(px(99.0))
-                    .bg(status_ok_fg())
+                    .bg(move || {
+                        if capture_muted(rules_on, breaks_on) {
+                            status_warn_fg()
+                        } else {
+                            status_ok_fg()
+                        }
+                    })
             },
         ))
         .tooltip(label_tip("配置", "Config"))
         .child(glyph(
             || Glyph::Sliders,
             move || {
-                color(if config_set(label_bypass, label_rules, label_upstream) {
+                color(if capture_muted(rules_on, breaks_on) {
+                    status_warn_fg()
+                } else if config_set(label_bypass, label_rules, label_upstream) {
                     accent_blue_text()
                 } else {
                     fg_secondary()
@@ -1224,6 +1250,8 @@ fn config_panel(
     rules_controls: Arc<Controls>,
     upstream_controls: Arc<Controls>,
     width: Signal<f32>,
+    rules_on: Signal<bool>,
+    breaks_on: Signal<bool>,
 ) -> impl IntoElement {
     view()
         .w(move || px((width.get() - LIST_INSET - LIST_PAD_END).max(200.0)))
@@ -1234,6 +1262,7 @@ fn config_panel(
         .border_color(border_strong())
         .bg(bg_card())
         .shadow_md()
+        .child(rule_switches(rules_on, breaks_on, rules_controls.clone()))
         .child(config_field(
             "直通",
             "Bypass",
@@ -1289,6 +1318,85 @@ fn config_panel(
                 },
             ),
         ))
+}
+
+fn rule_switches(
+    rules_on: Signal<bool>,
+    breaks_on: Signal<bool>,
+    controls: Arc<Controls>,
+) -> impl IntoElement {
+    let break_controls = controls.clone();
+    view()
+        .w_full()
+        .flex_row()
+        .gap_1p5()
+        .child(enable_switch(rules_on, "启用规则", "Rules", move |enabled| {
+            controls.hub.set_rules_enabled(enabled);
+        }))
+        .child(enable_switch(breaks_on, "启用断点", "Breaks", move |enabled| {
+            break_controls.hub.set_breaks_enabled(enabled);
+        }))
+}
+
+fn enable_switch(
+    on: Signal<bool>,
+    zh: &'static str,
+    en: &'static str,
+    apply: impl Fn(bool) + 'static,
+) -> impl IntoElement {
+    view()
+        .h(px(26.0))
+        .px_2()
+        .flex_1()
+        .min_w(px(0.0))
+        .flex_row()
+        .items_center()
+        .justify_center()
+        .gap_1p5()
+        .rounded(px(CONTROL_RADIUS))
+        .border_1()
+        .border_color(move || {
+            if on.get() {
+                accent_blue_border()
+            } else {
+                border_control()
+            }
+        })
+        .bg(move || {
+            if on.get() {
+                accent_blue_soft()
+            } else {
+                bg_control()
+            }
+        })
+        .hover(|style| {
+            style.bg(move || {
+                if on.get() {
+                    accent_blue_soft()
+                } else {
+                    bg_control_hover()
+                }
+            })
+        })
+        .cursor(Cursor::Pointer)
+        .on_press(move || {
+            let next = !on.get();
+            on.set(next);
+            apply(next);
+        })
+        .child(
+            view()
+                .w(px(6.0))
+                .h(px(6.0))
+                .rounded(px(99.0))
+                .bg(move || if on.get() { accent_blue() } else { fg_muted() }),
+        )
+        .child(
+            text(tr(zh, en))
+                .number_of_lines(1)
+                .text_size(px(12.0))
+                .text_color(move || if on.get() { accent_blue_text() } else { fg_secondary() }),
+        )
 }
 
 fn rules_editor(value: Signal<String>, controls: Arc<Controls>) -> impl IntoElement {
