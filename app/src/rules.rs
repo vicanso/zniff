@@ -13,7 +13,11 @@
 //! header example.com/api res set X-Debug 1
 //! header example.com/api req del Cookie
 //! cors example.com
+//! replace example.com/api res hello -> hi there
 //! ```
+//!
+//! `replace` changes UTF-8 text in the body and leaves the rest of the bytes.
+//! `from` is one token. `to` may contain spaces. It is not a terminal rule.
 //!
 //! `delay` is capped at 30s. A response break buffers at most 1 MB.
 
@@ -61,6 +65,14 @@ pub enum Rule {
         host: String,
         path_prefix: String,
     },
+    /// Substitute text in the request or response body. Not a terminal rule.
+    Replace {
+        host: String,
+        path_prefix: String,
+        response: bool,
+        from: String,
+        to: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,6 +96,9 @@ pub struct Effect {
     pub response_headers: Vec<HeaderOp>,
     pub cors: bool,
     pub action: Option<Action>,
+    /// `(from, to)` applied in order to a UTF-8 body that fits in one flow.
+    pub request_replaces: Vec<(String, String)>,
+    pub response_replaces: Vec<(String, String)>,
 }
 
 impl Default for Effect {
@@ -94,6 +109,8 @@ impl Default for Effect {
             response_headers: Vec::new(),
             cors: false,
             action: None,
+            request_replaces: Vec::new(),
+            response_replaces: Vec::new(),
         }
     }
 }
@@ -125,6 +142,9 @@ impl Rule {
                 host, path_prefix, ..
             }
             | Self::Cors {
+                host, path_prefix, ..
+            }
+            | Self::Replace {
                 host, path_prefix, ..
             } => (host, path_prefix),
         }
@@ -180,6 +200,19 @@ pub fn effect(rules: &[Rule], host: &str, path: &str) -> Effect {
                 }
             }
             Rule::Cors { .. } => effect.cors = true,
+            Rule::Replace {
+                response,
+                from,
+                to,
+                ..
+            } => {
+                let pair = (from.clone(), to.clone());
+                if *response {
+                    effect.response_replaces.push(pair);
+                } else {
+                    effect.request_replaces.push(pair);
+                }
+            }
             Rule::MapLocal {
                 file,
                 status,
@@ -329,8 +362,78 @@ fn parse_line(line: &str) -> Option<Rule> {
             })
         }
         "cors" => Some(Rule::Cors { host, path_prefix }),
+        "replace" => {
+            let side = parts.next()?;
+            let rest = parts.collect::<Vec<_>>().join(" ");
+            let (from, to) = rest.split_once(" -> ")?;
+            if from.is_empty() {
+                return None;
+            }
+            let response = match side {
+                "res" | "response" => true,
+                "req" | "request" => false,
+                _ => return None,
+            };
+            Some(Rule::Replace {
+                host,
+                path_prefix,
+                response,
+                from: from.to_string(),
+                to: to.to_string(),
+            })
+        }
         _ => None,
     }
+}
+
+/// Replaces each pair in order. `None` when the body is not UTF-8, `from` is
+/// empty, or nothing changed. Callers keep the original bytes in that case.
+pub fn apply_replaces(body: &[u8], pairs: &[(String, String)]) -> Option<Vec<u8>> {
+    if pairs.is_empty() {
+        return None;
+    }
+    let mut text = std::str::from_utf8(body).ok()?.to_string();
+    let mut changed = false;
+    for (from, to) in pairs {
+        if from.is_empty() || !text.contains(from.as_str()) {
+            continue;
+        }
+        text = text.replace(from, to);
+        changed = true;
+    }
+    changed.then(|| text.into_bytes())
+}
+
+/// One line for the rules box. `from` cannot contain spaces or `->`.
+pub fn append_replace_line(
+    rules: &str,
+    pattern: &str,
+    response: bool,
+    from: &str,
+    to: &str,
+) -> Option<String> {
+    let pattern = pattern.trim();
+    let from = from.trim();
+    let to = to.trim();
+    if pattern.is_empty()
+        || from.is_empty()
+        || pattern.contains(char::is_whitespace)
+        || from.contains(char::is_whitespace)
+        || from.contains("->")
+        || pattern.contains('\n')
+        || to.contains('\n')
+    {
+        return None;
+    }
+    let side = if response { "res" } else { "req" };
+    let line = format!("replace {pattern} {side} {from} -> {to}");
+    let mut next = rules.to_string();
+    if !next.is_empty() && !next.ends_with('\n') {
+        next.push('\n');
+    }
+    next.push_str(&line);
+    next.push('\n');
+    Some(next)
 }
 
 fn parse_delay(text: &str) -> Option<Duration> {
@@ -460,5 +563,28 @@ break example.com/api
             ],
         );
         assert_eq!(headers, vec![("X-From".into(), "zniff".into())]);
+    }
+
+    #[test]
+    fn replace_keeps_the_rest_of_a_utf8_body() {
+        let rules = parse_rules(
+            "replace example.com/api res hello -> hi there\nreplace example.com/api req token -> secret\n",
+        );
+        let applied = effect(&rules, "example.com", "/api");
+        assert!(applied.action.is_none());
+        assert_eq!(
+            applied.response_replaces,
+            vec![("hello".into(), "hi there".into())]
+        );
+        assert_eq!(
+            apply_replaces(b"say hello", &applied.response_replaces).as_deref(),
+            Some(&b"say hi there"[..])
+        );
+        assert!(apply_replaces(b"untouched", &applied.response_replaces).is_none());
+        assert!(apply_replaces(&[0xff, 0xfe], &applied.response_replaces).is_none());
+        let line = append_replace_line("", "example.com/api", true, "hello", "hi there").unwrap();
+        assert_eq!(line, "replace example.com/api res hello -> hi there\n");
+        assert!(append_replace_line("", "has space", true, "a", "b").is_none());
+        assert!(append_replace_line("", "example.com", true, "a -> b", "c").is_none());
     }
 }

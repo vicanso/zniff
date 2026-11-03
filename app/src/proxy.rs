@@ -903,6 +903,8 @@ where
     let mut path = path;
     let mut headers = head.headers.clone();
     let mut body_override: Option<Vec<u8>> = None;
+    let mut request_taken = false;
+    let mut strip_request_encoding = false;
     let websocket = header_is_websocket(&headers);
     let plan = if websocket {
         rules::Effect::default()
@@ -966,6 +968,23 @@ where
         }
         Some(Action::BreakResponse) | None => {}
     }
+    if body_override.is_none() && !plan.request_replaces.is_empty() {
+        if let Some(len) = content_length(&head.headers) {
+            if len <= crate::session::BODY_CAP {
+                let raw = read_exact(client, len).await?;
+                request_taken = true;
+                let encoding = header_value(&head.headers, "content-encoding");
+                if let Some(next) =
+                    replaced_body(&raw, encoding.as_deref(), &plan.request_replaces)
+                {
+                    strip_request_encoding = true;
+                    body_override = Some(next);
+                } else {
+                    body_override = Some(raw);
+                }
+            }
+        }
+    }
     let pool_key = pool_key(&host, port, &hub);
     let mut origin = match hub.take_idle(pool_key.clone()).await {
         Some(stream) => stream,
@@ -990,6 +1009,7 @@ where
     for (name, value) in &headers {
         if name.eq_ignore_ascii_case("proxy-connection")
             || (body_override.is_some() && name.eq_ignore_ascii_case("content-length"))
+            || (strip_request_encoding && name.eq_ignore_ascii_case("content-encoding"))
             || (websocket && name.eq_ignore_ascii_case("sec-websocket-extensions"))
         {
             continue;
@@ -1030,7 +1050,9 @@ where
     if let Some(body) = &body_override {
         origin.write_all(body).await?;
         hub.replace_request(id, headers.clone(), body.clone());
-        let _ = discard_request(client, &head.headers).await;
+        if !request_taken {
+            let _ = discard_request(client, &head.headers).await;
+        }
     } else {
         copy_message_body(
             client,
@@ -1075,6 +1097,32 @@ where
         pos: 0,
         inner: origin,
     };
+    if !websocket && !break_response && !plan.response_replaces.is_empty() {
+        if let Some(len) = content_length(&resp_headers) {
+            if len <= crate::session::BODY_CAP {
+                let raw = read_exact(&mut origin, len).await?;
+                let encoding = header_value(&resp_headers, "content-encoding");
+                if let Some(next) =
+                    replaced_body(&raw, encoding.as_deref(), &plan.response_replaces)
+                {
+                    resp_headers.retain(|(name, _)| {
+                        !name.eq_ignore_ascii_case("content-encoding")
+                            && !name.eq_ignore_ascii_case("transfer-encoding")
+                    });
+                    hub.replace_response(id, status, resp_headers.clone(), next.clone());
+                    write_bytes(client, status, &reason, &resp_headers, &next).await?;
+                    hub.mark_finished(id);
+                    return Ok(());
+                }
+                let head = render_response_head(status, &reason, &resp_headers);
+                client.write_all(head.as_bytes()).await?;
+                client.write_all(&raw).await?;
+                note_decoded(&hub, id, Direction::Response, &raw, encoding.as_deref());
+                hub.mark_finished(id);
+                return Ok(());
+            }
+        }
+    }
     if break_response {
         match read_capped_body(&mut origin, &resp_headers, crate::session::BODY_CAP).await {
             Ok(Some(body)) => {
@@ -2522,6 +2570,7 @@ async fn forward_request(
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
     let (mut parts, body) = req.into_parts();
+    let mut incoming = Some(body);
     let mut path = parts
         .uri
         .path_and_query()
@@ -2541,9 +2590,11 @@ async fn forward_request(
         request_headers: header_pairs(&parts.headers),
     });
     let mut body_override: Option<Vec<u8>> = None;
+    let mut strip_request_encoding = false;
     let mut headers_replaced = false;
     let mut break_response = false;
     let mut response_ops = Vec::new();
+    let mut response_replaces = Vec::new();
     let mut cors = false;
     if !websocket {
         let plan = hub.plan(&host, &path);
@@ -2551,6 +2602,7 @@ async fn forward_request(
             tokio::time::sleep(plan.delay).await;
         }
         response_ops = plan.response_headers.clone();
+        response_replaces = plan.response_replaces.clone();
         cors = plan.cors;
         if !plan.request_headers.is_empty() {
             let mut pairs = header_pairs(&parts.headers);
@@ -2559,7 +2611,7 @@ async fn forward_request(
             headers_replaced = true;
         }
         if cors && parts.method == Method::OPTIONS && plan.action.is_none() {
-            drain_incoming(body).await?;
+            drain_incoming(incoming.take().expect("request body")).await?;
             let mut resp_headers = Vec::new();
             rules::ensure_cors(&mut resp_headers);
             rules::apply_header_ops(&mut resp_headers, &response_ops);
@@ -2568,14 +2620,20 @@ async fn forward_request(
         }
         match &plan.action {
             Some(Action::MapLocal { file, status }) => {
-                record_request_bytes(&hub, id, body, encoding.as_deref()).await?;
+                record_request_bytes(
+                    &hub,
+                    id,
+                    incoming.take().expect("request body"),
+                    encoding.as_deref(),
+                )
+                .await?;
                 return mapped_file_response(&hub, id, file, *status, &response_ops, cors);
             }
             Some(Action::BreakRequest) => {
                 let decision = hub.wait_break(id, BreakSide::Request).await;
                 if decision.drop {
                     hub.set_error(id, "断点丢弃");
-                    drain_incoming(body).await?;
+                    drain_incoming(incoming.take().expect("request body")).await?;
                     return empty_status(&hub, id, StatusCode::NO_CONTENT);
                 }
                 if let Some(next) = decision.headers {
@@ -2600,8 +2658,13 @@ async fn forward_request(
                         format!("{scheme}://{authority}{path}"),
                     );
                     if !same {
-                        let raw =
-                            record_request_bytes(&hub, id, body, encoding.as_deref()).await?;
+                        let raw = record_request_bytes(
+                            &hub,
+                            id,
+                            incoming.take().expect("request body"),
+                            encoding.as_deref(),
+                        )
+                        .await?;
                         return fetch_remote(
                             &hub,
                             id,
@@ -2620,22 +2683,57 @@ async fn forward_request(
             Some(Action::BreakResponse) => break_response = true,
             None => {}
         }
+        if body_override.is_none() && !plan.request_replaces.is_empty() {
+            let known = parts
+                .headers
+                .get(http::header::CONTENT_LENGTH)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|text| text.parse::<usize>().ok());
+            if known.is_some_and(|len| len <= crate::session::BODY_CAP) {
+                let raw = record_request_bytes(
+                    &hub,
+                    id,
+                    incoming.take().expect("request body"),
+                    encoding.as_deref(),
+                )
+                .await?;
+                if let Some(next) =
+                    replaced_body(&raw, encoding.as_deref(), &plan.request_replaces)
+                {
+                    strip_request_encoding = true;
+                    body_override = Some(next);
+                } else {
+                    body_override = Some(raw.to_vec());
+                }
+            }
+        }
     }
     let outbound_body = if let Some(bytes) = body_override {
         parts.headers.remove(http::header::CONTENT_LENGTH);
+        if strip_request_encoding {
+            parts.headers.remove(http::header::CONTENT_ENCODING);
+        }
         if let Ok(value) = http::HeaderValue::from_str(&bytes.len().to_string()) {
             parts.headers.insert(http::header::CONTENT_LENGTH, value);
         }
-        drain_incoming(body).await?;
+        if let Some(left) = incoming.take() {
+            drain_incoming(left).await?;
+        }
         hub.replace_request(id, header_pairs(&parts.headers), bytes.clone());
         RecordingBody::from_bytes(Bytes::from(bytes))
     } else if websocket {
-        RecordingBody::passthrough(body)
+        RecordingBody::passthrough(incoming.take().expect("request body"))
     } else {
         if headers_replaced {
             hub.replace_request(id, header_pairs(&parts.headers), Vec::new());
         }
-        RecordingBody::new(body, hub.clone(), id, Direction::Request, encoding.as_deref())
+        RecordingBody::new(
+            incoming.take().expect("request body"),
+            hub.clone(),
+            id,
+            Direction::Request,
+            encoding.as_deref(),
+        )
     };
     parts.version = match protocol {
         Protocol::Http2 => Version::HTTP_2,
@@ -2687,6 +2785,45 @@ async fn forward_request(
             rules::ensure_cors(&mut pairs);
         }
         replace_header_map(&mut parts.headers, &pairs);
+    }
+    if !websocket && !break_response && !response_replaces.is_empty() {
+        let known = parts
+            .headers
+            .get(http::header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|text| text.parse::<usize>().ok());
+        if known.is_some_and(|len| len <= crate::session::BODY_CAP) {
+            let collected = body
+                .collect()
+                .await
+                .map_err(|err| anyhow!("读取响应体: {err}"))?;
+            let raw = collected.to_bytes();
+            if let Some(next) = replaced_body(&raw, resp_encoding.as_deref(), &response_replaces)
+            {
+                parts.headers.remove(http::header::CONTENT_ENCODING);
+                parts.headers.remove(http::header::CONTENT_LENGTH);
+                if let Ok(value) = http::HeaderValue::from_str(&next.len().to_string()) {
+                    parts.headers.insert(http::header::CONTENT_LENGTH, value);
+                }
+                return synthetic_headers(
+                    &hub,
+                    id,
+                    parts.status,
+                    header_pairs(&parts.headers),
+                    next,
+                );
+            }
+            hub.set_response(id, parts.status.as_u16(), header_pairs(&parts.headers), None);
+            note_decoded(
+                &hub,
+                id,
+                Direction::Response,
+                &raw,
+                resp_encoding.as_deref(),
+            );
+            hub.mark_finished(id);
+            return Ok(Response::from_parts(parts, RecordingBody::from_bytes(raw)));
+        }
     }
     if break_response && !websocket {
         return hold_hyper_response(hub, id, parts, body, resp_encoding).await;
@@ -2842,6 +2979,25 @@ async fn drain_incoming(body: Incoming) -> Result<()> {
         .await
         .map_err(|err| anyhow!("丢掉请求体: {err}"))?;
     Ok(())
+}
+
+/// Decodes `Content-Encoding`, then applies text replacements. `None` keeps
+/// the wire bytes: binary, a failed decode, or a body the pairs do not change.
+fn replaced_body(
+    raw: &[u8],
+    encoding: Option<&str>,
+    pairs: &[(String, String)],
+) -> Option<Vec<u8>> {
+    if pairs.is_empty() || raw.len() > crate::session::BODY_CAP {
+        return None;
+    }
+    let mut decoder = Decoder::from_header(encoding);
+    let mut decoded = decoder.push(raw);
+    decoded.extend(decoder.finish());
+    if decoder.error().is_some() {
+        return None;
+    }
+    rules::apply_replaces(&decoded, pairs)
 }
 
 fn note_decoded(hub: &Hub, id: u64, direction: Direction, raw: &[u8], encoding: Option<&str>) {
@@ -3178,6 +3334,51 @@ mod tests {
         assert_eq!(flow.status, Some(200));
         assert_eq!(flow.response_body, b"hello-snoop");
         assert_eq!(flow.protocol, Protocol::Http11);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn replace_rewrites_a_plain_response_body() {
+        let dir = std::env::temp_dir().join(format!("snoop-replace-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+        hub.set_rules("replace 127.0.0.1 res hello -> hi there");
+        let origin = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = origin.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let _ = sock.read(&mut buf).await.unwrap();
+            let body = b"say hello";
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            sock.write_all(resp.as_bytes()).await.unwrap();
+            sock.write_all(body).await.unwrap();
+        });
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        let hub_serve = hub.clone();
+        tokio::spawn(async move {
+            let (socket, _) = proxy.accept().await.unwrap();
+            let _ = handle_conn(socket, hub_serve).await;
+        });
+        let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+        let req = format!(
+            "GET http://{origin_addr}/hi HTTP/1.1\r\nHost: {origin_addr}\r\nConnection: close\r\n\r\n"
+        );
+        client.write_all(req.as_bytes()).await.unwrap();
+        let mut resp = Vec::new();
+        let _ = timeout(Duration::from_secs(5), client.read_to_end(&mut resp))
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&resp);
+        assert!(text.contains("say hi there"), "{text}");
+        assert!(!text.contains("say hello"), "{text}");
+        let flow = hub.with_session(|session| session.get(1).cloned()).unwrap();
+        assert_eq!(flow.response_body, b"say hi there");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

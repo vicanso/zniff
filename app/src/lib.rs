@@ -1081,26 +1081,30 @@ fn config_panel(
             side_input(
                 rules_text,
                 tr(
-                    "map-local status=429 delay=2s、break-res、header、cors",
-                    "map-local status=429 delay=2s, break-res, header, cors",
+                    "map-local、break-res、replace host res a -> b",
+                    "map-local, break-res, replace host res a -> b",
                 ),
                 64.0,
                 true,
-                move |text| {
-                    rules_text.set(text.to_string());
-                    rules_controls.hub.set_rules(text);
-                    if let Err(err) = save_config(|config| config.rules = text.to_string()) {
-                        set_status(
-                            &rules_controls,
-                            StatusMsg::PrefUnsaved {
-                                name: PrefName::Rules,
-                                err: err.to_string(),
-                            },
-                        );
+                {
+                    let rules_controls = rules_controls.clone();
+                    move |text| {
+                        rules_text.set(text.to_string());
+                        rules_controls.hub.set_rules(text);
+                        if let Err(err) = save_config(|config| config.rules = text.to_string()) {
+                            set_status(
+                                &rules_controls,
+                                StatusMsg::PrefUnsaved {
+                                    name: PrefName::Rules,
+                                    err: err.to_string(),
+                                },
+                            );
+                        }
                     }
                 },
             ),
         ))
+        .child(replace_row(rules_text, rules_controls))
         .child(config_field(
             "上游",
             "Upstream",
@@ -1124,6 +1128,120 @@ fn config_panel(
                 },
             ),
         ))
+}
+
+fn replace_row(rules_text: Signal<String>, controls: Arc<Controls>) -> impl IntoElement {
+    let pattern = signal(String::new());
+    let from = signal(String::new());
+    let to = signal(String::new());
+    let response = signal(true);
+    view()
+        .gap_1()
+        .w_full()
+        .child(
+            text(tr("添加替换", "Add replace"))
+                .text_size(px(11.5))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(fg_muted()),
+        )
+        .child(
+            view()
+                .flex_row()
+                .gap_1()
+                .child(view().flex_1().min_w(px(0.0)).child(side_input(
+                    pattern,
+                    tr("example.com/api", "example.com/api"),
+                    28.0,
+                    false,
+                    move |text| pattern.set(text.to_string()),
+                )))
+                .child(
+                    view()
+                        .w(px(52.0))
+                        .h(px(28.0))
+                        .flex_shrink_0()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(6.0))
+                        .border_1()
+                        .border_color(border_control())
+                        .bg(bg_control())
+                        .cursor(Cursor::Pointer)
+                        .on_press(move || response.set(!response.get()))
+                        .child(
+                            text(move || {
+                                if response.get() {
+                                    tr("响应", "Res")()
+                                } else {
+                                    tr("请求", "Req")()
+                                }
+                            })
+                            .text_size(px(11.0))
+                            .text_color(fg_secondary()),
+                        ),
+                ),
+        )
+        .child(
+            view()
+                .flex_row()
+                .gap_1()
+                .child(view().flex_1().min_w(px(0.0)).child(side_input(
+                    from,
+                    tr("原文", "from"),
+                    28.0,
+                    false,
+                    move |text| from.set(text.to_string()),
+                )))
+                .child(view().flex_1().min_w(px(0.0)).child(side_input(
+                    to,
+                    tr("替换成", "to"),
+                    28.0,
+                    false,
+                    move |text| to.set(text.to_string()),
+                )))
+                .child(
+                    view()
+                        .w(px(52.0))
+                        .h(px(28.0))
+                        .flex_shrink_0()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(6.0))
+                        .bg(accent_blue())
+                        .cursor(Cursor::Pointer)
+                        .on_press(move || {
+                            let Some(next) = crate::rules::append_replace_line(
+                                &rules_text.get(),
+                                &pattern.get(),
+                                response.get(),
+                                &from.get(),
+                                &to.get(),
+                            ) else {
+                                return;
+                            };
+                            rules_text.set(next.clone());
+                            controls.hub.set_rules(&next);
+                            if let Err(err) = save_config(|config| config.rules = next) {
+                                set_status(
+                                    &controls,
+                                    StatusMsg::PrefUnsaved {
+                                        name: PrefName::Rules,
+                                        err: err.to_string(),
+                                    },
+                                );
+                            }
+                            pattern.set(String::new());
+                            from.set(String::new());
+                            to.set(String::new());
+                        })
+                        .child(
+                            text(tr("添加", "Add"))
+                                .text_size(px(11.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(white()),
+                        ),
+                ),
+        )
 }
 
 fn config_field(zh: &'static str, en: &'static str, field: impl IntoElement) -> impl IntoElement {
