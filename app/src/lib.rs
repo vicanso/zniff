@@ -2155,7 +2155,12 @@ fn body_section(
                         .border_color(border_strong())
                         .bg(bg_code())
                         .overflow_hidden()
-                        .child(image(move || shown.preview.get()).h(px(200.0))),
+                        .child(
+                            image(move || shown.preview.get())
+                                .w_full()
+                                .h(px(200.0))
+                                .resize_mode(ResizeMode::Contain),
+                        ),
                 )
                 .child(when(
                     move || !shown.image_caption.get().is_empty(),

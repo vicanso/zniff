@@ -111,9 +111,23 @@ pub fn image_body(
     };
     ImageBody {
         text: String::new(),
-        note,
+        note: without_hex_cap_note(&note),
         caption,
     }
+}
+
+/// The hex-window note belongs on the raw dump. A decoded preview drops it
+/// and keeps every other note, such as a failed decompression.
+fn without_hex_cap_note(note: &str) -> String {
+    note.lines()
+        .filter(|line| !is_hex_cap_note(line))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn is_hex_cap_note(line: &str) -> bool {
+    let line = line.trim();
+    line.starts_with("十六进制只显示前 ") || line.starts_with("Hex shows the first ")
 }
 
 pub fn image_extension(content_type: &str) -> Option<&'static str> {
@@ -1183,13 +1197,23 @@ mod tests {
     #[test]
     fn pretty_image_hides_hex_until_raw() {
         let hex = "89 50 4e 47 ".to_string();
-        let pretty = image_body(true, true, hex.clone(), String::new(), 128, Lang::Zh);
+        let note = "解压失败，以下是原始字节。boom\n十六进制只显示前 4096 字节，共 8000 字节。";
+        let pretty = image_body(true, true, hex.clone(), note.into(), 128, Lang::Zh);
         assert!(pretty.text.is_empty());
         assert_eq!(pretty.caption, "共 128 字节");
-        let raw = image_body(false, true, hex.clone(), "warn".into(), 128, Lang::En);
+        assert!(pretty.note.contains("解压失败"), "{}", pretty.note);
+        assert!(!pretty.note.contains("十六进制"), "{}", pretty.note);
+        let raw = image_body(
+            false,
+            true,
+            hex.clone(),
+            "Hex shows the first 4096 of 8000 bytes.".into(),
+            128,
+            Lang::En,
+        );
         assert_eq!(raw.text, hex);
         assert!(raw.caption.is_empty());
-        assert_eq!(raw.note, "warn");
+        assert!(raw.note.starts_with("Hex shows the first "));
         let plain = image_body(true, false, "{ }".into(), String::new(), 3, Lang::En);
         assert_eq!(plain.text, "{ }");
         assert!(plain.caption.is_empty());
