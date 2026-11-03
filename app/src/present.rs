@@ -179,16 +179,11 @@ pub fn format_timing(
 }
 
 pub const SLOW_AFTER: Duration = Duration::from_secs(1);
-pub const LARGE_BYTES: u64 = 256 * 1024;
 
 pub fn is_slow(started: SystemTime, finished: Option<SystemTime>, now: SystemTime) -> bool {
     let end = finished.unwrap_or(now);
     end.duration_since(started)
         .is_ok_and(|elapsed| elapsed >= SLOW_AFTER)
-}
-
-pub fn is_large(response_bytes: u64, body_len: usize) -> bool {
-    response_bytes >= LARGE_BYTES || body_len as u64 >= LARGE_BYTES
 }
 
 /// Shell exports so curl, Node, Python, and Git trust this proxy.

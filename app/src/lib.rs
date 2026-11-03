@@ -280,7 +280,6 @@ struct RowLine {
     path: String,
     failed: bool,
     slow: bool,
-    large: bool,
     pinned: bool,
 }
 
@@ -1184,7 +1183,13 @@ fn time_cell(rows: Signal<Vec<RowLine>>, at: Position) -> Text {
     .flex_shrink_0()
     .number_of_lines(1)
     .text_size(px(12.0))
-    .text_color(fg_muted())
+    .text_color(move || {
+        if rows.with(|rows| rows.get(at.index()).is_some_and(|row| row.slow)) {
+            status_warn_fg()
+        } else {
+            fg_muted()
+        }
+    })
 }
 
 fn host_cell(rows: Signal<Vec<RowLine>>, at: Position) -> impl IntoElement {
@@ -1228,13 +1233,7 @@ fn host_cell(rows: Signal<Vec<RowLine>>, at: Position) -> impl IntoElement {
             .ellipsize_mode(EllipsizeMode::Middle)
             .text_size(px(12.5))
             .font_weight(FontWeight::MEDIUM)
-            .text_color(move || {
-                if rows.with(|rows| rows.get(at.index()).is_some_and(|row| row.slow)) {
-                    status_warn_fg()
-                } else {
-                    fg_primary()
-                }
-            }),
+            .text_color(fg_primary()),
         )
 }
 
@@ -1252,13 +1251,7 @@ fn path_cell(rows: Signal<Vec<RowLine>>, at: Position) -> Text {
     .number_of_lines(1)
     .ellipsize_mode(EllipsizeMode::Middle)
     .text_size(px(12.0))
-    .text_color(move || {
-        if rows.with(|rows| rows.get(at.index()).is_some_and(|row| row.large)) {
-            status_warn_fg()
-        } else {
-            fg_secondary()
-        }
-    })
+    .text_color(fg_secondary())
     .tooltip(cell_tip(move || {
         tip_rows.with(|rows| {
             rows.get(at.index())
@@ -2810,7 +2803,6 @@ fn row_lines(hub: &Hub, filter: &str) -> Vec<RowLine> {
                         flow.finished_at,
                         std::time::SystemTime::now(),
                     ),
-                    large: present::is_large(flow.response_bytes, flow.response_body.len()),
                     pinned: flow.pinned,
                 })
             })

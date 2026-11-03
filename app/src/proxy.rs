@@ -2385,6 +2385,14 @@ impl<B> RecordingBody<B> {
     }
 }
 
+impl<B> Drop for RecordingBody<B> {
+    fn drop(&mut self) {
+        // An empty body (304, HEAD) is dropped after `is_end_stream` without
+        // `poll_frame` ever running.
+        self.finish_record();
+    }
+}
+
 impl<B> Body for RecordingBody<B>
 where
     B: Body<Data = Bytes> + Unpin,
@@ -2409,6 +2417,15 @@ where
                 if let Some(data) = frame.data_ref() {
                     let bytes = data.clone();
                     this.record_bytes(&bytes);
+                }
+                // hyper stops polling once `is_end_stream` is true, so the
+                // trailing `None` never arrives for the last DATA frame.
+                if this
+                    .inner
+                    .as_ref()
+                    .is_some_and(|inner| inner.is_end_stream())
+                {
+                    this.finish_record();
                 }
                 Poll::Ready(Some(Ok(frame)))
             }
@@ -4707,5 +4724,141 @@ mod tests {
                 .unwrap();
         }
         buf
+    }
+
+    use bytes::Bytes;
+    use http_body::{Body, Frame};
+    use std::pin::Pin;
+    use std::task::Poll;
+
+    struct ChunkThenEnd {
+        pending: std::collections::VecDeque<Bytes>,
+    }
+
+    impl Body for ChunkThenEnd {
+        type Data = Bytes;
+        type Error = std::convert::Infallible;
+
+        fn poll_frame(
+            mut self: Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+            if let Some(chunk) = self.pending.pop_front() {
+                return Poll::Ready(Some(Ok(Frame::data(chunk))));
+            }
+            // The caller stops once `is_end_stream` is true and never polls `None`.
+            Poll::Pending
+        }
+
+        fn is_end_stream(&self) -> bool {
+            self.pending.is_empty()
+        }
+    }
+
+    struct AlreadyEnded;
+
+    impl Body for AlreadyEnded {
+        type Data = Bytes;
+        type Error = std::convert::Infallible;
+
+        fn poll_frame(
+            self: Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+            Poll::Pending
+        }
+
+        fn is_end_stream(&self) -> bool {
+            true
+        }
+    }
+
+    fn open_recorded(hub: &Hub) -> u64 {
+        hub.with_session(|session| {
+            session.open(FlowDraft {
+                protocol: Protocol::Http2,
+                method: "GET".into(),
+                host: "example.com".into(),
+                path: "/".into(),
+                url: "https://example.com/".into(),
+                request_headers: Vec::new(),
+            })
+        })
+    }
+
+    fn poll_once<B>(body: &mut RecordingBody<B>)
+    where
+        B: Body<Data = Bytes> + Unpin,
+    {
+        let waker = std::task::Waker::noop();
+        let mut cx = std::task::Context::from_waker(waker);
+        let _ = Pin::new(body).poll_frame(&mut cx);
+    }
+
+    #[test]
+    fn recording_body_finishes_on_end_of_stream_without_a_none_poll() {
+        let dir = std::env::temp_dir().join(format!(
+            "zniff-body-end-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+        let id = open_recorded(&hub);
+        hub.with_session(|session| session.set_response(id, 200, Vec::new(), None));
+        {
+            let mut body = RecordingBody::new(
+                ChunkThenEnd {
+                    pending: std::collections::VecDeque::from([Bytes::from_static(b"hi")]),
+                },
+                hub.clone(),
+                id,
+                Direction::Response,
+                None,
+            );
+            poll_once(&mut body);
+            let flow = hub.with_session(|session| session.get(id).cloned()).unwrap();
+            assert_eq!(flow.response_body, b"hi");
+            assert!(flow.finished_at.is_some(), "last frame must finish the flow");
+        }
+
+        let empty = open_recorded(&hub);
+        hub.with_session(|session| session.set_response(empty, 304, Vec::new(), None));
+        {
+            let body = RecordingBody::new(
+                AlreadyEnded,
+                hub.clone(),
+                empty,
+                Direction::Response,
+                None,
+            );
+            drop(body);
+        }
+        let flow = hub.with_session(|session| session.get(empty).cloned()).unwrap();
+        assert!(flow.response_body.is_empty());
+        assert!(
+            flow.finished_at.is_some(),
+            "dropping an already-ended body must finish the flow"
+        );
+
+        let request = open_recorded(&hub);
+        {
+            let body = RecordingBody::new(
+                AlreadyEnded,
+                hub.clone(),
+                request,
+                Direction::Request,
+                None,
+            );
+            drop(body);
+        }
+        let flow = hub
+            .with_session(|session| session.get(request).cloned())
+            .unwrap();
+        assert!(
+            flow.finished_at.is_none(),
+            "the request side copy must not mark the flow finished"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
