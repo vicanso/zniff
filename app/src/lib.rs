@@ -21,7 +21,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use nsh_base::{input, menu, menu_item, popover, theme, tooltip};
+use nsh_base::{DiffLayout, diff_view, editor, input, menu, menu_item, popover, theme, tooltip};
 use nsh_core::prelude::*;
 use nsh_core::EllipsizeMode;
 
@@ -388,6 +388,8 @@ struct Shown {
     response_headers: Signal<Vec<HeaderLine>>,
     request_body: Signal<String>,
     response_body: Signal<String>,
+    request_language: Signal<String>,
+    response_language: Signal<String>,
     request_note: Signal<String>,
     response_note: Signal<String>,
     metrics: Signal<String>,
@@ -397,6 +399,8 @@ struct Shown {
     pretty: Signal<bool>,
     messages: Signal<Vec<HeaderLine>>,
     diff: Signal<String>,
+    diff_old: Signal<String>,
+    diff_new: Signal<String>,
     pinned: Signal<bool>,
 }
 
@@ -435,6 +439,8 @@ pub fn App() -> impl IntoElement {
         response_headers: signal(Vec::new()),
         request_body: signal(String::new()),
         response_body: signal(String::new()),
+        request_language: signal(String::new()),
+        response_language: signal(String::new()),
         request_note: signal(String::new()),
         response_note: signal(String::new()),
         metrics: signal(String::new()),
@@ -444,6 +450,8 @@ pub fn App() -> impl IntoElement {
         pretty: signal(true),
         messages: signal(Vec::new()),
         diff: signal(String::new()),
+        diff_old: signal(String::new()),
+        diff_new: signal(String::new()),
         pinned: signal(false),
     };
     let port_text = signal(String::new());
@@ -1748,6 +1756,7 @@ fn ready_detail(
                         "Response body",
                         shown.response_body,
                         shown.response_note,
+                        shown.response_language,
                         true,
                         shown,
                         controls.clone(),
@@ -1781,6 +1790,7 @@ fn ready_detail(
                     "Request body",
                     shown.request_body,
                     shown.request_note,
+                    shown.request_language,
                     false,
                     shown,
                     controls.clone(),
@@ -2062,13 +2072,18 @@ fn diff_card(shown: Shown, folded: Signal<u8>) -> impl IntoElement {
                     .rounded(px(10.0))
                     .border_1()
                     .border_color(border_strong())
-                    .px_3p5()
-                    .py_2p5()
+                    .h(px(320.0))
+                    .overflow_hidden()
                     .child(
-                        mono(move || shown.diff.get())
-                            .selectable(true)
-                            .text_size(px(12.0))
-                            .text_color(fg_primary()),
+                        diff_view()
+                            .old_value(move || SharedString::from(shown.diff_old.get()))
+                            .new_value(move || SharedString::from(shown.diff_new.get()))
+                            .layout(DiffLayout::Unified)
+                            .language("plaintext")
+                            .soft_wrap(true)
+                            .font_size(Points(12.0))
+                            .line_height(Points(18.0))
+                            .size_full(),
                     )
             },
         ))
@@ -2079,6 +2094,7 @@ fn body_section(
     en: &'static str,
     body: Signal<String>,
     note: Signal<String>,
+    code: Signal<String>,
     embed_image: bool,
     shown: Shown,
     controls: Arc<Controls>,
@@ -2168,7 +2184,7 @@ fn body_section(
                 ))
         }))
         .child(when(
-            move || !card_folded(folded, bit) && !body.get().is_empty(),
+            move || !card_folded(folded, bit) && !body.get().is_empty() && code.get().is_empty(),
             move || {
                 let divided = image_on() || !note.get().is_empty();
                 view()
@@ -2185,6 +2201,35 @@ fn body_section(
                     )
             },
         ))
+        .child(when(
+            move || !card_folded(folded, bit) && !body.get().is_empty() && !code.get().is_empty(),
+            move || code_body(body, code),
+        ))
+}
+
+fn editor_box_height(text: &str) -> f32 {
+    let lines = text.lines().count().max(1) as f32;
+    (lines * 18.0 + 16.0).clamp(96.0, 360.0)
+}
+
+fn code_body(body: Signal<String>, code: Signal<String>) -> impl IntoElement {
+    view()
+        .w_full()
+        .h(move || px(editor_box_height(&body.get())))
+        .bg(bg_code())
+        .child(
+            editor()
+                .value(move || SharedString::from(body.get()))
+                .read_only(true)
+                .language(move || SharedString::from(code.get()))
+                .line_numbers(true)
+                .folding(true)
+                .soft_wrap(true)
+                .font_size(Points(12.0))
+                .line_height(Points(18.0))
+                .scroll_beyond_last_line(false)
+                .size_full(),
+        )
 }
 
 fn pretty_switch(
@@ -3468,6 +3513,10 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baselin
         shown.preview.set(String::new());
         shown.image_caption.set(String::new());
         shown.diff.set(String::new());
+        shown.diff_old.set(String::new());
+        shown.diff_new.set(String::new());
+        shown.request_language.set(String::new());
+        shown.response_language.set(String::new());
         shown.pinned.set(false);
         return;
     };
@@ -3477,15 +3526,29 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baselin
         shown.preview.set(String::new());
         shown.image_caption.set(String::new());
         shown.diff.set(String::new());
+        shown.diff_old.set(String::new());
+        shown.diff_new.set(String::new());
+        shown.request_language.set(String::new());
+        shown.response_language.set(String::new());
         shown.pinned.set(false);
         return;
     };
-    let diff = match baseline {
+    let (diff_old, diff_new) = match baseline {
         Some(base) if base != id => hub
             .with_session(|session| session.get(base).cloned())
-            .map(|base| present::flow_diff(&base, &flow, lang))
+            .map(|base| {
+                (
+                    present::flow_snapshot(&base, lang),
+                    present::flow_snapshot(&flow, lang),
+                )
+            })
             .unwrap_or_default(),
-        _ => String::new(),
+        _ => (String::new(), String::new()),
+    };
+    let diff = if diff_old.is_empty() {
+        String::new()
+    } else {
+        "1".to_string()
     };
     let messages = message_lines(&flow, lang);
     let pretty = shown.pretty.get();
@@ -3548,6 +3611,16 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baselin
     shown.error.set(flow.error.clone().unwrap_or_default());
     shown.request_headers.set(header_lines(&flow.request_headers, pretty));
     shown.response_headers.set(header_lines(&flow.response_headers, pretty));
+    shown.request_language.set(
+        present::editor_language(request_type, &request.text)
+            .unwrap_or("")
+            .to_string(),
+    );
+    shown.response_language.set(
+        present::editor_language(response_type, &response.text)
+            .unwrap_or("")
+            .to_string(),
+    );
     shown.request_body.set(request.text);
     shown.response_body.set(response.text);
     shown.request_note.set(request.note);
@@ -3556,6 +3629,8 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baselin
     shown.image_caption.set(response.caption);
     shown.messages.set(messages);
     shown.diff.set(diff);
+    shown.diff_old.set(diff_old);
+    shown.diff_new.set(diff_new);
     shown.pinned.set(flow.pinned);
     shown.phase.set(Phase::Ready);
 }
@@ -4522,13 +4597,43 @@ fn compose_box(compose: Compose) -> impl IntoElement {
                         )),
                 ),
         )
-        .child(compose_input(
+        .child(compose_editor(
             compose.headers,
             tr("一行一个 Name: value", "One Name: value per line"),
-            88.0,
-            true,
+            120.0,
+            "plaintext",
         ))
-        .child(compose_input(compose.body, "body", 72.0, true))
+        .child(compose_editor(compose.body, tr("body", "body"), 180.0, "json"))
+}
+
+fn compose_editor(
+    value: Signal<String>,
+    placeholder: impl Fn() -> String + 'static,
+    height: f32,
+    language: &'static str,
+) -> impl IntoElement {
+    view()
+        .w_full()
+        .h(px(height))
+        .rounded(px(7.0))
+        .border_1()
+        .border_color(border_control())
+        .bg(bg_code())
+        .overflow_hidden()
+        .child(
+            editor()
+                .value(move || SharedString::from(value.get()))
+                .language(language)
+                .placeholder(move || SharedString::from(placeholder()))
+                .line_numbers(true)
+                .folding(true)
+                .soft_wrap(true)
+                .font_size(Points(12.0))
+                .line_height(Points(18.0))
+                .scroll_beyond_last_line(false)
+                .on_change(move |text: &SharedString| value.set(text.to_string()))
+                .size_full(),
+        )
 }
 
 fn compose_input(

@@ -528,6 +528,77 @@ pub fn line_diff(before: &str, after: &str) -> Vec<DiffLine> {
     out
 }
 
+/// Language for the read-only body editor. Short or binary text stays a
+/// plain block. JSON, HTML, and XML use their highlighter; other long
+/// multiline text uses plain text with line numbers.
+pub fn editor_language(content_type: Option<&str>, text: &str) -> Option<&'static str> {
+    if text.is_empty() {
+        return None;
+    }
+    let kind = content_type.unwrap_or("").to_ascii_lowercase();
+    if kind.contains("json") {
+        return Some("json");
+    }
+    if kind.contains("html") {
+        return Some("html");
+    }
+    if kind.contains("xml") {
+        return Some("xml");
+    }
+    if kind.contains("javascript") {
+        return Some("javascript");
+    }
+    let textual = kind.is_empty()
+        || kind.contains("text/")
+        || kind.contains("yaml")
+        || kind.contains("csv")
+        || kind.contains("graphql");
+    if textual && text.contains('\n') && text.len() >= 80 {
+        return Some(if kind.contains("yaml") {
+            "yaml"
+        } else {
+            "plaintext"
+        });
+    }
+    None
+}
+
+/// One block the diff view can compare: URL, both header lists, both bodies.
+pub fn flow_snapshot(flow: &Flow, lang: Lang) -> String {
+    let mut out = String::new();
+    push_section(&mut out, t(lang, "URL", "URL"), &flow.url);
+    push_section(
+        &mut out,
+        t(lang, "请求头", "Request headers"),
+        &header_block(&flow.request_headers),
+    );
+    push_section(
+        &mut out,
+        t(lang, "请求 body", "Request body"),
+        &body_text(&flow.request_body),
+    );
+    push_section(
+        &mut out,
+        t(lang, "响应头", "Response headers"),
+        &header_block(&flow.response_headers),
+    );
+    push_section(
+        &mut out,
+        t(lang, "响应 body", "Response body"),
+        &body_text(&flow.response_body),
+    );
+    out
+}
+
+fn push_section(out: &mut String, title: &str, body: &str) {
+    if !out.is_empty() {
+        out.push_str("\n\n");
+    }
+    out.push_str(title);
+    out.push('\n');
+    out.push_str(body);
+}
+
 pub fn flow_diff(base: &Flow, current: &Flow, lang: Lang) -> String {
     let mut out = String::new();
     push_diff(
@@ -1217,6 +1288,27 @@ mod tests {
         let plain = image_body(true, false, "{ }".into(), String::new(), 3, Lang::En);
         assert_eq!(plain.text, "{ }");
         assert!(plain.caption.is_empty());
+    }
+
+    #[test]
+    fn editor_language_follows_the_content_type() {
+        assert_eq!(
+            editor_language(Some("application/json; charset=utf-8"), "{\"a\":1}"),
+            Some("json")
+        );
+        assert_eq!(
+            editor_language(Some("text/html"), "<p>"),
+            Some("html")
+        );
+        assert_eq!(editor_language(Some("text/xml"), "<a/>"), Some("xml"));
+        let long = "a\n".repeat(50);
+        assert_eq!(
+            editor_language(Some("text/plain"), &long),
+            Some("plaintext")
+        );
+        assert_eq!(editor_language(Some("image/png"), "not text"), None);
+        assert_eq!(editor_language(Some("text/plain"), "short"), None);
+        assert_eq!(editor_language(None, ""), None);
     }
 
     #[test]
