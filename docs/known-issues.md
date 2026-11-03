@@ -17,7 +17,7 @@ P0 到 P3 里点名的能力已经接上。下面是仍然接受的缺口，不�
 - macOS `security add-trusted-cert` 可能要用户点确认。`security find-certificate` 只说明证书在登录钥匙串里，不保证 SSL 信任策略已经生效。
 - 带密码的系统代理：`networksetup` 读不回密码，停止后可能恢复不完整。
 - Windows、Linux 上「移除证书」还没接上。macOS 用 `security delete-certificate`。
-- 窗口位置和大小暂未持久化（待按 `zedis` 的多显示器恢复方案接入，见下文「下一轮体验与交互改进待办」）。`nsh 0.3.0` 的 `AppOptions` 虽仅暴露初始 `size`、`window()` 仅返回表面尺寸，但底层平台 API 已可直接调用（macOS 由 `nsh-platform-macos` 重导出 `objc2_app_kit` 的 `NSApplication` / `NSWindow` / `NSScreen` 配合 CoreGraphics 显示器 UUID，Windows 用 `windows-sys` 的 `EnumDisplayMonitors` / `GetMonitorInfoW` / `SetWindowPos`）。当前启动尺寸仍是 `app/src/main.rs` 里的 `(1200, 760)`。
+- 窗口位置和大小不记。nsh 0.3 的 `AppOptions` 仍只有初始 `size`，没有坐标。公开的窗口接口是 `set_title_bar`、`title_bar`、`close_window`。`window()` 只返回表面尺寸。`set_frame` 和 `desktop_command` 仍是 `pub(crate)`。`nsh-platform-macos` 重导出了 `objc2_app_kit`，应用拿不到 nsh 正在用的那扇 `NSWindow`；用 `NSApplication` 的窗口列表去猜，会和 nsh 自己的标题栏、全屏状态抢外框。多显示器 UUID、重叠面积，以及 Windows、Linux 的同一套恢复因此先不做。启动尺寸仍是 `app/src/main.rs` 里的 `(1200, 760)`。
 
 ## 代理行为
 
@@ -68,15 +68,3 @@ P0 到 P3 里点名的能力已经接上。下面是仍然接受的缺口，不�
 - **超过 1 MB 的响应改写**。响应断点的缓冲上限就是单条 body 上限。更大的响应只转发，不在界面里改。
 - **完整 cURL 语法**。不解析换行续行、`-G`、`--json`、`--form` 和多段 body。认不出的旗标忽略。
 - **非 JSON 的 TypeScript**。响应不是 JSON 对象或数组时，「类型」提示不可用，不猜表单或 XML。
-
-## 下一轮体验与交互改进待办（基于 `nsh 0.3.0` 评估）
-
-以下功能点已完成评估，作为下一阶段界面与交互打磨的待办项：
-
-1. **多显示器窗口位置与尺寸记忆（参考 `zedis` 的 `resolve_window_bounds`）**
-    - 在 `config.toml` 中按显示器保存窗口布局记录 `window_placements`（包含 `display_uuid`、相对该显示器原点的 `x` / `y` / `width` / `height` 及 `maximized`）和最后一次的绝对外框 `window_bounds`。
-    - 启动恢复按三级优先级（每次均通过 `clamp_to` 保证窗口尺寸不小于最小尺寸、不超出屏幕工作区，且标题栏保持在屏幕可达范围内）：
-      1. **按 `display_uuid` 匹配已连接显示器**（优先主显示器，其次最近使用过的已连接显示器），还原相对于该显示器的坐标 `p.bounds + screen.origin` 及最大化状态，使办公外接屏与回家单屏各自记住独立位置；
-      2. **最大重叠面积兜底**：若原显示器已拔出或 UUID 变化，计算已保存绝对外框 `saved` 与当前各显示器的交集面积 `saved.intersect(screen)`，吸附并钳制到重叠面积最大的显示器；
-      3. **默认居中兜底**：无有效记录或完全无交集时，在主显示器居中打开默认尺寸 `(1200, 760)`。
-    - 平台实现：macOS 通过 `nsh-platform-macos` 重导出的 `objc2_app_kit`（`NSApplication` / `NSWindow` / `NSScreen`）与 CoreGraphics `CGDisplayCreateUUIDFromDisplayID` 读写外框与屏幕 UUID；Windows 通过 `windows-sys` 的 `EnumDisplayMonitors` / `GetMonitorInfoW` / `GetWindowPlacement` / `SetWindowPos` 实现；Linux 优先保存并恢复窗口尺寸。
