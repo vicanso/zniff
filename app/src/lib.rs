@@ -83,8 +83,8 @@ const COL_PROTOCOL: f32 = 84.0;
 const COL_TIME: f32 = 72.0;
 const COL_HOST: f32 = 120.0;
 const COL_SIZE: f32 = 72.0;
-/// Same width as the header's 「列」 control, so the columns line up with it.
-const COL_PICKER: f32 = 44.0;
+/// Header column button. Rows keep the same width so the columns line up.
+const COL_PICKER: f32 = 28.0;
 /// A set bit collapses that detail card. Zero leaves every card open for this window only.
 const FOLD_QUERY: u8 = 1;
 const FOLD_DIFF: u8 = 1 << 1;
@@ -1361,9 +1361,7 @@ fn column_labels(columns: Signal<ListColumns>) -> impl IntoElement {
         .items_center()
         .gap_2()
         .child(header_label("方法", "Method").w(px(COL_METHOD)).flex_shrink_0())
-        .child(when(move || columns.get().path, move || {
-            header_label("路径", "Path").flex_1().min_w(px(0.0))
-        }))
+        .child(when(move || columns.get().path, move || path_slot().child(header_label("路径", "Path"))))
         .child(when(move || columns.get().status, move || {
             header_label("状态", "Status").w(px(COL_STATUS)).flex_shrink_0()
         }))
@@ -1709,34 +1707,43 @@ fn size_cell(rows: Signal<Vec<RowLine>>, at: Position) -> Text {
     .text_color(fg_muted())
 }
 
-fn path_cell(rows: Signal<Vec<RowLine>>, at: Position) -> Text {
+/// The path column takes whatever width the fixed columns leave.
+/// A text node keeps its own min-content width, so the slot is a view.
+fn path_slot() -> View {
+    view().flex_1().w(px(0.0)).min_w(px(0.0)).overflow_hidden()
+}
+
+fn path_cell(rows: Signal<Vec<RowLine>>, at: Position) -> impl IntoElement {
     let tip_rows = rows;
-    mono(move || {
-        rows.with(|rows| {
-            rows.get(at.index())
-                .map(|row| row.path.clone())
-                .unwrap_or_default()
-        })
-    })
-    .flex_1()
-    .min_w(px(0.0))
-    .number_of_lines(1)
-    .ellipsize_mode(EllipsizeMode::Middle)
-    .text_size(px(12.0))
-    .text_color(move || {
-        if rows.with(|rows| rows.get(at.index()).is_some_and(|row| row.failed)) {
-            status_err_fg()
-        } else {
-            fg_secondary()
-        }
-    })
-    .tooltip(cell_tip(move || {
-        tip_rows.with(|rows| {
-            rows.get(at.index())
-                .map(|row| row.path.clone())
-                .unwrap_or_default()
-        })
-    }))
+    path_slot()
+        .child(
+            mono(move || {
+                rows.with(|rows| {
+                    rows.get(at.index())
+                        .map(|row| row.path.clone())
+                        .unwrap_or_default()
+                })
+            })
+            .w_full()
+            .min_w(px(0.0))
+            .number_of_lines(1)
+            .ellipsize_mode(EllipsizeMode::Middle)
+            .text_size(px(12.0))
+            .text_color(move || {
+                if rows.with(|rows| rows.get(at.index()).is_some_and(|row| row.failed)) {
+                    status_err_fg()
+                } else {
+                    fg_secondary()
+                }
+            }),
+        )
+        .tooltip(cell_tip(move || {
+            tip_rows.with(|rows| {
+                rows.get(at.index())
+                    .map(|row| row.path.clone())
+                    .unwrap_or_default()
+            })
+        }))
 }
 
 fn label_tip(zh: &'static str, en: &'static str) -> impl IntoTooltip {
