@@ -10,6 +10,14 @@ pub const BODY_CAP: usize = 1024 * 1024;
 pub const SESSION_CAP: usize = 256 * 1024 * 1024;
 /// Pinned flows skip eviction. The cap keeps a pinned set from growing without a bound.
 pub const PIN_CAP: usize = 32;
+/// Same line as the warning color on a row: elapsed time from start to finish.
+pub const SLOW_AFTER: Duration = Duration::from_secs(1);
+
+pub fn is_slow(started: SystemTime, finished: Option<SystemTime>, now: SystemTime) -> bool {
+    let end = finished.unwrap_or(now);
+    end.duration_since(started)
+        .is_ok_and(|elapsed| elapsed >= SLOW_AFTER)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Protocol {
@@ -510,6 +518,7 @@ struct FlowQuery {
     bodies: Vec<String>,
     headers: Vec<String>,
     pinned_only: bool,
+    slow_only: bool,
 }
 
 impl FlowQuery {
@@ -523,11 +532,16 @@ impl FlowQuery {
             bodies: Vec::new(),
             headers: Vec::new(),
             pinned_only: false,
+            slow_only: false,
         };
         for token in filter.split_whitespace() {
             let lower = token.to_ascii_lowercase();
             if lower == "pin:" {
                 query.pinned_only = true;
+                continue;
+            }
+            if lower == "slow:" {
+                query.slow_only = true;
                 continue;
             }
             if let Some(keyword) = lower.strip_prefix("mute:") {
@@ -589,6 +603,9 @@ impl FlowQuery {
 
     fn matches(&self, flow: &Flow) -> bool {
         if self.pinned_only && !flow.pinned {
+            return false;
+        }
+        if self.slow_only && !is_slow(flow.started, flow.finished_at, SystemTime::now()) {
             return false;
         }
         if let Some(method) = &self.method {
@@ -837,5 +854,35 @@ mod tests {
         assert!(session.get(noisy).is_none());
         assert!(session.get(kept).is_some());
         assert!(session.get(kept).unwrap().pinned);
+    }
+
+    #[test]
+    fn slow_filter_matches_the_one_second_warning() {
+        let mut session = Session::default();
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let slow = session.open(draft("slow.test"));
+        session.set_started(slow, now - Duration::from_secs(2));
+        session.restore_imported(slow, None, Some(now), None, None);
+        let fast = session.open(draft("fast.test"));
+        session.set_started(fast, now - Duration::from_millis(200));
+        session.restore_imported(fast, None, Some(now), None, None);
+        let _ = fast;
+        let edge = session.open(draft("edge.test"));
+        session.set_started(edge, now);
+        session.restore_imported(edge, None, Some(now + SLOW_AFTER), None, None);
+        let young = session.open(draft("young.test"));
+        session.set_started(young, SystemTime::now() - Duration::from_millis(200));
+        let _ = young;
+        let pending = session.open(draft("pending.test"));
+        session.set_started(pending, SystemTime::now() - Duration::from_secs(2));
+
+        assert_eq!(session.ids_matching("slow:"), vec![slow, edge, pending]);
+        assert_eq!(session.ids_matching("SLOW: slow.test"), vec![slow]);
+        assert!(session.ids_matching("slow: fast.test").is_empty());
+        assert!(!is_slow(
+            now,
+            Some(now + Duration::from_millis(999)),
+            now + Duration::from_secs(5),
+        ));
     }
 }

@@ -930,8 +930,6 @@ fn flow_list(
                 .pl(px(LIST_INSET))
                 .pr(px(LIST_PAD_END))
                 .bg(bg_chrome())
-                .border_b_1()
-                .border_b_color(border_strong())
                 .child(
                     view().flex_1().min_w(px(0.0)).child(focused_input(
                         filter,
@@ -955,6 +953,7 @@ fn flow_list(
                     width,
                 )),
         )
+        .child(filter_chips(filter))
         .child(column_header(width, columns, column_controls))
         .child(view().flex_1().child(
             when(
@@ -976,6 +975,109 @@ fn flow_list(
                 )
             }),
         ))
+}
+
+const JSON_ALIASES: &[&str] = &["type:json", "ct:json"];
+const FAIL_ALIASES: &[&str] = &["失败", "fail"];
+const PIN_ALIASES: &[&str] = &["pin:"];
+const SLOW_ALIASES: &[&str] = &["slow:"];
+
+fn filter_chips(filter: Signal<String>) -> impl IntoElement {
+    view()
+        .w_full()
+        .h(px(32.0))
+        .flex_shrink_0()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .overflow_hidden()
+        .pl(px(LIST_INSET))
+        .pr(px(LIST_PAD_END))
+        .bg(bg_chrome())
+        .border_b_1()
+        .border_b_color(border_strong())
+        .child(filter_chip(filter, "JSON", "JSON", "type:json", JSON_ALIASES))
+        .child(filter_chip(filter, "报错", "Errors", "失败", FAIL_ALIASES))
+        .child(filter_chip(filter, "星标", "Starred", "pin:", PIN_ALIASES))
+        .child(filter_chip(filter, "慢请求", "Slow", "slow:", SLOW_ALIASES))
+}
+
+fn filter_chip(
+    filter: Signal<String>,
+    zh: &'static str,
+    en: &'static str,
+    token: &'static str,
+    aliases: &'static [&'static str],
+) -> impl IntoElement {
+    view()
+        .h(px(22.0))
+        .px_2()
+        .flex_shrink_0()
+        .flex_row()
+        .items_center()
+        .rounded(px(11.0))
+        .border_1()
+        .border_color(move || {
+            if filter_has_token(&filter.get(), aliases) {
+                accent_blue_border()
+            } else {
+                border_control()
+            }
+        })
+        .bg(move || {
+            if filter_has_token(&filter.get(), aliases) {
+                accent_blue_soft()
+            } else {
+                bg_control()
+            }
+        })
+        .hover(|style| {
+            style.bg(move || {
+                if filter_has_token(&filter.get(), aliases) {
+                    accent_blue_soft()
+                } else {
+                    bg_control_hover()
+                }
+            })
+        })
+        .cursor(Cursor::Pointer)
+        .on_press(move || filter.set(toggle_filter_chip(&filter.get(), token, aliases)))
+        .child(
+            text(tr(zh, en))
+                .text_size(px(11.0))
+                .text_color(move || {
+                    if filter_has_token(&filter.get(), aliases) {
+                        accent_blue_text()
+                    } else {
+                        fg_secondary()
+                    }
+                }),
+        )
+}
+
+fn filter_has_token(filter: &str, aliases: &[&str]) -> bool {
+    filter.split_whitespace().any(|part| {
+        let lower = part.to_ascii_lowercase();
+        aliases.iter().any(|alias| lower == *alias)
+    })
+}
+
+/// Adds `token` as its own word, or removes every alias of that chip.
+fn toggle_filter_chip(filter: &str, token: &str, aliases: &[&str]) -> String {
+    let mut kept = Vec::new();
+    let mut found = false;
+    for part in filter.split_whitespace() {
+        let lower = part.to_ascii_lowercase();
+        if aliases.iter().any(|alias| lower == *alias) {
+            found = true;
+            continue;
+        }
+        kept.push(part.to_string());
+    }
+    if !found {
+        kept.push(token.to_string());
+    }
+    kept.join(" ")
 }
 
 fn side_input(
@@ -6024,6 +6126,27 @@ mod tests {
         assert!(!usable_v4(Ipv4Addr::LOCALHOST));
         assert!(!usable_v4(Ipv4Addr::new(169, 254, 1, 1)));
         assert!(!usable_v4(Ipv4Addr::BROADCAST));
+    }
+
+    #[test]
+    fn filter_chips_toggle_a_whole_token() {
+        assert_eq!(super::toggle_filter_chip("", "type:json", super::JSON_ALIASES), "type:json");
+        assert_eq!(
+            super::toggle_filter_chip("api.test type:json", "type:json", super::JSON_ALIASES),
+            "api.test"
+        );
+        assert_eq!(
+            super::toggle_filter_chip("CT:JSON pin:", "type:json", super::JSON_ALIASES),
+            "pin:"
+        );
+        assert_eq!(
+            super::toggle_filter_chip("fail example", "失败", super::FAIL_ALIASES),
+            "example"
+        );
+        assert_eq!(super::toggle_filter_chip("example", "失败", super::FAIL_ALIASES), "example 失败");
+        assert_eq!(super::toggle_filter_chip("pin: slow:", "slow:", super::SLOW_ALIASES), "pin:");
+        assert!(!super::filter_has_token("type:jsonl", super::JSON_ALIASES));
+        assert!(super::filter_has_token("pin:", super::PIN_ALIASES));
     }
 
     #[test]

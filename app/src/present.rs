@@ -225,12 +225,8 @@ pub fn format_timing(
     parts.join("  ·  ")
 }
 
-pub const SLOW_AFTER: Duration = Duration::from_secs(1);
-
 pub fn is_slow(started: SystemTime, finished: Option<SystemTime>, now: SystemTime) -> bool {
-    let end = finished.unwrap_or(now);
-    end.duration_since(started)
-        .is_ok_and(|elapsed| elapsed >= SLOW_AFTER)
+    crate::session::is_slow(started, finished, now)
 }
 
 /// Shell exports so curl, Node, Python, and Git trust this proxy.
