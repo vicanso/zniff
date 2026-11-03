@@ -55,7 +55,7 @@ P0 到 P3 里点名的能力已经接上。下面是仍然接受的缺口，不�
 
 - 列表默认列是方法、路径、状态、间隔、主机。方法列始终在最左，路径紧跟其后并占剩余宽度，状态、协议、间隔、主机、大小是固定列。表头右侧列图标和表头右键都能开关状态、协议、路径、间隔、主机、大小，写进 `config.toml`：`show_status`、`show_path`、`show_gap`、`show_host` 默认开，`show_protocol`、`show_size` 默认关。旧文件没有这些键时仍是现在这几列。间隔是距到达顺序里上一条的时间，首条 `+0 ms`（`+45 ms`、`+1.24 s`，再长用分和小时）。被过滤掉的行仍计入下一条的间隔，所以藏起一行不会改两边剩下的数字。悬停显示本地 `HH:MM:SS.mmm`。详情摘要用同一绝对时间。路径可见时占剩余宽度；藏起路径后，空出来的宽度不挪给别的列。主机是较窄的固定列。路径和主机超出时中间省略，悬停显示全文。协议列用和摘要徽章相同的名字，大小列是响应的线字节。左栏与右栏之间可拖，松开后把宽度记到 `list_width`，限制在 280 到 1100，默认 560。分割条宽 6，悬停时中间的线变宽并改成强调色。
 - 没有状态码的失败行，列表状态是 `ERR`，路径用错误色显示记录里的简短原因。窗口会翻译一批固定原因，原文仍是写入时的语言。进行中、还没有错误的行状态是 `—`。过滤仍用记录里的真实路径。详情摘要在没有状态码且有错误时徽章是 `ERR`，否则仍是「等待响应」。
-- 详情在摘要之后是查询参数、行级对比、消息、响应 body、响应头、请求头、请求 body。查询、对比、消息、两张 body 和两张头卡片可以点标题折叠，摘要不折叠。折叠只在这次窗口里记住，不写入配置，换选中行也不重置。请求 body 为空且没有截断或解压说明时不画那张卡片。响应 body 没有正文、没有说明、美化模式下也没有图片时同样不画。图片在美化时按比例画进响应 body 卡片的预览框，不裁切铺满，并写上字节数；这时去掉「十六进制只显示前 N 字节」这句，解压失败等其它说明仍留下。原文显示十六进制，每 16 字节一行，行首是 `0001` 这种四位行号；复制仍是不带行号的记录。并保留那句截断说明。JSON、HTML、XML，以及不少于 80 字节的多行文本，画在只读 `editor` 里，带行号和折叠，高度最多 360。短文本和十六进制仍是普通等宽文本。「编辑重发」的头和 body 用可编辑的 `editor`。有基准时，对比卡片用 `diff_view` 的上下对照，两边是 URL、请求头、请求 body、响应头、响应 body。两张 body 卡片的标题上都有「美化 / 原文」，点标题不会切到美化。菜单里仍可切换。美化时 `Cookie` 和 `Set-Cookie` 按 `;` 拆开，每个键一行，名字是 `Cookie · session` 这种；没有等号的属性（`HttpOnly`、`Secure`）值留空。原文和复制仍是整段。美化时请求头和响应头按名字忽略大小写升序，同名保持原来的先后和大小写；原文、cURL 和复制不排序。
+- 详情在摘要之后是查询参数、行级对比、消息、响应 body、响应头、请求头、请求 body。查询、对比、消息、两张 body 和两张头卡片可以点标题折叠，摘要不折叠。折叠只在这次窗口里记住，不写入配置，换选中行也不重置。请求 body 为空且没有截断或解压说明时不画那张卡片。响应 body 没有正文、没有说明、美化模式下也没有图片时同样不画。图片在美化时按比例画进响应 body 卡片的预览框，不裁切铺满，并写上字节数；这时去掉「十六进制只显示前 N 字节」这句，解压失败等其它说明仍留下。原文显示十六进制，每 16 字节一行，行首是 `0001` 这种四位行号；复制仍是不带行号的记录。并保留那句截断说明。JSON、HTML、XML，以及不少于 80 字节的多行文本，画在只读 `editor` 里，带行号和折叠，高度最多 360。没有 `Content-Type` 或标成 `text/plain`、但正文以 `{` 或 `[` 开头的，也按 JSON 高亮。短文本和十六进制仍是普通等宽文本。「编辑重发」的头和 body 用可编辑的 `editor`。有基准时，对比卡片用 `diff_view` 的上下对照，两边是 URL、请求头、请求 body、响应头、响应 body。两张 body 卡片的标题上都有「美化 / 原文」，点标题不会切到美化。菜单里仍可切换。美化时 `Cookie` 和 `Set-Cookie` 按 `;` 拆开，每个键一行，名字是 `Cookie · session` 这种；没有等号的属性（`HttpOnly`、`Secure`）值留空。原文和复制仍是整段。美化时请求头和响应头按名字忽略大小写升序，同名保持原来的先后和大小写；原文、cURL 和复制不排序。
 - HAR 导出仍写到数据目录的 `exports/`。导入在顶栏「更多」里，路径空着就读数据目录的 `import.har`，把 `.har` 拖到窗口上也会导入。没有系统文件选择框。
 
 ## 后续吸引力增强方向（这一轮跳过）
@@ -73,33 +73,30 @@ P0 到 P3 里点名的能力已经接上。下面是仍然接受的缺口，不�
 
 ### 一、现有实现细节完善
 
-1. **无 `Content-Type` 的 JSON 在只读 `editor` 中启用语法高亮与折叠**
-   - [`editor_language`](file:///Users/tree/github/zniff/app/src/present.rs#L534-L564) 与 [`pretty_body`](file:///Users/tree/github/zniff/app/src/present.rs#L60-L77) 对齐：当 `Content-Type` 为 `text/plain` 或缺失但正文满足 `looks_like_json(text)` 时，同样返回 `"json"`，避免退回 `"plaintext"` 失去语法着色与节点折叠。
-
-2. **左侧流量行右键菜单（Row Context Menu）**
+1. **左侧流量行右键菜单（Row Context Menu）**
    - 为列表行 [`flow_row`](file:///Users/tree/github/zniff/app/src/lib.rs#L1469-L1527) 绑定 `context_menu()`，右键某行时自动选中该行并直接弹出高频动作（复制 URL、复制 cURL、只看此主机、屏蔽此主机、星标、设为基准、重放、填入规则），省去先左键选中再去右栏点「更多」的步骤。
 
-3. **配置面板规则编辑体验与快捷规则扩展**
+2. **配置面板规则编辑体验与快捷规则扩展**
    - 将 [`config_panel`](file:///Users/tree/github/zniff/app/src/lib.rs#L1078-L1107) 中的多行规则 `side_input` 升级为带行号的 `editor()`。
    - 在详情「更多」或行右键菜单中支持「基于当前请求创建规则」，自动带入当前流量的 `host + path`。
    - 将 [`replace_row`](file:///Users/tree/github/zniff/app/src/lib.rs#L1133-L1245) 扩展为可选规则类型的快捷构建行（支持 `replace` 内容替换、`map-remote` 接口转发、`map-local` 本地文件、`delay` 延迟、`break` 断点）。
 
-4. **表单请求体（`x-www-form-urlencoded`）键值展示与编码提示**
+3. **表单请求体（`x-www-form-urlencoded`）键值展示与编码提示**
    - 对 `POST` 表单字段值复用 [`annotated`](file:///Users/tree/github/zniff/app/src/lib.rs#L3884)（自动识别并附注 JWT、Unix 时间戳、可打印 Base64），或像「查询参数」一样以对齐键值行展示。
 
-5. **右栏卡片标题样式与左对齐统一（实机截图核对发现）**
+4. **右栏卡片标题样式与左对齐统一（实机截图核对发现）**
    - 当前 `查询参数`、`对比`、`消息`、`响应头`、`请求头`（[`header_section`](file:///Users/tree/github/zniff/app/src/lib.rs#L2101-L2133)、[`diff_card`](file:///Users/tree/github/zniff/app/src/lib.rs#L2199-L2212)）的折叠箭头与标题位于**卡片外上方**（左内边距 `px_1` = `4px`），而 `响应 body`、`请求 body`（[`body_section`](file:///Users/tree/github/zniff/app/src/lib.rs#L2259-L2288)）将折叠箭头与标题放在**卡片框内部顶栏**（左内边距 `px_3p5` = `14px`）。上下相邻卡片的折叠箭头水平错位 `10px`，视觉层次不统一；应统一为同一套卡片头样式（将「美化 / 原文」放到卡片外标题行右侧，或所有可折叠卡片统一使用卡片内顶栏）。
 
-6. **隐藏「主机」列时保留星标蓝点指示（实机截图核对发现）**
+5. **隐藏「主机」列时保留星标蓝点指示（实机截图核对发现）**
    - 当前星标蓝点画在 [`host_cell`](file:///Users/tree/github/zniff/app/src/lib.rs#L1653-L1663) 内；当 `config.toml` 中 `show_host = false`（隐藏主机列）时，列表中星标行的蓝点会随之消失。应将星标蓝点移到始终显示的「方法」列旁，或在隐藏主机列时回退显示在路径/方法前。
 
-7. **`body_section` 中 `editor` 与上方 `note` 横幅的分隔线及外边距**
+6. **`body_section` 中 `editor` 与上方 `note` 横幅的分隔线及外边距**
    - 普通文本分支（[`app/src/lib.rs#L2335-L2341`](file:///Users/tree/github/zniff/app/src/lib.rs#L2335-L2341)）在上方有 `note` 提示框或图片预览时会加 `1px` 顶部分隔线，而只读 `editor` 分支（[`code_body`](file:///Users/tree/github/zniff/app/src/lib.rs#L2350-L2379)）未加顶部分隔线与间距，当大段 JSON 同时带有 256 KB 截断提示框时会直接紧贴在一起。
 
-8. **外部 HAR 导入兼容 `"http/2.0"` / `"HTTP/2.0"`（实机注入测试发现）**
+7. **外部 HAR 导入兼容 `"http/2.0"` / `"HTTP/2.0"`（实机注入测试发现）**
    - [`har::protocol_from`](file:///Users/tree/github/zniff/app/src/har.rs#L263-L269) 目前只识别 `"HTTP/2"` 与 `"h2"`，而 Chrome DevTools 等导出的 HAR 1.2 通常写 `"http/2.0"` 或 `"HTTP/2.0"`，导入后会被归为 `HTTP/1.1`；应一并匹配 `"http/2.0"`。
 
-9. **清理仅测试使用的 `dead_code` 编译警告**
+8. **清理仅测试使用的 `dead_code` 编译警告**
     - 切换至 `diff_view` 后，[`present.rs`](file:///Users/tree/github/zniff/app/src/present.rs#L461-L474) 的 `DiffKind` / `DiffLine` / `line_diff`、[`rules.rs`](file:///Users/tree/github/zniff/app/src/rules.rs#L166) 的 `first_match`、[`session.rs`](file:///Users/tree/github/zniff/app/src/session.rs#L337-L418) 的 `ttfb` / `duration` / `ids_matching` 仅被单元测试调用，`make build` 会报 5 条 `dead_code` 警告，应加上 `#[cfg(test)]`。
 
 ### 二、待新增功能点

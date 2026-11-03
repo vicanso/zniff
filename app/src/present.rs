@@ -536,7 +536,9 @@ pub fn editor_language(content_type: Option<&str>, text: &str) -> Option<&'stati
         return None;
     }
     let kind = content_type.unwrap_or("").to_ascii_lowercase();
-    if kind.contains("json") {
+    if kind.contains("json")
+        || ((kind.is_empty() || kind.contains("text/plain")) && looks_like_json(text))
+    {
         return Some("json");
     }
     if kind.contains("html") {
@@ -1250,6 +1252,12 @@ mod tests {
         );
         assert_eq!(editor_language(Some("image/png"), "not text"), None);
         assert_eq!(editor_language(Some("text/plain"), "short"), None);
+        assert_eq!(
+            editor_language(Some("text/plain"), "{\"a\":1}"),
+            Some("json")
+        );
+        assert_eq!(editor_language(None, "[\n  1\n]"), Some("json"));
+        assert_eq!(editor_language(Some("image/png"), "{\"a\":1}"), None);
         assert_eq!(editor_language(None, ""), None);
     }
 
