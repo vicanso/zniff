@@ -17,6 +17,7 @@ P0 到 P3 里点名的能力已经接上。下面是仍然接受的缺口，不�
 - macOS `security add-trusted-cert` 可能要用户点确认。`security find-certificate` 只说明证书在登录钥匙串里，不保证 SSL 信任策略已经生效。
 - 带密码的系统代理：`networksetup` 读不回密码，停止后可能恢复不完整。
 - Windows、Linux 上「移除证书」还没接上。macOS 用 `security delete-certificate`。
+- 窗口位置和大小不记。nsh 0.2 的 `AppOptions` 只有初始 `size`，没有坐标。Rust 组件能调的窗口接口是 `set_title_bar`、`title_bar`、`close_window`。`Window.setFrame` 在运行时里是 `pub(crate)`，`desktop_command` 也是，应用读不到当前窗口框，也发不出移动命令。只保存宽高同样做不到，因为关窗口时读不回用户拖过的尺寸。不升 nsh，也不改平台 crate。启动尺寸仍是 `app/src/main.rs` 里的 `(1200, 760)`。
 
 ## 代理行为
 
@@ -58,12 +59,6 @@ P0 到 P3 里点名的能力已经接上。下面是仍然接受的缺口，不�
 ## 基于实际抓包截图的体验改进项（待办）
 
 结合真实业务抓包截图暴露出的问题与交互反馈，以下改进具有明确实用价值：
-
-8. **记住窗口所在显示器（Monitor）与位置并在下次启动时恢复**
-   - **可行性与做法**：
-     - 在 `config.toml` 中持久化窗口几何信息（窗口 `x, y, width, height` 以及所在显示器的边界 `screen_x, screen_y, screen_w, screen_h`）。
-     - **macOS / Windows**：启动创建窗口后，枚举当前连接的显示器（macOS `NSScreen::screens`，Windows `MonitorFromRect` / `GetMonitorInfoW`）；若上次所在的显示器仍然存在且窗口坐标落在其可视区域内，则恢复到上次的位置与尺寸；若外接显示器已拔出，则回退到当前主显示器居中。
-     - **Linux**：X11 下可恢复位置与尺寸；Wayland 协议下合成器不允许客户端指定全局坐标，仅恢复保存的窗口宽高（`width, height`）。
 
 9. **截图暴露的其他界面细节打磨**
    - **`CONNECT` 失败行的列表展示优化**：截图中 `CONNECT` 握手失败行在状态列显示红色省略号 `…`、路径列显示 `/`，表意不明。应将状态明确显示为 `ERR` 或 `—`，路径列直接展示简短原因（如 `TLS 握手失败` / `证书被拒绝`）而非 `/`。

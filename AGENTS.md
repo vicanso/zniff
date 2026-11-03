@@ -17,7 +17,7 @@
 - `app/src/i18n.rs`、`app/src/icon.rs`：界面语言和单色描边图标。
 - `app/src/config.rs`：用户配置，数据目录里的一份 `config.toml`。
 - `docs/known-issues.md`：已经接受的缺口。新的缺口补在这里，不要为了绕开它停掉当前开发。
-- 依赖 nsh 0.2，不要升到 0.3。edition 是 2024，`gen` 是保留字。
+- 依赖 nsh 0.2，不要升到 0.3。edition 是 2024，`gen` 是保留字。窗口位置和大小不写入配置：nsh 0.2 没有公开接口可读当前窗口框或设置坐标。启动尺寸仍是 `app/src/main.rs` 里的 `(1200, 760)`。
 
 ## 这一刀的边界
 
