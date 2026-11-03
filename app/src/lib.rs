@@ -83,7 +83,7 @@ const COL_PROTOCOL: f32 = 84.0;
 const COL_TIME: f32 = 72.0;
 const COL_HOST: f32 = 120.0;
 const COL_SIZE: f32 = 72.0;
-/// Header column button. Rows keep the same width so the columns line up.
+/// Column picker on the filter-chip row.
 const COL_PICKER: f32 = 28.0;
 /// A set bit collapses that detail card. Zero leaves every card open for this window only.
 const FOLD_QUERY: u8 = 1;
@@ -915,6 +915,8 @@ fn flow_list(
     let column_controls = controls.clone();
     let rules_on = signal(true);
     let breaks_on = signal(true);
+    let hovered = signal(None::<u64>);
+    let picked = signal(None::<u64>);
     let upstream_controls = controls;
     view()
         .w(move || px(width.get()))
@@ -932,6 +934,8 @@ fn flow_list(
                 .pl(px(LIST_INSET))
                 .pr(px(LIST_PAD_END))
                 .bg(bg_chrome())
+                .border_b_1()
+                .border_b_color(border_strong())
                 .child(
                     view().flex_1().min_w(px(0.0)).child(focused_input(
                         filter,
@@ -957,28 +961,22 @@ fn flow_list(
                     breaks_on,
                 )),
         )
-        .child(filter_chips(filter))
+        .child(filter_chips(filter, columns, column_controls.clone()))
         .child(column_header(width, columns, column_controls))
-        .child(view().flex_1().child(
-            when(
-                move || rows.with(Vec::is_empty),
-                move || list_empty(filter),
-            )
-            .otherwise(move || {
-                flow_rows(
-                    rows,
-                    selected,
-                    compose,
-                    width,
-                    columns,
-                    row_controls.clone(),
-                    filter,
-                    shown,
-                    baseline,
-                    rules_text,
-                )
-            }),
-        ))
+        .child(view().flex_1().child(list_menu(
+            rows,
+            selected,
+            compose,
+            width,
+            columns,
+            row_controls,
+            filter,
+            shown,
+            baseline,
+            rules_text,
+            hovered,
+            picked,
+        )))
 }
 
 const JSON_ALIASES: &[&str] = &["type:json", "ct:json"];
@@ -986,24 +984,37 @@ const FAIL_ALIASES: &[&str] = &["失败", "fail"];
 const PIN_ALIASES: &[&str] = &["pin:"];
 const SLOW_ALIASES: &[&str] = &["slow:"];
 
-fn filter_chips(filter: Signal<String>) -> impl IntoElement {
+fn filter_chips(
+    filter: Signal<String>,
+    columns: Signal<ListColumns>,
+    controls: Arc<Controls>,
+) -> impl IntoElement {
     view()
         .w_full()
         .h(px(32.0))
         .flex_shrink_0()
         .flex_row()
         .items_center()
-        .gap_1()
-        .overflow_hidden()
+        .gap_1p5()
         .pl(px(LIST_INSET))
         .pr(px(LIST_PAD_END))
         .bg(bg_chrome())
         .border_b_1()
         .border_b_color(border_strong())
-        .child(filter_chip(filter, "JSON", "JSON", "type:json", JSON_ALIASES))
-        .child(filter_chip(filter, "报错", "Errors", "失败", FAIL_ALIASES))
-        .child(filter_chip(filter, "星标", "Starred", "pin:", PIN_ALIASES))
-        .child(filter_chip(filter, "慢请求", "Slow", "slow:", SLOW_ALIASES))
+        .child(
+            view()
+                .flex_1()
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .child(filter_chip(filter, "JSON", "JSON", "type:json", JSON_ALIASES))
+                .child(filter_chip(filter, "报错", "Errors", "失败", FAIL_ALIASES))
+                .child(filter_chip(filter, "星标", "Starred", "pin:", PIN_ALIASES))
+                .child(filter_chip(filter, "慢请求", "Slow", "slow:", SLOW_ALIASES)),
+        )
+        .child(column_menu(columns, controls))
 }
 
 fn filter_chip(
@@ -1637,7 +1648,7 @@ fn list_empty(filter: Signal<String>) -> impl IntoElement {
         )
 }
 
-fn flow_rows(
+fn list_menu(
     rows: Signal<Vec<RowLine>>,
     selected: Signal<Option<u64>>,
     compose: Compose,
@@ -1648,6 +1659,47 @@ fn flow_rows(
     shown: Shown,
     baseline: Signal<Option<u64>>,
     rules_text: Signal<String>,
+    hovered: Signal<Option<u64>>,
+    picked: Signal<Option<u64>>,
+) -> impl IntoElement {
+    context_menu()
+        .offset(px(4.0))
+        .margin(px(8.0))
+        .on_open_change(move |event: &nsh_base::MenuEvent| {
+            let nsh_base::MenuEvent::OpenChange(open, _) = event else {
+                return;
+            };
+            if !open {
+                return;
+            }
+            let next = hovered.get();
+            picked.set(next);
+            if selected.get() != next {
+                reset_compose(compose);
+            }
+            selected.set(next);
+        })
+        .trigger(
+            when(
+                move || rows.with(Vec::is_empty),
+                move || list_empty(filter),
+            )
+            .otherwise(move || {
+                flow_rows(rows, selected, compose, width, columns, hovered)
+            }),
+        )
+        .child(row_context_menu(
+            picked, controls, filter, shown, baseline, rules_text,
+        ))
+}
+
+fn flow_rows(
+    rows: Signal<Vec<RowLine>>,
+    selected: Signal<Option<u64>>,
+    compose: Compose,
+    width: Signal<f32>,
+    columns: Signal<ListColumns>,
+    hovered: Signal<Option<u64>>,
 ) -> impl IntoElement {
     virtual_list(
         move || rows.with(Vec::len),
@@ -1659,11 +1711,7 @@ fn flow_rows(
                 width,
                 columns,
                 at,
-                controls.clone(),
-                filter,
-                shown,
-                baseline,
-                rules_text,
+                hovered,
             )
         },
     )
@@ -1683,15 +1731,11 @@ fn column_header(
     context_menu()
         .offset(px(4.0))
         .margin(px(8.0))
-        .trigger(column_header_row(width, columns, controls.clone()))
+        .trigger(column_header_row(width, columns))
         .child(column_picker_panel(columns, controls))
 }
 
-fn column_header_row(
-    width: Signal<f32>,
-    columns: Signal<ListColumns>,
-    controls: Arc<Controls>,
-) -> impl IntoElement {
+fn column_header_row(width: Signal<f32>, columns: Signal<ListColumns>) -> impl IntoElement {
     view()
         .w(move || px(width.get()))
         .flex_shrink_0()
@@ -1706,7 +1750,6 @@ fn column_header_row(
         .border_l(px(2.0))
         .border_l_color(bg_col_header())
         .child(column_labels(columns))
-        .child(column_picker(columns, controls))
 }
 
 fn column_labels(columns: Signal<ListColumns>) -> impl IntoElement {
@@ -1735,13 +1778,6 @@ fn column_labels(columns: Signal<ListColumns>) -> impl IntoElement {
         .child(when(move || columns.get().size, move || {
             header_label("大小", "Size").w(px(COL_SIZE)).flex_shrink_0()
         }))
-}
-
-fn column_picker(columns: Signal<ListColumns>, controls: Arc<Controls>) -> impl IntoElement {
-    view()
-        .w(px(COL_PICKER))
-        .flex_shrink_0()
-        .child(column_menu(columns, controls))
 }
 
 fn column_menu(columns: Signal<ListColumns>, controls: Arc<Controls>) -> impl IntoElement {
@@ -1829,33 +1865,11 @@ fn flow_row(
     width: Signal<f32>,
     columns: Signal<ListColumns>,
     at: Position,
-    controls: Arc<Controls>,
-    filter: Signal<String>,
-    shown: Shown,
-    baseline: Signal<Option<u64>>,
-    rules_text: Signal<String>,
+    hovered: Signal<Option<u64>>,
 ) -> impl IntoElement {
     let row_id = move || rows.with(|rows| rows.get(at.index()).map(|row| row.id));
     let is_selected = move || selected.get() == row_id();
-    let picked = signal(None::<u64>);
-    context_menu()
-        .offset(px(4.0))
-        .margin(px(8.0))
-        .on_open_change(move |event: &nsh_base::MenuEvent| {
-            let nsh_base::MenuEvent::OpenChange(open, _) = event else {
-                return;
-            };
-            if !open {
-                return;
-            }
-            let next = rows.with(|rows| rows.get(at.index()).map(|row| row.id));
-            picked.set(next);
-            if selected.get() != next {
-                reset_compose(compose);
-            }
-            selected.set(next);
-        })
-        .trigger(view()
+    view()
         .w(move || px(width.get()))
         .h(px(34.0))
         .px_3()
@@ -1894,6 +1908,8 @@ fn flow_row(
                 }
             })
         })
+        .on_hover_in(move || hovered.set(row_id()))
+        .on_hover_move(move |_: &HoverEvent| hovered.set(row_id()))
         .on_press(move || {
             let next = row_id();
             if selected.get() != next {
@@ -1902,11 +1918,6 @@ fn flow_row(
             selected.set(next);
         })
         .child(row_cells(rows, columns, at))
-        .child(view().w(px(COL_PICKER)).flex_shrink_0()),
-        )
-        .child(row_context_menu(
-            picked, controls, filter, shown, baseline, rules_text,
-        ))
 }
 
 fn row_context_menu(
@@ -2266,25 +2277,24 @@ fn label_tip(zh: &'static str, en: &'static str) -> impl IntoTooltip {
     )
 }
 
-/// A reactive bubble. A plain string tooltip is captured once, and a virtual row reuses its cell.
+/// A reactive bubble. A view, not the Tooltip component: list cells are
+/// rebuilt on every new row, and disposing that component panics.
 fn cell_tip(full: impl Fn() -> String + 'static) -> impl IntoTooltip {
-    tooltip().child(
-        view()
-            .max_w(px(420.0))
-            .px_2p5()
-            .py_1p5()
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(border_strong())
-            .bg(bg_card())
-            .shadow_md()
-            .child(
-                mono(full)
-                    .max_w(px(396.0))
-                    .text_size(px(12.0))
-                    .text_color(fg_primary()),
-            ),
-    )
+    view()
+        .max_w(px(420.0))
+        .px_2p5()
+        .py_1p5()
+        .rounded(px(6.0))
+        .border_1()
+        .border_color(border_strong())
+        .bg(bg_card())
+        .shadow_md()
+        .child(
+            mono(full)
+                .max_w(px(396.0))
+                .text_size(px(12.0))
+                .text_color(fg_primary()),
+        )
 }
 
 fn detail_pane(
