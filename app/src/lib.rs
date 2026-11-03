@@ -2353,13 +2353,20 @@ fn header_section(
     bit: u8,
 ) -> impl IntoElement {
     view()
-        .gap_1p5()
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(border_strong())
+        .bg(bg_card())
+        .overflow_hidden()
         .child(
             view()
                 .flex_row()
                 .items_center()
                 .gap_1p5()
-                .px_1()
+                .px_3p5()
+                .py_2()
+                .border_b(move || if card_folded(folded, bit) { px(0.0) } else { px(1.0) })
+                .border_b_color(border_subtle())
                 .cursor(Cursor::Pointer)
                 .on_press(move || toggle_card(folded, bit))
                 .child(fold_mark(folded, bit))
@@ -2381,13 +2388,6 @@ fn header_section(
         .child(when(
             move || !card_folded(folded, bit),
             move || {
-                view()
-                    .rounded(px(10.0))
-                    .border_1()
-                    .border_color(border_strong())
-                    .bg(bg_card())
-                    .overflow_hidden()
-                    .child(
                     when(
                         move || lines.with(Vec::is_empty),
                         || view().px_3p5().py_2p5().child(muted_line(tr("无", "None"))),
@@ -2437,21 +2437,27 @@ fn header_section(
                                     )
                             },
                         )
-                    }),
-                    )
+                    })
             },
         ))
 }
 
 fn diff_card(shown: Shown, folded: Signal<u8>) -> impl IntoElement {
     view()
-        .gap_1p5()
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(border_strong())
+        .bg(bg_card())
+        .overflow_hidden()
         .child(
             view()
                 .flex_row()
                 .items_center()
                 .gap_1p5()
-                .px_1()
+                .px_3p5()
+                .py_2()
+                .border_b(move || if card_folded(folded, FOLD_DIFF) { px(0.0) } else { px(1.0) })
+                .border_b_color(border_subtle())
                 .cursor(Cursor::Pointer)
                 .on_press(move || toggle_card(folded, FOLD_DIFF))
                 .child(fold_mark(folded, FOLD_DIFF))
@@ -2462,9 +2468,6 @@ fn diff_card(shown: Shown, folded: Signal<u8>) -> impl IntoElement {
             move || {
                 view()
                     .bg(bg_code())
-                    .rounded(px(10.0))
-                    .border_1()
-                    .border_color(border_strong())
                     .h(px(320.0))
                     .overflow_hidden()
                     .child(
@@ -2512,13 +2515,7 @@ fn body_section(
                 .gap_2()
                 .px_3p5()
                 .py_2()
-                .border_b(move || {
-                    if card_folded(folded, bit) {
-                        px(0.0)
-                    } else {
-                        px(1.0)
-                    }
-                })
+                .border_b(move || if card_folded(folded, bit) { px(0.0) } else { px(1.0) })
                 .border_b_color(border_subtle())
                 .child(
                     view()
