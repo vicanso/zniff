@@ -322,7 +322,12 @@ impl Hub {
     }
 
     pub fn export_har(&self) -> serde_json::Value {
-        let flows = self.with_session(|session| session.flows());
+        self.export_har_matching("")
+    }
+
+    /// Exports the flows the list is showing. An empty filter exports the session.
+    pub fn export_har_matching(&self, filter: &str) -> serde_json::Value {
+        let flows = self.with_session(|session| session.flows_matching(filter));
         crate::har::export_har(&flows)
     }
 

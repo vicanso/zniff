@@ -639,7 +639,7 @@ pub fn App() -> impl IntoElement {
             move || {
                 clear_captured(&controls_clear, selected_clear, baseline_clear, compose_clear);
             },
-            move || export_har_file(&controls_export),
+            move || export_har_file(&controls_export, &filter.get()),
             move || copy_proxy_env(&controls_env),
             move || toggle_capture(controls_start.clone()),
             import_path,
@@ -3757,6 +3757,9 @@ fn more_menu(
     filter: Signal<String>,
     pretty: Signal<bool>,
 ) -> impl IntoElement {
+    let export_har = Rc::new(export_har);
+    let export_all = Rc::clone(&export_har);
+    let export_filtered = Rc::clone(&export_har);
     view()
         .w(px(248.0))
         .p_1()
@@ -3772,7 +3775,24 @@ fn more_menu(
             move || SharedString::from(flow_count_now(rows, flow_total, filter)),
             clear,
         ))
-        .child(menu_action(Glyph::Download, tr("导出", "Export"), export_har))
+        .child(
+            when(
+                move || !filter.get().is_empty(),
+                move || {
+                    let export_filtered = Rc::clone(&export_filtered);
+                    menu_action_meta(
+                        Glyph::Download,
+                        tr("导出", "Export"),
+                        move || SharedString::from(rows.with(Vec::len).to_string()),
+                        move || export_filtered(),
+                    )
+                },
+            )
+            .otherwise(move || {
+                let export_all = Rc::clone(&export_all);
+                menu_action(Glyph::Download, tr("导出", "Export"), move || export_all())
+            }),
+        )
         .child(import_menu(import_path, import_controls.clone()))
         .child(menu_action(
             Glyph::Prompt,
@@ -5589,8 +5609,8 @@ fn parse_header_text(text: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-fn export_har_file(controls: &Controls) {
-    let value = controls.hub.export_har();
+fn export_har_file(controls: &Controls, filter: &str) {
+    let value = controls.hub.export_har_matching(filter);
     let dir = ca::data_dir().join("exports");
     if let Err(err) = std::fs::create_dir_all(&dir) {
         set_status(controls, StatusMsg::ExportFailed(err.to_string()));

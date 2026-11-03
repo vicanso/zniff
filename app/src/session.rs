@@ -332,9 +332,14 @@ impl Session {
     }
 
     pub fn flows(&self) -> Vec<Flow> {
-        self.order
-            .iter()
-            .filter_map(|id| self.flows.get(id).cloned())
+        self.flows_matching("")
+    }
+
+    /// Flows that match `filter`, oldest first. An empty filter is the whole session.
+    pub fn flows_matching(&self, filter: &str) -> Vec<Flow> {
+        self.matching_with_previous_start(filter)
+            .into_iter()
+            .filter_map(|(id, _)| self.get(id).cloned())
             .collect()
     }
 
@@ -805,6 +810,15 @@ mod tests {
         assert_eq!(session.ids_matching("type:json"), vec![get_id]);
         assert_eq!(session.ids_matching("失败"), vec![failed]);
         assert_eq!(session.ids_matching("/v1"), vec![get_id, post_id]);
+        assert_eq!(
+            session
+                .flows_matching("POST")
+                .iter()
+                .map(|flow| flow.id)
+                .collect::<Vec<_>>(),
+            vec![post_id]
+        );
+        assert_eq!(session.flows_matching("").len(), 3);
     }
 
     #[test]
