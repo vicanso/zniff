@@ -73,10 +73,7 @@ P0 到 P3 里点名的能力已经接上。下面是仍然接受的缺口，不�
 
 ### 一、现有实现细节完善
 
-1. **外部 HAR 导入兼容 `"http/2.0"` / `"HTTP/2.0"`（实机注入测试发现）**
-   - [`har::protocol_from`](file:///Users/tree/github/zniff/app/src/har.rs#L263-L269) 目前只识别 `"HTTP/2"` 与 `"h2"`，而 Chrome DevTools 等导出的 HAR 1.2 通常写 `"http/2.0"` 或 `"HTTP/2.0"`，导入后会被归为 `HTTP/1.1`；应一并匹配 `"http/2.0"`。
-
-2. **清理仅测试使用的 `dead_code` 编译警告**
+1. **清理仅测试使用的 `dead_code` 编译警告**
     - 切换至 `diff_view` 后，[`present.rs`](file:///Users/tree/github/zniff/app/src/present.rs#L461-L474) 的 `DiffKind` / `DiffLine` / `line_diff`、[`rules.rs`](file:///Users/tree/github/zniff/app/src/rules.rs#L166) 的 `first_match`、[`session.rs`](file:///Users/tree/github/zniff/app/src/session.rs#L337-L418) 的 `ttfb` / `duration` / `ids_matching` 仅被单元测试调用，`make build` 会报 5 条 `dead_code` 警告，应加上 `#[cfg(test)]`。
 
 ### 二、待新增功能点

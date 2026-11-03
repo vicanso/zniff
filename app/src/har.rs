@@ -261,7 +261,11 @@ fn split_url(url: &str) -> (String, String) {
 }
 
 fn protocol_from(version: &str) -> Protocol {
-    if version.eq_ignore_ascii_case("HTTP/2") || version.eq_ignore_ascii_case("h2") {
+    let version = version.trim();
+    if version.eq_ignore_ascii_case("h2")
+        || version.eq_ignore_ascii_case("HTTP/2")
+        || version.eq_ignore_ascii_case("HTTP/2.0")
+    {
         Protocol::Http2
     } else {
         Protocol::Http11
@@ -407,6 +411,15 @@ fn b64_decode(text: &str) -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::session::{Direction, FlowDraft, Session};
+
+    #[test]
+    fn http2_versions_from_chrome_stay_http2() {
+        assert_eq!(protocol_from("HTTP/2"), Protocol::Http2);
+        assert_eq!(protocol_from("h2"), Protocol::Http2);
+        assert_eq!(protocol_from("http/2.0"), Protocol::Http2);
+        assert_eq!(protocol_from("HTTP/2.0"), Protocol::Http2);
+        assert_eq!(protocol_from("HTTP/1.1"), Protocol::Http11);
+    }
 
     #[test]
     fn round_trip_keeps_method_url_and_json_body() {
