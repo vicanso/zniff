@@ -428,6 +428,7 @@ pub fn App() -> impl IntoElement {
     let rows = signal(Vec::<RowLine>::new());
     let flow_total = signal(0_usize);
     let listen = signal(String::new());
+    let saved = saved_config();
     let shown = Shown {
         phase: signal(Phase::Empty),
         method: signal(String::new()),
@@ -447,7 +448,7 @@ pub fn App() -> impl IntoElement {
         query: signal(Vec::new()),
         preview: signal(String::new()),
         image_caption: signal(String::new()),
-        pretty: signal(true),
+        pretty: signal(saved.default_pretty),
         messages: signal(Vec::new()),
         diff: signal(String::new()),
         diff_old: signal(String::new()),
@@ -467,7 +468,6 @@ pub fn App() -> impl IntoElement {
         body: signal(String::new()),
         status: signal(String::new()),
     };
-    let saved = saved_config();
     let list_width = signal(saved.list_width as f32);
     let columns = signal(ListColumns::from_config(&saved));
     let bypass_text = signal(saved.bypass_hosts);
@@ -598,6 +598,7 @@ pub fn App() -> impl IntoElement {
             rows,
             flow_total,
             filter,
+            shown.pretty,
         ))
         .child(when(
             move || paused.get().is_some(),
@@ -664,6 +665,7 @@ fn toolbar(
     rows: Signal<Vec<RowLine>>,
     flow_total: Signal<usize>,
     filter: Signal<String>,
+    pretty: Signal<bool>,
 ) -> impl IntoElement {
     let install = Rc::new(install);
     let remove = Rc::new(remove);
@@ -760,6 +762,7 @@ fn toolbar(
             rows,
             flow_total,
             filter,
+            pretty,
         ))
         .child(primary_button(
             {
@@ -2976,6 +2979,7 @@ fn toolbar_menu(
     rows: Signal<Vec<RowLine>>,
     flow_total: Signal<usize>,
     filter: Signal<String>,
+    pretty: Signal<bool>,
 ) -> impl IntoElement {
     menu()
         .placement(Placement::Bottom)
@@ -2997,6 +3001,7 @@ fn toolbar_menu(
             rows,
             flow_total,
             filter,
+            pretty,
         ))
 }
 
@@ -3135,6 +3140,7 @@ fn more_menu(
     rows: Signal<Vec<RowLine>>,
     flow_total: Signal<usize>,
     filter: Signal<String>,
+    pretty: Signal<bool>,
 ) -> impl IntoElement {
     view()
         .w(px(248.0))
@@ -3152,7 +3158,7 @@ fn more_menu(
             clear,
         ))
         .child(menu_action(Glyph::Download, tr("导出", "Export"), export_har))
-        .child(import_menu(import_path, import_controls))
+        .child(import_menu(import_path, import_controls.clone()))
         .child(menu_action(
             Glyph::Prompt,
             tr("复制代理环境", "Copy proxy env"),
@@ -3177,6 +3183,23 @@ fn more_menu(
             })
         }))
         .child(menu_rule())
+        .child(marked_action(
+            move || pretty.get(),
+            tr("默认美化", "Pretty by default"),
+            move || {
+                let next = !pretty.get();
+                pretty.set(next);
+                if let Err(err) = save_config(|config| config.default_pretty = next) {
+                    set_status(
+                        &import_controls,
+                        StatusMsg::PrefUnsaved {
+                            name: PrefName::Pretty,
+                            err: err.to_string(),
+                        },
+                    );
+                }
+            },
+        ))
         .child(lang_choice(None, "跟随系统", "Follow system"))
         .child(lang_choice(Some(Lang::Zh), "中文", "中文"))
         .child(lang_choice(Some(Lang::En), "English", "English"))

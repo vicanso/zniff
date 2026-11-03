@@ -65,6 +65,9 @@ pub struct Config {
     pub show_size: bool,
     #[serde(default = "default_list_width", skip_serializing_if = "is_default_list_width")]
     pub list_width: u32,
+    /// Pretty is the body default unless the file says otherwise.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub default_pretty: bool,
 }
 
 impl Default for Config {
@@ -84,6 +87,7 @@ impl Default for Config {
             show_host: true,
             show_size: false,
             list_width: default_list_width(),
+            default_pretty: true,
         }
     }
 }
@@ -402,5 +406,20 @@ mod tests {
         assert!(!config.show_path);
         assert!(config.show_gap);
         assert!(!config.show_protocol);
+        assert!(config.default_pretty);
+    }
+
+    #[test]
+    fn default_pretty_stays_on_unless_the_file_turns_it_off() {
+        let dir = Scratch::new();
+        fs::write(dir.path().join("config.toml"), "listen_port = 8877\n").unwrap();
+        assert!(load(dir.path()).default_pretty);
+        update(dir.path(), |config| config.default_pretty = false).unwrap();
+        let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(text.contains("default_pretty = false"), "{text}");
+        assert!(!load(dir.path()).default_pretty);
+        update(dir.path(), |config| config.default_pretty = true).unwrap();
+        let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(!text.contains("default_pretty"), "{text}");
     }
 }

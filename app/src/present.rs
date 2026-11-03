@@ -599,64 +599,6 @@ fn push_section(out: &mut String, title: &str, body: &str) {
     out.push_str(body);
 }
 
-pub fn flow_diff(base: &Flow, current: &Flow, lang: Lang) -> String {
-    let mut out = String::new();
-    push_diff(
-        &mut out,
-        t(lang, "URL", "URL"),
-        &base.url,
-        &current.url,
-    );
-    push_diff(
-        &mut out,
-        t(lang, "请求头", "Request headers"),
-        &header_block(&base.request_headers),
-        &header_block(&current.request_headers),
-    );
-    push_diff(
-        &mut out,
-        t(lang, "请求 body", "Request body"),
-        &body_text(&base.request_body),
-        &body_text(&current.request_body),
-    );
-    push_diff(
-        &mut out,
-        t(lang, "响应头", "Response headers"),
-        &header_block(&base.response_headers),
-        &header_block(&current.response_headers),
-    );
-    push_diff(
-        &mut out,
-        t(lang, "响应 body", "Response body"),
-        &body_text(&base.response_body),
-        &body_text(&current.response_body),
-    );
-    out
-}
-
-fn push_diff(out: &mut String, title: &str, before: &str, after: &str) {
-    if !out.is_empty() {
-        out.push('\n');
-    }
-    out.push_str(title);
-    out.push('\n');
-    if before == after {
-        out.push_str("  =\n");
-        return;
-    }
-    for line in line_diff(before, after) {
-        let mark = match line.kind {
-            DiffKind::Same => " ",
-            DiffKind::Add => "+",
-            DiffKind::Remove => "-",
-        };
-        out.push(mark.chars().next().unwrap_or(' '));
-        out.push(' ');
-        out.push_str(&line.text);
-        out.push('\n');
-    }
-}
-
 fn header_block(headers: &[(String, String)]) -> String {
     headers
         .iter()

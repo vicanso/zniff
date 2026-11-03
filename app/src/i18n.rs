@@ -45,6 +45,7 @@ pub enum PrefName {
     Port,
     Lan,
     List,
+    Pretty,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -149,6 +150,7 @@ impl StatusMsg {
                     PrefName::Port => t(lang, "端口没有记住:", "Port was not saved:"),
                     PrefName::Lan => t(lang, "局域网开关没有记住:", "LAN switch was not saved:"),
                     PrefName::List => t(lang, "列表设置没有记住:", "List layout was not saved:"),
+                    PrefName::Pretty => t(lang, "默认展示没有记住:", "Default view was not saved:"),
                 };
                 format!("{name} {err}")
             }
