@@ -926,6 +926,7 @@ fn flow_list(
                     filter,
                     shown,
                     baseline,
+                    rules_text,
                 )
             }),
         ))
@@ -1099,31 +1100,7 @@ fn config_panel(
         .child(config_field(
             "规则",
             "Rules",
-            side_input(
-                rules_text,
-                tr(
-                    "map-local、break-res、replace host res a -> b",
-                    "map-local, break-res, replace host res a -> b",
-                ),
-                64.0,
-                true,
-                {
-                    let rules_controls = rules_controls.clone();
-                    move |text| {
-                        rules_text.set(text.to_string());
-                        rules_controls.hub.set_rules(text);
-                        if let Err(err) = save_config(|config| config.rules = text.to_string()) {
-                            set_status(
-                                &rules_controls,
-                                StatusMsg::PrefUnsaved {
-                                    name: PrefName::Rules,
-                                    err: err.to_string(),
-                                },
-                            );
-                        }
-                    }
-                },
-            ),
+            rules_editor(rules_text, rules_controls.clone()),
         ))
         .child(replace_row(rules_text, rules_controls))
         .child(config_field(
@@ -1151,19 +1128,88 @@ fn config_panel(
         ))
 }
 
+fn rules_editor(value: Signal<String>, controls: Arc<Controls>) -> impl IntoElement {
+    view()
+        .w_full()
+        .h(px(140.0))
+        .rounded(px(7.0))
+        .border_1()
+        .border_color(border_control())
+        .bg(bg_code())
+        .overflow_hidden()
+        .child(
+            editor()
+                .value(move || SharedString::from(value.get()))
+                .language("plaintext")
+                .line_numbers(true)
+                .folding(true)
+                .soft_wrap(true)
+                .font_size(Points(12.0))
+                .line_height(Points(18.0))
+                .scroll_beyond_last_line(false)
+                .placeholder(move || {
+                    SharedString::from(tr(
+                        "一行一条：break example.com/api",
+                        "One rule per line: break example.com/api",
+                    )())
+                })
+                .on_change(move |text: &SharedString| {
+                    let text = text.to_string();
+                    value.set(text.clone());
+                    controls.hub.set_rules(&text);
+                    if let Err(err) = save_config(|config| config.rules = text) {
+                        set_status(
+                            &controls,
+                            StatusMsg::PrefUnsaved {
+                                name: PrefName::Rules,
+                                err: err.to_string(),
+                            },
+                        );
+                    }
+                })
+                .size_full(),
+        )
+}
+
 fn replace_row(rules_text: Signal<String>, controls: Arc<Controls>) -> impl IntoElement {
     let pattern = signal(String::new());
     let from = signal(String::new());
     let to = signal(String::new());
     let response = signal(true);
+    let kind = signal(0_u8);
     view()
         .gap_1()
         .w_full()
         .child(
-            text(tr("添加替换", "Add replace"))
-                .text_size(px(11.5))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(fg_muted()),
+            view()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .child(
+                    text(tr("添加规则", "Add rule"))
+                        .text_size(px(11.5))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(fg_muted()),
+                )
+                .child(
+                    view()
+                        .h(px(22.0))
+                        .px_2()
+                        .rounded(px(6.0))
+                        .border_1()
+                        .border_color(border_control())
+                        .bg(bg_control())
+                        .cursor(Cursor::Pointer)
+                        .on_press(move || kind.set((kind.get() + 1) % 6))
+                        .child(
+                            text(move || {
+                                let (zh, en) = quick_kind(kind.get()).label();
+                                tr(zh, en)()
+                            })
+                            .text_size(px(11.0))
+                            .text_color(fg_secondary()),
+                        ),
+                ),
         )
         .child(
             view()
@@ -1231,8 +1277,9 @@ fn replace_row(rules_text: Signal<String>, controls: Arc<Controls>) -> impl Into
                         .bg(accent_blue())
                         .cursor(Cursor::Pointer)
                         .on_press(move || {
-                            let Some(next) = crate::rules::append_replace_line(
+                            let Some(next) = crate::rules::append_quick_rule(
                                 &rules_text.get(),
+                                quick_kind(kind.get()),
                                 &pattern.get(),
                                 response.get(),
                                 &from.get(),
@@ -1329,13 +1376,23 @@ fn flow_rows(
     filter: Signal<String>,
     shown: Shown,
     baseline: Signal<Option<u64>>,
+    rules_text: Signal<String>,
 ) -> impl IntoElement {
     virtual_list(
         move || rows.with(Vec::len),
         move |at| {
             flow_row(
-                rows, selected, compose, width, columns, at, controls.clone(), filter, shown,
+                rows,
+                selected,
+                compose,
+                width,
+                columns,
+                at,
+                controls.clone(),
+                filter,
+                shown,
                 baseline,
+                rules_text,
             )
         },
     )
@@ -1505,6 +1562,7 @@ fn flow_row(
     filter: Signal<String>,
     shown: Shown,
     baseline: Signal<Option<u64>>,
+    rules_text: Signal<String>,
 ) -> impl IntoElement {
     let row_id = move || rows.with(|rows| rows.get(at.index()).map(|row| row.id));
     let is_selected = move || selected.get() == row_id();
@@ -1575,7 +1633,9 @@ fn flow_row(
         .child(row_cells(rows, columns, at))
         .child(view().w(px(COL_PICKER)).flex_shrink_0()),
         )
-        .child(row_context_menu(picked, controls, filter, shown, baseline))
+        .child(row_context_menu(
+            picked, controls, filter, shown, baseline, rules_text,
+        ))
 }
 
 fn row_context_menu(
@@ -1584,8 +1644,10 @@ fn row_context_menu(
     filter: Signal<String>,
     shown: Shown,
     baseline: Signal<Option<u64>>,
+    rules_text: Signal<String>,
 ) -> impl IntoElement {
     let copy_url = controls.clone();
+    let break_controls = controls.clone();
     let copy_curl = controls.clone();
     let focus_controls = controls.clone();
     let mute_controls = controls.clone();
@@ -1651,6 +1713,42 @@ fn row_context_menu(
         .child(action_item(tr("重放", "Replay"), move || {
             replay_flow(&replay_controls, picked.get(), ReplayOverride::default());
         }))
+        .child(action_item(tr("填入断点", "Add break"), move || {
+            fill_break_rule(&break_controls, picked.get(), rules_text);
+        }))
+}
+
+fn quick_kind(kind: u8) -> crate::rules::QuickRule {
+    use crate::rules::QuickRule;
+    match kind % 6 {
+        0 => QuickRule::Replace,
+        1 => QuickRule::Remote,
+        2 => QuickRule::Local,
+        3 => QuickRule::Delay,
+        4 => QuickRule::Break,
+        _ => QuickRule::BreakRes,
+    }
+}
+
+fn fill_break_rule(controls: &Controls, id: Option<u64>, rules_text: Signal<String>) {
+    let Some(flow) = selected_flow(controls, id) else {
+        return;
+    };
+    let Some(next) = crate::rules::append_break_line(&rules_text.get(), &flow.host, &flow.path)
+    else {
+        return;
+    };
+    rules_text.set(next.clone());
+    controls.hub.set_rules(&next);
+    if let Err(err) = save_config(|config| config.rules = next) {
+        set_status(
+            controls,
+            StatusMsg::PrefUnsaved {
+                name: PrefName::Rules,
+                err: err.to_string(),
+            },
+        );
+    }
 }
 
 fn flow_pinned(controls: &Controls, id: Option<u64>) -> bool {

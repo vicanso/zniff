@@ -31,7 +31,7 @@ P0 到 P3 里点名的能力已经接上。下面是仍然接受的缺口，不�
 - HTTP/2 这一层只表示两边用源站选定的协议。不解析帧、HPACK、trailer、gRPC。
 - 界面里非 UTF-8 body 只显示前 4 KB 十六进制，UTF-8 只显示前 256 KB，截在字符边界上。记录本身仍保留最多 1 MB。复制用的是记录原文。左栏按到达时间排列，最新在最下面；离底部不超过一行时跟着新流量，再往上翻就停在当前内容。响应 body 在内层已经 `is_end_stream()`，或 `RecordingBody` 被丢弃时记完成。空响应（例如 `304`）和最后一帧不会停在「进行中」。超过 1 秒的时间列用警告色。主机列保持正常颜色。没有状态码的失败行，路径列用错误色。
 - WebSocket 从旁路解析帧并立刻转发。转发握手时去掉 `Sec-WebSocket-Extensions`，避免谈成 `permessage-deflate`。非法帧或仍然带扩展位（`RSV1 != 0`）只停止解析后续帧，不切断对拷。消息最多 200 条或 256 KB 文本。`Content-Type` 含 `event-stream` 且没有 WebSocket 消息时，按 SSE 事件列出。
-- 规则里 `map-local`、`map-remote`、`break`、`break-res` 是终点，按写下来的顺序第一条命中。`delay`、`header`、`cors`、`replace` 不占这条名额，匹配到的都会叠加上去，包括写在终点后面的行。`replace 主机/路径 res 原文 -> 替换成` 改响应正文，`req` 改请求正文。`原文` 不能有空格，`替换成` 可以有。只处理带 `Content-Length` 且不超过 1 MB 的正文：先按 `Content-Encoding` 解开，改到文字再去掉压缩头发明文。对不上、不是 UTF-8、分块或超过 1 MB 时照原样转发。同一条又命中响应断点时，这一轮不替换，断点仍看源站正文。配置里可以追加一条 `replace`；`map-local`、`map-remote`、`header`、`delay`、`break` 仍只写文本，因为「改已有的哪一行」还没有规则。`delay` 最长 30 秒。`map-local` 可写 `status=429`，省略时是 200。`header` 用 `req` 或 `res`，再写 `set` 或 `del`。`cors` 给响应补跨域头；`OPTIONS` 且没有终点规则时直接回 204，不拨源站。明文在拨号前应用，HTTPS 在源站连接打开后应用，WebSocket 和 `CONNECT` 跳过。Map Remote 换了主机就另开连接。请求断点和响应断点共用一个槽位，新命中会顶替并自动放行上一条，等 60 秒，超时当放行。响应断点先缓冲 body，最多 1 MB。已经写明的 `Content-Length` 超过 1 MB 时不暂停，记「响应断点跳过」后照常转发。分块或未知长度读过 1 MB 时，这条响应记失败。放行时可以改状态码、头和 body。重放不套规则和断点。规则里的文件路径不能有空格。
+- 规则里 `map-local`、`map-remote`、`break`、`break-res` 是终点，按写下来的顺序第一条命中。`delay`、`header`、`cors`、`replace` 不占这条名额，匹配到的都会叠加上去，包括写在终点后面的行。`replace 主机/路径 res 原文 -> 替换成` 改响应正文，`req` 改请求正文。`原文` 不能有空格，`替换成` 可以有。只处理带 `Content-Length` 且不超过 1 MB 的正文：先按 `Content-Encoding` 解开，改到文字再去掉压缩头发明文。对不上、不是 UTF-8、分块或超过 1 MB 时照原样转发。同一条又命中响应断点时，这一轮不替换，断点仍看源站正文。配置里的规则框是带行号的编辑器。下面可以追加一行：点类型在替换、转发、文件、延迟、断点、响应断点之间切换。行右键「填入断点」写入 `break 主机路径`，查询串不放进去。`header` 仍只写文本。改已有的哪一行仍没有单独的规则。`delay` 最长 30 秒。`map-local` 可写 `status=429`，省略时是 200。`header` 用 `req` 或 `res`，再写 `set` 或 `del`。`cors` 给响应补跨域头；`OPTIONS` 且没有终点规则时直接回 204，不拨源站。明文在拨号前应用，HTTPS 在源站连接打开后应用，WebSocket 和 `CONNECT` 跳过。Map Remote 换了主机就另开连接。请求断点和响应断点共用一个槽位，新命中会顶替并自动放行上一条，等 60 秒，超时当放行。响应断点先缓冲 body，最多 1 MB。已经写明的 `Content-Length` 超过 1 MB 时不暂停，记「响应断点跳过」后照常转发。分块或未知长度读过 1 MB 时，这条响应记失败。放行时可以改状态码、头和 body。重放不套规则和断点。规则里的文件路径不能有空格。
 - 直通名单在 ClientHello 之后看 SNI，没有 SNI 就用 CONNECT 主机。`*.example.com` 匹配子域，不匹配顶点。`only:` 是白名单。`*` 全部直通。空名单全部解密。
 - `GET` 或 `HEAD` 的路径去掉 query 后是 `/zniff-ca.crt` 时直接返回根证书 PEM。直接访问 `/`，或路径是 `/zniff`，返回手机安装页。`Accept-Language` 首段不是 `zh` 时安装页是英文，空的或 `zh` 仍是中文。代理请求里的 `http://其他主机/` 仍转发出去。
 - 监听默认 `127.0.0.1:8877`。端口和局域网开关记在 `config.toml` 的 `listen_port`、`listen_all`，`0` 拒绝，绑不上就报错，不悄悄换端口。`listen_all` 打开后绑 `0.0.0.0`。监听地址是 `0.0.0.0` 之后，底栏「扫码」点开才显示安装页二维码。默认地址是访问公网的那张 IPv4；隧道和 `198.18.0.0/15` 让位给物理网卡。多张网卡可改选。没有系统文件选择框。图片预览只做 png、jpeg、webp、gif，且响应已结束、非空、未截断。SVG 不预览。
@@ -73,27 +73,22 @@ P0 到 P3 里点名的能力已经接上。下面是仍然接受的缺口，不�
 
 ### 一、现有实现细节完善
 
-1. **配置面板规则编辑体验与快捷规则扩展**
-   - 将配置面板里的多行规则输入升级为带行号的 `editor()`。
-   - 在详情「更多」或行右键菜单中支持「基于当前请求创建规则」，自动带入当前流量的 `host + path`。行右键已经能复制 URL、cURL、只看、屏蔽、星标、基准和重放；「填入规则」留在这里，因为还没定写入 `break`、`map-remote` 还是 `replace`。
-   - 将现在的替换添加行扩展为可选规则类型（`replace`、`map-remote`、`map-local`、`delay`、`break`）。
-
-2. **表单请求体（`x-www-form-urlencoded`）键值展示与编码提示**
+1. **表单请求体（`x-www-form-urlencoded`）键值展示与编码提示**
    - 对 `POST` 表单字段值复用 [`annotated`](file:///Users/tree/github/zniff/app/src/lib.rs#L3884)（自动识别并附注 JWT、Unix 时间戳、可打印 Base64），或像「查询参数」一样以对齐键值行展示。
 
-3. **右栏卡片标题样式与左对齐统一（实机截图核对发现）**
+2. **右栏卡片标题样式与左对齐统一（实机截图核对发现）**
    - 当前 `查询参数`、`对比`、`消息`、`响应头`、`请求头`（[`header_section`](file:///Users/tree/github/zniff/app/src/lib.rs#L2101-L2133)、[`diff_card`](file:///Users/tree/github/zniff/app/src/lib.rs#L2199-L2212)）的折叠箭头与标题位于**卡片外上方**（左内边距 `px_1` = `4px`），而 `响应 body`、`请求 body`（[`body_section`](file:///Users/tree/github/zniff/app/src/lib.rs#L2259-L2288)）将折叠箭头与标题放在**卡片框内部顶栏**（左内边距 `px_3p5` = `14px`）。上下相邻卡片的折叠箭头水平错位 `10px`，视觉层次不统一；应统一为同一套卡片头样式（将「美化 / 原文」放到卡片外标题行右侧，或所有可折叠卡片统一使用卡片内顶栏）。
 
-4. **隐藏「主机」列时保留星标蓝点指示（实机截图核对发现）**
+3. **隐藏「主机」列时保留星标蓝点指示（实机截图核对发现）**
    - 当前星标蓝点画在 [`host_cell`](file:///Users/tree/github/zniff/app/src/lib.rs#L1653-L1663) 内；当 `config.toml` 中 `show_host = false`（隐藏主机列）时，列表中星标行的蓝点会随之消失。应将星标蓝点移到始终显示的「方法」列旁，或在隐藏主机列时回退显示在路径/方法前。
 
-5. **`body_section` 中 `editor` 与上方 `note` 横幅的分隔线及外边距**
+4. **`body_section` 中 `editor` 与上方 `note` 横幅的分隔线及外边距**
    - 普通文本分支（[`app/src/lib.rs#L2335-L2341`](file:///Users/tree/github/zniff/app/src/lib.rs#L2335-L2341)）在上方有 `note` 提示框或图片预览时会加 `1px` 顶部分隔线，而只读 `editor` 分支（[`code_body`](file:///Users/tree/github/zniff/app/src/lib.rs#L2350-L2379)）未加顶部分隔线与间距，当大段 JSON 同时带有 256 KB 截断提示框时会直接紧贴在一起。
 
-6. **外部 HAR 导入兼容 `"http/2.0"` / `"HTTP/2.0"`（实机注入测试发现）**
+5. **外部 HAR 导入兼容 `"http/2.0"` / `"HTTP/2.0"`（实机注入测试发现）**
    - [`har::protocol_from`](file:///Users/tree/github/zniff/app/src/har.rs#L263-L269) 目前只识别 `"HTTP/2"` 与 `"h2"`，而 Chrome DevTools 等导出的 HAR 1.2 通常写 `"http/2.0"` 或 `"HTTP/2.0"`，导入后会被归为 `HTTP/1.1`；应一并匹配 `"http/2.0"`。
 
-7. **清理仅测试使用的 `dead_code` 编译警告**
+6. **清理仅测试使用的 `dead_code` 编译警告**
     - 切换至 `diff_view` 后，[`present.rs`](file:///Users/tree/github/zniff/app/src/present.rs#L461-L474) 的 `DiffKind` / `DiffLine` / `line_diff`、[`rules.rs`](file:///Users/tree/github/zniff/app/src/rules.rs#L166) 的 `first_match`、[`session.rs`](file:///Users/tree/github/zniff/app/src/session.rs#L337-L418) 的 `ttfb` / `duration` / `ids_matching` 仅被单元测试调用，`make build` 会报 5 条 `dead_code` 警告，应加上 `#[cfg(test)]`。
 
 ### 二、待新增功能点

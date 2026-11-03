@@ -404,6 +404,118 @@ pub fn apply_replaces(body: &[u8], pairs: &[(String, String)]) -> Option<Vec<u8>
     changed.then(|| text.into_bytes())
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum QuickRule {
+    Replace,
+    Remote,
+    Local,
+    Delay,
+    Break,
+    BreakRes,
+}
+
+impl QuickRule {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Replace => Self::Remote,
+            Self::Remote => Self::Local,
+            Self::Local => Self::Delay,
+            Self::Delay => Self::Break,
+            Self::Break => Self::BreakRes,
+            Self::BreakRes => Self::Replace,
+        }
+    }
+
+    pub fn label(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Replace => ("替换", "Replace"),
+            Self::Remote => ("转发", "Forward"),
+            Self::Local => ("文件", "File"),
+            Self::Delay => ("延迟", "Delay"),
+            Self::Break => ("断点", "Break"),
+            Self::BreakRes => ("响应断点", "Break res"),
+        }
+    }
+}
+
+/// `host` plus the path, without the query. Both must be one token.
+pub fn request_pattern(host: &str, path: &str) -> Option<String> {
+    let host = host.trim();
+    let path = path.split('?').next().unwrap_or(path).trim();
+    if host.is_empty()
+        || host.contains(char::is_whitespace)
+        || path.contains(char::is_whitespace)
+    {
+        return None;
+    }
+    let path = if path.is_empty() || !path.starts_with('/') {
+        return None;
+    } else {
+        path
+    };
+    Some(format!("{host}{path}"))
+}
+
+pub fn append_break_line(rules: &str, host: &str, path: &str) -> Option<String> {
+    let pattern = request_pattern(host, path)?;
+    push_line(rules, &format!("break {pattern}"))
+}
+
+pub fn append_quick_rule(
+    rules: &str,
+    kind: QuickRule,
+    pattern: &str,
+    response: bool,
+    from: &str,
+    to: &str,
+) -> Option<String> {
+    let pattern = pattern.trim();
+    if pattern.is_empty() || pattern.contains(char::is_whitespace) {
+        return None;
+    }
+    let from = from.trim();
+    let to = to.trim();
+    let line = match kind {
+        QuickRule::Replace => {
+            return append_replace_line(rules, pattern, response, from, to);
+        }
+        QuickRule::Remote => {
+            if !(from.starts_with("http://") || from.starts_with("https://")) {
+                return None;
+            }
+            format!("map-remote {pattern} {from}")
+        }
+        QuickRule::Local => {
+            if from.is_empty() || from.contains(char::is_whitespace) {
+                return None;
+            }
+            format!("map-local {pattern} {from}")
+        }
+        QuickRule::Delay => {
+            if from.is_empty() || from.contains(char::is_whitespace) {
+                return None;
+            }
+            format!("delay {pattern} {from}")
+        }
+        QuickRule::Break => format!("break {pattern}"),
+        QuickRule::BreakRes => format!("break-res {pattern}"),
+    };
+    push_line(rules, &line)
+}
+
+fn push_line(rules: &str, line: &str) -> Option<String> {
+    if line.contains('\n') {
+        return None;
+    }
+    let mut next = rules.to_string();
+    if !next.is_empty() && !next.ends_with('\n') {
+        next.push('\n');
+    }
+    next.push_str(line);
+    next.push('\n');
+    Some(next)
+}
+
 /// One line for the rules box. `from` cannot contain spaces or `->`.
 pub fn append_replace_line(
     rules: &str,
@@ -586,5 +698,20 @@ break example.com/api
         assert_eq!(line, "replace example.com/api res hello -> hi there\n");
         assert!(append_replace_line("", "has space", true, "a", "b").is_none());
         assert!(append_replace_line("", "example.com", true, "a -> b", "c").is_none());
+        let broken = append_quick_rule("", QuickRule::Remote, "example.com/api", true, "not-a-url", "");
+        assert!(broken.is_none());
+        let forwarded = append_quick_rule(
+            "",
+            QuickRule::Remote,
+            "example.com/api",
+            true,
+            "https://other.test/v1",
+            "",
+        )
+        .unwrap();
+        assert_eq!(forwarded, "map-remote example.com/api https://other.test/v1\n");
+        let stopped = append_break_line("", "example.com", "/pay?x=1").unwrap();
+        assert_eq!(stopped, "break example.com/pay\n");
+        assert!(append_break_line("", "has space", "/pay").is_none());
     }
 }
