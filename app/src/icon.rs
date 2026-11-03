@@ -16,6 +16,7 @@ pub enum Glyph {
     Badge,
     List,
     Prompt,
+    Columns,
 }
 
 pub fn glyph(kind: impl Fn() -> Glyph + 'static, paint: impl Fn() -> Hsla + 'static) -> impl IntoElement {
@@ -75,6 +76,10 @@ fn draw(kind: Glyph, paint: Hsla, size: f32) -> Painter {
             .stroke_svg("M3 4.4 H13")
             .stroke_svg("M3 8 H13")
             .stroke_svg("M3 11.6 H9"),
+        Glyph::Columns => painter
+            .stroke_svg("M2.6 3.2 H13.4 V12.8 H2.6 Z")
+            .stroke_svg("M6.2 3.2 V12.8")
+            .stroke_svg("M9.8 3.2 V12.8"),
         Glyph::Prompt => painter
             .stroke_svg("M3.2 3.2 H12.8 V12.8 H3.2 Z")
             .stroke_svg("M5.2 8.2 L7.2 9.6 L5.2 11")

@@ -21,7 +21,9 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use nsh_base::{DiffLayout, diff_view, editor, input, menu, menu_item, popover, theme, tooltip};
+use nsh_base::{
+    DiffLayout, context_menu, diff_view, editor, input, menu, menu_item, popover, theme, tooltip,
+};
 use nsh_core::prelude::*;
 use nsh_core::EllipsizeMode;
 
@@ -1016,6 +1018,7 @@ fn config_trigger(
                     .bg(status_ok_fg())
             },
         ))
+        .tooltip(label_tip("配置", "Config"))
         .child(glyph(
             || Glyph::Sliders,
             move || {
@@ -1026,19 +1029,6 @@ fn config_trigger(
                 })
             },
         ))
-        .child(
-            text(tr("配置", "Config"))
-                .number_of_lines(1)
-                .text_size(px(CONTROL_TEXT))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(move || {
-                    if config_set(label_bypass, label_rules, label_upstream) {
-                        accent_blue_text()
-                    } else {
-                        fg_secondary()
-                    }
-                }),
-        )
 }
 
 fn config_panel(
@@ -1214,6 +1204,18 @@ fn column_header(
     columns: Signal<ListColumns>,
     controls: Arc<Controls>,
 ) -> impl IntoElement {
+    context_menu()
+        .offset(px(4.0))
+        .margin(px(8.0))
+        .trigger(column_header_row(width, columns, controls.clone()))
+        .child(column_picker_panel(columns, controls))
+}
+
+fn column_header_row(
+    width: Signal<f32>,
+    columns: Signal<ListColumns>,
+    controls: Arc<Controls>,
+) -> impl IntoElement {
     view()
         .w(move || px(width.get()))
         .flex_shrink_0()
@@ -1262,7 +1264,10 @@ fn column_labels(columns: Signal<ListColumns>) -> impl IntoElement {
 }
 
 fn column_picker(columns: Signal<ListColumns>, controls: Arc<Controls>) -> impl IntoElement {
-    view().w(px(COL_PICKER)).flex_shrink_0().child(column_menu(columns, controls))
+    view()
+        .w(px(COL_PICKER))
+        .flex_shrink_0()
+        .child(column_menu(columns, controls))
 }
 
 fn column_menu(columns: Signal<ListColumns>, controls: Arc<Controls>) -> impl IntoElement {
@@ -1286,13 +1291,8 @@ fn column_picker_trigger() -> impl IntoElement {
         .rounded(px(5.0))
         .hover(|style| style.bg(bg_control_hover()))
         .cursor(Cursor::Pointer)
-        .child(
-            text(tr("列", "Cols"))
-                .number_of_lines(1)
-                .text_size(px(11.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(fg_secondary()),
-        )
+        .tooltip(label_tip("列", "Columns"))
+        .child(glyph(|| Glyph::Columns, || color(fg_secondary())))
 }
 
 fn column_picker_panel(columns: Signal<ListColumns>, controls: Arc<Controls>) -> impl IntoElement {
@@ -1619,6 +1619,23 @@ fn path_cell(rows: Signal<Vec<RowLine>>, at: Position) -> Text {
                 .unwrap_or_default()
         })
     }))
+}
+
+fn label_tip(zh: &'static str, en: &'static str) -> impl IntoTooltip {
+    tooltip().child(
+        view()
+            .px_2()
+            .py_1()
+            .rounded(px(6.0))
+            .bg(bg_card())
+            .border_1()
+            .border_color(border_strong())
+            .child(
+                text(tr(zh, en))
+                    .text_size(px(12.0))
+                    .text_color(fg_primary()),
+            ),
+    )
 }
 
 /// A reactive bubble. A plain string tooltip is captured once, and a virtual row reuses its cell.
