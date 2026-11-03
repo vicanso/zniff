@@ -2605,7 +2605,13 @@ fn body_section(
                     && !body.get().is_empty()
                     && !code.get().is_empty()
             },
-            move || code_body(body, code),
+            move || {
+                let divided = image_on() || !note.get().is_empty();
+                view()
+                    .border_t(move || if divided { px(1.0) } else { px(0.0) })
+                    .border_t_color(border_subtle())
+                    .child(code_body(body, code))
+            },
         ))
         .child(when(
             move || !card_folded(folded, bit) && !form.with(Vec::is_empty),
