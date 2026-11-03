@@ -70,6 +70,8 @@ pub struct Flow {
     pub messages_truncated: bool,
     /// Kept when the session cap drops older flows.
     pub pinned: bool,
+    /// Rules that rewrote this flow, joined by spaces. Empty when none did.
+    pub rule_hit: String,
     accounted: usize,
 }
 
@@ -129,6 +131,7 @@ impl Session {
             messages: Vec::new(),
             messages_truncated: false,
             pinned: false,
+            rule_hit: String::new(),
             accounted: headers_size,
         };
         self.bytes += headers_size;
@@ -332,6 +335,12 @@ impl Session {
         self.flows.clear();
         self.bytes = 0;
         self.dropped = 0;
+    }
+
+    pub fn set_rule_hit(&mut self, id: u64, hit: impl Into<String>) {
+        if let Some(flow) = self.flows.get_mut(&id) {
+            flow.rule_hit = hit.into();
+        }
     }
 
     #[cfg(test)]

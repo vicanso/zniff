@@ -141,6 +141,19 @@ impl Hub {
         rules::effect(&rules, host, path)
     }
 
+    fn note_rules(&self, id: u64, host: &str, path: &str) {
+        let rules = self
+            .rules
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone();
+        let hit = rules::hit_summary(&rules, host, path);
+        if !hit.is_empty() {
+            self.with_session(|session| session.set_rule_hit(id, hit));
+            self.touch();
+        }
+    }
+
     pub fn paused(&self) -> Option<(u64, BreakSide)> {
         self.break_slot
             .lock()
@@ -909,6 +922,7 @@ where
     let plan = if websocket {
         rules::Effect::default()
     } else {
+        hub.note_rules(id, &host, &path);
         hub.plan(&host, &path)
     };
     if !plan.delay.is_zero() {
@@ -2597,6 +2611,7 @@ async fn forward_request(
     let mut response_replaces = Vec::new();
     let mut cors = false;
     if !websocket {
+        hub.note_rules(id, &host, &path);
         let plan = hub.plan(&host, &path);
         if !plan.delay.is_zero() {
             tokio::time::sleep(plan.delay).await;

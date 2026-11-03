@@ -384,6 +384,7 @@ struct Shown {
     method: Signal<String>,
     url: Signal<String>,
     protocol: Signal<String>,
+    rules: Signal<String>,
     status: Signal<Option<u16>>,
     error: Signal<String>,
     request_headers: Signal<Vec<HeaderLine>>,
@@ -437,6 +438,7 @@ pub fn App() -> impl IntoElement {
         method: signal(String::new()),
         url: signal(String::new()),
         protocol: signal(String::new()),
+        rules: signal(String::new()),
         status: signal(None),
         error: signal(String::new()),
         request_headers: signal(Vec::new()),
@@ -2273,6 +2275,22 @@ fn summary(
                                 .text_color(fg_muted()),
                         ),
                 )
+                .child(when(
+                    move || !shown.rules.get().is_empty(),
+                    move || {
+                        view()
+                            .px_2()
+                            .py_0p5()
+                            .rounded(px(5.0))
+                            .bg(accent_blue_soft())
+                            .child(
+                                mono(move || shown.rules.get())
+                                    .text_size(px(11.5))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(accent_blue_text()),
+                            )
+                    },
+                ))
                 .child(view().flex_1())
                 .child(detail_actions(
                     shown, controls, selected, compose, filter, baseline,
@@ -3979,6 +3997,7 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baselin
         shown.request_language.set(String::new());
         shown.response_language.set(String::new());
         shown.request_form.set(Vec::new());
+        shown.rules.set(String::new());
         shown.pinned.set(false);
         return;
     };
@@ -3993,6 +4012,7 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baselin
         shown.request_language.set(String::new());
         shown.response_language.set(String::new());
         shown.request_form.set(Vec::new());
+        shown.rules.set(String::new());
         shown.pinned.set(false);
         return;
     };
@@ -4070,6 +4090,7 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baselin
     shown.method.set(flow.method);
     shown.url.set(flow.url);
     shown.protocol.set(flow.protocol.label().to_string());
+    shown.rules.set(flow.rule_hit.clone());
     shown.status.set(flow.status);
     shown.error.set(flow.error.clone().unwrap_or_default());
     shown.request_headers.set(header_lines(&flow.request_headers, pretty));

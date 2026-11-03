@@ -163,6 +163,38 @@ pub fn parse_rules(text: &str) -> Vec<Rule> {
         .collect()
 }
 
+/// Labels of the rules that actually apply, in text order. The first terminal
+/// rule stops later terminal rules. Modifiers still count after it.
+pub fn hit_summary(rules: &[Rule], host: &str, path: &str) -> String {
+    let mut labels = Vec::new();
+    let mut took_terminal = false;
+    for rule in rules {
+        if !rule.matches(host, path) {
+            continue;
+        }
+        let (label, terminal) = match rule {
+            Rule::MapLocal { .. } => ("map-local", true),
+            Rule::MapRemote { .. } => ("map-remote", true),
+            Rule::Break { .. } => ("break", true),
+            Rule::BreakResponse { .. } => ("break-res", true),
+            Rule::Delay { .. } => ("delay", false),
+            Rule::Header { .. } => ("header", false),
+            Rule::Cors { .. } => ("cors", false),
+            Rule::Replace { .. } => ("replace", false),
+        };
+        if terminal {
+            if took_terminal {
+                continue;
+            }
+            took_terminal = true;
+        }
+        if !labels.contains(&label) {
+            labels.push(label);
+        }
+    }
+    labels.join(" ")
+}
+
 #[cfg(test)]
 pub fn first_match<'a>(rules: &'a [Rule], host: &str, path: &str) -> Option<&'a Rule> {
     rules.iter().find(|rule| rule.matches(host, path))
@@ -701,6 +733,14 @@ break example.com/api
         .unwrap();
         assert_eq!(forwarded, "map-remote example.com/api https://other.test/v1\n");
         let stopped = append_break_line("", "example.com", "/pay?x=1").unwrap();
+        assert_eq!(
+            hit_summary(
+                &parse_rules("delay example.com 1s\nreplace example.com res a -> b\nbreak example.com\nbreak-res example.com"),
+                "example.com",
+                "/",
+            ),
+            "delay replace break"
+        );
         assert_eq!(stopped, "break example.com/pay\n");
         assert!(append_break_line("", "has space", "/pay").is_none());
     }
