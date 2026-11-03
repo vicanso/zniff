@@ -812,16 +812,58 @@ fn format_unix_utc(secs: i64) -> String {
 }
 
 pub fn format_clock(time: SystemTime) -> String {
-    let secs = time
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs() as i64)
-        .unwrap_or(0);
+    let duration = time.duration_since(UNIX_EPOCH).unwrap_or_default();
+    let secs = duration.as_secs() as i64;
+    let millis = duration.subsec_millis();
     let local = secs + local_offset_secs();
     let day = local.rem_euclid(86_400);
     let hour = day / 3600;
     let minute = (day % 3600) / 60;
     let second = day % 60;
-    format!("{hour:02}:{minute:02}:{second:02}")
+    format!("{hour:02}:{minute:02}:{second:02}.{millis:03}")
+}
+
+/// Gap from the previous arrival. The first flow, and a clock that steps
+/// backwards, both read as `+0 ms`.
+pub fn format_gap(previous: Option<SystemTime>, started: SystemTime) -> String {
+    let Some(previous) = previous else {
+        return "+0 ms".into();
+    };
+    match started.duration_since(previous) {
+        Ok(duration) => format_delta(duration),
+        Err(_) => "+0 ms".into(),
+    }
+}
+
+fn format_delta(duration: Duration) -> String {
+    let ms = duration.as_millis();
+    if ms < 1_000 {
+        return format!("+{ms} ms");
+    }
+    if ms < 10_000 {
+        let whole = ms / 1_000;
+        let frac = (ms % 1_000) / 10;
+        return format!("+{whole}.{frac:02} s");
+    }
+    if ms < 60_000 {
+        let whole = ms / 1_000;
+        let frac = (ms % 1_000) / 100;
+        return format!("+{whole}.{frac} s");
+    }
+    if ms < 3_600_000 {
+        // Hundredths of a minute. 60_000 ms is `+1.00 m`.
+        let hundredths = ms / 600;
+        if hundredths < 1_000 {
+            return format!("+{}.{:02} m", hundredths / 100, hundredths % 100);
+        }
+        return format!("+{} m", hundredths / 100);
+    }
+    let tenths = ms / 360_000;
+    if tenths < 100 {
+        format!("+{}.{} h", tenths / 10, tenths % 10)
+    } else {
+        format!("+{} h", tenths / 10)
+    }
 }
 
 fn local_offset_secs() -> i64 {
@@ -1005,6 +1047,29 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn gap_and_clock_keep_milliseconds() {
+        let start = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        assert_eq!(format_gap(None, start), "+0 ms");
+        assert_eq!(format_gap(Some(start + Duration::from_secs(2)), start), "+0 ms");
+        assert_eq!(format_gap(Some(start), start + Duration::from_millis(45)), "+45 ms");
+        assert_eq!(
+            format_gap(Some(start), start + Duration::from_millis(1_240)),
+            "+1.24 s"
+        );
+        assert_eq!(
+            format_gap(Some(start), start + Duration::from_millis(10_500)),
+            "+10.5 s"
+        );
+        assert_eq!(
+            format_gap(Some(start), start + Duration::from_millis(90_000)),
+            "+1.50 m"
+        );
+        let clock = format_clock(start + Duration::from_millis(123));
+        assert!(clock.ends_with(".123"), "{clock}");
+        assert_eq!(clock.len(), 12);
     }
 
     #[test]

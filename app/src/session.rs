@@ -412,12 +412,28 @@ impl Session {
     }
 
     pub fn ids_matching(&self, filter: &str) -> Vec<u64> {
-        let query = FlowQuery::parse(filter);
-        self.order
-            .iter()
-            .copied()
-            .filter(|id| self.flows.get(id).is_some_and(|flow| query.matches(flow)))
+        self.matching_with_previous_start(filter)
+            .into_iter()
+            .map(|(id, _)| id)
             .collect()
+    }
+
+    /// Matching ids, oldest first. The time is when the previous flow in
+    /// arrival order started, including a neighbor the filter hides.
+    pub fn matching_with_previous_start(&self, filter: &str) -> Vec<(u64, Option<SystemTime>)> {
+        let query = FlowQuery::parse(filter);
+        let mut previous = None;
+        let mut out = Vec::new();
+        for id in &self.order {
+            let Some(flow) = self.flows.get(id) else {
+                continue;
+            };
+            if query.matches(flow) {
+                out.push((*id, previous));
+            }
+            previous = Some(flow.started);
+        }
+        out
     }
 
     fn evict(&mut self, keep: u64) {
@@ -660,6 +676,34 @@ mod tests {
         assert!(session.get(first).is_none());
         assert!(session.dropped() >= 1);
         assert!(session.memory_bytes() <= SESSION_CAP);
+    }
+
+    #[test]
+    fn gap_keeps_the_hidden_neighbor() {
+        let mut session = Session::default();
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let mut open = |host: &str, path: &str| {
+            session.open(FlowDraft {
+                protocol: Protocol::Http11,
+                method: "GET".into(),
+                host: host.into(),
+                path: path.into(),
+                url: format!("http://{host}{path}"),
+                request_headers: vec![],
+            })
+        };
+        let first = open("alpha.test", "/item");
+        let hidden = open("beta.test", "/secret");
+        let third = open("gamma.test", "/item");
+        session.set_started(first, base);
+        session.set_started(hidden, base + Duration::from_millis(45));
+        session.set_started(third, base + Duration::from_millis(45 + 1_240));
+        let rows = session.matching_with_previous_start("item");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0, first);
+        assert_eq!(rows[0].1, None);
+        assert_eq!(rows[1].0, third);
+        assert_eq!(rows[1].1, Some(base + Duration::from_millis(45)));
     }
 
     #[test]

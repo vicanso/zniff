@@ -276,6 +276,8 @@ struct RowLine {
     method: String,
     status: Option<u16>,
     time: String,
+    /// Local `HH:MM:SS.mmm`, shown when the gap cell is hovered.
+    clock: String,
     host: String,
     path: String,
     failed: bool,
@@ -1172,6 +1174,7 @@ fn status_text(rows: Signal<Vec<RowLine>>, at: Position) -> Text {
 }
 
 fn time_cell(rows: Signal<Vec<RowLine>>, at: Position) -> Text {
+    let tip_rows = rows;
     mono(move || {
         rows.with(|rows| {
             rows.get(at.index())
@@ -1190,6 +1193,13 @@ fn time_cell(rows: Signal<Vec<RowLine>>, at: Position) -> Text {
             fg_muted()
         }
     })
+    .tooltip(cell_tip(move || {
+        tip_rows.with(|rows| {
+            rows.get(at.index())
+                .map(|row| row.clock.clone())
+                .unwrap_or_default()
+        })
+    }))
 }
 
 fn host_cell(rows: Signal<Vec<RowLine>>, at: Position) -> impl IntoElement {
@@ -2786,15 +2796,16 @@ fn mono(content: impl IntoReactive<SharedString>) -> Text {
 fn row_lines(hub: &Hub, filter: &str) -> Vec<RowLine> {
     hub.with_session(|session| {
         session
-            .ids_matching(filter)
+            .matching_with_previous_start(filter)
             .into_iter()
-            .filter_map(|id| {
+            .filter_map(|(id, previous)| {
                 let flow = session.get(id)?;
                 Some(RowLine {
                     id,
                     method: flow.method.clone(),
                     status: flow.status,
-                    time: present::format_clock(flow.started),
+                    time: present::format_gap(previous, flow.started),
+                    clock: present::format_clock(flow.started),
                     host: flow.host.clone(),
                     path: flow.path.clone(),
                     failed: flow.error.is_some() && flow.status.is_none(),
