@@ -565,6 +565,8 @@ pub fn App() -> impl IntoElement {
     let controls_remove = controls.clone();
     let controls_proxy = controls.clone();
     let controls_clear = controls.clone();
+    let controls_clear_key = controls_clear.clone();
+    let controls_replay_key = controls.clone();
     let controls_export = controls.clone();
     let controls_env = controls.clone();
     let selected_clear = selected;
@@ -578,6 +580,46 @@ pub fn App() -> impl IntoElement {
     let controls_drop = controls.clone();
     let folded = signal(0_u8);
     let drop_langs = langs;
+    let filter_focus = element_ref();
+    let rows_step = rows;
+    let selected_step = selected;
+    let compose_step = compose;
+    on_key_with(
+        "up",
+        KeyOptions {
+            repeat: true,
+            ..KeyOptions::default()
+        },
+        move |_| step_selected(rows_step, selected_step, compose_step, -1),
+    );
+    on_key_with(
+        "down",
+        KeyOptions {
+            repeat: true,
+            ..KeyOptions::default()
+        },
+        move |_| step_selected(rows_step, selected_step, compose_step, 1),
+    );
+    let selected_clear_key = selected;
+    let baseline_clear_key = baseline;
+    let compose_clear_key = compose;
+    on_key("mod+k", move |_| {
+        clear_captured(
+            &controls_clear_key,
+            selected_clear_key,
+            baseline_clear_key,
+            compose_clear_key,
+        );
+    });
+    on_key("mod+f", move |_| filter_focus.focus());
+    let selected_replay = selected;
+    on_key("mod+r", move |_| {
+        replay_flow(
+            &controls_replay_key,
+            selected_replay.get(),
+            ReplayOverride::default(),
+        );
+    });
 
     view()
         .flex_1()
@@ -595,10 +637,7 @@ pub fn App() -> impl IntoElement {
             move || remove_ca(controls_remove.clone()),
             move || toggle_system_proxy(controls_proxy.clone()),
             move || {
-                controls_clear.hub.clear_session();
-                selected_clear.set(None);
-                baseline_clear.set(None);
-                reset_compose(compose_clear);
+                clear_captured(&controls_clear, selected_clear, baseline_clear, compose_clear);
             },
             move || export_har_file(&controls_export),
             move || copy_proxy_env(&controls_env),
@@ -633,6 +672,7 @@ pub fn App() -> impl IntoElement {
                     controls_list,
                     shown,
                     baseline,
+                    filter_focus,
                 ))
                 .child(column_splitter(list_width, controls_split))
                 .child(detail_pane(
@@ -867,6 +907,7 @@ fn flow_list(
     controls: Arc<Controls>,
     shown: Shown,
     baseline: Signal<Option<u64>>,
+    filter_focus: ElementRef,
 ) -> impl IntoElement {
     let bypass_controls = controls.clone();
     let row_controls = controls.clone();
@@ -892,7 +933,7 @@ fn flow_list(
                 .border_b_1()
                 .border_b_color(border_strong())
                 .child(
-                    view().flex_1().min_w(px(0.0)).child(side_input(
+                    view().flex_1().min_w(px(0.0)).child(focused_input(
                         filter,
                         tr(
                             "主机、路径、GET、404、-host、mute:、pin:",
@@ -901,6 +942,7 @@ fn flow_list(
                         30.0,
                         false,
                         move |text| filter.set(text.to_string()),
+                        Some(filter_focus),
                     )),
                 )
                 .child(capture_config(
@@ -943,7 +985,18 @@ fn side_input(
     multiline: bool,
     on_change: impl Fn(&str) + 'static,
 ) -> impl IntoElement {
-    input()
+    focused_input(value, placeholder, height, multiline, on_change, None)
+}
+
+fn focused_input(
+    value: Signal<String>,
+    placeholder: impl IntoReactive<String> + 'static,
+    height: f32,
+    multiline: bool,
+    on_change: impl Fn(&str) + 'static,
+    focus: Option<ElementRef>,
+) -> impl IntoElement {
+    let field = input()
         .value(value)
         .placeholder(placeholder)
         .placeholder_color(move || color(fg_muted()))
@@ -958,7 +1011,11 @@ fn side_input(
         .text_size(px(12.5))
         .text_color(fg_primary())
         .multiline(multiline)
-        .on_change(on_change)
+        .on_change(on_change);
+    match focus {
+        Some(focus) => field.element_ref(&focus),
+        None => field,
+    }
 }
 
 fn capture_config(
@@ -5349,6 +5406,61 @@ fn reset_compose(compose: Compose) {
     compose.status.set(String::new());
 }
 
+fn clear_captured(
+    controls: &Controls,
+    selected: Signal<Option<u64>>,
+    baseline: Signal<Option<u64>>,
+    compose: Compose,
+) {
+    controls.hub.clear_session();
+    selected.set(None);
+    baseline.set(None);
+    reset_compose(compose);
+}
+
+/// Next id in the filtered list. `delta` is `-1` for up and `1` for down.
+/// An empty list stays unselected. With nothing selected, down takes the
+/// first row and up the last. Either end clamps. An id that is not in the
+/// list is treated as no selection.
+fn neighbor(ids: &[u64], selected: Option<u64>, delta: i32) -> Option<u64> {
+    if ids.is_empty() {
+        return None;
+    }
+    let Some(current) = selected else {
+        return Some(end_id(ids, delta));
+    };
+    let Some(index) = ids.iter().position(|id| *id == current) else {
+        return Some(end_id(ids, delta));
+    };
+    let last = ids.len() as i64 - 1;
+    let next = (index as i64 + i64::from(delta)).clamp(0, last) as usize;
+    Some(ids[next])
+}
+
+fn end_id(ids: &[u64], delta: i32) -> u64 {
+    if delta < 0 {
+        ids[ids.len() - 1]
+    } else {
+        ids[0]
+    }
+}
+
+fn step_selected(
+    rows: Signal<Vec<RowLine>>,
+    selected: Signal<Option<u64>>,
+    compose: Compose,
+    delta: i32,
+) {
+    let next = rows.with(|rows| {
+        let ids: Vec<u64> = rows.iter().map(|row| row.id).collect();
+        neighbor(&ids, selected.get(), delta)
+    });
+    if selected.get() != next {
+        reset_compose(compose);
+        selected.set(next);
+    }
+}
+
 fn replay_flow(controls: &Arc<Controls>, id: Option<u64>, edit: ReplayOverride) {
     let Some(id) = id else {
         set_status(controls, StatusMsg::NeedSelection);
@@ -5912,6 +6024,20 @@ mod tests {
         assert!(!usable_v4(Ipv4Addr::LOCALHOST));
         assert!(!usable_v4(Ipv4Addr::new(169, 254, 1, 1)));
         assert!(!usable_v4(Ipv4Addr::BROADCAST));
+    }
+
+    #[test]
+    fn neighbor_steps_the_filtered_ids_and_clamps() {
+        assert_eq!(super::neighbor(&[], None, 1), None);
+        assert_eq!(super::neighbor(&[], Some(1), -1), None);
+        assert_eq!(super::neighbor(&[2, 4, 9], None, 1), Some(2));
+        assert_eq!(super::neighbor(&[2, 4, 9], None, -1), Some(9));
+        assert_eq!(super::neighbor(&[2, 4, 9], Some(4), 1), Some(9));
+        assert_eq!(super::neighbor(&[2, 4, 9], Some(4), -1), Some(2));
+        assert_eq!(super::neighbor(&[2, 4, 9], Some(2), -1), Some(2));
+        assert_eq!(super::neighbor(&[2, 4, 9], Some(9), 1), Some(9));
+        assert_eq!(super::neighbor(&[2, 4, 9], Some(7), 1), Some(2));
+        assert_eq!(super::neighbor(&[2, 4, 9], Some(7), -1), Some(9));
     }
 
     #[test]
