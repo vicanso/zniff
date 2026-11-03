@@ -1025,13 +1025,26 @@ fn looks_like_json(body: &str) -> bool {
     trimmed.starts_with('{') || trimmed.starts_with('[')
 }
 
-fn pretty_form(body: &str) -> String {
+pub fn is_form(content_type: Option<&str>, body: &str) -> bool {
+    let kind = content_type.unwrap_or("").to_ascii_lowercase();
+    kind.contains("x-www-form-urlencoded")
+        || (!kind.contains('/') && body.contains('=') && body.contains('&'))
+}
+
+pub fn form_pairs(body: &str) -> Vec<(String, String)> {
     body.split('&')
         .filter(|pair| !pair.is_empty())
         .map(|pair| {
             let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-            format!("{}={}", percent_decode(key), percent_decode(value))
+            (percent_decode(key), percent_decode(value))
         })
+        .collect()
+}
+
+fn pretty_form(body: &str) -> String {
+    form_pairs(body)
+        .into_iter()
+        .map(|(key, value)| format!("{key}={value}"))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -1232,6 +1245,19 @@ mod tests {
         let plain = image_body(true, false, "{ }".into(), String::new(), 3, Lang::En);
         assert_eq!(plain.text, "{ }");
         assert!(plain.caption.is_empty());
+    }
+
+    #[test]
+    fn form_pairs_decode_and_keep_flags() {
+        assert!(is_form(Some("application/x-www-form-urlencoded"), "a=1"));
+        assert!(!is_form(Some("application/json"), "a=1&b=2"));
+        assert_eq!(
+            form_pairs("name=Ada+Lovelace&on=1"),
+            vec![
+                ("name".into(), "Ada Lovelace".into()),
+                ("on".into(), "1".into()),
+            ]
+        );
     }
 
     #[test]

@@ -392,6 +392,7 @@ struct Shown {
     response_body: Signal<String>,
     request_language: Signal<String>,
     response_language: Signal<String>,
+    request_form: Signal<Vec<HeaderLine>>,
     request_note: Signal<String>,
     response_note: Signal<String>,
     metrics: Signal<String>,
@@ -444,6 +445,7 @@ pub fn App() -> impl IntoElement {
         response_body: signal(String::new()),
         request_language: signal(String::new()),
         response_language: signal(String::new()),
+        request_form: signal(Vec::new()),
         request_note: signal(String::new()),
         response_note: signal(String::new()),
         metrics: signal(String::new()),
@@ -2099,6 +2101,7 @@ fn ready_detail(
     baseline: Signal<Option<u64>>,
     folded: Signal<u8>,
 ) -> impl IntoElement {
+    let no_form = signal(Vec::<HeaderLine>::new());
     view()
         .p_3p5()
         .gap_3p5()
@@ -2141,6 +2144,7 @@ fn ready_detail(
                         shown.response_body,
                         shown.response_note,
                         shown.response_language,
+                        no_form,
                         true,
                         shown,
                         controls.clone(),
@@ -2167,7 +2171,11 @@ fn ready_detail(
             FOLD_REQ_HEADERS,
         ))
         .child(when(
-            move || !shown.request_body.get().is_empty() || !shown.request_note.get().is_empty(),
+            move || {
+                !shown.request_body.get().is_empty()
+                    || !shown.request_note.get().is_empty()
+                    || !shown.request_form.with(Vec::is_empty)
+            },
             move || {
                 body_section(
                     "请求 body",
@@ -2175,6 +2183,7 @@ fn ready_detail(
                     shown.request_body,
                     shown.request_note,
                     shown.request_language,
+                    shown.request_form,
                     false,
                     shown,
                     controls.clone(),
@@ -2479,6 +2488,7 @@ fn body_section(
     body: Signal<String>,
     note: Signal<String>,
     code: Signal<String>,
+    form: Signal<Vec<HeaderLine>>,
     embed_image: bool,
     shown: Shown,
     controls: Arc<Controls>,
@@ -2568,7 +2578,12 @@ fn body_section(
                 ))
         }))
         .child(when(
-            move || !card_folded(folded, bit) && !body.get().is_empty() && code.get().is_empty(),
+            move || {
+                !card_folded(folded, bit)
+                    && form.with(Vec::is_empty)
+                    && !body.get().is_empty()
+                    && code.get().is_empty()
+            },
             move || {
                 let divided = image_on() || !note.get().is_empty();
                 view()
@@ -2586,8 +2601,46 @@ fn body_section(
             },
         ))
         .child(when(
-            move || !card_folded(folded, bit) && !body.get().is_empty() && !code.get().is_empty(),
+            move || {
+                !card_folded(folded, bit)
+                    && form.with(Vec::is_empty)
+                    && !body.get().is_empty()
+                    && !code.get().is_empty()
+            },
             move || code_body(body, code),
+        ))
+        .child(when(
+            move || !card_folded(folded, bit) && !form.with(Vec::is_empty),
+            move || {
+                each(form, |line| line.key, |line, index| {
+                    view()
+                        .flex_row()
+                        .gap_3()
+                        .px_3p5()
+                        .py_2()
+                        .bg(move || if index.get() % 2 == 1 { bg_code() } else { bg_card() })
+                        .border_t(move || if index.get() > 0 { px(1.0) } else { px(0.0) })
+                        .border_t_color(border_subtle())
+                        .child(
+                            mono(move || line.with(|line| line.name.clone()))
+                                .w(px(176.0))
+                                .flex_shrink_0()
+                                .selectable(true)
+                                .number_of_lines(1)
+                                .ellipsize_mode(EllipsizeMode::Tail)
+                                .text_size(px(12.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(fg_muted()),
+                        )
+                        .child(
+                            mono(move || line.with(|line| line.value.clone()))
+                                .flex_1()
+                                .selectable(true)
+                                .text_size(px(12.0))
+                                .text_color(fg_primary()),
+                        )
+                })
+            },
         ))
 }
 
@@ -3921,6 +3974,7 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baselin
         shown.diff_new.set(String::new());
         shown.request_language.set(String::new());
         shown.response_language.set(String::new());
+        shown.request_form.set(Vec::new());
         shown.pinned.set(false);
         return;
     };
@@ -3934,6 +3988,7 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baselin
         shown.diff_new.set(String::new());
         shown.request_language.set(String::new());
         shown.response_language.set(String::new());
+        shown.request_form.set(Vec::new());
         shown.pinned.set(false);
         return;
     };
@@ -4015,17 +4070,43 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baselin
     shown.error.set(flow.error.clone().unwrap_or_default());
     shown.request_headers.set(header_lines(&flow.request_headers, pretty));
     shown.response_headers.set(header_lines(&flow.response_headers, pretty));
-    shown.request_language.set(
+    let form = if pretty {
+        std::str::from_utf8(&flow.request_body)
+            .ok()
+            .filter(|text| present::is_form(request_type, text))
+            .map(|text| {
+                present::form_pairs(text)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, (name, value))| HeaderLine {
+                        key: index as u32,
+                        name: name.clone(),
+                        value: annotated(&name, &value),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    shown.request_form.set(form);
+    shown.request_language.set(if shown.request_form.with(Vec::is_empty) {
         present::editor_language(request_type, &request.text)
             .unwrap_or("")
-            .to_string(),
-    );
+            .to_string()
+    } else {
+        String::new()
+    });
     shown.response_language.set(
         present::editor_language(response_type, &response.text)
             .unwrap_or("")
             .to_string(),
     );
-    shown.request_body.set(request.text);
+    shown.request_body.set(if shown.request_form.with(Vec::is_empty) {
+        request.text
+    } else {
+        String::new()
+    });
     shown.response_body.set(response.text);
     shown.request_note.set(request.note);
     shown.response_note.set(response.note);
