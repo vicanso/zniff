@@ -3796,13 +3796,7 @@ fn body_text(body: &[u8], truncated: bool, encoding_error: Option<&str>, lang: L
     } else {
         const HEX_CAP: usize = 4096;
         let shown = body.len().min(HEX_CAP);
-        let mut out = String::new();
-        for (index, byte) in body[..shown].iter().enumerate() {
-            if index > 0 && index % 16 == 0 {
-                out.push('\n');
-            }
-            out.push_str(&format!("{byte:02x} "));
-        }
+        let out = hex_display(&body[..shown]);
         if body.len() > shown {
             if !note.is_empty() {
                 note.push('\n');
@@ -4293,6 +4287,22 @@ fn bytes_for_copy(body: &[u8], side: Side) -> (String, StatusMsg) {
     } else {
         (hex_dump(body), StatusMsg::CopiedBody { side, hex: true })
     }
+}
+
+/// Display rows are `0001  ` plus 16 bytes. Copy uses `hex_dump`, which has no row numbers.
+fn hex_display(body: &[u8]) -> String {
+    let mut out = String::with_capacity(body.len() * 4);
+    for (index, byte) in body.iter().enumerate() {
+        if index % 16 == 0 {
+            if index > 0 {
+                out.push('\n');
+            }
+            let row = index / 16 + 1;
+            out.push_str(&format!("{row:04}  "));
+        }
+        out.push_str(&format!("{byte:02x} "));
+    }
+    out
 }
 
 fn hex_dump(body: &[u8]) -> String {
@@ -5420,6 +5430,21 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
         assert!(
             super::xdg_download_dir("/home/ada", "XDG_DESKTOP_DIR=\"$HOME/Desktop\"\n").is_none()
         );
+    }
+
+    #[test]
+    fn hex_display_numbers_each_row_and_copy_does_not() {
+        let body: Vec<u8> = (0..20).collect();
+        let shown = super::hex_display(&body);
+        let mut lines = shown.lines();
+        let first = lines.next().unwrap();
+        let second = lines.next().unwrap();
+        assert!(first.starts_with("0001  "), "{first}");
+        assert!(second.starts_with("0002  "), "{second}");
+        assert!(first.split_whitespace().skip(1).count() == 16);
+        let copied = super::hex_dump(&body);
+        assert!(!copied.contains("0001"), "{copied}");
+        assert!(copied.starts_with("00 01 02 "));
     }
 
     #[test]
