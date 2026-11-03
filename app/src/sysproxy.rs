@@ -1,8 +1,9 @@
-//! System proxy: remember the previous settings, point them at zniff while
-//! capture is on, and put them back on stop, panic, or the next launch.
+//! System proxy: remember the previous settings, point them at zniff when
+//! capture asks, and put them back on stop, panic, or the next launch.
+//! The window decides whether to ask. Launch itself does not call `enable`.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
@@ -22,9 +23,9 @@ pub struct Snapshot {
     pub active: bool,
     #[serde(default)]
     pub macos: Vec<MacService>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub windows: Option<WindowsProxy>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gnome: Option<GnomeProxy>,
 }
 
@@ -63,16 +64,14 @@ pub enum EnableOutcome {
     Manual { reason: String },
 }
 
-fn snapshot_path() -> PathBuf {
-    data_dir().join("proxy-snapshot.json")
+fn snapshot_path(dir: &Path) -> PathBuf {
+    dir.join("proxy-snapshot.toml")
 }
 
 pub fn restore_if_dirty() -> Result<bool> {
-    let path = snapshot_path();
-    if !path.exists() {
+    let Some(snapshot) = read_snapshot_in(&data_dir())? else {
         return Ok(false);
-    }
-    let snapshot: Snapshot = serde_json::from_slice(&fs::read(&path)?)?;
+    };
     if !snapshot.active {
         return Ok(false);
     }
@@ -84,7 +83,7 @@ pub fn restore_if_dirty() -> Result<bool> {
 }
 
 pub fn enable(port: u16) -> Result<EnableOutcome> {
-    if let Ok(existing) = read_snapshot() {
+    if let Some(existing) = read_snapshot_in(&data_dir())? {
         if existing.active {
             apply_snoop(port, &existing)?;
             return Ok(EnableOutcome::Applied);
@@ -173,16 +172,54 @@ fn apply_snoop(port: u16, snapshot: &Snapshot) -> Result<()> {
     }
 }
 
-fn read_snapshot() -> Result<Snapshot> {
-    Ok(serde_json::from_slice(&fs::read(snapshot_path())?)?)
+fn read_snapshot_in(dir: &Path) -> Result<Option<Snapshot>> {
+    let toml_path = snapshot_path(dir);
+    let json_path = dir.join("proxy-snapshot.json");
+    if toml_path.is_file() {
+        let text = fs::read_to_string(&toml_path)
+            .with_context(|| format!("读取 {}", toml_path.display()))?;
+        let snapshot: Snapshot = toml::from_str(&text)
+            .with_context(|| format!("解析 {}", toml_path.display()))?;
+        if json_path.is_file() {
+            let _ = fs::remove_file(&json_path);
+        }
+        return Ok(Some(snapshot));
+    }
+    if !json_path.is_file() {
+        return Ok(None);
+    }
+    let snapshot: Snapshot = serde_json::from_slice(&fs::read(&json_path)?)
+        .with_context(|| format!("解析 {}", json_path.display()))?;
+    write_snapshot_in(dir, &snapshot)?;
+    let _ = fs::remove_file(&json_path);
+    Ok(Some(snapshot))
 }
 
 fn write_snapshot(snapshot: &Snapshot) -> Result<()> {
-    let path = snapshot_path();
+    write_snapshot_in(&data_dir(), snapshot)
+}
+
+fn write_snapshot_in(dir: &Path, snapshot: &Snapshot) -> Result<()> {
+    let text = toml::to_string_pretty(snapshot).context("编码系统代理快照")?;
+    let path = snapshot_path(dir);
+    write_atomic(&path, &text).with_context(|| format!("写入 {}", path.display()))?;
+    Ok(())
+}
+
+fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
     }
-    fs::write(path, serde_json::to_vec_pretty(snapshot)?)?;
+    let mut tmp_name = path.as_os_str().to_os_string();
+    tmp_name.push(".tmp");
+    let tmp = PathBuf::from(tmp_name);
+    fs::write(&tmp, text)?;
+    if fs::rename(&tmp, path).is_err() {
+        let _ = fs::remove_file(path);
+        fs::rename(&tmp, path)?;
+    }
     Ok(())
 }
 
@@ -566,5 +603,52 @@ mod tests {
             parse_bypass(text),
             vec!["localhost", "127.0.0.0/8", "::1"]
         );
+    }
+
+    #[test]
+    fn json_snapshot_moves_to_toml_without_touching_the_system() {
+        let dir = std::env::temp_dir().join(format!(
+            "zniff-snapshot-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let json = r#"{
+            "active": true,
+            "macos": [{
+                "name": "Wi-Fi",
+                "web": {"enabled": false, "server": "127.0.0.1", "port": 12334},
+                "secure": {"enabled": false, "server": "127.0.0.1", "port": 12334},
+                "socks": {"enabled": false, "server": "0.0.0.0", "port": 0},
+                "pac_enabled": false,
+                "pac_url": "(null)",
+                "bypass": ["*.local", "169.254/16"]
+            }],
+            "windows": null,
+            "gnome": null
+        }"#;
+        fs::write(dir.join("proxy-snapshot.json"), json).unwrap();
+
+        let loaded = read_snapshot_in(&dir).unwrap().expect("snapshot");
+        assert!(loaded.active);
+        assert_eq!(loaded.macos[0].name, "Wi-Fi");
+        assert_eq!(loaded.macos[0].web.port, 12334);
+        assert_eq!(loaded.macos[0].bypass, vec!["*.local", "169.254/16"]);
+        assert!(loaded.windows.is_none());
+        assert!(!dir.join("proxy-snapshot.json").exists());
+        assert!(dir.join("proxy-snapshot.toml").is_file());
+
+        let again = read_snapshot_in(&dir).unwrap().expect("toml");
+        assert!(again.active);
+        assert_eq!(again.macos[0].pac_url, "(null)");
+
+        let mut idle = again;
+        idle.active = false;
+        write_snapshot_in(&dir, &idle).unwrap();
+        assert!(!read_snapshot_in(&dir).unwrap().expect("idle").active);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

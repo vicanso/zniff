@@ -4,6 +4,7 @@
 //! copy of each body is decompressed and capped; forwarding does not wait
 //! for the UI.
 
+use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -17,6 +18,7 @@ use bytes::Bytes;
 use http::{HeaderMap, HeaderName, Method, Request, Response, StatusCode, Uri, Version};
 use http_body::Body;
 use http_body::Frame;
+use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::upgrade::Upgraded;
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -31,10 +33,13 @@ use tokio::sync::watch;
 use tokio::time::timeout;
 use tokio_rustls::TlsConnector;
 
+use crate::bypass::BypassRules;
 use crate::ca::Ca;
 use crate::client_hello::{read_client_hello, ReadHello};
 use crate::decompress::Decoder;
+use crate::rules::{self, Rule};
 use crate::session::{Direction, FlowDraft, Protocol, Session};
+use crate::ws::{self, FrameFeed};
 
 const IO_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -43,6 +48,40 @@ pub struct Hub {
     generation: AtomicU64,
     pub ca: Arc<Ca>,
     roots: RootCertStore,
+    bypass: Mutex<BypassRules>,
+    rules: Mutex<Vec<Rule>>,
+    upstream: Mutex<Option<Upstream>>,
+    /// Idle plaintext origin sockets, used only on the proxy runtime.
+    pool: tokio::sync::Mutex<HashMap<(String, u16), Vec<TcpStream>>>,
+    h2_pool: Mutex<HashMap<(String, u16), hyper::client::conn::http2::SendRequest<RecordingBody<Incoming>>>>,
+    break_slot: Mutex<Option<BreakSlot>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Upstream {
+    pub host: String,
+    pub port: u16,
+}
+
+struct BreakSlot {
+    id: u64,
+    reply: Option<tokio::sync::oneshot::Sender<BreakDecision>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BreakDecision {
+    pub drop: bool,
+    pub headers: Option<Vec<(String, String)>>,
+    pub body: Option<Vec<u8>>,
+}
+
+/// Optional edits for one replay. Empty method or URL keeps the stored request.
+#[derive(Debug, Default, Clone)]
+pub struct ReplayOverride {
+    pub method: Option<String>,
+    pub url: Option<String>,
+    pub headers: Option<Vec<(String, String)>>,
+    pub body: Option<Vec<u8>>,
 }
 
 impl Hub {
@@ -55,7 +94,128 @@ impl Hub {
             generation: AtomicU64::new(1),
             ca,
             roots,
+            bypass: Mutex::new(BypassRules::default()),
+            rules: Mutex::new(Vec::new()),
+            upstream: Mutex::new(None),
+            pool: tokio::sync::Mutex::new(HashMap::new()),
+            h2_pool: Mutex::new(HashMap::new()),
+            break_slot: Mutex::new(None),
         })
+    }
+
+    pub fn set_bypass(&self, text: &str) {
+        *self.bypass.lock().unwrap_or_else(|err| err.into_inner()) = BypassRules::parse(text);
+    }
+
+    pub fn set_rules(&self, text: &str) {
+        *self.rules.lock().unwrap_or_else(|err| err.into_inner()) = rules::parse_rules(text);
+    }
+
+    pub fn set_upstream(&self, text: &str) {
+        *self.upstream.lock().unwrap_or_else(|err| err.into_inner()) = parse_upstream(text);
+    }
+
+    fn upstream(&self) -> Option<Upstream> {
+        self.upstream.lock().unwrap_or_else(|err| err.into_inner()).clone()
+    }
+
+    fn skips_tls(&self, host: &str) -> bool {
+        self.bypass.lock().unwrap_or_else(|err| err.into_inner()).skips(host)
+    }
+
+    fn matching_rule(&self, host: &str, path: &str) -> Option<Rule> {
+        self.rules
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .iter()
+            .find(|rule| rule.matches(host, path))
+            .cloned()
+    }
+
+    pub fn paused_id(&self) -> Option<u64> {
+        self.break_slot
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .as_ref()
+            .map(|slot| slot.id)
+    }
+
+    pub fn resolve_break(&self, decision: BreakDecision) -> bool {
+        let mut slot = self.break_slot.lock().unwrap_or_else(|err| err.into_inner());
+        let Some(slot) = slot.take() else {
+            return false;
+        };
+        slot.reply.map(|reply| reply.send(decision).is_ok()).unwrap_or(false)
+    }
+
+    async fn wait_break(&self, id: u64) -> BreakDecision {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        *self.break_slot.lock().unwrap_or_else(|err| err.into_inner()) = Some(BreakSlot {
+            id,
+            reply: Some(tx),
+        });
+        self.touch();
+        let decision = match timeout(Duration::from_secs(60), rx).await {
+            Ok(Ok(decision)) => decision,
+            _ => BreakDecision {
+                drop: false,
+                headers: None,
+                body: None,
+            },
+        };
+        let mut slot = self.break_slot.lock().unwrap_or_else(|err| err.into_inner());
+        if slot.as_ref().map(|slot| slot.id) == Some(id) {
+            *slot = None;
+        }
+        drop(slot);
+        self.touch();
+        decision
+    }
+
+    fn cached_h2(
+        &self,
+        key: &(String, u16),
+    ) -> Option<hyper::client::conn::http2::SendRequest<RecordingBody<Incoming>>> {
+        self.h2_pool
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .get(key)
+            .cloned()
+    }
+
+    fn store_h2(
+        &self,
+        key: (String, u16),
+        sender: hyper::client::conn::http2::SendRequest<RecordingBody<Incoming>>,
+    ) {
+        let mut pool = self.h2_pool.lock().unwrap_or_else(|err| err.into_inner());
+        if pool.len() >= 16 {
+            pool.clear();
+        }
+        pool.insert(key, sender);
+    }
+
+    fn drop_h2(&self, key: &(String, u16)) {
+        self.h2_pool
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .remove(key);
+    }
+
+    async fn take_idle(&self, key: (String, u16)) -> Option<TcpStream> {
+        self.pool.lock().await.get_mut(&key).and_then(|slots| slots.pop())
+    }
+
+    async fn park_idle(&self, key: (String, u16), stream: TcpStream) {
+        let mut pool = self.pool.lock().await;
+        if pool.len() >= 32 && !pool.contains_key(&key) {
+            pool.clear();
+        }
+        let slots = pool.entry(key).or_default();
+        if slots.len() >= 4 {
+            slots.remove(0);
+        }
+        slots.push(stream);
     }
 
     #[cfg(test)]
@@ -106,6 +266,112 @@ impl Hub {
         self.touch();
     }
 
+    fn add_transfer(&self, id: u64, direction: Direction, bytes: u64) {
+        if bytes == 0 {
+            return;
+        }
+        self.with_session(|session| session.add_transfer(id, direction, bytes));
+        self.touch();
+    }
+
+    pub fn mark_finished(&self, id: u64) {
+        self.with_session(|session| session.mark_finished(id));
+        self.touch();
+    }
+
+    pub fn clear_session(&self) {
+        self.with_session(|session| session.clear());
+        self.touch();
+    }
+
+    pub fn export_har(&self) -> serde_json::Value {
+        let flows = self.with_session(|session| session.flows());
+        crate::har::export_har(&flows)
+    }
+
+    pub fn import_har(&self, value: &serde_json::Value) -> usize {
+        let items = crate::har::import_har(value);
+        let count = items.len();
+        for item in items {
+            let id = self.open(FlowDraft {
+                protocol: item.protocol,
+                method: item.method,
+                host: item.host,
+                path: item.path,
+                url: item.url,
+                request_headers: item.request_headers,
+            });
+            self.with_session(|session| session.set_started(id, item.started));
+            if let Some(status) = item.status {
+                self.set_response(id, status, item.response_headers, Some(item.protocol));
+            }
+            self.append_body(id, Direction::Request, &item.request_body);
+            self.append_body(id, Direction::Response, &item.response_body);
+            if let Some(error) = item.error {
+                self.set_error(id, error);
+            }
+            self.mark_finished(id);
+            self.with_session(|session| {
+                session.restore_imported(
+                    id,
+                    item.response_at,
+                    item.finished_at,
+                    item.request_bytes,
+                    item.response_bytes,
+                );
+            });
+        }
+        count
+    }
+
+    /// Replays one stored request on a fresh runtime. Map and break rules are
+    /// not applied. The callback runs on the worker thread and may only touch
+    /// mutexes, not nsh signals.
+    pub fn replay_later<F>(
+        self: &Arc<Self>,
+        id: u64,
+        edit: ReplayOverride,
+        on_done: F,
+    ) where
+        F: FnOnce(Result<u64>) + Send + 'static,
+    {
+        let flow = self.with_session(|session| session.get(id).cloned());
+        let Some(flow) = flow else {
+            on_done(Err(anyhow!("没有这条记录")));
+            return;
+        };
+        if flow.protocol == Protocol::Tunnel || flow.method.eq_ignore_ascii_case("CONNECT") {
+            on_done(Err(anyhow!("隧道不能重放")));
+            return;
+        }
+        let hub = Arc::clone(self);
+        std::thread::spawn(move || {
+            let result = (|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .context("重放运行时")?;
+                runtime.block_on(replay_once(hub, flow, edit))
+            })();
+            on_done(result);
+        });
+    }
+
+    fn add_message(&self, id: u64, direction: Direction, kind: &str, text: String) {
+        self.with_session(|session| session.add_message(id, direction, kind, text));
+        self.touch();
+    }
+
+    fn retarget(&self, id: u64, host: String, path: String, url: String) {
+        self.with_session(|session| session.retarget(id, host, path, url));
+        self.touch();
+    }
+
+    fn replace_request(&self, id: u64, headers: Vec<(String, String)>, body: Vec<u8>) {
+        self.with_session(|session| session.replace_request(id, headers, body));
+        self.touch();
+    }
+
     fn set_encoding_error(&self, id: u64, direction: Direction, error: impl Into<String>) {
         self.with_session(|session| session.set_encoding_error(id, direction, error));
         self.touch();
@@ -150,7 +416,7 @@ pub struct Capture {
 }
 
 impl Capture {
-    pub fn spawn(hub: Arc<Hub>) -> Result<Self> {
+    pub fn spawn(hub: Arc<Hub>, addr: SocketAddr) -> Result<Self> {
         let (tx, rx) = std::sync::mpsc::channel();
         let (shutdown, shutdown_rx) = watch::channel(false);
         let thread = std::thread::spawn(move || {
@@ -159,7 +425,7 @@ impl Capture {
                 .build()
                 .expect("tokio runtime");
             runtime.block_on(async move {
-                let listener = match TcpListener::bind("127.0.0.1:0").await {
+                let listener = match TcpListener::bind(addr).await {
                     Ok(listener) => listener,
                     Err(err) => {
                         let _ = tx.send(Err(err));
@@ -207,6 +473,11 @@ async fn handle_conn(mut socket: TcpStream, hub: Arc<Hub>) -> Result<()> {
     let mut parts = head.start.split_whitespace();
     let method = parts.next().unwrap_or("").to_string();
     let target = parts.next().unwrap_or("").to_string();
+    match local_route(&method, &target) {
+        Some(LocalRoute::Cert) => return serve_ca_cert(&mut socket, &hub, &head).await,
+        Some(LocalRoute::Install) => return serve_install_page(&mut socket, &hub, &head).await,
+        None => {}
+    }
     if method.eq_ignore_ascii_case("CONNECT") {
         let (host, port) = split_host_port(&target, 443)?;
         socket
@@ -248,9 +519,23 @@ where
             unreachable!();
         };
         record_tunnel(&hub, host, port, "不是 TLS，已改为隧道".into());
-        return tunnel_after_hello(&mut client, raw, host, port).await;
+        return tunnel_after_hello(&mut client, raw, host, port, &hub).await;
     };
     let sni_host = hello.sni.clone().unwrap_or_else(|| host.to_string());
+    if hub.skips_tls(&sni_host) {
+        record_tunnel(&hub, &sni_host, port, "直通名单，未解密".into());
+        return tunnel_after_hello(&mut client, hello.raw, host, port, &hub).await;
+    }
+    let offers_h2 = hello.alpn.iter().any(|proto| proto == b"h2");
+    if offers_h2 {
+        if let Some(mut sender) = hub.cached_h2(&(sni_host.clone(), port)) {
+            let ready = timeout(Duration::from_secs(2), sender.ready()).await;
+            if matches!(ready, Ok(Ok(()))) {
+                return intercept_h2_pooled(client, hello.raw, sender, &sni_host, port, hub).await;
+            }
+            hub.drop_h2(&(sni_host.clone(), port));
+        }
+    }
     let alpn = if hello.alpn.is_empty() {
         vec![b"http/1.1".to_vec()]
     } else {
@@ -268,11 +553,11 @@ where
                 port,
                 format!("源站 TLS 失败，已改为隧道: {err}"),
             );
-            tunnel_after_hello(&mut client, hello.raw, host, port).await
+            tunnel_after_hello(&mut client, hello.raw, host, port, &hub).await
         }
         Err(_) => {
             record_tunnel(&hub, &sni_host, port, "连接源站超时，已改为隧道".into());
-            tunnel_after_hello(&mut client, hello.raw, host, port).await
+            tunnel_after_hello(&mut client, hello.raw, host, port, &hub).await
         }
     }
 }
@@ -283,7 +568,7 @@ async fn connect_origin(
     alpn: &[Vec<u8>],
     hub: &Hub,
 ) -> Result<(tokio_rustls::client::TlsStream<TcpStream>, Vec<u8>)> {
-    let tcp = timeout(IO_TIMEOUT, TcpStream::connect((host, port)))
+    let tcp = timeout(IO_TIMEOUT, dial(host, port, hub, true))
         .await
         .context("连接源站超时")??;
     tcp.set_nodelay(true).ok();
@@ -436,6 +721,54 @@ where
             log::debug!("上游 HTTP/2 连接结束: {err}");
         }
     });
+    hub.store_h2((host.clone(), port), sender.clone());
+    serve_h2_sender(client, sender, host, port, hub, executor).await
+}
+
+async fn intercept_h2_pooled<S>(
+    client: S,
+    client_hello: Vec<u8>,
+    sender: hyper::client::conn::http2::SendRequest<RecordingBody<Incoming>>,
+    host: &str,
+    port: u16,
+    hub: Arc<Hub>,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let config = hub.ca.server_config(host, b"h2").context("叶子证书")?;
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+    let rewound = Prefixed {
+        prefix: client_hello,
+        pos: 0,
+        inner: client,
+    };
+    let client_tls = match timeout(IO_TIMEOUT, acceptor.accept(rewound)).await {
+        Ok(Ok(tls)) => tls,
+        Ok(Err(err)) => {
+            let reason = client_tls_reason(&err);
+            record_note(&hub, host, port, Protocol::Http2, reason.clone());
+            return Err(anyhow!(reason));
+        }
+        Err(_) => {
+            record_note(&hub, host, port, Protocol::Http2, "客户端 TLS 超时".into());
+            return Err(anyhow!("客户端 TLS 超时"));
+        }
+    };
+    serve_h2_sender(client_tls, sender, host.to_string(), port, hub, TokioExecutor::new()).await
+}
+
+async fn serve_h2_sender<C>(
+    client: C,
+    sender: hyper::client::conn::http2::SendRequest<RecordingBody<Incoming>>,
+    host: String,
+    port: u16,
+    hub: Arc<Hub>,
+    executor: TokioExecutor,
+) -> Result<()>
+where
+    C: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let host_for_service = host.clone();
     let service = hyper::service::service_fn(move |req| {
         let mut sender = sender.clone();
@@ -509,11 +842,12 @@ async fn tunnel_after_hello<S>(
     hello: Vec<u8>,
     host: &str,
     port: u16,
+    hub: &Hub,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut origin = timeout(IO_TIMEOUT, TcpStream::connect((host, port)))
+    let mut origin = timeout(IO_TIMEOUT, dial(host, port, hub, true))
         .await
         .context("隧道连接源站超时")??;
     origin.set_nodelay(true).ok();
@@ -535,19 +869,78 @@ where
         url: format!("http://{}{path}", display_authority(&host, port, "http")),
         request_headers: head.headers.clone(),
     });
-    let mut origin = timeout(IO_TIMEOUT, TcpStream::connect((host.as_str(), port)))
-        .await
-        .context("连接源站超时")
-        .map_err(|err| {
-            hub.set_error(id, err.to_string());
-            err
-        })??;
+    let mut host = host;
+    let mut port = port;
+    let mut path = path;
+    let mut headers = head.headers.clone();
+    let mut body_override: Option<Vec<u8>> = None;
+    if let Some(rule) = hub.matching_rule(&host, &path) {
+        match rule {
+            Rule::MapLocal { file, .. } => {
+                let _ = drain_request(client, &headers, &hub, id).await;
+                return write_mapped_file(client, &hub, id, &file).await;
+            }
+            Rule::Break { .. } => {
+                let decision = hub.wait_break(id).await;
+                if decision.drop {
+                    hub.set_error(id, "断点丢弃");
+                    let _ = drain_request(client, &headers, &hub, id).await;
+                    write_static(client, &hub, id, 204, "No Content", &[], &[]).await?;
+                    return Ok(());
+                }
+                if let Some(next) = decision.headers {
+                    hub.replace_request(id, next.clone(), Vec::new());
+                    headers = next;
+                }
+                body_override = decision.body;
+            }
+            Rule::MapRemote { url, .. } => {
+                if let Some((scheme, next_host, next_port, next_path)) = parse_http_url(&url) {
+                    host = next_host;
+                    port = next_port;
+                    path = next_path;
+                    hub.retarget(
+                        id,
+                        host.clone(),
+                        path.clone(),
+                        format!("{scheme}://{}{path}", display_authority(&host, port, scheme)),
+                    );
+                    if scheme == "https" {
+                        let _ = drain_request(client, &headers, &hub, id).await;
+                        let body = body_override.unwrap_or_default();
+                        return exchange_tls(client, &hub, id, &method, &host, port, &path, &headers, &body).await;
+                    }
+                }
+            }
+        }
+    }
+    let pool_key = pool_key(&host, port, &hub);
+    let mut origin = match hub.take_idle(pool_key.clone()).await {
+        Some(stream) => stream,
+        None => timeout(IO_TIMEOUT, dial(&host, port, &hub, false))
+            .await
+            .context("连接源站超时")
+            .map_err(|err| {
+                hub.set_error(id, err.to_string());
+                err
+            })??,
+    };
     origin.set_nodelay(true).ok();
-    let mut outbound = format!("{method} {path} HTTP/1.1\r\n");
+    let target = if hub.upstream().is_some() {
+        format!("http://{}{path}", display_authority(&host, port, "http"))
+    } else {
+        path.clone()
+    };
+    let websocket = header_is_websocket(&headers);
+    let mut outbound = format!("{method} {target} HTTP/1.1\r\n");
     let mut has_host = false;
     let mut has_connection = false;
-    for (name, value) in &head.headers {
-        if name.eq_ignore_ascii_case("proxy-connection") {
+    let mut connection_close = false;
+    for (name, value) in &headers {
+        if name.eq_ignore_ascii_case("proxy-connection")
+            || (body_override.is_some() && name.eq_ignore_ascii_case("content-length"))
+            || (websocket && name.eq_ignore_ascii_case("sec-websocket-extensions"))
+        {
             continue;
         }
         if name.eq_ignore_ascii_case("host") {
@@ -555,6 +948,7 @@ where
         }
         if name.eq_ignore_ascii_case("connection") {
             has_connection = true;
+            connection_close = value.eq_ignore_ascii_case("close");
         }
         outbound.push_str(name);
         outbound.push_str(": ");
@@ -568,13 +962,294 @@ where
         ));
     }
     if !has_connection {
-        outbound.push_str("Connection: close\r\n");
+        outbound.push_str("Connection: keep-alive\r\n");
+    }
+    if let Some(body) = &body_override {
+        outbound.push_str(&format!("Content-Length: {}\r\n", body.len()));
     }
     outbound.push_str("\r\n");
-    origin.write_all(outbound.as_bytes()).await?;
-    let encoding = header_value(&head.headers, "content-encoding");
-    copy_message_body(client, &mut origin, &head.headers, &hub, id, Direction::Request, encoding)
+    if origin.write_all(outbound.as_bytes()).await.is_err() {
+        origin = timeout(IO_TIMEOUT, dial(&host, port, &hub, false))
+            .await
+            .context("连接源站超时")??;
+        origin.set_nodelay(true).ok();
+        origin.write_all(outbound.as_bytes()).await?;
+    }
+    let encoding = header_value(&headers, "content-encoding");
+    if let Some(body) = &body_override {
+        origin.write_all(body).await?;
+        hub.replace_request(id, headers.clone(), body.clone());
+        let _ = discard_request(client, &head.headers).await;
+    } else {
+        copy_message_body(
+            client,
+            &mut origin,
+            &head.headers,
+            &hub,
+            id,
+            Direction::Request,
+            encoding,
+        )
         .await?;
+    }
+    let (mut resp_bytes, resp_rest) = read_header_block(&mut origin).await?;
+    if websocket {
+        resp_bytes = strip_ws_extension(&resp_bytes);
+    }
+    client.write_all(&resp_bytes).await?;
+    let resp = parse_head(&resp_bytes)?;
+    let status = resp
+        .start
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    hub.set_response(id, status, resp.headers.clone(), None);
+    if status == 101 && header_is_websocket(&headers) {
+        hub.mark_protocol(id, Protocol::WebSocket);
+        if !resp_rest.is_empty() {
+            client.write_all(&resp_rest).await?;
+        }
+        let copied = copy_with_messages(client, &mut origin, &hub, id, &resp_rest).await;
+        hub.mark_finished(id);
+        copied?;
+        return Ok(());
+    }
+    let mut origin = Prefixed {
+        prefix: resp_rest,
+        pos: 0,
+        inner: origin,
+    };
+    let encoding = header_value(&resp.headers, "content-encoding");
+    let reusable = copy_message_body(
+        &mut origin,
+        client,
+        &resp.headers,
+        &hub,
+        id,
+        Direction::Response,
+        encoding,
+    )
+    .await?;
+    hub.mark_finished(id);
+    let response_close = header_value(&resp.headers, "connection")
+        .is_some_and(|value| value.eq_ignore_ascii_case("close"));
+    if reusable && !connection_close && !response_close && status != 101 {
+        if let Some(stream) = origin.into_idle() {
+            hub.park_idle(pool_key, stream).await;
+        }
+    }
+    Ok(())
+}
+
+fn pool_key(host: &str, port: u16, hub: &Hub) -> (String, u16) {
+    match hub.upstream() {
+        Some(upstream) => (upstream.host, upstream.port),
+        None => (host.to_string(), port),
+    }
+}
+
+async fn dial(host: &str, port: u16, hub: &Hub, tunnel: bool) -> Result<TcpStream> {
+    if let Some(upstream) = hub.upstream() {
+        let mut stream = TcpStream::connect((upstream.host.as_str(), upstream.port))
+            .await
+            .context("连接上游代理")?;
+        stream.set_nodelay(true).ok();
+        if tunnel {
+            let req = format!("CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n");
+            stream.write_all(req.as_bytes()).await?;
+            let (head, rest) = read_header_block(&mut stream).await?;
+            let text = String::from_utf8_lossy(&head);
+            let ok = text.starts_with("HTTP/1.1 200") || text.starts_with("HTTP/1.0 200");
+            if !ok {
+                anyhow::bail!(
+                    "上游代理拒绝 CONNECT: {}",
+                    text.lines().next().unwrap_or("").trim()
+                );
+            }
+            if !rest.is_empty() {
+                anyhow::bail!("上游 CONNECT 响应带了多余字节");
+            }
+        }
+        return Ok(stream);
+    }
+    let stream = TcpStream::connect((host, port)).await?;
+    stream.set_nodelay(true).ok();
+    Ok(stream)
+}
+
+fn parse_upstream(text: &str) -> Option<Upstream> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let (host, port) = split_host_port(text, 80).ok()?;
+    Some(Upstream { host, port })
+}
+
+async fn drain_request<S>(client: &mut S, headers: &[(String, String)], hub: &Hub, id: u64) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut sink = tokio::io::sink();
+    let encoding = header_value(headers, "content-encoding");
+    let _ = copy_message_body(
+        client,
+        &mut sink,
+        headers,
+        hub,
+        id,
+        Direction::Request,
+        encoding,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn discard_request<S>(client: &mut S, headers: &[(String, String)]) -> Result<()>
+where
+    S: AsyncRead + Unpin,
+{
+    if let Some(length) = content_length(headers) {
+        let mut left = length;
+        let mut buf = vec![0u8; 16 * 1024];
+        while left > 0 {
+            let want = left.min(buf.len());
+            let n = client.read(&mut buf[..want]).await?;
+            if n == 0 {
+                break;
+            }
+            left -= n;
+        }
+    } else if is_chunked(headers) {
+        loop {
+            let size_line = read_line(client).await?;
+            let text = String::from_utf8_lossy(&size_line);
+            let size = usize::from_str_radix(
+                text.trim().split(';').next().unwrap_or("0").trim(),
+                16,
+            )
+            .unwrap_or(0);
+            if size == 0 {
+                let _ = read_line(client).await?;
+                break;
+            }
+            let mut left = size;
+            let mut buf = vec![0u8; 16 * 1024];
+            while left > 0 {
+                let want = left.min(buf.len());
+                let n = client.read(&mut buf[..want]).await?;
+                if n == 0 {
+                    return Ok(());
+                }
+                left -= n;
+            }
+            let _ = read_exact(client, 2).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn write_mapped_file<S>(client: &mut S, hub: &Hub, id: u64, file: &std::path::Path) -> Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
+    match std::fs::read(file) {
+        Ok(body) => {
+            let kind = file_type(file);
+            let headers = vec![
+                ("Content-Type".to_string(), kind.to_string()),
+                ("Content-Length".to_string(), body.len().to_string()),
+            ];
+            write_static(client, hub, id, 200, "OK", &headers, &body).await
+        }
+        Err(err) => {
+            let body = format!("map-local 读不到文件: {err}");
+            hub.set_error(id, body.clone());
+            write_static(
+                client,
+                hub,
+                id,
+                502,
+                "Bad Gateway",
+                &[("Content-Type".into(), "text/plain".into())],
+                body.as_bytes(),
+            )
+            .await
+        }
+    }
+}
+
+async fn write_static<S>(
+    client: &mut S,
+    hub: &Hub,
+    id: u64,
+    status: u16,
+    reason: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+) -> Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
+    let mut head = format!("HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n", body.len());
+    for (name, value) in headers {
+        if name.eq_ignore_ascii_case("content-length") {
+            continue;
+        }
+        head.push_str(name);
+        head.push_str(": ");
+        head.push_str(value);
+        head.push_str("\r\n");
+    }
+    head.push_str("\r\n");
+    client.write_all(head.as_bytes()).await?;
+    client.write_all(body).await?;
+    let mut recorded = headers.to_vec();
+    if !recorded.iter().any(|(name, _)| name.eq_ignore_ascii_case("content-length")) {
+        recorded.push(("Content-Length".into(), body.len().to_string()));
+    }
+    hub.set_response(id, status, recorded, None);
+    hub.append_body(id, Direction::Response, body);
+    hub.mark_finished(id);
+    Ok(())
+}
+
+async fn exchange_tls<S>(
+    client: &mut S,
+    hub: &Hub,
+    id: u64,
+    method: &str,
+    host: &str,
+    port: u16,
+    path: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+) -> Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
+    let (mut origin, _) = connect_origin(host, port, &[b"http/1.1".to_vec()], hub).await?;
+    let mut outbound = format!("{method} {path} HTTP/1.1\r\n");
+    let mut has_host = false;
+    for (name, value) in headers {
+        if name.eq_ignore_ascii_case("proxy-connection") || name.eq_ignore_ascii_case("content-length") {
+            continue;
+        }
+        if name.eq_ignore_ascii_case("host") {
+            has_host = true;
+        }
+        outbound.push_str(name);
+        outbound.push_str(": ");
+        outbound.push_str(value);
+        outbound.push_str("\r\n");
+    }
+    if !has_host {
+        outbound.push_str(&format!("Host: {}\r\n", display_authority(host, port, "https")));
+    }
+    outbound.push_str(&format!("Content-Length: {}\r\nConnection: close\r\n\r\n", body.len()));
+    origin.write_all(outbound.as_bytes()).await?;
+    origin.write_all(body).await?;
     let (resp_bytes, resp_rest) = read_header_block(&mut origin).await?;
     client.write_all(&resp_bytes).await?;
     let resp = parse_head(&resp_bytes)?;
@@ -585,31 +1260,402 @@ where
         .and_then(|code| code.parse().ok())
         .unwrap_or(0);
     hub.set_response(id, status, resp.headers.clone(), None);
-    if status == 101 && header_is_websocket(&head.headers) {
-        hub.mark_protocol(id, Protocol::WebSocket);
-        if !resp_rest.is_empty() {
-            client.write_all(&resp_rest).await?;
-        }
-        copy_bidirectional(client, &mut origin).await?;
-        return Ok(());
-    }
     let mut origin = Prefixed {
         prefix: resp_rest,
         pos: 0,
         inner: origin,
     };
-    let encoding = header_value(&resp.headers, "content-encoding");
-    copy_message_body(
+    let _ = copy_message_body(
         &mut origin,
         client,
         &resp.headers,
-        &hub,
+        hub,
         id,
         Direction::Response,
-        encoding,
+        header_value(&resp.headers, "content-encoding"),
     )
     .await?;
+    hub.mark_finished(id);
     Ok(())
+}
+
+fn parse_http_url(url: &str) -> Option<(&str, String, u16, String)> {
+    let (scheme, rest) = url.split_once("://")?;
+    if scheme != "http" && scheme != "https" {
+        return None;
+    }
+    let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+    let path = if path.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{path}")
+    };
+    let default_port = if scheme == "https" { 443 } else { 80 };
+    let (host, port) = split_host_port(authority, default_port).ok()?;
+    Some((scheme, host, port, path))
+}
+
+enum LocalRoute {
+    Cert,
+    Install,
+}
+
+/// A request the proxy answers itself. Origin-form `/` is the install page.
+/// Absolute-form `http://其他主机/` stays a proxied request. `/zniff` is the
+/// page in both forms. `/zniff-ca.crt` is the certificate file.
+fn local_route(method: &str, target: &str) -> Option<LocalRoute> {
+    if !method.eq_ignore_ascii_case("GET") && !method.eq_ignore_ascii_case("HEAD") {
+        return None;
+    }
+    let bare = target.split(['?', '#']).next().unwrap_or(target);
+    let (origin_form, path) = if let Some(rest) = bare
+        .strip_prefix("http://")
+        .or_else(|| bare.strip_prefix("https://"))
+    {
+        let path = match rest.find('/') {
+            Some(index) => &rest[index..],
+            None => "/",
+        };
+        (false, path)
+    } else if bare.starts_with('/') {
+        (true, bare)
+    } else {
+        return None;
+    };
+    if path == "/zniff-ca.crt" || path.ends_with("/zniff-ca.crt") {
+        return Some(LocalRoute::Cert);
+    }
+    if path == "/zniff" || path == "/zniff/" || (origin_form && path == "/") {
+        return Some(LocalRoute::Install);
+    }
+    None
+}
+
+const INSTALL_PAGE: &str = r#"<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>安装 zniff 根证书</title>
+<style>
+  body { margin: 0; background: #0d1017; color: #f1f5f9; font: 16px/1.55 -apple-system, BlinkMacSystemFont, sans-serif; }
+  main { max-width: 28rem; margin: 0 auto; padding: 1.5rem 1.25rem 2.5rem; }
+  h1 { font-size: 1.35rem; margin: 0 0 0.6rem; }
+  h2 { font-size: 1rem; margin: 1.4rem 0 0.4rem; }
+  p { margin: 0.4rem 0; }
+  a.btn { display: block; margin: 1rem 0 0.4rem; padding: 0.85rem 1rem; border-radius: 10px; background: #2563eb; color: #fff; font-weight: 600; text-align: center; text-decoration: none; }
+  ol { margin: 0.3rem 0; padding-left: 1.2rem; }
+  code { font-family: ui-monospace, Menlo, monospace; }
+  .note { color: #94a3b8; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>安装 zniff 根证书</h1>
+  <p>手机和电脑在同一局域网。先下载证书，再按系统步骤信任它。</p>
+  <a class="btn" href="/zniff-ca.crt">下载根证书</a>
+  <h2>iPhone / iPad</h2>
+  <ol>
+    <li>点上面的下载。系统会提示安装描述文件。</li>
+    <li>打开「设置」→「已下载描述文件」，安装 zniff CA。</li>
+    <li>再到「设置」→「通用」→「关于本机」→「证书信任设置」，打开 zniff CA 的完全信任。</li>
+  </ol>
+  <h2>Android</h2>
+  <ol>
+    <li>点下载，保存 <code>zniff-ca.crt</code>。</li>
+    <li>打开「设置」→「安全」→「加密与凭据」→「安装证书」→「CA 证书」。</li>
+  </ol>
+  <p class="note">装好后，把手机 Wi-Fi 的代理指到这台电脑的地址和端口，才能抓到手机的 HTTP(S)。</p>
+</main>
+</body>
+</html>
+"#;
+
+fn install_page_for(accept_language: Option<&str>) -> &'static str {
+    let primary = accept_language
+        .unwrap_or("")
+        .split(',')
+        .next()
+        .unwrap_or("")
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim();
+    if primary.is_empty() || primary.to_ascii_lowercase().starts_with("zh") {
+        INSTALL_PAGE
+    } else {
+        INSTALL_PAGE_EN
+    }
+}
+
+const INSTALL_PAGE_EN: &str = r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Install the zniff root certificate</title>
+<style>
+  body { margin: 0; background: #0d1017; color: #f1f5f9; font: 16px/1.55 -apple-system, BlinkMacSystemFont, sans-serif; }
+  main { max-width: 28rem; margin: 0 auto; padding: 1.5rem 1.25rem 2.5rem; }
+  h1 { font-size: 1.35rem; margin: 0 0 0.6rem; }
+  h2 { font-size: 1rem; margin: 1.4rem 0 0.4rem; }
+  p { margin: 0.4rem 0; }
+  a.btn { display: block; margin: 1rem 0 0.4rem; padding: 0.85rem 1rem; border-radius: 10px; background: #2563eb; color: #fff; font-weight: 600; text-align: center; text-decoration: none; }
+  ol { margin: 0.3rem 0; padding-left: 1.2rem; }
+  code { font-family: ui-monospace, Menlo, monospace; }
+  .note { color: #94a3b8; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Install the zniff root certificate</h1>
+  <p>Keep the phone and the computer on the same network. Download the certificate, then trust it.</p>
+  <a class="btn" href="/zniff-ca.crt">Download the root certificate</a>
+  <h2>iPhone / iPad</h2>
+  <ol>
+    <li>Tap the download. The system offers to install a profile.</li>
+    <li>Open Settings → Profile Downloaded and install zniff CA.</li>
+    <li>Then open Settings → General → About → Certificate Trust Settings and enable full trust for zniff CA.</li>
+  </ol>
+  <h2>Android</h2>
+  <ol>
+    <li>Tap the download and save <code>zniff-ca.crt</code>.</li>
+    <li>Open Settings → Security → Encryption &amp; credentials → Install a certificate → CA certificate.</li>
+  </ol>
+  <p class="note">After it is installed, point the phone's Wi-Fi HTTP proxy at this computer's address and port to capture HTTP(S).</p>
+</main>
+</body>
+</html>
+"#;
+
+async fn serve_install_page<S>(socket: &mut S, hub: &Hub, head: &Head) -> Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
+    let host = header_value(&head.headers, "host").unwrap_or_else(|| "zniff".into());
+    let id = hub.open(FlowDraft {
+        protocol: Protocol::Http11,
+        method: "GET".into(),
+        host: host.clone(),
+        path: "/zniff".into(),
+        url: format!("http://{host}/zniff"),
+        request_headers: head.headers.clone(),
+    });
+    let body = install_page_for(header_value(&head.headers, "accept-language").as_deref()).as_bytes();
+    write_static(
+        socket,
+        hub,
+        id,
+        200,
+        "OK",
+        &[(
+            "Content-Type".into(),
+            "text/html; charset=utf-8".into(),
+        )],
+        body,
+    )
+    .await
+}
+
+async fn serve_ca_cert<S>(socket: &mut S, hub: &Hub, head: &Head) -> Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
+    let pem = std::fs::read(hub.ca.cert_path()).unwrap_or_default();
+    let host = header_value(&head.headers, "host").unwrap_or_else(|| "zniff".into());
+    let id = hub.open(FlowDraft {
+        protocol: Protocol::Http11,
+        method: "GET".into(),
+        host: host.clone(),
+        path: "/zniff-ca.crt".into(),
+        url: format!("http://{host}/zniff-ca.crt"),
+        request_headers: head.headers.clone(),
+    });
+    write_static(
+        socket,
+        hub,
+        id,
+        200,
+        "OK",
+        &[("Content-Type".into(), "application/x-x509-ca-cert".into())],
+        &pem,
+    )
+    .await
+}
+
+async fn replay_once(
+    hub: Arc<Hub>,
+    source: crate::session::Flow,
+    edit: ReplayOverride,
+) -> Result<u64> {
+    let custom_method = edit.method.unwrap_or_default();
+    let custom_method = custom_method.trim();
+    let method = if custom_method.is_empty() {
+        source.method.clone()
+    } else {
+        custom_method.to_string()
+    };
+    let custom_url = edit.url.unwrap_or_default();
+    let custom_url = custom_url.trim().to_string();
+    let url_overridden = !custom_url.is_empty();
+    let url_for_parse: &str = if url_overridden {
+        &custom_url
+    } else {
+        &source.url
+    };
+    let Some((scheme, host, port, path)) = parse_http_url(url_for_parse) else {
+        anyhow::bail!(
+            "{}",
+            if url_overridden {
+                "编辑后的 URL 不能重放"
+            } else {
+                "这条记录没有可重放的 URL"
+            }
+        );
+    };
+    let mut headers = edit.headers.unwrap_or(source.request_headers);
+    if url_overridden {
+        headers.retain(|(name, _)| !name.eq_ignore_ascii_case("host"));
+    }
+    let body = edit.body.unwrap_or(source.request_body);
+    let id = hub.open(FlowDraft {
+        protocol: Protocol::Http11,
+        method: method.clone(),
+        host: host.clone(),
+        path: path.clone(),
+        url: format!("{scheme}://{}{path}", display_authority(&host, port, scheme)),
+        request_headers: headers.clone(),
+    });
+    hub.replace_request(id, headers.clone(), body.clone());
+    let sent = if scheme == "https" {
+        replay_tls(&hub, id, &method, &host, port, &path, &headers, &body).await
+    } else {
+        replay_http(&hub, id, &method, &host, port, &path, &headers, &body).await
+    };
+    if let Err(err) = &sent {
+        hub.set_error(id, err.to_string());
+    }
+    sent?;
+    Ok(id)
+}
+
+async fn replay_http(
+    hub: &Hub,
+    id: u64,
+    method: &str,
+    host: &str,
+    port: u16,
+    path: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+) -> Result<()> {
+    let mut origin = timeout(IO_TIMEOUT, dial(host, port, hub, false))
+        .await
+        .context("连接源站超时")??;
+    let target = if hub.upstream().is_some() {
+        format!("http://{}{path}", display_authority(host, port, "http"))
+    } else {
+        path.to_string()
+    };
+    write_replay(hub, id, &mut origin, method, host, port, "http", &target, headers, body).await
+}
+
+async fn replay_tls(
+    hub: &Hub,
+    id: u64,
+    method: &str,
+    host: &str,
+    port: u16,
+    path: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+) -> Result<()> {
+    let (origin, _) = connect_origin(host, port, &[b"http/1.1".to_vec()], hub).await?;
+    write_replay(hub, id, origin, method, host, port, "https", path, headers, body).await
+}
+
+async fn write_replay<S>(
+    hub: &Hub,
+    id: u64,
+    mut origin: S,
+    method: &str,
+    host: &str,
+    port: u16,
+    scheme: &str,
+    target: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut outbound = format!("{method} {target} HTTP/1.1\r\n");
+    let mut has_host = false;
+    for (name, value) in headers {
+        if name.eq_ignore_ascii_case("proxy-connection")
+            || name.eq_ignore_ascii_case("content-length")
+            || name.eq_ignore_ascii_case("transfer-encoding")
+            || name.eq_ignore_ascii_case("connection")
+        {
+            continue;
+        }
+        if name.eq_ignore_ascii_case("host") {
+            has_host = true;
+        }
+        outbound.push_str(name);
+        outbound.push_str(": ");
+        outbound.push_str(value);
+        outbound.push_str("\r\n");
+    }
+    if !has_host {
+        outbound.push_str(&format!("Host: {}\r\n", display_authority(host, port, scheme)));
+    }
+    outbound.push_str(&format!(
+        "Content-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    ));
+    origin.write_all(outbound.as_bytes()).await?;
+    origin.write_all(body).await?;
+    let (resp_bytes, resp_rest) = read_header_block(&mut origin).await?;
+    let resp = parse_head(&resp_bytes)?;
+    let status = resp
+        .start
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    hub.set_response(id, status, resp.headers.clone(), None);
+    let mut origin = Prefixed {
+        prefix: resp_rest,
+        pos: 0,
+        inner: origin,
+    };
+    let mut sink = tokio::io::sink();
+    let _ = copy_message_body(
+        &mut origin,
+        &mut sink,
+        &resp.headers,
+        hub,
+        id,
+        Direction::Response,
+        header_value(&resp.headers, "content-encoding"),
+    )
+    .await?;
+    hub.mark_finished(id);
+    Ok(())
+}
+
+fn file_type(path: &std::path::Path) -> &'static str {
+    match path.extension().and_then(|ext| ext.to_str()).unwrap_or("") {
+        "json" => "application/json",
+        "html" | "htm" => "text/html",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "txt" | "log" => "text/plain",
+        _ => "application/octet-stream",
+    }
 }
 
 async fn copy_message_body<R, W>(
@@ -620,7 +1666,7 @@ async fn copy_message_body<R, W>(
     id: u64,
     direction: Direction,
     encoding: Option<String>,
-) -> Result<()>
+) -> Result<bool>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
@@ -629,7 +1675,7 @@ where
     if let Some(error) = decoder.error() {
         hub.set_encoding_error(id, direction, error.to_string());
     }
-    if let Some(length) = content_length(headers) {
+    let reusable = if let Some(length) = content_length(headers) {
         let mut left = length;
         let mut buf = vec![0u8; 16 * 1024];
         while left > 0 {
@@ -639,12 +1685,15 @@ where
                 break;
             }
             to.write_all(&buf[..n]).await?;
+            hub.add_transfer(id, direction, n as u64);
             let decoded = decoder.push(&buf[..n]);
             hub.append_body(id, direction, &decoded);
             left -= n;
         }
+        left == 0
     } else if is_chunked(headers) {
         copy_chunked(from, to, hub, id, direction, &mut decoder).await?;
+        true
     } else if direction == Direction::Response {
         let mut buf = vec![0u8; 16 * 1024];
         loop {
@@ -653,16 +1702,20 @@ where
                 break;
             }
             to.write_all(&buf[..n]).await?;
+            hub.add_transfer(id, direction, n as u64);
             let decoded = decoder.push(&buf[..n]);
             hub.append_body(id, direction, &decoded);
         }
-    }
+        false
+    } else {
+        true
+    };
     let tail = decoder.finish();
     hub.append_body(id, direction, &tail);
     if let Some(error) = decoder.error() {
         hub.set_encoding_error(id, direction, error.to_string());
     }
-    Ok(())
+    Ok(reusable)
 }
 
 async fn copy_chunked<R, W>(
@@ -697,6 +1750,7 @@ where
                 anyhow::bail!("分块 body 提前结束");
             }
             to.write_all(&buf[..n]).await?;
+            hub.add_transfer(id, direction, n as u64);
             let decoded = decoder.push(&buf[..n]);
             hub.append_body(id, direction, &decoded);
             left -= n;
@@ -715,6 +1769,35 @@ fn is_chunked(headers: &[(String, String)]) -> bool {
     header_value(headers, "transfer-encoding")
         .map(|value| value.to_ascii_lowercase().contains("chunked"))
         .unwrap_or(false)
+}
+
+/// Drops `Sec-WebSocket-Extensions` so a handshake cannot negotiate
+/// `permessage-deflate`. The forwarded frames stay uncompressed and the
+/// side-copy parser can read them. RSV1 on a frame still stops parsing only.
+fn strip_ws_extension(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    for line in bytes.split_inclusive(|&byte| byte == b'\n') {
+        let name = line.split(|&byte| byte == b':').next().unwrap_or(line);
+        let name = trim_ascii(name);
+        if name.eq_ignore_ascii_case(b"sec-websocket-extensions") {
+            continue;
+        }
+        out.extend_from_slice(line);
+    }
+    out
+}
+
+fn trim_ascii(bytes: &[u8]) -> &[u8] {
+    let start = bytes
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    let end = bytes
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())
+        .map(|index| index + 1)
+        .unwrap_or(start);
+    &bytes[start..end]
 }
 
 fn header_is_websocket(headers: &[(String, String)]) -> bool {
@@ -854,6 +1937,16 @@ struct Prefixed<S> {
     inner: S,
 }
 
+impl Prefixed<TcpStream> {
+    fn into_idle(self) -> Option<TcpStream> {
+        if self.pos >= self.prefix.len() {
+            Some(self.inner)
+        } else {
+            None
+        }
+    }
+}
+
 impl<S: AsyncRead + Unpin> AsyncRead for Prefixed<S> {
     fn poll_read(
         mut self: Pin<&mut Self>,
@@ -897,9 +1990,73 @@ where
     Ok(())
 }
 
+/// Forwards bytes immediately and parses WebSocket frames from the copy.
+/// A bad frame stops the parser only. The splice keeps going.
+async fn copy_with_messages<A, B>(
+    client: &mut A,
+    origin: &mut B,
+    hub: &Hub,
+    id: u64,
+    already_to_client: &[u8],
+) -> Result<()>
+where
+    A: AsyncRead + AsyncWrite + Unpin,
+    B: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut to_origin = FrameFeed::default();
+    let mut to_client = FrameFeed::default();
+    if !already_to_client.is_empty() {
+        note_frames(&mut to_client, already_to_client, hub, id, Direction::Response);
+    }
+    let mut client_buf = vec![0u8; 16 * 1024];
+    let mut origin_buf = vec![0u8; 16 * 1024];
+    let mut client_done = false;
+    let mut origin_done = false;
+    loop {
+        if client_done && origin_done {
+            break;
+        }
+        tokio::select! {
+            result = client.read(&mut client_buf), if !client_done => {
+                let n = result?;
+                if n == 0 {
+                    client_done = true;
+                    origin.shutdown().await.ok();
+                } else {
+                    note_frames(&mut to_origin, &client_buf[..n], hub, id, Direction::Request);
+                    origin.write_all(&client_buf[..n]).await?;
+                }
+            }
+            result = origin.read(&mut origin_buf), if !origin_done => {
+                let n = result?;
+                if n == 0 {
+                    origin_done = true;
+                    client.shutdown().await.ok();
+                } else {
+                    note_frames(&mut to_client, &origin_buf[..n], hub, id, Direction::Response);
+                    client.write_all(&origin_buf[..n]).await?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn note_frames(feed: &mut FrameFeed, data: &[u8], hub: &Hub, id: u64, direction: Direction) {
+    for frame in feed.push(data) {
+        hub.add_message(
+            id,
+            direction,
+            ws::frame_label(frame.opcode),
+            ws::frame_text(frame.opcode, &frame.payload),
+        );
+    }
+}
+
 /// Records a decompressed side copy while the original frames pass through.
 struct RecordingBody<B> {
-    inner: B,
+    inner: Option<B>,
+    once: Option<Bytes>,
     record: Option<Record>,
 }
 
@@ -918,7 +2075,8 @@ impl<B> RecordingBody<B> {
             hub.set_encoding_error(id, direction, error.to_string());
         }
         Self {
-            inner,
+            inner: Some(inner),
+            once: None,
             record: Some(Record {
                 hub,
                 id,
@@ -931,7 +2089,17 @@ impl<B> RecordingBody<B> {
 
     fn passthrough(inner: B) -> Self {
         Self {
-            inner,
+            inner: Some(inner),
+            once: None,
+            record: None,
+        }
+    }
+
+    fn from_bytes(bytes: impl Into<Bytes>) -> Self {
+        let bytes = bytes.into();
+        Self {
+            inner: None,
+            once: if bytes.is_empty() { None } else { Some(bytes) },
             record: None,
         }
     }
@@ -940,6 +2108,9 @@ impl<B> RecordingBody<B> {
         let Some(record) = self.record.as_mut() else {
             return;
         };
+        record
+            .hub
+            .add_transfer(record.id, record.direction, bytes.len() as u64);
         let decoded = record.decoder.push(bytes);
         record
             .hub
@@ -959,10 +2130,16 @@ impl<B> RecordingBody<B> {
             return;
         }
         record.finished = true;
+        let direction = record.direction;
+        let id = record.id;
+        let hub = record.hub.clone();
         let decoded = record.decoder.finish();
         record
             .hub
             .append_body(record.id, record.direction, &decoded);
+        if direction == Direction::Response {
+            hub.mark_finished(id);
+        }
     }
 }
 
@@ -978,7 +2155,14 @@ where
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         let this = self.get_mut();
-        match Pin::new(&mut this.inner).poll_frame(cx) {
+        if let Some(bytes) = this.once.take() {
+            return Poll::Ready(Some(Ok(Frame::data(bytes))));
+        }
+        let Some(inner) = this.inner.as_mut() else {
+            this.finish_record();
+            return Poll::Ready(None);
+        };
+        match Pin::new(inner).poll_frame(cx) {
             Poll::Ready(Some(Ok(frame))) => {
                 if let Some(data) = frame.data_ref() {
                     let bytes = data.clone();
@@ -995,11 +2179,25 @@ where
     }
 
     fn is_end_stream(&self) -> bool {
-        self.inner.is_end_stream()
+        if self.once.is_some() {
+            return false;
+        }
+        self.inner
+            .as_ref()
+            .map(|inner| inner.is_end_stream())
+            .unwrap_or(true)
     }
 
     fn size_hint(&self) -> http_body::SizeHint {
-        self.inner.size_hint()
+        if let Some(bytes) = &self.once {
+            let mut hint = http_body::SizeHint::new();
+            hint.set_exact(bytes.len() as u64);
+            return hint;
+        }
+        self.inner
+            .as_ref()
+            .map(|inner| inner.size_hint())
+            .unwrap_or_default()
     }
 }
 
@@ -1065,39 +2263,129 @@ async fn forward_request(
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
     let (mut parts, body) = req.into_parts();
-    let path = parts
+    let mut path = parts
         .uri
         .path_and_query()
         .map(|path| path.as_str().to_string())
         .unwrap_or_else(|| "/".into());
-    let authority = display_authority(host, port, scheme);
+    let origin_key = (host.to_string(), port);
+    let mut host = host.to_string();
+    let mut port = port;
+    let mut scheme = scheme.to_string();
+    let authority = display_authority(&host, port, &scheme);
     let id = hub.open(FlowDraft {
         protocol,
         method: parts.method.to_string(),
-        host: host.to_string(),
+        host: host.clone(),
         path: path.clone(),
         url: format!("{scheme}://{authority}{path}"),
         request_headers: header_pairs(&parts.headers),
     });
-    let body = if websocket {
+    let mut body_override: Option<Vec<u8>> = None;
+    let mut headers_replaced = false;
+    if !websocket {
+        if let Some(rule) = hub.matching_rule(&host, &path) {
+            match rule {
+                Rule::MapLocal { file, .. } => {
+                    record_request_bytes(&hub, id, body, encoding.as_deref()).await?;
+                    return mapped_file_response(&hub, id, &file);
+                }
+                Rule::Break { .. } => {
+                    let decision = hub.wait_break(id).await;
+                    if decision.drop {
+                        hub.set_error(id, "断点丢弃");
+                        drain_incoming(body).await?;
+                        return empty_status(&hub, id, StatusCode::NO_CONTENT);
+                    }
+                    if let Some(next) = decision.headers {
+                        replace_header_map(&mut parts.headers, &next);
+                        headers_replaced = true;
+                    }
+                    body_override = decision.body;
+                }
+                Rule::MapRemote { url, .. } => {
+                    if let Some((next_scheme, next_host, next_port, next_path)) =
+                        parse_http_url(&url)
+                    {
+                        let same = next_scheme == scheme && next_host == host && next_port == port;
+                        host = next_host;
+                        port = next_port;
+                        path = next_path;
+                        scheme = next_scheme.to_string();
+                        let authority = display_authority(&host, port, &scheme);
+                        hub.retarget(
+                            id,
+                            host.clone(),
+                            path.clone(),
+                            format!("{scheme}://{authority}{path}"),
+                        );
+                        if !same {
+                            let raw =
+                                record_request_bytes(&hub, id, body, encoding.as_deref()).await?;
+                            return fetch_remote(
+                                &hub,
+                                id,
+                                parts.method.clone(),
+                                &scheme,
+                                &host,
+                                port,
+                                &path,
+                                &parts.headers,
+                                raw,
+                            )
+                            .await;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let outbound_body = if let Some(bytes) = body_override {
+        parts.headers.remove(http::header::CONTENT_LENGTH);
+        if let Ok(value) = http::HeaderValue::from_str(&bytes.len().to_string()) {
+            parts.headers.insert(http::header::CONTENT_LENGTH, value);
+        }
+        drain_incoming(body).await?;
+        hub.replace_request(id, header_pairs(&parts.headers), bytes.clone());
+        RecordingBody::from_bytes(Bytes::from(bytes))
+    } else if websocket {
         RecordingBody::passthrough(body)
     } else {
+        if headers_replaced {
+            hub.replace_request(id, header_pairs(&parts.headers), Vec::new());
+        }
         RecordingBody::new(body, hub.clone(), id, Direction::Request, encoding.as_deref())
     };
     parts.version = match protocol {
         Protocol::Http2 => Version::HTTP_2,
         _ => Version::HTTP_11,
     };
-    parts.uri = absolute_uri(scheme, &authority, &path)?;
+    let authority = display_authority(&host, port, &scheme);
+    parts.uri = absolute_uri(&scheme, &authority, &path)?;
     strip_hop_by_hop(&mut parts.headers, websocket);
-    let outbound = Request::from_parts(parts, body);
-    let mut response = sender.send(outbound).await?;
+    if websocket {
+        parts
+            .headers
+            .remove(HeaderName::from_static("sec-websocket-extensions"));
+    }
+    let outbound = Request::from_parts(parts, outbound_body);
+    let mut response = match sender.send(outbound).await {
+        Ok(response) => response,
+        Err(err) => {
+            if protocol == Protocol::Http2 {
+                hub.drop_h2(&origin_key);
+            }
+            hub.set_error(id, err.to_string());
+            return Err(err);
+        }
+    };
     if websocket && response.status() == StatusCode::SWITCHING_PROTOCOLS {
         hub.mark_protocol(id, Protocol::WebSocket);
         if let Some(upgrade) = upgrade {
             let server_up = hyper::upgrade::on(&mut response);
+            let hub_up = hub.clone();
             tokio::spawn(async move {
-                splice_upgrades(upgrade, server_up).await;
+                splice_upgrades(upgrade, server_up, hub_up, id).await;
             });
         }
     }
@@ -1106,7 +2394,12 @@ async fn forward_request(
         .get(http::header::CONTENT_ENCODING)
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
-    let (parts, body) = response.into_parts();
+    let (mut parts, body) = response.into_parts();
+    if websocket {
+        parts
+            .headers
+            .remove(HeaderName::from_static("sec-websocket-extensions"));
+    }
     hub.set_response(id, parts.status.as_u16(), header_pairs(&parts.headers), None);
     let body = if websocket {
         RecordingBody::passthrough(body)
@@ -1119,6 +2412,191 @@ async fn forward_request(
             resp_encoding.as_deref(),
         )
     };
+    Ok(Response::from_parts(parts, body))
+}
+
+async fn record_request_bytes(
+    hub: &Arc<Hub>,
+    id: u64,
+    body: Incoming,
+    encoding: Option<&str>,
+) -> Result<Bytes> {
+    let collected = body
+        .collect()
+        .await
+        .map_err(|err| anyhow!("读取请求体: {err}"))?;
+    let raw = collected.to_bytes();
+    note_decoded(hub, id, Direction::Request, &raw, encoding);
+    Ok(raw)
+}
+
+async fn drain_incoming(body: Incoming) -> Result<()> {
+    body.collect()
+        .await
+        .map_err(|err| anyhow!("丢掉请求体: {err}"))?;
+    Ok(())
+}
+
+fn note_decoded(hub: &Hub, id: u64, direction: Direction, raw: &[u8], encoding: Option<&str>) {
+    hub.add_transfer(id, direction, raw.len() as u64);
+    let mut decoder = Decoder::from_header(encoding);
+    if let Some(error) = decoder.error() {
+        hub.set_encoding_error(id, direction, error.to_string());
+    }
+    let decoded = decoder.push(raw);
+    hub.append_body(id, direction, &decoded);
+    let tail = decoder.finish();
+    hub.append_body(id, direction, &tail);
+    if let Some(error) = decoder.error() {
+        hub.set_encoding_error(id, direction, error.to_string());
+    }
+}
+
+fn mapped_file_response(
+    hub: &Arc<Hub>,
+    id: u64,
+    file: &std::path::Path,
+) -> Result<Response<RecordingBody<Incoming>>> {
+    match std::fs::read(file) {
+        Ok(body) => synthetic_response(hub, id, StatusCode::OK, file_type(file), body),
+        Err(err) => {
+            let text = format!("map-local 读不到文件: {err}");
+            hub.set_error(id, text.clone());
+            synthetic_response(
+                hub,
+                id,
+                StatusCode::BAD_GATEWAY,
+                "text/plain",
+                text.into_bytes(),
+            )
+        }
+    }
+}
+
+fn empty_status(
+    hub: &Arc<Hub>,
+    id: u64,
+    status: StatusCode,
+) -> Result<Response<RecordingBody<Incoming>>> {
+    synthetic_response(hub, id, status, "text/plain", Vec::new())
+}
+
+fn synthetic_response(
+    hub: &Arc<Hub>,
+    id: u64,
+    status: StatusCode,
+    content_type: &str,
+    body: Vec<u8>,
+) -> Result<Response<RecordingBody<Incoming>>> {
+    let headers = vec![
+        ("Content-Type".into(), content_type.to_string()),
+        ("Content-Length".into(), body.len().to_string()),
+    ];
+    hub.set_response(id, status.as_u16(), headers, None);
+    hub.append_body(id, Direction::Response, &body);
+    hub.mark_finished(id);
+    Response::builder()
+        .status(status)
+        .header(http::header::CONTENT_TYPE, content_type)
+        .header(http::header::CONTENT_LENGTH, body.len().to_string())
+        .body(RecordingBody::from_bytes(Bytes::from(body)))
+        .context("组装映射响应")
+}
+
+fn replace_header_map(headers: &mut HeaderMap, pairs: &[(String, String)]) {
+    headers.clear();
+    for (name, value) in pairs {
+        let Ok(name) = HeaderName::from_bytes(name.as_bytes()) else {
+            continue;
+        };
+        let Ok(value) = http::HeaderValue::from_bytes(value.as_bytes()) else {
+            continue;
+        };
+        headers.append(name, value);
+    }
+}
+
+async fn fetch_remote(
+    hub: &Arc<Hub>,
+    id: u64,
+    method: Method,
+    scheme: &str,
+    host: &str,
+    port: u16,
+    path: &str,
+    headers: &HeaderMap,
+    body: Bytes,
+) -> Result<Response<RecordingBody<Incoming>>> {
+    if scheme == "https" {
+        let (tls, _) = connect_origin(host, port, &[b"http/1.1".to_vec()], hub).await?;
+        fetch_on(tls, hub, id, method, scheme, host, port, path, headers, body).await
+    } else {
+        let tcp = dial(host, port, hub, false).await?;
+        fetch_on(tcp, hub, id, method, scheme, host, port, path, headers, body).await
+    }
+}
+
+async fn fetch_on<IO>(
+    io: IO,
+    hub: &Arc<Hub>,
+    id: u64,
+    method: Method,
+    scheme: &str,
+    host: &str,
+    port: u16,
+    path: &str,
+    headers: &HeaderMap,
+    body: Bytes,
+) -> Result<Response<RecordingBody<Incoming>>>
+where
+    IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let authority = display_authority(host, port, scheme);
+    let mut outbound = Request::builder()
+        .method(method)
+        .uri(absolute_uri(scheme, &authority, path)?)
+        .body(Full::new(body.clone()))
+        .context("组装映射请求")?;
+    *outbound.headers_mut() = headers.clone();
+    strip_hop_by_hop(outbound.headers_mut(), false);
+    outbound.headers_mut().remove(http::header::CONTENT_LENGTH);
+    outbound.headers_mut().insert(
+        http::header::CONTENT_LENGTH,
+        http::HeaderValue::from_str(&body.len().to_string()).unwrap_or(http::HeaderValue::from_static("0")),
+    );
+    if !outbound.headers().contains_key(http::header::HOST) {
+        if let Ok(value) = http::HeaderValue::from_str(&authority) {
+            outbound.headers_mut().insert(http::header::HOST, value);
+        }
+    }
+    let (mut sender, connection) = hyper::client::conn::http1::Builder::new()
+        .preserve_header_case(true)
+        .title_case_headers(true)
+        .handshake::<_, Full<Bytes>>(TokioIo::new(io))
+        .await
+        .context("映射连接")?;
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    sender.ready().await.context("映射连接未就绪")?;
+    let response = sender
+        .send_request(outbound)
+        .await
+        .context("映射请求")?;
+    let encoding = response
+        .headers()
+        .get(http::header::CONTENT_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let (parts, resp_body) = response.into_parts();
+    hub.set_response(id, parts.status.as_u16(), header_pairs(&parts.headers), None);
+    let body = RecordingBody::new(
+        resp_body,
+        hub.clone(),
+        id,
+        Direction::Response,
+        encoding.as_deref(),
+    );
     Ok(Response::from_parts(parts, body))
 }
 
@@ -1198,19 +2676,37 @@ fn absolute_uri(scheme: &str, host: &str, path: &str) -> Result<Uri> {
 async fn splice_upgrades(
     client: impl std::future::Future<Output = Result<Upgraded, hyper::Error>>,
     server: impl std::future::Future<Output = Result<Upgraded, hyper::Error>>,
+    hub: Arc<Hub>,
+    id: u64,
 ) {
     let (client, server) = tokio::join!(client, server);
-    let Ok(client) = client else { return };
-    let Ok(server) = server else { return };
+    let Ok(client) = client else {
+        hub.mark_finished(id);
+        return;
+    };
+    let Ok(server) = server else {
+        hub.mark_finished(id);
+        return;
+    };
     let mut client = TokioIo::new(client);
     let mut server = TokioIo::new(server);
-    let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
+    let _ = copy_with_messages(&mut client, &mut server, &hub, id, &[]).await;
+    hub.mark_finished(id);
 }
 
 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn install_page_follows_accept_language() {
+        assert!(super::install_page_for(None).contains("安装 zniff"));
+        assert!(super::install_page_for(Some("")).contains("安装 zniff"));
+        assert!(super::install_page_for(Some("zh-CN,en;q=0.8")).contains("安装 zniff"));
+        assert!(super::install_page_for(Some("en-US,en;q=0.9")).contains("Install the zniff"));
+        assert!(super::install_page_for(Some("fr")).contains("Install the zniff"));
+    }
+
     use super::*;
 
     #[tokio::test]
@@ -1586,6 +3082,407 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[tokio::test]
+    async fn plaintext_keep_alive_reuses_the_origin_socket() {
+        let dir = std::env::temp_dir().join(format!("zniff-pool-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+        let accepts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        let accepts_bg = accepts.clone();
+        tokio::spawn(async move {
+            let (mut sock, _) = origin.accept().await.unwrap();
+            accepts_bg.fetch_add(1, Ordering::SeqCst);
+            for mark in [b"one", b"two"] {
+                let mut buf = Vec::new();
+                let mut byte = [0u8; 1];
+                while !buf.ends_with(b"\r\n\r\n") {
+                    let n = timeout(Duration::from_secs(5), sock.read(&mut byte))
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_ne!(n, 0);
+                    buf.push(byte[0]);
+                }
+                let resp = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", mark.len());
+                sock.write_all(resp.as_bytes()).await.unwrap();
+                sock.write_all(mark).await.unwrap();
+            }
+        });
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        let hub_serve = hub.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((socket, _)) = proxy.accept().await else { break };
+                let hub = hub_serve.clone();
+                tokio::spawn(async move {
+                    let _ = handle_conn(socket, hub).await;
+                });
+            }
+        });
+        for mark in ["one", "two"] {
+            let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+            let req = format!("GET http://{origin_addr}/x HTTP/1.1\r\nHost: {origin_addr}\r\n\r\n");
+            client.write_all(req.as_bytes()).await.unwrap();
+            let mut resp = Vec::new();
+            timeout(Duration::from_secs(5), client.read_to_end(&mut resp))
+                .await
+                .unwrap()
+                .unwrap();
+            let text = String::from_utf8_lossy(&resp);
+            assert!(text.contains(mark), "{text}");
+        }
+        assert_eq!(accepts.load(Ordering::SeqCst), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn upstream_proxy_receives_absolute_form() {
+        let dir = std::env::temp_dir().join(format!("zniff-up-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = upstream.accept().await.unwrap();
+            let mut buf = vec![0u8; 2048];
+            let n = timeout(Duration::from_secs(5), sock.read(&mut buf))
+                .await
+                .unwrap()
+                .unwrap();
+            let text = String::from_utf8_lossy(&buf[..n]);
+            assert!(text.starts_with("GET http://example.test/hi "), "{text}");
+            let body = b"via-upstream";
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            sock.write_all(resp.as_bytes()).await.unwrap();
+            sock.write_all(body).await.unwrap();
+        });
+        hub.set_upstream(&format!("127.0.0.1:{}", upstream_addr.port()));
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        let hub_serve = hub.clone();
+        tokio::spawn(async move {
+            let (socket, _) = proxy.accept().await.unwrap();
+            let _ = handle_conn(socket, hub_serve).await;
+        });
+        let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+        let req = "GET http://example.test/hi HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n";
+        client.write_all(req.as_bytes()).await.unwrap();
+        let mut resp = Vec::new();
+        timeout(Duration::from_secs(5), client.read_to_end(&mut resp))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&resp).contains("via-upstream"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn bypass_tunnels_tls_without_a_leaf() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let dir = std::env::temp_dir().join(format!("zniff-bypass-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+        hub.set_bypass("127.0.0.1");
+        let (origin_ca, origin_leaf, leaf_key) = test_origin_cert();
+        let mut server_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![origin_leaf.der().clone(), origin_ca.der().clone()],
+                rustls::pki_types::PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
+                    leaf_key.serialize_der(),
+                )),
+            )
+            .unwrap();
+        server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
+        let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (sock, _) = origin.accept().await.unwrap();
+            let mut tls = acceptor.accept(sock).await.unwrap();
+            let mut buf = vec![0u8; 1024];
+            let _ = tls.read(&mut buf).await.unwrap();
+            let body = b"tunnel-ok";
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            tls.write_all(resp.as_bytes()).await.unwrap();
+            tls.write_all(body).await.unwrap();
+            tls.shutdown().await.unwrap();
+        });
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        let hub_serve = hub.clone();
+        tokio::spawn(async move {
+            let (socket, _) = proxy.accept().await.unwrap();
+            let _ = handle_conn(socket, hub_serve).await;
+        });
+        let mut tcp = TcpStream::connect(proxy_addr).await.unwrap();
+        let connect = format!("CONNECT {origin_addr} HTTP/1.1\r\nHost: {origin_addr}\r\n\r\n");
+        tcp.write_all(connect.as_bytes()).await.unwrap();
+        read_http_head(&mut tcp).await;
+        let mut roots = RootCertStore::empty();
+        roots.add(origin_ca.der().clone()).unwrap();
+        let client_config = ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let connector = TlsConnector::from(Arc::new(client_config));
+        let mut tls = timeout(
+            Duration::from_secs(5),
+            connector.connect(ServerName::IpAddress(origin_addr.ip().into()), tcp),
+        )
+        .await
+        .expect("客户端 TLS 超时")
+        .expect("直通后应使用源站证书");
+        tls.write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut resp = Vec::new();
+        let read = timeout(Duration::from_secs(5), tls.read_to_end(&mut resp))
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&resp);
+        assert!(text.contains("tunnel-ok"), "{read:?} {text}");
+        let flow = hub.with_session(|session| session.get(1).cloned()).expect("flow");
+        assert_eq!(flow.protocol, Protocol::Tunnel);
+        let reason = flow.error.unwrap_or_default();
+        assert!(reason.contains("直通"), "{reason}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn websocket_text_frame_is_recorded_beside_the_handshake() {
+        let dir = std::env::temp_dir().join(format!("zniff-ws-frame-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+        let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = origin.accept().await.unwrap();
+            let mut buf = vec![0u8; 1024];
+            let _ = sock.read(&mut buf).await.unwrap();
+            sock.write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+                .await
+                .unwrap();
+            sock.write_all(&[0x81, 0x02, b'h', b'i']).await.unwrap();
+        });
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        let hub_serve = hub.clone();
+        tokio::spawn(async move {
+            let (socket, _) = proxy.accept().await.unwrap();
+            let _ = handle_conn(socket, hub_serve).await;
+        });
+        let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+        let req = format!(
+            "GET http://{origin_addr}/chat HTTP/1.1\r\nHost: {origin_addr}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n"
+        );
+        client.write_all(req.as_bytes()).await.unwrap();
+        let mut header = Vec::new();
+        let mut byte = [0u8; 1];
+        while !header.ends_with(b"\r\n\r\n") {
+            let n = timeout(Duration::from_secs(5), client.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_ne!(n, 0);
+            header.push(byte[0]);
+        }
+        assert!(String::from_utf8_lossy(&header).contains("101"));
+        let mut frame = [0u8; 4];
+        timeout(Duration::from_secs(5), client.read_exact(&mut frame))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&frame, &[0x81, 0x02, b'h', b'i']);
+        let flow = hub.with_session(|session| session.get(1).cloned()).expect("flow");
+        assert_eq!(flow.protocol, Protocol::WebSocket);
+        assert_eq!(flow.messages.len(), 1);
+        assert_eq!(flow.messages[0].kind, "文本");
+        assert_eq!(flow.messages[0].text, "hi");
+        assert!(flow.response_body.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn map_local_answers_without_dialing() {
+        let dir = std::env::temp_dir().join(format!("zniff-map-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+        let file = dir.join("body.txt");
+        std::fs::write(&file, b"from-file").unwrap();
+        hub.set_rules(&format!("map-local 127.0.0.1/hi {}", file.display()));
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        let hub_serve = hub.clone();
+        tokio::spawn(async move {
+            let (socket, _) = proxy.accept().await.unwrap();
+            let _ = handle_conn(socket, hub_serve).await;
+        });
+        let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+        client
+            .write_all(b"GET http://127.0.0.1:9/hi HTTP/1.1\r\nHost: 127.0.0.1:9\r\n\r\n")
+            .await
+            .unwrap();
+        let mut resp = Vec::new();
+        timeout(Duration::from_secs(5), client.read_to_end(&mut resp))
+            .await
+            .unwrap()
+            .unwrap();
+        let text = String::from_utf8_lossy(&resp);
+        assert!(text.contains("200"), "{text}");
+        assert!(text.contains("from-file"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn breakpoint_drop_returns_204() {
+        let dir = std::env::temp_dir().join(format!("zniff-break-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+        hub.set_rules("break 127.0.0.1/hold");
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        let hub_serve = hub.clone();
+        tokio::spawn(async move {
+            let (socket, _) = proxy.accept().await.unwrap();
+            let _ = handle_conn(socket, hub_serve).await;
+        });
+        let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+        client
+            .write_all(b"GET http://127.0.0.1:9/hold HTTP/1.1\r\nHost: 127.0.0.1:9\r\n\r\n")
+            .await
+            .unwrap();
+        let hub_wait = hub.clone();
+        let waiter = tokio::spawn(async move {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                if hub_wait.paused_id() == Some(1) {
+                    hub_wait.resolve_break(BreakDecision {
+                        drop: true,
+                        headers: None,
+                        body: None,
+                    });
+                    return;
+                }
+                if std::time::Instant::now() > deadline {
+                    panic!("断点没有暂停");
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        let mut resp = Vec::new();
+        timeout(Duration::from_secs(5), client.read_to_end(&mut resp))
+            .await
+            .unwrap()
+            .unwrap();
+        waiter.await.unwrap();
+        let text = String::from_utf8_lossy(&resp);
+        assert!(text.contains("204"), "{text}");
+        let flow = hub.with_session(|session| session.get(1).cloned()).expect("flow");
+        assert_eq!(flow.error.as_deref(), Some("断点丢弃"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn local_routes_leave_proxied_roots_alone() {
+        assert!(matches!(
+            local_route("GET", "/zniff"),
+            Some(LocalRoute::Install)
+        ));
+        assert!(matches!(local_route("GET", "/"), Some(LocalRoute::Install)));
+        assert!(matches!(
+            local_route("GET", "http://192.168.1.8:8877/zniff"),
+            Some(LocalRoute::Install)
+        ));
+        assert!(local_route("GET", "http://example.com/").is_none());
+        assert!(local_route("GET", "http://example.com/index").is_none());
+        assert!(matches!(
+            local_route("GET", "http://127.0.0.1/zniff-ca.crt"),
+            Some(LocalRoute::Cert)
+        ));
+        assert!(local_route("POST", "/zniff").is_none());
+        assert!(local_route("CONNECT", "example.com:443").is_none());
+    }
+
+    #[tokio::test]
+    async fn install_page_links_to_the_certificate() {
+        let dir = std::env::temp_dir().join(format!("zniff-install-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        let hub_serve = hub.clone();
+        tokio::spawn(async move {
+            let (socket, _) = proxy.accept().await.unwrap();
+            let _ = handle_conn(socket, hub_serve).await;
+        });
+        let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+        client
+            .write_all(b"GET /zniff HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            .await
+            .unwrap();
+        let mut resp = Vec::new();
+        timeout(Duration::from_secs(5), client.read_to_end(&mut resp))
+            .await
+            .unwrap()
+            .unwrap();
+        let text = String::from_utf8_lossy(&resp);
+        assert!(text.contains("200"), "{text}");
+        assert!(text.contains("text/html"), "{text}");
+        assert!(text.contains("href=\"/zniff-ca.crt\""), "{text}");
+        let flow = hub.with_session(|session| session.get(1).cloned()).expect("flow");
+        assert_eq!(flow.path, "/zniff");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn ca_cert_route_returns_the_pem() {
+        let dir = std::env::temp_dir().join(format!("zniff-ca-route-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let pem = std::fs::read(ca.cert_path()).unwrap();
+        let hub = Arc::new(Hub::new(ca).unwrap());
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        let hub_serve = hub.clone();
+        tokio::spawn(async move {
+            let (socket, _) = proxy.accept().await.unwrap();
+            let _ = handle_conn(socket, hub_serve).await;
+        });
+        let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+        client
+            .write_all(b"GET http://127.0.0.1/zniff-ca.crt HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            .await
+            .unwrap();
+        let mut resp = Vec::new();
+        timeout(Duration::from_secs(5), client.read_to_end(&mut resp))
+            .await
+            .unwrap()
+            .unwrap();
+        let text = String::from_utf8_lossy(&resp);
+        assert!(text.contains("200"), "{text}");
+        assert!(text.contains("application/x-x509-ca-cert"), "{text}");
+        assert!(resp.windows(pem.len()).any(|window| window == pem.as_slice()));
+        let flow = hub.with_session(|session| session.get(1).cloned()).expect("flow");
+        assert_eq!(flow.path, "/zniff-ca.crt");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn splits_connect_authority() {
         assert_eq!(
@@ -1596,5 +3493,678 @@ mod tests {
             split_host_port("[::1]:8443", 443).unwrap(),
             ("::1".into(), 8443)
         );
+    }
+
+    #[test]
+    fn strip_ws_extension_drops_only_that_header() {
+        let raw = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nSec-WebSocket-Extensions: permessage-deflate\r\nConnection: Upgrade\r\n\r\n";
+        let text = String::from_utf8(strip_ws_extension(raw)).unwrap();
+        assert!(!text.to_ascii_lowercase().contains("sec-websocket-extensions"));
+        assert!(text.contains("Upgrade: websocket"));
+        assert!(text.contains("Connection: Upgrade"));
+        assert!(text.ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    fn import_har_restores_timing_after_mark_finished() {
+        let dir = std::env::temp_dir().join(format!("zniff-har-import-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Hub::new(ca).unwrap();
+        let har = serde_json::json!({
+            "log": {
+                "entries": [{
+                    "startedDateTime": "2023-11-14T22:13:20.000Z",
+                    "time": 40,
+                    "request": {
+                        "method": "POST",
+                        "url": "http://example.com/v1",
+                        "httpVersion": "HTTP/1.1",
+                        "headers": [],
+                        "bodySize": 18,
+                        "postData": {"mimeType": "text/plain", "text": "hi"}
+                    },
+                    "response": {
+                        "status": 200,
+                        "httpVersion": "HTTP/1.1",
+                        "headers": [],
+                        "bodySize": 4,
+                        "content": {"mimeType": "text/plain", "text": "ok"}
+                    },
+                    "timings": {"wait": 15, "receive": 25}
+                }]
+            }
+        });
+        assert_eq!(hub.import_har(&har), 1);
+        let flow = hub.with_session(|session| session.get(1).cloned()).unwrap();
+        assert_eq!(flow.request_body, b"hi");
+        assert_eq!(flow.response_body, b"ok");
+        assert_eq!(flow.request_bytes, 18);
+        assert_eq!(flow.response_bytes, 4);
+        let wait = flow
+            .response_at
+            .unwrap()
+            .duration_since(flow.started)
+            .unwrap();
+        let total = flow
+            .finished_at
+            .unwrap()
+            .duration_since(flow.started)
+            .unwrap();
+        assert_eq!(wait, Duration::from_millis(15));
+        assert_eq!(total, Duration::from_millis(40));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn websocket_extension_is_not_forwarded() {
+        let dir = std::env::temp_dir().join(format!("zniff-ws-ext-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+        let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        let seen = Arc::new(Mutex::new(String::new()));
+        let seen_task = seen.clone();
+        tokio::spawn(async move {
+            let (mut sock, _) = origin.accept().await.unwrap();
+            let req = read_h1_message(&mut sock).await;
+            *seen_task.lock().unwrap() = String::from_utf8_lossy(&req).into_owned();
+            sock.write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nSec-WebSocket-Extensions: permessage-deflate\r\nConnection: Upgrade\r\n\r\n")
+                .await
+                .unwrap();
+            sock.write_all(&[0x81, 0x05, b'p', b'l', b'a', b'i', b'n']).await.unwrap();
+        });
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        serve_one(proxy, hub.clone());
+        let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+        let req = format!(
+            "GET http://{origin_addr}/chat HTTP/1.1\r\nHost: {origin_addr}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Extensions: permessage-deflate\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        );
+        client.write_all(req.as_bytes()).await.unwrap();
+        let header = read_h1_message(&mut client).await;
+        let header_text = String::from_utf8_lossy(&header);
+        assert!(header_text.contains("101"), "{header_text}");
+        assert!(
+            !header_text.to_ascii_lowercase().contains("sec-websocket-extensions"),
+            "{header_text}"
+        );
+        let mut frame = [0u8; 7];
+        timeout(Duration::from_secs(5), client.read_exact(&mut frame))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&frame, &[0x81, 0x05, b'p', b'l', b'a', b'i', b'n']);
+        let origin_text = seen.lock().unwrap().clone();
+        assert!(
+            !origin_text.to_ascii_lowercase().contains("sec-websocket-extensions"),
+            "{origin_text}"
+        );
+        assert!(origin_text.to_ascii_lowercase().contains("upgrade: websocket"), "{origin_text}");
+        let flow = hub.with_session(|session| session.get(1).cloned()).expect("flow");
+        assert_eq!(flow.messages.len(), 1);
+        assert_eq!(flow.messages[0].text, "plain");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn replay_override_recalculates_content_length_and_skips_rules() {
+        let dir = std::env::temp_dir().join(format!("zniff-replay-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+        let file = dir.join("mapped.txt");
+        std::fs::write(&file, b"from-rule").unwrap();
+        let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        hub.set_rules(&format!("map-local 127.0.0.1/new {}", file.display()));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_task = seen.clone();
+        tokio::spawn(async move {
+            let (mut sock, _) = origin.accept().await.unwrap();
+            let req = read_h1_message(&mut sock).await;
+            *seen_task.lock().unwrap() = req;
+            sock.write_all(b"HTTP/1.1 201 Created\r\nContent-Length: 4\r\nConnection: close\r\n\r\nokay")
+                .await
+                .unwrap();
+        });
+        let id = hub.with_session(|session| {
+            session.open(FlowDraft {
+                protocol: Protocol::Http11,
+                method: "GET".into(),
+                host: "127.0.0.1".into(),
+                path: "/old".into(),
+                url: format!("http://{origin_addr}/old"),
+                request_headers: vec![
+                    ("Host".into(), origin_addr.to_string()),
+                    ("Content-Length".into(), "1".into()),
+                    ("X-Old".into(), "keep".into()),
+                ],
+            })
+        });
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        hub.replay_later(
+            id,
+            ReplayOverride {
+                method: Some("POST".into()),
+                url: Some(format!("http://{origin_addr}/new?x=1")),
+                headers: Some(vec![
+                    ("Content-Length".into(), "1".into()),
+                    ("X-Edit".into(), "yes".into()),
+                    ("Host".into(), "wrong.test".into()),
+                ]),
+                body: Some(b"abcdef".to_vec()),
+            },
+            move |result| {
+                let _ = tx.send(result);
+            },
+        );
+        let new_id = timeout(Duration::from_secs(5), rx)
+            .await
+            .expect("重放超时")
+            .expect("重放任务中断")
+            .expect("重放失败");
+        let text = String::from_utf8(seen.lock().unwrap().clone()).unwrap();
+        assert!(text.starts_with("POST /new?x=1 HTTP/1.1"), "{text}");
+        assert!(text.contains("Content-Length: 6\r\n"), "{text}");
+        assert!(!text.contains("Content-Length: 1"), "{text}");
+        assert!(text.contains("X-Edit: yes"), "{text}");
+        assert!(!text.contains("X-Old"), "{text}");
+        assert!(!text.to_ascii_lowercase().contains("host: wrong.test"), "{text}");
+        assert!(text.ends_with("abcdef"), "{text}");
+        let flow = hub.with_session(|session| session.get(new_id).cloned()).unwrap();
+        assert_eq!(flow.method, "POST");
+        assert!(flow.url.contains("/new?x=1"), "{}", flow.url);
+        assert_eq!(flow.status, Some(201));
+        assert_eq!(flow.request_body, b"abcdef");
+        assert_eq!(flow.response_body, b"okay");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn h2_sender_cache_reuses_the_origin_connection() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let dir = std::env::temp_dir().join(format!("zniff-h2-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let (origin_ca, origin_leaf, leaf_key) = test_origin_cert();
+        let mut hub = Hub::new(ca.clone()).unwrap();
+        hub.add_trust_anchor(origin_ca.der().clone());
+        let hub = Arc::new(hub);
+        let server = origin_tls_config(&origin_ca, &origin_leaf, &leaf_key, vec![b"h2".to_vec()]);
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server));
+        let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        let accepts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let accepts_task = accepts.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((sock, _)) = origin.accept().await else {
+                    break;
+                };
+                accepts_task.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    let Ok(tls) = acceptor.accept(sock).await else {
+                        return;
+                    };
+                    let service = hyper::service::service_fn(|req: Request<Incoming>| async move {
+                        let body = format!("h2-{}", req.uri().path());
+                        Ok::<_, std::convert::Infallible>(Response::new(
+                            http_body_util::Full::new(Bytes::from(body)),
+                        ))
+                    });
+                    let _ = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+                        .serve_connection(TokioIo::new(tls), service)
+                        .await;
+                });
+            }
+        });
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        serve_proxy(proxy, hub.clone());
+        let first = h2_get(&ca, proxy_addr, origin_addr, "/a").await;
+        assert_eq!(first.0, StatusCode::OK);
+        assert_eq!(&first.1[..], b"h2-/a");
+        let second = h2_get(&ca, proxy_addr, origin_addr, "/b").await;
+        assert_eq!(second.0, StatusCode::OK);
+        assert_eq!(&second.1[..], b"h2-/b");
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(accepts.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn https_map_local_answers_from_the_file() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let dir = std::env::temp_dir().join(format!("zniff-https-map-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let (origin_ca, origin_leaf, leaf_key) = test_origin_cert();
+        let mut hub = Hub::new(ca.clone()).unwrap();
+        hub.add_trust_anchor(origin_ca.der().clone());
+        let file = dir.join("body.txt");
+        std::fs::write(&file, b"from-file").unwrap();
+        hub.set_rules(&format!("map-local 127.0.0.1/hi {}", file.display()));
+        let hub = Arc::new(hub);
+        let server = origin_tls_config(
+            &origin_ca,
+            &origin_leaf,
+            &leaf_key,
+            vec![b"http/1.1".to_vec()],
+        );
+        let (origin_addr, seen) = spawn_tls_sink(server);
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        serve_one(proxy, hub.clone());
+        let mut tls = connect_mitm(proxy_addr, origin_addr, &ca, vec![b"http/1.1".to_vec()]).await;
+        tls.write_all(b"GET /hi HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let resp = read_h1_message(&mut tls).await;
+        let text = String::from_utf8_lossy(&resp);
+        assert!(text.contains("200"), "{text}");
+        assert!(text.contains("from-file"), "{text}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(seen.lock().unwrap().is_empty(), "map local 仍把请求送到了源站");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn https_map_remote_fetches_the_other_origin() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let dir = std::env::temp_dir().join(format!("zniff-https-remote-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let (origin_ca, origin_leaf, leaf_key) = test_origin_cert();
+        let mut hub = Hub::new(ca.clone()).unwrap();
+        hub.add_trust_anchor(origin_ca.der().clone());
+        let remote = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let remote_addr = remote.local_addr().unwrap();
+        hub.set_rules(&format!(
+            "map-remote 127.0.0.1/hi http://{remote_addr}/landed"
+        ));
+        let hub = Arc::new(hub);
+        let seen = Arc::new(Mutex::new(String::new()));
+        let seen_task = seen.clone();
+        tokio::spawn(async move {
+            let (mut sock, _) = remote.accept().await.unwrap();
+            let req = read_h1_message(&mut sock).await;
+            *seen_task.lock().unwrap() = String::from_utf8_lossy(&req).into_owned();
+            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\nConnection: close\r\n\r\nremote-ok")
+                .await
+                .unwrap();
+        });
+        let server = origin_tls_config(
+            &origin_ca,
+            &origin_leaf,
+            &leaf_key,
+            vec![b"http/1.1".to_vec()],
+        );
+        let (origin_addr, _) = spawn_tls_sink(server);
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        serve_one(proxy, hub.clone());
+        let mut tls = connect_mitm(proxy_addr, origin_addr, &ca, vec![b"http/1.1".to_vec()]).await;
+        tls.write_all(b"GET /hi HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let resp = read_h1_message(&mut tls).await;
+        let text = String::from_utf8_lossy(&resp);
+        assert!(text.contains("remote-ok"), "{text}");
+        let remote_text = seen.lock().unwrap().clone();
+        assert!(remote_text.contains("/landed"), "{remote_text}");
+        let flow = hub.with_session(|session| session.get(1).cloned()).unwrap();
+        assert!(flow.url.contains("/landed"), "{}", flow.url);
+        assert_eq!(flow.response_body, b"remote-ok");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn https_break_continue_rewrites_the_request() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let dir = std::env::temp_dir().join(format!("zniff-https-break-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let (origin_ca, origin_leaf, leaf_key) = test_origin_cert();
+        let mut hub = Hub::new(ca.clone()).unwrap();
+        hub.add_trust_anchor(origin_ca.der().clone());
+        hub.set_rules("break 127.0.0.1/hold");
+        let hub = Arc::new(hub);
+        let server = origin_tls_config(
+            &origin_ca,
+            &origin_leaf,
+            &leaf_key,
+            vec![b"http/1.1".to_vec()],
+        );
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server));
+        let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        let seen = Arc::new(Mutex::new(String::new()));
+        let seen_task = seen.clone();
+        tokio::spawn(async move {
+            let (sock, _) = origin.accept().await.unwrap();
+            let mut tls = acceptor.accept(sock).await.unwrap();
+            let req = read_h1_message(&mut tls).await;
+            *seen_task.lock().unwrap() = String::from_utf8_lossy(&req).into_owned();
+            tls.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\nConnection: close\r\n\r\ncontinued")
+                .await
+                .unwrap();
+        });
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        serve_one(proxy, hub.clone());
+        let hub_wait = hub.clone();
+        let waiter = tokio::spawn(async move {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                if hub_wait.paused_id() == Some(1) {
+                    assert!(hub_wait.resolve_break(BreakDecision {
+                        drop: false,
+                        headers: Some(vec![
+                            ("Host".into(), "127.0.0.1".into()),
+                            ("X-Edit".into(), "yes".into()),
+                            ("Content-Length".into(), "99".into()),
+                        ]),
+                        body: Some(b"abcdef".to_vec()),
+                    }));
+                    return;
+                }
+                if std::time::Instant::now() > deadline {
+                    panic!("断点没有暂停");
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        let mut tls = connect_mitm(proxy_addr, origin_addr, &ca, vec![b"http/1.1".to_vec()]).await;
+        tls.write_all(b"POST /hold HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 8\r\nConnection: close\r\n\r\noriginal")
+            .await
+            .unwrap();
+        let resp = read_h1_message(&mut tls).await;
+        waiter.await.unwrap();
+        let text = String::from_utf8_lossy(&resp);
+        assert!(text.contains("continued"), "{text}");
+        let origin_text = seen.lock().unwrap().clone();
+        assert!(origin_text.contains("X-Edit: yes"), "{origin_text}");
+        assert!(origin_text.contains("Content-Length: 6"), "{origin_text}");
+        assert!(origin_text.ends_with("abcdef"), "{origin_text}");
+        assert!(!origin_text.contains("original"), "{origin_text}");
+        let flow = hub.with_session(|session| session.get(1).cloned()).unwrap();
+        assert_eq!(flow.request_body, b"abcdef");
+        assert_eq!(flow.response_body, b"continued");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn https_h2_break_drop_does_not_reach_the_origin() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let dir = std::env::temp_dir().join(format!("zniff-h2-break-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let (origin_ca, origin_leaf, leaf_key) = test_origin_cert();
+        let mut hub = Hub::new(ca.clone()).unwrap();
+        hub.add_trust_anchor(origin_ca.der().clone());
+        hub.set_rules("break 127.0.0.1/hold");
+        let hub = Arc::new(hub);
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hits_task = hits.clone();
+        let server = origin_tls_config(&origin_ca, &origin_leaf, &leaf_key, vec![b"h2".to_vec()]);
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server));
+        let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (sock, _) = origin.accept().await.unwrap();
+            let Ok(tls) = acceptor.accept(sock).await else {
+                return;
+            };
+            let hits_task = hits_task.clone();
+            let service = hyper::service::service_fn(move |_req: Request<Incoming>| {
+                hits_task.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async move {
+                    Ok::<_, std::convert::Infallible>(Response::new(http_body_util::Full::new(
+                        Bytes::from_static(b"origin"),
+                    )))
+                }
+            });
+            let _ = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+                .serve_connection(TokioIo::new(tls), service)
+                .await;
+        });
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        serve_one(proxy, hub.clone());
+        let hub_wait = hub.clone();
+        let waiter = tokio::spawn(async move {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                if hub_wait.paused_id().is_some() {
+                    assert!(hub_wait.resolve_break(BreakDecision {
+                        drop: true,
+                        headers: None,
+                        body: None,
+                    }));
+                    return;
+                }
+                if std::time::Instant::now() > deadline {
+                    panic!("断点没有暂停");
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        let (status, body) = h2_get(&ca, proxy_addr, origin_addr, "/hold").await;
+        waiter.await.unwrap();
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(body.is_empty());
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let flow = hub.with_session(|session| session.flows().into_iter().next()).unwrap();
+        assert_eq!(flow.error.as_deref(), Some("断点丢弃"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn https_h2_map_local_answers_from_the_file() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let dir = std::env::temp_dir().join(format!("zniff-h2-map-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let (origin_ca, origin_leaf, leaf_key) = test_origin_cert();
+        let mut hub = Hub::new(ca.clone()).unwrap();
+        hub.add_trust_anchor(origin_ca.der().clone());
+        let file = dir.join("body.txt");
+        std::fs::write(&file, b"from-h2-file").unwrap();
+        hub.set_rules(&format!("map-local 127.0.0.1/hi {}", file.display()));
+        let hub = Arc::new(hub);
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hits_task = hits.clone();
+        let server = origin_tls_config(&origin_ca, &origin_leaf, &leaf_key, vec![b"h2".to_vec()]);
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server));
+        let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (sock, _) = origin.accept().await.unwrap();
+            let Ok(tls) = acceptor.accept(sock).await else {
+                return;
+            };
+            let hits_task = hits_task.clone();
+            let service = hyper::service::service_fn(move |_req: Request<Incoming>| {
+                hits_task.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async move {
+                    Ok::<_, std::convert::Infallible>(Response::new(http_body_util::Full::new(
+                        Bytes::from_static(b"origin"),
+                    )))
+                }
+            });
+            let _ = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+                .serve_connection(TokioIo::new(tls), service)
+                .await;
+        });
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        serve_one(proxy, hub.clone());
+        let (status, body) = h2_get(&ca, proxy_addr, origin_addr, "/hi").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(&body[..], b"from-h2-file");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn serve_one(proxy: TcpListener, hub: Arc<Hub>) {
+        tokio::spawn(async move {
+            let (socket, _) = proxy.accept().await.unwrap();
+            let _ = handle_conn(socket, hub).await;
+        });
+    }
+
+    fn serve_proxy(proxy: TcpListener, hub: Arc<Hub>) {
+        tokio::spawn(async move {
+            loop {
+                let Ok((socket, _)) = proxy.accept().await else {
+                    break;
+                };
+                let hub = hub.clone();
+                tokio::spawn(async move {
+                    let _ = handle_conn(socket, hub).await;
+                });
+            }
+        });
+    }
+
+    fn origin_tls_config(
+        origin_ca: &rcgen::Certificate,
+        origin_leaf: &rcgen::Certificate,
+        leaf_key: &rcgen::KeyPair,
+        alpn: Vec<Vec<u8>>,
+    ) -> rustls::ServerConfig {
+        let mut server = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![origin_leaf.der().clone(), origin_ca.der().clone()],
+                rustls::pki_types::PrivateKeyDer::Pkcs8(
+                    rustls::pki_types::PrivatePkcs8KeyDer::from(leaf_key.serialize_der()),
+                ),
+            )
+            .unwrap();
+        server.alpn_protocols = alpn;
+        server
+    }
+
+    fn spawn_tls_sink(server: rustls::ServerConfig) -> (std::net::SocketAddr, Arc<Mutex<Vec<u8>>>) {
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_task = seen.clone();
+        let origin = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        origin.set_nonblocking(true).unwrap();
+        let addr = origin.local_addr().unwrap();
+        let origin = TcpListener::from_std(origin).unwrap();
+        tokio::spawn(async move {
+            let Ok((sock, _)) = origin.accept().await else {
+                return;
+            };
+            let Ok(mut tls) = acceptor.accept(sock).await else {
+                return;
+            };
+            let mut buf = vec![0u8; 1024];
+            if let Ok(Ok(n)) = timeout(Duration::from_millis(250), tls.read(&mut buf)).await {
+                seen_task.lock().unwrap().extend_from_slice(&buf[..n]);
+            }
+        });
+        (addr, seen)
+    }
+
+    async fn connect_mitm(
+        proxy_addr: std::net::SocketAddr,
+        origin_addr: std::net::SocketAddr,
+        ca: &Ca,
+        alpn: Vec<Vec<u8>>,
+    ) -> tokio_rustls::client::TlsStream<TcpStream> {
+        let mut tcp = TcpStream::connect(proxy_addr).await.unwrap();
+        let connect = format!("CONNECT {origin_addr} HTTP/1.1\r\nHost: {origin_addr}\r\n\r\n");
+        tcp.write_all(connect.as_bytes()).await.unwrap();
+        read_http_head(&mut tcp).await;
+        let mut roots = RootCertStore::empty();
+        roots.add(ca.cert_der()).unwrap();
+        let mut client_config = ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        client_config.alpn_protocols = alpn;
+        timeout(
+            Duration::from_secs(5),
+            TlsConnector::from(Arc::new(client_config))
+                .connect(ServerName::IpAddress(origin_addr.ip().into()), tcp),
+        )
+        .await
+        .expect("客户端 TLS 超时")
+        .expect("客户端 TLS")
+    }
+
+    async fn h2_get(
+        ca: &Ca,
+        proxy_addr: std::net::SocketAddr,
+        origin_addr: std::net::SocketAddr,
+        path: &str,
+    ) -> (StatusCode, Bytes) {
+        let tls = connect_mitm(proxy_addr, origin_addr, ca, vec![b"h2".to_vec()]).await;
+        assert_eq!(tls.get_ref().1.alpn_protocol(), Some(b"h2".as_slice()));
+        let (mut sender, connection) =
+            hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+                .handshake::<_, http_body_util::Full<Bytes>>(TokioIo::new(tls))
+                .await
+                .expect("客户端 HTTP/2");
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        let req = Request::builder()
+            .uri(path)
+            .body(http_body_util::Full::new(Bytes::new()))
+            .unwrap();
+        let response = timeout(Duration::from_secs(5), sender.send_request(req))
+            .await
+            .expect("HTTP/2 响应超时")
+            .expect("HTTP/2 响应");
+        let status = response.status();
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        (status, body)
+    }
+
+    async fn read_h1_message(reader: &mut (impl AsyncRead + Unpin)) -> Vec<u8> {
+        let mut buf = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            let n = timeout(Duration::from_secs(5), reader.read(&mut byte))
+                .await
+                .expect("读超时")
+                .expect("读失败");
+            assert_ne!(n, 0, "连接提前关闭");
+            buf.push(byte[0]);
+            if buf.ends_with(b"\r\n\r\n") {
+                break;
+            }
+            assert!(buf.len() < 16 * 1024, "头过长");
+        }
+        let head = String::from_utf8_lossy(&buf);
+        let len = head
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                if name.eq_ignore_ascii_case("content-length") {
+                    value.trim().parse::<usize>().ok()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
+        let start = buf.len();
+        buf.resize(start + len, 0);
+        if len > 0 {
+            timeout(Duration::from_secs(5), reader.read_exact(&mut buf[start..]))
+                .await
+                .expect("读 body 超时")
+                .unwrap();
+        }
+        buf
     }
 }

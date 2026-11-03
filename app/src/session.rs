@@ -4,6 +4,7 @@
 //! direction. The 256 MB cap drops the oldest whole flow.
 
 use std::collections::{HashMap, VecDeque};
+use std::time::{Duration, SystemTime};
 
 pub const BODY_CAP: usize = 1024 * 1024;
 pub const SESSION_CAP: usize = 256 * 1024 * 1024;
@@ -52,7 +53,27 @@ pub struct Flow {
     pub response_truncated: bool,
     pub request_encoding_error: Option<String>,
     pub response_encoding_error: Option<String>,
+    /// When the request headers were recorded.
+    pub started: SystemTime,
+    /// When the response headers arrived. `None` until then.
+    pub response_at: Option<SystemTime>,
+    /// When the response body finished, or the flow failed.
+    pub finished_at: Option<SystemTime>,
+    /// On-the-wire request body bytes, before decompression.
+    pub request_bytes: u64,
+    /// On-the-wire response body bytes, before decompression.
+    pub response_bytes: u64,
+    /// WebSocket frames. They do not count toward the body or session caps.
+    pub messages: Vec<Message>,
+    pub messages_truncated: bool,
     accounted: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Message {
+    pub direction: Direction,
+    pub kind: String,
+    pub text: String,
 }
 
 #[derive(Debug, Clone)]
@@ -96,6 +117,13 @@ impl Session {
             response_truncated: false,
             request_encoding_error: None,
             response_encoding_error: None,
+            started: SystemTime::now(),
+            response_at: None,
+            finished_at: None,
+            request_bytes: 0,
+            response_bytes: 0,
+            messages: Vec::new(),
+            messages_truncated: false,
             accounted: headers_size,
         };
         self.bytes += headers_size;
@@ -117,6 +145,9 @@ impl Session {
             return;
         };
         flow.status = Some(status);
+        if flow.response_at.is_none() {
+            flow.response_at = Some(SystemTime::now());
+        }
         flow.response_headers = headers;
         if let Some(protocol) = protocol {
             flow.protocol = protocol;
@@ -129,7 +160,136 @@ impl Session {
     pub fn set_error(&mut self, id: u64, error: impl Into<String>) {
         if let Some(flow) = self.flows.get_mut(&id) {
             flow.error = Some(error.into());
+            if flow.finished_at.is_none() {
+                flow.finished_at = Some(SystemTime::now());
+            }
         }
+    }
+
+    pub fn add_transfer(&mut self, id: u64, direction: Direction, bytes: u64) {
+        let Some(flow) = self.flows.get_mut(&id) else {
+            return;
+        };
+        match direction {
+            Direction::Request => flow.request_bytes = flow.request_bytes.saturating_add(bytes),
+            Direction::Response => flow.response_bytes = flow.response_bytes.saturating_add(bytes),
+        }
+    }
+
+    pub fn add_message(&mut self, id: u64, direction: Direction, kind: impl Into<String>, text: impl Into<String>) {
+        const COUNT_CAP: usize = 200;
+        const BYTE_CAP: usize = 256 * 1024;
+        let Some(flow) = self.flows.get_mut(&id) else {
+            return;
+        };
+        if flow.messages_truncated || flow.messages.len() >= COUNT_CAP {
+            flow.messages_truncated = true;
+            return;
+        }
+        let used: usize = flow.messages.iter().map(|message| message.text.len()).sum();
+        if used >= BYTE_CAP {
+            flow.messages_truncated = true;
+            return;
+        }
+        let mut text = text.into();
+        let room = BYTE_CAP - used;
+        if text.len() > room {
+            let end = text.floor_char_boundary(room);
+            text.truncate(end);
+            flow.messages_truncated = true;
+        }
+        flow.messages.push(Message {
+            direction,
+            kind: kind.into(),
+            text,
+        });
+    }
+
+    pub fn retarget(&mut self, id: u64, host: String, path: String, url: String) {
+        if let Some(flow) = self.flows.get_mut(&id) {
+            flow.host = host;
+            flow.path = path;
+            flow.url = url;
+        }
+    }
+
+    pub fn replace_request(
+        &mut self,
+        id: u64,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    ) {
+        let Some(flow) = self.flows.get_mut(&id) else {
+            return;
+        };
+        let old = headers_size(&flow.request_headers) + flow.request_body.len();
+        let new_size = headers_size(&headers) + body.len();
+        flow.request_headers = headers;
+        flow.request_body = body;
+        flow.accounted = flow.accounted.saturating_sub(old) + new_size;
+        self.bytes = self.bytes.saturating_sub(old) + new_size;
+    }
+
+    pub fn mark_finished(&mut self, id: u64) {
+        if let Some(flow) = self.flows.get_mut(&id) {
+            if flow.finished_at.is_none() {
+                flow.finished_at = Some(SystemTime::now());
+            }
+        }
+    }
+
+    pub fn set_started(&mut self, id: u64, started: SystemTime) {
+        if let Some(flow) = self.flows.get_mut(&id) {
+            flow.started = started;
+        }
+    }
+
+    /// Restores timing and wire sizes after an import. `None` byte counts fall
+    /// back to the stored body length. Timestamps overwrite the ones `set_response`
+    /// and `mark_finished` just wrote.
+    pub fn restore_imported(
+        &mut self,
+        id: u64,
+        response_at: Option<SystemTime>,
+        finished_at: Option<SystemTime>,
+        request_bytes: Option<u64>,
+        response_bytes: Option<u64>,
+    ) {
+        let Some(flow) = self.flows.get_mut(&id) else {
+            return;
+        };
+        if let Some(at) = response_at {
+            flow.response_at = Some(at);
+        }
+        if let Some(at) = finished_at {
+            flow.finished_at = Some(at);
+        }
+        flow.request_bytes = request_bytes.unwrap_or(flow.request_body.len() as u64);
+        flow.response_bytes = response_bytes.unwrap_or(flow.response_body.len() as u64);
+    }
+
+    pub fn flows(&self) -> Vec<Flow> {
+        self.order
+            .iter()
+            .filter_map(|id| self.flows.get(id).cloned())
+            .collect()
+    }
+
+    pub fn clear(&mut self) {
+        self.order.clear();
+        self.flows.clear();
+        self.bytes = 0;
+        self.dropped = 0;
+    }
+
+    pub fn ttfb(&self, id: u64) -> Option<Duration> {
+        let flow = self.flows.get(&id)?;
+        flow.response_at?.duration_since(flow.started).ok()
+    }
+
+    pub fn duration(&self, id: u64) -> Option<Duration> {
+        let flow = self.flows.get(&id)?;
+        flow.finished_at?.duration_since(flow.started).ok()
     }
 
     pub fn set_protocol(&mut self, id: u64, protocol: Protocol) {
@@ -199,20 +359,12 @@ impl Session {
         self.dropped
     }
 
-    pub fn ids_matching(&self, host_filter: &str) -> Vec<u64> {
-        let needle = host_filter.trim().to_ascii_lowercase();
+    pub fn ids_matching(&self, filter: &str) -> Vec<u64> {
+        let query = FlowQuery::parse(filter);
         self.order
             .iter()
             .copied()
-            .filter(|id| {
-                if needle.is_empty() {
-                    return true;
-                }
-                self.flows
-                    .get(id)
-                    .map(|flow| flow.host.to_ascii_lowercase().contains(&needle))
-                    .unwrap_or(false)
-            })
+            .filter(|id| self.flows.get(id).is_some_and(|flow| query.matches(flow)))
             .collect()
     }
 
@@ -235,6 +387,152 @@ impl Session {
 
 fn headers_size(headers: &[(String, String)]) -> usize {
     headers.iter().map(|(k, v)| k.len() + v.len()).sum()
+}
+
+fn body_contains(flow: &Flow, keyword: &str) -> bool {
+    let request = String::from_utf8_lossy(&flow.request_body).to_ascii_lowercase();
+    let response = String::from_utf8_lossy(&flow.response_body).to_ascii_lowercase();
+    request.contains(keyword) || response.contains(keyword)
+}
+
+fn header_contains(flow: &Flow, keyword: &str) -> bool {
+    flow.request_headers
+        .iter()
+        .chain(flow.response_headers.iter())
+        .any(|(name, value)| {
+            name.to_ascii_lowercase().contains(keyword) || value.to_ascii_lowercase().contains(keyword)
+        })
+}
+
+const METHODS: &[&str] = &[
+    "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "CONNECT",
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StatusMatch {
+    Exact(u16),
+    Class(u16),
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FlowQuery {
+    texts: Vec<String>,
+    method: Option<String>,
+    status: Option<StatusMatch>,
+    content_type: Option<String>,
+    bodies: Vec<String>,
+    headers: Vec<String>,
+}
+
+impl FlowQuery {
+    fn parse(filter: &str) -> Self {
+        let mut query = Self {
+            texts: Vec::new(),
+            method: None,
+            status: None,
+            content_type: None,
+            bodies: Vec::new(),
+            headers: Vec::new(),
+        };
+        for token in filter.split_whitespace() {
+            let lower = token.to_ascii_lowercase();
+            if let Some(keyword) = lower.strip_prefix("body:") {
+                if !keyword.is_empty() {
+                    query.bodies.push(keyword.to_string());
+                }
+                continue;
+            }
+            if let Some(keyword) = lower.strip_prefix("header:") {
+                if !keyword.is_empty() {
+                    query.headers.push(keyword.to_string());
+                }
+                continue;
+            }
+            if let Some(kind) = lower.strip_prefix("type:").or_else(|| lower.strip_prefix("ct:")) {
+                if !kind.is_empty() {
+                    query.content_type = Some(kind.to_string());
+                }
+                continue;
+            }
+            if METHODS.iter().any(|method| method.eq_ignore_ascii_case(token)) {
+                query.method = Some(token.to_ascii_uppercase());
+                continue;
+            }
+            if lower == "fail" || lower == "失败" {
+                query.status = Some(StatusMatch::Failed);
+                continue;
+            }
+            if let Some(class) = lower.strip_suffix("xx") {
+                if let Ok(digit) = class.parse::<u16>() {
+                    if (1..6).contains(&digit) && class.len() == 1 {
+                        query.status = Some(StatusMatch::Class(digit));
+                        continue;
+                    }
+                }
+            }
+            if token.len() == 3 && token.bytes().all(|byte| byte.is_ascii_digit()) {
+                if let Ok(code) = token.parse::<u16>() {
+                    query.status = Some(StatusMatch::Exact(code));
+                    continue;
+                }
+            }
+            query.texts.push(lower);
+        }
+        query
+    }
+
+    fn matches(&self, flow: &Flow) -> bool {
+        if let Some(method) = &self.method {
+            if !flow.method.eq_ignore_ascii_case(method) {
+                return false;
+            }
+        }
+        if let Some(status) = &self.status {
+            match status {
+                StatusMatch::Failed => {
+                    if !(flow.error.is_some() && flow.status.is_none()) {
+                        return false;
+                    }
+                }
+                StatusMatch::Exact(code) => {
+                    if flow.status != Some(*code) {
+                        return false;
+                    }
+                }
+                StatusMatch::Class(digit) => {
+                    let Some(code) = flow.status else {
+                        return false;
+                    };
+                    if code / 100 != *digit {
+                        return false;
+                    }
+                }
+            }
+        }
+        if let Some(kind) = &self.content_type {
+            let header = flow
+                .response_headers
+                .iter()
+                .chain(flow.request_headers.iter())
+                .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+                .map(|(_, value)| value.to_ascii_lowercase());
+            if !header.is_some_and(|value| value.contains(kind)) {
+                return false;
+            }
+        }
+        if !self.bodies.iter().all(|keyword| body_contains(flow, keyword)) {
+            return false;
+        }
+        if !self.headers.iter().all(|keyword| header_contains(flow, keyword)) {
+            return false;
+        }
+        let host = flow.host.to_ascii_lowercase();
+        let path = flow.path.to_ascii_lowercase();
+        self.texts
+            .iter()
+            .all(|text| host.contains(text) || path.contains(text))
+    }
 }
 
 #[cfg(test)]
@@ -288,5 +586,91 @@ mod tests {
         let _ = session.open(draft("other.test"));
         assert_eq!(session.ids_matching("EXAMPLE"), vec![a]);
         assert_eq!(session.ids_matching("").len(), 2);
+    }
+
+    #[test]
+    fn clear_drops_flows_and_the_dropped_count() {
+        let mut session = Session::default();
+        let id = session.open(draft("a.test"));
+        session.append_body(id, Direction::Response, b"hi");
+        session.clear();
+        assert!(session.get(id).is_none());
+        assert_eq!(session.memory_bytes(), 0);
+        assert_eq!(session.dropped(), 0);
+        assert!(session.ids_matching("").is_empty());
+    }
+
+    #[test]
+    fn timing_and_transfer_bytes() {
+        let mut session = Session::default();
+        let id = session.open(draft("a.test"));
+        assert!(session.ttfb(id).is_none());
+        session.add_transfer(id, Direction::Request, 12);
+        session.set_response(id, 200, Vec::new(), None);
+        session.add_transfer(id, Direction::Response, 40);
+        session.mark_finished(id);
+        assert!(session.ttfb(id).is_some());
+        assert!(session.duration(id).is_some());
+        let flow = session.get(id).unwrap();
+        assert_eq!(flow.request_bytes, 12);
+        assert_eq!(flow.response_bytes, 40);
+        session.mark_finished(id);
+        let again = session.duration(id);
+        assert_eq!(again, session.duration(id));
+    }
+
+    #[test]
+    fn filter_matches_method_status_path_and_type() {
+        let mut session = Session::default();
+        let mut get = draft("api.example.com");
+        get.path = "/v1/users?q=1".into();
+        let get_id = session.open(get);
+        session.set_response(
+            get_id,
+            200,
+            vec![("Content-Type".into(), "application/json".into())],
+            None,
+        );
+        let mut post = draft("other.test");
+        post.method = "POST".into();
+        post.path = "/v1/login".into();
+        let post_id = session.open(post);
+        session.set_response(post_id, 500, Vec::new(), None);
+        let failed = session.open(draft("pin.test"));
+        session.set_error(failed, "证书被拒绝");
+
+        assert_eq!(session.ids_matching("GET"), vec![get_id, failed]);
+        assert_eq!(session.ids_matching("POST /login"), vec![post_id]);
+        assert_eq!(session.ids_matching("5xx"), vec![post_id]);
+        assert_eq!(session.ids_matching("type:json"), vec![get_id]);
+        assert_eq!(session.ids_matching("失败"), vec![failed]);
+        assert_eq!(session.ids_matching("/v1"), vec![get_id, post_id]);
+    }
+
+    #[test]
+    fn filter_matches_body_and_header_keywords() {
+        let mut session = Session::default();
+        let mut first = draft("api.example.com");
+        first.request_headers.push(("X-Trace".into(), "alpha-1".into()));
+        let id = session.open(first);
+        session.append_body(id, Direction::Request, b"{\"code\":1001}");
+        session.set_response(
+            id,
+            200,
+            vec![("Content-Type".into(), "application/json".into())],
+            None,
+        );
+        session.append_body(id, Direction::Response, b"{\"msg\":\"nope\"}");
+        let other = session.open(draft("other.test"));
+        session.append_body(other, Direction::Response, b"hello");
+
+        assert_eq!(session.ids_matching("body:1001"), vec![id]);
+        assert_eq!(session.ids_matching("BODY:Nope"), vec![id]);
+        assert_eq!(session.ids_matching("header:x-trace"), vec![id]);
+        assert_eq!(session.ids_matching("header:alpha"), vec![id]);
+        assert_eq!(session.ids_matching("header:json"), vec![id]);
+        assert!(session.ids_matching("body:1001 header:missing").is_empty());
+        assert_eq!(session.ids_matching("body:hello"), vec![other]);
+        assert_eq!(session.ids_matching("body:1001 example"), vec![id]);
     }
 }

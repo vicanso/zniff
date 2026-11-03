@@ -1,32 +1,67 @@
 //! zniff: a desktop HTTP(S) capture app. The window is an nsh Rust view.
 //! The proxy runs on its own tokio runtime in this process.
 
+mod bypass;
 mod ca;
 mod client_hello;
+mod config;
 mod decompress;
+mod har;
+mod i18n;
+mod icon;
+mod present;
 mod proxy;
+mod rules;
 mod session;
 mod sysproxy;
+mod ws;
 
+use std::net::{Ipv4Addr, SocketAddr};
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use nsh_base::theme;
+use nsh_base::{menu, menu_item, popover, theme};
+use nsh_core::ui::ambient::set_clipboard;
 use nsh_core::ui::prelude::*;
 use nsh_core::EllipsizeMode;
 
 use crate::ca::Ca;
-use crate::proxy::{Capture, Hub};
+use crate::i18n::{
+    direction_name, lang_from_tag, localize_error, parse_pref, t, ws_kind, Lang, PrefName, Side,
+    StatusMsg,
+};
+use crate::icon::{glyph, glyph_px, Glyph};
+use crate::proxy::{BreakDecision, Capture, Hub, ReplayOverride};
+use crate::session::Direction;
 
 pub use sysproxy::restore_if_dirty;
 
 struct Controls {
     hub: Arc<Hub>,
     capture: Mutex<Option<Capture>>,
-    status: Mutex<String>,
+    status: Mutex<StatusMsg>,
     running: Mutex<bool>,
     listen: Mutex<String>,
-    ca_label: Mutex<String>,
+    listen_port: Mutex<u16>,
+    ca_installed: Mutex<bool>,
+    /// User preference. Off until they turn on 「系统代理」.
+    use_system_proxy: Mutex<bool>,
+    /// True only after this session's `sysproxy::enable` returned `Applied`.
+    proxy_applied: Mutex<bool>,
+    /// Start, stop, and the proxy switch share this so they cannot interleave.
+    ops: Mutex<()>,
+    /// Next 「开始」binds `0.0.0.0` when this is on.
+    listen_all: Mutex<bool>,
+}
+
+#[derive(Clone, Copy)]
+struct Compose {
+    composing: Signal<bool>,
+    method: Signal<String>,
+    url: Signal<String>,
+    headers: Signal<String>,
+    body: Signal<String>,
 }
 
 /// The app's UI set (`nsh.json` `"rust"`).
@@ -35,9 +70,202 @@ fn native(registry: &mut Registry) {
     registry.register::<App>();
 }
 
-const COL_METHOD: f32 = 68.0;
-const COL_STATUS: f32 = 48.0;
-const COL_PROTOCOL: f32 = 84.0;
+/// Left pane width. The filter's width is this minus the same inset as the column text.
+const LIST_WIDTH: f32 = 560.0;
+/// Header and rows keep a 2pt selection bar plus `px_3` (12pt). The filter uses the same inset.
+const LIST_INSET: f32 = 14.0;
+const LIST_PAD_END: f32 = 12.0;
+const COL_METHOD: f32 = 62.0;
+const COL_STATUS: f32 = 56.0;
+const COL_PROTOCOL: f32 = 68.0;
+const COL_HOST: f32 = 176.0;
+/// Toolbar controls share one box. The cert chip is a status, not a button.
+const CONTROL_H: f32 = 30.0;
+const CONTROL_RADIUS: f32 = 7.0;
+const CONTROL_TEXT: f32 = 12.5;
+
+fn ui_langs() -> Signal<Option<Lang>> {
+    use_context().expect("language signal")
+}
+
+fn ui_lang(langs: Signal<Option<Lang>>) -> Lang {
+    langs
+        .get()
+        .unwrap_or_else(|| lang_from_tag(locale().as_str()))
+}
+
+fn tr(zh: &'static str, en: &'static str) -> impl Fn() -> String + 'static {
+    let langs = ui_langs();
+    move || t(ui_lang(langs), zh, en).to_string()
+}
+
+fn bg_canvas() -> AdaptiveColor {
+    AdaptiveColor::rgb(0xf8fafc, 0x0d1017)
+}
+
+fn bg_chrome() -> AdaptiveColor {
+    AdaptiveColor::rgb(0xffffff, 0x131822)
+}
+
+fn bg_list() -> AdaptiveColor {
+    AdaptiveColor::rgb(0xffffff, 0x10141d)
+}
+
+fn bg_col_header() -> AdaptiveColor {
+    AdaptiveColor::rgb(0xf1f5f9, 0x151b26)
+}
+
+fn bg_row_alt() -> AdaptiveColor {
+    AdaptiveColor::rgb(0xfafbfd, 0x121722)
+}
+
+fn bg_row_hover() -> AdaptiveColor {
+    AdaptiveColor::rgb(0xf1f5f9, 0x1a2232)
+}
+
+fn bg_row_selected() -> AdaptiveColor {
+    AdaptiveColor::rgb(0xeff6ff, 0x172542)
+}
+
+fn bg_card() -> AdaptiveColor {
+    AdaptiveColor::rgb(0xffffff, 0x131822)
+}
+
+fn bg_code() -> AdaptiveColor {
+    AdaptiveColor::rgb(0xf8fafc, 0x0f131b)
+}
+
+fn bg_control() -> AdaptiveColor {
+    AdaptiveColor::rgb(0xf1f5f9, 0x1c2331)
+}
+
+fn bg_control_hover() -> AdaptiveColor {
+    AdaptiveColor::rgb(0xe2e8f0, 0x252e40)
+}
+
+fn border_strong() -> AdaptiveColor {
+    AdaptiveColor::rgb(0xe2e8f0, 0x222938)
+}
+
+fn border_subtle() -> AdaptiveColor {
+    AdaptiveColor::rgb(0xf1f5f9, 0x19202e)
+}
+
+fn border_control() -> AdaptiveColor {
+    AdaptiveColor::rgb(0xcbd5e1, 0x2b3448)
+}
+
+fn fg_primary() -> AdaptiveColor {
+    AdaptiveColor::rgb(0x0f172a, 0xf1f5f9)
+}
+
+fn fg_secondary() -> AdaptiveColor {
+    AdaptiveColor::rgb(0x334155, 0xcbd5e1)
+}
+
+fn fg_muted() -> AdaptiveColor {
+    AdaptiveColor::rgb(0x64748b, 0x7e8ba3)
+}
+
+fn accent_blue() -> AdaptiveColor {
+    AdaptiveColor::rgb(0x2563eb, 0x3b82f6)
+}
+
+fn accent_blue_hover() -> AdaptiveColor {
+    AdaptiveColor::rgb(0x1d4ed8, 0x2563eb)
+}
+
+fn accent_blue_soft() -> AdaptiveColor {
+    AdaptiveColor::rgb(0xdbeafe, 0x172554)
+}
+
+fn accent_blue_border() -> AdaptiveColor {
+    AdaptiveColor::rgb(0x93c5fd, 0x1e40af)
+}
+
+fn accent_blue_text() -> AdaptiveColor {
+    AdaptiveColor::rgb(0x1d4ed8, 0x93c5fd)
+}
+
+fn status_ok_fg() -> AdaptiveColor {
+    AdaptiveColor::rgb(0x059669, 0x34d399)
+}
+
+fn status_ok_bg() -> AdaptiveColor {
+    AdaptiveColor::rgb(0xd1fae5, 0x0a2e26)
+}
+
+fn status_warn_fg() -> AdaptiveColor {
+    AdaptiveColor::rgb(0xd97706, 0xfbbf24)
+}
+
+fn status_warn_bg() -> AdaptiveColor {
+    AdaptiveColor::rgb(0xfef3c7, 0x33240b)
+}
+
+fn status_err_fg() -> AdaptiveColor {
+    AdaptiveColor::rgb(0xe11d48, 0xfb7185)
+}
+
+fn status_err_bg() -> AdaptiveColor {
+    AdaptiveColor::rgb(0xffe4e6, 0x361320)
+}
+
+fn danger_button_bg() -> AdaptiveColor {
+    AdaptiveColor::rgb(0xdc2626, 0xe11d48)
+}
+
+fn danger_button_hover() -> AdaptiveColor {
+    AdaptiveColor::rgb(0xb91c1c, 0xbe123c)
+}
+
+fn method_fg(method: &str) -> AdaptiveColor {
+    match method {
+        "GET" => AdaptiveColor::rgb(0x0284c7, 0x38bdf8),
+        "POST" => AdaptiveColor::rgb(0x059669, 0x34d399),
+        "PUT" | "PATCH" => AdaptiveColor::rgb(0xd97706, 0xfbbf24),
+        "DELETE" => AdaptiveColor::rgb(0xe11d48, 0xfb7185),
+        "CONNECT" => AdaptiveColor::rgb(0x7c3aed, 0xa78bfa),
+        _ => fg_secondary(),
+    }
+}
+
+fn method_bg(method: &str) -> AdaptiveColor {
+    match method {
+        "GET" => AdaptiveColor::rgb(0xe0f2fe, 0x0c2a42),
+        "POST" => AdaptiveColor::rgb(0xd1fae5, 0x0a2e26),
+        "PUT" | "PATCH" => AdaptiveColor::rgb(0xfef3c7, 0x33240b),
+        "DELETE" => AdaptiveColor::rgb(0xffe4e6, 0x361320),
+        "CONNECT" => AdaptiveColor::rgb(0xede9fe, 0x241842),
+        _ => bg_control(),
+    }
+}
+
+fn http_status_fg(status: Option<u16>, failed: bool) -> AdaptiveColor {
+    match status {
+        _ if failed => status_err_fg(),
+        Some(code) if code >= 400 => status_err_fg(),
+        Some(code) if (300..400).contains(&code) => status_warn_fg(),
+        Some(code) if (200..300).contains(&code) => status_ok_fg(),
+        _ => fg_muted(),
+    }
+}
+
+fn http_status_bg(status: Option<u16>, failed: bool) -> AdaptiveColor {
+    match status {
+        _ if failed => status_err_bg(),
+        Some(code) if code >= 400 => status_err_bg(),
+        Some(code) if (300..400).contains(&code) => status_warn_bg(),
+        Some(code) if (200..300).contains(&code) => status_ok_bg(),
+        _ => bg_control(),
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LanAddr {
+    name: String,
+    ip: Ipv4Addr,
+}
 
 #[derive(Clone, PartialEq)]
 struct RowLine {
@@ -78,14 +306,30 @@ struct Shown {
     response_body: Signal<String>,
     request_note: Signal<String>,
     response_note: Signal<String>,
+    metrics: Signal<String>,
+    query: Signal<Vec<HeaderLine>>,
+    preview: Signal<String>,
+    pretty: Signal<bool>,
+    messages: Signal<Vec<HeaderLine>>,
+}
+
+#[derive(Clone, Copy)]
+enum CopyPart {
+    Url,
+    Curl,
+    Request,
+    Response,
 }
 
 /// The root view: a flow list and the selected flow.
 #[component]
 pub fn App() -> impl IntoElement {
-    let status = signal(String::from("未开始"));
+    let langs = signal(load_lang_pref());
+    provide_context(langs);
+    let status = signal(StatusMsg::Idle);
     let running = signal(false);
-    let ca_label = signal(ca_text());
+    let ca_installed = signal(false);
+    let use_system_proxy = signal(false);
     let memory = signal(String::from("0 B"));
     let dropped = signal(0_u64);
     let filter = signal(String::new());
@@ -105,8 +349,36 @@ pub fn App() -> impl IntoElement {
         response_body: signal(String::new()),
         request_note: signal(String::new()),
         response_note: signal(String::new()),
+        metrics: signal(String::new()),
+        query: signal(Vec::new()),
+        preview: signal(String::new()),
+        pretty: signal(false),
+        messages: signal(Vec::new()),
     };
+    let port_text = signal(String::new());
+    let listen_all = signal(false);
+    let paused = signal(None::<u64>);
+    let compose = Compose {
+        composing: signal(false),
+        method: signal(String::new()),
+        url: signal(String::new()),
+        headers: signal(String::new()),
+        body: signal(String::new()),
+    };
+    let bypass_text = signal(saved_config().bypass_hosts);
+    let rules_text = signal(saved_config().rules);
+    let upstream_text = signal(saved_config().upstream_proxy);
+    let import_path = signal(String::new());
+    let lan_url = signal(String::new());
+    let lan_choice = signal(String::new());
+    let lan_addrs = signal(Vec::<LanAddr>::new());
+    let qr_path = signal(String::new());
     let controls = open_controls();
+    status.set(lock_status(&controls));
+    ca_installed.set(lock_bool(&controls.ca_installed));
+    use_system_proxy.set(lock_bool(&controls.use_system_proxy));
+    port_text.set(lock_port(&controls.listen_port).to_string());
+    listen_all.set(lock_bool(&controls.listen_all));
 
     let controls_tick = controls.clone();
     let filter_tick = filter;
@@ -116,90 +388,230 @@ pub fn App() -> impl IntoElement {
     let seen_gen = stored(0_u64);
     let seen_filter = stored(String::new());
     let seen_selected = stored(None::<u64>);
+    let seen_listen = stored(String::new());
+    let seen_lang = stored(ui_lang(langs));
     set_interval(Duration::from_millis(16), move || {
-        status.set(lock_string(&controls_tick.status));
+        status.set(lock_status(&controls_tick));
         running.set(*controls_tick.running.lock().unwrap_or_else(|err| err.into_inner()));
-        listen.set(lock_string(&controls_tick.listen));
-        ca_label.set(lock_string(&controls_tick.ca_label));
+        let listen_now = lock_string(&controls_tick.listen);
+        listen.set(listen_now.clone());
+        ca_installed.set(lock_bool(&controls_tick.ca_installed));
+        use_system_proxy.set(lock_bool(&controls_tick.use_system_proxy));
+        paused.set(controls_tick.hub.paused_id());
+        if listen_now != seen_listen.get() {
+            seen_listen.replace(listen_now.clone());
+            publish_lan(
+                &listen_now,
+                &lan_choice.get_untracked(),
+                lan_addrs,
+                lan_choice,
+                lan_url,
+                qr_path,
+            );
+        }
         let generation = controls_tick.hub.generation();
         let filter_now = filter_tick.get();
         let selected_now = selected_tick.get();
+        let lang_now = ui_lang(langs);
         if generation != seen_gen.get()
             || filter_now != seen_filter.get()
             || selected_now != seen_selected.get()
+            || lang_now != seen_lang.get()
         {
             seen_gen.replace(generation);
             seen_filter.replace(filter_now.clone());
             seen_selected.replace(selected_now);
+            seen_lang.replace(lang_now);
             let lines = row_lines(&controls_tick.hub, &filter_now);
             rows_tick.set(lines);
             memory.set(format_bytes(
                 controls_tick.hub.with_session(|session| session.memory_bytes()),
             ));
             dropped.set(controls_tick.hub.with_session(|session| session.dropped()));
-            publish_detail(&shown_tick, &controls_tick.hub, selected_now);
+            publish_detail(&shown_tick, &controls_tick.hub, selected_now, lang_now);
         }
     });
 
     let controls_start = controls.clone();
     let controls_ca = controls.clone();
     let controls_remove = controls.clone();
+    let controls_proxy = controls.clone();
+    let controls_clear = controls.clone();
+    let controls_export = controls.clone();
+    let selected_clear = selected;
+    let compose_clear = compose;
+    let controls_detail = controls.clone();
+    let controls_break = controls.clone();
+    let controls_list = controls.clone();
 
     view()
         .flex_1()
-        .bg(move || theme().background)
-        .text_color(move || theme().foreground)
+        .bg(bg_canvas())
+        .text_color(fg_primary())
         .child(toolbar(
             status,
             running,
-            ca_label,
+            ca_installed,
+            use_system_proxy,
             move || install_ca(controls_ca.clone()),
             move || remove_ca(controls_remove.clone()),
+            move || toggle_system_proxy(controls_proxy.clone()),
+            move || {
+                controls_clear.hub.clear_session();
+                selected_clear.set(None);
+                reset_compose(compose_clear);
+            },
+            move || export_har_file(&controls_export),
             move || toggle_capture(controls_start.clone()),
+        ))
+        .child(when(
+            move || paused.get().is_some(),
+            move || {
+                break_bar(paused, compose, selected, controls_break.clone())
+            },
         ))
         .child(
             view()
                 .flex_1()
                 .flex_row()
-                .child(flow_list(rows, selected, filter))
-                .child(detail_pane(shown)),
+                .child(flow_list(
+                    rows,
+                    selected,
+                    compose,
+                    filter,
+                    bypass_text,
+                    rules_text,
+                    upstream_text,
+                    controls_list,
+                ))
+                .child(detail_pane(shown, controls_detail, selected, compose)),
         )
-        .child(footer(listen, memory, dropped))
+        .child(footer(
+            listen,
+            running,
+            memory,
+            dropped,
+            port_text,
+            lan_url,
+            lan_choice,
+            lan_addrs,
+            qr_path,
+            import_path,
+            listen_all,
+            controls,
+        ))
 }
 
 fn toolbar(
-    status: Signal<String>,
+    status: Signal<StatusMsg>,
     running: Signal<bool>,
-    ca_label: Signal<String>,
+    ca_installed: Signal<bool>,
+    use_system_proxy: Signal<bool>,
     install: impl Fn() + 'static,
     remove: impl Fn() + 'static,
+    toggle_proxy: impl Fn() + 'static,
+    clear: impl Fn() + 'static,
+    export_har: impl Fn() + 'static,
     toggle: impl Fn() + 'static,
 ) -> impl IntoElement {
+    let install = Rc::new(install);
+    let remove = Rc::new(remove);
     view()
         .flex_row()
         .items_center()
-        .gap_3()
+        .gap_2()
         .px_3()
-        .h(px(52.0))
+        .h(px(50.0))
+        .bg(bg_chrome())
         .border_b_1()
-        .border_b_color(move || theme().border)
-        .child(text("zniff").text_size(px(16.0)).font_weight(FontWeight::SEMIBOLD))
+        .border_b_color(border_strong())
         .child(
-            text(move || status.get())
-                .flex_1()
-                .number_of_lines(1)
-                .text_size(px(13.0))
-                .text_color(move || theme().muted_foreground),
+            view()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .pr_1()
+                .child(
+                    view()
+                        .w(px(22.0))
+                        .h(px(22.0))
+                        .rounded(px(6.0))
+                        .bg(accent_blue())
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            mono("Z")
+                                .text_size(px(12.0))
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(white()),
+                        ),
+                )
+                .child(
+                    text("zniff")
+                        .text_size(px(15.5))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(fg_primary()),
+                ),
         )
-        .child(chip(move || ca_label.get()))
-        .child(quiet_button("安装证书", install))
-        .child(quiet_button("移除证书", remove))
+        .child(view().w(px(1.0)).h(px(16.0)).bg(border_strong()))
+        .child(
+            view()
+                .flex_1()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .px_1()
+                .min_w(px(0.0))
+                .child(
+                    view()
+                        .w(px(7.0))
+                        .h(px(7.0))
+                        .rounded(px(99.0))
+                        .flex_shrink_0()
+                        .bg(move || {
+                            if running.get() {
+                                status_ok_fg()
+                            } else {
+                                fg_muted()
+                            }
+                        }),
+                )
+                .child(
+                    text({
+                        let langs = ui_langs();
+                        move || status.get().text(ui_lang(langs))
+                    })
+                    .flex_1()
+                    .number_of_lines(1)
+                    .text_size(px(12.5))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(move || {
+                        if running.get() {
+                            fg_secondary()
+                        } else {
+                            fg_muted()
+                        }
+                    }),
+                ),
+        )
+        .child(toolbar_button(clear))
+        .child(toolbar_menu(
+            ca_installed,
+            use_system_proxy,
+            install,
+            remove,
+            toggle_proxy,
+            export_har,
+        ))
         .child(primary_button(
-            move || -> SharedString {
-                if running.get() {
-                    "停止".into()
-                } else {
-                    "开始".into()
+            {
+                let langs = ui_langs();
+                move || -> SharedString {
+                    if running.get() {
+                        t(ui_lang(langs), "停止", "Stop").into()
+                    } else {
+                        t(ui_lang(langs), "开始", "Start").into()
+                    }
                 }
             },
             move || running.get(),
@@ -210,28 +622,56 @@ fn toolbar(
 fn flow_list(
     rows: Signal<Vec<RowLine>>,
     selected: Signal<Option<u64>>,
+    compose: Compose,
     filter: Signal<String>,
+    bypass_text: Signal<String>,
+    rules_text: Signal<String>,
+    upstream_text: Signal<String>,
+    controls: Arc<Controls>,
 ) -> impl IntoElement {
+    let bypass_controls = controls.clone();
+    let rules_controls = controls.clone();
+    let upstream_controls = controls;
     view()
-        .w(px(560.0))
+        .w(px(LIST_WIDTH))
         .flex_shrink_0()
+        .overflow_hidden()
+        .bg(bg_list())
         .border_r_1()
-        .border_r_color(move || theme().border)
+        .border_r_color(border_strong())
         .child(
-            view().px_3().py_2().child(
-                input()
-                    .placeholder("过滤主机名")
-                    .placeholder_color(move || color(theme().muted_foreground))
-                    .w_full()
-                    .h(px(32.0))
-                    .px_3()
-                    .rounded(px(6.0))
-                    .bg(move || theme().input)
-                    .border_1()
-                    .border_color(move || theme().border)
-                    .text_size(px(13.0))
-                    .on_change(move |text: &str| filter.set(text.to_string())),
-            ),
+            view()
+                .w(px(LIST_WIDTH))
+                .h(px(46.0))
+                .flex_shrink_0()
+                .flex_row()
+                .items_center()
+                .gap_1p5()
+                .pl(px(LIST_INSET))
+                .pr(px(LIST_PAD_END))
+                .bg(bg_chrome())
+                .border_b_1()
+                .border_b_color(border_strong())
+                .child(
+                    view().flex_1().min_w(px(0.0)).child(side_input(
+                        filter,
+                        tr(
+                            "主机、路径、GET、404、body:、header:",
+                            "host, path, GET, 404, body:, header:",
+                        ),
+                        30.0,
+                        false,
+                        move |text| filter.set(text.to_string()),
+                    )),
+                )
+                .child(capture_config(
+                    bypass_text,
+                    rules_text,
+                    upstream_text,
+                    bypass_controls,
+                    rules_controls,
+                    upstream_controls,
+                )),
         )
         .child(column_header())
         .child(view().flex_1().child(
@@ -239,24 +679,297 @@ fn flow_list(
                 move || rows.with(Vec::is_empty),
                 move || list_empty(filter),
             )
-            .otherwise(move || flow_rows(rows, selected)),
+            .otherwise(move || flow_rows(rows, selected, compose)),
         ))
 }
 
-fn list_empty(filter: Signal<String>) -> impl IntoElement {
-    empty_copy(move || -> SharedString {
-        if filter.get().is_empty() {
-            "还没有流量".into()
-        } else {
-            "没有匹配的主机".into()
-        }
-    })
+fn side_input(
+    value: Signal<String>,
+    placeholder: impl IntoReactive<String> + 'static,
+    height: f32,
+    multiline: bool,
+    on_change: impl Fn(&str) + 'static,
+) -> impl IntoElement {
+    input()
+        .value(value)
+        .placeholder(placeholder)
+        .placeholder_color(move || color(fg_muted()))
+        .w_full()
+        .h(px(height))
+        .px_2p5()
+        .rounded(px(7.0))
+        .bg(bg_code())
+        .border_1()
+        .border_color(border_control())
+        .focus(|style| style.border_color(accent_blue()))
+        .text_size(px(12.5))
+        .text_color(fg_primary())
+        .multiline(multiline)
+        .on_change(on_change)
 }
 
-fn flow_rows(rows: Signal<Vec<RowLine>>, selected: Signal<Option<u64>>) -> impl IntoElement {
+fn capture_config(
+    bypass_text: Signal<String>,
+    rules_text: Signal<String>,
+    upstream_text: Signal<String>,
+    bypass_controls: Arc<Controls>,
+    rules_controls: Arc<Controls>,
+    upstream_controls: Arc<Controls>,
+) -> impl IntoElement {
+    let bypass_for_panel = bypass_text;
+    let rules_for_panel = rules_text;
+    let upstream_for_panel = upstream_text;
+    popover()
+        .placement(Placement::Bottom)
+        .align(Align::End)
+        .offset(px(6.0))
+        .margin(px(8.0))
+        .trigger(config_trigger(
+            bypass_for_panel,
+            rules_for_panel,
+            upstream_for_panel,
+        ))
+        .child(config_panel(
+            bypass_for_panel,
+            rules_for_panel,
+            upstream_for_panel,
+            bypass_controls,
+            rules_controls,
+            upstream_controls,
+        ))
+}
+
+fn config_set(bypass: Signal<String>, rules: Signal<String>, upstream: Signal<String>) -> bool {
+    !bypass.get().trim().is_empty()
+        || !rules.get().trim().is_empty()
+        || !upstream.get().trim().is_empty()
+}
+
+fn config_trigger(
+    bypass_text: Signal<String>,
+    rules_text: Signal<String>,
+    upstream_text: Signal<String>,
+) -> impl IntoElement {
+    let border_bypass = bypass_text;
+    let border_rules = rules_text;
+    let border_upstream = upstream_text;
+    let dot_bypass = bypass_text;
+    let dot_rules = rules_text;
+    let dot_upstream = upstream_text;
+    let label_bypass = bypass_text;
+    let label_rules = rules_text;
+    let label_upstream = upstream_text;
+    view()
+        .h(px(30.0))
+        .px_2p5()
+        .flex_shrink_0()
+        .flex_row()
+        .items_center()
+        .gap_1p5()
+        .rounded(px(CONTROL_RADIUS))
+        .border_1()
+        .border_color(move || {
+            if config_set(border_bypass, border_rules, border_upstream) {
+                accent_blue_border()
+            } else {
+                border_control()
+            }
+        })
+        .bg(bg_control())
+        .hover(|style| style.bg(bg_control_hover()))
+        .cursor(Cursor::Pointer)
+        .active(|style| style.opacity(0.75))
+        .child(when(
+            move || config_set(dot_bypass, dot_rules, dot_upstream),
+            move || {
+                view()
+                    .w(px(6.0))
+                    .h(px(6.0))
+                    .rounded(px(99.0))
+                    .bg(status_ok_fg())
+            },
+        ))
+        .child(glyph(
+            || Glyph::Sliders,
+            move || {
+                color(if config_set(label_bypass, label_rules, label_upstream) {
+                    accent_blue_text()
+                } else {
+                    fg_secondary()
+                })
+            },
+        ))
+        .child(
+            text(tr("配置", "Config"))
+                .number_of_lines(1)
+                .text_size(px(CONTROL_TEXT))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(move || {
+                    if config_set(label_bypass, label_rules, label_upstream) {
+                        accent_blue_text()
+                    } else {
+                        fg_secondary()
+                    }
+                }),
+        )
+}
+
+fn config_panel(
+    bypass_text: Signal<String>,
+    rules_text: Signal<String>,
+    upstream_text: Signal<String>,
+    bypass_controls: Arc<Controls>,
+    rules_controls: Arc<Controls>,
+    upstream_controls: Arc<Controls>,
+) -> impl IntoElement {
+    view()
+        .w(px(LIST_WIDTH - LIST_INSET - LIST_PAD_END))
+        .p_3()
+        .gap_3()
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(border_strong())
+        .bg(bg_card())
+        .shadow_md()
+        .child(config_field(
+            "直通",
+            "Bypass",
+            side_input(
+                bypass_text,
+                tr(
+                    "example.com *.pin.dev 或 only:api.example.com",
+                    "example.com *.pin.dev or only:api.example.com",
+                ),
+                30.0,
+                false,
+                move |text| {
+                    bypass_text.set(text.to_string());
+                    bypass_controls.hub.set_bypass(text);
+                    if let Err(err) = save_config(|config| config.bypass_hosts = text.to_string()) {
+                        set_status(
+                            &bypass_controls,
+                            StatusMsg::PrefUnsaved {
+                                name: PrefName::Bypass,
+                                err: err.to_string(),
+                            },
+                        );
+                    }
+                },
+            ),
+        ))
+        .child(config_field(
+            "规则",
+            "Rules",
+            side_input(
+                rules_text,
+                tr(
+                    "一行一条：map-local、map-remote 或 break",
+                    "One per line: map-local, map-remote, or break",
+                ),
+                64.0,
+                true,
+                move |text| {
+                    rules_text.set(text.to_string());
+                    rules_controls.hub.set_rules(text);
+                    if let Err(err) = save_config(|config| config.rules = text.to_string()) {
+                        set_status(
+                            &rules_controls,
+                            StatusMsg::PrefUnsaved {
+                                name: PrefName::Rules,
+                                err: err.to_string(),
+                            },
+                        );
+                    }
+                },
+            ),
+        ))
+        .child(config_field(
+            "上游",
+            "Upstream",
+            side_input(
+                upstream_text,
+                tr("host:port，空着直连", "host:port, empty means direct"),
+                30.0,
+                false,
+                move |text| {
+                    upstream_text.set(text.to_string());
+                    upstream_controls.hub.set_upstream(text);
+                    if let Err(err) = save_config(|config| config.upstream_proxy = text.to_string()) {
+                        set_status(
+                            &upstream_controls,
+                            StatusMsg::PrefUnsaved {
+                                name: PrefName::Upstream,
+                                err: err.to_string(),
+                            },
+                        );
+                    }
+                },
+            ),
+        ))
+}
+
+fn config_field(zh: &'static str, en: &'static str, field: impl IntoElement) -> impl IntoElement {
+    view()
+        .gap_1()
+        .w_full()
+        .child(
+            text(tr(zh, en))
+                .text_size(px(11.5))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(fg_muted()),
+        )
+        .child(field)
+}
+
+fn list_empty(filter: Signal<String>) -> impl IntoElement {
+    view()
+        .flex_1()
+        .items_center()
+        .justify_center()
+        .gap_1p5()
+        .px_6()
+        .child(glyph_px(28.0, || Glyph::List, || color(fg_muted())))
+        .child(
+            text({
+                let langs = ui_langs();
+                move || -> SharedString {
+                    let lang = ui_lang(langs);
+                    if filter.get().is_empty() {
+                        t(lang, "还没有流量", "No traffic yet").into()
+                    } else {
+                        t(lang, "没有匹配的流量", "No matching traffic").into()
+                    }
+                }
+            })
+            .text_size(px(13.5))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(fg_secondary()),
+        )
+        .child(
+            text({
+                let langs = ui_langs();
+                move || -> SharedString {
+                    let lang = ui_lang(langs);
+                    if filter.get().is_empty() {
+                        t(lang, "点击右上角「开始」捕获 HTTP(S) 请求", "Press Start to capture HTTP(S)").into()
+                    } else {
+                        t(lang, "试试调整上方的过滤关键词", "Try a different filter").into()
+                    }
+                }
+            })
+            .text_size(px(12.0))
+            .text_color(fg_muted()),
+        )
+}
+
+fn flow_rows(
+    rows: Signal<Vec<RowLine>>,
+    selected: Signal<Option<u64>>,
+    compose: Compose,
+) -> impl IntoElement {
     virtual_list(
         move || rows.with(Vec::len),
-        move |at| flow_row(rows, selected, at),
+        move |at| flow_row(rows, selected, compose, at),
     )
     .keys(move || rows.with(|rows| rows.iter().map(|row| row.id).collect::<Vec<_>>()))
     .estimated_item_size(px(34.0))
@@ -265,106 +978,136 @@ fn flow_rows(rows: Signal<Vec<RowLine>>, selected: Signal<Option<u64>>) -> impl 
 
 fn column_header() -> impl IntoElement {
     view()
+        .w(px(LIST_WIDTH))
+        .flex_shrink_0()
         .h(px(28.0))
         .px_3()
         .gap_2()
         .flex_row()
         .items_center()
-        .bg(move || theme().muted)
+        .bg(bg_col_header())
         .border_b_1()
-        .border_b_color(move || theme().border)
+        .border_b_color(border_strong())
         .border_l(px(2.0))
-        .border_l_color(move || theme().muted)
-        .child(header_label("方法").w(px(COL_METHOD)))
-        .child(header_label("状态").w(px(COL_STATUS)))
-        .child(header_label("协议").w(px(COL_PROTOCOL)))
-        .child(header_label("主机").flex_1())
-        .child(header_label("路径").flex_1())
+        .border_l_color(bg_col_header())
+        .child(header_label("方法", "Method").w(px(COL_METHOD)).flex_shrink_0())
+        .child(header_label("状态", "Status").w(px(COL_STATUS)).flex_shrink_0())
+        .child(header_label("协议", "Protocol").w(px(COL_PROTOCOL)).flex_shrink_0())
+        .child(header_label("主机", "Host").w(px(COL_HOST)).flex_shrink_0())
+        .child(header_label("路径", "Path").flex_1().min_w(px(0.0)))
 }
 
-fn header_label(label: &'static str) -> Text {
-    text(label)
+fn header_label(zh: &'static str, en: &'static str) -> Text {
+    text(tr(zh, en))
         .number_of_lines(1)
         .text_size(px(11.0))
         .font_weight(FontWeight::SEMIBOLD)
-        .text_color(move || theme().muted_foreground)
+        .text_color(fg_muted())
 }
 
-fn flow_row(rows: Signal<Vec<RowLine>>, selected: Signal<Option<u64>>, at: Position) -> impl IntoElement {
+fn flow_row(
+    rows: Signal<Vec<RowLine>>,
+    selected: Signal<Option<u64>>,
+    compose: Compose,
+    at: Position,
+) -> impl IntoElement {
     let row_id = move || rows.with(|rows| rows.get(at.index()).map(|row| row.id));
+    let is_selected = move || selected.get() == row_id();
     view()
+        .w(px(LIST_WIDTH))
         .h(px(34.0))
         .px_3()
         .gap_2()
         .flex_row()
         .items_center()
         .border_b_1()
-        .border_b_color(move || theme().border)
+        .border_b_color(border_subtle())
         .border_l(px(2.0))
         .border_l_color(move || {
-            if selected.get() == row_id() {
-                theme().primary
+            if is_selected() {
+                accent_blue()
+            } else if at.index() % 2 == 1 {
+                bg_row_alt()
             } else {
-                theme().background
+                bg_list()
             }
         })
         .overflow_hidden()
         .cursor(Cursor::Pointer)
         .bg(move || {
-            if selected.get() == row_id() {
-                theme().accent
+            if is_selected() {
+                bg_row_selected()
+            } else if at.index() % 2 == 1 {
+                bg_row_alt()
             } else {
-                theme().background
+                bg_list()
             }
         })
         .hover(|style| {
             style.bg(move || {
-                if selected.get() == row_id() {
-                    theme().accent
+                if is_selected() {
+                    bg_row_selected()
                 } else {
-                    theme().muted
+                    bg_row_hover()
                 }
             })
         })
-        .on_press(move || selected.set(row_id()))
-        .child(row_text(rows, at, |row| row.method.clone(), COL_METHOD, false))
+        .on_press(move || {
+            let next = row_id();
+            if selected.get() != next {
+                reset_compose(compose);
+            }
+            selected.set(next);
+        })
+        .child(method_cell(rows, at))
         .child(status_text(rows, at))
-        .child(row_text(rows, at, |row| row.protocol.clone(), COL_PROTOCOL, false))
-        .child(flex_text(rows, at, |row| row.host.clone()))
-        .child(flex_text(rows, at, |row| row.path.clone()))
+        .child(protocol_cell(rows, at))
+        .child(host_cell(rows, at))
+        .child(path_cell(rows, at))
 }
 
-fn row_text(
-    rows: Signal<Vec<RowLine>>,
-    at: Position,
-    pick: fn(&RowLine) -> String,
-    width: f32,
-    flex: bool,
-) -> Text {
-    let mut cell = text(move || rows.with(|rows| rows.get(at.index()).map(pick).unwrap_or_default()))
-        .number_of_lines(1)
-        .ellipsize_mode(EllipsizeMode::Middle)
-        .text_size(px(12.0))
-        .font_weight(FontWeight::MEDIUM);
-    cell = if flex {
-        cell.flex_1().min_w(px(0.0))
-    } else {
-        cell.w(px(width)).flex_shrink_0()
-    };
-    cell
-}
-
-fn flex_text(rows: Signal<Vec<RowLine>>, at: Position, pick: fn(&RowLine) -> String) -> Text {
-    text(move || rows.with(|rows| rows.get(at.index()).map(pick).unwrap_or_default()))
-        .flex_1()
-        .min_w(px(0.0))
-        .number_of_lines(1)
-        .ellipsize_mode(EllipsizeMode::Tail)
-        .text_size(px(12.0))
+fn method_cell(rows: Signal<Vec<RowLine>>, at: Position) -> impl IntoElement {
+    view()
+        .w(px(COL_METHOD))
+        .flex_shrink_0()
+        .flex_row()
+        .items_center()
+        .child(
+            view()
+                .px_1p5()
+                .py_0p5()
+                .rounded(px(4.0))
+                .bg(move || {
+                    rows.with(|rows| {
+                        rows.get(at.index())
+                            .map(|row| method_bg(&row.method))
+                            .unwrap_or_else(bg_control)
+                    })
+                })
+                .child(
+                    mono(move || {
+                        rows.with(|rows| {
+                            rows.get(at.index())
+                                .map(|row| row.method.clone())
+                                .unwrap_or_default()
+                        })
+                    })
+                    .number_of_lines(1)
+                    .text_size(px(11.0))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(move || {
+                        rows.with(|rows| {
+                            rows.get(at.index())
+                                .map(|row| method_fg(&row.method))
+                                .unwrap_or_else(fg_secondary)
+                        })
+                    }),
+                ),
+        )
 }
 
 fn status_text(rows: Signal<Vec<RowLine>>, at: Position) -> Text {
-    text(move || {
+    mono(move || {
         rows.with(|rows| {
             rows.get(at.index())
                 .map(|row| {
@@ -383,46 +1126,178 @@ fn status_text(rows: Signal<Vec<RowLine>>, at: Position) -> Text {
     .text_color(move || {
         let row = rows.with(|rows| rows.get(at.index()).cloned());
         match row {
-            Some(row) if row.failed || row.status.is_some_and(|code| code >= 400) => theme().destructive,
-            Some(row) if row.status.is_some_and(|code| (200..300).contains(&code)) => theme().primary,
-            _ => theme().muted_foreground,
+            Some(row) => http_status_fg(row.status, row.failed),
+            None => fg_muted(),
         }
     })
 }
 
-fn detail_pane(shown: Shown) -> impl IntoElement {
-    scroll().flex_1().child(
+fn protocol_cell(rows: Signal<Vec<RowLine>>, at: Position) -> Text {
+    mono(move || {
+        rows.with(|rows| {
+            rows.get(at.index())
+                .map(|row| row.protocol.clone())
+                .unwrap_or_default()
+        })
+    })
+    .w(px(COL_PROTOCOL))
+    .flex_shrink_0()
+    .number_of_lines(1)
+    .ellipsize_mode(EllipsizeMode::Middle)
+    .text_size(px(11.5))
+    .text_color(fg_muted())
+}
+
+fn host_cell(rows: Signal<Vec<RowLine>>, at: Position) -> Text {
+    text(move || {
+        rows.with(|rows| {
+            rows.get(at.index())
+                .map(|row| row.host.clone())
+                .unwrap_or_default()
+        })
+    })
+    .w(px(COL_HOST))
+    .flex_shrink_0()
+    .number_of_lines(1)
+    .ellipsize_mode(EllipsizeMode::Middle)
+    .text_size(px(12.5))
+    .font_weight(FontWeight::MEDIUM)
+    .text_color(fg_primary())
+}
+
+fn path_cell(rows: Signal<Vec<RowLine>>, at: Position) -> Text {
+    mono(move || {
+        rows.with(|rows| {
+            rows.get(at.index())
+                .map(|row| row.path.clone())
+                .unwrap_or_default()
+        })
+    })
+    .flex_1()
+    .min_w(px(0.0))
+    .number_of_lines(1)
+    .ellipsize_mode(EllipsizeMode::Tail)
+    .text_size(px(12.0))
+    .text_color(fg_secondary())
+}
+
+fn detail_pane(
+    shown: Shown,
+    controls: Arc<Controls>,
+    selected: Signal<Option<u64>>,
+    compose: Compose,
+) -> impl IntoElement {
+    scroll().flex_1().bg(bg_canvas()).child(
         when(
             move || shown.phase.get() == Phase::Ready,
-            move || ready_detail(shown),
+            move || ready_detail(shown, controls.clone(), selected, compose),
         )
         .otherwise(move || {
-            empty_copy(move || -> SharedString {
-                match shown.phase.get() {
-                    Phase::Gone => "这条 flow 已经因为内存上限被丢掉。".into(),
-                    _ => "选一条流量查看请求头、响应头和 body。".into(),
-                }
-            })
+            view()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .gap_1p5()
+                .px_6()
+                .child(glyph_px(28.0, || Glyph::List, || color(fg_muted())))
+                .child(
+                    text({
+                        let langs = ui_langs();
+                        move || -> SharedString {
+                            let lang = ui_lang(langs);
+                            match shown.phase.get() {
+                                Phase::Gone => t(lang, "这条记录已经不在了", "That flow is gone").into(),
+                                _ => t(lang, "还没有选择", "Nothing selected").into(),
+                            }
+                        }
+                    })
+                    .text_size(px(13.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(fg_secondary()),
+                )
+                .child(
+                    text({
+                        let langs = ui_langs();
+                        move || -> SharedString {
+                            let lang = ui_lang(langs);
+                            match shown.phase.get() {
+                                Phase::Gone => t(
+                                    lang,
+                                    "它因为内存上限被丢掉了。",
+                                    "It was dropped because the session hit its memory cap.",
+                                )
+                                .into(),
+                                _ => t(
+                                    lang,
+                                    "从左边选一条流量，查看请求头、响应头和 body。",
+                                    "Pick a flow on the left to see headers and the body.",
+                                )
+                                .into(),
+                            }
+                        }
+                    })
+                    .text_size(px(12.0))
+                    .text_color(fg_muted()),
+                )
         }),
     )
 }
 
-fn ready_detail(shown: Shown) -> impl IntoElement {
+fn ready_detail(
+    shown: Shown,
+    controls: Arc<Controls>,
+    selected: Signal<Option<u64>>,
+    compose: Compose,
+) -> impl IntoElement {
     view()
-        .child(summary(shown))
-        .child(header_section("请求头", shown.request_headers))
-        .child(body_section("请求 body", shown.request_body, shown.request_note))
-        .child(header_section("响应头", shown.response_headers))
-        .child(body_section("响应 body", shown.response_body, shown.response_note))
+        .p_3p5()
+        .gap_3p5()
+        .child(summary(shown, controls, selected, compose))
+        .child(when(
+            move || compose.composing.get(),
+            move || compose_box(compose),
+        ))
+        .child(when(
+            move || !shown.messages.with(Vec::is_empty),
+            move || header_section("消息", "Messages", shown.messages),
+        ))
+        .child(when(
+            move || !shown.query.with(Vec::is_empty),
+            move || header_section("查询参数", "Query", shown.query),
+        ))
+        .child(header_section("请求头", "Request headers", shown.request_headers))
+        .child(body_section(
+            "请求 body",
+            "Request body",
+            shown.request_body,
+            shown.request_note,
+        ))
+        .child(header_section("响应头", "Response headers", shown.response_headers))
+        .child(when(
+            move || !shown.preview.get().is_empty(),
+            move || image_preview(shown),
+        ))
+        .child(body_section(
+            "响应 body",
+            "Response body",
+            shown.response_body,
+            shown.response_note,
+        ))
 }
 
-fn summary(shown: Shown) -> impl IntoElement {
+fn summary(
+    shown: Shown,
+    controls: Arc<Controls>,
+    selected: Signal<Option<u64>>,
+    compose: Compose,
+) -> impl IntoElement {
     view()
-        .px_3()
-        .py_3()
-        .gap_2()
-        .border_b_1()
-        .border_b_color(move || theme().border)
+        .p_3p5()
+        .gap_2p5()
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(border_strong())
+        .bg(bg_card())
         .child(
             view()
                 .flex_row()
@@ -431,244 +1306,1177 @@ fn summary(shown: Shown) -> impl IntoElement {
                 .child(
                     view()
                         .px_2()
-                        .py_1()
-                        .rounded(px(6.0))
-                        .bg(move || theme().secondary)
+                        .py_0p5()
+                        .rounded(px(5.0))
+                        .bg(move || method_bg(&shown.method.get()))
                         .child(
-                            text(move || shown.method.get())
-                                .text_size(px(12.0))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(move || theme().secondary_foreground),
+                            mono(move || shown.method.get())
+                                .text_size(px(11.5))
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(move || method_fg(&shown.method.get())),
                         ),
                 )
                 .child(
-                    text(move || match shown.status.get() {
-                        Some(code) => code.to_string(),
-                        None => "等待响应".into(),
-                    })
-                    .text_size(px(13.0))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(move || match shown.status.get() {
-                        Some(code) if code >= 400 => theme().destructive,
-                        Some(code) if (200..300).contains(&code) => theme().primary,
-                        _ => theme().muted_foreground,
-                    }),
+                    view()
+                        .px_2()
+                        .py_0p5()
+                        .rounded(px(5.0))
+                        .bg(move || {
+                            http_status_bg(
+                                shown.status.get(),
+                                !shown.error.get().is_empty() && shown.status.get().is_none(),
+                            )
+                        })
+                        .child(
+                            mono({
+                                let langs = ui_langs();
+                                move || match shown.status.get() {
+                                    Some(code) => code.to_string(),
+                                    None => t(ui_lang(langs), "等待响应", "Waiting").into(),
+                                }
+                            })
+                            .text_size(px(11.5))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(move || {
+                                http_status_fg(
+                                    shown.status.get(),
+                                    !shown.error.get().is_empty() && shown.status.get().is_none(),
+                                )
+                            }),
+                        ),
                 )
                 .child(
-                    text(move || shown.protocol.get())
-                        .text_size(px(12.0))
-                        .text_color(move || theme().muted_foreground),
+                    view()
+                        .px_2()
+                        .py_0p5()
+                        .rounded(px(5.0))
+                        .bg(bg_control())
+                        .child(
+                            mono(move || shown.protocol.get())
+                                .text_size(px(11.5))
+                                .text_color(fg_muted()),
+                        ),
                 ),
         )
         .child(
-            mono(move || shown.url.get())
-                .selectable(true)
-                .text_size(px(13.0)),
+            view()
+                .px_3()
+                .py_2()
+                .rounded(px(7.0))
+                .bg(bg_code())
+                .border_1()
+                .border_color(border_subtle())
+                .child(
+                    mono(move || shown.url.get())
+                        .selectable(true)
+                        .text_size(px(12.5))
+                        .text_color(fg_primary()),
+                ),
         )
+        .child(
+            mono(move || shown.metrics.get())
+                .selectable(true)
+                .text_size(px(11.5))
+                .text_color(fg_muted()),
+        )
+        .child(detail_actions(shown, controls, selected, compose))
         .child(
             when(
                 move || !shown.error.get().is_empty(),
                 move || {
-                    text(move || shown.error.get())
-                        .selectable(true)
-                        .text_size(px(12.0))
-                        .text_color(move || theme().destructive)
+                    view()
+                        .px_3()
+                        .py_2()
+                        .rounded(px(7.0))
+                        .bg(status_err_bg())
+                        .border_1()
+                        .border_color(status_err_fg())
+                        .child(
+                            text({
+                                let langs = ui_langs();
+                                move || localize_error(ui_lang(langs), &shown.error.get())
+                            })
+                                .selectable(true)
+                                .text_size(px(12.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(status_err_fg()),
+                        )
                 },
             ),
         )
 }
 
-fn header_section(title: &'static str, lines: Signal<Vec<HeaderLine>>) -> impl IntoElement {
+fn header_section(
+    zh: &'static str,
+    en: &'static str,
+    lines: Signal<Vec<HeaderLine>>,
+) -> impl IntoElement {
     view()
-        .px_3()
-        .py_3()
-        .gap_2()
-        .border_b_1()
-        .border_b_color(move || theme().border)
-        .child(section_title(title))
+        .gap_1p5()
         .child(
-            when(
-                move || lines.with(Vec::is_empty),
-                || muted_line("无"),
-            )
-            .otherwise(move || {
-                each(
-                    lines,
-                    |line| line.key,
-                    |line, _| {
-                        view()
-                            .flex_row()
-                            .gap_3()
-                            .py_2()
-                            .border_b_1()
-                            .border_b_color(move || theme().border)
-                            .child(
-                                mono(move || line.with(|line| line.name.clone()))
-                                    .w(px(168.0))
-                                    .flex_shrink_0()
-                                    .number_of_lines(1)
-                                    .ellipsize_mode(EllipsizeMode::Tail)
-                                    .text_size(px(12.0))
-                                    .text_color(move || theme().muted_foreground),
-                            )
-                            .child(
-                                mono(move || line.with(|line| line.value.clone()))
-                                    .flex_1()
-                                    .selectable(true)
-                                    .text_size(px(12.0)),
-                            )
-                    },
-                )
-            }),
+            view()
+                .flex_row()
+                .items_center()
+                .gap_1p5()
+                .px_1()
+                .child(section_title(tr(zh, en)))
+                .child(
+                    view()
+                        .px_1p5()
+                        .py(px(1.0))
+                        .rounded(px(4.0))
+                        .bg(bg_control())
+                        .child(
+                            mono(move || format!("{}", lines.with(Vec::len)))
+                                .text_size(px(10.5))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(fg_muted()),
+                        ),
+                ),
+        )
+        .child(
+            view()
+                .rounded(px(10.0))
+                .border_1()
+                .border_color(border_strong())
+                .bg(bg_card())
+                .overflow_hidden()
+                .child(
+                    when(
+                        move || lines.with(Vec::is_empty),
+                        || view().px_3p5().py_2p5().child(muted_line(tr("无", "None"))),
+                    )
+                    .otherwise(move || {
+                        each(
+                            lines,
+                            |line| line.key,
+                            |line, index| {
+                                view()
+                                    .flex_row()
+                                    .gap_3()
+                                    .px_3p5()
+                                    .py_2()
+                                    .bg(move || {
+                                        if index.get() % 2 == 1 {
+                                            bg_code()
+                                        } else {
+                                            bg_card()
+                                        }
+                                    })
+                                    .border_t(move || {
+                                        if index.get() > 0 {
+                                            px(1.0)
+                                        } else {
+                                            px(0.0)
+                                        }
+                                    })
+                                    .border_t_color(border_subtle())
+                                    .child(
+                                        mono(move || line.with(|line| line.name.clone()))
+                                            .w(px(176.0))
+                                            .flex_shrink_0()
+                                            .selectable(true)
+                                            .number_of_lines(1)
+                                            .ellipsize_mode(EllipsizeMode::Tail)
+                                            .text_size(px(12.0))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(fg_muted()),
+                                    )
+                                    .child(
+                                        mono(move || line.with(|line| line.value.clone()))
+                                            .flex_1()
+                                            .selectable(true)
+                                            .text_size(px(12.0))
+                                            .text_color(fg_primary()),
+                                    )
+                            },
+                        )
+                    }),
+                ),
         )
 }
 
-fn body_section(title: &'static str, body: Signal<String>, note: Signal<String>) -> impl IntoElement {
+fn body_section(
+    zh: &'static str,
+    en: &'static str,
+    body: Signal<String>,
+    note: Signal<String>,
+) -> impl IntoElement {
     view()
-        .px_3()
-        .py_3()
-        .gap_2()
-        .border_b_1()
-        .border_b_color(move || theme().border)
-        .child(section_title(title))
+        .gap_1p5()
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .px_1()
+                .child(section_title(tr(zh, en))),
+        )
         .child(
             when(
                 move || !note.get().is_empty(),
                 move || {
-                    text(move || note.get())
-                        .text_size(px(12.0))
-                        .text_color(move || theme().destructive)
+                    view()
+                        .px_3()
+                        .py_2()
+                        .rounded(px(7.0))
+                        .bg(status_warn_bg())
+                        .border_1()
+                        .border_color(status_warn_fg())
+                        .child(
+                            text(move || note.get())
+                                .text_size(px(12.0))
+                                .text_color(status_warn_fg()),
+                        )
                 },
             ),
         )
         .child(
             view()
-                .bg(move || theme().muted)
-                .rounded(px(8.0))
-                .px_3()
-                .py_2()
+                .bg(bg_code())
+                .rounded(px(10.0))
+                .border_1()
+                .border_color(border_strong())
+                .px_3p5()
+                .py_2p5()
                 .child(
-                    mono(move || {
-                        let text = body.get();
-                        if text.is_empty() {
-                            "（空）".into()
-                        } else {
-                            text
+                    mono({
+                        let langs = ui_langs();
+                        move || {
+                            let text = body.get();
+                            if text.is_empty() {
+                                t(ui_lang(langs), "（空）", "(empty)").into()
+                            } else {
+                                text
+                            }
                         }
                     })
                     .selectable(true)
-                    .text_size(px(12.0)),
+                    .text_size(px(12.0))
+                    .text_color(move || {
+                        if body.get().is_empty() {
+                            fg_muted()
+                        } else {
+                            fg_primary()
+                        }
+                    }),
                 ),
         )
 }
 
-fn section_title(label: &'static str) -> Text {
-    text(label)
-        .text_size(px(11.0))
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(move || theme().muted_foreground)
-}
-
-fn muted_line(label: &'static str) -> Text {
-    text(label)
-        .text_size(px(12.0))
-        .text_color(move || theme().muted_foreground)
-}
-
-fn empty_copy(label: impl IntoReactive<SharedString> + 'static) -> impl IntoElement {
+fn detail_actions(
+    shown: Shown,
+    controls: Arc<Controls>,
+    selected: Signal<Option<u64>>,
+    compose: Compose,
+) -> impl IntoElement {
+    let copy_url = controls.clone();
+    let copy_curl = controls.clone();
+    let copy_request = controls.clone();
+    let copy_response = controls.clone();
+    let save = controls.clone();
+    let replay_controls = controls.clone();
+    let edit_controls = controls.clone();
+    let send_controls = controls.clone();
+    let pretty_controls = controls;
     view()
-        .flex_1()
+        .flex_row()
+        .flex_wrap()
         .items_center()
-        .justify_center()
-        .py_3()
-        .child(
-            text(label)
-                .text_size(px(13.0))
-                .text_color(move || theme().muted_foreground),
-        )
+        .gap_1p5()
+        .child(detail_button(tr("复制 URL", "Copy URL"), move || {
+            copy_part(&copy_url, selected.get(), CopyPart::Url);
+        }))
+        .child(detail_button("cURL", move || {
+            copy_part(&copy_curl, selected.get(), CopyPart::Curl);
+        }))
+        .child(detail_button(tr("复制请求", "Copy request"), move || {
+            copy_part(&copy_request, selected.get(), CopyPart::Request);
+        }))
+        .child(detail_button(tr("复制响应", "Copy response"), move || {
+            copy_part(&copy_response, selected.get(), CopyPart::Response);
+        }))
+        .child(detail_button(tr("另存", "Save"), move || {
+            export_response(&save, selected.get());
+        }))
+        .child(detail_button(tr("重放", "Replay"), move || {
+            replay_flow(&replay_controls, selected.get(), ReplayOverride::default());
+        }))
+        .child(detail_button(tr("编辑重发", "Edit"), move || {
+            begin_compose(&edit_controls, selected.get(), compose);
+        }))
+        .child(when(
+            move || compose.composing.get(),
+            move || {
+                let controls = send_controls.clone();
+                detail_button(tr("发送", "Send"), move || {
+                    replay_flow(
+                        &controls,
+                        selected.get(),
+                        ReplayOverride {
+                            method: Some(compose.method.get()),
+                            url: Some(compose.url.get()),
+                            headers: Some(parse_header_text(&compose.headers.get())),
+                            body: Some(compose.body.get().into_bytes()),
+                        },
+                    );
+                })
+            },
+        ))
+        .child(detail_button(
+            {
+                let langs = ui_langs();
+                move || -> SharedString {
+                    if shown.pretty.get() {
+                        t(ui_lang(langs), "原文", "Raw").into()
+                    } else {
+                        t(ui_lang(langs), "美化", "Pretty").into()
+                    }
+                }
+            },
+            {
+                let langs = ui_langs();
+                move || {
+                    shown.pretty.set(!shown.pretty.get());
+                    publish_detail(&shown, &pretty_controls.hub, selected.get(), ui_lang(langs));
+                }
+            },
+        ))
 }
 
-fn footer(listen: Signal<String>, memory: Signal<String>, dropped: Signal<u64>) -> impl IntoElement {
+fn detail_button(
+    label: impl IntoReactive<SharedString>,
+    on_press: impl Fn() + 'static,
+) -> impl IntoElement {
     view()
-        .h(px(28.0))
-        .px_3()
+        .h(px(26.0))
+        .px_2()
+        .flex_shrink_0()
         .flex_row()
         .items_center()
-        .border_t_1()
-        .border_t_color(move || theme().border)
-        .child(
-            text(move || {
-                if listen.get().is_empty() {
-                    "监听尚未开始".into()
-                } else {
-                    format!("监听 {}", listen.get())
-                }
-            })
-            .flex_1()
-            .text_size(px(12.0))
-            .text_color(move || theme().muted_foreground),
-        )
-        .child(
-            text(move || format!("{} · 已丢弃 {}", memory.get(), dropped.get()))
-                .text_size(px(12.0))
-                .text_color(move || theme().muted_foreground),
-        )
-}
-
-fn chip(label: impl IntoReactive<SharedString>) -> impl IntoElement {
-    view()
-        .px_2()
-        .py_1()
         .rounded(px(6.0))
-        .bg(move || theme().muted)
+        .border_1()
+        .border_color(border_control())
+        .bg(bg_control())
+        .hover(|style| style.bg(bg_control_hover()))
+        .cursor(Cursor::Pointer)
+        .active(|style| style.opacity(0.75))
+        .on_press(on_press)
         .child(
             text(label)
                 .number_of_lines(1)
                 .text_size(px(12.0))
-                .text_color(move || theme().muted_foreground),
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(fg_secondary()),
         )
 }
 
-fn quiet_button(label: &'static str, on_press: impl Fn() + 'static) -> impl IntoElement {
+fn image_preview(shown: Shown) -> impl IntoElement {
+    view().gap_1p5().child(view().px_1().child(section_title(tr("图片", "Image")))).child(
+        view()
+            .rounded(px(10.0))
+            .border_1()
+            .border_color(border_strong())
+            .bg(bg_code())
+            .p_3()
+            .overflow_hidden()
+            .child(image(move || shown.preview.get()).h(px(200.0))),
+    )
+}
+
+fn section_title(label: impl IntoReactive<SharedString>) -> Text {
+    text(label)
+        .text_size(px(12.0))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(fg_secondary())
+}
+
+fn muted_line(label: impl IntoReactive<SharedString>) -> Text {
+    text(label)
+        .text_size(px(12.0))
+        .text_color(fg_muted())
+}
+
+fn footer(
+    listen: Signal<String>,
+    running: Signal<bool>,
+    memory: Signal<String>,
+    dropped: Signal<u64>,
+    port_text: Signal<String>,
+    lan_url: Signal<String>,
+    lan_choice: Signal<String>,
+    lan_addrs: Signal<Vec<LanAddr>>,
+    qr_path: Signal<String>,
+    import_path: Signal<String>,
+    listen_all: Signal<bool>,
+    controls: Arc<Controls>,
+) -> impl IntoElement {
+    let port_controls = controls.clone();
+    let lan_controls = controls.clone();
+    let import_controls = controls;
     view()
+        .h(px(32.0))
         .px_3()
-        .py_2()
-        .rounded(px(8.0))
-        .bg(move || theme().secondary)
+        .gap_3()
+        .flex_row()
+        .items_center()
+        .bg(bg_chrome())
+        .border_t_1()
+        .border_t_color(border_strong())
+        .child(
+            view()
+                .flex_1()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .min_w(px(0.0))
+                .child(
+                    view()
+                        .w(px(6.0))
+                        .h(px(6.0))
+                        .rounded(px(99.0))
+                        .flex_shrink_0()
+                        .bg(move || {
+                            if running.get() {
+                                status_ok_fg()
+                            } else {
+                                fg_muted()
+                            }
+                        }),
+                )
+                .child(
+                    mono({
+                        let langs = ui_langs();
+                        move || {
+                            let lang = ui_lang(langs);
+                            if listen.get().is_empty() {
+                                t(lang, "监听尚未开始", "Not listening").into()
+                            } else {
+                                format!("{} {}", t(lang, "监听", "Listening"), listen.get())
+                            }
+                        }
+                    })
+                    .number_of_lines(1)
+                    .text_size(px(11.5))
+                    .text_color(fg_muted()),
+                ),
+        )
+        .child(when(
+            move || !lan_url.get().is_empty(),
+            move || cert_qr(listen, lan_url, lan_choice, lan_addrs, qr_path),
+        ))
+        .child(when(
+            move || !running.get(),
+            move || port_field(port_text, port_controls.clone()),
+        ))
+        .child(when(
+            move || !running.get(),
+            move || lan_toggle(listen_all, lan_controls.clone()),
+        ))
+        .child(import_field(import_path, import_controls))
+        .child(
+            mono({
+                let langs = ui_langs();
+                move || {
+                    format!(
+                        "{} · {} {}",
+                        memory.get(),
+                        t(ui_lang(langs), "已丢弃", "dropped"),
+                        dropped.get()
+                    )
+                }
+            })
+                .flex_shrink_0()
+                .text_size(px(11.5))
+                .text_color(fg_muted()),
+        )
+}
+
+fn cert_qr(
+    listen: Signal<String>,
+    lan_url: Signal<String>,
+    lan_choice: Signal<String>,
+    lan_addrs: Signal<Vec<LanAddr>>,
+    qr_path: Signal<String>,
+) -> impl IntoElement {
+    popover()
+        .placement(Placement::Top)
+        .align(Align::End)
+        .offset(px(6.0))
+        .margin(px(8.0))
+        .trigger(qr_trigger(lan_choice))
+        .child(qr_panel(
+            listen, lan_url, lan_choice, lan_addrs, qr_path,
+        ))
+}
+
+fn qr_trigger(choice: Signal<String>) -> impl IntoElement {
+    view()
+        .h(px(22.0))
+        .px_2()
+        .flex_shrink_0()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .rounded(px(6.0))
+        .border_1()
+        .border_color(accent_blue_border())
+        .bg(bg_control())
+        .hover(|style| style.bg(bg_control_hover()))
+        .cursor(Cursor::Pointer)
+        .active(|style| style.opacity(0.75))
+        .child(
+            view()
+                .w(px(6.0))
+                .h(px(6.0))
+                .rounded(px(99.0))
+                .bg(accent_blue()),
+        )
+        .child(
+            text({
+                let langs = ui_langs();
+                move || -> SharedString {
+                    format!("{} {}", t(ui_lang(langs), "扫码", "Scan"), choice.get()).into()
+                }
+            })
+                .number_of_lines(1)
+                .text_size(px(11.5))
+                .text_color(fg_secondary()),
+        )
+}
+
+fn qr_panel(
+    listen: Signal<String>,
+    lan_url: Signal<String>,
+    lan_choice: Signal<String>,
+    lan_addrs: Signal<Vec<LanAddr>>,
+    qr_path: Signal<String>,
+) -> impl IntoElement {
+    view()
+        .w(px(300.0))
+        .p_3()
+        .gap_2()
+        .items_center()
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(border_strong())
+        .bg(bg_card())
+        .shadow_md()
+        .child(
+            text(tr("手机安装页", "Phone install page"))
+                .text_size(px(12.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(fg_secondary()),
+        )
+        .child(
+            view()
+                .w_full()
+                .p_2()
+                .rounded(px(6.0))
+                .bg(bg_code())
+                .border_1()
+                .border_color(border_strong())
+                .child(
+                    mono(move || lan_url.get())
+                        .text_size(px(12.0))
+                        .text_color(fg_primary()),
+                ),
+        )
+        .child(
+            text({
+                let langs = ui_langs();
+                move || -> SharedString {
+                    let lang = ui_lang(langs);
+                    let ip = lan_choice.get();
+                    let name = lan_addrs.with(|addrs| {
+                        addrs
+                            .iter()
+                            .find(|addr| addr.ip.to_string() == ip)
+                            .map(|addr| addr.name.clone())
+                            .unwrap_or_default()
+                    });
+                    if lan_addrs.with(Vec::len) > 1 {
+                        t(
+                            lang,
+                            "点下面换一张网卡。手机要和这个地址在同一网络。",
+                            "Pick a network below. The phone must be on that network.",
+                        )
+                        .into()
+                    } else if name.is_empty() {
+                        t(
+                            lang,
+                            "手机要能访问这个地址。",
+                            "The phone must be able to reach this address.",
+                        )
+                        .into()
+                    } else if lang == Lang::Zh {
+                        format!("网卡 {name}。手机要和它在同一网络。").into()
+                    } else {
+                        format!("Interface {name}. The phone must be on that network.").into()
+                    }
+                }
+            })
+            .text_size(px(12.0))
+            .text_color(fg_muted()),
+        )
+        .child(when(
+            move || lan_addrs.with(Vec::len) > 1,
+            move || {
+                view().w_full().gap_1().child(each(
+                    move || lan_addrs.get(),
+                    |addr: &LanAddr| addr.ip.to_string(),
+                    move |addr, _index| {
+                        lan_choice_row(addr, listen, lan_addrs, lan_choice, lan_url, qr_path)
+                    },
+                ))
+            },
+        ))
+        .child(when(
+            move || !qr_path.get().is_empty(),
+            move || {
+                view()
+                    .p_2()
+                    .rounded(px(8.0))
+                    .bg(AdaptiveColor::rgb(0xffffff, 0xffffff))
+                    .child(image(move || qr_path.get()).w(px(168.0)).h(px(168.0)))
+            },
+        ))
+        .child(when(
+            move || qr_path.get().is_empty(),
+            move || muted_line(tr("二维码没有生成", "QR code was not generated")),
+        ))
+}
+
+fn lan_choice_row(
+    addr: ReadSignal<LanAddr>,
+    listen: Signal<String>,
+    lan_addrs: Signal<Vec<LanAddr>>,
+    lan_choice: Signal<String>,
+    lan_url: Signal<String>,
+    qr_path: Signal<String>,
+) -> impl IntoElement {
+    let picked = move || lan_choice.get() == addr.with(|item| item.ip.to_string());
+    let picked_bg = picked.clone();
+    let picked_dot = picked.clone();
+    view()
+        .h(px(28.0))
+        .px_2()
+        .w_full()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .rounded(px(6.0))
+        .border_1()
+        .border_color(move || {
+            if picked() {
+                accent_blue_border()
+            } else {
+                border_control()
+            }
+        })
+        .bg(move || {
+            if picked_bg() {
+                accent_blue_soft()
+            } else {
+                bg_control()
+            }
+        })
+        .cursor(Cursor::Pointer)
+        .on_press(move || {
+            let ip = addr.with(|item| item.ip.to_string());
+            publish_lan(
+                &listen.get(),
+                &ip,
+                lan_addrs,
+                lan_choice,
+                lan_url,
+                qr_path,
+            );
+        })
+        .child(
+            view()
+                .w(px(6.0))
+                .h(px(6.0))
+                .rounded(px(99.0))
+                .flex_shrink_0()
+                .bg(move || {
+                    if picked_dot() {
+                        accent_blue()
+                    } else {
+                        fg_muted()
+                    }
+                }),
+        )
+        .child(
+            mono(move || -> SharedString {
+                let item = addr.get();
+                if item.name.is_empty() {
+                    item.ip.to_string().into()
+                } else {
+                    format!("{}  {}", item.name, item.ip).into()
+                }
+            })
+            .number_of_lines(1)
+            .text_size(px(12.0))
+            .text_color(fg_primary()),
+        )
+}
+
+fn port_field(port_text: Signal<String>, controls: Arc<Controls>) -> impl IntoElement {
+    view()
+        .flex_row()
+        .items_center()
+        .gap_1p5()
+        .flex_shrink_0()
+        .child(
+            text(tr("端口", "Port"))
+                .text_size(px(11.5))
+                .text_color(fg_muted()),
+        )
+        .child(
+            input()
+                .value(port_text)
+                .placeholder(present::DEFAULT_PORT.to_string())
+                .placeholder_color(move || color(fg_muted()))
+                .w(px(72.0))
+                .h(px(22.0))
+                .px_2()
+                .rounded(px(6.0))
+                .bg(bg_code())
+                .border_1()
+                .border_color(border_control())
+                .focus(|style| style.border_color(accent_blue()))
+                .text_size(px(12.0))
+                .text_color(fg_primary())
+                .on_change(move |text: &str| {
+                    port_text.set(text.to_string());
+                    if let Some(port) = present::parse_port(text) {
+                        set_port(&controls.listen_port, port);
+                        if let Err(err) = store_listen_port(port) {
+                            set_status(
+                                &controls,
+                                StatusMsg::PrefUnsaved {
+                                    name: PrefName::Port,
+                                    err: err.to_string(),
+                                },
+                            );
+                        }
+                    }
+                }),
+        )
+}
+
+fn control_text(label: impl IntoReactive<SharedString>) -> Text {
+    text(label)
+        .number_of_lines(1)
+        .text_size(px(CONTROL_TEXT))
+        .font_weight(FontWeight::MEDIUM)
+}
+
+fn toolbar_menu(
+    installed: Signal<bool>,
+    proxy_on: Signal<bool>,
+    install: Rc<impl Fn() + 'static>,
+    remove: Rc<impl Fn() + 'static>,
+    toggle_proxy: impl Fn() + 'static,
+    export_har: impl Fn() + 'static,
+) -> impl IntoElement {
+    menu()
+        .placement(Placement::Bottom)
+        .align(Align::End)
+        .offset(px(6.0))
+        .margin(px(8.0))
+        .trigger(more_trigger(installed, proxy_on))
+        .child(more_menu(
+            installed,
+            proxy_on,
+            install,
+            remove,
+            toggle_proxy,
+            export_har,
+        ))
+}
+
+fn more_trigger(installed: Signal<bool>, proxy_on: Signal<bool>) -> impl IntoElement {
+    let dot_installed = installed;
+    let dot_proxy = proxy_on;
+    let label_proxy = proxy_on;
+    view()
+        .h(px(CONTROL_H))
+        .px_2p5()
+        .gap_1p5()
+        .flex_shrink_0()
+        .flex_row()
+        .items_center()
+        .rounded(px(CONTROL_RADIUS))
+        .border_1()
+        .border_color(move || {
+            if proxy_on.get() {
+                accent_blue_border()
+            } else {
+                border_control()
+            }
+        })
+        .bg(move || {
+            if proxy_on.get() {
+                accent_blue_soft()
+            } else {
+                bg_control()
+            }
+        })
+        .hover(|style| {
+            style.bg(move || {
+                if proxy_on.get() {
+                    accent_blue_soft()
+                } else {
+                    bg_control_hover()
+                }
+            })
+        })
+        .cursor(Cursor::Pointer)
+        .active(|style| style.opacity(0.75))
+        .child(when(
+            move || dot_proxy.get() || !dot_installed.get(),
+            move || {
+                view()
+                    .w(px(6.0))
+                    .h(px(6.0))
+                    .rounded(px(99.0))
+                    .bg(move || {
+                        if dot_proxy.get() {
+                            accent_blue()
+                        } else {
+                            status_warn_fg()
+                        }
+                    })
+            },
+        ))
+        .child(
+            control_text(tr("更多", "More")).text_color(move || {
+                if label_proxy.get() {
+                    accent_blue_text()
+                } else {
+                    fg_secondary()
+                }
+            }),
+        )
+        .child(glyph(
+            || Glyph::Chevron,
+            move || {
+                color(if label_proxy.get() {
+                    accent_blue_text()
+                } else {
+                    fg_secondary()
+                })
+            },
+        ))
+}
+
+fn more_menu(
+    installed: Signal<bool>,
+    proxy_on: Signal<bool>,
+    install: Rc<impl Fn() + 'static>,
+    remove: Rc<impl Fn() + 'static>,
+    toggle_proxy: impl Fn() + 'static,
+    export_har: impl Fn() + 'static,
+) -> impl IntoElement {
+    view()
+        .w(px(248.0))
+        .p_1()
+        .gap_0p5()
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(border_strong())
+        .bg(bg_card())
+        .shadow_md()
+        .child(menu_action(Glyph::Download, tr("导出", "Export"), export_har))
+        .child(menu_rule())
+        .child(proxy_menu_item(proxy_on, toggle_proxy))
+        .child(menu_rule())
+        .child(cert_menu_status(installed))
+        .child(when(
+            move || installed.get(),
+            move || {
+                let remove = remove.clone();
+                menu_action(Glyph::Badge, tr("移除证书", "Remove certificate"), move || {
+                    remove.as_ref()()
+                })
+            },
+        ).otherwise(move || {
+            let install = install.clone();
+            menu_action(Glyph::Badge, tr("安装证书", "Install certificate"), move || {
+                install.as_ref()()
+            })
+        }))
+        .child(menu_rule())
+        .child(lang_choice(None, "跟随系统", "Follow system"))
+        .child(lang_choice(Some(Lang::Zh), "中文", "中文"))
+        .child(lang_choice(Some(Lang::En), "English", "English"))
+}
+
+fn menu_action(
+    icon: Glyph,
+    label: impl IntoReactive<SharedString>,
+    on_select: impl Fn() + 'static,
+) -> impl IntoElement {
+    menu_item()
+        .on_select(on_select)
+        .h(px(32.0))
+        .px_2p5()
+        .gap_2()
+        .rounded(px(6.0))
+        .flex_row()
+        .items_center()
+        .hover(|style| style.bg(bg_control_hover()))
+        .active(|style| style.opacity(0.75))
+        .cursor(Cursor::Pointer)
+        .child(glyph(move || icon, || color(fg_secondary())))
+        .child(control_text(label).text_color(fg_secondary()))
+}
+
+fn lang_choice(choice: Option<Lang>, zh: &'static str, en: &'static str) -> impl IntoElement {
+    let langs = ui_langs();
+    let mark = langs;
+    menu_item()
+        .on_select(move || {
+            langs.set(choice);
+            let _ = store_lang_pref(choice);
+        })
+        .h(px(32.0))
+        .px_2p5()
+        .gap_2()
+        .rounded(px(6.0))
+        .flex_row()
+        .items_center()
+        .hover(|style| style.bg(bg_control_hover()))
+        .active(|style| style.opacity(0.75))
+        .cursor(Cursor::Pointer)
+        .child(
+            canvas(move || {
+                let paint = color(if mark.get() == choice {
+                    accent_blue()
+                } else {
+                    bg_card()
+                });
+                Painter::new().fill_color(paint).fill_svg(
+                    "M6.5 6.5 m-3 0 a3 3 0 1 0 6 0 a3 3 0 1 0 -6 0",
+                )
+            })
+            .w(px(13.0))
+            .h(px(13.0))
+            .flex_shrink_0(),
+        )
+        .child(
+            control_text(tr(zh, en)).text_color(move || {
+                if mark.get() == choice {
+                    accent_blue_text()
+                } else {
+                    fg_secondary()
+                }
+            }),
+        )
+}
+
+fn proxy_menu_item(on: Signal<bool>, toggle: impl Fn() + 'static) -> impl IntoElement {
+    let bg_on = on;
+    let hover_on = on;
+    let dot_on = on;
+    let label_on = on;
+    let state_on = on;
+    menu_item()
+        .on_select(toggle)
+        .h(px(32.0))
+        .px_2p5()
+        .gap_1p5()
+        .rounded(px(6.0))
+        .flex_row()
+        .items_center()
+        .bg(move || {
+            if bg_on.get() {
+                accent_blue_soft()
+            } else {
+                bg_card()
+            }
+        })
+        .hover(|style| {
+            style.bg(move || {
+                if hover_on.get() {
+                    accent_blue_soft()
+                } else {
+                    bg_control_hover()
+                }
+            })
+        })
+        .active(|style| style.opacity(0.75))
+        .cursor(Cursor::Pointer)
+        .child(glyph(
+            || Glyph::Shield,
+            move || {
+                color(if dot_on.get() {
+                    accent_blue_text()
+                } else {
+                    fg_secondary()
+                })
+            },
+        ))
+        .child(
+            view()
+                .w(px(6.0))
+                .h(px(6.0))
+                .rounded(px(99.0))
+                .bg(move || {
+                    if dot_on.get() {
+                        accent_blue()
+                    } else {
+                        fg_muted()
+                    }
+                }),
+        )
+        .child(
+            control_text(tr("系统代理", "System proxy"))
+                .flex_1()
+                .text_color(move || {
+                    if label_on.get() {
+                        accent_blue_text()
+                    } else {
+                        fg_secondary()
+                    }
+                }),
+        )
+        .child(
+            control_text({
+                let langs = ui_langs();
+                move || -> SharedString {
+                    if state_on.get() {
+                        t(ui_lang(langs), "开", "On").into()
+                    } else {
+                        t(ui_lang(langs), "关", "Off").into()
+                    }
+                }
+            })
+            .text_color(move || {
+                if state_on.get() {
+                    accent_blue_text()
+                } else {
+                    fg_muted()
+                }
+            }),
+        )
+}
+
+fn cert_menu_status(installed: Signal<bool>) -> impl IntoElement {
+    let dot_installed = installed;
+    view()
+        .h(px(28.0))
+        .px_2p5()
+        .gap_1p5()
+        .flex_row()
+        .items_center()
+        .child(glyph(|| Glyph::Badge, || color(fg_muted())))
+        .child(
+            view()
+                .w(px(6.0))
+                .h(px(6.0))
+                .rounded(px(99.0))
+                .bg(move || {
+                    if dot_installed.get() {
+                        status_ok_fg()
+                    } else {
+                        status_warn_fg()
+                    }
+                }),
+        )
+        .child(
+            control_text({
+                let langs = ui_langs();
+                move || -> SharedString {
+                    if installed.get() {
+                        t(ui_lang(langs), "证书已安装", "Certificate installed").into()
+                    } else {
+                        t(ui_lang(langs), "证书未安装", "Certificate missing").into()
+                    }
+                }
+            })
+            .text_color(fg_muted()),
+        )
+}
+
+fn menu_rule() -> impl IntoElement {
+    view()
+        .h(px(1.0))
+        .mx(px(6.0))
+        .bg(border_strong())
+}
+
+fn toolbar_button(on_press: impl Fn() + 'static) -> impl IntoElement {
+    view()
+        .h(px(CONTROL_H))
+        .px_2p5()
+        .gap_1p5()
+        .flex_shrink_0()
+        .flex_row()
+        .items_center()
+        .rounded(px(CONTROL_RADIUS))
+        .border_1()
+        .border_color(border_control())
+        .bg(bg_control())
+        .hover(|style| style.bg(bg_control_hover()))
         .cursor(Cursor::Pointer)
         .active(|style| style.opacity(0.75))
         .on_press(on_press)
-        .child(
-            text(label)
-                .text_size(px(13.0))
-                .text_color(move || theme().secondary_foreground),
-        )
+        .child(glyph(|| Glyph::Trash, || color(fg_secondary())))
+        .child(control_text(tr("清空", "Clear")).text_color(fg_secondary()))
 }
 
 fn primary_button(
     label: impl IntoReactive<SharedString>,
-    danger: impl Fn() -> bool + 'static,
+    danger: impl Fn() -> bool + 'static + Clone,
     on_press: impl Fn() + 'static,
 ) -> impl IntoElement {
+    let danger_bg = danger.clone();
+    let danger_hover = danger.clone();
+    let icon_state = danger;
     view()
-        .px_3()
-        .py_2()
-        .rounded(px(8.0))
+        .h(px(CONTROL_H))
+        .px_3p5()
+        .gap_1p5()
+        .flex_shrink_0()
+        .flex_row()
+        .items_center()
+        .rounded(px(CONTROL_RADIUS))
         .bg(move || {
-            if danger() {
-                theme().destructive
+            if danger_bg() {
+                danger_button_bg()
             } else {
-                theme().primary
+                accent_blue()
             }
         })
+        .hover(|style| {
+            style.bg(move || {
+                if danger_hover() {
+                    danger_button_hover()
+                } else {
+                    accent_blue_hover()
+                }
+            })
+        })
         .cursor(Cursor::Pointer)
-        .active(|style| style.opacity(0.75))
+        .active(|style| style.opacity(0.8))
         .on_press(on_press)
+        .child(glyph(
+            move || {
+                if icon_state() {
+                    Glyph::Stop
+                } else {
+                    Glyph::Play
+                }
+            },
+            || white(),
+        ))
         .child(
-            text(label)
-                .text_size(px(13.0))
+            control_text(label)
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(move || theme().primary_foreground),
+                .text_color(white()),
         )
 }
 
@@ -697,38 +2505,132 @@ fn row_lines(hub: &Hub, filter: &str) -> Vec<RowLine> {
     })
 }
 
-fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>) {
+fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang) {
     let Some(id) = id else {
         shown.phase.set(Phase::Empty);
+        shown.preview.set(String::new());
         return;
     };
     let snapshot = hub.with_session(|session| session.get(id).cloned());
     let Some(flow) = snapshot else {
         shown.phase.set(Phase::Gone);
+        shown.preview.set(String::new());
         return;
     };
-    let request = body_text(
+    let messages = message_lines(&flow, lang);
+    let pretty = shown.pretty.get();
+    let request_type = present::content_type(&flow.request_headers);
+    let response_type = present::content_type(&flow.response_headers);
+    let request = display_body(
         &flow.request_body,
         flow.request_truncated,
         flow.request_encoding_error.as_deref(),
+        request_type,
+        pretty,
+        lang,
     );
-    let response = body_text(
+    let mut response = display_body(
         &flow.response_body,
         flow.response_truncated,
         flow.response_encoding_error.as_deref(),
+        response_type,
+        pretty,
+        lang,
+    );
+    let preview = image_preview_path(id, &flow);
+    if !preview.is_empty() {
+        if !response.note.is_empty() {
+            response.note.push('\n');
+        }
+        let bytes = flow.response_body.len();
+        response.note.push_str(&match lang {
+            Lang::Zh => format!("图片预览见上方，共 {bytes} 字节。"),
+            Lang::En => format!("Image preview is above, {bytes} bytes."),
+        });
+        response.text.clear();
+    }
+    let ttfb = flow
+        .response_at
+        .and_then(|at| at.duration_since(flow.started).ok());
+    let total = flow
+        .finished_at
+        .and_then(|at| at.duration_since(flow.started).ok());
+    shown.metrics.set(present::format_timing(
+        flow.started,
+        ttfb,
+        total,
+        flow.request_bytes,
+        flow.response_bytes,
+        lang,
+    ));
+    shown.query.set(
+        present::query_pairs(&flow.url)
+            .into_iter()
+            .enumerate()
+            .map(|(index, (name, value))| HeaderLine {
+                key: index as u32,
+                name,
+                value,
+            })
+            .collect(),
     );
     shown.method.set(flow.method);
     shown.url.set(flow.url);
     shown.protocol.set(flow.protocol.label().to_string());
     shown.status.set(flow.status);
-    shown.error.set(flow.error.unwrap_or_default());
+    shown.error.set(flow.error.clone().unwrap_or_default());
     shown.request_headers.set(header_lines(&flow.request_headers));
     shown.response_headers.set(header_lines(&flow.response_headers));
     shown.request_body.set(request.text);
     shown.response_body.set(response.text);
     shown.request_note.set(request.note);
     shown.response_note.set(response.note);
+    shown.preview.set(preview);
+    shown.messages.set(messages);
     shown.phase.set(Phase::Ready);
+}
+
+fn message_lines(flow: &crate::session::Flow, lang: Lang) -> Vec<HeaderLine> {
+    if !flow.messages.is_empty() {
+        let mut lines = flow
+            .messages
+            .iter()
+            .enumerate()
+            .map(|(index, message)| {
+                let who = direction_name(lang, matches!(message.direction, Direction::Request));
+                HeaderLine {
+                    key: index as u32,
+                    name: format!("{who} {}", ws_kind(lang, &message.kind)),
+                    value: message.text.clone(),
+                }
+            })
+            .collect::<Vec<_>>();
+        if flow.messages_truncated {
+            let key = lines.len() as u32;
+            lines.push(HeaderLine {
+                key,
+                name: "…".into(),
+                value: t(lang, "消息已截断", "Messages truncated").into(),
+            });
+        }
+        return lines;
+    }
+    let kind = present::content_type(&flow.response_headers).unwrap_or("");
+    if !kind.to_ascii_lowercase().contains("event-stream") {
+        return Vec::new();
+    }
+    let Ok(text) = std::str::from_utf8(&flow.response_body) else {
+        return Vec::new();
+    };
+    present::sse_events(text)
+        .into_iter()
+        .enumerate()
+        .map(|(index, event)| HeaderLine {
+            key: index as u32,
+            name: event.event,
+            value: event.data,
+        })
+        .collect()
 }
 
 fn header_lines(headers: &[(String, String)]) -> Vec<HeaderLine> {
@@ -748,10 +2650,52 @@ struct BodyText {
     note: String,
 }
 
-fn body_text(body: &[u8], truncated: bool, encoding_error: Option<&str>) -> BodyText {
+fn display_body(
+    body: &[u8],
+    truncated: bool,
+    encoding_error: Option<&str>,
+    content_type: Option<&str>,
+    pretty: bool,
+    lang: Lang,
+) -> BodyText {
+    let mut presented = body_text(body, truncated, encoding_error, lang);
+    if pretty {
+        apply_pretty(&mut presented, body, content_type, lang);
+    }
+    presented
+}
+
+fn apply_pretty(presented: &mut BodyText, body: &[u8], content_type: Option<&str>, lang: Lang) {
+    let Ok(text) = std::str::from_utf8(body) else {
+        return;
+    };
+    let pretty = present::pretty_body(content_type, text);
+    const DISPLAY_CAP: usize = 256 * 1024;
+    if pretty.len() > DISPLAY_CAP {
+        let end = pretty.floor_char_boundary(DISPLAY_CAP);
+        presented.text = pretty[..end].to_string();
+        let marker = t(lang, "界面只显示", "Showing only");
+        if !presented.note.contains(marker) {
+            if !presented.note.is_empty() {
+                presented.note.push('\n');
+            }
+            presented
+                .note
+                .push_str(t(lang, "界面只显示前 256KB。", "Showing only the first 256 KB."));
+        }
+    } else {
+        presented.text = pretty;
+    }
+}
+
+fn body_text(body: &[u8], truncated: bool, encoding_error: Option<&str>, lang: Lang) -> BodyText {
     let mut note = String::new();
     if let Some(error) = encoding_error {
-        note.push_str("解压失败，以下是原始字节。");
+        note.push_str(t(
+            lang,
+            "解压失败，以下是原始字节。",
+            "Decompression failed; showing the raw bytes. ",
+        ));
         note.push_str(error);
     }
     let text = if body.is_empty() {
@@ -762,10 +2706,11 @@ fn body_text(body: &[u8], truncated: bool, encoding_error: Option<&str>) -> Body
             if !note.is_empty() {
                 note.push('\n');
             }
-            note.push_str(&format!(
-                "界面只显示前 256KB，记录里还有 {} 字节。",
-                text.len() - DISPLAY_CAP
-            ));
+            let rest = text.len() - DISPLAY_CAP;
+            note.push_str(&match lang {
+                Lang::Zh => format!("界面只显示前 256KB，记录里还有 {rest} 字节。"),
+                Lang::En => format!("Showing only the first 256 KB; {rest} more bytes are stored."),
+            });
             text[..DISPLAY_CAP].to_string()
         } else {
             text.to_string()
@@ -784,7 +2729,11 @@ fn body_text(body: &[u8], truncated: bool, encoding_error: Option<&str>) -> Body
             if !note.is_empty() {
                 note.push('\n');
             }
-            note.push_str(&format!("十六进制只显示前 {shown} 字节，共 {} 字节。", body.len()));
+            let total = body.len();
+            note.push_str(&match lang {
+                Lang::Zh => format!("十六进制只显示前 {shown} 字节，共 {total} 字节。"),
+                Lang::En => format!("Hex shows the first {shown} of {total} bytes."),
+            });
         }
         out
     };
@@ -792,21 +2741,33 @@ fn body_text(body: &[u8], truncated: bool, encoding_error: Option<&str>) -> Body
         if !note.is_empty() {
             note.push('\n');
         }
-        note.push_str("body 已超过 1 MB，记录被截断，转发仍继续。");
+        note.push_str(t(
+            lang,
+            "body 已超过 1 MB，记录被截断，转发仍继续。",
+            "The body passed 1 MB. The record is truncated; forwarding continued.",
+        ));
     }
     BodyText { text, note }
 }
 
 fn open_controls() -> Arc<Controls> {
     match Ca::open_default().and_then(|ca| Hub::new(Arc::new(ca))) {
-        Ok(hub) => Arc::new(Controls {
-            hub: Arc::new(hub),
-            capture: Mutex::new(None),
-            status: Mutex::new("未开始".into()),
-            running: Mutex::new(false),
-            listen: Mutex::new(String::new()),
-            ca_label: Mutex::new(ca_text()),
-        }),
+        Ok(hub) => {
+            apply_saved_prefs(&hub);
+            Arc::new(Controls {
+                hub: Arc::new(hub),
+                capture: Mutex::new(None),
+                status: Mutex::new(StatusMsg::Idle),
+                running: Mutex::new(false),
+                listen: Mutex::new(String::new()),
+                listen_port: Mutex::new(load_listen_port()),
+                ca_installed: Mutex::new(ca::is_installed()),
+                use_system_proxy: Mutex::new(load_use_system_proxy()),
+                proxy_applied: Mutex::new(false),
+                ops: Mutex::new(()),
+                listen_all: Mutex::new(load_listen_all()),
+            })
+        }
         Err(err) => {
             // A hub is required for the view. If the CA cannot be created,
             // build one in a temp directory so the window can still explain
@@ -814,23 +2775,21 @@ fn open_controls() -> Arc<Controls> {
             let dir = std::env::temp_dir().join("zniff-fallback");
             let ca = Arc::new(Ca::open(&dir).expect("临时证书目录"));
             let hub = Hub::new(ca).expect("hub");
+            apply_saved_prefs(&hub);
             Arc::new(Controls {
                 hub: Arc::new(hub),
                 capture: Mutex::new(None),
-                status: Mutex::new(format!("证书目录不可用: {err:#}")),
+                status: Mutex::new(StatusMsg::CaUnavailable(format!("{err:#}"))),
                 running: Mutex::new(false),
                 listen: Mutex::new(String::new()),
-                ca_label: Mutex::new("证书未安装".into()),
+                listen_port: Mutex::new(load_listen_port()),
+                ca_installed: Mutex::new(false),
+                use_system_proxy: Mutex::new(load_use_system_proxy()),
+                proxy_applied: Mutex::new(false),
+                ops: Mutex::new(()),
+                listen_all: Mutex::new(load_listen_all()),
             })
         }
-    }
-}
-
-fn ca_text() -> String {
-    if ca::is_installed() {
-        "证书已安装".into()
-    } else {
-        "证书未安装".into()
     }
 }
 
@@ -838,8 +2797,11 @@ fn install_ca(controls: Arc<Controls>) {
     std::thread::spawn(move || {
         let ca = controls.hub.ca.clone();
         match ca::install(&ca) {
-            Ok(message) => set_ca(&controls, message),
-            Err(err) => set_ca(&controls, format!("安装失败: {err:#}")),
+            Ok(_) => set_ca_installed(&controls, true),
+            Err(err) => {
+                set_ca_installed(&controls, ca::is_installed());
+                set_status(&controls, StatusMsg::InstallFailed(format!("{err:#}")));
+            }
         }
     });
 }
@@ -848,14 +2810,32 @@ fn remove_ca(controls: Arc<Controls>) {
     std::thread::spawn(move || {
         let ca = controls.hub.ca.clone();
         match ca::remove(&ca) {
-            Ok(message) => set_ca(&controls, message),
-            Err(err) => set_ca(&controls, format!("移除失败: {err:#}")),
+            Ok(_) => set_ca_installed(&controls, ca::is_installed()),
+            Err(err) => {
+                set_ca_installed(&controls, ca::is_installed());
+                set_status(&controls, StatusMsg::RemoveFailed(format!("{err:#}")));
+            }
         }
     });
 }
 
-fn set_ca(controls: &Controls, message: String) {
-    *controls.ca_label.lock().unwrap_or_else(|err| err.into_inner()) = message;
+fn set_ca_installed(controls: &Controls, installed: bool) {
+    *controls
+        .ca_installed
+        .lock()
+        .unwrap_or_else(|err| err.into_inner()) = installed;
+}
+
+fn set_status(controls: &Controls, message: StatusMsg) {
+    *controls.status.lock().unwrap_or_else(|err| err.into_inner()) = message;
+}
+
+fn lock_status(controls: &Controls) -> StatusMsg {
+    controls
+        .status
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .clone()
 }
 
 fn toggle_capture(controls: Arc<Controls>) {
@@ -870,43 +2850,69 @@ fn toggle_capture(controls: Arc<Controls>) {
 }
 
 fn start_capture(controls: &Controls) {
-    {
-        let mut status = controls.status.lock().unwrap_or_else(|err| err.into_inner());
-        *status = "正在启动代理…".into();
+    let _ops = lock_ops(controls);
+    if lock_bool(&controls.running) {
+        return;
     }
-    let capture = match Capture::spawn(controls.hub.clone()) {
+    set_status(controls, StatusMsg::Starting);
+    let port = lock_port(&controls.listen_port);
+    let ip = if lock_bool(&controls.listen_all) {
+        [0, 0, 0, 0]
+    } else {
+        [127, 0, 0, 1]
+    };
+    let addr = SocketAddr::from((ip, port));
+    let capture = match Capture::spawn(controls.hub.clone(), addr) {
         Ok(capture) => capture,
         Err(err) => {
-            *controls.status.lock().unwrap_or_else(|err| err.into_inner()) =
-                format!("代理没有起来: {err:#}");
+            set_status(
+                controls,
+                StatusMsg::BindFailed {
+                    port,
+                    err: format!("{err:#}"),
+                },
+            );
             return;
         }
     };
     let port = capture.addr.port();
-    *controls.listen.lock().unwrap_or_else(|err| err.into_inner()) =
-        capture.addr.to_string();
-    match sysproxy::enable(port) {
-        Ok(sysproxy::EnableOutcome::Applied) => {
-            *controls.status.lock().unwrap_or_else(|err| err.into_inner()) =
-                format!("抓包中 · 127.0.0.1:{port}");
-            *controls.running.lock().unwrap_or_else(|err| err.into_inner()) = true;
-            *controls.capture.lock().unwrap_or_else(|err| err.into_inner()) = Some(capture);
-        }
-        Ok(sysproxy::EnableOutcome::Manual { reason }) => {
-            *controls.status.lock().unwrap_or_else(|err| err.into_inner()) = reason;
-            *controls.running.lock().unwrap_or_else(|err| err.into_inner()) = true;
-            *controls.capture.lock().unwrap_or_else(|err| err.into_inner()) = Some(capture);
-        }
-        Err(err) => {
-            capture.stop();
-            *controls.listen.lock().unwrap_or_else(|err| err.into_inner()) = String::new();
-            *controls.status.lock().unwrap_or_else(|err| err.into_inner()) =
-                format!("系统代理没有改成: {err:#}");
-        }
+    set_port(&controls.listen_port, port);
+    let remembered = store_listen_port(port);
+    *controls
+        .listen
+        .lock()
+        .unwrap_or_else(|err| err.into_inner()) = capture.addr.to_string();
+    *controls
+        .capture
+        .lock()
+        .unwrap_or_else(|err| err.into_inner()) = Some(capture);
+    set_bool(&controls.running, true);
+    if lock_bool(&controls.use_system_proxy) {
+        apply_system_proxy(controls);
+    } else {
+        set_bool(&controls.proxy_applied, false);
+        set_status(
+            controls,
+            StatusMsg::Listening {
+                port,
+                via_system_proxy: false,
+            },
+        );
+    }
+    if let Err(err) = remembered {
+        let base = lock_status(controls);
+        set_status(
+            controls,
+            StatusMsg::PortUnsaved {
+                base: Box::new(base),
+                err: err.to_string(),
+            },
+        );
     }
 }
 
 fn stop_capture(controls: &Controls) {
+    let _ops = lock_ops(controls);
     if let Some(capture) = controls
         .capture
         .lock()
@@ -915,20 +2921,1031 @@ fn stop_capture(controls: &Controls) {
     {
         capture.stop();
     }
+    *controls
+        .listen
+        .lock()
+        .unwrap_or_else(|err| err.into_inner()) = String::new();
+    let applied = lock_bool(&controls.proxy_applied);
+    set_bool(&controls.proxy_applied, false);
+    set_bool(&controls.running, false);
+    if !applied {
+        set_status(controls, StatusMsg::Stopped);
+        return;
+    }
     match sysproxy::disable() {
-        Ok(()) => {
-            *controls.status.lock().unwrap_or_else(|err| err.into_inner()) = "已停止，系统代理已恢复".into();
+        Ok(()) => set_status(controls, StatusMsg::StoppedRestored),
+        Err(err) => set_status(controls, StatusMsg::StopRestoreFailed(format!("{err:#}"))),
+    }
+}
+
+fn toggle_system_proxy(controls: Arc<Controls>) {
+    std::thread::spawn(move || {
+        let _ops = lock_ops(&controls);
+        let on = !lock_bool(&controls.use_system_proxy);
+        set_bool(&controls.use_system_proxy, on);
+        let running = lock_bool(&controls.running);
+        if let Err(err) = store_use_system_proxy(on) {
+            if !running {
+                set_status(&controls, StatusMsg::ProxyOptionUnsaved(err.to_string()));
+                return;
+            }
+        }
+        if !running {
+            return;
+        }
+        if on {
+            apply_system_proxy(&controls);
+        } else {
+            clear_system_proxy(&controls);
+        }
+    });
+}
+
+fn apply_system_proxy(controls: &Controls) {
+    let Some(port) = capture_port(controls) else {
+        set_bool(&controls.proxy_applied, false);
+        return;
+    };
+    match sysproxy::enable(port) {
+        Ok(sysproxy::EnableOutcome::Applied) => {
+            set_bool(&controls.proxy_applied, true);
+            set_status(
+                controls,
+                StatusMsg::Listening {
+                    port,
+                    via_system_proxy: true,
+                },
+            );
+        }
+        Ok(sysproxy::EnableOutcome::Manual { reason }) => {
+            set_bool(&controls.proxy_applied, false);
+            set_status(controls, StatusMsg::ProxyManual(reason));
         }
         Err(err) => {
-            *controls.status.lock().unwrap_or_else(|err| err.into_inner()) =
-                format!("代理已停，恢复系统代理失败: {err:#}");
+            set_bool(&controls.proxy_applied, false);
+            set_status(
+                controls,
+                StatusMsg::ProxyApplyFailed {
+                    port,
+                    err: format!("{err:#}"),
+                },
+            );
         }
     }
-    *controls.running.lock().unwrap_or_else(|err| err.into_inner()) = false;
+}
+
+fn clear_system_proxy(controls: &Controls) {
+    let port = capture_port(controls);
+    if !lock_bool(&controls.proxy_applied) {
+        if let Some(port) = port {
+            set_status(
+                controls,
+                StatusMsg::Listening {
+                    port,
+                    via_system_proxy: false,
+                },
+            );
+        }
+        return;
+    }
+    match sysproxy::disable() {
+        Ok(()) => {
+            set_bool(&controls.proxy_applied, false);
+            if let Some(port) = port {
+                set_status(
+                    controls,
+                    StatusMsg::Listening {
+                        port,
+                        via_system_proxy: false,
+                    },
+                );
+            }
+        }
+        Err(err) => {
+            set_bool(&controls.use_system_proxy, true);
+            let _ = store_use_system_proxy(true);
+            set_status(controls, StatusMsg::ProxyRestoreFailed(format!("{err:#}")));
+        }
+    }
+}
+
+fn capture_port(controls: &Controls) -> Option<u16> {
+    controls
+        .capture
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .as_ref()
+        .map(|capture| capture.addr.port())
+}
+
+fn lock_ops(controls: &Controls) -> std::sync::MutexGuard<'_, ()> {
+    controls.ops.lock().unwrap_or_else(|err| err.into_inner())
+}
+
+fn saved_config() -> config::Config {
+    config::load(&ca::data_dir())
+}
+
+fn save_config(change: impl FnOnce(&mut config::Config)) -> std::io::Result<()> {
+    config::update(&ca::data_dir(), change)
+}
+
+fn load_use_system_proxy() -> bool {
+    saved_config().use_system_proxy
+}
+
+fn store_use_system_proxy(on: bool) -> std::io::Result<()> {
+    save_config(|config| config.use_system_proxy = on)
+}
+
+fn load_listen_port() -> u16 {
+    saved_config().listen_port
+}
+
+fn store_listen_port(port: u16) -> std::io::Result<()> {
+    save_config(|config| config.listen_port = port)
+}
+
+fn lock_port(slot: &Mutex<u16>) -> u16 {
+    *slot.lock().unwrap_or_else(|err| err.into_inner())
+}
+
+fn set_port(slot: &Mutex<u16>, port: u16) {
+    *slot.lock().unwrap_or_else(|err| err.into_inner()) = port;
+}
+
+fn copy_part(controls: &Controls, id: Option<u64>, part: CopyPart) {
+    let Some(flow) = selected_flow(controls, id) else {
+        return;
+    };
+    let (text, note) = match part {
+        CopyPart::Url => (flow.url, StatusMsg::CopiedUrl),
+        CopyPart::Curl => {
+            let binary = !flow.request_body.is_empty()
+                && std::str::from_utf8(&flow.request_body).is_err();
+            (present::curl_command(&flow), StatusMsg::CopiedCurl { binary })
+        }
+        CopyPart::Request => bytes_for_copy(&flow.request_body, Side::Request),
+        CopyPart::Response => bytes_for_copy(&flow.response_body, Side::Response),
+    };
+    set_clipboard(text);
+    set_status(controls, note);
+}
+
+fn bytes_for_copy(body: &[u8], side: Side) -> (String, StatusMsg) {
+    if body.is_empty() {
+        return (String::new(), StatusMsg::EmptyCopy(side));
+    }
+    if let Ok(text) = std::str::from_utf8(body) {
+        (text.to_string(), StatusMsg::CopiedBody { side, hex: false })
+    } else {
+        (hex_dump(body), StatusMsg::CopiedBody { side, hex: true })
+    }
+}
+
+fn hex_dump(body: &[u8]) -> String {
+    let mut out = String::with_capacity(body.len() * 3);
+    for (index, byte) in body.iter().enumerate() {
+        if index > 0 && index % 16 == 0 {
+            out.push('\n');
+        }
+        out.push_str(&format!("{byte:02x} "));
+    }
+    out
+}
+
+fn export_response(controls: &Controls, id: Option<u64>) {
+    let Some(flow) = selected_flow(controls, id) else {
+        return;
+    };
+    if flow.response_body.is_empty() {
+        set_status(controls, StatusMsg::EmptyResponse);
+        return;
+    }
+    let ext = present::content_type(&flow.response_headers)
+        .and_then(present::image_extension)
+        .unwrap_or_else(|| body_extension(&flow.response_headers, &flow.response_body));
+    let dir = ca::data_dir().join("exports");
+    if let Err(err) = std::fs::create_dir_all(&dir) {
+        set_status(controls, StatusMsg::SaveFailed(err.to_string()));
+        return;
+    }
+    let path = dir.join(format!("{}.{}", flow.id, ext));
+    if let Err(err) = std::fs::write(&path, &flow.response_body) {
+        set_status(controls, StatusMsg::SaveFailed(err.to_string()));
+        return;
+    }
+    let text = path.display().to_string();
+    set_clipboard(text.clone());
+    set_status(controls, StatusMsg::Saved(text));
+}
+
+fn body_extension(headers: &[(String, String)], body: &[u8]) -> &'static str {
+    if let Some(kind) = present::content_type(headers) {
+        let kind = kind.to_ascii_lowercase();
+        if kind.contains("json") {
+            return "json";
+        }
+        if kind.contains("html") {
+            return "html";
+        }
+        if kind.contains("xml") {
+            return "xml";
+        }
+        if kind.contains("text/") || kind.contains("javascript") {
+            return "txt";
+        }
+    }
+    if std::str::from_utf8(body).is_ok() {
+        "txt"
+    } else {
+        "bin"
+    }
+}
+
+fn selected_flow(controls: &Controls, id: Option<u64>) -> Option<crate::session::Flow> {
+    let id = id?;
+    let flow = controls.hub.with_session(|session| session.get(id).cloned());
+    if flow.is_none() {
+        set_status(controls, StatusMsg::FlowGone);
+    }
+    flow
+}
+
+fn image_preview_path(id: u64, flow: &crate::session::Flow) -> String {
+    if flow.finished_at.is_none() || flow.response_body.is_empty() || flow.response_truncated {
+        return String::new();
+    }
+    let Some(ext) =
+        present::content_type(&flow.response_headers).and_then(present::image_extension)
+    else {
+        return String::new();
+    };
+    if ext == "svg" {
+        return String::new();
+    }
+    let dir = ca::data_dir().join("preview");
+    let path = dir.join(format!("{id}.{ext}"));
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if meta.len() == flow.response_body.len() as u64 {
+            return path.to_string_lossy().into_owned();
+        }
+    }
+    if std::fs::create_dir_all(&dir).is_err() || std::fs::write(&path, &flow.response_body).is_err()
+    {
+        return String::new();
+    }
+    path.to_string_lossy().into_owned()
+}
+
+fn lock_bool(slot: &Mutex<bool>) -> bool {
+    *slot.lock().unwrap_or_else(|err| err.into_inner())
+}
+
+fn set_bool(slot: &Mutex<bool>, value: bool) {
+    *slot.lock().unwrap_or_else(|err| err.into_inner()) = value;
 }
 
 fn lock_string(slot: &Mutex<String>) -> String {
     slot.lock().unwrap_or_else(|err| err.into_inner()).clone()
+}
+
+fn break_bar(
+    paused: Signal<Option<u64>>,
+    compose: Compose,
+    selected: Signal<Option<u64>>,
+    controls: Arc<Controls>,
+) -> impl IntoElement {
+    let release = controls.clone();
+    let drop_controls = controls;
+    view()
+        .h(px(40.0))
+        .px_3()
+        .gap_2()
+        .flex_row()
+        .items_center()
+        .bg(status_warn_bg())
+        .border_b_1()
+        .border_b_color(status_warn_fg())
+        .child(
+            text({
+                let langs = ui_langs();
+                move || -> SharedString {
+                    match paused.get() {
+                        Some(id) => format!(
+                            "{} #{id} {}",
+                            t(ui_lang(langs), "流量", "Flow"),
+                            t(ui_lang(langs), "停在断点", "is paused")
+                        )
+                        .into(),
+                        None => "".into(),
+                    }
+                }
+            })
+            .flex_1()
+            .number_of_lines(1)
+            .text_size(px(12.5))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(status_warn_fg()),
+        )
+        .child(detail_button(tr("放行", "Continue"), move || {
+            let edited = compose.composing.get() && selected.get() == paused.get();
+            let decision = if edited {
+                BreakDecision {
+                    drop: false,
+                    headers: Some(parse_header_text(&compose.headers.get())),
+                    body: Some(compose.body.get().into_bytes()),
+                }
+            } else {
+                BreakDecision {
+                    drop: false,
+                    headers: None,
+                    body: None,
+                }
+            };
+            if !release.hub.resolve_break(decision) {
+                set_status(&release, StatusMsg::BreakDone);
+            }
+        }))
+        .child(detail_button(tr("丢弃", "Drop"), move || {
+            let _ = drop_controls.hub.resolve_break(BreakDecision {
+                drop: true,
+                headers: None,
+                body: None,
+            });
+        }))
+}
+
+fn compose_box(compose: Compose) -> impl IntoElement {
+    view()
+        .gap_1p5()
+        .child(view().px_1().child(section_title(tr("编辑重发", "Edit and resend"))))
+        .child(
+            view()
+                .flex_row()
+                .gap_1p5()
+                .child(
+                    view()
+                        .w(px(88.0))
+                        .flex_shrink_0()
+                        .child(compose_input(compose.method, "POST", 30.0, false)),
+                )
+                .child(
+                    view()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .child(compose_input(compose.url, "https://example.com/path", 30.0, false)),
+                ),
+        )
+        .child(compose_input(
+            compose.headers,
+            tr("一行一个 Name: value", "One Name: value per line"),
+            88.0,
+            true,
+        ))
+        .child(compose_input(compose.body, "body", 72.0, true))
+}
+
+fn compose_input(
+    value: Signal<String>,
+    placeholder: impl IntoReactive<String> + 'static,
+    height: f32,
+    multiline: bool,
+) -> impl IntoElement {
+    input()
+        .value(value)
+        .placeholder(placeholder)
+        .placeholder_color(move || color(fg_muted()))
+        .w_full()
+        .h(px(height))
+        .px_2p5()
+        .rounded(px(7.0))
+        .bg(bg_code())
+        .border_1()
+        .border_color(border_control())
+        .focus(|style| style.border_color(accent_blue()))
+        .text_size(px(12.0))
+        .text_color(fg_primary())
+        .multiline(multiline)
+        .on_change(move |text: &str| value.set(text.to_string()))
+}
+
+fn lan_toggle(on: Signal<bool>, controls: Arc<Controls>) -> impl IntoElement {
+    view()
+        .h(px(22.0))
+        .px_2()
+        .flex_shrink_0()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .rounded(px(6.0))
+        .border_1()
+        .border_color(move || {
+            if on.get() {
+                accent_blue_border()
+            } else {
+                border_control()
+            }
+        })
+        .bg(bg_control())
+        .cursor(Cursor::Pointer)
+        .on_press(move || {
+            let next = !on.get();
+            on.set(next);
+            set_bool(&controls.listen_all, next);
+            if let Err(err) = store_listen_all(next) {
+                set_status(
+                    &controls,
+                    StatusMsg::PrefUnsaved {
+                        name: PrefName::Lan,
+                        err: err.to_string(),
+                    },
+                );
+            }
+        })
+        .child(
+            view()
+                .w(px(6.0))
+                .h(px(6.0))
+                .rounded(px(99.0))
+                .bg(move || if on.get() { status_ok_fg() } else { fg_muted() }),
+        )
+        .child(
+            text({
+                let langs = ui_langs();
+                move || -> SharedString {
+                    if on.get() {
+                        t(ui_lang(langs), "局域网 开", "LAN on").into()
+                    } else {
+                        t(ui_lang(langs), "局域网 关", "LAN off").into()
+                    }
+                }
+            })
+            .text_size(px(11.5))
+            .text_color(fg_secondary()),
+        )
+}
+
+fn import_field(path_text: Signal<String>, controls: Arc<Controls>) -> impl IntoElement {
+    let import_controls = controls;
+    view()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .flex_shrink_0()
+        .child(
+            input()
+                .value(path_text)
+                .placeholder("import.har")
+                .placeholder_color(move || color(fg_muted()))
+                .w(px(148.0))
+                .h(px(22.0))
+                .px_2()
+                .rounded(px(6.0))
+                .bg(bg_code())
+                .border_1()
+                .border_color(border_control())
+                .focus(|style| style.border_color(accent_blue()))
+                .text_size(px(11.5))
+                .text_color(fg_primary())
+                .on_change(move |text: &str| path_text.set(text.to_string())),
+        )
+        .child(
+            view()
+                .h(px(22.0))
+                .px_2()
+                .flex_row()
+                .items_center()
+                .rounded(px(6.0))
+                .border_1()
+                .border_color(border_control())
+                .bg(bg_control())
+                .cursor(Cursor::Pointer)
+                .on_press(move || import_har_file(&import_controls, &path_text.get()))
+                .child(
+                    text(tr("导入", "Import"))
+                        .text_size(px(11.5))
+                        .text_color(fg_secondary()),
+                ),
+        )
+}
+
+fn begin_compose(controls: &Controls, id: Option<u64>, compose: Compose) {
+    let Some(flow) = selected_flow(controls, id) else {
+        set_status(controls, StatusMsg::NeedSelection);
+        return;
+    };
+    let text = flow
+        .request_headers
+        .iter()
+        .map(|(name, value)| format!("{name}: {value}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    compose.method.set(flow.method);
+    compose.url.set(flow.url);
+    compose.headers.set(text);
+    compose.body.set(String::from_utf8_lossy(&flow.request_body).into_owned());
+    compose.composing.set(true);
+}
+
+fn reset_compose(compose: Compose) {
+    compose.composing.set(false);
+    compose.method.set(String::new());
+    compose.url.set(String::new());
+    compose.headers.set(String::new());
+    compose.body.set(String::new());
+}
+
+fn replay_flow(controls: &Arc<Controls>, id: Option<u64>, edit: ReplayOverride) {
+    let Some(id) = id else {
+        set_status(controls, StatusMsg::NeedSelection);
+        return;
+    };
+    let hub = controls.hub.clone();
+    let controls = Arc::clone(controls);
+    hub.replay_later(id, edit, move |result| match result {
+        Ok(new_id) => set_status(&controls, StatusMsg::Replayed(new_id)),
+        Err(err) => set_status(&controls, StatusMsg::ReplayFailed(format!("{err:#}"))),
+    });
+}
+
+fn parse_header_text(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() {
+                return None;
+            }
+            let (name, value) = line.split_once(':')?;
+            Some((name.trim().to_string(), value.trim().to_string()))
+        })
+        .collect()
+}
+
+fn export_har_file(controls: &Controls) {
+    let value = controls.hub.export_har();
+    let dir = ca::data_dir().join("exports");
+    if let Err(err) = std::fs::create_dir_all(&dir) {
+        set_status(controls, StatusMsg::ExportFailed(err.to_string()));
+        return;
+    }
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    let path = dir.join(format!("zniff-{secs}.har"));
+    let bytes = match serde_json::to_vec_pretty(&value) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            set_status(controls, StatusMsg::ExportFailed(err.to_string()));
+            return;
+        }
+    };
+    if let Err(err) = std::fs::write(&path, bytes) {
+        set_status(controls, StatusMsg::ExportFailed(err.to_string()));
+        return;
+    }
+    set_clipboard(path.display().to_string());
+    set_status(controls, StatusMsg::Exported(path.display().to_string()));
+}
+
+fn import_har_file(controls: &Controls, path_text: &str) {
+    let path = if path_text.trim().is_empty() {
+        ca::data_dir().join("import.har")
+    } else {
+        std::path::PathBuf::from(path_text.trim())
+    };
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            set_status(controls, StatusMsg::ImportFailed(err.to_string()));
+            return;
+        }
+    };
+    let value = match serde_json::from_slice::<serde_json::Value>(&bytes) {
+        Ok(value) => value,
+        Err(err) => {
+            set_status(controls, StatusMsg::ImportFailed(err.to_string()));
+            return;
+        }
+    };
+    let count = controls.hub.import_har(&value);
+    set_status(
+        controls,
+        StatusMsg::Imported {
+            count,
+            path: path.display().to_string(),
+        },
+    );
+}
+
+fn apply_saved_prefs(hub: &Hub) {
+    let saved = saved_config();
+    hub.set_bypass(&saved.bypass_hosts);
+    hub.set_rules(&saved.rules);
+    hub.set_upstream(&saved.upstream_proxy);
+}
+
+fn load_listen_all() -> bool {
+    saved_config().listen_all
+}
+
+fn store_listen_all(on: bool) -> std::io::Result<()> {
+    save_config(|config| config.listen_all = on)
+}
+
+fn load_lang_pref() -> Option<Lang> {
+    saved_config().language.as_deref().and_then(parse_pref)
+}
+
+fn store_lang_pref(lang: Option<Lang>) -> std::io::Result<()> {
+    save_config(|config| config.language = config::language_name(lang))
+}
+
+fn publish_lan(
+    listen: &str,
+    previous: &str,
+    addrs_out: Signal<Vec<LanAddr>>,
+    choice: Signal<String>,
+    url_out: Signal<String>,
+    qr_out: Signal<String>,
+) {
+    let host_ok = listen
+        .rsplit_once(':')
+        .is_some_and(|(host, _)| host == "0.0.0.0");
+    if !host_ok {
+        addrs_out.set(Vec::new());
+        url_out.set(String::new());
+        qr_out.set(String::new());
+        return;
+    }
+    let addrs = lan_addrs();
+    let chosen = choose_lan(&addrs, routed_v4(), previous);
+    let ip = chosen.as_ref().map(|addr| addr.ip);
+    addrs_out.set(addrs);
+    choice.set(ip.map(|ip| ip.to_string()).unwrap_or_default());
+    let url = cert_url(listen, ip);
+    url_out.set(url.clone());
+    qr_out.set(match ip {
+        Some(ip) if !url.is_empty() => write_ca_qr(&url, ip).unwrap_or_default(),
+        _ => String::new(),
+    });
+}
+
+fn cert_url(listen: &str, ip: Option<Ipv4Addr>) -> String {
+    let Some((host, port)) = listen.rsplit_once(':') else {
+        return String::new();
+    };
+    if host != "0.0.0.0" {
+        return String::new();
+    }
+    let Some(ip) = ip else {
+        return String::new();
+    };
+    let Ok(port) = port.parse::<u16>() else {
+        return String::new();
+    };
+    if port == 0 {
+        return String::new();
+    }
+    format!("http://{ip}:{port}/zniff")
+}
+
+/// Keeps `previous` when that address is still up. Otherwise the public
+/// route when it is a normal LAN address, then a physical interface ahead
+/// of a tunnel. `198.18.0.0/15` is the usual TUN fake-ip range.
+fn choose_lan(addrs: &[LanAddr], routed: Option<Ipv4Addr>, previous: &str) -> Option<LanAddr> {
+    if let Some(found) = addrs.iter().find(|addr| addr.ip.to_string() == previous) {
+        return Some(found.clone());
+    }
+    if let Some(ip) = routed
+        && let Some(found) = addrs.iter().find(|addr| addr.ip == ip && lan_rank(addr) < 9)
+    {
+        return Some(found.clone());
+    }
+    if let Some(found) = addrs.iter().filter(|addr| lan_rank(addr) < 9).min_by(|left, right| {
+        lan_rank(left)
+            .cmp(&lan_rank(right))
+            .then(left.name.cmp(&right.name))
+            .then(left.ip.octets().cmp(&right.ip.octets()))
+    }) {
+        return Some(found.clone());
+    }
+    addrs.first().cloned().or_else(|| {
+        routed
+            .filter(|ip| usable_v4(*ip) && !fake_ip(*ip))
+            .map(|ip| LanAddr {
+                name: String::new(),
+                ip,
+            })
+    })
+}
+
+fn lan_rank(addr: &LanAddr) -> u8 {
+    if tunnel_name(&addr.name) || fake_ip(addr.ip) {
+        return 9;
+    }
+    let name = addr.name.to_ascii_lowercase();
+    if name.starts_with("en")
+        || name.starts_with("eth")
+        || name.starts_with("wlan")
+        || name.starts_with("wl")
+    {
+        return 0;
+    }
+    if name.starts_with("bridge") {
+        return 2;
+    }
+    5
+}
+
+fn tunnel_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.starts_with("utun")
+        || name.starts_with("tun")
+        || name.starts_with("tap")
+        || name.starts_with("tailscale")
+        || name.starts_with("wg")
+}
+
+fn fake_ip(ip: Ipv4Addr) -> bool {
+    let [first, second, _, _] = ip.octets();
+    first == 198 && (second == 18 || second == 19)
+}
+
+fn usable_v4(ip: Ipv4Addr) -> bool {
+    !ip.is_unspecified()
+        && !ip.is_loopback()
+        && !ip.is_link_local()
+        && !ip.is_broadcast()
+        && !ip.is_multicast()
+}
+
+/// IPv4 of the interface the OS would use to reach the public internet.
+fn routed_v4() -> Option<Ipv4Addr> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("1.1.1.1:80").ok()?;
+    match socket.local_addr().ok()?.ip() {
+        std::net::IpAddr::V4(ip) if usable_v4(ip) => Some(ip),
+        _ => None,
+    }
+}
+
+fn lan_addrs() -> Vec<LanAddr> {
+    let mut addrs = list_v4_addrs();
+    addrs.sort_by(|left, right| {
+        lan_rank(left)
+            .cmp(&lan_rank(right))
+            .then(left.name.cmp(&right.name))
+            .then(left.ip.octets().cmp(&right.ip.octets()))
+    });
+    addrs
+}
+
+#[cfg(unix)]
+fn list_v4_addrs() -> Vec<LanAddr> {
+    let mut out = Vec::new();
+    unsafe {
+        let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
+        if libc::getifaddrs(&mut head) != 0 {
+            return out;
+        }
+        let mut cursor = head;
+        while !cursor.is_null() {
+            let ifa = &*cursor;
+            cursor = ifa.ifa_next;
+            if ifa.ifa_addr.is_null() {
+                continue;
+            }
+            let flags = ifa.ifa_flags as u32;
+            let up = libc::IFF_UP as u32;
+            let loopback = libc::IFF_LOOPBACK as u32;
+            if flags & up == 0 || flags & loopback != 0 {
+                continue;
+            }
+            if i32::from((*ifa.ifa_addr).sa_family) != libc::AF_INET {
+                continue;
+            }
+            let sa = &*(ifa.ifa_addr as *const libc::sockaddr_in);
+            let ip = Ipv4Addr::from(u32::from_be(sa.sin_addr.s_addr));
+            if !usable_v4(ip) || out.iter().any(|addr| addr.ip == ip) {
+                continue;
+            }
+            let name = if ifa.ifa_name.is_null() {
+                String::new()
+            } else {
+                std::ffi::CStr::from_ptr(ifa.ifa_name)
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            out.push(LanAddr { name, ip });
+        }
+        libc::freeifaddrs(head);
+    }
+    out
+}
+
+#[cfg(windows)]
+fn list_v4_addrs() -> Vec<LanAddr> {
+    use windows_sys::Win32::Foundation::ERROR_BUFFER_OVERFLOW;
+    use windows_sys::Win32::NetworkManagement::IpHelper::{GetAdaptersInfo, IP_ADAPTER_INFO};
+
+    let mut out = Vec::new();
+    unsafe {
+        let mut size = 16 * 1024u32;
+        let mut buf;
+        loop {
+            buf = vec![0u8; size as usize];
+            let result = GetAdaptersInfo(buf.as_mut_ptr() as *mut IP_ADAPTER_INFO, &mut size);
+            if result == 0 {
+                break;
+            }
+            if result != ERROR_BUFFER_OVERFLOW || size > 1024 * 1024 {
+                return out;
+            }
+        }
+        let mut cursor = buf.as_ptr() as *const IP_ADAPTER_INFO;
+        while !cursor.is_null() {
+            let adapter = &*cursor;
+            let name = c_array_to_string(&adapter.Description);
+            let mut address = &adapter.IpAddressList as *const windows_sys::Win32::NetworkManagement::IpHelper::IP_ADDR_STRING;
+            while !address.is_null() {
+                let item = &*address;
+                let text = c_array_to_string(&item.IpAddress.String);
+                if let Ok(ip) = text.parse::<Ipv4Addr>()
+                    && usable_v4(ip)
+                    && !out.iter().any(|addr| addr.ip == ip)
+                {
+                    out.push(LanAddr {
+                        name: name.clone(),
+                        ip,
+                    });
+                }
+                address = item.Next;
+            }
+            cursor = adapter.Next;
+        }
+    }
+    out
+}
+
+#[cfg(windows)]
+fn c_array_to_string(bytes: &[i8]) -> String {
+    let end = bytes.iter().position(|byte| *byte == 0).unwrap_or(bytes.len());
+    let raw = bytes[..end].iter().map(|byte| *byte as u8).collect::<Vec<_>>();
+    String::from_utf8_lossy(&raw).into_owned()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn list_v4_addrs() -> Vec<LanAddr> {
+    Vec::new()
+}
+
+fn write_ca_qr(text: &str, ip: Ipv4Addr) -> Option<String> {
+    let code = qrcode::QrCode::new(text.as_bytes()).ok()?;
+    let modules = code.width();
+    let scale = 4u32;
+    let quiet = 2u32;
+    let side = (modules as u32 + quiet * 2) * scale;
+    let mut raw = Vec::with_capacity(((side + 1) * side) as usize);
+    for y in 0..side {
+        raw.push(0);
+        for x in 0..side {
+            let mx = x / scale;
+            let my = y / scale;
+            let inside = mx >= quiet
+                && my >= quiet
+                && (mx - quiet) < modules as u32
+                && (my - quiet) < modules as u32;
+            let dark = inside
+                && code[((mx - quiet) as usize, (my - quiet) as usize)] == qrcode::Color::Dark;
+            raw.push(if dark { 0 } else { 255 });
+        }
+    }
+    let mut zlib = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+    std::io::Write::write_all(&mut zlib, &raw).ok()?;
+    let compressed = zlib.finish().ok()?;
+    let png = png_gray(&compressed, side, side);
+    let dir = ca::data_dir().join("preview");
+    std::fs::create_dir_all(&dir).ok()?;
+    let port = text.rsplit_once(':')?.1.split('/').next().unwrap_or("0");
+    let path = dir.join(format!(
+        "ca-qr-{}-{port}.png",
+        ip.to_string().replace('.', "-")
+    ));
+    std::fs::write(&path, png).ok()?;
+    Some(path.to_string_lossy().into_owned())
+}
+
+fn png_gray(zlib_data: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let mut ihdr = Vec::new();
+    ihdr.extend(width.to_be_bytes());
+    ihdr.extend(height.to_be_bytes());
+    ihdr.extend([8, 0, 0, 0, 0]);
+    let mut out = vec![137, 80, 78, 71, 13, 10, 26, 10];
+    out.extend(png_chunk(b"IHDR", &ihdr));
+    out.extend(png_chunk(b"IDAT", zlib_data));
+    out.extend(png_chunk(b"IEND", &[]));
+    out
+}
+
+fn png_chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+    let mut body = Vec::with_capacity(4 + data.len());
+    body.extend_from_slice(kind);
+    body.extend_from_slice(data);
+    let crc = crc32(&body);
+    let mut out = Vec::with_capacity(8 + body.len());
+    out.extend((data.len() as u32).to_be_bytes());
+    out.extend(body);
+    out.extend(crc.to_be_bytes());
+    out
+}
+
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc = 0xffff_ffffu32;
+    for byte in data {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+        }
+    }
+    !crc
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::Ipv4Addr;
+
+    use super::{LanAddr, cert_url, choose_lan, usable_v4};
+
+    #[test]
+    fn cert_url_uses_only_the_chosen_lan_address() {
+        let ip = Ipv4Addr::new(192, 168, 1, 8);
+        assert_eq!(cert_url("127.0.0.1:8877", Some(ip)), "");
+        assert_eq!(cert_url("0.0.0.0:8877", None), "");
+        assert_eq!(cert_url("0.0.0.0:0", Some(ip)), "");
+        assert_eq!(
+            cert_url("0.0.0.0:8877", Some(ip)),
+            "http://192.168.1.8:8877/zniff"
+        );
+    }
+
+    #[test]
+    fn choose_lan_keeps_a_present_choice_then_the_routed_address() {
+        let wifi = LanAddr {
+            name: "en0".into(),
+            ip: Ipv4Addr::new(192, 168, 1, 8),
+        };
+        let vpn = LanAddr {
+            name: "utun3".into(),
+            ip: Ipv4Addr::new(10, 8, 0, 2),
+        };
+        let bridge = LanAddr {
+            name: "bridge100".into(),
+            ip: Ipv4Addr::new(192, 168, 64, 1),
+        };
+        let addrs = [vpn.clone(), bridge, wifi.clone()];
+        assert_eq!(
+            choose_lan(&addrs, Some(vpn.ip), "192.168.1.8").map(|addr| addr.ip),
+            Some(wifi.ip)
+        );
+        assert_eq!(
+            choose_lan(&addrs, Some(vpn.ip), "10.8.0.2").map(|addr| addr.ip),
+            Some(vpn.ip)
+        );
+        assert_eq!(
+            choose_lan(&addrs, Some(vpn.ip), "").map(|addr| addr.ip),
+            Some(wifi.ip)
+        );
+        assert_eq!(
+            choose_lan(&addrs, Some(vpn.ip), "10.1.1.1").map(|addr| addr.ip),
+            Some(wifi.ip)
+        );
+        assert_eq!(
+            choose_lan(&[], Some(wifi.ip), "").map(|addr| addr.ip),
+            Some(wifi.ip)
+        );
+        assert!(choose_lan(&[], Some(Ipv4Addr::LOCALHOST), "").is_none());
+        assert!(choose_lan(&[], Some(Ipv4Addr::new(198, 18, 0, 1)), "").is_none());
+    }
+
+    #[test]
+    fn usable_v4_skips_addresses_a_phone_cannot_open() {
+        assert!(usable_v4(Ipv4Addr::new(192, 168, 1, 8)));
+        assert!(usable_v4(Ipv4Addr::new(10, 8, 0, 2)));
+        assert!(!usable_v4(Ipv4Addr::UNSPECIFIED));
+        assert!(!usable_v4(Ipv4Addr::LOCALHOST));
+        assert!(!usable_v4(Ipv4Addr::new(169, 254, 1, 1)));
+        assert!(!usable_v4(Ipv4Addr::BROADCAST));
+    }
+
+    #[test]
+    fn listed_lan_addresses_are_usable_ipv4() {
+        for addr in super::lan_addrs() {
+            assert!(usable_v4(addr.ip), "{} {}", addr.name, addr.ip);
+        }
+    }
 }
 
 fn format_bytes(bytes: usize) -> String {
