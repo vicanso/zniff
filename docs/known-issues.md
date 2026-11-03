@@ -46,7 +46,7 @@ P0 到 P3 里点名的能力已经接上。下面是仍然接受的缺口，不�
 - JSON、表单、XML、HTML 默认美化，可切「原文」。`config.toml` 的 `default_pretty` 缺省为开；「更多」里「默认美化」关掉后下次启动用原文，并马上按新模式重画当前选中的详情。卡片上的「美化 / 原文」仍只改当前窗口。复制和另存仍用记录原文。查询参数单独成表。美化时 `x-www-form-urlencoded` 的请求 body 也按键值行画，值下面带 JWT、时间戳和 Base64 提示；原文仍是整段。另存写到下载目录的 `zniff` 文件夹（Linux 读 `~/.config/user-dirs.dirs` 的 `XDG_DOWNLOAD_DIR`，否则 `~/Downloads`），状态栏给出完整路径。HAR 仍导出到数据目录的 `exports/`。
 - 过滤是 AND 词：方法精确、状态精确或 `1xx`–`5xx`、`失败`、`type:` / `ct:`、`body:`、`header:`、`pin:`、`mute:` 或 `-词`，其余匹配主机或路径。`body:` 搜请求和响应 body，`header:` 搜头名和头值。`pin:` 只留星标。`mute:` 和 `-词` 排除主机或路径里带这个词的行。方法行右侧「更多」里「只看」把过滤换成当前主机，「屏蔽」追加 `-主机`（主机带冒号时用 `mute:`）。复制、另存、星标、基准、重放、编辑重发和美化也在这个菜单里。
 - 「编辑重发」可改方法、URL、头和 body。URL 框以 `curl` 开头时，按 `-X`、`-H`、`--url`、`-d` / `--data*`、`-A`、`-e`、`-b` 填进这些框；带 body 又没写方法时当成 `POST`。发送时按新 body 重算 `Content-Length`。URL 改了就丢掉旧的 `Host`。停在响应断点上再点「编辑重发」，改的是状态码、响应头和响应 body，由断点条的「放行」送出。状态码只接受 100–599。
-- 复制还有 `fetch`、Python `requests`，以及响应 JSON 对象或数组的浅层 TypeScript `interface`。「更多」里「复制代理环境」复制 `http_proxy`、`https_proxy`、`SSL_CERT_FILE`、`NODE_EXTRA_CA_CERTS`、`REQUESTS_CA_BUNDLE`、`CURL_CA_BUNDLE`、`GIT_SSL_CAINFO`，证书路径指向数据目录的 `ca.crt`，端口用当前记住的监听端口。请求头和查询值里能认出的 JWT、10 位或 13 位时间戳、可打印 Base64 会附在原值下面。两条流量可以用「基准」做行级对比。超过 1 秒的时间列用警告色。星标在主机名前有蓝点。
+- 复制还有 `fetch`、Python `requests`，以及响应 JSON 对象或数组的浅层 TypeScript `interface`。「更多」里「复制代理环境」复制 `http_proxy`、`https_proxy`、`SSL_CERT_FILE`、`NODE_EXTRA_CA_CERTS`、`REQUESTS_CA_BUNDLE`、`CURL_CA_BUNDLE`、`GIT_SSL_CAINFO`，证书路径指向数据目录的 `ca.crt`，端口用当前记住的监听端口。请求头和查询值里能认出的 JWT、10 位或 13 位时间戳、可打印 Base64 会附在原值下面。两条流量可以用「基准」做行级对比。超过 1 秒的时间列用警告色。星标在方法徽章前有蓝点，藏起主机列也看得到。
 - 直通名单、上游绝对形式、明文连接池、WebSocket 文本帧、握手去掉 `Sec-WebSocket-Extensions`、Map Local、断点丢弃、HTTPS 上的 Map Local / Map Remote / 断点放行、HTTP/2 发送端缓存命中、HTTP/2 Map Local、HTTP/2 断点丢弃、重放改方法 URL 头和 body、`/zniff-ca.crt`、安装页 `/zniff` 有代理往返测试。HAR、规则语法、SSE、美化、`body:` / `header:`、`status=` / `delay` / `header` / `cors`、响应断点改写、星标不淘汰、环境变量、`fetch` / Python / TypeScript、cURL 解析、JWT 提示和行级 diff 有单元测试。
 
 ## 界面
@@ -73,19 +73,13 @@ P0 到 P3 里点名的能力已经接上。下面是仍然接受的缺口，不�
 
 ### 一、现有实现细节完善
 
-1. **右栏卡片标题样式与左对齐统一（实机截图核对发现）**
-   - 当前 `查询参数`、`对比`、`消息`、`响应头`、`请求头`（[`header_section`](file:///Users/tree/github/zniff/app/src/lib.rs#L2101-L2133)、[`diff_card`](file:///Users/tree/github/zniff/app/src/lib.rs#L2199-L2212)）的折叠箭头与标题位于**卡片外上方**（左内边距 `px_1` = `4px`），而 `响应 body`、`请求 body`（[`body_section`](file:///Users/tree/github/zniff/app/src/lib.rs#L2259-L2288)）将折叠箭头与标题放在**卡片框内部顶栏**（左内边距 `px_3p5` = `14px`）。上下相邻卡片的折叠箭头水平错位 `10px`，视觉层次不统一；应统一为同一套卡片头样式（将「美化 / 原文」放到卡片外标题行右侧，或所有可折叠卡片统一使用卡片内顶栏）。
-
-3. **隐藏「主机」列时保留星标蓝点指示（实机截图核对发现）**
-   - 当前星标蓝点画在 [`host_cell`](file:///Users/tree/github/zniff/app/src/lib.rs#L1653-L1663) 内；当 `config.toml` 中 `show_host = false`（隐藏主机列）时，列表中星标行的蓝点会随之消失。应将星标蓝点移到始终显示的「方法」列旁，或在隐藏主机列时回退显示在路径/方法前。
-
-4. **`body_section` 中 `editor` 与上方 `note` 横幅的分隔线及外边距**
+1. **`body_section` 中 `editor` 与上方 `note` 横幅的分隔线及外边距**
    - 普通文本分支（[`app/src/lib.rs#L2335-L2341`](file:///Users/tree/github/zniff/app/src/lib.rs#L2335-L2341)）在上方有 `note` 提示框或图片预览时会加 `1px` 顶部分隔线，而只读 `editor` 分支（[`code_body`](file:///Users/tree/github/zniff/app/src/lib.rs#L2350-L2379)）未加顶部分隔线与间距，当大段 JSON 同时带有 256 KB 截断提示框时会直接紧贴在一起。
 
-5. **外部 HAR 导入兼容 `"http/2.0"` / `"HTTP/2.0"`（实机注入测试发现）**
+2. **外部 HAR 导入兼容 `"http/2.0"` / `"HTTP/2.0"`（实机注入测试发现）**
    - [`har::protocol_from`](file:///Users/tree/github/zniff/app/src/har.rs#L263-L269) 目前只识别 `"HTTP/2"` 与 `"h2"`，而 Chrome DevTools 等导出的 HAR 1.2 通常写 `"http/2.0"` 或 `"HTTP/2.0"`，导入后会被归为 `HTTP/1.1`；应一并匹配 `"http/2.0"`。
 
-6. **清理仅测试使用的 `dead_code` 编译警告**
+3. **清理仅测试使用的 `dead_code` 编译警告**
     - 切换至 `diff_view` 后，[`present.rs`](file:///Users/tree/github/zniff/app/src/present.rs#L461-L474) 的 `DiffKind` / `DiffLine` / `line_diff`、[`rules.rs`](file:///Users/tree/github/zniff/app/src/rules.rs#L166) 的 `first_match`、[`session.rs`](file:///Users/tree/github/zniff/app/src/session.rs#L337-L418) 的 `ttfb` / `duration` / `ids_matching` 仅被单元测试调用，`make build` 会报 5 条 `dead_code` 警告，应加上 `#[cfg(test)]`。
 
 ### 二、待新增功能点

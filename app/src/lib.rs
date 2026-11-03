@@ -1780,6 +1780,18 @@ fn method_cell(rows: Signal<Vec<RowLine>>, at: Position) -> impl IntoElement {
         .flex_shrink_0()
         .flex_row()
         .items_center()
+        .gap_1()
+        .child(when(
+            move || rows.with(|rows| rows.get(at.index()).is_some_and(|row| row.pinned)),
+            || {
+                view()
+                    .w(px(6.0))
+                    .h(px(6.0))
+                    .rounded(px(99.0))
+                    .flex_shrink_0()
+                    .bg(accent_blue())
+            },
+        ))
         .child(
             view()
                 .px_1p5()
@@ -1881,17 +1893,6 @@ fn host_cell(rows: Signal<Vec<RowLine>>, at: Position) -> impl IntoElement {
                     .unwrap_or_default()
             })
         }))
-        .child(when(
-            move || rows.with(|rows| rows.get(at.index()).is_some_and(|row| row.pinned)),
-            || {
-                view()
-                    .w(px(6.0))
-                    .h(px(6.0))
-                    .rounded(px(99.0))
-                    .flex_shrink_0()
-                    .bg(accent_blue())
-            },
-        ))
         .child(
             mono(move || {
                 rows.with(|rows| {
