@@ -21,9 +21,8 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use nsh_base::{menu, menu_item, popover, theme, tooltip};
-use nsh_core::ui::ambient::set_clipboard;
-use nsh_core::ui::prelude::*;
+use nsh_base::{input, menu, menu_item, popover, theme, tooltip};
+use nsh_core::prelude::*;
 use nsh_core::EllipsizeMode;
 
 use crate::ca::Ca;

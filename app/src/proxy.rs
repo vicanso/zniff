@@ -3200,14 +3200,13 @@ mod tests {
             rcgen::KeyUsagePurpose::DigitalSignature,
         ];
         let origin_ca = origin_ca_params.self_signed(&origin_ca_key).unwrap();
+        let issuer = rcgen::Issuer::from_params(&origin_ca_params, &origin_ca_key);
         let leaf_key = rcgen::KeyPair::generate().unwrap();
         let mut leaf_params = rcgen::CertificateParams::new(vec!["127.0.0.1".into()]).unwrap();
         leaf_params.is_ca = rcgen::IsCa::NoCa;
         leaf_params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
         leaf_params.key_usages = vec![rcgen::KeyUsagePurpose::DigitalSignature];
-        let origin_leaf = leaf_params
-            .signed_by(&leaf_key, &origin_ca, &origin_ca_key)
-            .unwrap();
+        let origin_leaf = leaf_params.signed_by(&leaf_key, &issuer).unwrap();
         hub.add_trust_anchor(origin_ca.der().clone());
         let hub = Arc::new(hub);
 
@@ -3419,14 +3418,13 @@ mod tests {
             rcgen::KeyUsagePurpose::DigitalSignature,
         ];
         let origin_ca = origin_ca_params.self_signed(&origin_ca_key).unwrap();
+        let issuer = rcgen::Issuer::from_params(&origin_ca_params, &origin_ca_key);
         let leaf_key = rcgen::KeyPair::generate().unwrap();
         let mut leaf_params = rcgen::CertificateParams::new(vec!["127.0.0.1".into()]).unwrap();
         leaf_params.is_ca = rcgen::IsCa::NoCa;
         leaf_params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
         leaf_params.key_usages = vec![rcgen::KeyUsagePurpose::DigitalSignature];
-        let origin_leaf = leaf_params
-            .signed_by(&leaf_key, &origin_ca, &origin_ca_key)
-            .unwrap();
+        let origin_leaf = leaf_params.signed_by(&leaf_key, &issuer).unwrap();
         (origin_ca, origin_leaf, leaf_key)
     }
 

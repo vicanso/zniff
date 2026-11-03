@@ -1,7 +1,7 @@
 //! Small stroke icons drawn on a canvas so they follow the text color.
 
 use nsh_core::canvas::{LineCap, LineJoin};
-use nsh_core::ui::prelude::*;
+use nsh_core::prelude::*;
 
 #[derive(Clone, Copy)]
 pub enum Glyph {

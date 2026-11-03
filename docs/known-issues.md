@@ -17,7 +17,7 @@ P0 到 P3 里点名的能力已经接上。下面是仍然接受的缺口，不�
 - macOS `security add-trusted-cert` 可能要用户点确认。`security find-certificate` 只说明证书在登录钥匙串里，不保证 SSL 信任策略已经生效。
 - 带密码的系统代理：`networksetup` 读不回密码，停止后可能恢复不完整。
 - Windows、Linux 上「移除证书」还没接上。macOS 用 `security delete-certificate`。
-- 窗口位置和大小不记。nsh 0.2 的 `AppOptions` 只有初始 `size`，没有坐标。Rust 组件能调的窗口接口是 `set_title_bar`、`title_bar`、`close_window`。`Window.setFrame` 在运行时里是 `pub(crate)`，`desktop_command` 也是，应用读不到当前窗口框，也发不出移动命令。只保存宽高同样做不到，因为关窗口时读不回用户拖过的尺寸。不升 nsh，也不改平台 crate。启动尺寸仍是 `app/src/main.rs` 里的 `(1200, 760)`。
+- 窗口位置和大小暂未持久化（待按 `zedis` 的多显示器恢复方案接入，见下文「下一轮体验与交互改进待办」）。`nsh 0.3.0` 的 `AppOptions` 虽仅暴露初始 `size`、`window()` 仅返回表面尺寸，但底层平台 API 已可直接调用（macOS 由 `nsh-platform-macos` 重导出 `objc2_app_kit` 的 `NSApplication` / `NSWindow` / `NSScreen` 配合 CoreGraphics 显示器 UUID，Windows 用 `windows-sys` 的 `EnumDisplayMonitors` / `GetMonitorInfoW` / `SetWindowPos`）。当前启动尺寸仍是 `app/src/main.rs` 里的 `(1200, 760)`。
 
 ## 代理行为
 
@@ -68,3 +68,49 @@ P0 到 P3 里点名的能力已经接上。下面是仍然接受的缺口，不�
 - **超过 1 MB 的响应改写**。响应断点的缓冲上限就是单条 body 上限。更大的响应只转发，不在界面里改。
 - **完整 cURL 语法**。不解析换行续行、`-G`、`--json`、`--form` 和多段 body。认不出的旗标忽略。
 - **非 JSON 的 TypeScript**。响应不是 JSON 对象或数组时，「类型」提示不可用，不猜表单或 XML。
+
+## 下一轮体验与交互改进待办（基于 `nsh 0.3.0` 评估）
+
+以下功能点已完成评估，作为下一阶段界面与交互打磨的待办项：
+
+1. **「清空」置顶与总请求数角标**
+   - 顶栏「更多」下拉菜单将最高频的「清空」移到第一项（「导出」移到第二项）。
+   - 在「清空」菜单项右侧（或工具栏状态区）展示当前会话已记录的总请求数（如 `128`，当存在过滤词时可展示 `筛选数 / 总数`），方便一眼确认当前积压的抓包条数。
+
+2. **图片预览去误报与等比缩放**
+   - **去掉十六进制截断误报**：当前 [`body_text`](file:///Users/tree/github/zniff/app/src/lib.rs#L3593-L3612) 对非 UTF-8 且超过 4096 字节的二进制统一写入 `"十六进制只显示前 4096 字节，共 XXXX 字节。"`，[`present::image_body`](file:///Users/tree/github/zniff/app/src/present.rs#L93-L117) 在美化模式下清空了十六进制文本却保留了 `note`。美化模式且图片解码成功时应清空该提示，仅在切回「原文」看十六进制时显示。
+   - **修复小图被放大拉伸**：当前 `image(...).h(px(200.0))` 未指定 `resize_mode`，`nsh_core::prelude::Image` 默认使用 `ResizeMode::Cover`，会把小图标或小图放大铺满容器并裁切。应改为 `.resize_mode(ResizeMode::Contain)`（或按图片实际尺寸限制最大高宽），保持原始比例。
+
+3. **接入 `nsh 0.3.0` 的 `editor` 与 `diff_view` 组件**
+   - `nsh-base 0.3.0` 已原生提供 [`editor()`](https://nsh.dev/elements/editor/)（基于 `xi-rope` 与虚拟化行渲染，支持 `.read_only(true)`、`.language("json" | "html" | "xml" | "plaintext")`、`.line_numbers(true)`、`.folding(true)` 缩进折叠以及编辑器内搜索 `EditorSearch`）和 `diff_view()`。
+   - **响应 / 请求 Body 卡片**：对于 JSON、HTML、XML 及多行长文本，用 `editor(content).read_only(true).language(...).line_numbers(true).folding(true)` 替代静态 `text()`，获得语法高亮、行号、JSON 节点折叠和大文本虚拟滚动。
+   - **「编辑重发」与断点改写**：将多行 `textarea` 升级为可编辑的 `editor(content).read_only(false)`，方便直接修改大段 JSON 请求或响应体。
+
+4. **十六进制视图行号（`0001`、`0002`、`0003`…）**
+   - 在十六进制预览每行（每 16 字节一行）最前面加上 4 位行号前缀（`0001  `、`0002  `、`0003  `…，或直接开启只读 `editor` 的行号槽 `line_numbers(true)`），便于定位字节位置；点「复制」时仍复制干净的原始记录。
+
+5. **默认响应展示模式（美化 / 原文）写入公共配置**
+   - 在 `config.toml` 中新增 `default_pretty`（布尔值，缺省 `true`），并在顶栏「更多」或「配置」弹出层中允许切换默认展示「美化」还是「原文」。启动和新窗口初始化时读取该配置作为 `pretty_body` 的初始值；单卡片标题上的「美化 / 原文」仍可临时切换。
+
+6. **左右分栏拖动体验优化**
+   - 左栏与右栏之间的拖动分割及持久化到 `config.toml` 的 `list_width`（限制 `280..=1100`，默认 `560`）已接上。下一步在 6px 分割条上增加悬停高亮色（hover 态），提升可拖动区域的视觉可发现性。
+
+7. **表头右键菜单配置列显示 +「配置」「列」改为純图标按钮**
+   - **表头右键弹出列开关**：在左侧列表表头整行绑定右键事件（`.on_mouse_down(MouseButton::Right, ...)`），右键任意表头位置即可弹出列显示勾选项，修改后立即写入 `config.toml`。
+   - **纯图标触发器**：将过滤框右侧的「配置」文字按钮和表头右侧的「列」文字按钮改为紧凑的单色描边图标按钮（保留 `tooltip` 悬停说明），释放横向空间给过滤输入框和列表列。
+
+8. **列表列顺序调整为：方法、路径、状态、协议、间隔、主机、大小**
+   - 将列表列顺序调整为：`方法`、`路径`、`状态`、`协议`、`间隔`、`主机`、`大小`；默认开启 `方法`、`路径`、`状态`、`间隔`、`主机`（`协议` 和 `大小` 默认隐藏）。
+   - `方法` 固定在最左，紧接着放自适应剩余宽度的 `路径`（`flex_1`），使所有请求的 URL 路径起点对齐在同一垂直线上；右侧依次排列固定宽度的 `状态`、`协议`、`间隔`、`主机`、`大小`。
+
+9. **规则可视化快捷配置 + 响应内容替换（保留纯文本指令）**
+   - **双模式并存**：保留现有紧凑的纯文本规则 DSL（方便批量复制分享），同时在「配置 -> 规则」及流量右键/更多菜单中提供结构化快捷添加（类型下拉：`接口转发 A -> B (map-remote)`、`本地文件替换 (map-local)`、`内容替换 (replace)`、`改写头 (header)`、`延迟 (delay)`、`断点 (break)`，填入匹配词与目标后自动生成或更新规则行）。
+   - **新增内容替换指令**：支持在不替换整个响应体的情况下，将响应（或请求）body 中的指定字符串/片段由 `A` 替换为 `B`（仅对未超过 1 MB 的文本响应生效）。
+
+10. **多显示器窗口位置与尺寸记忆（参考 `zedis` 的 `resolve_window_bounds`）**
+    - 在 `config.toml` 中按显示器保存窗口布局记录 `window_placements`（包含 `display_uuid`、相对该显示器原点的 `x` / `y` / `width` / `height` 及 `maximized`）和最后一次的绝对外框 `window_bounds`。
+    - 启动恢复按三级优先级（每次均通过 `clamp_to` 保证窗口尺寸不小于最小尺寸、不超出屏幕工作区，且标题栏保持在屏幕可达范围内）：
+      1. **按 `display_uuid` 匹配已连接显示器**（优先主显示器，其次最近使用过的已连接显示器），还原相对于该显示器的坐标 `p.bounds + screen.origin` 及最大化状态，使办公外接屏与回家单屏各自记住独立位置；
+      2. **最大重叠面积兜底**：若原显示器已拔出或 UUID 变化，计算已保存绝对外框 `saved` 与当前各显示器的交集面积 `saved.intersect(screen)`，吸附并钳制到重叠面积最大的显示器；
+      3. **默认居中兜底**：无有效记录或完全无交集时，在主显示器居中打开默认尺寸 `(1200, 760)`。
+    - 平台实现：macOS 通过 `nsh-platform-macos` 重导出的 `objc2_app_kit`（`NSApplication` / `NSWindow` / `NSScreen`）与 CoreGraphics `CGDisplayCreateUUIDFromDisplayID` 读写外框与屏幕 UUID；Windows 通过 `windows-sys` 的 `EnumDisplayMonitors` / `GetMonitorInfoW` / `GetWindowPlacement` / `SetWindowPos` 实现；Linux 优先保存并恢复窗口尺寸。

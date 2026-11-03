@@ -11,8 +11,8 @@ use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use rcgen::{
-    BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType,
-    ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, SanType,
+    BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose,
+    IsCa, Issuer, KeyPair, KeyUsagePurpose, SanType,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::ServerConfig;
@@ -24,10 +24,9 @@ const LEGACY_CA_NAME: &str = "Snoop CA";
 
 pub struct Ca {
     dir: PathBuf,
-    /// Params plus the CA key. `signed_by` reads these, not a regenerated DER.
+    /// Subject and key of the installed root. Leaf signing reads these.
     /// The PEM on disk is what gets installed.
-    issuer: Certificate,
-    issuer_key: KeyPair,
+    issuer: Issuer<'static, KeyPair>,
     ca_der: CertificateDer<'static>,
     leaves: Mutex<Vec<(String, Leaf)>>,
 }
@@ -100,15 +99,11 @@ impl Ca {
 
     fn from_pem(dir: PathBuf, cert_pem: String, key_pem: String) -> Result<Self> {
         let issuer_key = KeyPair::from_pem(&key_pem).context("读取根 CA 私钥")?;
-        let params = CertificateParams::from_ca_cert_pem(&cert_pem).context("读取根 CA 证书")?;
-        // Rebuild an in-memory issuer. Leaf signing uses its subject and key id,
-        // together with the original private key. The installed PEM is unchanged.
-        let issuer = params.self_signed(&issuer_key).context("重建签发参数")?;
+        let issuer = Issuer::from_ca_cert_pem(&cert_pem, issuer_key).context("读取根 CA 证书")?;
         let ca_der = ca_der_from_pem(&cert_pem)?;
         Ok(Self {
             dir,
             issuer,
-            issuer_key,
             ca_der,
             leaves: Mutex::new(Vec::new()),
         })
@@ -159,7 +154,7 @@ impl Ca {
         params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
         params.use_authority_key_identifier_extension = true;
         let cert = params
-            .signed_by(&leaf_key, &self.issuer, &self.issuer_key)
+            .signed_by(&leaf_key, &self.issuer)
             .context("签发叶子证书")?;
         Ok(Leaf {
             cert: CertificateDer::from(cert.der().to_vec()),
