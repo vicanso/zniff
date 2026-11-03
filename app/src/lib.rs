@@ -3077,6 +3077,17 @@ fn message_lines(flow: &crate::session::Flow, lang: Lang) -> Vec<HeaderLine> {
 }
 
 fn header_lines(headers: &[(String, String)], pretty: bool) -> Vec<HeaderLine> {
+    let sorted;
+    let headers = if pretty {
+        sorted = {
+            let mut copy = headers.to_vec();
+            present::sort_headers_pretty(&mut copy);
+            copy
+        };
+        sorted.as_slice()
+    } else {
+        headers
+    };
     let mut lines = Vec::new();
     for (name, value) in headers {
         if pretty {

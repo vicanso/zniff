@@ -402,6 +402,11 @@ pub fn cookie_pairs(value: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Case-insensitive `a–z`. Equal names keep their original order and case.
+pub fn sort_headers_pretty(headers: &mut [(String, String)]) {
+    headers.sort_by(|left, right| left.0.to_ascii_lowercase().cmp(&right.0.to_ascii_lowercase()));
+}
+
 /// Pretty rows for one `Cookie` or `Set-Cookie` header. Other headers return `None`.
 pub fn pretty_cookie_rows(header: &str, value: &str) -> Option<Vec<(String, String)>> {
     if !header.eq_ignore_ascii_case("cookie") && !header.eq_ignore_ascii_case("set-cookie") {
@@ -1125,6 +1130,23 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn pretty_headers_sort_without_changing_case() {
+        let mut headers = vec![
+            ("X-Trace".into(), "1".into()),
+            ("accept".into(), "a".into()),
+            ("Content-Type".into(), "b".into()),
+            ("Accept".into(), "c".into()),
+        ];
+        sort_headers_pretty(&mut headers);
+        assert_eq!(
+            headers.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(),
+            vec!["accept", "Accept", "Content-Type", "X-Trace"]
+        );
+        assert_eq!(headers[0].1, "a");
+        assert_eq!(headers[1].1, "c");
     }
 
     #[test]
