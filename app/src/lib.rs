@@ -1220,7 +1220,7 @@ fn host_cell(rows: Signal<Vec<RowLine>>, at: Position) -> impl IntoElement {
             },
         ))
         .child(
-            text(move || {
+            mono(move || {
                 rows.with(|rows| {
                     rows.get(at.index())
                         .map(|row| row.host.clone())
