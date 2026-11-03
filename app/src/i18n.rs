@@ -86,6 +86,13 @@ pub enum StatusMsg {
     Exported(String),
     ImportFailed(String),
     Imported { count: usize, path: String },
+    CopiedEnv,
+    CopiedFetch,
+    CopiedPython,
+    CopiedInterface,
+    InterfaceUnavailable,
+    PinLimit,
+    BaselineSet,
 }
 
 impl StatusMsg {
@@ -182,6 +189,17 @@ impl StatusMsg {
                 t(lang, "已导入", "Imported"),
                 t(lang, "条", "flows")
             ),
+            Self::CopiedEnv => t(lang, "已复制代理环境变量", "Copied the proxy environment").into(),
+            Self::CopiedFetch => t(lang, "已复制 fetch", "Copied fetch").into(),
+            Self::CopiedPython => t(lang, "已复制 Python requests", "Copied Python requests").into(),
+            Self::CopiedInterface => {
+                t(lang, "已复制 TypeScript interface", "Copied the TypeScript interface").into()
+            }
+            Self::InterfaceUnavailable => {
+                t(lang, "响应不是 JSON 对象或数组", "Response is not a JSON object or array").into()
+            }
+            Self::PinLimit => t(lang, "星标已满 32 条", "The star list is full at 32").into(),
+            Self::BaselineSet => t(lang, "已设为对比基准", "Set as the comparison baseline").into(),
         }
     }
 }
@@ -207,6 +225,7 @@ pub fn localize_error(lang: Lang, text: &str) -> String {
         ("连接源站超时，已改为隧道", "Timed out connecting to the origin, tunneled instead"),
         ("客户端 TLS 超时", "Client TLS timed out"),
         ("断点丢弃", "Dropped at the break"),
+        ("响应断点跳过，body 超过 1 MB", "Response break skipped, body is over 1 MB"),
         ("消息已截断", "Messages truncated"),
     ];
     if let Some((_, en)) = EXACT.iter().find(|(zh, _)| *zh == text) {
@@ -216,6 +235,7 @@ pub fn localize_error(lang: Lang, text: &str) -> String {
         ("读取 ClientHello 失败: ", "Failed to read ClientHello: "),
         ("源站 TLS 失败，已改为隧道: ", "Origin TLS failed, tunneled instead: "),
         ("客户端 TLS 失败: ", "Client TLS failed: "),
+        ("响应断点读 body 失败: ", "Failed to read the body for a response break: "),
     ];
     for (zh, en) in PREFIX {
         if let Some(rest) = text.strip_prefix(zh) {

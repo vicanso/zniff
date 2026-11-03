@@ -8,6 +8,8 @@ use std::time::{Duration, SystemTime};
 
 pub const BODY_CAP: usize = 1024 * 1024;
 pub const SESSION_CAP: usize = 256 * 1024 * 1024;
+/// Pinned flows skip eviction. The cap keeps a pinned set from growing without a bound.
+pub const PIN_CAP: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Protocol {
@@ -66,6 +68,8 @@ pub struct Flow {
     /// WebSocket frames. They do not count toward the body or session caps.
     pub messages: Vec<Message>,
     pub messages_truncated: bool,
+    /// Kept when the session cap drops older flows.
+    pub pinned: bool,
     accounted: usize,
 }
 
@@ -124,6 +128,7 @@ impl Session {
             response_bytes: 0,
             messages: Vec::new(),
             messages_truncated: false,
+            pinned: false,
             accounted: headers_size,
         };
         self.bytes += headers_size;
@@ -228,6 +233,53 @@ impl Session {
         flow.request_body = body;
         flow.accounted = flow.accounted.saturating_sub(old) + new_size;
         self.bytes = self.bytes.saturating_sub(old) + new_size;
+    }
+
+    pub fn replace_response(
+        &mut self,
+        id: u64,
+        status: u16,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    ) {
+        let Some(flow) = self.flows.get_mut(&id) else {
+            return;
+        };
+        let old = headers_size(&flow.response_headers) + flow.response_body.len();
+        let new_size = headers_size(&headers) + body.len();
+        flow.status = Some(status);
+        flow.response_headers = headers;
+        flow.response_body = body;
+        flow.response_truncated = false;
+        if flow.response_at.is_none() {
+            flow.response_at = Some(SystemTime::now());
+        }
+        flow.accounted = flow.accounted.saturating_sub(old) + new_size;
+        self.bytes = self.bytes.saturating_sub(old) + new_size;
+        self.evict(id);
+    }
+
+    /// Pins until [`PIN_CAP`]. Returns false when the flow is missing or the cap is full.
+    pub fn set_pinned(&mut self, id: u64, pinned: bool) -> bool {
+        if pinned {
+            let count = self.flows.values().filter(|flow| flow.pinned).count();
+            let Some(flow) = self.flows.get_mut(&id) else {
+                return false;
+            };
+            if flow.pinned {
+                return true;
+            }
+            if count >= PIN_CAP {
+                return false;
+            }
+            flow.pinned = true;
+            true
+        } else if let Some(flow) = self.flows.get_mut(&id) {
+            flow.pinned = false;
+            true
+        } else {
+            false
+        }
     }
 
     pub fn mark_finished(&mut self, id: u64) {
@@ -370,13 +422,14 @@ impl Session {
 
     fn evict(&mut self, keep: u64) {
         while self.bytes > SESSION_CAP && self.order.len() > 1 {
-            let Some(old) = self.order.front().copied() else {
+            let Some(pos) = self.order.iter().position(|id| {
+                *id != keep && self.flows.get(id).is_some_and(|flow| !flow.pinned)
+            }) else {
                 break;
             };
-            if old == keep {
+            let Some(old) = self.order.remove(pos) else {
                 break;
-            }
-            self.order.pop_front();
+            };
             if let Some(flow) = self.flows.remove(&old) {
                 self.bytes = self.bytes.saturating_sub(flow.accounted);
                 self.dropped += 1;
@@ -418,25 +471,45 @@ enum StatusMatch {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FlowQuery {
     texts: Vec<String>,
+    excludes: Vec<String>,
     method: Option<String>,
     status: Option<StatusMatch>,
     content_type: Option<String>,
     bodies: Vec<String>,
     headers: Vec<String>,
+    pinned_only: bool,
 }
 
 impl FlowQuery {
     fn parse(filter: &str) -> Self {
         let mut query = Self {
             texts: Vec::new(),
+            excludes: Vec::new(),
             method: None,
             status: None,
             content_type: None,
             bodies: Vec::new(),
             headers: Vec::new(),
+            pinned_only: false,
         };
         for token in filter.split_whitespace() {
             let lower = token.to_ascii_lowercase();
+            if lower == "pin:" {
+                query.pinned_only = true;
+                continue;
+            }
+            if let Some(keyword) = lower.strip_prefix("mute:") {
+                if !keyword.is_empty() {
+                    query.excludes.push(keyword.to_string());
+                }
+                continue;
+            }
+            if let Some(keyword) = lower.strip_prefix("-") {
+                if !keyword.is_empty() && !keyword.contains(':') {
+                    query.excludes.push(keyword.to_string());
+                }
+                continue;
+            }
             if let Some(keyword) = lower.strip_prefix("body:") {
                 if !keyword.is_empty() {
                     query.bodies.push(keyword.to_string());
@@ -483,6 +556,9 @@ impl FlowQuery {
     }
 
     fn matches(&self, flow: &Flow) -> bool {
+        if self.pinned_only && !flow.pinned {
+            return false;
+        }
         if let Some(method) = &self.method {
             if !flow.method.eq_ignore_ascii_case(method) {
                 return false;
@@ -529,6 +605,13 @@ impl FlowQuery {
         }
         let host = flow.host.to_ascii_lowercase();
         let path = flow.path.to_ascii_lowercase();
+        if self
+            .excludes
+            .iter()
+            .any(|text| host.contains(text) || path.contains(text))
+        {
+            return false;
+        }
         self.texts
             .iter()
             .all(|text| host.contains(text) || path.contains(text))
@@ -672,5 +755,27 @@ mod tests {
         assert!(session.ids_matching("body:1001 header:missing").is_empty());
         assert_eq!(session.ids_matching("body:hello"), vec![other]);
         assert_eq!(session.ids_matching("body:1001 example"), vec![id]);
+    }
+
+    #[test]
+    fn mute_and_pin_filter_and_pinned_flows_skip_eviction() {
+        let mut session = Session::default();
+        let noisy = session.open(draft("ads.example"));
+        let kept = session.open(draft("api.example"));
+        assert!(session.set_pinned(kept, true));
+        assert_eq!(session.ids_matching("-ads.example"), vec![kept]);
+        assert_eq!(session.ids_matching("mute:ads.example"), vec![kept]);
+        assert_eq!(session.ids_matching("pin:"), vec![kept]);
+        session.append_body(noisy, Direction::Response, &vec![1u8; BODY_CAP]);
+        session.append_body(kept, Direction::Response, &vec![2u8; BODY_CAP]);
+        let mut opened = 2u64;
+        while session.get(noisy).is_some() && opened < 400 {
+            let id = session.open(draft("new.test"));
+            session.append_body(id, Direction::Response, &vec![3u8; BODY_CAP]);
+            opened += 1;
+        }
+        assert!(session.get(noisy).is_none());
+        assert!(session.get(kept).is_some());
+        assert!(session.get(kept).unwrap().pinned);
     }
 }

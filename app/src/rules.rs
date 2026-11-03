@@ -1,11 +1,26 @@
-//! Map Local, Map Remote, and breakpoints.
+//! Map Local, Map Remote, breakpoints, and non-terminal tweaks.
 //!
-//! One rule per line:
-//! `map-local example.com/api ./body.json`
-//! `map-remote example.com/api https://other.test/v1`
-//! `break example.com/pay`
+//! One rule per line. The first matching terminal rule wins. `delay`,
+//! `header`, and `cors` do not consume the match: every matching one applies,
+//! including lines after the terminal rule.
+//!
+//! ```text
+//! map-local example.com/api ./body.json status=429 delay=2000ms
+//! map-remote example.com/api https://other.test/v1
+//! break example.com/pay
+//! break-res example.com/pay
+//! delay example.com/api 2000ms
+//! header example.com/api res set X-Debug 1
+//! header example.com/api req del Cookie
+//! cors example.com
+//! ```
+//!
+//! `delay` is capped at 30s. A response break buffers at most 1 MB.
 
 use std::path::PathBuf;
+use std::time::Duration;
+
+pub const DELAY_CAP: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Rule {
@@ -13,6 +28,8 @@ pub enum Rule {
         host: String,
         path_prefix: String,
         file: PathBuf,
+        status: Option<u16>,
+        delay: Duration,
     },
     MapRemote {
         host: String,
@@ -23,11 +40,72 @@ pub enum Rule {
         host: String,
         path_prefix: String,
     },
+    BreakResponse {
+        host: String,
+        path_prefix: String,
+    },
+    Delay {
+        host: String,
+        path_prefix: String,
+        delay: Duration,
+    },
+    Header {
+        host: String,
+        path_prefix: String,
+        response: bool,
+        remove: bool,
+        name: String,
+        value: String,
+    },
+    Cors {
+        host: String,
+        path_prefix: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeaderOp {
+    Set { name: String, value: String },
+    Remove { name: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Action {
+    MapLocal { file: PathBuf, status: u16 },
+    MapRemote { url: String },
+    BreakRequest,
+    BreakResponse,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Effect {
+    pub delay: Duration,
+    pub request_headers: Vec<HeaderOp>,
+    pub response_headers: Vec<HeaderOp>,
+    pub cors: bool,
+    pub action: Option<Action>,
+}
+
+impl Default for Effect {
+    fn default() -> Self {
+        Self {
+            delay: Duration::ZERO,
+            request_headers: Vec::new(),
+            response_headers: Vec::new(),
+            cors: false,
+            action: None,
+        }
+    }
 }
 
 impl Rule {
     pub fn matches(&self, host: &str, path: &str) -> bool {
-        let (rule_host, prefix) = match self {
+        let (rule_host, prefix) = self.target();
+        host_matches(rule_host, host) && path_matches(prefix, path)
+    }
+
+    fn target(&self) -> (&str, &str) {
+        match self {
             Self::MapLocal {
                 host, path_prefix, ..
             }
@@ -36,9 +114,20 @@ impl Rule {
             }
             | Self::Break {
                 host, path_prefix, ..
+            }
+            | Self::BreakResponse {
+                host, path_prefix, ..
+            }
+            | Self::Delay {
+                host, path_prefix, ..
+            }
+            | Self::Header {
+                host, path_prefix, ..
+            }
+            | Self::Cors {
+                host, path_prefix, ..
             } => (host, path_prefix),
-        };
-        host_matches(rule_host, host) && path_matches(prefix, path)
+        }
     }
 }
 
@@ -58,6 +147,108 @@ pub fn first_match<'a>(rules: &'a [Rule], host: &str, path: &str) -> Option<&'a 
     rules.iter().find(|rule| rule.matches(host, path))
 }
 
+/// Modifiers accumulate. The first matching terminal rule is the action.
+pub fn effect(rules: &[Rule], host: &str, path: &str) -> Effect {
+    let mut effect = Effect::default();
+    for rule in rules {
+        if !rule.matches(host, path) {
+            continue;
+        }
+        match rule {
+            Rule::Delay { delay, .. } => {
+                effect.delay = cap_delay(effect.delay.saturating_add(*delay));
+            }
+            Rule::Header {
+                response,
+                remove,
+                name,
+                value,
+                ..
+            } => {
+                let op = if *remove {
+                    HeaderOp::Remove { name: name.clone() }
+                } else {
+                    HeaderOp::Set {
+                        name: name.clone(),
+                        value: value.clone(),
+                    }
+                };
+                if *response {
+                    effect.response_headers.push(op);
+                } else {
+                    effect.request_headers.push(op);
+                }
+            }
+            Rule::Cors { .. } => effect.cors = true,
+            Rule::MapLocal {
+                file,
+                status,
+                delay,
+                ..
+            } if effect.action.is_none() => {
+                effect.delay = cap_delay(effect.delay.saturating_add(*delay));
+                effect.action = Some(Action::MapLocal {
+                    file: file.clone(),
+                    status: status.unwrap_or(200),
+                });
+            }
+            Rule::MapRemote { url, .. } if effect.action.is_none() => {
+                effect.action = Some(Action::MapRemote { url: url.clone() });
+            }
+            Rule::Break { .. } if effect.action.is_none() => {
+                effect.action = Some(Action::BreakRequest);
+            }
+            Rule::BreakResponse { .. } if effect.action.is_none() => {
+                effect.action = Some(Action::BreakResponse);
+            }
+            _ => {}
+        }
+    }
+    effect
+}
+
+pub fn apply_header_ops(headers: &mut Vec<(String, String)>, ops: &[HeaderOp]) {
+    for op in ops {
+        match op {
+            HeaderOp::Remove { name } => {
+                headers.retain(|(existing, _)| !existing.eq_ignore_ascii_case(name));
+            }
+            HeaderOp::Set { name, value } => {
+                headers.retain(|(existing, _)| !existing.eq_ignore_ascii_case(name));
+                headers.push((name.clone(), value.clone()));
+            }
+        }
+    }
+}
+
+pub fn cors_pairs() -> Vec<(String, String)> {
+    vec![
+        ("Access-Control-Allow-Origin".into(), "*".into()),
+        (
+            "Access-Control-Allow-Methods".into(),
+            "GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD".into(),
+        ),
+        ("Access-Control-Allow-Headers".into(), "*".into()),
+        ("Access-Control-Max-Age".into(), "86400".into()),
+    ]
+}
+
+pub fn ensure_cors(headers: &mut Vec<(String, String)>) {
+    for (name, value) in cors_pairs() {
+        if headers
+            .iter()
+            .any(|(existing, _)| existing.eq_ignore_ascii_case(&name))
+        {
+            continue;
+        }
+        headers.push((name, value));
+    }
+}
+
+fn cap_delay(delay: Duration) -> Duration {
+    if delay > DELAY_CAP { DELAY_CAP } else { delay }
+}
+
 fn parse_line(line: &str) -> Option<Rule> {
     let mut parts = line.split_whitespace();
     let kind = parts.next()?;
@@ -66,10 +257,27 @@ fn parse_line(line: &str) -> Option<Rule> {
     match kind {
         "map-local" => {
             let file = parts.next()?;
+            let mut status = None;
+            let mut delay = Duration::ZERO;
+            for token in parts {
+                if let Some(code) = token.strip_prefix("status=") {
+                    let code: u16 = code.parse().ok()?;
+                    if !(100..600).contains(&code) {
+                        return None;
+                    }
+                    status = Some(code);
+                } else if let Some(text) = token.strip_prefix("delay=") {
+                    delay = parse_delay(text)?;
+                } else {
+                    return None;
+                }
+            }
             Some(Rule::MapLocal {
                 host,
                 path_prefix,
                 file: PathBuf::from(file),
+                status,
+                delay,
             })
         }
         "map-remote" => {
@@ -84,8 +292,62 @@ fn parse_line(line: &str) -> Option<Rule> {
             })
         }
         "break" => Some(Rule::Break { host, path_prefix }),
+        "break-res" | "break-response" => Some(Rule::BreakResponse { host, path_prefix }),
+        "delay" => {
+            let text = parts.next()?;
+            Some(Rule::Delay {
+                host,
+                path_prefix,
+                delay: parse_delay(text)?,
+            })
+        }
+        "header" => {
+            let side = parts.next()?;
+            let op = parts.next()?;
+            let name = parts.next()?.to_string();
+            if name.is_empty() {
+                return None;
+            }
+            let response = match side {
+                "res" | "response" => true,
+                "req" | "request" => false,
+                _ => return None,
+            };
+            let remove = match op {
+                "del" | "delete" | "rm" => true,
+                "set" | "add" => false,
+                _ => return None,
+            };
+            let value = parts.collect::<Vec<_>>().join(" ");
+            Some(Rule::Header {
+                host,
+                path_prefix,
+                response,
+                remove,
+                name,
+                value,
+            })
+        }
+        "cors" => Some(Rule::Cors { host, path_prefix }),
         _ => None,
     }
+}
+
+fn parse_delay(text: &str) -> Option<Duration> {
+    let text = text.trim();
+    let text = text.strip_prefix("delay=").unwrap_or(text);
+    let (num, unit) = if let Some(num) = text.strip_suffix("ms") {
+        (num, 1u64)
+    } else if let Some(num) = text.strip_suffix('s') {
+        (num, 1000)
+    } else {
+        (text, 1)
+    };
+    if num.is_empty() || !num.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let ms = num.parse::<u64>().ok()?.saturating_mul(unit);
+    Some(Duration::from_millis(ms.min(DELAY_CAP.as_millis() as u64)))
 }
 
 fn split_pattern(pattern: &str) -> (String, String) {
@@ -142,5 +404,61 @@ mod tests {
         assert!(!rules[1].matches("other.test", "/v1"));
         assert!(rules[2].matches("pay.test", "/checkout/1"));
         assert!(first_match(&rules, "example.com", "/api").is_some());
+    }
+
+    #[test]
+    fn modifiers_apply_around_the_first_terminal_rule() {
+        let rules = parse_rules(
+            "\
+delay example.com/api 1500ms
+header example.com req set X-From zniff
+cors example.com
+map-local example.com/api ./a.json status=429 delay=1s
+header example.com res del Set-Cookie
+break example.com/api
+",
+        );
+        let applied = effect(&rules, "example.com", "/api/v1");
+        assert_eq!(applied.delay, Duration::from_millis(2500));
+        assert!(applied.cors);
+        assert_eq!(
+            applied.action,
+            Some(Action::MapLocal {
+                file: PathBuf::from("./a.json"),
+                status: 429,
+            })
+        );
+        assert_eq!(applied.request_headers.len(), 1);
+        assert!(matches!(
+            &applied.response_headers[0],
+            HeaderOp::Remove { name } if name == "Set-Cookie"
+        ));
+        let capped = effect(
+            &parse_rules("delay example.com 40s"),
+            "example.com",
+            "/",
+        );
+        assert_eq!(capped.delay, DELAY_CAP);
+    }
+
+    #[test]
+    fn header_ops_replace_and_remove() {
+        let mut headers = vec![
+            ("X-From".into(), "old".into()),
+            ("Cookie".into(), "a=b".into()),
+        ];
+        apply_header_ops(
+            &mut headers,
+            &[
+                HeaderOp::Set {
+                    name: "X-From".into(),
+                    value: "zniff".into(),
+                },
+                HeaderOp::Remove {
+                    name: "Cookie".into(),
+                },
+            ],
+        );
+        assert_eq!(headers, vec![("X-From".into(), "zniff".into())]);
     }
 }

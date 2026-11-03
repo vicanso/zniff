@@ -7,7 +7,7 @@ P0 到 P3 里点名的能力已经接上。下面是仍然接受的缺口，不�
 - HTTP/3、QUIC。UDP 不经过 HTTP 代理。
 - Firefox 的证书库。Firefox 默认也不代理 localhost。验收浏览器是 Chrome、Safari、Edge。
 - 透明代理、JSON 树、SQLite、cyberapi、Web 界面。
-- 会话只在内存里。重启清空。单条 body 解压后最多 1 MB，整段会话最多 256 MB，超出丢掉最旧的整条 flow。线字节和 WebSocket 消息文本不计入这两个上限。
+- 会话只在内存里。重启清空。单条 body 解压后最多 1 MB，整段会话最多 256 MB，超出丢掉最旧的未星标 flow。星标最多 32 条，不参与淘汰，因此星标集合可以让内存超过 256 MB。线字节和 WebSocket 消息文本不计入这两个上限。过滤不写入配置。
 
 ## 平台
 
@@ -28,9 +28,9 @@ P0 到 P3 里点名的能力已经接上。下面是仍然接受的缺口，不�
 - ServerHello 之前失败改成 TCP 隧道，只记目标和原因。ServerHello 之后的解析失败只记错误，不能退回隧道。
 - ServerHello 之后客户端断开，界面尽量记成「证书被拒绝」。这是根据连接被重置做的判断，不是证书钉扎的专用检测。直通名单可以避开钉扎主机。
 - HTTP/2 这一层只表示两边用源站选定的协议。不解析帧、HPACK、trailer、gRPC。
-- 界面里非 UTF-8 body 只显示前 4 KB 十六进制，UTF-8 只显示前 256 KB。记录本身仍保留最多 1 MB。复制用的是记录原文。
+- 界面里非 UTF-8 body 只显示前 4 KB 十六进制，UTF-8 只显示前 256 KB，截在字符边界上。记录本身仍保留最多 1 MB。复制用的是记录原文。左栏按到达时间排列，最新在最下面；离底部不超过一行时跟着新流量，再往上翻就停在当前内容。
 - WebSocket 从旁路解析帧并立刻转发。转发握手时去掉 `Sec-WebSocket-Extensions`，避免谈成 `permessage-deflate`。非法帧或仍然带扩展位（`RSV1 != 0`）只停止解析后续帧，不切断对拷。消息最多 200 条或 256 KB 文本。`Content-Type` 含 `event-stream` 且没有 WebSocket 消息时，按 SSE 事件列出。
-- 规则按写下来的顺序，第一条命中。明文在拨号前应用，HTTPS 在源站连接打开后应用，WebSocket 和 `CONNECT` 跳过。Map Remote 换了主机就另开连接。断点只拦请求不拦响应，单槽位保存当前挂起请求（新命中的断点会顶替并自动放行上一条），等 60 秒，超时当放行。重放不套规则和断点。规则里的文件路径不能有空格。
+- 规则里 `map-local`、`map-remote`、`break`、`break-res` 是终点，按写下来的顺序第一条命中。`delay`、`header`、`cors` 不占这条名额，匹配到的都会叠加上去，包括写在终点后面的行。`delay` 最长 30 秒。`map-local` 可写 `status=429`，省略时是 200。`header` 用 `req` 或 `res`，再写 `set` 或 `del`。`cors` 给响应补跨域头；`OPTIONS` 且没有终点规则时直接回 204，不拨源站。明文在拨号前应用，HTTPS 在源站连接打开后应用，WebSocket 和 `CONNECT` 跳过。Map Remote 换了主机就另开连接。请求断点和响应断点共用一个槽位，新命中会顶替并自动放行上一条，等 60 秒，超时当放行。响应断点先缓冲 body，最多 1 MB。已经写明的 `Content-Length` 超过 1 MB 时不暂停，记「响应断点跳过」后照常转发。分块或未知长度读过 1 MB 时，这条响应记失败。放行时可以改状态码、头和 body。重放不套规则和断点。规则里的文件路径不能有空格。
 - 直通名单在 ClientHello 之后看 SNI，没有 SNI 就用 CONNECT 主机。`*.example.com` 匹配子域，不匹配顶点。`only:` 是白名单。`*` 全部直通。空名单全部解密。
 - `GET` 或 `HEAD` 的路径去掉 query 后是 `/zniff-ca.crt` 时直接返回根证书 PEM。直接访问 `/`，或路径是 `/zniff`，返回手机安装页。`Accept-Language` 首段不是 `zh` 时安装页是英文，空的或 `zh` 仍是中文。代理请求里的 `http://其他主机/` 仍转发出去。
 - 监听默认 `127.0.0.1:8877`。端口和局域网开关记在 `config.toml` 的 `listen_port`、`listen_all`，`0` 拒绝，绑不上就报错，不悄悄换端口。`listen_all` 打开后绑 `0.0.0.0`。监听地址是 `0.0.0.0` 之后，底栏「扫码」点开才显示安装页二维码。默认地址是访问公网的那张 IPv4；隧道和 `198.18.0.0/15` 让位给物理网卡。多张网卡可改选。没有系统文件选择框。图片预览只做 png、jpeg、webp、gif，且响应已结束、非空、未截断。SVG 不预览。
@@ -39,10 +39,29 @@ P0 到 P3 里点名的能力已经接上。下面是仍然接受的缺口，不�
 
 这些有库测试：
 
-- 清空会话。清列表、字节和丢弃计数，不清下一条 id。切换选中行或点「清空」会收起「编辑重发」并清掉编辑框。
+- 清空会话。按钮在顶栏「更多」里，紧挨「导出」，清的是整个会话。清列表、字节和丢弃计数，不清下一条 id。切换选中行或点「清空」会收起「编辑重发」并清掉编辑框。
 - 复制 URL、cURL、请求 body、响应 body。cURL 跳过 `Host` 和 `Content-Length`。非 UTF-8 复制十六进制。二进制请求 body 不写进 cURL。
 - 记住监听端口。摘要里有开始时间、TTFB、总耗时、请求和响应线字节。时区用启动时的 `date +%z`，否则 UTC。HAR 导入按 `timings.wait`、`time` 和 `bodySize` 回填 `response_at`、`finished_at`、`request_bytes`、`response_bytes`。`bodySize` 缺失或为负时用已还原的 body 长度。
-- JSON、表单、XML、HTML 默认原文，可切「美化」。查询参数单独成表。
-- 过滤是 AND 词：方法精确、状态精确或 `1xx`–`5xx`、`失败`、`type:` / `ct:`、`body:`、`header:`，其余匹配主机或路径。`body:` 搜请求和响应 body，`header:` 搜头名和头值。
-- 「编辑重发」可改方法、URL、头和 body。发送时按新 body 重算 `Content-Length`。URL 改了就丢掉旧的 `Host`。
-- 直通名单、上游绝对形式、明文连接池、WebSocket 文本帧、握手去掉 `Sec-WebSocket-Extensions`、Map Local、断点丢弃、HTTPS 上的 Map Local / Map Remote / 断点放行、HTTP/2 发送端缓存命中、HTTP/2 Map Local、HTTP/2 断点丢弃、重放改方法 URL 头和 body、`/zniff-ca.crt`、安装页 `/zniff` 有代理往返测试。HAR、规则语法、SSE、美化、`body:` / `header:` 有单元测试。
+- JSON、表单、XML、HTML 默认美化，可切「原文」。复制和另存仍用记录原文。查询参数单独成表。另存写到下载目录的 `zniff` 文件夹（Linux 读 `~/.config/user-dirs.dirs` 的 `XDG_DOWNLOAD_DIR`，否则 `~/Downloads`），状态栏给出完整路径。HAR 仍导出到数据目录的 `exports/`。
+- 过滤是 AND 词：方法精确、状态精确或 `1xx`–`5xx`、`失败`、`type:` / `ct:`、`body:`、`header:`、`pin:`、`mute:` 或 `-词`，其余匹配主机或路径。`body:` 搜请求和响应 body，`header:` 搜头名和头值。`pin:` 只留星标。`mute:` 和 `-词` 排除主机或路径里带这个词的行。方法行右侧「更多」里「只看」把过滤换成当前主机，「屏蔽」追加 `-主机`（主机带冒号时用 `mute:`）。复制、另存、星标、基准、重放、编辑重发和美化也在这个菜单里。
+- 「编辑重发」可改方法、URL、头和 body。URL 框以 `curl` 开头时，按 `-X`、`-H`、`--url`、`-d` / `--data*`、`-A`、`-e`、`-b` 填进这些框；带 body 又没写方法时当成 `POST`。发送时按新 body 重算 `Content-Length`。URL 改了就丢掉旧的 `Host`。停在响应断点上再点「编辑重发」，改的是状态码、响应头和响应 body，由断点条的「放行」送出。状态码只接受 100–599。
+- 复制还有 `fetch`、Python `requests`，以及响应 JSON 对象或数组的浅层 TypeScript `interface`。「更多」里「复制代理环境」复制 `http_proxy`、`https_proxy`、`SSL_CERT_FILE`、`NODE_EXTRA_CA_CERTS`、`REQUESTS_CA_BUNDLE`、`CURL_CA_BUNDLE`、`GIT_SSL_CAINFO`，证书路径指向数据目录的 `ca.crt`，端口用当前记住的监听端口。请求头和查询值里能认出的 JWT、10 位或 13 位时间戳、可打印 Base64 会附在原值下面。两条流量可以用「基准」做行级对比。超过 1 秒的主机名、超过 256 KB 的路径用警告色。星标在主机名前有蓝点。
+- 直通名单、上游绝对形式、明文连接池、WebSocket 文本帧、握手去掉 `Sec-WebSocket-Extensions`、Map Local、断点丢弃、HTTPS 上的 Map Local / Map Remote / 断点放行、HTTP/2 发送端缓存命中、HTTP/2 Map Local、HTTP/2 断点丢弃、重放改方法 URL 头和 body、`/zniff-ca.crt`、安装页 `/zniff` 有代理往返测试。HAR、规则语法、SSE、美化、`body:` / `header:`、`status=` / `delay` / `header` / `cors`、响应断点改写、星标不淘汰、环境变量、`fetch` / Python / TypeScript、cURL 解析、JWT 提示和行级 diff 有单元测试。
+
+## 界面
+
+左栏宽 560。方法、状态、路径、时间、URL、头和 body 用等宽。主机名、按钮和句子用界面字体。英文界面的按钮和说明不改成等宽。
+
+- 列表列是方法、状态、路径、时间、主机。时间是本地 `HH:MM:SS`，固定窄列。路径占剩余宽度。主机是较窄的固定列，放在路径后面。路径和主机超出时中间省略，悬停显示全文。协议不进列表，只在详情摘要的徽章里。以后若要开关，只加「显示协议」，不做成任意列编辑器。这一轮没有这个开关。
+- 详情在摘要、消息和对比之后是图片（若有）、响应 body、响应头、查询参数、请求头、请求 body。请求 body 为空且没有截断或解压说明时不画那张卡片。响应 body 没有正文、没有说明、也没有图片预览时同样不画。
+
+## 后续吸引力增强方向（这一轮跳过）
+
+上面第 1 到第 4 组里，环境变量、响应断点、状态码和延迟、头改写、CORS、行级对比、只看 / 屏蔽 / 星标、慢请求和大响应着色、JWT 与编码提示、`fetch` / Python / TypeScript、粘贴 cURL，都已经接上。下面这些不做：
+
+- **TCP 建连和 TLS 握手分段计时**。连接池命中时没有新的握手。摘要里已经有 TTFB 和总耗时。慢请求用超过 1 秒的警告色代替分段计时。
+- **丢包和带宽限制**。`delay`（最长 30 秒）和 `status=` 覆盖 Loading、超时和错误边界。按字节限速或随机丢包是另一套转发，不放进现在的规则。
+- **JSON 树对比**。对比是 URL、请求头、请求 body、响应头、响应 body 的行级差异，每边最多 200 行。不做可折叠的 JSON 树。
+- **超过 1 MB 的响应改写**。响应断点的缓冲上限就是单条 body 上限。更大的响应只转发，不在界面里改。
+- **完整 cURL 语法**。不解析换行续行、`-G`、`--json`、`--form` 和多段 body。认不出的旗标忽略。
+- **非 JSON 的 TypeScript**。响应不是 JSON 对象或数组时，「类型」提示不可用，不猜表单或 XML。

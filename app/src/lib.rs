@@ -21,7 +21,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use nsh_base::{menu, menu_item, popover, theme};
+use nsh_base::{menu, menu_item, popover, theme, tooltip};
 use nsh_core::ui::ambient::set_clipboard;
 use nsh_core::ui::prelude::*;
 use nsh_core::EllipsizeMode;
@@ -32,7 +32,7 @@ use crate::i18n::{
     StatusMsg,
 };
 use crate::icon::{glyph, glyph_px, Glyph};
-use crate::proxy::{BreakDecision, Capture, Hub, ReplayOverride};
+use crate::proxy::{BreakDecision, BreakSide, Capture, Hub, ReplayOverride};
 use crate::session::Direction;
 
 pub use sysproxy::restore_if_dirty;
@@ -58,10 +58,13 @@ struct Controls {
 #[derive(Clone, Copy)]
 struct Compose {
     composing: Signal<bool>,
+    /// True when the open editor is the paused response, not the request.
+    response: Signal<bool>,
     method: Signal<String>,
     url: Signal<String>,
     headers: Signal<String>,
     body: Signal<String>,
+    status: Signal<String>,
 }
 
 /// The app's UI set (`nsh.json` `"rust"`).
@@ -75,10 +78,10 @@ const LIST_WIDTH: f32 = 560.0;
 /// Header and rows keep a 2pt selection bar plus `px_3` (12pt). The filter uses the same inset.
 const LIST_INSET: f32 = 14.0;
 const LIST_PAD_END: f32 = 12.0;
-const COL_METHOD: f32 = 62.0;
+const COL_METHOD: f32 = 72.0;
 const COL_STATUS: f32 = 56.0;
-const COL_PROTOCOL: f32 = 68.0;
-const COL_HOST: f32 = 176.0;
+const COL_TIME: f32 = 72.0;
+const COL_HOST: f32 = 120.0;
 /// Toolbar controls share one box. The cert chip is a status, not a button.
 const CONTROL_H: f32 = 30.0;
 const CONTROL_RADIUS: f32 = 7.0;
@@ -272,10 +275,13 @@ struct RowLine {
     id: u64,
     method: String,
     status: Option<u16>,
-    protocol: String,
+    time: String,
     host: String,
     path: String,
     failed: bool,
+    slow: bool,
+    large: bool,
+    pinned: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -311,6 +317,8 @@ struct Shown {
     preview: Signal<String>,
     pretty: Signal<bool>,
     messages: Signal<Vec<HeaderLine>>,
+    diff: Signal<String>,
+    pinned: Signal<bool>,
 }
 
 #[derive(Clone, Copy)]
@@ -352,18 +360,23 @@ pub fn App() -> impl IntoElement {
         metrics: signal(String::new()),
         query: signal(Vec::new()),
         preview: signal(String::new()),
-        pretty: signal(false),
+        pretty: signal(true),
         messages: signal(Vec::new()),
+        diff: signal(String::new()),
+        pinned: signal(false),
     };
     let port_text = signal(String::new());
     let listen_all = signal(false);
-    let paused = signal(None::<u64>);
+    let paused = signal(None::<(u64, BreakSide)>);
+    let baseline = signal(None::<u64>);
     let compose = Compose {
         composing: signal(false),
+        response: signal(false),
         method: signal(String::new()),
         url: signal(String::new()),
         headers: signal(String::new()),
         body: signal(String::new()),
+        status: signal(String::new()),
     };
     let bypass_text = signal(saved_config().bypass_hosts);
     let rules_text = signal(saved_config().rules);
@@ -390,6 +403,8 @@ pub fn App() -> impl IntoElement {
     let seen_selected = stored(None::<u64>);
     let seen_listen = stored(String::new());
     let seen_lang = stored(ui_lang(langs));
+    let baseline_tick = baseline;
+    let seen_baseline = stored(None::<u64>);
     set_interval(Duration::from_millis(16), move || {
         status.set(lock_status(&controls_tick));
         running.set(*controls_tick.running.lock().unwrap_or_else(|err| err.into_inner()));
@@ -397,7 +412,7 @@ pub fn App() -> impl IntoElement {
         listen.set(listen_now.clone());
         ca_installed.set(lock_bool(&controls_tick.ca_installed));
         use_system_proxy.set(lock_bool(&controls_tick.use_system_proxy));
-        paused.set(controls_tick.hub.paused_id());
+        paused.set(controls_tick.hub.paused());
         if listen_now != seen_listen.get() {
             seen_listen.replace(listen_now.clone());
             publish_lan(
@@ -413,22 +428,31 @@ pub fn App() -> impl IntoElement {
         let filter_now = filter_tick.get();
         let selected_now = selected_tick.get();
         let lang_now = ui_lang(langs);
+        let baseline_now = baseline_tick.get();
         if generation != seen_gen.get()
             || filter_now != seen_filter.get()
             || selected_now != seen_selected.get()
             || lang_now != seen_lang.get()
+            || baseline_now != seen_baseline.get()
         {
             seen_gen.replace(generation);
             seen_filter.replace(filter_now.clone());
             seen_selected.replace(selected_now);
             seen_lang.replace(lang_now);
+            seen_baseline.replace(baseline_now);
             let lines = row_lines(&controls_tick.hub, &filter_now);
             rows_tick.set(lines);
             memory.set(format_bytes(
                 controls_tick.hub.with_session(|session| session.memory_bytes()),
             ));
             dropped.set(controls_tick.hub.with_session(|session| session.dropped()));
-            publish_detail(&shown_tick, &controls_tick.hub, selected_now, lang_now);
+            publish_detail(
+                &shown_tick,
+                &controls_tick.hub,
+                selected_now,
+                lang_now,
+                baseline_now,
+            );
         }
     });
 
@@ -438,7 +462,9 @@ pub fn App() -> impl IntoElement {
     let controls_proxy = controls.clone();
     let controls_clear = controls.clone();
     let controls_export = controls.clone();
+    let controls_env = controls.clone();
     let selected_clear = selected;
+    let baseline_clear = baseline;
     let compose_clear = compose;
     let controls_detail = controls.clone();
     let controls_break = controls.clone();
@@ -459,9 +485,11 @@ pub fn App() -> impl IntoElement {
             move || {
                 controls_clear.hub.clear_session();
                 selected_clear.set(None);
+                baseline_clear.set(None);
                 reset_compose(compose_clear);
             },
             move || export_har_file(&controls_export),
+            move || copy_proxy_env(&controls_env),
             move || toggle_capture(controls_start.clone()),
         ))
         .child(when(
@@ -484,7 +512,14 @@ pub fn App() -> impl IntoElement {
                     upstream_text,
                     controls_list,
                 ))
-                .child(detail_pane(shown, controls_detail, selected, compose)),
+                .child(detail_pane(
+                    shown,
+                    controls_detail,
+                    selected,
+                    compose,
+                    filter,
+                    baseline,
+                )),
         )
         .child(footer(
             listen,
@@ -512,6 +547,7 @@ fn toolbar(
     toggle_proxy: impl Fn() + 'static,
     clear: impl Fn() + 'static,
     export_har: impl Fn() + 'static,
+    copy_env: impl Fn() + 'static,
     toggle: impl Fn() + 'static,
 ) -> impl IntoElement {
     let install = Rc::new(install);
@@ -594,7 +630,6 @@ fn toolbar(
                     }),
                 ),
         )
-        .child(toolbar_button(clear))
         .child(toolbar_menu(
             ca_installed,
             use_system_proxy,
@@ -602,6 +637,8 @@ fn toolbar(
             remove,
             toggle_proxy,
             export_har,
+            copy_env,
+            clear,
         ))
         .child(primary_button(
             {
@@ -656,8 +693,8 @@ fn flow_list(
                     view().flex_1().min_w(px(0.0)).child(side_input(
                         filter,
                         tr(
-                            "主机、路径、GET、404、body:、header:",
-                            "host, path, GET, 404, body:, header:",
+                            "主机、路径、GET、404、-host、mute:、pin:",
+                            "host, path, GET, 404, -host, mute:, pin:",
                         ),
                         30.0,
                         false,
@@ -863,8 +900,8 @@ fn config_panel(
             side_input(
                 rules_text,
                 tr(
-                    "一行一条：map-local、map-remote 或 break",
-                    "One per line: map-local, map-remote, or break",
+                    "map-local status=429 delay=2s、break-res、header、cors",
+                    "map-local status=429 delay=2s, break-res, header, cors",
                 ),
                 64.0,
                 true,
@@ -973,6 +1010,9 @@ fn flow_rows(
     )
     .keys(move || rows.with(|rows| rows.iter().map(|row| row.id).collect::<Vec<_>>()))
     .estimated_item_size(px(34.0))
+    // Newest stays at the bottom. Follow it while the viewport is still on
+    // that last row; scrolling further up keeps the visible rows put.
+    .follow_end(px(36.0))
     .flex_1()
 }
 
@@ -992,9 +1032,9 @@ fn column_header() -> impl IntoElement {
         .border_l_color(bg_col_header())
         .child(header_label("方法", "Method").w(px(COL_METHOD)).flex_shrink_0())
         .child(header_label("状态", "Status").w(px(COL_STATUS)).flex_shrink_0())
-        .child(header_label("协议", "Protocol").w(px(COL_PROTOCOL)).flex_shrink_0())
-        .child(header_label("主机", "Host").w(px(COL_HOST)).flex_shrink_0())
         .child(header_label("路径", "Path").flex_1().min_w(px(0.0)))
+        .child(header_label("时间", "Time").w(px(COL_TIME)).flex_shrink_0())
+        .child(header_label("主机", "Host").w(px(COL_HOST)).flex_shrink_0())
 }
 
 fn header_label(zh: &'static str, en: &'static str) -> Text {
@@ -1061,9 +1101,9 @@ fn flow_row(
         })
         .child(method_cell(rows, at))
         .child(status_text(rows, at))
-        .child(protocol_cell(rows, at))
-        .child(host_cell(rows, at))
         .child(path_cell(rows, at))
+        .child(time_cell(rows, at))
+        .child(host_cell(rows, at))
 }
 
 fn method_cell(rows: Signal<Vec<RowLine>>, at: Position) -> impl IntoElement {
@@ -1132,40 +1172,74 @@ fn status_text(rows: Signal<Vec<RowLine>>, at: Position) -> Text {
     })
 }
 
-fn protocol_cell(rows: Signal<Vec<RowLine>>, at: Position) -> Text {
+fn time_cell(rows: Signal<Vec<RowLine>>, at: Position) -> Text {
     mono(move || {
         rows.with(|rows| {
             rows.get(at.index())
-                .map(|row| row.protocol.clone())
+                .map(|row| row.time.clone())
                 .unwrap_or_default()
         })
     })
-    .w(px(COL_PROTOCOL))
+    .w(px(COL_TIME))
     .flex_shrink_0()
     .number_of_lines(1)
-    .ellipsize_mode(EllipsizeMode::Middle)
-    .text_size(px(11.5))
+    .text_size(px(12.0))
     .text_color(fg_muted())
 }
 
-fn host_cell(rows: Signal<Vec<RowLine>>, at: Position) -> Text {
-    text(move || {
-        rows.with(|rows| {
-            rows.get(at.index())
-                .map(|row| row.host.clone())
-                .unwrap_or_default()
-        })
-    })
-    .w(px(COL_HOST))
-    .flex_shrink_0()
-    .number_of_lines(1)
-    .ellipsize_mode(EllipsizeMode::Middle)
-    .text_size(px(12.5))
-    .font_weight(FontWeight::MEDIUM)
-    .text_color(fg_primary())
+fn host_cell(rows: Signal<Vec<RowLine>>, at: Position) -> impl IntoElement {
+    let tip_rows = rows;
+    view()
+        .w(px(COL_HOST))
+        .flex_shrink_0()
+        .min_w(px(0.0))
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .tooltip(cell_tip(move || {
+            tip_rows.with(|rows| {
+                rows.get(at.index())
+                    .map(|row| row.host.clone())
+                    .unwrap_or_default()
+            })
+        }))
+        .child(when(
+            move || rows.with(|rows| rows.get(at.index()).is_some_and(|row| row.pinned)),
+            || {
+                view()
+                    .w(px(6.0))
+                    .h(px(6.0))
+                    .rounded(px(99.0))
+                    .flex_shrink_0()
+                    .bg(accent_blue())
+            },
+        ))
+        .child(
+            text(move || {
+                rows.with(|rows| {
+                    rows.get(at.index())
+                        .map(|row| row.host.clone())
+                        .unwrap_or_default()
+                })
+            })
+            .flex_1()
+            .min_w(px(0.0))
+            .number_of_lines(1)
+            .ellipsize_mode(EllipsizeMode::Middle)
+            .text_size(px(12.5))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(move || {
+                if rows.with(|rows| rows.get(at.index()).is_some_and(|row| row.slow)) {
+                    status_warn_fg()
+                } else {
+                    fg_primary()
+                }
+            }),
+        )
 }
 
 fn path_cell(rows: Signal<Vec<RowLine>>, at: Position) -> Text {
+    let tip_rows = rows;
     mono(move || {
         rows.with(|rows| {
             rows.get(at.index())
@@ -1176,9 +1250,43 @@ fn path_cell(rows: Signal<Vec<RowLine>>, at: Position) -> Text {
     .flex_1()
     .min_w(px(0.0))
     .number_of_lines(1)
-    .ellipsize_mode(EllipsizeMode::Tail)
+    .ellipsize_mode(EllipsizeMode::Middle)
     .text_size(px(12.0))
-    .text_color(fg_secondary())
+    .text_color(move || {
+        if rows.with(|rows| rows.get(at.index()).is_some_and(|row| row.large)) {
+            status_warn_fg()
+        } else {
+            fg_secondary()
+        }
+    })
+    .tooltip(cell_tip(move || {
+        tip_rows.with(|rows| {
+            rows.get(at.index())
+                .map(|row| row.path.clone())
+                .unwrap_or_default()
+        })
+    }))
+}
+
+/// A reactive bubble. A plain string tooltip is captured once, and a virtual row reuses its cell.
+fn cell_tip(full: impl Fn() -> String + 'static) -> impl IntoTooltip {
+    tooltip().child(
+        view()
+            .max_w(px(420.0))
+            .px_2p5()
+            .py_1p5()
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(border_strong())
+            .bg(bg_card())
+            .shadow_md()
+            .child(
+                mono(full)
+                    .max_w(px(396.0))
+                    .text_size(px(12.0))
+                    .text_color(fg_primary()),
+            ),
+    )
 }
 
 fn detail_pane(
@@ -1186,11 +1294,13 @@ fn detail_pane(
     controls: Arc<Controls>,
     selected: Signal<Option<u64>>,
     compose: Compose,
+    filter: Signal<String>,
+    baseline: Signal<Option<u64>>,
 ) -> impl IntoElement {
     scroll().flex_1().bg(bg_canvas()).child(
         when(
             move || shown.phase.get() == Phase::Ready,
-            move || ready_detail(shown, controls.clone(), selected, compose),
+            move || ready_detail(shown, controls.clone(), selected, compose, filter, baseline),
         )
         .otherwise(move || {
             view()
@@ -1248,40 +1358,68 @@ fn ready_detail(
     controls: Arc<Controls>,
     selected: Signal<Option<u64>>,
     compose: Compose,
+    filter: Signal<String>,
+    baseline: Signal<Option<u64>>,
 ) -> impl IntoElement {
     view()
         .p_3p5()
         .gap_3p5()
-        .child(summary(shown, controls, selected, compose))
+        .child(summary(shown, controls, selected, compose, filter, baseline))
         .child(when(
             move || compose.composing.get(),
             move || compose_box(compose),
+        ))
+        .child(when(
+            move || !shown.diff.get().is_empty(),
+            move || diff_card(shown),
         ))
         .child(when(
             move || !shown.messages.with(Vec::is_empty),
             move || header_section("消息", "Messages", shown.messages),
         ))
         .child(when(
-            move || !shown.query.with(Vec::is_empty),
-            move || header_section("查询参数", "Query", shown.query),
-        ))
-        .child(header_section("请求头", "Request headers", shown.request_headers))
-        .child(body_section(
-            "请求 body",
-            "Request body",
-            shown.request_body,
-            shown.request_note,
-        ))
-        .child(header_section("响应头", "Response headers", shown.response_headers))
-        .child(when(
             move || !shown.preview.get().is_empty(),
             move || image_preview(shown),
         ))
-        .child(body_section(
-            "响应 body",
-            "Response body",
-            shown.response_body,
-            shown.response_note,
+        .child(when(
+            move || {
+                !shown.response_body.get().is_empty()
+                    || !shown.response_note.get().is_empty()
+                    || !shown.preview.get().is_empty()
+            },
+            move || {
+                body_section(
+                    "响应 body",
+                    "Response body",
+                    shown.response_body,
+                    shown.response_note,
+                )
+            },
+        ))
+        .child(header_section(
+            "响应头",
+            "Response headers",
+            shown.response_headers,
+        ))
+        .child(when(
+            move || !shown.query.with(Vec::is_empty),
+            move || header_section("查询参数", "Query", shown.query),
+        ))
+        .child(header_section(
+            "请求头",
+            "Request headers",
+            shown.request_headers,
+        ))
+        .child(when(
+            move || !shown.request_body.get().is_empty() || !shown.request_note.get().is_empty(),
+            move || {
+                body_section(
+                    "请求 body",
+                    "Request body",
+                    shown.request_body,
+                    shown.request_note,
+                )
+            },
         ))
 }
 
@@ -1290,6 +1428,8 @@ fn summary(
     controls: Arc<Controls>,
     selected: Signal<Option<u64>>,
     compose: Compose,
+    filter: Signal<String>,
+    baseline: Signal<Option<u64>>,
 ) -> impl IntoElement {
     view()
         .p_3p5()
@@ -1300,6 +1440,7 @@ fn summary(
         .bg(bg_card())
         .child(
             view()
+                .w_full()
                 .flex_row()
                 .items_center()
                 .gap_2()
@@ -1356,7 +1497,11 @@ fn summary(
                                 .text_size(px(11.5))
                                 .text_color(fg_muted()),
                         ),
-                ),
+                )
+                .child(view().flex_1())
+                .child(detail_actions(
+                    shown, controls, selected, compose, filter, baseline,
+                )),
         )
         .child(
             view()
@@ -1379,7 +1524,6 @@ fn summary(
                 .text_size(px(11.5))
                 .text_color(fg_muted()),
         )
-        .child(detail_actions(shown, controls, selected, compose))
         .child(
             when(
                 move || !shown.error.get().is_empty(),
@@ -1496,6 +1640,27 @@ fn header_section(
         )
 }
 
+fn diff_card(shown: Shown) -> impl IntoElement {
+    view()
+        .gap_1p5()
+        .child(view().px_1().child(section_title(tr("对比", "Diff"))))
+        .child(
+            view()
+                .bg(bg_code())
+                .rounded(px(10.0))
+                .border_1()
+                .border_color(border_strong())
+                .px_3p5()
+                .py_2p5()
+                .child(
+                    mono(move || shown.diff.get())
+                        .selectable(true)
+                        .text_size(px(12.0))
+                        .text_color(fg_primary()),
+                ),
+        )
+}
+
 fn body_section(
     zh: &'static str,
     en: &'static str,
@@ -1531,37 +1696,24 @@ fn body_section(
                 },
             ),
         )
-        .child(
-            view()
-                .bg(bg_code())
-                .rounded(px(10.0))
-                .border_1()
-                .border_color(border_strong())
-                .px_3p5()
-                .py_2p5()
-                .child(
-                    mono({
-                        let langs = ui_langs();
-                        move || {
-                            let text = body.get();
-                            if text.is_empty() {
-                                t(ui_lang(langs), "（空）", "(empty)").into()
-                            } else {
-                                text
-                            }
-                        }
-                    })
-                    .selectable(true)
-                    .text_size(px(12.0))
-                    .text_color(move || {
-                        if body.get().is_empty() {
-                            fg_muted()
-                        } else {
-                            fg_primary()
-                        }
-                    }),
-                ),
-        )
+        .child(when(
+            move || !body.get().is_empty(),
+            move || {
+                view()
+                    .bg(bg_code())
+                    .rounded(px(10.0))
+                    .border_1()
+                    .border_color(border_strong())
+                    .px_3p5()
+                    .py_2p5()
+                    .child(
+                        mono(move || body.get())
+                            .selectable(true)
+                            .text_size(px(12.0))
+                            .text_color(fg_primary()),
+                    )
+            },
+        ))
 }
 
 fn detail_actions(
@@ -1569,79 +1721,241 @@ fn detail_actions(
     controls: Arc<Controls>,
     selected: Signal<Option<u64>>,
     compose: Compose,
+    filter: Signal<String>,
+    baseline: Signal<Option<u64>>,
 ) -> impl IntoElement {
     let copy_url = controls.clone();
     let copy_curl = controls.clone();
+    let copy_fetch = controls.clone();
+    let copy_python = controls.clone();
+    let copy_types = controls.clone();
     let copy_request = controls.clone();
     let copy_response = controls.clone();
     let save = controls.clone();
+    let focus_controls = controls.clone();
+    let mute_controls = controls.clone();
+    let pin_controls = controls.clone();
+    let base_controls = controls.clone();
     let replay_controls = controls.clone();
     let edit_controls = controls.clone();
     let send_controls = controls.clone();
     let pretty_controls = controls;
+    let pinned = shown.pinned;
+    let pretty = shown.pretty;
+    let baseline_mark = baseline;
+    let selected_mark = selected;
+    menu()
+        .placement(Placement::Bottom)
+        .align(Align::End)
+        .offset(px(6.0))
+        .margin(px(8.0))
+        .trigger(detail_more_trigger())
+        .child(
+            view()
+                .w(px(196.0))
+                .p_1()
+                .gap_0p5()
+                .rounded(px(10.0))
+                .border_1()
+                .border_color(border_strong())
+                .bg(bg_card())
+                .shadow_md()
+                .child(action_item(tr("复制 URL", "Copy URL"), move || {
+                    copy_part(&copy_url, selected.get(), CopyPart::Url);
+                }))
+                .child(action_item("cURL", move || {
+                    copy_part(&copy_curl, selected.get(), CopyPart::Curl);
+                }))
+                .child(action_item("fetch", move || {
+                    copy_snippet(&copy_fetch, selected.get(), Snippet::Fetch);
+                }))
+                .child(action_item("Python", move || {
+                    copy_snippet(&copy_python, selected.get(), Snippet::Python);
+                }))
+                .child(action_item(tr("类型", "Types"), move || {
+                    copy_snippet(&copy_types, selected.get(), Snippet::Types);
+                }))
+                .child(action_item(tr("复制请求", "Copy request"), move || {
+                    copy_part(&copy_request, selected.get(), CopyPart::Request);
+                }))
+                .child(action_item(tr("复制响应", "Copy response"), move || {
+                    copy_part(&copy_response, selected.get(), CopyPart::Response);
+                }))
+                .child(action_item(tr("另存", "Save"), move || {
+                    export_response(&save, selected.get());
+                }))
+                .child(menu_rule())
+                .child(action_item(tr("只看", "Focus"), move || {
+                    focus_host(&focus_controls, selected.get(), filter);
+                }))
+                .child(action_item(tr("屏蔽", "Mute"), move || {
+                    mute_host(&mute_controls, selected.get(), filter);
+                }))
+                .child(menu_rule())
+                .child(marked_action(
+                    move || pinned.get(),
+                    {
+                        let langs = ui_langs();
+                        move || -> SharedString {
+                            if pinned.get() {
+                                t(ui_lang(langs), "取消星标", "Unstar").into()
+                            } else {
+                                t(ui_lang(langs), "星标", "Star").into()
+                            }
+                        }
+                    },
+                    move || toggle_pin(&pin_controls, selected.get()),
+                ))
+                .child(marked_action(
+                    move || baseline_mark.get().is_some_and(|id| selected_mark.get() == Some(id)),
+                    tr("基准", "Baseline"),
+                    {
+                        let langs = ui_langs();
+                        move || {
+                            set_baseline(
+                                &base_controls,
+                                selected.get(),
+                                baseline,
+                                &shown,
+                                ui_lang(langs),
+                            );
+                        }
+                    },
+                ))
+                .child(marked_action(
+                    move || pretty.get(),
+                    {
+                        let langs = ui_langs();
+                        move || -> SharedString {
+                            if pretty.get() {
+                                t(ui_lang(langs), "原文", "Raw").into()
+                            } else {
+                                t(ui_lang(langs), "美化", "Pretty").into()
+                            }
+                        }
+                    },
+                    {
+                        let langs = ui_langs();
+                        move || {
+                            shown.pretty.set(!shown.pretty.get());
+                            publish_detail(
+                                &shown,
+                                &pretty_controls.hub,
+                                selected.get(),
+                                ui_lang(langs),
+                                baseline.get(),
+                            );
+                        }
+                    },
+                ))
+                .child(menu_rule())
+                .child(action_item(tr("重放", "Replay"), move || {
+                    replay_flow(&replay_controls, selected.get(), ReplayOverride::default());
+                }))
+                .child(action_item(tr("编辑重发", "Edit"), move || {
+                    begin_compose(&edit_controls, selected.get(), compose);
+                }))
+                .child(when(
+                    move || compose.composing.get() && !compose.response.get(),
+                    move || {
+                        let controls = send_controls.clone();
+                        action_item(tr("发送", "Send"), move || {
+                            replay_flow(
+                                &controls,
+                                selected.get(),
+                                ReplayOverride {
+                                    method: Some(compose.method.get()),
+                                    url: Some(compose.url.get()),
+                                    headers: Some(parse_header_text(&compose.headers.get())),
+                                    body: Some(compose.body.get().into_bytes()),
+                                },
+                            );
+                        })
+                    },
+                )),
+        )
+}
+
+fn detail_more_trigger() -> impl IntoElement {
     view()
+        .h(px(26.0))
+        .px_2()
+        .gap_1()
+        .flex_shrink_0()
         .flex_row()
-        .flex_wrap()
         .items_center()
-        .gap_1p5()
-        .child(detail_button(tr("复制 URL", "Copy URL"), move || {
-            copy_part(&copy_url, selected.get(), CopyPart::Url);
-        }))
-        .child(detail_button("cURL", move || {
-            copy_part(&copy_curl, selected.get(), CopyPart::Curl);
-        }))
-        .child(detail_button(tr("复制请求", "Copy request"), move || {
-            copy_part(&copy_request, selected.get(), CopyPart::Request);
-        }))
-        .child(detail_button(tr("复制响应", "Copy response"), move || {
-            copy_part(&copy_response, selected.get(), CopyPart::Response);
-        }))
-        .child(detail_button(tr("另存", "Save"), move || {
-            export_response(&save, selected.get());
-        }))
-        .child(detail_button(tr("重放", "Replay"), move || {
-            replay_flow(&replay_controls, selected.get(), ReplayOverride::default());
-        }))
-        .child(detail_button(tr("编辑重发", "Edit"), move || {
-            begin_compose(&edit_controls, selected.get(), compose);
-        }))
-        .child(when(
-            move || compose.composing.get(),
-            move || {
-                let controls = send_controls.clone();
-                detail_button(tr("发送", "Send"), move || {
-                    replay_flow(
-                        &controls,
-                        selected.get(),
-                        ReplayOverride {
-                            method: Some(compose.method.get()),
-                            url: Some(compose.url.get()),
-                            headers: Some(parse_header_text(&compose.headers.get())),
-                            body: Some(compose.body.get().into_bytes()),
-                        },
-                    );
-                })
-            },
-        ))
-        .child(detail_button(
-            {
-                let langs = ui_langs();
-                move || -> SharedString {
-                    if shown.pretty.get() {
-                        t(ui_lang(langs), "原文", "Raw").into()
+        .rounded(px(6.0))
+        .border_1()
+        .border_color(border_control())
+        .bg(bg_control())
+        .hover(|style| style.bg(bg_control_hover()))
+        .cursor(Cursor::Pointer)
+        .active(|style| style.opacity(0.75))
+        .child(
+            text(tr("更多", "More"))
+                .number_of_lines(1)
+                .text_size(px(12.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(fg_secondary()),
+        )
+        .child(glyph(|| Glyph::Chevron, || color(fg_secondary())))
+}
+
+fn action_item(
+    label: impl IntoReactive<SharedString>,
+    on_select: impl Fn() + 'static,
+) -> impl IntoElement {
+    menu_item()
+        .on_select(on_select)
+        .h(px(30.0))
+        .px_2p5()
+        .rounded(px(6.0))
+        .flex_row()
+        .items_center()
+        .hover(|style| style.bg(bg_control_hover()))
+        .active(|style| style.opacity(0.75))
+        .cursor(Cursor::Pointer)
+        .child(control_text(label).text_color(fg_secondary()))
+}
+
+fn marked_action(
+    marked: impl Fn() -> bool + 'static + Clone,
+    label: impl IntoReactive<SharedString>,
+    on_select: impl Fn() + 'static,
+) -> impl IntoElement {
+    let dot = marked.clone();
+    let label_on = marked;
+    menu_item()
+        .on_select(on_select)
+        .h(px(30.0))
+        .px_2p5()
+        .gap_2()
+        .rounded(px(6.0))
+        .flex_row()
+        .items_center()
+        .hover(|style| style.bg(bg_control_hover()))
+        .active(|style| style.opacity(0.75))
+        .cursor(Cursor::Pointer)
+        .child(
+            view()
+                .w(px(6.0))
+                .h(px(6.0))
+                .rounded(px(99.0))
+                .bg(move || {
+                    if dot() {
+                        accent_blue()
                     } else {
-                        t(ui_lang(langs), "美化", "Pretty").into()
+                        bg_card()
                     }
-                }
-            },
-            {
-                let langs = ui_langs();
-                move || {
-                    shown.pretty.set(!shown.pretty.get());
-                    publish_detail(&shown, &pretty_controls.hub, selected.get(), ui_lang(langs));
-                }
-            },
-        ))
+                }),
+        )
+        .child(control_text(label).text_color(move || {
+            if label_on() {
+                accent_blue_text()
+            } else {
+                fg_secondary()
+            }
+        }))
 }
 
 fn detail_button(
@@ -2080,6 +2394,8 @@ fn toolbar_menu(
     remove: Rc<impl Fn() + 'static>,
     toggle_proxy: impl Fn() + 'static,
     export_har: impl Fn() + 'static,
+    copy_env: impl Fn() + 'static,
+    clear: impl Fn() + 'static,
 ) -> impl IntoElement {
     menu()
         .placement(Placement::Bottom)
@@ -2094,6 +2410,8 @@ fn toolbar_menu(
             remove,
             toggle_proxy,
             export_har,
+            copy_env,
+            clear,
         ))
 }
 
@@ -2179,6 +2497,8 @@ fn more_menu(
     remove: Rc<impl Fn() + 'static>,
     toggle_proxy: impl Fn() + 'static,
     export_har: impl Fn() + 'static,
+    copy_env: impl Fn() + 'static,
+    clear: impl Fn() + 'static,
 ) -> impl IntoElement {
     view()
         .w(px(248.0))
@@ -2190,6 +2510,12 @@ fn more_menu(
         .bg(bg_card())
         .shadow_md()
         .child(menu_action(Glyph::Download, tr("导出", "Export"), export_har))
+        .child(menu_action(Glyph::Trash, tr("清空", "Clear"), clear))
+        .child(menu_action(
+            Glyph::Prompt,
+            tr("复制代理环境", "Copy proxy env"),
+            copy_env,
+        ))
         .child(menu_rule())
         .child(proxy_menu_item(proxy_on, toggle_proxy))
         .child(menu_rule())
@@ -2408,26 +2734,6 @@ fn menu_rule() -> impl IntoElement {
         .bg(border_strong())
 }
 
-fn toolbar_button(on_press: impl Fn() + 'static) -> impl IntoElement {
-    view()
-        .h(px(CONTROL_H))
-        .px_2p5()
-        .gap_1p5()
-        .flex_shrink_0()
-        .flex_row()
-        .items_center()
-        .rounded(px(CONTROL_RADIUS))
-        .border_1()
-        .border_color(border_control())
-        .bg(bg_control())
-        .hover(|style| style.bg(bg_control_hover()))
-        .cursor(Cursor::Pointer)
-        .active(|style| style.opacity(0.75))
-        .on_press(on_press)
-        .child(glyph(|| Glyph::Trash, || color(fg_secondary())))
-        .child(control_text(tr("清空", "Clear")).text_color(fg_secondary()))
-}
-
 fn primary_button(
     label: impl IntoReactive<SharedString>,
     danger: impl Fn() -> bool + 'static + Clone,
@@ -2495,27 +2801,45 @@ fn row_lines(hub: &Hub, filter: &str) -> Vec<RowLine> {
                     id,
                     method: flow.method.clone(),
                     status: flow.status,
-                    protocol: flow.protocol.label().to_string(),
+                    time: present::format_clock(flow.started),
                     host: flow.host.clone(),
                     path: flow.path.clone(),
                     failed: flow.error.is_some() && flow.status.is_none(),
+                    slow: present::is_slow(
+                        flow.started,
+                        flow.finished_at,
+                        std::time::SystemTime::now(),
+                    ),
+                    large: present::is_large(flow.response_bytes, flow.response_body.len()),
+                    pinned: flow.pinned,
                 })
             })
             .collect()
     })
 }
 
-fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang) {
+fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baseline: Option<u64>) {
     let Some(id) = id else {
         shown.phase.set(Phase::Empty);
         shown.preview.set(String::new());
+        shown.diff.set(String::new());
+        shown.pinned.set(false);
         return;
     };
     let snapshot = hub.with_session(|session| session.get(id).cloned());
     let Some(flow) = snapshot else {
         shown.phase.set(Phase::Gone);
         shown.preview.set(String::new());
+        shown.diff.set(String::new());
+        shown.pinned.set(false);
         return;
+    };
+    let diff = match baseline {
+        Some(base) if base != id => hub
+            .with_session(|session| session.get(base).cloned())
+            .map(|base| present::flow_diff(&base, &flow, lang))
+            .unwrap_or_default(),
+        _ => String::new(),
     };
     let messages = message_lines(&flow, lang);
     let pretty = shown.pretty.get();
@@ -2569,8 +2893,8 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang) {
             .enumerate()
             .map(|(index, (name, value))| HeaderLine {
                 key: index as u32,
-                name,
-                value,
+                name: name.clone(),
+                value: annotated(&name, &value),
             })
             .collect(),
     );
@@ -2587,6 +2911,8 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang) {
     shown.response_note.set(response.note);
     shown.preview.set(preview);
     shown.messages.set(messages);
+    shown.diff.set(diff);
+    shown.pinned.set(flow.pinned);
     shown.phase.set(Phase::Ready);
 }
 
@@ -2640,9 +2966,16 @@ fn header_lines(headers: &[(String, String)]) -> Vec<HeaderLine> {
         .map(|(index, (name, value))| HeaderLine {
             key: index as u32,
             name: name.clone(),
-            value: value.clone(),
+            value: annotated(name, value),
         })
         .collect()
+}
+
+fn annotated(name: &str, value: &str) -> String {
+    match present::annotate_value(name, value) {
+        Some(hint) => format!("{value}\n{hint}"),
+        None => value.to_string(),
+    }
 }
 
 struct BodyText {
@@ -2706,12 +3039,13 @@ fn body_text(body: &[u8], truncated: bool, encoding_error: Option<&str>, lang: L
             if !note.is_empty() {
                 note.push('\n');
             }
-            let rest = text.len() - DISPLAY_CAP;
+            let end = text.floor_char_boundary(DISPLAY_CAP);
+            let rest = text.len() - end;
             note.push_str(&match lang {
                 Lang::Zh => format!("界面只显示前 256KB，记录里还有 {rest} 字节。"),
                 Lang::En => format!("Showing only the first 256 KB; {rest} more bytes are stored."),
             });
-            text[..DISPLAY_CAP].to_string()
+            text[..end].to_string()
         } else {
             text.to_string()
         }
@@ -3074,6 +3408,120 @@ fn set_port(slot: &Mutex<u16>, port: u16) {
     *slot.lock().unwrap_or_else(|err| err.into_inner()) = port;
 }
 
+#[derive(Clone, Copy)]
+enum Snippet {
+    Fetch,
+    Python,
+    Types,
+}
+
+fn copy_proxy_env(controls: &Controls) {
+    let port = lock_port(&controls.listen_port);
+    let cert = controls.hub.ca.cert_path();
+    set_clipboard(present::proxy_env(port, &cert.display().to_string()));
+    set_status(controls, StatusMsg::CopiedEnv);
+}
+
+fn copy_snippet(controls: &Controls, id: Option<u64>, kind: Snippet) {
+    let Some(flow) = selected_flow(controls, id) else {
+        return;
+    };
+    match kind {
+        Snippet::Fetch => {
+            set_clipboard(present::fetch_snippet(&flow));
+            set_status(controls, StatusMsg::CopiedFetch);
+        }
+        Snippet::Python => {
+            set_clipboard(present::python_requests(&flow));
+            set_status(controls, StatusMsg::CopiedPython);
+        }
+        Snippet::Types => match std::str::from_utf8(&flow.response_body)
+            .ok()
+            .and_then(present::typescript_interface)
+        {
+            Some(text) => {
+                set_clipboard(text);
+                set_status(controls, StatusMsg::CopiedInterface);
+            }
+            None => set_status(controls, StatusMsg::InterfaceUnavailable),
+        },
+    }
+}
+
+fn focus_host(controls: &Controls, id: Option<u64>, filter: Signal<String>) {
+    let Some(flow) = selected_flow(controls, id) else {
+        return;
+    };
+    if flow.host.is_empty() {
+        return;
+    }
+    filter.set(flow.host);
+}
+
+fn mute_host(controls: &Controls, id: Option<u64>, filter: Signal<String>) {
+    let Some(flow) = selected_flow(controls, id) else {
+        return;
+    };
+    let host = flow.host.to_ascii_lowercase();
+    if host.is_empty() || host.split_whitespace().nth(1).is_some() {
+        return;
+    }
+    let token = if host.contains(':') {
+        format!("mute:{host}")
+    } else {
+        format!("-{host}")
+    };
+    let current = filter.get();
+    if current
+        .split_whitespace()
+        .any(|part| part.eq_ignore_ascii_case(&token))
+    {
+        return;
+    }
+    if current.trim().is_empty() {
+        filter.set(token);
+    } else {
+        filter.set(format!("{current} {token}"));
+    }
+}
+
+fn toggle_pin(controls: &Controls, id: Option<u64>) {
+    let Some(flow) = selected_flow(controls, id) else {
+        return;
+    };
+    let next = !flow.pinned;
+    if controls.hub.set_pinned(flow.id, next) {
+        return;
+    }
+    set_status(
+        controls,
+        if next {
+            StatusMsg::PinLimit
+        } else {
+            StatusMsg::FlowGone
+        },
+    );
+}
+
+fn set_baseline(
+    controls: &Controls,
+    id: Option<u64>,
+    baseline: Signal<Option<u64>>,
+    shown: &Shown,
+    lang: Lang,
+) {
+    let Some(id) = id else {
+        set_status(controls, StatusMsg::NeedSelection);
+        return;
+    };
+    if selected_flow(controls, Some(id)).is_none() {
+        return;
+    }
+    baseline.set(Some(id));
+    set_status(controls, StatusMsg::BaselineSet);
+    publish_detail(shown, &controls.hub, Some(id), lang, Some(id));
+}
+
 fn copy_part(controls: &Controls, id: Option<u64>, part: CopyPart) {
     let Some(flow) = selected_flow(controls, id) else {
         return;
@@ -3125,7 +3573,7 @@ fn export_response(controls: &Controls, id: Option<u64>) {
     let ext = present::content_type(&flow.response_headers)
         .and_then(present::image_extension)
         .unwrap_or_else(|| body_extension(&flow.response_headers, &flow.response_body));
-    let dir = ca::data_dir().join("exports");
+    let dir = download_dir().join("zniff");
     if let Err(err) = std::fs::create_dir_all(&dir) {
         set_status(controls, StatusMsg::SaveFailed(err.to_string()));
         return;
@@ -3138,6 +3586,72 @@ fn export_response(controls: &Controls, id: Option<u64>) {
     let text = path.display().to_string();
     set_clipboard(text.clone());
     set_status(controls, StatusMsg::Saved(text));
+}
+
+fn home_dir() -> std::path::PathBuf {
+    let key = if cfg!(target_os = "windows") {
+        "USERPROFILE"
+    } else {
+        "HOME"
+    };
+    std::env::var(key)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .or_else(|| std::env::var("HOME").ok())
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
+/// macOS and Windows use `~/Downloads`. Linux prefers `XDG_DOWNLOAD_DIR`.
+fn download_dir() -> std::path::PathBuf {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    if let Some(dir) = read_xdg_download() {
+        return dir;
+    }
+    home_dir().join("Downloads")
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn read_xdg_download() -> Option<std::path::PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    let text = std::fs::read_to_string(
+        std::path::PathBuf::from(&home).join(".config/user-dirs.dirs"),
+    )
+    .ok()?;
+    xdg_download_dir(&home, &text)
+}
+
+/// `XDG_DOWNLOAD_DIR="$HOME/Downloads"` from `user-dirs.dirs`.
+/// Linux calls this. Other platforms keep it for the parser test.
+#[cfg_attr(not(all(unix, not(target_os = "macos"))), allow(dead_code))]
+fn xdg_download_dir(home: &str, text: &str) -> Option<std::path::PathBuf> {
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() != "XDG_DOWNLOAD_DIR" {
+            continue;
+        }
+        let mut value = value.trim();
+        if value.len() >= 2 {
+            let bytes = value.as_bytes();
+            let quoted = (bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"')
+                || (bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\'');
+            if quoted {
+                value = &value[1..value.len() - 1];
+            }
+        }
+        if value.is_empty() {
+            return None;
+        }
+        return Some(std::path::PathBuf::from(value.replace("$HOME", home)));
+    }
+    None
 }
 
 fn body_extension(headers: &[(String, String)], body: &[u8]) -> &'static str {
@@ -3211,7 +3725,7 @@ fn lock_string(slot: &Mutex<String>) -> String {
 }
 
 fn break_bar(
-    paused: Signal<Option<u64>>,
+    paused: Signal<Option<(u64, BreakSide)>>,
     compose: Compose,
     selected: Signal<Option<u64>>,
     controls: Arc<Controls>,
@@ -3232,10 +3746,16 @@ fn break_bar(
                 let langs = ui_langs();
                 move || -> SharedString {
                     match paused.get() {
-                        Some(id) => format!(
+                        Some((id, BreakSide::Response)) => format!(
                             "{} #{id} {}",
                             t(ui_lang(langs), "流量", "Flow"),
-                            t(ui_lang(langs), "停在断点", "is paused")
+                            t(ui_lang(langs), "停在响应断点", "is paused on the response")
+                        )
+                        .into(),
+                        Some((id, BreakSide::Request)) => format!(
+                            "{} #{id} {}",
+                            t(ui_lang(langs), "流量", "Flow"),
+                            t(ui_lang(langs), "停在请求断点", "is paused on the request")
                         )
                         .into(),
                         None => "".into(),
@@ -3249,18 +3769,24 @@ fn break_bar(
             .text_color(status_warn_fg()),
         )
         .child(detail_button(tr("放行", "Continue"), move || {
-            let edited = compose.composing.get() && selected.get() == paused.get();
+            let edited = compose.composing.get()
+                && paused.get().is_some_and(|(id, side)| {
+                    selected.get() == Some(id)
+                        && compose.response.get() == matches!(side, BreakSide::Response)
+                });
             let decision = if edited {
                 BreakDecision {
                     drop: false,
                     headers: Some(parse_header_text(&compose.headers.get())),
                     body: Some(compose.body.get().into_bytes()),
+                    status: edited_status(compose),
                 }
             } else {
                 BreakDecision {
                     drop: false,
                     headers: None,
                     body: None,
+                    status: None,
                 }
             };
             if !release.hub.resolve_break(decision) {
@@ -3272,6 +3798,7 @@ fn break_bar(
                 drop: true,
                 headers: None,
                 body: None,
+                status: None,
             });
         }))
 }
@@ -3279,11 +3806,31 @@ fn break_bar(
 fn compose_box(compose: Compose) -> impl IntoElement {
     view()
         .gap_1p5()
-        .child(view().px_1().child(section_title(tr("编辑重发", "Edit and resend"))))
+        .child(view().px_1().child(section_title({
+            let langs = ui_langs();
+            move || -> SharedString {
+                if compose.response.get() {
+                    t(ui_lang(langs), "编辑响应", "Edit response").into()
+                } else {
+                    t(ui_lang(langs), "编辑重发", "Edit and resend").into()
+                }
+            }
+        })))
         .child(
             view()
                 .flex_row()
                 .gap_1p5()
+                .child(when(
+                    move || compose.response.get(),
+                    move || {
+                        view().w(px(72.0)).flex_shrink_0().child(compose_input(
+                            compose.status,
+                            "200",
+                            30.0,
+                            false,
+                        ))
+                    },
+                ))
                 .child(
                     view()
                         .w(px(88.0))
@@ -3294,7 +3841,16 @@ fn compose_box(compose: Compose) -> impl IntoElement {
                     view()
                         .flex_1()
                         .min_w(px(0.0))
-                        .child(compose_input(compose.url, "https://example.com/path", 30.0, false)),
+                        .child(compose_input_on(
+                            compose.url,
+                            tr(
+                                "https://example.com/path，或粘贴 curl",
+                                "https://example.com/path, or paste curl",
+                            ),
+                            30.0,
+                            false,
+                            move |text| apply_url_edit(compose, text),
+                        )),
                 ),
         )
         .child(compose_input(
@@ -3312,6 +3868,18 @@ fn compose_input(
     height: f32,
     multiline: bool,
 ) -> impl IntoElement {
+    compose_input_on(value, placeholder, height, multiline, move |text| {
+        value.set(text.to_string());
+    })
+}
+
+fn compose_input_on(
+    value: Signal<String>,
+    placeholder: impl IntoReactive<String> + 'static,
+    height: f32,
+    multiline: bool,
+    on_change: impl Fn(&str) + 'static,
+) -> impl IntoElement {
     input()
         .value(value)
         .placeholder(placeholder)
@@ -3327,7 +3895,37 @@ fn compose_input(
         .text_size(px(12.0))
         .text_color(fg_primary())
         .multiline(multiline)
-        .on_change(move |text: &str| value.set(text.to_string()))
+        .on_change(on_change)
+}
+
+fn apply_url_edit(compose: Compose, text: &str) {
+    if looks_like_curl(text) {
+        if let Some(parsed) = present::parse_curl(text) {
+            compose.method.set(parsed.method);
+            compose.url.set(parsed.url);
+            compose.headers.set(header_text(&parsed.headers));
+            compose.body.set(parsed.body);
+            return;
+        }
+    }
+    compose.url.set(text.to_string());
+}
+
+fn looks_like_curl(text: &str) -> bool {
+    let text = text.trim_start();
+    text == "curl"
+        || text.starts_with("curl ")
+        || text.starts_with("curl\t")
+        || text.starts_with("curl\n")
+        || text.starts_with("curl\r")
+}
+
+fn edited_status(compose: Compose) -> Option<u16> {
+    if !compose.response.get() {
+        return None;
+    }
+    let code = compose.status.get().trim().parse::<u16>().ok()?;
+    (100..600).contains(&code).then_some(code)
 }
 
 fn lan_toggle(on: Signal<bool>, controls: Arc<Controls>) -> impl IntoElement {
@@ -3435,25 +4033,40 @@ fn begin_compose(controls: &Controls, id: Option<u64>, compose: Compose) {
         set_status(controls, StatusMsg::NeedSelection);
         return;
     };
-    let text = flow
-        .request_headers
+    let response = controls.hub.paused().is_some_and(|(paused_id, side)| {
+        id == Some(paused_id) && side == BreakSide::Response
+    });
+    compose.response.set(response);
+    compose.method.set(flow.method);
+    compose.url.set(flow.url);
+    if response {
+        compose.status.set(flow.status.map(|code| code.to_string()).unwrap_or_default());
+        compose.headers.set(header_text(&flow.response_headers));
+        compose.body.set(String::from_utf8_lossy(&flow.response_body).into_owned());
+    } else {
+        compose.status.set(String::new());
+        compose.headers.set(header_text(&flow.request_headers));
+        compose.body.set(String::from_utf8_lossy(&flow.request_body).into_owned());
+    }
+    compose.composing.set(true);
+}
+
+fn header_text(headers: &[(String, String)]) -> String {
+    headers
         .iter()
         .map(|(name, value)| format!("{name}: {value}"))
         .collect::<Vec<_>>()
-        .join("\n");
-    compose.method.set(flow.method);
-    compose.url.set(flow.url);
-    compose.headers.set(text);
-    compose.body.set(String::from_utf8_lossy(&flow.request_body).into_owned());
-    compose.composing.set(true);
+        .join("\n")
 }
 
 fn reset_compose(compose: Compose) {
     compose.composing.set(false);
+    compose.response.set(false);
     compose.method.set(String::new());
     compose.url.set(String::new());
     compose.headers.set(String::new());
     compose.body.set(String::new());
+    compose.status.set(String::new());
 }
 
 fn replay_flow(controls: &Arc<Controls>, id: Option<u64>, edit: ReplayOverride) {
@@ -3945,6 +4558,45 @@ mod tests {
         for addr in super::lan_addrs() {
             assert!(usable_v4(addr.ip), "{} {}", addr.name, addr.ip);
         }
+    }
+
+    #[test]
+    fn xdg_download_dir_reads_the_quoted_home_path() {
+        let text = "\
+# comment
+XDG_DESKTOP_DIR=\"$HOME/Desktop\"
+XDG_DOWNLOAD_DIR=\"$HOME/Downloads\"
+XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
+";
+        let path = super::xdg_download_dir("/home/ada", text).unwrap();
+        assert_eq!(path, std::path::PathBuf::from("/home/ada/Downloads"));
+        let absolute = super::xdg_download_dir("/home/ada", "XDG_DOWNLOAD_DIR=/srv/downloads\n");
+        assert_eq!(
+            absolute,
+            Some(std::path::PathBuf::from("/srv/downloads"))
+        );
+        assert!(super::xdg_download_dir("/home/ada", "XDG_DOWNLOAD_DIR=\"\"\n").is_none());
+        assert!(
+            super::xdg_download_dir("/home/ada", "XDG_DESKTOP_DIR=\"$HOME/Desktop\"\n").is_none()
+        );
+    }
+
+    #[test]
+    fn body_text_cuts_on_a_char_boundary() {
+        let mut raw = vec![b'a'; 256 * 1024 - 2];
+        raw.extend_from_slice("不".as_bytes());
+        raw.extend(std::iter::repeat_n(b'b', 40));
+        let shown = super::body_text(&raw, false, None, super::Lang::Zh);
+        assert_eq!(shown.text.len(), 256 * 1024 - 2);
+        assert!(shown.text.is_char_boundary(shown.text.len()));
+        assert!(shown.text.chars().all(|ch| ch == 'a'));
+        let rest = raw.len() - shown.text.len();
+        assert!(shown.note.contains(&rest.to_string()), "{}", shown.note);
+
+        let ascii = vec![b'x'; 256 * 1024 + 10];
+        let ascii_shown = super::body_text(&ascii, false, None, super::Lang::En);
+        assert_eq!(ascii_shown.text.len(), 256 * 1024);
+        assert!(ascii_shown.note.contains("10 more bytes"), "{}", ascii_shown.note);
     }
 }
 

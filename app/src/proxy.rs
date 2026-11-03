@@ -37,7 +37,7 @@ use crate::bypass::BypassRules;
 use crate::ca::Ca;
 use crate::client_hello::{read_client_hello, ReadHello};
 use crate::decompress::Decoder;
-use crate::rules::{self, Rule};
+use crate::rules::{self, Action, Rule};
 use crate::session::{Direction, FlowDraft, Protocol, Session};
 use crate::ws::{self, FrameFeed};
 
@@ -65,7 +65,14 @@ pub struct Upstream {
 
 struct BreakSlot {
     id: u64,
+    side: BreakSide,
     reply: Option<tokio::sync::oneshot::Sender<BreakDecision>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BreakSide {
+    Request,
+    Response,
 }
 
 #[derive(Debug, Clone)]
@@ -73,6 +80,8 @@ pub struct BreakDecision {
     pub drop: bool,
     pub headers: Option<Vec<(String, String)>>,
     pub body: Option<Vec<u8>>,
+    /// Replaces the response status. Ignored for a request break.
+    pub status: Option<u16>,
 }
 
 /// Optional edits for one replay. Empty method or URL keeps the stored request.
@@ -123,21 +132,34 @@ impl Hub {
         self.bypass.lock().unwrap_or_else(|err| err.into_inner()).skips(host)
     }
 
-    fn matching_rule(&self, host: &str, path: &str) -> Option<Rule> {
-        self.rules
+    fn plan(&self, host: &str, path: &str) -> rules::Effect {
+        let rules = self
+            .rules
             .lock()
             .unwrap_or_else(|err| err.into_inner())
-            .iter()
-            .find(|rule| rule.matches(host, path))
-            .cloned()
+            .clone();
+        rules::effect(&rules, host, path)
     }
 
-    pub fn paused_id(&self) -> Option<u64> {
+    pub fn paused(&self) -> Option<(u64, BreakSide)> {
         self.break_slot
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .as_ref()
-            .map(|slot| slot.id)
+            .map(|slot| (slot.id, slot.side))
+    }
+
+    #[cfg(test)]
+    pub fn paused_id(&self) -> Option<u64> {
+        self.paused().map(|(id, _)| id)
+    }
+
+    pub fn set_pinned(&self, id: u64, pinned: bool) -> bool {
+        let ok = self.with_session(|session| session.set_pinned(id, pinned));
+        if ok {
+            self.touch();
+        }
+        ok
     }
 
     pub fn resolve_break(&self, decision: BreakDecision) -> bool {
@@ -148,10 +170,11 @@ impl Hub {
         slot.reply.map(|reply| reply.send(decision).is_ok()).unwrap_or(false)
     }
 
-    async fn wait_break(&self, id: u64) -> BreakDecision {
+    async fn wait_break(&self, id: u64, side: BreakSide) -> BreakDecision {
         let (tx, rx) = tokio::sync::oneshot::channel();
         *self.break_slot.lock().unwrap_or_else(|err| err.into_inner()) = Some(BreakSlot {
             id,
+            side,
             reply: Some(tx),
         });
         self.touch();
@@ -161,6 +184,7 @@ impl Hub {
                 drop: false,
                 headers: None,
                 body: None,
+                status: None,
             },
         };
         let mut slot = self.break_slot.lock().unwrap_or_else(|err| err.into_inner());
@@ -369,6 +393,11 @@ impl Hub {
 
     fn replace_request(&self, id: u64, headers: Vec<(String, String)>, body: Vec<u8>) {
         self.with_session(|session| session.replace_request(id, headers, body));
+        self.touch();
+    }
+
+    fn replace_response(&self, id: u64, status: u16, headers: Vec<(String, String)>, body: Vec<u8>) {
+        self.with_session(|session| session.replace_response(id, status, headers, body));
         self.touch();
     }
 
@@ -874,45 +903,68 @@ where
     let mut path = path;
     let mut headers = head.headers.clone();
     let mut body_override: Option<Vec<u8>> = None;
-    if let Some(rule) = hub.matching_rule(&host, &path) {
-        match rule {
-            Rule::MapLocal { file, .. } => {
+    let websocket = header_is_websocket(&headers);
+    let plan = if websocket {
+        rules::Effect::default()
+    } else {
+        hub.plan(&host, &path)
+    };
+    if !plan.delay.is_zero() {
+        tokio::time::sleep(plan.delay).await;
+    }
+    if !plan.request_headers.is_empty() {
+        rules::apply_header_ops(&mut headers, &plan.request_headers);
+        hub.replace_request(id, headers.clone(), Vec::new());
+    }
+    let response_ops = plan.response_headers.clone();
+    let cors = plan.cors;
+    let break_response = matches!(plan.action, Some(Action::BreakResponse));
+    if cors && method.eq_ignore_ascii_case("OPTIONS") && plan.action.is_none() {
+        let _ = drain_request(client, &headers, &hub, id).await;
+        let mut resp_headers = Vec::new();
+        rules::ensure_cors(&mut resp_headers);
+        rules::apply_header_ops(&mut resp_headers, &response_ops);
+        write_static(client, &hub, id, 204, "No Content", &resp_headers, &[]).await?;
+        return Ok(());
+    }
+    match &plan.action {
+        Some(Action::MapLocal { file, status }) => {
+            let _ = drain_request(client, &headers, &hub, id).await;
+            return write_mapped_file(client, &hub, id, file, *status, &response_ops, cors).await;
+        }
+        Some(Action::BreakRequest) => {
+            let decision = hub.wait_break(id, BreakSide::Request).await;
+            if decision.drop {
+                hub.set_error(id, "断点丢弃");
                 let _ = drain_request(client, &headers, &hub, id).await;
-                return write_mapped_file(client, &hub, id, &file).await;
+                write_static(client, &hub, id, 204, "No Content", &[], &[]).await?;
+                return Ok(());
             }
-            Rule::Break { .. } => {
-                let decision = hub.wait_break(id).await;
-                if decision.drop {
-                    hub.set_error(id, "断点丢弃");
+            if let Some(next) = decision.headers {
+                hub.replace_request(id, next.clone(), Vec::new());
+                headers = next;
+            }
+            body_override = decision.body;
+        }
+        Some(Action::MapRemote { url }) => {
+            if let Some((scheme, next_host, next_port, next_path)) = parse_http_url(url) {
+                host = next_host;
+                port = next_port;
+                path = next_path;
+                hub.retarget(
+                    id,
+                    host.clone(),
+                    path.clone(),
+                    format!("{scheme}://{}{path}", display_authority(&host, port, scheme)),
+                );
+                if scheme == "https" {
                     let _ = drain_request(client, &headers, &hub, id).await;
-                    write_static(client, &hub, id, 204, "No Content", &[], &[]).await?;
-                    return Ok(());
-                }
-                if let Some(next) = decision.headers {
-                    hub.replace_request(id, next.clone(), Vec::new());
-                    headers = next;
-                }
-                body_override = decision.body;
-            }
-            Rule::MapRemote { url, .. } => {
-                if let Some((scheme, next_host, next_port, next_path)) = parse_http_url(&url) {
-                    host = next_host;
-                    port = next_port;
-                    path = next_path;
-                    hub.retarget(
-                        id,
-                        host.clone(),
-                        path.clone(),
-                        format!("{scheme}://{}{path}", display_authority(&host, port, scheme)),
-                    );
-                    if scheme == "https" {
-                        let _ = drain_request(client, &headers, &hub, id).await;
-                        let body = body_override.unwrap_or_default();
-                        return exchange_tls(client, &hub, id, &method, &host, port, &path, &headers, &body).await;
-                    }
+                    let body = body_override.unwrap_or_default();
+                    return exchange_tls(client, &hub, id, &method, &host, port, &path, &headers, &body).await;
                 }
             }
         }
+        Some(Action::BreakResponse) | None => {}
     }
     let pool_key = pool_key(&host, port, &hub);
     let mut origin = match hub.take_idle(pool_key.clone()).await {
@@ -931,7 +983,6 @@ where
     } else {
         path.clone()
     };
-    let websocket = header_is_websocket(&headers);
     let mut outbound = format!("{method} {target} HTTP/1.1\r\n");
     let mut has_host = false;
     let mut has_connection = false;
@@ -996,15 +1047,19 @@ where
     if websocket {
         resp_bytes = strip_ws_extension(&resp_bytes);
     }
-    client.write_all(&resp_bytes).await?;
     let resp = parse_head(&resp_bytes)?;
-    let status = resp
-        .start
-        .split_whitespace()
-        .nth(1)
-        .and_then(|code| code.parse().ok())
-        .unwrap_or(0);
-    hub.set_response(id, status, resp.headers.clone(), None);
+    let (mut status, reason) = status_and_reason(&resp.start);
+    let mut resp_headers = resp.headers.clone();
+    if !websocket {
+        rules::apply_header_ops(&mut resp_headers, &response_ops);
+        if cors {
+            rules::ensure_cors(&mut resp_headers);
+        }
+    }
+    if websocket {
+        client.write_all(&resp_bytes).await?;
+    }
+    hub.set_response(id, status, resp_headers.clone(), None);
     if status == 101 && header_is_websocket(&headers) {
         hub.mark_protocol(id, Protocol::WebSocket);
         if !resp_rest.is_empty() {
@@ -1020,11 +1075,63 @@ where
         pos: 0,
         inner: origin,
     };
-    let encoding = header_value(&resp.headers, "content-encoding");
+    if break_response {
+        match read_capped_body(&mut origin, &resp_headers, crate::session::BODY_CAP).await {
+            Ok(Some(body)) => {
+                let encoding = header_value(&resp_headers, "content-encoding");
+                note_decoded(&hub, id, Direction::Response, &body, encoding.as_deref());
+                let decision = hub.wait_break(id, BreakSide::Response).await;
+                if decision.drop {
+                    hub.set_error(id, "断点丢弃");
+                    hub.replace_response(id, 204, Vec::new(), Vec::new());
+                    write_bytes(client, 204, "No Content", &[], &[]).await?;
+                    return Ok(());
+                }
+                let mut next_headers = decision.headers.unwrap_or(resp_headers);
+                let replaced_body = decision.body.is_some();
+                let next_body = decision.body.unwrap_or(body);
+                if replaced_body {
+                    next_headers
+                        .retain(|(name, _)| !name.eq_ignore_ascii_case("content-encoding"));
+                }
+                if let Some(code) = decision.status {
+                    status = code;
+                }
+                let reason = reason_phrase(status);
+                hub.replace_response(id, status, next_headers.clone(), next_body.clone());
+                write_bytes(client, status, reason, &next_headers, &next_body).await?;
+                hub.mark_finished(id);
+                return Ok(());
+            }
+            Ok(None) => {
+                hub.set_error(id, "响应断点跳过，body 超过 1 MB");
+            }
+            Err(err) => {
+                let text = format!("响应断点读 body 失败: {err}");
+                hub.set_error(id, text.clone());
+                write_static(
+                    client,
+                    &hub,
+                    id,
+                    502,
+                    "Bad Gateway",
+                    &[("Content-Type".into(), "text/plain".into())],
+                    text.as_bytes(),
+                )
+                .await?;
+                return Ok(());
+            }
+        }
+    }
+    if !websocket {
+        let head = render_response_head(status, &reason, &resp_headers);
+        client.write_all(head.as_bytes()).await?;
+    }
+    let encoding = header_value(&resp_headers, "content-encoding");
     let reusable = copy_message_body(
         &mut origin,
         client,
-        &resp.headers,
+        &resp_headers,
         &hub,
         id,
         Direction::Response,
@@ -1150,18 +1257,30 @@ where
     Ok(())
 }
 
-async fn write_mapped_file<S>(client: &mut S, hub: &Hub, id: u64, file: &std::path::Path) -> Result<()>
+async fn write_mapped_file<S>(
+    client: &mut S,
+    hub: &Hub,
+    id: u64,
+    file: &std::path::Path,
+    status: u16,
+    response_ops: &[rules::HeaderOp],
+    cors: bool,
+) -> Result<()>
 where
     S: AsyncWrite + Unpin,
 {
     match std::fs::read(file) {
         Ok(body) => {
             let kind = file_type(file);
-            let headers = vec![
+            let mut headers = vec![
                 ("Content-Type".to_string(), kind.to_string()),
                 ("Content-Length".to_string(), body.len().to_string()),
             ];
-            write_static(client, hub, id, 200, "OK", &headers, &body).await
+            if cors {
+                rules::ensure_cors(&mut headers);
+            }
+            rules::apply_header_ops(&mut headers, response_ops);
+            write_static(client, hub, id, status, reason_phrase(status), &headers, &body).await
         }
         Err(err) => {
             let body = format!("map-local 读不到文件: {err}");
@@ -1761,6 +1880,112 @@ where
     Ok(())
 }
 
+fn status_and_reason(start: &str) -> (u16, String) {
+    let mut parts = start.split_whitespace();
+    let _version = parts.next();
+    let status = parts.next().and_then(|code| code.parse().ok()).unwrap_or(0);
+    let reason: String = parts.collect::<Vec<_>>().join(" ");
+    let reason = if reason.is_empty() {
+        reason_phrase(status).to_string()
+    } else {
+        reason
+    };
+    (status, reason)
+}
+
+fn reason_phrase(status: u16) -> &'static str {
+    StatusCode::from_u16(status)
+        .ok()
+        .and_then(|code| code.canonical_reason())
+        .unwrap_or("OK")
+}
+
+fn render_response_head(status: u16, reason: &str, headers: &[(String, String)]) -> String {
+    let mut head = format!("HTTP/1.1 {status} {reason}\r\n");
+    for (name, value) in headers {
+        head.push_str(name);
+        head.push_str(": ");
+        head.push_str(value);
+        head.push_str("\r\n");
+    }
+    head.push_str("\r\n");
+    head
+}
+
+async fn write_bytes<S>(
+    client: &mut S,
+    status: u16,
+    reason: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+) -> Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
+    let mut headers: Vec<(String, String)> = headers
+        .iter()
+        .filter(|(name, _)| !name.eq_ignore_ascii_case("content-length"))
+        .cloned()
+        .collect();
+    headers.push(("Content-Length".into(), body.len().to_string()));
+    let head = render_response_head(status, reason, &headers);
+    client.write_all(head.as_bytes()).await?;
+    client.write_all(body).await?;
+    Ok(())
+}
+
+/// `Ok(None)` means the body is larger than `cap` and was not consumed.
+async fn read_capped_body<R>(
+    reader: &mut R,
+    headers: &[(String, String)],
+    cap: usize,
+) -> Result<Option<Vec<u8>>>
+where
+    R: AsyncRead + Unpin,
+{
+    if let Some(length) = content_length(headers) {
+        if length > cap {
+            return Ok(None);
+        }
+        return Ok(Some(read_exact(reader, length).await?));
+    }
+    if is_chunked(headers) {
+        let mut out = Vec::new();
+        loop {
+            let size_line = read_line(reader).await?;
+            let text = String::from_utf8_lossy(&size_line);
+            let size = usize::from_str_radix(
+                text.trim().split(';').next().unwrap_or("0").trim(),
+                16,
+            )
+            .unwrap_or(0);
+            if size == 0 {
+                let _ = read_line(reader).await?;
+                break;
+            }
+            if out.len().saturating_add(size) > cap {
+                anyhow::bail!("响应断点跳过，body 超过 1 MB");
+            }
+            out.extend(read_exact(reader, size).await?);
+            let _ = read_exact(reader, 2).await?;
+        }
+        return Ok(Some(out));
+    }
+    let mut out = Vec::new();
+    let mut buf = vec![0u8; 8 * 1024];
+    loop {
+        let n = reader.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        if out.len() + n > cap {
+            anyhow::bail!("响应断点跳过，body 超过 1 MB");
+        }
+        out.extend_from_slice(&buf[..n]);
+    }
+    Ok(Some(out))
+}
+
 fn content_length(headers: &[(String, String)]) -> Option<usize> {
     header_value(headers, "content-length")?.parse().ok()
 }
@@ -2104,6 +2329,23 @@ impl<B> RecordingBody<B> {
         }
     }
 
+    /// Yields `prefix` first, then `inner`. Only `inner` is recorded; the caller
+    /// already stored `prefix`.
+    fn prefixed(
+        prefix: Bytes,
+        inner: B,
+        hub: Arc<Hub>,
+        id: u64,
+        direction: Direction,
+        encoding: Option<&str>,
+    ) -> Self {
+        let mut body = Self::new(inner, hub, id, direction, encoding);
+        if !prefix.is_empty() {
+            body.once = Some(prefix);
+        }
+        body
+    }
+
     fn record_bytes(&mut self, bytes: &[u8]) {
         let Some(record) = self.record.as_mut() else {
             return;
@@ -2283,61 +2525,83 @@ async fn forward_request(
     });
     let mut body_override: Option<Vec<u8>> = None;
     let mut headers_replaced = false;
+    let mut break_response = false;
+    let mut response_ops = Vec::new();
+    let mut cors = false;
     if !websocket {
-        if let Some(rule) = hub.matching_rule(&host, &path) {
-            match rule {
-                Rule::MapLocal { file, .. } => {
-                    record_request_bytes(&hub, id, body, encoding.as_deref()).await?;
-                    return mapped_file_response(&hub, id, &file);
+        let plan = hub.plan(&host, &path);
+        if !plan.delay.is_zero() {
+            tokio::time::sleep(plan.delay).await;
+        }
+        response_ops = plan.response_headers.clone();
+        cors = plan.cors;
+        if !plan.request_headers.is_empty() {
+            let mut pairs = header_pairs(&parts.headers);
+            rules::apply_header_ops(&mut pairs, &plan.request_headers);
+            replace_header_map(&mut parts.headers, &pairs);
+            headers_replaced = true;
+        }
+        if cors && parts.method == Method::OPTIONS && plan.action.is_none() {
+            drain_incoming(body).await?;
+            let mut resp_headers = Vec::new();
+            rules::ensure_cors(&mut resp_headers);
+            rules::apply_header_ops(&mut resp_headers, &response_ops);
+            resp_headers.push(("Content-Length".into(), "0".into()));
+            return synthetic_headers(&hub, id, StatusCode::NO_CONTENT, resp_headers, Vec::new());
+        }
+        match &plan.action {
+            Some(Action::MapLocal { file, status }) => {
+                record_request_bytes(&hub, id, body, encoding.as_deref()).await?;
+                return mapped_file_response(&hub, id, file, *status, &response_ops, cors);
+            }
+            Some(Action::BreakRequest) => {
+                let decision = hub.wait_break(id, BreakSide::Request).await;
+                if decision.drop {
+                    hub.set_error(id, "断点丢弃");
+                    drain_incoming(body).await?;
+                    return empty_status(&hub, id, StatusCode::NO_CONTENT);
                 }
-                Rule::Break { .. } => {
-                    let decision = hub.wait_break(id).await;
-                    if decision.drop {
-                        hub.set_error(id, "断点丢弃");
-                        drain_incoming(body).await?;
-                        return empty_status(&hub, id, StatusCode::NO_CONTENT);
-                    }
-                    if let Some(next) = decision.headers {
-                        replace_header_map(&mut parts.headers, &next);
-                        headers_replaced = true;
-                    }
-                    body_override = decision.body;
+                if let Some(next) = decision.headers {
+                    replace_header_map(&mut parts.headers, &next);
+                    headers_replaced = true;
                 }
-                Rule::MapRemote { url, .. } => {
-                    if let Some((next_scheme, next_host, next_port, next_path)) =
-                        parse_http_url(&url)
-                    {
-                        let same = next_scheme == scheme && next_host == host && next_port == port;
-                        host = next_host;
-                        port = next_port;
-                        path = next_path;
-                        scheme = next_scheme.to_string();
-                        let authority = display_authority(&host, port, &scheme);
-                        hub.retarget(
+                body_override = decision.body;
+            }
+            Some(Action::MapRemote { url }) => {
+                if let Some((next_scheme, next_host, next_port, next_path)) = parse_http_url(url)
+                {
+                    let same = next_scheme == scheme && next_host == host && next_port == port;
+                    host = next_host;
+                    port = next_port;
+                    path = next_path;
+                    scheme = next_scheme.to_string();
+                    let authority = display_authority(&host, port, &scheme);
+                    hub.retarget(
+                        id,
+                        host.clone(),
+                        path.clone(),
+                        format!("{scheme}://{authority}{path}"),
+                    );
+                    if !same {
+                        let raw =
+                            record_request_bytes(&hub, id, body, encoding.as_deref()).await?;
+                        return fetch_remote(
+                            &hub,
                             id,
-                            host.clone(),
-                            path.clone(),
-                            format!("{scheme}://{authority}{path}"),
-                        );
-                        if !same {
-                            let raw =
-                                record_request_bytes(&hub, id, body, encoding.as_deref()).await?;
-                            return fetch_remote(
-                                &hub,
-                                id,
-                                parts.method.clone(),
-                                &scheme,
-                                &host,
-                                port,
-                                &path,
-                                &parts.headers,
-                                raw,
-                            )
-                            .await;
-                        }
+                            parts.method.clone(),
+                            &scheme,
+                            &host,
+                            port,
+                            &path,
+                            &parts.headers,
+                            raw,
+                        )
+                        .await;
                     }
                 }
             }
+            Some(Action::BreakResponse) => break_response = true,
+            None => {}
         }
     }
     let outbound_body = if let Some(bytes) = body_override {
@@ -2399,6 +2663,16 @@ async fn forward_request(
         parts
             .headers
             .remove(HeaderName::from_static("sec-websocket-extensions"));
+    } else {
+        let mut pairs = header_pairs(&parts.headers);
+        rules::apply_header_ops(&mut pairs, &response_ops);
+        if cors {
+            rules::ensure_cors(&mut pairs);
+        }
+        replace_header_map(&mut parts.headers, &pairs);
+    }
+    if break_response && !websocket {
+        return hold_hyper_response(hub, id, parts, body, resp_encoding).await;
     }
     hub.set_response(id, parts.status.as_u16(), header_pairs(&parts.headers), None);
     let body = if websocket {
@@ -2413,6 +2687,122 @@ async fn forward_request(
         )
     };
     Ok(Response::from_parts(parts, body))
+}
+
+async fn hold_hyper_response(
+    hub: Arc<Hub>,
+    id: u64,
+    parts: http::response::Parts,
+    body: Incoming,
+    encoding: Option<String>,
+) -> Result<Response<RecordingBody<Incoming>>> {
+    let too_big = parts
+        .headers
+        .get(http::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|text| text.parse::<usize>().ok())
+        .is_some_and(|len| len > crate::session::BODY_CAP);
+    if too_big {
+        hub.set_error(id, "响应断点跳过，body 超过 1 MB");
+        hub.set_response(id, parts.status.as_u16(), header_pairs(&parts.headers), None);
+        let body = RecordingBody::new(
+            body,
+            hub,
+            id,
+            Direction::Response,
+            encoding.as_deref(),
+        );
+        return Ok(Response::from_parts(parts, body));
+    }
+    match take_limited(body, crate::session::BODY_CAP).await? {
+        Take::Overflow { prefix, rest } => {
+            hub.set_error(id, "响应断点跳过，body 超过 1 MB");
+            hub.set_response(id, parts.status.as_u16(), header_pairs(&parts.headers), None);
+            note_decoded(&hub, id, Direction::Response, &prefix, encoding.as_deref());
+            let body = RecordingBody::prefixed(
+                prefix,
+                rest,
+                hub,
+                id,
+                Direction::Response,
+                encoding.as_deref(),
+            );
+            Ok(Response::from_parts(parts, body))
+        }
+        Take::Whole(bytes) => {
+            note_decoded(&hub, id, Direction::Response, &bytes, encoding.as_deref());
+            hub.set_response(id, parts.status.as_u16(), header_pairs(&parts.headers), None);
+            let decision = hub.wait_break(id, BreakSide::Response).await;
+            if decision.drop {
+                hub.set_error(id, "断点丢弃");
+                hub.replace_response(id, 204, Vec::new(), Vec::new());
+                return response_from_headers(204, &[], &[]);
+            }
+            let status = decision.status.unwrap_or(parts.status.as_u16());
+            let mut headers = decision
+                .headers
+                .unwrap_or_else(|| header_pairs(&parts.headers));
+            let replaced_body = decision.body.is_some();
+            let body = decision.body.unwrap_or_else(|| bytes.to_vec());
+            if replaced_body {
+                headers.retain(|(name, _)| !name.eq_ignore_ascii_case("content-encoding"));
+            }
+            headers.retain(|(name, _)| !name.eq_ignore_ascii_case("content-length"));
+            headers.push(("Content-Length".into(), body.len().to_string()));
+            hub.replace_response(id, status, headers.clone(), body.clone());
+            response_from_headers(status, &headers, &body)
+        }
+    }
+}
+
+enum Take {
+    Whole(Bytes),
+    Overflow { prefix: Bytes, rest: Incoming },
+}
+
+async fn take_limited(mut body: Incoming, cap: usize) -> Result<Take> {
+    let mut buf = Vec::new();
+    loop {
+        match body.frame().await {
+            Some(Ok(frame)) => {
+                let Ok(data) = frame.into_data() else {
+                    continue;
+                };
+                if buf.len().saturating_add(data.len()) > cap {
+                    buf.extend_from_slice(&data);
+                    return Ok(Take::Overflow {
+                        prefix: Bytes::from(buf),
+                        rest: body,
+                    });
+                }
+                buf.extend_from_slice(&data);
+            }
+            Some(Err(err)) => return Err(anyhow!("读取响应体: {err}")),
+            None => return Ok(Take::Whole(Bytes::from(buf))),
+        }
+    }
+}
+
+fn response_from_headers(
+    status: u16,
+    headers: &[(String, String)],
+    body: &[u8],
+) -> Result<Response<RecordingBody<Incoming>>> {
+    let code = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
+    let mut builder = Response::builder().status(code);
+    let mut saw_length = false;
+    for (name, value) in headers {
+        if name.eq_ignore_ascii_case("content-length") {
+            saw_length = true;
+        }
+        builder = builder.header(name, value);
+    }
+    if !saw_length {
+        builder = builder.header(http::header::CONTENT_LENGTH, body.len().to_string());
+    }
+    builder
+        .body(RecordingBody::from_bytes(Bytes::copy_from_slice(body)))
+        .context("组装断点响应")
 }
 
 async fn record_request_bytes(
@@ -2456,9 +2846,23 @@ fn mapped_file_response(
     hub: &Arc<Hub>,
     id: u64,
     file: &std::path::Path,
+    status: u16,
+    response_ops: &[rules::HeaderOp],
+    cors: bool,
 ) -> Result<Response<RecordingBody<Incoming>>> {
     match std::fs::read(file) {
-        Ok(body) => synthetic_response(hub, id, StatusCode::OK, file_type(file), body),
+        Ok(body) => {
+            let code = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
+            let mut headers = vec![
+                ("Content-Type".into(), file_type(file).to_string()),
+                ("Content-Length".into(), body.len().to_string()),
+            ];
+            if cors {
+                rules::ensure_cors(&mut headers);
+            }
+            rules::apply_header_ops(&mut headers, response_ops);
+            synthetic_headers(hub, id, code, headers, body)
+        }
         Err(err) => {
             let text = format!("map-local 读不到文件: {err}");
             hub.set_error(id, text.clone());
@@ -2492,15 +2896,20 @@ fn synthetic_response(
         ("Content-Type".into(), content_type.to_string()),
         ("Content-Length".into(), body.len().to_string()),
     ];
-    hub.set_response(id, status.as_u16(), headers, None);
+    synthetic_headers(hub, id, status, headers, body)
+}
+
+fn synthetic_headers(
+    hub: &Arc<Hub>,
+    id: u64,
+    status: StatusCode,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+) -> Result<Response<RecordingBody<Incoming>>> {
+    hub.set_response(id, status.as_u16(), headers.clone(), None);
     hub.append_body(id, Direction::Response, &body);
     hub.mark_finished(id);
-    Response::builder()
-        .status(status)
-        .header(http::header::CONTENT_TYPE, content_type)
-        .header(http::header::CONTENT_LENGTH, body.len().to_string())
-        .body(RecordingBody::from_bytes(Bytes::from(body)))
-        .context("组装映射响应")
+    response_from_headers(status.as_u16(), &headers, &body)
 }
 
 fn replace_header_map(headers: &mut HeaderMap, pairs: &[(String, String)]) {
@@ -3348,6 +3757,135 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn map_local_status_and_cors_preflight() {
+        let dir = std::env::temp_dir().join(format!("zniff-mock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+        let file = dir.join("body.txt");
+        std::fs::write(&file, b"nope").unwrap();
+        hub.set_rules(&format!(
+            "map-local 127.0.0.1/hi {} status=429\ncors 127.0.0.1\nheader 127.0.0.1 res set X-Zniff yes\n",
+            file.display()
+        ));
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        let hub_serve = hub.clone();
+        tokio::spawn(async move {
+            let (socket, _) = proxy.accept().await.unwrap();
+            let _ = handle_conn(socket, hub_serve).await;
+        });
+        let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+        client
+            .write_all(b"GET http://127.0.0.1:9/hi HTTP/1.1\r\nHost: 127.0.0.1:9\r\n\r\n")
+            .await
+            .unwrap();
+        let mut resp = Vec::new();
+        timeout(Duration::from_secs(5), client.read_to_end(&mut resp))
+            .await
+            .unwrap()
+            .unwrap();
+        let text = String::from_utf8_lossy(&resp);
+        assert!(text.contains("429"), "{text}");
+        assert!(text.to_ascii_lowercase().contains("x-zniff: yes"), "{text}");
+        assert!(
+            text.to_ascii_lowercase().contains("access-control-allow-origin: *"),
+            "{text}"
+        );
+
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        let hub_serve = hub.clone();
+        tokio::spawn(async move {
+            let (socket, _) = proxy.accept().await.unwrap();
+            let _ = handle_conn(socket, hub_serve).await;
+        });
+        let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+        client
+            .write_all(b"OPTIONS http://127.0.0.1:9/other HTTP/1.1\r\nHost: 127.0.0.1:9\r\n\r\n")
+            .await
+            .unwrap();
+        let mut resp = Vec::new();
+        timeout(Duration::from_secs(5), client.read_to_end(&mut resp))
+            .await
+            .unwrap()
+            .unwrap();
+        let text = String::from_utf8_lossy(&resp);
+        assert!(text.contains("204"), "{text}");
+        assert!(
+            text.to_ascii_lowercase().contains("access-control-allow-origin: *"),
+            "{text}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn response_break_can_replace_status_and_body() {
+        let dir = std::env::temp_dir().join(format!("zniff-break-res-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+        let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = origin.accept().await.unwrap();
+            let mut buf = vec![0u8; 2048];
+            let _ = sock.read(&mut buf).await.unwrap();
+            let body = b"orig";
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            sock.write_all(resp.as_bytes()).await.unwrap();
+            sock.write_all(body).await.unwrap();
+        });
+        hub.set_rules("break-res 127.0.0.1/hi");
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        let hub_serve = hub.clone();
+        tokio::spawn(async move {
+            let (socket, _) = proxy.accept().await.unwrap();
+            let _ = handle_conn(socket, hub_serve).await;
+        });
+        let hub_wait = hub.clone();
+        let waiter = tokio::spawn(async move {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                if hub_wait.paused_id() == Some(1) {
+                    assert_eq!(hub_wait.paused().map(|(_, side)| side), Some(BreakSide::Response));
+                    hub_wait.resolve_break(BreakDecision {
+                        drop: false,
+                        headers: None,
+                        body: Some(b"edited".to_vec()),
+                        status: Some(201),
+                    });
+                    return;
+                }
+                if std::time::Instant::now() > deadline {
+                    panic!("响应断点没有暂停");
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+        let req = format!("GET http://{origin_addr}/hi HTTP/1.1\r\nHost: {origin_addr}\r\nConnection: close\r\n\r\n");
+        client.write_all(req.as_bytes()).await.unwrap();
+        let mut resp = Vec::new();
+        timeout(Duration::from_secs(5), client.read_to_end(&mut resp))
+            .await
+            .unwrap()
+            .unwrap();
+        waiter.await.unwrap();
+        let text = String::from_utf8_lossy(&resp);
+        assert!(text.contains("201"), "{text}");
+        assert!(text.contains("edited"), "{text}");
+        let flow = hub.with_session(|session| session.get(1).cloned()).expect("flow");
+        assert_eq!(flow.status, Some(201));
+        assert_eq!(flow.response_body, b"edited");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
     async fn breakpoint_drop_returns_204() {
         let dir = std::env::temp_dir().join(format!("zniff-break-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -3375,6 +3913,7 @@ mod tests {
                         drop: true,
                         headers: None,
                         body: None,
+                        status: None,
                     });
                     return;
                 }
@@ -3868,6 +4407,7 @@ mod tests {
                             ("Content-Length".into(), "99".into()),
                         ]),
                         body: Some(b"abcdef".to_vec()),
+                        status: None,
                     }));
                     return;
                 }
@@ -3943,6 +4483,7 @@ mod tests {
                         drop: true,
                         headers: None,
                         body: None,
+                        status: None,
                     }));
                     return;
                 }
