@@ -13,6 +13,16 @@ use crate::i18n::{parse_pref, Lang};
 use crate::present::DEFAULT_PORT;
 
 const FILE_NAME: &str = "config.toml";
+
+/// Left pane width when `config.toml` has no `list_width`.
+pub const LIST_WIDTH_DEFAULT: u32 = 560;
+pub const LIST_WIDTH_MIN: u32 = 280;
+pub const LIST_WIDTH_MAX: u32 = 1100;
+
+pub fn clamp_list_width(width: u32) -> u32 {
+    width.clamp(LIST_WIDTH_MIN, LIST_WIDTH_MAX)
+}
+
 const LEGACY: &[&str] = &[
     "listen-port",
     "listen-all",
@@ -40,6 +50,21 @@ pub struct Config {
     pub rules: String,
     #[serde(default)]
     pub upstream_proxy: String,
+    /// On unless the file says otherwise, so an older `config.toml` keeps today's list.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub show_status: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub show_protocol: bool,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub show_path: bool,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub show_gap: bool,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub show_host: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub show_size: bool,
+    #[serde(default = "default_list_width", skip_serializing_if = "is_default_list_width")]
+    pub list_width: u32,
 }
 
 impl Default for Config {
@@ -52,12 +77,39 @@ impl Default for Config {
             bypass_hosts: String::new(),
             rules: String::new(),
             upstream_proxy: String::new(),
+            show_status: true,
+            show_protocol: false,
+            show_path: true,
+            show_gap: true,
+            show_host: true,
+            show_size: false,
+            list_width: default_list_width(),
         }
     }
 }
 
 fn default_port() -> u16 {
     DEFAULT_PORT
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_list_width() -> u32 {
+    LIST_WIDTH_DEFAULT
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+fn is_default_list_width(value: &u32) -> bool {
+    *value == LIST_WIDTH_DEFAULT
 }
 
 fn lock() -> std::sync::MutexGuard<'static, ()> {
@@ -159,6 +211,7 @@ fn normalize(mut config: Config) -> Config {
         config.listen_port = default_port();
     }
     config.language = language_name(config.language.as_deref().and_then(parse_pref));
+    config.list_width = clamp_list_width(config.list_width);
     config
 }
 
@@ -307,5 +360,47 @@ mod tests {
         let err = update(dir.path(), |config| config.listen_port = 9).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::InvalidData);
         assert_eq!(fs::read_to_string(dir.path().join("config.toml")).unwrap(), broken);
+    }
+
+    #[test]
+    fn list_layout_keeps_today_columns_and_clamps_width() {
+        let dir = Scratch::new();
+        fs::write(dir.path().join("config.toml"), "listen_port = 8877\n").unwrap();
+        let config = load(dir.path());
+        assert!(config.show_status && config.show_path && config.show_gap && config.show_host);
+        assert!(!config.show_protocol && !config.show_size);
+        assert_eq!(config.list_width, LIST_WIDTH_DEFAULT);
+        let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(!text.contains("show_status"), "{text}");
+        assert!(!text.contains("list_width"), "{text}");
+
+        update(dir.path(), |config| {
+            config.show_protocol = true;
+            config.show_host = false;
+            config.list_width = 9_999;
+        })
+        .unwrap();
+        let config = load(dir.path());
+        assert!(config.show_protocol);
+        assert!(!config.show_host);
+        assert!(config.show_status);
+        assert_eq!(config.list_width, LIST_WIDTH_MAX);
+        let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(text.contains("show_protocol = true"), "{text}");
+        assert!(text.contains("show_host = false"), "{text}");
+        assert!(!text.contains("show_status"), "{text}");
+        assert!(!text.contains("show_size"), "{text}");
+        assert!(text.contains(&format!("list_width = {LIST_WIDTH_MAX}")), "{text}");
+
+        fs::write(
+            dir.path().join("config.toml"),
+            "list_width = 10\nshow_path = false\n",
+        )
+        .unwrap();
+        let config = load(dir.path());
+        assert_eq!(config.list_width, LIST_WIDTH_MIN);
+        assert!(!config.show_path);
+        assert!(config.show_gap);
+        assert!(!config.show_protocol);
     }
 }

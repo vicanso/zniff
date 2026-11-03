@@ -44,6 +44,7 @@ pub enum PrefName {
     Upstream,
     Port,
     Lan,
+    List,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -147,6 +148,7 @@ impl StatusMsg {
                     PrefName::Upstream => t(lang, "上游代理没有记住:", "Upstream proxy was not saved:"),
                     PrefName::Port => t(lang, "端口没有记住:", "Port was not saved:"),
                     PrefName::Lan => t(lang, "局域网开关没有记住:", "LAN switch was not saved:"),
+                    PrefName::List => t(lang, "列表设置没有记住:", "List layout was not saved:"),
                 };
                 format!("{name} {err}")
             }

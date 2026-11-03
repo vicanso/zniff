@@ -73,15 +73,17 @@ fn native(registry: &mut Registry) {
     registry.register::<App>();
 }
 
-/// Left pane width. The filter's width is this minus the same inset as the column text.
-const LIST_WIDTH: f32 = 560.0;
 /// Header and rows keep a 2pt selection bar plus `px_3` (12pt). The filter uses the same inset.
 const LIST_INSET: f32 = 14.0;
 const LIST_PAD_END: f32 = 12.0;
 const COL_METHOD: f32 = 72.0;
 const COL_STATUS: f32 = 56.0;
+const COL_PROTOCOL: f32 = 84.0;
 const COL_TIME: f32 = 72.0;
 const COL_HOST: f32 = 120.0;
+const COL_SIZE: f32 = 72.0;
+/// Same width as the header's 「列」 control, so the columns line up with it.
+const COL_PICKER: f32 = 44.0;
 /// Toolbar controls share one box. The cert chip is a status, not a button.
 const CONTROL_H: f32 = 30.0;
 const CONTROL_RADIUS: f32 = 7.0;
@@ -280,9 +282,77 @@ struct RowLine {
     clock: String,
     host: String,
     path: String,
+    protocol: String,
+    size: String,
     failed: bool,
     slow: bool,
     pinned: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ListColumns {
+    status: bool,
+    protocol: bool,
+    path: bool,
+    gap: bool,
+    host: bool,
+    size: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ListColumn {
+    Status,
+    Protocol,
+    Path,
+    Gap,
+    Host,
+    Size,
+}
+
+impl ListColumns {
+    fn from_config(config: &config::Config) -> Self {
+        Self {
+            status: config.show_status,
+            protocol: config.show_protocol,
+            path: config.show_path,
+            gap: config.show_gap,
+            host: config.show_host,
+            size: config.show_size,
+        }
+    }
+
+    fn on(self, column: ListColumn) -> bool {
+        match column {
+            ListColumn::Status => self.status,
+            ListColumn::Protocol => self.protocol,
+            ListColumn::Path => self.path,
+            ListColumn::Gap => self.gap,
+            ListColumn::Host => self.host,
+            ListColumn::Size => self.size,
+        }
+    }
+
+    fn toggle(self, column: ListColumn) -> Self {
+        let mut next = self;
+        match column {
+            ListColumn::Status => next.status = !next.status,
+            ListColumn::Protocol => next.protocol = !next.protocol,
+            ListColumn::Path => next.path = !next.path,
+            ListColumn::Gap => next.gap = !next.gap,
+            ListColumn::Host => next.host = !next.host,
+            ListColumn::Size => next.size = !next.size,
+        }
+        next
+    }
+
+    fn write(self, config: &mut config::Config) {
+        config.show_status = self.status;
+        config.show_protocol = self.protocol;
+        config.show_path = self.path;
+        config.show_gap = self.gap;
+        config.show_host = self.host;
+        config.show_size = self.size;
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -381,9 +451,12 @@ pub fn App() -> impl IntoElement {
         body: signal(String::new()),
         status: signal(String::new()),
     };
-    let bypass_text = signal(saved_config().bypass_hosts);
-    let rules_text = signal(saved_config().rules);
-    let upstream_text = signal(saved_config().upstream_proxy);
+    let saved = saved_config();
+    let list_width = signal(saved.list_width as f32);
+    let columns = signal(ListColumns::from_config(&saved));
+    let bypass_text = signal(saved.bypass_hosts);
+    let rules_text = signal(saved.rules);
+    let upstream_text = signal(saved.upstream_proxy);
     let import_path = signal(String::new());
     let lan_url = signal(String::new());
     let lan_choice = signal(String::new());
@@ -472,6 +545,7 @@ pub fn App() -> impl IntoElement {
     let controls_detail = controls.clone();
     let controls_break = controls.clone();
     let controls_list = controls.clone();
+    let controls_split = controls.clone();
 
     view()
         .flex_1()
@@ -513,8 +587,11 @@ pub fn App() -> impl IntoElement {
                     bypass_text,
                     rules_text,
                     upstream_text,
+                    list_width,
+                    columns,
                     controls_list,
                 ))
+                .child(column_splitter(list_width, controls_split))
                 .child(detail_pane(
                     shown,
                     controls_detail,
@@ -659,6 +736,60 @@ fn toolbar(
         ))
 }
 
+fn clamp_list_px(width: f32) -> f32 {
+    let rounded = if width.is_finite() && width > 0.0 {
+        width.round().min(u32::MAX as f32) as u32
+    } else {
+        0
+    };
+    config::clamp_list_width(rounded) as f32
+}
+
+fn column_splitter(width: Signal<f32>, controls: Arc<Controls>) -> impl IntoElement {
+    let origin = signal(0.0_f32);
+    let width_grant = width;
+    let width_move = width;
+    let width_release = width;
+    let width_cancel = width;
+    let controls_release = controls.clone();
+    let controls_cancel = controls;
+    view()
+        .w(px(6.0))
+        .flex_shrink_0()
+        .self_stretch()
+        .flex_row()
+        .justify_center()
+        .cursor(Cursor::ColResize)
+        .claim_touches(TouchClaim::on_start())
+        .keep_touches(true)
+        .on_responder_grant(move |_event: &ResponderEvent| {
+            origin.set(width_grant.get());
+        })
+        .on_responder_move(move |event: &ResponderEvent| {
+            width_move.set(clamp_list_px(origin.get() + event.gesture.delta.x.0));
+        })
+        .on_responder_release(move |_event: &ResponderEvent| {
+            store_list_width(width_release.get(), &controls_release);
+        })
+        .on_responder_terminate(move |_event: &ResponderEvent| {
+            store_list_width(width_cancel.get(), &controls_cancel);
+        })
+        .child(view().w(px(1.0)).h_full().bg(border_strong()))
+}
+
+fn store_list_width(width: f32, controls: &Controls) {
+    let stored = clamp_list_px(width).round() as u32;
+    if let Err(err) = save_config(|config| config.list_width = stored) {
+        set_status(
+            controls,
+            StatusMsg::PrefUnsaved {
+                name: PrefName::List,
+                err: err.to_string(),
+            },
+        );
+    }
+}
+
 fn flow_list(
     rows: Signal<Vec<RowLine>>,
     selected: Signal<Option<u64>>,
@@ -667,21 +798,22 @@ fn flow_list(
     bypass_text: Signal<String>,
     rules_text: Signal<String>,
     upstream_text: Signal<String>,
+    width: Signal<f32>,
+    columns: Signal<ListColumns>,
     controls: Arc<Controls>,
 ) -> impl IntoElement {
     let bypass_controls = controls.clone();
     let rules_controls = controls.clone();
+    let column_controls = controls.clone();
     let upstream_controls = controls;
     view()
-        .w(px(LIST_WIDTH))
+        .w(move || px(width.get()))
         .flex_shrink_0()
         .overflow_hidden()
         .bg(bg_list())
-        .border_r_1()
-        .border_r_color(border_strong())
         .child(
             view()
-                .w(px(LIST_WIDTH))
+                .w(move || px(width.get()))
                 .h(px(46.0))
                 .flex_shrink_0()
                 .flex_row()
@@ -711,15 +843,16 @@ fn flow_list(
                     bypass_controls,
                     rules_controls,
                     upstream_controls,
+                    width,
                 )),
         )
-        .child(column_header())
+        .child(column_header(width, columns, column_controls))
         .child(view().flex_1().child(
             when(
                 move || rows.with(Vec::is_empty),
                 move || list_empty(filter),
             )
-            .otherwise(move || flow_rows(rows, selected, compose)),
+            .otherwise(move || flow_rows(rows, selected, compose, width, columns)),
         ))
 }
 
@@ -755,6 +888,7 @@ fn capture_config(
     bypass_controls: Arc<Controls>,
     rules_controls: Arc<Controls>,
     upstream_controls: Arc<Controls>,
+    width: Signal<f32>,
 ) -> impl IntoElement {
     let bypass_for_panel = bypass_text;
     let rules_for_panel = rules_text;
@@ -776,6 +910,7 @@ fn capture_config(
             bypass_controls,
             rules_controls,
             upstream_controls,
+            width,
         ))
 }
 
@@ -861,9 +996,10 @@ fn config_panel(
     bypass_controls: Arc<Controls>,
     rules_controls: Arc<Controls>,
     upstream_controls: Arc<Controls>,
+    width: Signal<f32>,
 ) -> impl IntoElement {
     view()
-        .w(px(LIST_WIDTH - LIST_INSET - LIST_PAD_END))
+        .w(move || px((width.get() - LIST_INSET - LIST_PAD_END).max(200.0)))
         .p_3()
         .gap_3()
         .rounded(px(10.0))
@@ -1006,10 +1142,12 @@ fn flow_rows(
     rows: Signal<Vec<RowLine>>,
     selected: Signal<Option<u64>>,
     compose: Compose,
+    width: Signal<f32>,
+    columns: Signal<ListColumns>,
 ) -> impl IntoElement {
     virtual_list(
         move || rows.with(Vec::len),
-        move |at| flow_row(rows, selected, compose, at),
+        move |at| flow_row(rows, selected, compose, width, columns, at),
     )
     .keys(move || rows.with(|rows| rows.iter().map(|row| row.id).collect::<Vec<_>>()))
     .estimated_item_size(px(34.0))
@@ -1019,9 +1157,13 @@ fn flow_rows(
     .flex_1()
 }
 
-fn column_header() -> impl IntoElement {
+fn column_header(
+    width: Signal<f32>,
+    columns: Signal<ListColumns>,
+    controls: Arc<Controls>,
+) -> impl IntoElement {
     view()
-        .w(px(LIST_WIDTH))
+        .w(move || px(width.get()))
         .flex_shrink_0()
         .h(px(28.0))
         .px_3()
@@ -1033,11 +1175,117 @@ fn column_header() -> impl IntoElement {
         .border_b_color(border_strong())
         .border_l(px(2.0))
         .border_l_color(bg_col_header())
+        .child(column_labels(columns))
+        .child(column_picker(columns, controls))
+}
+
+fn column_labels(columns: Signal<ListColumns>) -> impl IntoElement {
+    view()
+        .flex_1()
+        .min_w(px(0.0))
+        .h_full()
+        .overflow_hidden()
+        .flex_row()
+        .items_center()
+        .gap_2()
         .child(header_label("方法", "Method").w(px(COL_METHOD)).flex_shrink_0())
-        .child(header_label("状态", "Status").w(px(COL_STATUS)).flex_shrink_0())
-        .child(header_label("路径", "Path").flex_1().min_w(px(0.0)))
-        .child(header_label("时间", "Time").w(px(COL_TIME)).flex_shrink_0())
-        .child(header_label("主机", "Host").w(px(COL_HOST)).flex_shrink_0())
+        .child(when(move || columns.get().status, move || {
+            header_label("状态", "Status").w(px(COL_STATUS)).flex_shrink_0()
+        }))
+        .child(when(move || columns.get().protocol, move || {
+            header_label("协议", "Protocol").w(px(COL_PROTOCOL)).flex_shrink_0()
+        }))
+        .child(when(move || columns.get().path, move || {
+            header_label("路径", "Path").flex_1().min_w(px(0.0))
+        }))
+        .child(when(move || columns.get().gap, move || {
+            header_label("间隔", "Gap").w(px(COL_TIME)).flex_shrink_0()
+        }))
+        .child(when(move || columns.get().host, move || {
+            header_label("主机", "Host").w(px(COL_HOST)).flex_shrink_0()
+        }))
+        .child(when(move || columns.get().size, move || {
+            header_label("大小", "Size").w(px(COL_SIZE)).flex_shrink_0()
+        }))
+}
+
+fn column_picker(columns: Signal<ListColumns>, controls: Arc<Controls>) -> impl IntoElement {
+    view().w(px(COL_PICKER)).flex_shrink_0().child(column_menu(columns, controls))
+}
+
+fn column_menu(columns: Signal<ListColumns>, controls: Arc<Controls>) -> impl IntoElement {
+    menu()
+        .placement(Placement::Bottom)
+        .align(Align::End)
+        .offset(px(4.0))
+        .margin(px(8.0))
+        .trigger(column_picker_trigger())
+        .child(column_picker_panel(columns, controls))
+}
+
+fn column_picker_trigger() -> impl IntoElement {
+    view()
+        .w(px(COL_PICKER))
+        .h(px(22.0))
+        .flex_shrink_0()
+        .flex_row()
+        .items_center()
+        .justify_center()
+        .rounded(px(5.0))
+        .hover(|style| style.bg(bg_control_hover()))
+        .cursor(Cursor::Pointer)
+        .child(
+            text(tr("列", "Cols"))
+                .number_of_lines(1)
+                .text_size(px(11.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(fg_secondary()),
+        )
+}
+
+fn column_picker_panel(columns: Signal<ListColumns>, controls: Arc<Controls>) -> impl IntoElement {
+    view()
+        .w(px(168.0))
+        .p_1()
+        .gap_0p5()
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(border_strong())
+        .bg(bg_card())
+        .shadow_md()
+        .child(column_toggle(columns, controls.clone(), ListColumn::Status, "状态", "Status"))
+        .child(column_toggle(columns, controls.clone(), ListColumn::Protocol, "协议", "Protocol"))
+        .child(column_toggle(columns, controls.clone(), ListColumn::Path, "路径", "Path"))
+        .child(column_toggle(columns, controls.clone(), ListColumn::Gap, "间隔", "Gap"))
+        .child(column_toggle(columns, controls.clone(), ListColumn::Host, "主机", "Host"))
+        .child(column_toggle(columns, controls, ListColumn::Size, "大小", "Size"))
+}
+
+fn column_toggle(
+    columns: Signal<ListColumns>,
+    controls: Arc<Controls>,
+    column: ListColumn,
+    zh: &'static str,
+    en: &'static str,
+) -> impl IntoElement {
+    let marked = columns;
+    marked_action(
+        move || marked.get().on(column),
+        tr(zh, en),
+        move || {
+            let next = columns.get().toggle(column);
+            columns.set(next);
+            if let Err(err) = save_config(|config| next.write(config)) {
+                set_status(
+                    &controls,
+                    StatusMsg::PrefUnsaved {
+                        name: PrefName::List,
+                        err: err.to_string(),
+                    },
+                );
+            }
+        },
+    )
 }
 
 fn header_label(zh: &'static str, en: &'static str) -> Text {
@@ -1052,12 +1300,14 @@ fn flow_row(
     rows: Signal<Vec<RowLine>>,
     selected: Signal<Option<u64>>,
     compose: Compose,
+    width: Signal<f32>,
+    columns: Signal<ListColumns>,
     at: Position,
 ) -> impl IntoElement {
     let row_id = move || rows.with(|rows| rows.get(at.index()).map(|row| row.id));
     let is_selected = move || selected.get() == row_id();
     view()
-        .w(px(LIST_WIDTH))
+        .w(move || px(width.get()))
         .h(px(34.0))
         .px_3()
         .gap_2()
@@ -1102,11 +1352,25 @@ fn flow_row(
             }
             selected.set(next);
         })
+        .child(row_cells(rows, columns, at))
+        .child(view().w(px(COL_PICKER)).flex_shrink_0())
+}
+
+fn row_cells(rows: Signal<Vec<RowLine>>, columns: Signal<ListColumns>, at: Position) -> impl IntoElement {
+    view()
+        .flex_1()
+        .min_w(px(0.0))
+        .overflow_hidden()
+        .flex_row()
+        .items_center()
+        .gap_2()
         .child(method_cell(rows, at))
-        .child(status_text(rows, at))
-        .child(path_cell(rows, at))
-        .child(time_cell(rows, at))
-        .child(host_cell(rows, at))
+        .child(when(move || columns.get().status, move || status_text(rows, at)))
+        .child(when(move || columns.get().protocol, move || protocol_cell(rows, at)))
+        .child(when(move || columns.get().path, move || path_cell(rows, at)))
+        .child(when(move || columns.get().gap, move || time_cell(rows, at)))
+        .child(when(move || columns.get().host, move || host_cell(rows, at)))
+        .child(when(move || columns.get().size, move || size_cell(rows, at)))
 }
 
 fn method_cell(rows: Signal<Vec<RowLine>>, at: Position) -> impl IntoElement {
@@ -1249,6 +1513,36 @@ fn host_cell(rows: Signal<Vec<RowLine>>, at: Position) -> impl IntoElement {
         )
 }
 
+fn protocol_cell(rows: Signal<Vec<RowLine>>, at: Position) -> Text {
+    mono(move || {
+        rows.with(|rows| {
+            rows.get(at.index())
+                .map(|row| row.protocol.clone())
+                .unwrap_or_default()
+        })
+    })
+    .w(px(COL_PROTOCOL))
+    .flex_shrink_0()
+    .number_of_lines(1)
+    .text_size(px(12.0))
+    .text_color(fg_secondary())
+}
+
+fn size_cell(rows: Signal<Vec<RowLine>>, at: Position) -> Text {
+    mono(move || {
+        rows.with(|rows| {
+            rows.get(at.index())
+                .map(|row| row.size.clone())
+                .unwrap_or_default()
+        })
+    })
+    .w(px(COL_SIZE))
+    .flex_shrink_0()
+    .number_of_lines(1)
+    .text_size(px(12.0))
+    .text_color(fg_muted())
+}
+
 fn path_cell(rows: Signal<Vec<RowLine>>, at: Position) -> Text {
     let tip_rows = rows;
     mono(move || {
@@ -1302,7 +1596,7 @@ fn detail_pane(
     filter: Signal<String>,
     baseline: Signal<Option<u64>>,
 ) -> impl IntoElement {
-    scroll().flex_1().bg(bg_canvas()).child(
+    scroll().flex_1().min_w(px(0.0)).bg(bg_canvas()).child(
         when(
             move || shown.phase.get() == Phase::Ready,
             move || ready_detail(shown, controls.clone(), selected, compose, filter, baseline),
@@ -2922,6 +3216,8 @@ fn row_lines(hub: &Hub, filter: &str) -> Vec<RowLine> {
                     clock: present::format_clock(flow.started),
                     host: flow.host.clone(),
                     path: flow.path.clone(),
+                    protocol: flow.protocol.label().to_string(),
+                    size: format_bytes(flow.response_bytes as usize),
                     failed: flow.error.is_some() && flow.status.is_none(),
                     slow: present::is_slow(
                         flow.started,
@@ -4739,6 +5035,25 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
         let ascii_shown = super::body_text(&ascii, false, None, super::Lang::En);
         assert_eq!(ascii_shown.text.len(), 256 * 1024);
         assert!(ascii_shown.note.contains("10 more bytes"), "{}", ascii_shown.note);
+    }
+
+    #[test]
+    fn list_columns_round_trip_and_the_pane_clamps() {
+        let mut config = crate::config::Config::default();
+        assert!(config.show_status && config.show_path && config.show_gap && config.show_host);
+        assert!(!config.show_protocol && !config.show_size);
+        let columns = super::ListColumns::from_config(&config)
+            .toggle(super::ListColumn::Protocol)
+            .toggle(super::ListColumn::Host);
+        columns.write(&mut config);
+        assert!(config.show_protocol);
+        assert!(!config.show_host);
+        assert!(config.show_path);
+        assert_eq!(super::ListColumns::from_config(&config), columns);
+        assert_eq!(super::clamp_list_px(10.0), crate::config::LIST_WIDTH_MIN as f32);
+        assert_eq!(super::clamp_list_px(5_000.0), crate::config::LIST_WIDTH_MAX as f32);
+        assert_eq!(super::clamp_list_px(640.6), 641.0);
+        assert_eq!(super::clamp_list_px(-20.0), crate::config::LIST_WIDTH_MIN as f32);
     }
 }
 
