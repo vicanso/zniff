@@ -83,6 +83,39 @@ pub fn content_type<'a>(headers: &'a [(String, String)]) -> Option<&'a str> {
         .map(|(_, value)| value.as_str())
 }
 
+/// Pretty mode draws the image and a byte count. Raw keeps the hex text.
+pub struct ImageBody {
+    pub text: String,
+    pub note: String,
+    pub caption: String,
+}
+
+pub fn image_body(
+    pretty: bool,
+    has_preview: bool,
+    text: String,
+    note: String,
+    bytes: usize,
+    lang: Lang,
+) -> ImageBody {
+    if !pretty || !has_preview {
+        return ImageBody {
+            text,
+            note,
+            caption: String::new(),
+        };
+    }
+    let caption = match lang {
+        Lang::Zh => format!("共 {bytes} 字节"),
+        Lang::En => format!("{bytes} bytes"),
+    };
+    ImageBody {
+        text: String::new(),
+        note,
+        caption,
+    }
+}
+
 pub fn image_extension(content_type: &str) -> Option<&'static str> {
     let kind = content_type.to_ascii_lowercase();
     if kind.contains("png") {
@@ -1047,6 +1080,21 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn pretty_image_hides_hex_until_raw() {
+        let hex = "89 50 4e 47 ".to_string();
+        let pretty = image_body(true, true, hex.clone(), String::new(), 128, Lang::Zh);
+        assert!(pretty.text.is_empty());
+        assert_eq!(pretty.caption, "共 128 字节");
+        let raw = image_body(false, true, hex.clone(), "warn".into(), 128, Lang::En);
+        assert_eq!(raw.text, hex);
+        assert!(raw.caption.is_empty());
+        assert_eq!(raw.note, "warn");
+        let plain = image_body(true, false, "{ }".into(), String::new(), 3, Lang::En);
+        assert_eq!(plain.text, "{ }");
+        assert!(plain.caption.is_empty());
     }
 
     #[test]

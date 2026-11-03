@@ -316,6 +316,7 @@ struct Shown {
     metrics: Signal<String>,
     query: Signal<Vec<HeaderLine>>,
     preview: Signal<String>,
+    image_caption: Signal<String>,
     pretty: Signal<bool>,
     messages: Signal<Vec<HeaderLine>>,
     diff: Signal<String>,
@@ -361,6 +362,7 @@ pub fn App() -> impl IntoElement {
         metrics: signal(String::new()),
         query: signal(Vec::new()),
         preview: signal(String::new()),
+        image_caption: signal(String::new()),
         pretty: signal(true),
         messages: signal(Vec::new()),
         diff: signal(String::new()),
@@ -1367,7 +1369,14 @@ fn ready_detail(
     view()
         .p_3p5()
         .gap_3p5()
-        .child(summary(shown, controls, selected, compose, filter, baseline))
+        .child(summary(
+            shown,
+            controls.clone(),
+            selected,
+            compose,
+            filter,
+            baseline,
+        ))
         .child(when(
             move || compose.composing.get(),
             move || compose_box(compose),
@@ -1381,22 +1390,26 @@ fn ready_detail(
             move || header_section("消息", "Messages", shown.messages),
         ))
         .child(when(
-            move || !shown.preview.get().is_empty(),
-            move || image_preview(shown),
-        ))
-        .child(when(
             move || {
                 !shown.response_body.get().is_empty()
                     || !shown.response_note.get().is_empty()
-                    || !shown.preview.get().is_empty()
+                    || (shown.pretty.get() && !shown.preview.get().is_empty())
             },
-            move || {
-                body_section(
-                    "响应 body",
-                    "Response body",
-                    shown.response_body,
-                    shown.response_note,
-                )
+            {
+                let controls = controls.clone();
+                move || {
+                    body_section(
+                        "响应 body",
+                        "Response body",
+                        shown.response_body,
+                        shown.response_note,
+                        true,
+                        shown,
+                        controls.clone(),
+                        selected,
+                        baseline,
+                    )
+                }
             },
         ))
         .child(header_section(
@@ -1421,6 +1434,11 @@ fn ready_detail(
                     "Request body",
                     shown.request_body,
                     shown.request_note,
+                    false,
+                    shown,
+                    controls.clone(),
+                    selected,
+                    baseline,
                 )
             },
         ))
@@ -1669,21 +1687,36 @@ fn body_section(
     en: &'static str,
     body: Signal<String>,
     note: Signal<String>,
+    embed_image: bool,
+    shown: Shown,
+    controls: Arc<Controls>,
+    selected: Signal<Option<u64>>,
+    baseline: Signal<Option<u64>>,
 ) -> impl IntoElement {
+    let image_on = move || embed_image && shown.pretty.get() && !shown.preview.get().is_empty();
     view()
-        .gap_1p5()
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(border_strong())
+        .bg(bg_card())
+        .overflow_hidden()
         .child(
             view()
                 .flex_row()
                 .items_center()
                 .justify_between()
-                .px_1()
-                .child(section_title(tr(zh, en))),
+                .gap_2()
+                .px_3p5()
+                .py_2()
+                .border_b_1()
+                .border_b_color(border_subtle())
+                .child(section_title(tr(zh, en)))
+                .child(pretty_switch(shown, controls, selected, baseline)),
         )
-        .child(
-            when(
-                move || !note.get().is_empty(),
-                move || {
+        .child(when(
+            move || !note.get().is_empty(),
+            move || {
+                view().px_3().pt_3().child(
                     view()
                         .px_3()
                         .py_2()
@@ -1695,20 +1728,39 @@ fn body_section(
                             text(move || note.get())
                                 .text_size(px(12.0))
                                 .text_color(status_warn_fg()),
-                        )
-                },
-            ),
-        )
+                        ),
+                )
+            },
+        ))
+        .child(when(image_on, move || {
+            view()
+                .px_3()
+                .py_3()
+                .gap_1p5()
+                .child(
+                    view()
+                        .rounded(px(8.0))
+                        .border_1()
+                        .border_color(border_strong())
+                        .bg(bg_code())
+                        .overflow_hidden()
+                        .child(image(move || shown.preview.get()).h(px(200.0))),
+                )
+                .child(when(
+                    move || !shown.image_caption.get().is_empty(),
+                    move || muted_line(move || shown.image_caption.get()),
+                ))
+        }))
         .child(when(
             move || !body.get().is_empty(),
             move || {
+                let divided = image_on() || !note.get().is_empty();
                 view()
                     .bg(bg_code())
-                    .rounded(px(10.0))
-                    .border_1()
-                    .border_color(border_strong())
                     .px_3p5()
                     .py_2p5()
+                    .border_t(move || if divided { px(1.0) } else { px(0.0) })
+                    .border_t_color(border_subtle())
                     .child(
                         mono(move || body.get())
                             .selectable(true)
@@ -1717,6 +1769,81 @@ fn body_section(
                     )
             },
         ))
+}
+
+fn pretty_switch(
+    shown: Shown,
+    controls: Arc<Controls>,
+    selected: Signal<Option<u64>>,
+    baseline: Signal<Option<u64>>,
+) -> impl IntoElement {
+    view()
+        .flex_row()
+        .flex_shrink_0()
+        .h(px(22.0))
+        .rounded(px(6.0))
+        .border_1()
+        .border_color(border_control())
+        .overflow_hidden()
+        .child(pretty_chip(
+            shown, controls.clone(), selected, baseline, true, "美化", "Pretty",
+        ))
+        .child(pretty_chip(
+            shown, controls, selected, baseline, false, "原文", "Raw",
+        ))
+}
+
+fn pretty_chip(
+    shown: Shown,
+    controls: Arc<Controls>,
+    selected: Signal<Option<u64>>,
+    baseline: Signal<Option<u64>>,
+    on: bool,
+    zh: &'static str,
+    en: &'static str,
+) -> impl IntoElement {
+    let langs = ui_langs();
+    view()
+        .h(px(22.0))
+        .px_2()
+        .flex_row()
+        .items_center()
+        .border_r(move || if on { px(1.0) } else { px(0.0) })
+        .border_r_color(border_control())
+        .bg(move || {
+            if shown.pretty.get() == on {
+                accent_blue()
+            } else {
+                bg_card()
+            }
+        })
+        .cursor(Cursor::Pointer)
+        .on_press(move || {
+            if shown.pretty.get() == on {
+                return;
+            }
+            shown.pretty.set(on);
+            publish_detail(
+                &shown,
+                &controls.hub,
+                selected.get(),
+                ui_lang(langs),
+                baseline.get(),
+            );
+        })
+        .child(
+            text(tr(zh, en))
+                .number_of_lines(1)
+                .text_size(px(11.5))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(move || {
+                    if shown.pretty.get() == on {
+                        AdaptiveColor::rgb(0xffffff, 0xffffff)
+                    } else {
+                        fg_secondary()
+                    }
+                }),
+        )
 }
 
 fn detail_actions(
@@ -1986,19 +2113,6 @@ fn detail_button(
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(fg_secondary()),
         )
-}
-
-fn image_preview(shown: Shown) -> impl IntoElement {
-    view().gap_1p5().child(view().px_1().child(section_title(tr("图片", "Image")))).child(
-        view()
-            .rounded(px(10.0))
-            .border_1()
-            .border_color(border_strong())
-            .bg(bg_code())
-            .p_3()
-            .overflow_hidden()
-            .child(image(move || shown.preview.get()).h(px(200.0))),
-    )
 }
 
 fn section_title(label: impl IntoReactive<SharedString>) -> Text {
@@ -2825,6 +2939,7 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baselin
     let Some(id) = id else {
         shown.phase.set(Phase::Empty);
         shown.preview.set(String::new());
+        shown.image_caption.set(String::new());
         shown.diff.set(String::new());
         shown.pinned.set(false);
         return;
@@ -2833,6 +2948,7 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baselin
     let Some(flow) = snapshot else {
         shown.phase.set(Phase::Gone);
         shown.preview.set(String::new());
+        shown.image_caption.set(String::new());
         shown.diff.set(String::new());
         shown.pinned.set(false);
         return;
@@ -2856,7 +2972,7 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baselin
         pretty,
         lang,
     );
-    let mut response = display_body(
+    let response = display_body(
         &flow.response_body,
         flow.response_truncated,
         flow.response_encoding_error.as_deref(),
@@ -2865,17 +2981,14 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baselin
         lang,
     );
     let preview = image_preview_path(id, &flow);
-    if !preview.is_empty() {
-        if !response.note.is_empty() {
-            response.note.push('\n');
-        }
-        let bytes = flow.response_body.len();
-        response.note.push_str(&match lang {
-            Lang::Zh => format!("图片预览见上方，共 {bytes} 字节。"),
-            Lang::En => format!("Image preview is above, {bytes} bytes."),
-        });
-        response.text.clear();
-    }
+    let response = present::image_body(
+        pretty,
+        !preview.is_empty(),
+        response.text,
+        response.note,
+        flow.response_body.len(),
+        lang,
+    );
     let ttfb = flow
         .response_at
         .and_then(|at| at.duration_since(flow.started).ok());
@@ -2913,6 +3026,7 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baselin
     shown.request_note.set(request.note);
     shown.response_note.set(response.note);
     shown.preview.set(preview);
+    shown.image_caption.set(response.caption);
     shown.messages.set(messages);
     shown.diff.set(diff);
     shown.pinned.set(flow.pinned);
