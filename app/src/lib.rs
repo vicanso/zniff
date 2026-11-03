@@ -627,6 +627,8 @@ pub fn App() -> impl IntoElement {
                     list_width,
                     columns,
                     controls_list,
+                    shown,
+                    baseline,
                 ))
                 .child(column_splitter(list_width, controls_split))
                 .child(detail_pane(
@@ -859,8 +861,11 @@ fn flow_list(
     width: Signal<f32>,
     columns: Signal<ListColumns>,
     controls: Arc<Controls>,
+    shown: Shown,
+    baseline: Signal<Option<u64>>,
 ) -> impl IntoElement {
     let bypass_controls = controls.clone();
+    let row_controls = controls.clone();
     let rules_controls = controls.clone();
     let column_controls = controls.clone();
     let upstream_controls = controls;
@@ -910,7 +915,19 @@ fn flow_list(
                 move || rows.with(Vec::is_empty),
                 move || list_empty(filter),
             )
-            .otherwise(move || flow_rows(rows, selected, compose, width, columns)),
+            .otherwise(move || {
+                flow_rows(
+                    rows,
+                    selected,
+                    compose,
+                    width,
+                    columns,
+                    row_controls.clone(),
+                    filter,
+                    shown,
+                    baseline,
+                )
+            }),
         ))
 }
 
@@ -1308,10 +1325,19 @@ fn flow_rows(
     compose: Compose,
     width: Signal<f32>,
     columns: Signal<ListColumns>,
+    controls: Arc<Controls>,
+    filter: Signal<String>,
+    shown: Shown,
+    baseline: Signal<Option<u64>>,
 ) -> impl IntoElement {
     virtual_list(
         move || rows.with(Vec::len),
-        move |at| flow_row(rows, selected, compose, width, columns, at),
+        move |at| {
+            flow_row(
+                rows, selected, compose, width, columns, at, controls.clone(), filter, shown,
+                baseline,
+            )
+        },
     )
     .keys(move || rows.with(|rows| rows.iter().map(|row| row.id).collect::<Vec<_>>()))
     .estimated_item_size(px(34.0))
@@ -1475,10 +1501,32 @@ fn flow_row(
     width: Signal<f32>,
     columns: Signal<ListColumns>,
     at: Position,
+    controls: Arc<Controls>,
+    filter: Signal<String>,
+    shown: Shown,
+    baseline: Signal<Option<u64>>,
 ) -> impl IntoElement {
     let row_id = move || rows.with(|rows| rows.get(at.index()).map(|row| row.id));
     let is_selected = move || selected.get() == row_id();
-    view()
+    let picked = signal(None::<u64>);
+    context_menu()
+        .offset(px(4.0))
+        .margin(px(8.0))
+        .on_open_change(move |event: &nsh_base::MenuEvent| {
+            let nsh_base::MenuEvent::OpenChange(open, _) = event else {
+                return;
+            };
+            if !open {
+                return;
+            }
+            let next = rows.with(|rows| rows.get(at.index()).map(|row| row.id));
+            picked.set(next);
+            if selected.get() != next {
+                reset_compose(compose);
+            }
+            selected.set(next);
+        })
+        .trigger(view()
         .w(move || px(width.get()))
         .h(px(34.0))
         .px_3()
@@ -1525,7 +1573,88 @@ fn flow_row(
             selected.set(next);
         })
         .child(row_cells(rows, columns, at))
-        .child(view().w(px(COL_PICKER)).flex_shrink_0())
+        .child(view().w(px(COL_PICKER)).flex_shrink_0()),
+        )
+        .child(row_context_menu(picked, controls, filter, shown, baseline))
+}
+
+fn row_context_menu(
+    picked: Signal<Option<u64>>,
+    controls: Arc<Controls>,
+    filter: Signal<String>,
+    shown: Shown,
+    baseline: Signal<Option<u64>>,
+) -> impl IntoElement {
+    let copy_url = controls.clone();
+    let copy_curl = controls.clone();
+    let focus_controls = controls.clone();
+    let mute_controls = controls.clone();
+    let pin_controls = controls.clone();
+    let pin_mark = controls.clone();
+    let pin_label = controls.clone();
+    let base_controls = controls.clone();
+    let replay_controls = controls;
+    view()
+        .w(px(196.0))
+        .p_1()
+        .gap_0p5()
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(border_strong())
+        .bg(bg_card())
+        .shadow_md()
+        .child(action_item(tr("复制 URL", "Copy URL"), move || {
+            copy_part(&copy_url, picked.get(), CopyPart::Url);
+        }))
+        .child(action_item("cURL", move || {
+            copy_part(&copy_curl, picked.get(), CopyPart::Curl);
+        }))
+        .child(menu_rule())
+        .child(action_item(tr("只看", "Focus"), move || {
+            focus_host(&focus_controls, picked.get(), filter);
+        }))
+        .child(action_item(tr("屏蔽", "Mute"), move || {
+            mute_host(&mute_controls, picked.get(), filter);
+        }))
+        .child(menu_rule())
+        .child(marked_action(
+            move || flow_pinned(&pin_mark, picked.get()),
+            {
+                let langs = ui_langs();
+                move || -> SharedString {
+                    if flow_pinned(&pin_label, picked.get()) {
+                        t(ui_lang(langs), "取消星标", "Unstar").into()
+                    } else {
+                        t(ui_lang(langs), "星标", "Star").into()
+                    }
+                }
+            },
+            move || toggle_pin(&pin_controls, picked.get()),
+        ))
+        .child(marked_action(
+            move || baseline.get().is_some_and(|id| picked.get() == Some(id)),
+            tr("基准", "Baseline"),
+            {
+                let langs = ui_langs();
+                move || {
+                    set_baseline(
+                        &base_controls,
+                        picked.get(),
+                        baseline,
+                        &shown,
+                        ui_lang(langs),
+                    );
+                }
+            },
+        ))
+        .child(menu_rule())
+        .child(action_item(tr("重放", "Replay"), move || {
+            replay_flow(&replay_controls, picked.get(), ReplayOverride::default());
+        }))
+}
+
+fn flow_pinned(controls: &Controls, id: Option<u64>) -> bool {
+    id.is_some_and(|id| controls.hub.with_session(|session| session.get(id).is_some_and(|flow| flow.pinned)))
 }
 
 fn row_cells(rows: Signal<Vec<RowLine>>, columns: Signal<ListColumns>, at: Position) -> impl IntoElement {
