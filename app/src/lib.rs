@@ -3019,8 +3019,8 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baselin
     shown.protocol.set(flow.protocol.label().to_string());
     shown.status.set(flow.status);
     shown.error.set(flow.error.clone().unwrap_or_default());
-    shown.request_headers.set(header_lines(&flow.request_headers));
-    shown.response_headers.set(header_lines(&flow.response_headers));
+    shown.request_headers.set(header_lines(&flow.request_headers, pretty));
+    shown.response_headers.set(header_lines(&flow.response_headers, pretty));
     shown.request_body.set(request.text);
     shown.response_body.set(response.text);
     shown.request_note.set(request.note);
@@ -3076,16 +3076,30 @@ fn message_lines(flow: &crate::session::Flow, lang: Lang) -> Vec<HeaderLine> {
         .collect()
 }
 
-fn header_lines(headers: &[(String, String)]) -> Vec<HeaderLine> {
-    headers
-        .iter()
-        .enumerate()
-        .map(|(index, (name, value))| HeaderLine {
-            key: index as u32,
+fn header_lines(headers: &[(String, String)], pretty: bool) -> Vec<HeaderLine> {
+    let mut lines = Vec::new();
+    for (name, value) in headers {
+        if pretty {
+            if let Some(rows) = present::pretty_cookie_rows(name, value) {
+                for (row_name, shown) in rows {
+                    let key = lines.len() as u32;
+                    lines.push(HeaderLine {
+                        key,
+                        name: row_name,
+                        value: shown,
+                    });
+                }
+                continue;
+            }
+        }
+        let key = lines.len() as u32;
+        lines.push(HeaderLine {
+            key,
             name: name.clone(),
             value: annotated(name, value),
-        })
-        .collect()
+        });
+    }
+    lines
 }
 
 fn annotated(name: &str, value: &str) -> String {

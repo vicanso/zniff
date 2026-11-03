@@ -383,6 +383,51 @@ pub fn parse_curl(text: &str) -> Option<CurlRequest> {
 
 /// Extra readable text for a header value: JWT payload, a unix time, or
 /// printable base64. The original value stays intact.
+/// Splits a `Cookie` or `Set-Cookie` value on `;`. A piece without `=` is a flag.
+pub fn cookie_pairs(value: &str) -> Vec<(String, String)> {
+    value
+        .split(';')
+        .filter_map(|part| {
+            let part = part.trim();
+            if part.is_empty() {
+                return None;
+            }
+            let (key, val) = part.split_once('=').unwrap_or((part, ""));
+            let key = key.trim();
+            if key.is_empty() {
+                return None;
+            }
+            Some((key.to_string(), val.trim().to_string()))
+        })
+        .collect()
+}
+
+/// Pretty rows for one `Cookie` or `Set-Cookie` header. Other headers return `None`.
+pub fn pretty_cookie_rows(header: &str, value: &str) -> Option<Vec<(String, String)>> {
+    if !header.eq_ignore_ascii_case("cookie") && !header.eq_ignore_ascii_case("set-cookie") {
+        return None;
+    }
+    let pairs = cookie_pairs(value);
+    if pairs.is_empty() {
+        return None;
+    }
+    Some(
+        pairs
+            .into_iter()
+            .map(|(key, val)| {
+                let shown = if val.is_empty() {
+                    String::new()
+                } else if let Some(hint) = annotate_value(&key, &val) {
+                    format!("{val}\n{hint}")
+                } else {
+                    val
+                };
+                (format!("{header} · {key}"), shown)
+            })
+            .collect(),
+    )
+}
+
 pub fn annotate_value(name: &str, value: &str) -> Option<String> {
     if let Some(text) = jwt_hint(name, value) {
         return Some(text);
@@ -1080,6 +1125,37 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn pretty_cookie_splits_pairs_and_flags() {
+        assert_eq!(
+            cookie_pairs("session=abc; theme=dark; HttpOnly"),
+            vec![
+                ("session".into(), "abc".into()),
+                ("theme".into(), "dark".into()),
+                ("HttpOnly".into(), String::new()),
+            ]
+        );
+        assert_eq!(
+            cookie_pairs("id=a; Path=/; Secure"),
+            vec![
+                ("id".into(), "a".into()),
+                ("Path".into(), "/".into()),
+                ("Secure".into(), String::new()),
+            ]
+        );
+        let payload = base64url_encode(br#"{"sub":"a"}"#);
+        let header = base64url_encode(br#"{"alg":"none"}"#);
+        let token = format!("{header}.{payload}.x");
+        let rows = pretty_cookie_rows("Cookie", &format!("session={token}; theme=dark")).unwrap();
+        assert_eq!(rows[0].0, "Cookie · session");
+        assert!(rows[0].1.starts_with(&token));
+        assert!(rows[0].1.contains("\"sub\": \"a\""));
+        assert_eq!(rows[1].0, "Cookie · theme");
+        assert_eq!(rows[1].1, "dark");
+        assert!(pretty_cookie_rows("Accept", "text/plain").is_none());
+        assert!(pretty_cookie_rows("Set-Cookie", "   ").is_none());
     }
 
     #[test]
