@@ -500,6 +500,7 @@ pub fn App() -> impl IntoElement {
     let seen_lang = stored(ui_lang(langs));
     let baseline_tick = baseline;
     let seen_baseline = stored(None::<u64>);
+    let seen_pretty = stored(shown_tick.pretty.get());
     set_interval(Duration::from_millis(16), move || {
         status.set(lock_status(&controls_tick));
         running.set(*controls_tick.running.lock().unwrap_or_else(|err| err.into_inner()));
@@ -524,17 +525,20 @@ pub fn App() -> impl IntoElement {
         let selected_now = selected_tick.get();
         let lang_now = ui_lang(langs);
         let baseline_now = baseline_tick.get();
+        let pretty_now = shown_tick.pretty.get();
         if generation != seen_gen.get()
             || filter_now != seen_filter.get()
             || selected_now != seen_selected.get()
             || lang_now != seen_lang.get()
             || baseline_now != seen_baseline.get()
+            || pretty_now != seen_pretty.get()
         {
             seen_gen.replace(generation);
             seen_filter.replace(filter_now.clone());
             seen_selected.replace(selected_now);
             seen_lang.replace(lang_now);
             seen_baseline.replace(baseline_now);
+            seen_pretty.replace(pretty_now);
             let lines = row_lines(&controls_tick.hub, &filter_now, lang_now);
             total_tick.set(controls_tick.hub.with_session(|session| session.len()));
             rows_tick.set(lines);

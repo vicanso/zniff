@@ -43,7 +43,7 @@ P0 到 P3 里点名的能力已经接上。下面是仍然接受的缺口，不�
 - 清空会话。按钮在顶栏「更多」的第一项，右侧是会话条数；「导出」是第二项。工具栏「更多」左边用同一数字。没有过滤词时只显示总数，有过滤词时显示「筛选数 / 总数」。清的是整个会话。清列表、字节和丢弃计数，不清下一条 id。切换选中行或点「清空」会收起「编辑重发」并清掉编辑框。
 - 复制 URL、cURL、请求 body、响应 body。cURL 跳过 `Host` 和 `Content-Length`。非 UTF-8 复制十六进制。二进制请求 body 不写进 cURL。
 - 记住监听端口。摘要里有开始时间、TTFB、总耗时、请求和响应线字节。时区用启动时的 `date +%z`，否则 UTC。HAR 导入按 `timings.wait`、`time` 和 `bodySize` 回填 `response_at`、`finished_at`、`request_bytes`、`response_bytes`。`bodySize` 缺失或为负时用已还原的 body 长度。
-- JSON、表单、XML、HTML 默认美化，可切「原文」。`config.toml` 的 `default_pretty` 缺省为开；「更多」里「默认美化」关掉后下次启动用原文，卡片上的「美化 / 原文」仍只改当前窗口。复制和另存仍用记录原文。查询参数单独成表。另存写到下载目录的 `zniff` 文件夹（Linux 读 `~/.config/user-dirs.dirs` 的 `XDG_DOWNLOAD_DIR`，否则 `~/Downloads`），状态栏给出完整路径。HAR 仍导出到数据目录的 `exports/`。
+- JSON、表单、XML、HTML 默认美化，可切「原文」。`config.toml` 的 `default_pretty` 缺省为开；「更多」里「默认美化」关掉后下次启动用原文，并马上按新模式重画当前选中的详情。卡片上的「美化 / 原文」仍只改当前窗口。复制和另存仍用记录原文。查询参数单独成表。另存写到下载目录的 `zniff` 文件夹（Linux 读 `~/.config/user-dirs.dirs` 的 `XDG_DOWNLOAD_DIR`，否则 `~/Downloads`），状态栏给出完整路径。HAR 仍导出到数据目录的 `exports/`。
 - 过滤是 AND 词：方法精确、状态精确或 `1xx`–`5xx`、`失败`、`type:` / `ct:`、`body:`、`header:`、`pin:`、`mute:` 或 `-词`，其余匹配主机或路径。`body:` 搜请求和响应 body，`header:` 搜头名和头值。`pin:` 只留星标。`mute:` 和 `-词` 排除主机或路径里带这个词的行。方法行右侧「更多」里「只看」把过滤换成当前主机，「屏蔽」追加 `-主机`（主机带冒号时用 `mute:`）。复制、另存、星标、基准、重放、编辑重发和美化也在这个菜单里。
 - 「编辑重发」可改方法、URL、头和 body。URL 框以 `curl` 开头时，按 `-X`、`-H`、`--url`、`-d` / `--data*`、`-A`、`-e`、`-b` 填进这些框；带 body 又没写方法时当成 `POST`。发送时按新 body 重算 `Content-Length`。URL 改了就丢掉旧的 `Host`。停在响应断点上再点「编辑重发」，改的是状态码、响应头和响应 body，由断点条的「放行」送出。状态码只接受 100–599。
 - 复制还有 `fetch`、Python `requests`，以及响应 JSON 对象或数组的浅层 TypeScript `interface`。「更多」里「复制代理环境」复制 `http_proxy`、`https_proxy`、`SSL_CERT_FILE`、`NODE_EXTRA_CA_CERTS`、`REQUESTS_CA_BUNDLE`、`CURL_CA_BUNDLE`、`GIT_SSL_CAINFO`，证书路径指向数据目录的 `ca.crt`，端口用当前记住的监听端口。请求头和查询值里能认出的 JWT、10 位或 13 位时间戳、可打印 Base64 会附在原值下面。两条流量可以用「基准」做行级对比。超过 1 秒的时间列用警告色。星标在主机名前有蓝点。
@@ -68,3 +68,56 @@ P0 到 P3 里点名的能力已经接上。下面是仍然接受的缺口，不�
 - **超过 1 MB 的响应改写**。响应断点的缓冲上限就是单条 body 上限。更大的响应只转发，不在界面里改。
 - **完整 cURL 语法**。不解析换行续行、`-G`、`--json`、`--form` 和多段 body。认不出的旗标忽略。
 - **非 JSON 的 TypeScript**。响应不是 JSON 对象或数组时，「类型」提示不可用，不猜表单或 XML。
+
+## 下一轮细节完善与新增功能待办
+
+### 一、现有实现细节完善
+
+1. **无 `Content-Type` 的 JSON 在只读 `editor` 中启用语法高亮与折叠**
+   - [`editor_language`](file:///Users/tree/github/zniff/app/src/present.rs#L534-L564) 与 [`pretty_body`](file:///Users/tree/github/zniff/app/src/present.rs#L60-L77) 对齐：当 `Content-Type` 为 `text/plain` 或缺失但正文满足 `looks_like_json(text)` 时，同样返回 `"json"`，避免退回 `"plaintext"` 失去语法着色与节点折叠。
+
+2. **左侧流量行右键菜单（Row Context Menu）**
+   - 为列表行 [`flow_row`](file:///Users/tree/github/zniff/app/src/lib.rs#L1469-L1527) 绑定 `context_menu()`，右键某行时自动选中该行并直接弹出高频动作（复制 URL、复制 cURL、只看此主机、屏蔽此主机、星标、设为基准、重放、填入规则），省去先左键选中再去右栏点「更多」的步骤。
+
+3. **配置面板规则编辑体验与快捷规则扩展**
+   - 将 [`config_panel`](file:///Users/tree/github/zniff/app/src/lib.rs#L1078-L1107) 中的多行规则 `side_input` 升级为带行号的 `editor()`。
+   - 在详情「更多」或行右键菜单中支持「基于当前请求创建规则」，自动带入当前流量的 `host + path`。
+   - 将 [`replace_row`](file:///Users/tree/github/zniff/app/src/lib.rs#L1133-L1245) 扩展为可选规则类型的快捷构建行（支持 `replace` 内容替换、`map-remote` 接口转发、`map-local` 本地文件、`delay` 延迟、`break` 断点）。
+
+4. **表单请求体（`x-www-form-urlencoded`）键值展示与编码提示**
+   - 对 `POST` 表单字段值复用 [`annotated`](file:///Users/tree/github/zniff/app/src/lib.rs#L3884)（自动识别并附注 JWT、Unix 时间戳、可打印 Base64），或像「查询参数」一样以对齐键值行展示。
+
+5. **右栏卡片标题样式与左对齐统一（实机截图核对发现）**
+   - 当前 `查询参数`、`对比`、`消息`、`响应头`、`请求头`（[`header_section`](file:///Users/tree/github/zniff/app/src/lib.rs#L2101-L2133)、[`diff_card`](file:///Users/tree/github/zniff/app/src/lib.rs#L2199-L2212)）的折叠箭头与标题位于**卡片外上方**（左内边距 `px_1` = `4px`），而 `响应 body`、`请求 body`（[`body_section`](file:///Users/tree/github/zniff/app/src/lib.rs#L2259-L2288)）将折叠箭头与标题放在**卡片框内部顶栏**（左内边距 `px_3p5` = `14px`）。上下相邻卡片的折叠箭头水平错位 `10px`，视觉层次不统一；应统一为同一套卡片头样式（将「美化 / 原文」放到卡片外标题行右侧，或所有可折叠卡片统一使用卡片内顶栏）。
+
+6. **隐藏「主机」列时保留星标蓝点指示（实机截图核对发现）**
+   - 当前星标蓝点画在 [`host_cell`](file:///Users/tree/github/zniff/app/src/lib.rs#L1653-L1663) 内；当 `config.toml` 中 `show_host = false`（隐藏主机列）时，列表中星标行的蓝点会随之消失。应将星标蓝点移到始终显示的「方法」列旁，或在隐藏主机列时回退显示在路径/方法前。
+
+7. **`body_section` 中 `editor` 与上方 `note` 横幅的分隔线及外边距**
+   - 普通文本分支（[`app/src/lib.rs#L2335-L2341`](file:///Users/tree/github/zniff/app/src/lib.rs#L2335-L2341)）在上方有 `note` 提示框或图片预览时会加 `1px` 顶部分隔线，而只读 `editor` 分支（[`code_body`](file:///Users/tree/github/zniff/app/src/lib.rs#L2350-L2379)）未加顶部分隔线与间距，当大段 JSON 同时带有 256 KB 截断提示框时会直接紧贴在一起。
+
+8. **外部 HAR 导入兼容 `"http/2.0"` / `"HTTP/2.0"`（实机注入测试发现）**
+   - [`har::protocol_from`](file:///Users/tree/github/zniff/app/src/har.rs#L263-L269) 目前只识别 `"HTTP/2"` 与 `"h2"`，而 Chrome DevTools 等导出的 HAR 1.2 通常写 `"http/2.0"` 或 `"HTTP/2.0"`，导入后会被归为 `HTTP/1.1`；应一并匹配 `"http/2.0"`。
+
+9. **清理仅测试使用的 `dead_code` 编译警告**
+    - 切换至 `diff_view` 后，[`present.rs`](file:///Users/tree/github/zniff/app/src/present.rs#L461-L474) 的 `DiffKind` / `DiffLine` / `line_diff`、[`rules.rs`](file:///Users/tree/github/zniff/app/src/rules.rs#L166) 的 `first_match`、[`session.rs`](file:///Users/tree/github/zniff/app/src/session.rs#L337-L418) 的 `ttfb` / `duration` / `ids_matching` 仅被单元测试调用，`make build` 会报 5 条 `dead_code` 警告，应加上 `#[cfg(test)]`。
+
+### 二、待新增功能点
+
+1. **规则命中标记（Rule Hit Badge）**
+   - 在 [`Flow`](file:///Users/tree/github/zniff/app/src/session.rs) 中记录该条流量命中的规则摘要（如 `map-local`、`map-remote`、`replace`、`header`、`delay`），在详情摘要栏协议徽章旁展示醒目的小徽章，一眼区分「源站原始响应」与「本地规则改写响应」。
+
+2. **键盘快捷键（Keyboard Shortcuts）**
+   - `↑` / `↓`：在当前筛选后的流量列表中上下切换选中行；
+   - `Cmd/Ctrl + K`：清空当前会话；
+   - `Cmd/Ctrl + F`：聚焦到过滤输入框；
+   - `Cmd/Ctrl + R`：重放当前选中的流量。
+
+3. **过滤栏一键筛选胶囊（Quick Filter Chips）**
+   - 在过滤框旁或下方提供紧凑的快捷筛选胶囊（如 `JSON`、`报错`、`星标`、`慢请求`），点击即切换或追加对应过滤词（`type:json`、`失败`、`pin:` 等）。
+
+4. **按当前筛选结果导出 HAR（Export Filtered Flows）**
+   - 当过滤框非空时，支持仅导出当前过滤匹配的流量列表（并在「更多 -> 导出」右侧展示将导出的条数角标），方便脱敏分享特定接口的排障抓包。
+
+5. **全局规则 / 断点临时挂起开关（Mute Rules / Breakpoints Toggle）**
+   - 在「配置」弹出层顶部提供「启用规则」与「启用断点」总开关，无需删改或剪切已写好的规则文本即可临时放行所有流量、对比源站原始表现。
