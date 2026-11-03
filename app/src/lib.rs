@@ -797,6 +797,7 @@ fn column_splitter(width: Signal<f32>, controls: Arc<Controls>) -> impl IntoElem
     let width_cancel = width;
     let controls_release = controls.clone();
     let controls_cancel = controls;
+    let hot = signal(false);
     view()
         .w(px(6.0))
         .flex_shrink_0()
@@ -806,6 +807,8 @@ fn column_splitter(width: Signal<f32>, controls: Arc<Controls>) -> impl IntoElem
         .cursor(Cursor::ColResize)
         .claim_touches(TouchClaim::on_start())
         .keep_touches(true)
+        .on_hover_in(move || hot.set(true))
+        .on_hover_out(move || hot.set(false))
         .on_responder_grant(move |_event: &ResponderEvent| {
             origin.set(width_grant.get());
         })
@@ -818,7 +821,12 @@ fn column_splitter(width: Signal<f32>, controls: Arc<Controls>) -> impl IntoElem
         .on_responder_terminate(move |_event: &ResponderEvent| {
             store_list_width(width_cancel.get(), &controls_cancel);
         })
-        .child(view().w(px(1.0)).h_full().bg(border_strong()))
+        .child(
+            view()
+                .w(move || if hot.get() { px(3.0) } else { px(1.0) })
+                .h_full()
+                .bg(move || if hot.get() { accent_blue() } else { border_strong() }),
+        )
 }
 
 fn store_list_width(width: f32, controls: &Controls) {
