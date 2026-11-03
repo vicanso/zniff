@@ -422,6 +422,7 @@ pub fn App() -> impl IntoElement {
     let filter = signal(String::new());
     let selected = signal(None::<u64>);
     let rows = signal(Vec::<RowLine>::new());
+    let flow_total = signal(0_usize);
     let listen = signal(String::new());
     let shown = Shown {
         phase: signal(Phase::Empty),
@@ -480,6 +481,7 @@ pub fn App() -> impl IntoElement {
     let filter_tick = filter;
     let selected_tick = selected;
     let rows_tick = rows;
+    let total_tick = flow_total;
     let shown_tick = shown;
     let seen_gen = stored(0_u64);
     let seen_filter = stored(String::new());
@@ -524,6 +526,7 @@ pub fn App() -> impl IntoElement {
             seen_lang.replace(lang_now);
             seen_baseline.replace(baseline_now);
             let lines = row_lines(&controls_tick.hub, &filter_now, lang_now);
+            total_tick.set(controls_tick.hub.with_session(|session| session.len()));
             rows_tick.set(lines);
             memory.set(format_bytes(
                 controls_tick.hub.with_session(|session| session.memory_bytes()),
@@ -584,6 +587,9 @@ pub fn App() -> impl IntoElement {
             move || toggle_capture(controls_start.clone()),
             import_path,
             controls_import,
+            rows,
+            flow_total,
+            filter,
         ))
         .child(when(
             move || paused.get().is_some(),
@@ -647,6 +653,9 @@ fn toolbar(
     toggle: impl Fn() + 'static,
     import_path: Signal<String>,
     import_controls: Arc<Controls>,
+    rows: Signal<Vec<RowLine>>,
+    flow_total: Signal<usize>,
+    filter: Signal<String>,
 ) -> impl IntoElement {
     let install = Rc::new(install);
     let remove = Rc::new(remove);
@@ -728,6 +737,7 @@ fn toolbar(
                     }),
                 ),
         )
+        .child(flow_count_badge(rows, flow_total, filter))
         .child(toolbar_menu(
             ca_installed,
             use_system_proxy,
@@ -739,6 +749,9 @@ fn toolbar(
             clear,
             import_path,
             import_controls,
+            rows,
+            flow_total,
+            filter,
         ))
         .child(primary_button(
             {
@@ -2910,6 +2923,9 @@ fn toolbar_menu(
     clear: impl Fn() + 'static,
     import_path: Signal<String>,
     import_controls: Arc<Controls>,
+    rows: Signal<Vec<RowLine>>,
+    flow_total: Signal<usize>,
+    filter: Signal<String>,
 ) -> impl IntoElement {
     menu()
         .placement(Placement::Bottom)
@@ -2928,7 +2944,56 @@ fn toolbar_menu(
             clear,
             import_path,
             import_controls,
+            rows,
+            flow_total,
+            filter,
         ))
+}
+
+/// Session size for the toolbar and the Clear item. A filter shows
+/// `matched / total`; an empty filter shows the total alone.
+fn flow_count_text(filtered: usize, total: usize, filtering: bool) -> String {
+    if filtering {
+        format!("{filtered} / {total}")
+    } else {
+        total.to_string()
+    }
+}
+
+fn flow_count_now(
+    rows: Signal<Vec<RowLine>>,
+    flow_total: Signal<usize>,
+    filter: Signal<String>,
+) -> String {
+    flow_count_text(
+        rows.with(Vec::len),
+        flow_total.get(),
+        !filter.get().is_empty(),
+    )
+}
+
+fn flow_count_badge(
+    rows: Signal<Vec<RowLine>>,
+    flow_total: Signal<usize>,
+    filter: Signal<String>,
+) -> impl IntoElement {
+    view()
+        .h(px(22.0))
+        .px_2()
+        .flex_shrink_0()
+        .flex_row()
+        .items_center()
+        .rounded(px(6.0))
+        .bg(bg_control())
+        .border_1()
+        .border_color(border_control())
+        .child(
+            mono(move || SharedString::from(flow_count_now(rows, flow_total, filter)))
+                .number_of_lines(1)
+                .text_size(px(11.5))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(fg_secondary()),
+        )
 }
 
 fn more_trigger(installed: Signal<bool>, proxy_on: Signal<bool>) -> impl IntoElement {
@@ -3017,6 +3082,9 @@ fn more_menu(
     clear: impl Fn() + 'static,
     import_path: Signal<String>,
     import_controls: Arc<Controls>,
+    rows: Signal<Vec<RowLine>>,
+    flow_total: Signal<usize>,
+    filter: Signal<String>,
 ) -> impl IntoElement {
     view()
         .w(px(248.0))
@@ -3027,9 +3095,14 @@ fn more_menu(
         .border_color(border_strong())
         .bg(bg_card())
         .shadow_md()
+        .child(menu_action_meta(
+            Glyph::Trash,
+            tr("清空", "Clear"),
+            move || SharedString::from(flow_count_now(rows, flow_total, filter)),
+            clear,
+        ))
         .child(menu_action(Glyph::Download, tr("导出", "Export"), export_har))
         .child(import_menu(import_path, import_controls))
-        .child(menu_action(Glyph::Trash, tr("清空", "Clear"), clear))
         .child(menu_action(
             Glyph::Prompt,
             tr("复制代理环境", "Copy proxy env"),
@@ -3077,6 +3150,34 @@ fn menu_action(
         .cursor(Cursor::Pointer)
         .child(glyph(move || icon, || color(fg_secondary())))
         .child(control_text(label).text_color(fg_secondary()))
+}
+
+fn menu_action_meta(
+    icon: Glyph,
+    label: impl IntoReactive<SharedString>,
+    meta: impl Fn() -> SharedString + 'static,
+    on_select: impl Fn() + 'static,
+) -> impl IntoElement {
+    menu_item()
+        .on_select(on_select)
+        .h(px(32.0))
+        .px_2p5()
+        .gap_2()
+        .rounded(px(6.0))
+        .flex_row()
+        .items_center()
+        .hover(|style| style.bg(bg_control_hover()))
+        .active(|style| style.opacity(0.75))
+        .cursor(Cursor::Pointer)
+        .child(glyph(move || icon, || color(fg_secondary())))
+        .child(control_text(label).flex_1().text_color(fg_secondary()))
+        .child(
+            mono(meta)
+                .flex_shrink_0()
+                .number_of_lines(1)
+                .text_size(px(11.0))
+                .text_color(fg_muted()),
+        )
 }
 
 fn lang_choice(choice: Option<Lang>, zh: &'static str, en: &'static str) -> impl IntoElement {
@@ -5227,6 +5328,13 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
         let ascii_shown = super::body_text(&ascii, false, None, super::Lang::En);
         assert_eq!(ascii_shown.text.len(), 256 * 1024);
         assert!(ascii_shown.note.contains("10 more bytes"), "{}", ascii_shown.note);
+    }
+
+    #[test]
+    fn flow_count_shows_total_or_filtered_over_total() {
+        assert_eq!(super::flow_count_text(0, 0, false), "0");
+        assert_eq!(super::flow_count_text(4, 4, false), "4");
+        assert_eq!(super::flow_count_text(2, 9, true), "2 / 9");
     }
 
     #[test]

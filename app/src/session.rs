@@ -403,6 +403,10 @@ impl Session {
         self.flows.get(&id)
     }
 
+    pub fn len(&self) -> usize {
+        self.flows.len()
+    }
+
     pub fn memory_bytes(&self) -> usize {
         self.bytes
     }
