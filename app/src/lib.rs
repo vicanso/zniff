@@ -84,6 +84,14 @@ const COL_HOST: f32 = 120.0;
 const COL_SIZE: f32 = 72.0;
 /// Same width as the header's 「列」 control, so the columns line up with it.
 const COL_PICKER: f32 = 44.0;
+/// A set bit collapses that detail card. Zero leaves every card open for this window only.
+const FOLD_QUERY: u8 = 1;
+const FOLD_DIFF: u8 = 1 << 1;
+const FOLD_MESSAGES: u8 = 1 << 2;
+const FOLD_RES_BODY: u8 = 1 << 3;
+const FOLD_RES_HEADERS: u8 = 1 << 4;
+const FOLD_REQ_HEADERS: u8 = 1 << 5;
+const FOLD_REQ_BODY: u8 = 1 << 6;
 /// Toolbar controls share one box. The cert chip is a status, not a button.
 const CONTROL_H: f32 = 30.0;
 const CONTROL_RADIUS: f32 = 7.0;
@@ -516,7 +524,7 @@ pub fn App() -> impl IntoElement {
             seen_selected.replace(selected_now);
             seen_lang.replace(lang_now);
             seen_baseline.replace(baseline_now);
-            let lines = row_lines(&controls_tick.hub, &filter_now);
+            let lines = row_lines(&controls_tick.hub, &filter_now, lang_now);
             rows_tick.set(lines);
             memory.set(format_bytes(
                 controls_tick.hub.with_session(|session| session.memory_bytes()),
@@ -546,11 +554,18 @@ pub fn App() -> impl IntoElement {
     let controls_break = controls.clone();
     let controls_list = controls.clone();
     let controls_split = controls.clone();
+    let controls_import = controls.clone();
+    let controls_drop = controls.clone();
+    let folded = signal(0_u8);
+    let drop_langs = langs;
 
     view()
         .flex_1()
         .bg(bg_canvas())
         .text_color(fg_primary())
+        .on_file_drop(move |event: &FileDropEvent| {
+            import_dropped(&controls_drop, event, ui_lang(drop_langs));
+        })
         .child(toolbar(
             status,
             running,
@@ -568,6 +583,8 @@ pub fn App() -> impl IntoElement {
             move || export_har_file(&controls_export),
             move || copy_proxy_env(&controls_env),
             move || toggle_capture(controls_start.clone()),
+            import_path,
+            controls_import,
         ))
         .child(when(
             move || paused.get().is_some(),
@@ -599,6 +616,7 @@ pub fn App() -> impl IntoElement {
                     compose,
                     filter,
                     baseline,
+                    folded,
                 )),
         )
         .child(footer(
@@ -611,7 +629,6 @@ pub fn App() -> impl IntoElement {
             lan_choice,
             lan_addrs,
             qr_path,
-            import_path,
             listen_all,
             controls,
         ))
@@ -629,6 +646,8 @@ fn toolbar(
     export_har: impl Fn() + 'static,
     copy_env: impl Fn() + 'static,
     toggle: impl Fn() + 'static,
+    import_path: Signal<String>,
+    import_controls: Arc<Controls>,
 ) -> impl IntoElement {
     let install = Rc::new(install);
     let remove = Rc::new(remove);
@@ -719,6 +738,8 @@ fn toolbar(
             export_har,
             copy_env,
             clear,
+            import_path,
+            import_controls,
         ))
         .child(primary_button(
             {
@@ -1417,11 +1438,7 @@ fn status_text(rows: Signal<Vec<RowLine>>, at: Position) -> Text {
     mono(move || {
         rows.with(|rows| {
             rows.get(at.index())
-                .map(|row| {
-                    row.status
-                        .map(|code| code.to_string())
-                        .unwrap_or_else(|| "…".into())
-                })
+                .map(|row| list_status(row.status, row.failed))
                 .unwrap_or_default()
         })
     })
@@ -1557,7 +1574,13 @@ fn path_cell(rows: Signal<Vec<RowLine>>, at: Position) -> Text {
     .number_of_lines(1)
     .ellipsize_mode(EllipsizeMode::Middle)
     .text_size(px(12.0))
-    .text_color(fg_secondary())
+    .text_color(move || {
+        if rows.with(|rows| rows.get(at.index()).is_some_and(|row| row.failed)) {
+            status_err_fg()
+        } else {
+            fg_secondary()
+        }
+    })
     .tooltip(cell_tip(move || {
         tip_rows.with(|rows| {
             rows.get(at.index())
@@ -1595,11 +1618,22 @@ fn detail_pane(
     compose: Compose,
     filter: Signal<String>,
     baseline: Signal<Option<u64>>,
+    folded: Signal<u8>,
 ) -> impl IntoElement {
     scroll().flex_1().min_w(px(0.0)).bg(bg_canvas()).child(
         when(
             move || shown.phase.get() == Phase::Ready,
-            move || ready_detail(shown, controls.clone(), selected, compose, filter, baseline),
+            move || {
+                ready_detail(
+                    shown,
+                    controls.clone(),
+                    selected,
+                    compose,
+                    filter,
+                    baseline,
+                    folded,
+                )
+            },
         )
         .otherwise(move || {
             view()
@@ -1659,6 +1693,7 @@ fn ready_detail(
     compose: Compose,
     filter: Signal<String>,
     baseline: Signal<Option<u64>>,
+    folded: Signal<u8>,
 ) -> impl IntoElement {
     view()
         .p_3p5()
@@ -1676,12 +1711,16 @@ fn ready_detail(
             move || compose_box(compose),
         ))
         .child(when(
+            move || !shown.query.with(Vec::is_empty),
+            move || header_section("查询参数", "Query", shown.query, folded, FOLD_QUERY),
+        ))
+        .child(when(
             move || !shown.diff.get().is_empty(),
-            move || diff_card(shown),
+            move || diff_card(shown, folded),
         ))
         .child(when(
             move || !shown.messages.with(Vec::is_empty),
-            move || header_section("消息", "Messages", shown.messages),
+            move || header_section("消息", "Messages", shown.messages, folded, FOLD_MESSAGES),
         ))
         .child(when(
             move || {
@@ -1702,6 +1741,8 @@ fn ready_detail(
                         controls.clone(),
                         selected,
                         baseline,
+                        folded,
+                        FOLD_RES_BODY,
                     )
                 }
             },
@@ -1710,15 +1751,15 @@ fn ready_detail(
             "响应头",
             "Response headers",
             shown.response_headers,
-        ))
-        .child(when(
-            move || !shown.query.with(Vec::is_empty),
-            move || header_section("查询参数", "Query", shown.query),
+            folded,
+            FOLD_RES_HEADERS,
         ))
         .child(header_section(
             "请求头",
             "Request headers",
             shown.request_headers,
+            folded,
+            FOLD_REQ_HEADERS,
         ))
         .child(when(
             move || !shown.request_body.get().is_empty() || !shown.request_note.get().is_empty(),
@@ -1733,6 +1774,8 @@ fn ready_detail(
                     controls.clone(),
                     selected,
                     baseline,
+                    folded,
+                    FOLD_REQ_BODY,
                 )
             },
         ))
@@ -1788,6 +1831,7 @@ fn summary(
                                 let langs = ui_langs();
                                 move || match shown.status.get() {
                                     Some(code) => code.to_string(),
+                                    None if !shown.error.get().is_empty() => "ERR".to_string(),
                                     None => t(ui_lang(langs), "等待响应", "Waiting").into(),
                                 }
                             })
@@ -1865,10 +1909,33 @@ fn summary(
         )
 }
 
+fn card_folded(folded: Signal<u8>, bit: u8) -> bool {
+    folded.get() & bit != 0
+}
+
+fn toggle_card(folded: Signal<u8>, bit: u8) {
+    folded.set(folded.get() ^ bit);
+}
+
+fn fold_mark(folded: Signal<u8>, bit: u8) -> impl IntoElement {
+    glyph(
+        move || {
+            if card_folded(folded, bit) {
+                Glyph::ChevronRight
+            } else {
+                Glyph::Chevron
+            }
+        },
+        || color(fg_muted()),
+    )
+}
+
 fn header_section(
     zh: &'static str,
     en: &'static str,
     lines: Signal<Vec<HeaderLine>>,
+    folded: Signal<u8>,
+    bit: u8,
 ) -> impl IntoElement {
     view()
         .gap_1p5()
@@ -1878,6 +1945,9 @@ fn header_section(
                 .items_center()
                 .gap_1p5()
                 .px_1()
+                .cursor(Cursor::Pointer)
+                .on_press(move || toggle_card(folded, bit))
+                .child(fold_mark(folded, bit))
                 .child(section_title(tr(zh, en)))
                 .child(
                     view()
@@ -1893,14 +1963,16 @@ fn header_section(
                         ),
                 ),
         )
-        .child(
-            view()
-                .rounded(px(10.0))
-                .border_1()
-                .border_color(border_strong())
-                .bg(bg_card())
-                .overflow_hidden()
-                .child(
+        .child(when(
+            move || !card_folded(folded, bit),
+            move || {
+                view()
+                    .rounded(px(10.0))
+                    .border_1()
+                    .border_color(border_strong())
+                    .bg(bg_card())
+                    .overflow_hidden()
+                    .child(
                     when(
                         move || lines.with(Vec::is_empty),
                         || view().px_3p5().py_2p5().child(muted_line(tr("无", "None"))),
@@ -1951,29 +2023,43 @@ fn header_section(
                             },
                         )
                     }),
-                ),
-        )
+                    )
+            },
+        ))
 }
 
-fn diff_card(shown: Shown) -> impl IntoElement {
+fn diff_card(shown: Shown, folded: Signal<u8>) -> impl IntoElement {
     view()
         .gap_1p5()
-        .child(view().px_1().child(section_title(tr("对比", "Diff"))))
         .child(
             view()
-                .bg(bg_code())
-                .rounded(px(10.0))
-                .border_1()
-                .border_color(border_strong())
-                .px_3p5()
-                .py_2p5()
-                .child(
-                    mono(move || shown.diff.get())
-                        .selectable(true)
-                        .text_size(px(12.0))
-                        .text_color(fg_primary()),
-                ),
+                .flex_row()
+                .items_center()
+                .gap_1p5()
+                .px_1()
+                .cursor(Cursor::Pointer)
+                .on_press(move || toggle_card(folded, FOLD_DIFF))
+                .child(fold_mark(folded, FOLD_DIFF))
+                .child(section_title(tr("对比", "Diff"))),
         )
+        .child(when(
+            move || !card_folded(folded, FOLD_DIFF),
+            move || {
+                view()
+                    .bg(bg_code())
+                    .rounded(px(10.0))
+                    .border_1()
+                    .border_color(border_strong())
+                    .px_3p5()
+                    .py_2p5()
+                    .child(
+                        mono(move || shown.diff.get())
+                            .selectable(true)
+                            .text_size(px(12.0))
+                            .text_color(fg_primary()),
+                    )
+            },
+        ))
 }
 
 fn body_section(
@@ -1986,6 +2072,8 @@ fn body_section(
     controls: Arc<Controls>,
     selected: Signal<Option<u64>>,
     baseline: Signal<Option<u64>>,
+    folded: Signal<u8>,
+    bit: u8,
 ) -> impl IntoElement {
     let image_on = move || embed_image && shown.pretty.get() && !shown.preview.get().is_empty();
     view()
@@ -2002,13 +2090,30 @@ fn body_section(
                 .gap_2()
                 .px_3p5()
                 .py_2()
-                .border_b_1()
+                .border_b(move || {
+                    if card_folded(folded, bit) {
+                        px(0.0)
+                    } else {
+                        px(1.0)
+                    }
+                })
                 .border_b_color(border_subtle())
-                .child(section_title(tr(zh, en)))
+                .child(
+                    view()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .flex_row()
+                        .items_center()
+                        .gap_1p5()
+                        .cursor(Cursor::Pointer)
+                        .on_press(move || toggle_card(folded, bit))
+                        .child(fold_mark(folded, bit))
+                        .child(section_title(tr(zh, en))),
+                )
                 .child(pretty_switch(shown, controls, selected, baseline)),
         )
         .child(when(
-            move || !note.get().is_empty(),
+            move || !card_folded(folded, bit) && !note.get().is_empty(),
             move || {
                 view().px_3().pt_3().child(
                     view()
@@ -2026,7 +2131,7 @@ fn body_section(
                 )
             },
         ))
-        .child(when(image_on, move || {
+        .child(when(move || !card_folded(folded, bit) && image_on(), move || {
             view()
                 .px_3()
                 .py_3()
@@ -2046,7 +2151,7 @@ fn body_section(
                 ))
         }))
         .child(when(
-            move || !body.get().is_empty(),
+            move || !card_folded(folded, bit) && !body.get().is_empty(),
             move || {
                 let divided = image_on() || !note.get().is_empty();
                 view()
@@ -2432,13 +2537,11 @@ fn footer(
     lan_choice: Signal<String>,
     lan_addrs: Signal<Vec<LanAddr>>,
     qr_path: Signal<String>,
-    import_path: Signal<String>,
     listen_all: Signal<bool>,
     controls: Arc<Controls>,
 ) -> impl IntoElement {
     let port_controls = controls.clone();
-    let lan_controls = controls.clone();
-    let import_controls = controls;
+    let lan_controls = controls;
     view()
         .h(px(32.0))
         .px_3()
@@ -2498,7 +2601,6 @@ fn footer(
             move || !running.get(),
             move || lan_toggle(listen_all, lan_controls.clone()),
         ))
-        .child(import_field(import_path, import_controls))
         .child(
             mono({
                 let langs = ui_langs();
@@ -2807,6 +2909,8 @@ fn toolbar_menu(
     export_har: impl Fn() + 'static,
     copy_env: impl Fn() + 'static,
     clear: impl Fn() + 'static,
+    import_path: Signal<String>,
+    import_controls: Arc<Controls>,
 ) -> impl IntoElement {
     menu()
         .placement(Placement::Bottom)
@@ -2823,6 +2927,8 @@ fn toolbar_menu(
             export_har,
             copy_env,
             clear,
+            import_path,
+            import_controls,
         ))
 }
 
@@ -2910,6 +3016,8 @@ fn more_menu(
     export_har: impl Fn() + 'static,
     copy_env: impl Fn() + 'static,
     clear: impl Fn() + 'static,
+    import_path: Signal<String>,
+    import_controls: Arc<Controls>,
 ) -> impl IntoElement {
     view()
         .w(px(248.0))
@@ -2921,6 +3029,7 @@ fn more_menu(
         .bg(bg_card())
         .shadow_md()
         .child(menu_action(Glyph::Download, tr("导出", "Export"), export_har))
+        .child(import_menu(import_path, import_controls))
         .child(menu_action(Glyph::Trash, tr("清空", "Clear"), clear))
         .child(menu_action(
             Glyph::Prompt,
@@ -3201,13 +3310,30 @@ fn mono(content: impl IntoReactive<SharedString>) -> Text {
     text(content).font_family(move || theme().font_mono.clone().unwrap_or_else(|| "Menlo".into()))
 }
 
-fn row_lines(hub: &Hub, filter: &str) -> Vec<RowLine> {
+fn list_status(status: Option<u16>, failed: bool) -> String {
+    match status {
+        Some(code) => code.to_string(),
+        None if failed => "ERR".to_string(),
+        None => "—".to_string(),
+    }
+}
+
+fn list_path(path: &str, error: Option<&str>, failed: bool, lang: Lang) -> String {
+    if failed {
+        localize_error(lang, error.unwrap_or(""))
+    } else {
+        path.to_string()
+    }
+}
+
+fn row_lines(hub: &Hub, filter: &str, lang: Lang) -> Vec<RowLine> {
     hub.with_session(|session| {
         session
             .matching_with_previous_start(filter)
             .into_iter()
             .filter_map(|(id, previous)| {
                 let flow = session.get(id)?;
+                let failed = flow.error.is_some() && flow.status.is_none();
                 Some(RowLine {
                     id,
                     method: flow.method.clone(),
@@ -3215,10 +3341,10 @@ fn row_lines(hub: &Hub, filter: &str) -> Vec<RowLine> {
                     time: present::format_gap(previous, flow.started),
                     clock: present::format_clock(flow.started),
                     host: flow.host.clone(),
-                    path: flow.path.clone(),
+                    path: list_path(&flow.path, flow.error.as_deref(), failed, lang),
                     protocol: flow.protocol.label().to_string(),
                     size: format_bytes(flow.response_bytes as usize),
-                    failed: flow.error.is_some() && flow.status.is_none(),
+                    failed,
                     slow: present::is_slow(
                         flow.started,
                         flow.finished_at,
@@ -4422,48 +4548,34 @@ fn lan_toggle(on: Signal<bool>, controls: Arc<Controls>) -> impl IntoElement {
         )
 }
 
-fn import_field(path_text: Signal<String>, controls: Arc<Controls>) -> impl IntoElement {
+fn import_menu(path_text: Signal<String>, controls: Arc<Controls>) -> impl IntoElement {
     let import_controls = controls;
     view()
-        .flex_row()
-        .items_center()
         .gap_1()
-        .flex_shrink_0()
+        .px_1()
+        .py_0p5()
         .child(
             input()
                 .value(path_text)
                 .placeholder("import.har")
                 .placeholder_color(move || color(fg_muted()))
-                .w(px(148.0))
-                .h(px(22.0))
+                .w_full()
+                .h(px(28.0))
                 .px_2()
                 .rounded(px(6.0))
                 .bg(bg_code())
                 .border_1()
                 .border_color(border_control())
                 .focus(|style| style.border_color(accent_blue()))
-                .text_size(px(11.5))
+                .text_size(px(12.0))
                 .text_color(fg_primary())
                 .on_change(move |text: &str| path_text.set(text.to_string())),
         )
-        .child(
-            view()
-                .h(px(22.0))
-                .px_2()
-                .flex_row()
-                .items_center()
-                .rounded(px(6.0))
-                .border_1()
-                .border_color(border_control())
-                .bg(bg_control())
-                .cursor(Cursor::Pointer)
-                .on_press(move || import_har_file(&import_controls, &path_text.get()))
-                .child(
-                    text(tr("导入", "Import"))
-                        .text_size(px(11.5))
-                        .text_color(fg_secondary()),
-                ),
-        )
+        .child(menu_action(
+            Glyph::List,
+            tr("导入 HAR", "Import HAR"),
+            move || import_har_file(&import_controls, &path_text.get()),
+        ))
 }
 
 fn begin_compose(controls: &Controls, id: Option<u64>, compose: Compose) {
@@ -4558,6 +4670,87 @@ fn export_har_file(controls: &Controls) {
     }
     set_clipboard(path.display().to_string());
     set_status(controls, StatusMsg::Exported(path.display().to_string()));
+}
+
+fn import_dropped(controls: &Controls, event: &FileDropEvent, lang: Lang) {
+    let mut found = false;
+    for uri in &event.uris {
+        let Some(path) = dropped_har_path(uri) else {
+            continue;
+        };
+        found = true;
+        import_har_file(controls, &path);
+    }
+    if !found {
+        set_status(
+            controls,
+            StatusMsg::ImportFailed(
+                t(lang, "放下的文件不是 HAR", "Dropped file is not a HAR").to_string(),
+            ),
+        );
+    }
+}
+
+/// `file:` URL of a `.har`, or nothing. Encoded names are decoded. A Windows
+/// `file:///C:/...` drops the extra slash. Other schemes are ignored.
+fn dropped_har_path(uri: &str) -> Option<String> {
+    let rest = uri.strip_prefix("file:")?;
+    let rest = rest.strip_prefix("//").unwrap_or(rest);
+    let rest = rest
+        .strip_prefix("localhost")
+        .filter(|rest| rest.starts_with('/'))
+        .unwrap_or(rest);
+    if !rest.starts_with('/') {
+        return None;
+    }
+    let path = file_url_path(rest);
+    let har = std::path::Path::new(&path)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("har"));
+    har.then_some(path)
+}
+
+fn file_url_path(path: &str) -> String {
+    let decoded = percent_decode_path(path);
+    let bytes = decoded.as_bytes();
+    if bytes.len() >= 4
+        && bytes[0] == b'/'
+        && bytes[1].is_ascii_alphabetic()
+        && bytes[2] == b':'
+        && (bytes[3] == b'/' || bytes[3] == b'\\')
+    {
+        decoded[1..].to_string()
+    } else {
+        decoded
+    }
+}
+
+fn percent_decode_path(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
+        {
+            out.push((hi << 4) | lo);
+            index += 3;
+            continue;
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn import_har_file(controls: &Controls, path_text: &str) {
@@ -5054,6 +5247,54 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
         assert_eq!(super::clamp_list_px(5_000.0), crate::config::LIST_WIDTH_MAX as f32);
         assert_eq!(super::clamp_list_px(640.6), 641.0);
         assert_eq!(super::clamp_list_px(-20.0), crate::config::LIST_WIDTH_MIN as f32);
+    }
+
+    #[test]
+    fn failed_rows_show_err_and_the_short_reason() {
+        assert_eq!(super::list_status(Some(304), false), "304");
+        assert_eq!(super::list_status(None, false), "—");
+        assert_eq!(super::list_status(None, true), "ERR");
+        assert_eq!(super::list_status(Some(502), true), "502");
+        assert_eq!(
+            super::list_path("/index", None, false, super::Lang::Zh),
+            "/index"
+        );
+        assert_eq!(
+            super::list_path("/", Some("证书被拒绝"), true, super::Lang::Zh),
+            "证书被拒绝"
+        );
+        assert_eq!(
+            super::list_path(":443", Some("证书被拒绝"), true, super::Lang::En),
+            "Certificate rejected"
+        );
+        assert_eq!(
+            super::list_path("/", None, true, super::Lang::En),
+            ""
+        );
+    }
+
+    #[test]
+    fn dropped_files_keep_only_har_urls() {
+        assert_eq!(
+            super::dropped_har_path("file:///Users/tree/a.har").as_deref(),
+            Some("/Users/tree/a.har")
+        );
+        assert_eq!(
+            super::dropped_har_path("file://localhost/tmp/my%20capture.har").as_deref(),
+            Some("/tmp/my capture.har")
+        );
+        assert_eq!(
+            super::dropped_har_path("file:///C:/captures/one.HAR").as_deref(),
+            Some("C:/captures/one.HAR")
+        );
+        assert_eq!(
+            super::dropped_har_path("file:///tmp/%E4%B8%AD.har").as_deref(),
+            Some("/tmp/中.har")
+        );
+        assert!(super::dropped_har_path("file:///tmp/a.txt").is_none());
+        assert!(super::dropped_har_path("/tmp/a.har").is_none());
+        assert!(super::dropped_har_path("file://server/tmp/a.har").is_none());
+        assert!(super::dropped_har_path("file:///tmp/notes.har.bak").is_none());
     }
 }
 

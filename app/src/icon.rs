@@ -9,6 +9,7 @@ pub enum Glyph {
     Play,
     Stop,
     Chevron,
+    ChevronRight,
     Sliders,
     Download,
     Shield,
@@ -52,6 +53,7 @@ fn draw(kind: Glyph, paint: Hsla, size: f32) -> Painter {
         Glyph::Play => painter.fill_svg("M5.2 3.1 L12.4 8 L5.2 12.9 Z"),
         Glyph::Stop => painter.fill_svg("M4.2 4.2 H11.8 V11.8 H4.2 Z"),
         Glyph::Chevron => painter.stroke_svg("M4 6.2 L8 10.2 L12 6.2"),
+        Glyph::ChevronRight => painter.stroke_svg("M6.2 4 L10.2 8 L6.2 12"),
         Glyph::Sliders => painter
             .stroke_svg("M2.4 4.4 H13.6")
             .stroke_svg("M2.4 8 H13.6")
