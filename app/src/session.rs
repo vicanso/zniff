@@ -334,11 +334,13 @@ impl Session {
         self.dropped = 0;
     }
 
+    #[cfg(test)]
     pub fn ttfb(&self, id: u64) -> Option<Duration> {
         let flow = self.flows.get(&id)?;
         flow.response_at?.duration_since(flow.started).ok()
     }
 
+    #[cfg(test)]
     pub fn duration(&self, id: u64) -> Option<Duration> {
         let flow = self.flows.get(&id)?;
         flow.finished_at?.duration_since(flow.started).ok()
@@ -415,6 +417,7 @@ impl Session {
         self.dropped
     }
 
+    #[cfg(test)]
     pub fn ids_matching(&self, filter: &str) -> Vec<u64> {
         self.matching_with_previous_start(filter)
             .into_iter()

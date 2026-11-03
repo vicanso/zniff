@@ -163,6 +163,7 @@ pub fn parse_rules(text: &str) -> Vec<Rule> {
         .collect()
 }
 
+#[cfg(test)]
 pub fn first_match<'a>(rules: &'a [Rule], host: &str, path: &str) -> Option<&'a Rule> {
     rules.iter().find(|rule| rule.matches(host, path))
 }
@@ -415,17 +416,6 @@ pub enum QuickRule {
 }
 
 impl QuickRule {
-    pub fn next(self) -> Self {
-        match self {
-            Self::Replace => Self::Remote,
-            Self::Remote => Self::Local,
-            Self::Local => Self::Delay,
-            Self::Delay => Self::Break,
-            Self::Break => Self::BreakRes,
-            Self::BreakRes => Self::Replace,
-        }
-    }
-
     pub fn label(self) -> (&'static str, &'static str) {
         match self {
             Self::Replace => ("替换", "Replace"),

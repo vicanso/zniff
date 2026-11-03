@@ -458,6 +458,7 @@ pub fn annotate_value(name: &str, value: &str) -> Option<String> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(test)]
 pub enum DiffKind {
     Same,
     Add,
@@ -465,12 +466,14 @@ pub enum DiffKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(test)]
 pub struct DiffLine {
     pub kind: DiffKind,
     pub text: String,
 }
 
 /// Line diff capped at 200 lines on each side.
+#[cfg(test)]
 pub fn line_diff(before: &str, after: &str) -> Vec<DiffLine> {
     let left: Vec<&str> = before.lines().take(200).collect();
     let right: Vec<&str> = after.lines().take(200).collect();

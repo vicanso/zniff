@@ -69,14 +69,7 @@ P0 到 P3 里点名的能力已经接上。下面是仍然接受的缺口，不�
 - **完整 cURL 语法**。不解析换行续行、`-G`、`--json`、`--form` 和多段 body。认不出的旗标忽略。
 - **非 JSON 的 TypeScript**。响应不是 JSON 对象或数组时，「类型」提示不可用，不猜表单或 XML。
 
-## 下一轮细节完善与新增功能待办
-
-### 一、现有实现细节完善
-
-1. **清理仅测试使用的 `dead_code` 编译警告**
-    - 切换至 `diff_view` 后，[`present.rs`](file:///Users/tree/github/zniff/app/src/present.rs#L461-L474) 的 `DiffKind` / `DiffLine` / `line_diff`、[`rules.rs`](file:///Users/tree/github/zniff/app/src/rules.rs#L166) 的 `first_match`、[`session.rs`](file:///Users/tree/github/zniff/app/src/session.rs#L337-L418) 的 `ttfb` / `duration` / `ids_matching` 仅被单元测试调用，`make build` 会报 5 条 `dead_code` 警告，应加上 `#[cfg(test)]`。
-
-### 二、待新增功能点
+## 下一轮待新增功能
 
 1. **规则命中标记（Rule Hit Badge）**
    - 在 [`Flow`](file:///Users/tree/github/zniff/app/src/session.rs) 中记录该条流量命中的规则摘要（如 `map-local`、`map-remote`、`replace`、`header`、`delay`），在详情摘要栏协议徽章旁展示醒目的小徽章，一眼区分「源站原始响应」与「本地规则改写响应」。
