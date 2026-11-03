@@ -1243,14 +1243,14 @@ fn column_labels(columns: Signal<ListColumns>) -> impl IntoElement {
         .items_center()
         .gap_2()
         .child(header_label("方法", "Method").w(px(COL_METHOD)).flex_shrink_0())
+        .child(when(move || columns.get().path, move || {
+            header_label("路径", "Path").flex_1().min_w(px(0.0))
+        }))
         .child(when(move || columns.get().status, move || {
             header_label("状态", "Status").w(px(COL_STATUS)).flex_shrink_0()
         }))
         .child(when(move || columns.get().protocol, move || {
             header_label("协议", "Protocol").w(px(COL_PROTOCOL)).flex_shrink_0()
-        }))
-        .child(when(move || columns.get().path, move || {
-            header_label("路径", "Path").flex_1().min_w(px(0.0))
         }))
         .child(when(move || columns.get().gap, move || {
             header_label("间隔", "Gap").w(px(COL_TIME)).flex_shrink_0()
@@ -1417,9 +1417,9 @@ fn row_cells(rows: Signal<Vec<RowLine>>, columns: Signal<ListColumns>, at: Posit
         .items_center()
         .gap_2()
         .child(method_cell(rows, at))
+        .child(when(move || columns.get().path, move || path_cell(rows, at)))
         .child(when(move || columns.get().status, move || status_text(rows, at)))
         .child(when(move || columns.get().protocol, move || protocol_cell(rows, at)))
-        .child(when(move || columns.get().path, move || path_cell(rows, at)))
         .child(when(move || columns.get().gap, move || time_cell(rows, at)))
         .child(when(move || columns.get().host, move || host_cell(rows, at)))
         .child(when(move || columns.get().size, move || size_cell(rows, at)))
