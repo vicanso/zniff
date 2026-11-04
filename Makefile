@@ -7,7 +7,7 @@ MANIFEST := app/Cargo.toml
 CARGO_FLAGS := --manifest-path $(MANIFEST)
 VERSION := $(shell sed -n 's/^version = "\([^"]*\)"/\1/p' $(MANIFEST) | head -1)
 
-.PHONY: all help build dev debug run fmt lint test check release clean \
+.PHONY: all help build dev debug run fmt lint test check release bundle clean \
 	bloat udeps version version-patch version-minor version-major tag changelog
 
 # --- develop ---------------------------------------------------------------
@@ -25,6 +25,7 @@ help:
 		'check    type-check every target' \
 		'test     run the library and binary tests' \
 		'release  compile the release binary' \
+		'bundle   release binary wrapped as zniff.app with icons/zniff.icns' \
 		'clean    remove this package from the cargo target directory' \
 		'bloat    release binary size by crate' \
 		'udeps    unused dependencies (nightly)' \
@@ -67,6 +68,16 @@ test:
 
 release:
 	$(CARGO) build $(CARGO_FLAGS) --release $(ARGS)
+
+# macOS .app. The Dock and Finder icon is icons/zniff.icns.
+bundle: release
+	@case "$$(uname -s)" in \
+	  Darwin) ;; \
+	  *) echo "bundle builds a macOS .app; this machine is $$(uname -s)"; exit 1 ;; \
+	esac
+	@target_dir=$$($(CARGO) metadata $(CARGO_FLAGS) --format-version 1 --no-deps \
+	  | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p'); \
+	scripts/macos-app.sh "$$target_dir/release/zniff" "$$target_dir/release/zniff.app"
 
 # Where the release binary's size goes, by crate.
 bloat:
