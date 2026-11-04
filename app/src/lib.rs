@@ -1682,11 +1682,66 @@ fn saved_filter_panel(
                         },
                     ),
                 ))
-                .child(config_field(
-                    "规则 (域名与 Path 前缀均支持 | 表示 OR)",
-                    "Rules (Domain & Path Prefix support | for OR)",
-                    rules_editor(rules_text, rules_controls.clone()),
-                ))
+                .child(
+                    view()
+                        .gap_1()
+                        .w_full()
+                        .child(
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    text(tr(
+                                        "规则 (域名与 Path 前缀均支持 | 表示 OR)",
+                                        "Rules (Domain & Path Prefix support | for OR)",
+                                    ))
+                                    .text_size(px(11.5))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(fg_muted()),
+                                )
+                                .child(when(
+                                    move || {
+                                        !crate::rules::invalid_rule_lines(&rules_text.get())
+                                            .is_empty()
+                                    },
+                                    move || {
+                                        view()
+                                            .h(px(18.0))
+                                            .px_1p5()
+                                            .rounded(px(4.0))
+                                            .flex_row()
+                                            .items_center()
+                                            .bg(status_warn_bg())
+                                            .child(
+                                                text(move || {
+                                                    let bad = crate::rules::invalid_rule_lines(
+                                                        &rules_text.get(),
+                                                    );
+                                                    let lines = bad
+                                                        .iter()
+                                                        .map( usize::to_string)
+                                                        .collect::<Vec<_>>()
+                                                        .join(", ");
+                                                    let lang = ui_lang(ui_langs());
+                                                    match lang {
+                                                        Lang::Zh => {
+                                                            format!("第 {lines} 行语法有误")
+                                                        }
+                                                        Lang::En => {
+                                                            format!("Syntax error on line {lines}")
+                                                        }
+                                                    }
+                                                })
+                                                .text_size(px(10.5))
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_color(status_warn_fg()),
+                                            )
+                                    },
+                                )),
+                        )
+                        .child(rules_editor(rules_text, rules_controls.clone())),
+                )
                 .child(replace_row(rules_text, rules_controls))
                 .child(config_field(
                     "上游",
@@ -2378,7 +2433,7 @@ fn replace_row(rules_text: Signal<String>, controls: Arc<Controls>) -> impl Into
     let to = signal(String::new());
     let response = signal(true);
     let kind = signal(0_u8);
-    let kinds = [0_u8, 1, 2, 3, 4, 5];
+    let kinds = [0_u8, 1, 2, 3, 4, 5, 6, 7];
     view()
         .gap_1p5()
         .w_full()
@@ -2401,7 +2456,7 @@ fn replace_row(rules_text: Signal<String>, controls: Arc<Controls>) -> impl Into
                     let (zh, en) = quick_kind(idx).label();
                     view()
                         .h(px(24.0))
-                        .px_2()
+                        .px_1p5()
                         .flex_1()
                         .min_w(px(0.0))
                         .flex_row()
@@ -2468,7 +2523,7 @@ fn replace_row(rules_text: Signal<String>, controls: Arc<Controls>) -> impl Into
                     move |text| path_pattern.set(text.to_string()),
                 )))
                 .child(when(
-                    move || kind.get() == 0,
+                    move || kind.get() == 0 || kind.get() == 6,
                     move || {
                         view()
                             .w(px(54.0))
@@ -2502,7 +2557,7 @@ fn replace_row(rules_text: Signal<String>, controls: Arc<Controls>) -> impl Into
                 .flex_row()
                 .gap_1()
                 .child(when(
-                    move || kind.get() < 4,
+                    move || kind.get() < 4 || kind.get() == 6,
                     move || {
                         let placeholder = move || {
                             let lang = ui_lang(ui_langs());
@@ -2525,6 +2580,12 @@ fn replace_row(rules_text: Signal<String>, controls: Arc<Controls>) -> impl Into
                                     "Delay duration: 2000ms or 2s",
                                 )
                                 .to_string(),
+                                6 => t(
+                                    lang,
+                                    "Header 名称: X-Debug",
+                                    "Header name: X-Debug",
+                                )
+                                .to_string(),
                                 _ => t(lang, "查找原文 (from)", "Find text (from)").to_string(),
                             }
                         };
@@ -2538,11 +2599,19 @@ fn replace_row(rules_text: Signal<String>, controls: Arc<Controls>) -> impl Into
                     },
                 ))
                 .child(when(
-                    move || kind.get() == 0,
+                    move || kind.get() == 0 || kind.get() == 6,
                     move || {
+                        let placeholder = move || {
+                            let lang = ui_lang(ui_langs());
+                            if kind.get() == 6 {
+                                t(lang, "Header 值 (留空删除)", "Value (empty to delete)").to_string()
+                            } else {
+                                t(lang, "替换成 (to)", "Replace with (to)").to_string()
+                            }
+                        };
                         view().flex_1().min_w(px(0.0)).child(side_input(
                             to,
-                            tr("替换成 (to)", "Replace with (to)"),
+                            placeholder,
                             28.0,
                             false,
                             move |text| to.set(text.to_string()),
@@ -2553,7 +2622,13 @@ fn replace_row(rules_text: Signal<String>, controls: Arc<Controls>) -> impl Into
                     view()
                         .h(px(28.0))
                         .px_3()
-                        .flex_grow(move || if kind.get() >= 4 { 1.0_f32 } else { 0.0_f32 })
+                        .flex_grow(move || {
+                            if matches!(kind.get(), 4 | 5 | 7) {
+                                1.0_f32
+                            } else {
+                                0.0_f32
+                            }
+                        })
                         .flex_shrink_0()
                         .items_center()
                         .justify_center()
@@ -3104,13 +3179,15 @@ fn closing(open: Signal<bool>, run: impl Fn() + 'static) -> impl Fn() + 'static 
 
 fn quick_kind(kind: u8) -> crate::rules::QuickRule {
     use crate::rules::QuickRule;
-    match kind % 6 {
+    match kind % 8 {
         0 => QuickRule::Replace,
         1 => QuickRule::Remote,
         2 => QuickRule::Local,
         3 => QuickRule::Delay,
         4 => QuickRule::Break,
-        _ => QuickRule::BreakRes,
+        5 => QuickRule::BreakRes,
+        6 => QuickRule::Header,
+        _ => QuickRule::Cors,
     }
 }
 
@@ -6331,37 +6408,42 @@ fn focus_host(controls: &Controls, id: Option<u64>, filter: Signal<String>) {
     let Some(flow) = selected_flow(controls, id) else {
         return;
     };
-    if flow.host.is_empty() {
+    let host = flow.host.trim();
+    if host.is_empty() {
         return;
     }
-    filter.set(flow.host);
+    let current = filter.get();
+    let existing = split_ui_or_items(&extract_host_or(&current));
+    if existing.len() == 1 && existing[0].eq_ignore_ascii_case(host) && current.trim().starts_with("host:") {
+        return;
+    }
+    let next_hosts = if existing.is_empty() {
+        host.to_string()
+    } else if existing.iter().any(|item| item.eq_ignore_ascii_case(host)) {
+        existing.join(" | ")
+    } else {
+        let mut combined = existing;
+        combined.push(host.to_string());
+        combined.join(" | ")
+    };
+    filter.set(set_host_or(&current, &next_hosts));
 }
 
 fn mute_host(controls: &Controls, id: Option<u64>, filter: Signal<String>) {
     let Some(flow) = selected_flow(controls, id) else {
         return;
     };
-    let host = flow.host.to_ascii_lowercase();
+    let host = flow.host.trim().to_ascii_lowercase();
     if host.is_empty() || host.split_whitespace().nth(1).is_some() {
         return;
     }
-    let token = if host.contains(':') {
-        format!("mute:{host}")
-    } else {
-        format!("-{host}")
-    };
     let current = filter.get();
-    if current
-        .split_whitespace()
-        .any(|part| part.eq_ignore_ascii_case(&token))
-    {
+    let mut existing = split_ui_or_items(&extract_exclude_or(&current));
+    if existing.iter().any(|item| item.eq_ignore_ascii_case(&host)) {
         return;
     }
-    if current.trim().is_empty() {
-        filter.set(token);
-    } else {
-        filter.set(format!("{current} {token}"));
-    }
+    existing.push(host);
+    filter.set(set_exclude_or(&current, &existing.join(" | ")));
 }
 
 fn toggle_pin(controls: &Controls, id: Option<u64>) {

@@ -483,6 +483,8 @@ pub enum QuickRule {
     Delay,
     Break,
     BreakRes,
+    Header,
+    Cors,
 }
 
 impl QuickRule {
@@ -494,8 +496,25 @@ impl QuickRule {
             Self::Delay => ("延迟", "Delay"),
             Self::Break => ("断点", "Break"),
             Self::BreakRes => ("响应断点", "Break res"),
+            Self::Header => ("改头", "Header"),
+            Self::Cors => ("跨域", "CORS"),
         }
     }
+}
+
+/// Counts 1-based line numbers whose rule syntax could not be parsed.
+pub fn invalid_rule_lines(text: &str) -> Vec<usize> {
+    let mut bad = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        let stripped = line.split('#').next().unwrap_or(line).trim();
+        if stripped.is_empty() {
+            continue;
+        }
+        if parse_line(stripped).is_none() {
+            bad.push(index + 1);
+        }
+    }
+    bad
 }
 
 /// `host` plus the path, without the query. Both must be one token.
@@ -559,6 +578,18 @@ pub fn append_quick_rule(
         }
         QuickRule::Break => format!("break {pattern}"),
         QuickRule::BreakRes => format!("break-res {pattern}"),
+        QuickRule::Header => {
+            if from.is_empty() || from.contains(char::is_whitespace) {
+                return None;
+            }
+            let side = if response { "res" } else { "req" };
+            if to.is_empty() {
+                format!("header {pattern} {side} del {from}")
+            } else {
+                format!("header {pattern} {side} set {from} {to}")
+            }
+        }
+        QuickRule::Cors => format!("cors {pattern}"),
     };
     push_line(rules, &line)
 }
@@ -903,5 +934,13 @@ break example.com/api
         assert!(rules[0].matches("baidu.com", "/online-hall/configs"));
         assert!(!rules[0].matches("baidu.com", "/finance-api/v1"));
         assert!(!rules[0].matches("baidu.com", "/other"));
+
+        let hdr_set = append_quick_rule("", QuickRule::Header, "example.com/api", true, "X-Debug", "1").unwrap();
+        assert_eq!(hdr_set, "header example.com/api res set X-Debug 1\n");
+        let hdr_del = append_quick_rule("", QuickRule::Header, "example.com/api", false, "Cookie", "").unwrap();
+        assert_eq!(hdr_del, "header example.com/api req del Cookie\n");
+        let cors = append_quick_rule("", QuickRule::Cors, "example.com", true, "", "").unwrap();
+        assert_eq!(cors, "cors example.com\n");
+        assert_eq!(invalid_rule_lines("break example.com\nbad-rule foo\n# comment\nmap-remote a.com not_url"), vec![2, 4]);
     }
 }
