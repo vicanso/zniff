@@ -938,17 +938,13 @@ break example.com/api
 
     #[test]
     fn rules_support_domain_or_and_path_prefix_or() {
-        let pattern =
-            combine_rule_pattern("baidu.com | baidu.com", "/finance-api | /online-hall");
-        assert_eq!(
-            pattern,
-            "baidu.com|baidu.com/finance-api|/online-hall"
-        );
+        let pattern = combine_rule_pattern("a.test | b.test", "/finance-api | /online-hall");
+        assert_eq!(pattern, "a.test|b.test/finance-api|/online-hall");
         let rules = parse_rules(&format!("break {pattern}\n"));
-        assert!(rules[0].matches("baidu.com", "/finance-api/v1"));
-        assert!(rules[0].matches("baidu.com", "/online-hall/configs"));
-        assert!(!rules[0].matches("baidu.com", "/finance-api/v1"));
-        assert!(!rules[0].matches("baidu.com", "/other"));
+        assert!(rules[0].matches("a.test", "/finance-api/v1"));
+        assert!(rules[0].matches("b.test", "/online-hall/configs"));
+        assert!(!rules[0].matches("c.test", "/finance-api/v1"));
+        assert!(!rules[0].matches("a.test", "/other"));
 
         let hdr_set = append_quick_rule(
             "",
