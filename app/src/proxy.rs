@@ -4699,6 +4699,37 @@ mod tests {
         assert!(local_route("CONNECT", "example.com:443").is_none());
     }
 
+    #[test]
+    fn share_document_keeps_only_the_frozen_filter() {
+        let dir = std::env::temp_dir().join(format!("zniff-share-filter-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Hub::new(ca).unwrap();
+        hub.open(FlowDraft {
+            protocol: Protocol::Http11,
+            method: "GET".into(),
+            host: "a.test".into(),
+            path: "/secret".into(),
+            url: "http://a.test/secret".into(),
+            request_headers: vec![("Cookie".into(), "session=1".into())],
+        });
+        hub.open(FlowDraft {
+            protocol: Protocol::Http11,
+            method: "GET".into(),
+            host: "b.test".into(),
+            path: "/other".into(),
+            url: "http://b.test/other".into(),
+            request_headers: vec![("Accept".into(), "text/plain".into())],
+        });
+        hub.begin_share(Duration::from_secs(60), "header:cookie");
+        let id = hub.share_id().expect("share id");
+        let json = hub.share_document(&id).expect("document");
+        assert!(json.contains("http://a.test/secret"), "{json}");
+        assert!(!json.contains("http://b.test/other"), "{json}");
+        assert!(json.contains("header:cookie"), "{json}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn install_page_links_to_the_certificate() {
         let dir = std::env::temp_dir().join(format!("zniff-install-{}", std::process::id()));
