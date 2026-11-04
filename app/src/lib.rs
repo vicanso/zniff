@@ -999,6 +999,7 @@ fn saved_filter_menu(
     let rules_on = signal(true);
     let breaks_on = signal(true);
     let show_tunnels = signal(saved_config().show_tunnel_failures);
+    let active_rules_count = move || crate::rules::parse_rules(&rules_text.get()).len();
     popover()
         .placement(Placement::Bottom)
         .align(Align::End)
@@ -1087,7 +1088,26 @@ fn saved_filter_menu(
                     } else {
                         fg_primary()
                     }
-                })),
+                }))
+                .child(when(
+                    move || active_rules_count() > 0,
+                    move || {
+                        view()
+                            .h(px(16.0))
+                            .px_1()
+                            .rounded(px(4.0))
+                            .flex_row()
+                            .items_center()
+                            .justify_center()
+                            .bg(accent_blue_soft())
+                            .child(
+                                mono(move || active_rules_count().to_string())
+                                    .text_size(px(10.5))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(accent_blue_text()),
+                            )
+                    },
+                )),
         )
         .child(saved_filter_panel(
             filter,
@@ -1299,10 +1319,10 @@ fn saved_filter_panel(
                         )
                         .child(
                             view()
+                                .w_full()
                                 .flex_row()
-                                .flex_wrap()
                                 .items_center()
-                                .gap_1()
+                                .gap_1p5()
                                 .child(filter_chip(
                                     filter,
                                     "JSON",
@@ -1483,7 +1503,6 @@ fn saved_filter_panel(
                                             let recent_remove = recent;
                                             view()
                                                 .h(px(24.0))
-                                                .max_w(px(185.0))
                                                 .pl_2()
                                                 .pr_1()
                                                 .rounded(px(6.0))
@@ -1502,12 +1521,13 @@ fn saved_filter_panel(
                                                 .gap_1()
                                                 .child(
                                                     view()
-                                                        .flex_1()
-                                                        .min_w(px(0.0))
+                                                        .max_w(px(240.0))
                                                         .h_full()
                                                         .flex_row()
                                                         .items_center()
+                                                        .overflow_hidden()
                                                         .cursor(Cursor::Pointer)
+                                                        .hover(|style| style.opacity(0.85))
                                                         .on_press(move || {
                                                             filter.set(
                                                                 apply.with(|text| text.clone()),
@@ -1560,10 +1580,42 @@ fn saved_filter_panel(
                 .min_w(px(0.0))
                 .gap_2p5()
                 .child(
-                    text(tr("规则与代理配置", "Rules & Proxy Config"))
-                        .text_size(px(13.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(fg_primary()),
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            text(tr("规则与代理配置", "Rules & Proxy Config"))
+                                .text_size(px(13.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(fg_primary()),
+                        )
+                        .child(when(
+                            move || !crate::rules::parse_rules(&rules_text.get()).is_empty(),
+                            move || {
+                                view()
+                                    .h(px(20.0))
+                                    .px_2()
+                                    .rounded(px(99.0))
+                                    .flex_row()
+                                    .items_center()
+                                    .bg(accent_blue_soft())
+                                    .child(
+                                        text(move || {
+                                            let count =
+                                                crate::rules::parse_rules(&rules_text.get()).len();
+                                            let lang = ui_lang(ui_langs());
+                                            match lang {
+                                                Lang::Zh => format!("{count} 条规则生效"),
+                                                Lang::En => format!("{count} active"),
+                                            }
+                                        })
+                                        .text_size(px(11.0))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(accent_blue_text()),
+                                    )
+                            },
+                        )),
                 )
                 .child(
                     view()
@@ -1812,17 +1864,50 @@ fn flow_list(
                 .border_b_1()
                 .border_b_color(border_strong())
                 .child(
-                    view().flex_1().min_w(px(0.0)).child(focused_input(
-                        filter,
-                        tr(
-                            "主机、路径，或点击顶栏「过滤」配置规则",
-                            "Host, path, or click Filters in toolbar",
-                        ),
-                        30.0,
-                        false,
-                        move |text| filter.set(text.to_string()),
-                        Some(filter_focus),
-                    )),
+                    view()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .flex_row()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            view().flex_1().min_w(px(0.0)).child(focused_input(
+                                filter,
+                                tr(
+                                    "主机、路径，或点击顶栏「过滤」配置规则",
+                                    "Host, path, or click Filters in toolbar",
+                                ),
+                                30.0,
+                                false,
+                                move |text| filter.set(text.to_string()),
+                                Some(filter_focus),
+                            )),
+                        )
+                        .child(when(
+                            move || !filter.get().is_empty(),
+                            move || {
+                                view()
+                                    .w(px(30.0))
+                                    .h(px(30.0))
+                                    .flex_shrink_0()
+                                    .flex_row()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(CONTROL_RADIUS))
+                                    .border_1()
+                                    .border_color(border_control())
+                                    .bg(bg_control())
+                                    .hover(|style| style.bg(bg_control_hover()))
+                                    .cursor(Cursor::Pointer)
+                                    .tooltip(label_tip("清空过滤", "Clear filter"))
+                                    .on_press(move || filter.set(String::new()))
+                                    .child(
+                                        control_text("×")
+                                            .text_size(px(14.0))
+                                            .text_color(fg_secondary()),
+                                    )
+                            },
+                        )),
                 )
                 .child(column_menu(columns, column_controls)),
         )
@@ -1894,12 +1979,15 @@ fn filter_chip(
     aliases: &'static [&'static str],
 ) -> impl IntoElement {
     view()
-        .h(px(22.0))
-        .px_2()
-        .flex_shrink_0()
+        .h(px(26.0))
+        .px_2p5()
+        .flex_1()
+        .min_w(px(0.0))
         .flex_row()
         .items_center()
-        .rounded(px(11.0))
+        .justify_center()
+        .gap_1p5()
+        .rounded(px(6.0))
         .border_1()
         .border_color(move || {
             if filter_has_token(&filter.get(), aliases) {
@@ -1927,8 +2015,22 @@ fn filter_chip(
         .cursor(Cursor::Pointer)
         .on_press(move || filter.set(toggle_filter_chip(&filter.get(), token, aliases)))
         .child(
+            view()
+                .w(px(5.0))
+                .h(px(5.0))
+                .rounded(px(99.0))
+                .bg(move || {
+                    if filter_has_token(&filter.get(), aliases) {
+                        accent_blue()
+                    } else {
+                        fg_muted()
+                    }
+                }),
+        )
+        .child(
             text(tr(zh, en))
-                .text_size(px(11.0))
+                .number_of_lines(1)
+                .text_size(px(11.5))
                 .text_color(move || {
                     if filter_has_token(&filter.get(), aliases) {
                         accent_blue_text()
@@ -2276,39 +2378,76 @@ fn replace_row(rules_text: Signal<String>, controls: Arc<Controls>) -> impl Into
     let to = signal(String::new());
     let response = signal(true);
     let kind = signal(0_u8);
+    let kinds = [0_u8, 1, 2, 3, 4, 5];
     view()
-        .gap_1()
+        .gap_1p5()
         .w_full()
         .child(
+            text(tr(
+                "添加规则 (域名与 Path 前缀均支持 | 表示 OR)",
+                "Add Rule (Domain & Path Prefix support | for OR)",
+            ))
+            .text_size(px(11.5))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(fg_muted()),
+        )
+        .child(
             view()
+                .w_full()
                 .flex_row()
                 .items_center()
-                .justify_between()
-                .child(
-                    text(tr("添加规则 (支持域名 OR 与 Path 前缀 OR)", "Add rule (supports domain OR & path prefix OR)"))
-                        .text_size(px(11.5))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(fg_muted()),
-                )
-                .child(
+                .gap_1()
+                .children(kinds.into_iter().map(move |idx| {
+                    let (zh, en) = quick_kind(idx).label();
                     view()
-                        .h(px(22.0))
+                        .h(px(24.0))
                         .px_2()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .flex_row()
+                        .items_center()
+                        .justify_center()
                         .rounded(px(6.0))
                         .border_1()
-                        .border_color(border_control())
-                        .bg(bg_control())
-                        .cursor(Cursor::Pointer)
-                        .on_press(move || kind.set((kind.get() + 1) % 6))
-                        .child(
-                            text(move || {
-                                let (zh, en) = quick_kind(kind.get()).label();
-                                tr(zh, en)()
+                        .border_color(move || {
+                            if kind.get() == idx {
+                                accent_blue_border()
+                            } else {
+                                border_control()
+                            }
+                        })
+                        .bg(move || {
+                            if kind.get() == idx {
+                                accent_blue_soft()
+                            } else {
+                                bg_control()
+                            }
+                        })
+                        .hover(|style| {
+                            style.bg(move || {
+                                if kind.get() == idx {
+                                    accent_blue_soft()
+                                } else {
+                                    bg_control_hover()
+                                }
                             })
-                            .text_size(px(11.0))
-                            .text_color(fg_secondary()),
-                        ),
-                ),
+                        })
+                        .cursor(Cursor::Pointer)
+                        .on_press(move || kind.set(idx))
+                        .child(
+                            text(tr(zh, en))
+                                .number_of_lines(1)
+                                .text_size(px(11.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(move || {
+                                    if kind.get() == idx {
+                                        accent_blue_text()
+                                    } else {
+                                        fg_secondary()
+                                    }
+                                }),
+                        )
+                })),
         )
         .child(
             view()
@@ -2316,7 +2455,7 @@ fn replace_row(rules_text: Signal<String>, controls: Arc<Controls>) -> impl Into
                 .gap_1()
                 .child(view().flex_1().min_w(px(0.0)).child(side_input(
                     host_pattern,
-                    tr("域名: a.com | b.com", "Domain: a.com | b.com"),
+                    tr("域名: a.com | *.b.com", "Domain: a.com | *.b.com"),
                     28.0,
                     false,
                     move |text| host_pattern.set(text.to_string()),
@@ -2328,59 +2467,99 @@ fn replace_row(rules_text: Signal<String>, controls: Arc<Controls>) -> impl Into
                     false,
                     move |text| path_pattern.set(text.to_string()),
                 )))
-                .child(
-                    view()
-                        .w(px(52.0))
-                        .h(px(28.0))
-                        .flex_shrink_0()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(6.0))
-                        .border_1()
-                        .border_color(border_control())
-                        .bg(bg_control())
-                        .cursor(Cursor::Pointer)
-                        .on_press(move || response.set(!response.get()))
-                        .child(
-                            text(move || {
-                                if response.get() {
-                                    tr("响应", "Res")()
-                                } else {
-                                    tr("请求", "Req")()
-                                }
-                            })
-                            .text_size(px(11.0))
-                            .text_color(fg_secondary()),
-                        ),
-                ),
+                .child(when(
+                    move || kind.get() == 0,
+                    move || {
+                        view()
+                            .w(px(54.0))
+                            .h(px(28.0))
+                            .flex_shrink_0()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(6.0))
+                            .border_1()
+                            .border_color(border_control())
+                            .bg(bg_control())
+                            .hover(|style| style.bg(bg_control_hover()))
+                            .cursor(Cursor::Pointer)
+                            .on_press(move || response.set(!response.get()))
+                            .child(
+                                text(move || {
+                                    if response.get() {
+                                        tr("响应", "Res")()
+                                    } else {
+                                        tr("请求", "Req")()
+                                    }
+                                })
+                                .text_size(px(11.0))
+                                .text_color(fg_secondary()),
+                            )
+                    },
+                )),
         )
         .child(
             view()
                 .flex_row()
                 .gap_1()
-                .child(view().flex_1().min_w(px(0.0)).child(side_input(
-                    from,
-                    tr("原文", "from"),
-                    28.0,
-                    false,
-                    move |text| from.set(text.to_string()),
-                )))
-                .child(view().flex_1().min_w(px(0.0)).child(side_input(
-                    to,
-                    tr("替换成", "to"),
-                    28.0,
-                    false,
-                    move |text| to.set(text.to_string()),
-                )))
+                .child(when(
+                    move || kind.get() < 4,
+                    move || {
+                        let placeholder = move || {
+                            let lang = ui_lang(ui_langs());
+                            match kind.get() {
+                                1 => t(
+                                    lang,
+                                    "目标地址: https://other.test/v1",
+                                    "Target URL: https://other.test/v1",
+                                )
+                                .to_string(),
+                                2 => t(
+                                    lang,
+                                    "本地文件路径: ./mock.json",
+                                    "Local file path: ./mock.json",
+                                )
+                                .to_string(),
+                                3 => t(
+                                    lang,
+                                    "延迟时长: 2000ms 或 2s",
+                                    "Delay duration: 2000ms or 2s",
+                                )
+                                .to_string(),
+                                _ => t(lang, "查找原文 (from)", "Find text (from)").to_string(),
+                            }
+                        };
+                        view().flex_1().min_w(px(0.0)).child(side_input(
+                            from,
+                            placeholder,
+                            28.0,
+                            false,
+                            move |text| from.set(text.to_string()),
+                        ))
+                    },
+                ))
+                .child(when(
+                    move || kind.get() == 0,
+                    move || {
+                        view().flex_1().min_w(px(0.0)).child(side_input(
+                            to,
+                            tr("替换成 (to)", "Replace with (to)"),
+                            28.0,
+                            false,
+                            move |text| to.set(text.to_string()),
+                        ))
+                    },
+                ))
                 .child(
                     view()
-                        .w(px(52.0))
                         .h(px(28.0))
+                        .px_3()
+                        .flex_grow(move || if kind.get() >= 4 { 1.0_f32 } else { 0.0_f32 })
                         .flex_shrink_0()
                         .items_center()
                         .justify_center()
                         .rounded(px(6.0))
                         .bg(accent_blue())
+                        .hover(|style| style.bg(accent_blue_hover()))
                         .cursor(Cursor::Pointer)
                         .on_press(move || {
                             let combined_pattern = crate::rules::combine_rule_pattern(
@@ -2414,8 +2593,8 @@ fn replace_row(rules_text: Signal<String>, controls: Arc<Controls>) -> impl Into
                             to.set(String::new());
                         })
                         .child(
-                            text(tr("添加", "Add"))
-                                .text_size(px(11.0))
+                            text(tr("添加规则", "Add"))
+                                .text_size(px(11.5))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(white()),
                         ),
