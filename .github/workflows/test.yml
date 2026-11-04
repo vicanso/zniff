@@ -1,0 +1,61 @@
+name: Test
+
+# rustfmt, clippy with warnings denied, and the test suite. The crate is
+# app/. zniff ships on macOS, Windows, and Linux, so each of those builds.
+
+on:
+  push:
+    # Tag pushes are publish.yml's business. The commit behind a tag was
+    # already tested when its branch was pushed.
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+# A push superseded by a newer one on the same ref has nothing left to
+# prove. Cancel it instead of queueing behind it.
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: 1.99.1
+
+jobs:
+  test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos
+            os: macos-latest
+          - name: windows
+            os: windows-latest
+          - name: linux
+            os: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: GTK 4
+        # nsh's Linux backend links GTK 4. It does not use gtk4-layer-shell.
+        if: matrix.name == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libgtk-4-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
+      - name: rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app
+          key: test-${{ matrix.name }}
+      - name: fmt
+        run: cargo fmt --manifest-path app/Cargo.toml --check
+      - name: lint
+        run: cargo clippy --manifest-path app/Cargo.toml --all-targets -- --deny=warnings
+      - name: test
+        run: cargo test --manifest-path app/Cargo.toml --workspace
