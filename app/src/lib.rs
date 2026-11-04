@@ -13,16 +13,22 @@ mod present;
 mod proxy;
 mod rules;
 mod session;
+mod share;
 mod sysproxy;
 mod ws;
 
+use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use nsh_base::{
-    DiffLayout, context_menu, diff_view, editor, input, menu, menu_item, popover, theme, tooltip,
+    DataTable, DataTableApi, DataTableCell, DataTableClasses, DataTableColumn,
+    DataTableContextMenu, DataTableEvent, DataTableHeaderCell, DataTablePress, DataTableRange,
+    DataTableRows, DataTableSelection, DiffLayout, data_table, diff_view, editor,
+    input, menu,
+    menu_item, popover, theme, tooltip,
 };
 use nsh_core::prelude::*;
 use nsh_core::EllipsizeMode;
@@ -77,12 +83,6 @@ fn native(registry: &mut Registry) {
 /// Header and rows keep a 2pt selection bar plus `px_3` (12pt). The filter uses the same inset.
 const LIST_INSET: f32 = 14.0;
 const LIST_PAD_END: f32 = 12.0;
-const COL_METHOD: f32 = 72.0;
-const COL_STATUS: f32 = 56.0;
-const COL_PROTOCOL: f32 = 84.0;
-const COL_TIME: f32 = 72.0;
-const COL_HOST: f32 = 120.0;
-const COL_SIZE: f32 = 72.0;
 /// Column picker on the filter-chip row.
 const COL_PICKER: f32 = 28.0;
 /// A set bit collapses that detail card. Zero leaves every card open for this window only.
@@ -123,22 +123,6 @@ fn bg_chrome() -> AdaptiveColor {
 
 fn bg_list() -> AdaptiveColor {
     AdaptiveColor::rgb(0xffffff, 0x10141d)
-}
-
-fn bg_col_header() -> AdaptiveColor {
-    AdaptiveColor::rgb(0xf1f5f9, 0x151b26)
-}
-
-fn bg_row_alt() -> AdaptiveColor {
-    AdaptiveColor::rgb(0xfafbfd, 0x121722)
-}
-
-fn bg_row_hover() -> AdaptiveColor {
-    AdaptiveColor::rgb(0xf1f5f9, 0x1a2232)
-}
-
-fn bg_row_selected() -> AdaptiveColor {
-    AdaptiveColor::rgb(0xeff6ff, 0x172542)
 }
 
 fn bg_card() -> AdaptiveColor {
@@ -289,6 +273,9 @@ struct RowLine {
     time: String,
     /// Local `HH:MM:SS.mmm`, shown when the gap cell is hovered.
     clock: String,
+    /// Request start until the full response. `—` while it is still open.
+    elapsed: String,
+    elapsed_slow: bool,
     host: String,
     path: String,
     protocol: String,
@@ -304,6 +291,7 @@ struct ListColumns {
     protocol: bool,
     path: bool,
     gap: bool,
+    elapsed: bool,
     host: bool,
     size: bool,
 }
@@ -314,6 +302,7 @@ enum ListColumn {
     Protocol,
     Path,
     Gap,
+    Elapsed,
     Host,
     Size,
 }
@@ -325,6 +314,7 @@ impl ListColumns {
             protocol: config.show_protocol,
             path: config.show_path,
             gap: config.show_gap,
+            elapsed: config.show_elapsed,
             host: config.show_host,
             size: config.show_size,
         }
@@ -336,6 +326,7 @@ impl ListColumns {
             ListColumn::Protocol => self.protocol,
             ListColumn::Path => self.path,
             ListColumn::Gap => self.gap,
+            ListColumn::Elapsed => self.elapsed,
             ListColumn::Host => self.host,
             ListColumn::Size => self.size,
         }
@@ -348,6 +339,7 @@ impl ListColumns {
             ListColumn::Protocol => next.protocol = !next.protocol,
             ListColumn::Path => next.path = !next.path,
             ListColumn::Gap => next.gap = !next.gap,
+            ListColumn::Elapsed => next.elapsed = !next.elapsed,
             ListColumn::Host => next.host = !next.host,
             ListColumn::Size => next.size = !next.size,
         }
@@ -359,9 +351,85 @@ impl ListColumns {
         config.show_protocol = self.protocol;
         config.show_path = self.path;
         config.show_gap = self.gap;
+        config.show_elapsed = self.elapsed;
         config.show_host = self.host;
         config.show_size = self.size;
     }
+}
+
+/// Columns the table shows, in order. Method is always first and fixed.
+/// Path, when shown, is the next fixed column. The rest scroll under them.
+/// Widths are the last saved drag, not a live value: the table keeps a drag
+/// until this list changes, and a changed width here would fight the drag.
+fn flow_table_columns(
+    shown: ListColumns,
+    widths: &HashMap<String, u32>,
+) -> Vec<DataTableColumn> {
+    let specs = [
+        ("method", true, true),
+        ("path", true, shown.path),
+        ("status", false, shown.status),
+        ("protocol", false, shown.protocol),
+        ("gap", false, shown.gap),
+        ("elapsed", false, shown.elapsed),
+        ("host", false, shown.host),
+        ("size", false, shown.size),
+    ];
+    specs
+        .into_iter()
+        .filter(|spec| spec.2)
+        .map(|(key, fixed, _)| {
+            let limit = config::column_width_limit(key).expect("known column");
+            let width = widths.get(key).copied().unwrap_or(limit.default);
+            let mut column = DataTableColumn::default();
+            column.key = key.into();
+            column.width = Some(px(width as f32));
+            column.min_width = Some(px(limit.min as f32));
+            column.max_width = Some(px(limit.max as f32));
+            column.fixed = fixed;
+            column.resizable = Some(true);
+            column.movable = Some(false);
+            column.selectable = Some(false);
+            column
+        })
+        .collect()
+}
+
+/// Column titles follow the same `tr` pair as the rest of the window.
+/// Called while the `.columns` prop runs, so a language change rebuilds them.
+fn flow_column_title(key: &str) -> String {
+    match key {
+        "method" => tr("方法", "Method")(),
+        "path" => tr("路径", "Path")(),
+        "status" => tr("状态", "Status")(),
+        "protocol" => tr("协议", "Protocol")(),
+        "gap" => tr("间隔", "Gap")(),
+        "elapsed" => tr("耗时", "Elapsed")(),
+        "host" => tr("主机", "Host")(),
+        "size" => tr("大小", "Size")(),
+        _ => String::new(),
+    }
+}
+
+fn flow_table_classes() -> DataTableClasses {
+    let mut classes = DataTableClasses::default();
+    classes.root = Some("bg-white dark:bg-[#10141d]".into());
+    classes.header = Some(
+        "bg-[#f1f5f9] dark:bg-[#151b26] border-b border-b-[#e2e8f0] dark:border-b-[#222938]".into(),
+    );
+    classes.header_cell = Some("bg-[#f1f5f9] dark:bg-[#151b26]".into());
+    classes.row = Some(
+        "bg-white dark:bg-[#10141d] border-b border-b-[#f1f5f9] dark:border-b-[#19202e] cursor-pointer"
+            .into(),
+    );
+    classes.row_odd = Some("bg-[#fafbfd] dark:bg-[#121722]".into());
+    classes.row_hover = Some("bg-[#f1f5f9] dark:bg-[#1a2232]".into());
+    classes.row_selected = Some("bg-[#eff6ff] dark:bg-[#172542]".into());
+    // The table draws a 1px rule after the pinned columns. Painting it made
+    // a line only beside the first scrolling column. The drag target stays
+    // and shows on hover.
+    classes.resize_handle = Some("bg-transparent hover:bg-[#2563eb] dark:hover:bg-[#3b82f6]".into());
+    classes
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -391,6 +459,9 @@ struct Shown {
     response_headers: Signal<Vec<HeaderLine>>,
     request_body: Signal<String>,
     response_body: Signal<String>,
+    request_hex: Signal<Vec<u8>>,
+    response_hex: Signal<Vec<u8>>,
+    hex_cols: Signal<usize>,
     request_language: Signal<String>,
     response_language: Signal<String>,
     request_form: Signal<Vec<HeaderLine>>,
@@ -399,6 +470,8 @@ struct Shown {
     metrics: Signal<String>,
     query: Signal<Vec<HeaderLine>>,
     preview: Signal<String>,
+    preview_w: Signal<f32>,
+    preview_h: Signal<f32>,
     image_caption: Signal<String>,
     pretty: Signal<bool>,
     messages: Signal<Vec<HeaderLine>>,
@@ -427,7 +500,9 @@ pub fn App() -> impl IntoElement {
     let use_system_proxy = signal(false);
     let memory = signal(String::from("0 B"));
     let dropped = signal(0_u64);
-    let filter = signal(String::new());
+    let saved_filter = saved_config();
+    let filter = signal(saved_filter.filter);
+    let recent_filters = signal(saved_filter.recent_filters);
     let selected = signal(None::<u64>);
     let rows = signal(Vec::<RowLine>::new());
     let flow_total = signal(0_usize);
@@ -445,6 +520,9 @@ pub fn App() -> impl IntoElement {
         response_headers: signal(Vec::new()),
         request_body: signal(String::new()),
         response_body: signal(String::new()),
+        request_hex: signal(Vec::new()),
+        response_hex: signal(Vec::new()),
+        hex_cols: signal(16),
         request_language: signal(String::new()),
         response_language: signal(String::new()),
         request_form: signal(Vec::new()),
@@ -453,6 +531,8 @@ pub fn App() -> impl IntoElement {
         metrics: signal(String::new()),
         query: signal(Vec::new()),
         preview: signal(String::new()),
+        preview_w: signal(0.0),
+        preview_h: signal(0.0),
         image_caption: signal(String::new()),
         pretty: signal(saved.default_pretty),
         messages: signal(Vec::new()),
@@ -490,9 +570,16 @@ pub fn App() -> impl IntoElement {
     use_system_proxy.set(lock_bool(&controls.use_system_proxy));
     port_text.set(lock_port(&controls.listen_port).to_string());
     listen_all.set(lock_bool(&controls.listen_all));
+    if saved_config().capturing {
+        let controls_boot = controls.clone();
+        std::thread::spawn(move || start_capture(&controls_boot));
+    }
 
     let controls_tick = controls.clone();
     let filter_tick = filter;
+    let recent_tick = recent_filters;
+    let filter_pending = stored(filter.get());
+    let filter_since = stored(None::<SystemTime>);
     let selected_tick = selected;
     let rows_tick = rows;
     let total_tick = flow_total;
@@ -505,7 +592,15 @@ pub fn App() -> impl IntoElement {
     let baseline_tick = baseline;
     let seen_baseline = stored(None::<u64>);
     let seen_pretty = stored(shown_tick.pretty.get());
+    let share_id = signal(String::new());
+    let share_id_tick = share_id;
+    let seen_share = stored(String::new());
     set_interval(Duration::from_millis(16), move || {
+        let share_now = controls_tick.hub.share_id().unwrap_or_default();
+        if share_now != seen_share.get() {
+            seen_share.replace(share_now.clone());
+            share_id_tick.set(share_now);
+        }
         status.set(lock_status(&controls_tick));
         running.set(*controls_tick.running.lock().unwrap_or_else(|err| err.into_inner()));
         let listen_now = lock_string(&controls_tick.listen);
@@ -526,6 +621,15 @@ pub fn App() -> impl IntoElement {
         }
         let generation = controls_tick.hub.generation();
         let filter_now = filter_tick.get();
+        if filter_now != filter_pending.get() {
+            filter_pending.replace(filter_now.clone());
+            filter_since.replace(Some(SystemTime::now()));
+        } else if filter_since.get().is_some_and(|at| {
+            at.elapsed().unwrap_or_default() >= Duration::from_millis(500)
+        }) {
+            remember_filter(&filter_now, recent_tick);
+            filter_since.replace(None);
+        }
         let selected_now = selected_tick.get();
         let lang_now = ui_lang(langs);
         let baseline_now = baseline_tick.get();
@@ -648,6 +752,7 @@ pub fn App() -> impl IntoElement {
             flow_total,
             filter,
             shown.pretty,
+            share_id,
         ))
         .child(when(
             move || paused.get().is_some(),
@@ -664,6 +769,7 @@ pub fn App() -> impl IntoElement {
                     selected,
                     compose,
                     filter,
+                    recent_filters,
                     bypass_text,
                     rules_text,
                     upstream_text,
@@ -718,6 +824,7 @@ fn toolbar(
     flow_total: Signal<usize>,
     filter: Signal<String>,
     pretty: Signal<bool>,
+    share_id: Signal<String>,
 ) -> impl IntoElement {
     let install = Rc::new(install);
     let remove = Rc::new(remove);
@@ -815,6 +922,7 @@ fn toolbar(
             flow_total,
             filter,
             pretty,
+            share_id,
         ))
         .child(primary_button(
             {
@@ -899,6 +1007,7 @@ fn flow_list(
     selected: Signal<Option<u64>>,
     compose: Compose,
     filter: Signal<String>,
+    recent_filters: Signal<Vec<String>>,
     bypass_text: Signal<String>,
     rules_text: Signal<String>,
     upstream_text: Signal<String>,
@@ -915,8 +1024,10 @@ fn flow_list(
     let column_controls = controls.clone();
     let rules_on = signal(true);
     let breaks_on = signal(true);
-    let hovered = signal(None::<u64>);
+    let show_tunnels = signal(saved_config().show_tunnel_failures);
     let picked = signal(None::<u64>);
+    let menu_open = signal(false);
+    let menu_at = signal(Point::<Points>::default());
     let upstream_controls = controls;
     view()
         .w(move || px(width.get()))
@@ -949,6 +1060,7 @@ fn flow_list(
                         Some(filter_focus),
                     )),
                 )
+                .child(recent_filter_menu(filter, recent_filters))
                 .child(capture_config(
                     bypass_text,
                     rules_text,
@@ -959,23 +1071,23 @@ fn flow_list(
                     width,
                     rules_on,
                     breaks_on,
+                    show_tunnels,
                 )),
         )
         .child(filter_chips(filter, columns, column_controls.clone()))
-        .child(column_header(width, columns, column_controls))
-        .child(view().flex_1().child(list_menu(
+        .child(view().flex_1().min_h(px(0.0)).child(list_menu(
             rows,
             selected,
             compose,
-            width,
             columns,
             row_controls,
             filter,
             shown,
             baseline,
             rules_text,
-            hovered,
             picked,
+            menu_open,
+            menu_at,
         )))
 }
 
@@ -983,6 +1095,109 @@ const JSON_ALIASES: &[&str] = &["type:json", "ct:json"];
 const FAIL_ALIASES: &[&str] = &["失败", "fail"];
 const PIN_ALIASES: &[&str] = &["pin:"];
 const SLOW_ALIASES: &[&str] = &["slow:"];
+
+fn recent_filter_menu(filter: Signal<String>, recent: Signal<Vec<String>>) -> impl IntoElement {
+    when(
+        move || !recent.with(Vec::is_empty),
+        move || {
+            menu()
+                .placement(Placement::Bottom)
+                .align(Align::End)
+                .offset(px(4.0))
+                .margin(px(8.0))
+                .trigger(
+                    view()
+                        .h(px(30.0))
+                        .w(px(30.0))
+                        .flex_shrink_0()
+                        .flex_row()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(CONTROL_RADIUS))
+                        .border_1()
+                        .border_color(border_control())
+                        .bg(bg_control())
+                        .hover(|style| style.bg(bg_control_hover()))
+                        .cursor(Cursor::Pointer)
+                        .tooltip(label_tip("最近的过滤", "Recent filters"))
+                        .child(glyph(|| Glyph::History, || color(fg_secondary()))),
+                )
+                .child(recent_filter_panel(filter, recent))
+        },
+    )
+}
+
+fn recent_filter_panel(filter: Signal<String>, recent: Signal<Vec<String>>) -> impl IntoElement {
+    view()
+        .w(px(240.0))
+        .p_1()
+        .gap_0p5()
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(border_strong())
+        .bg(bg_card())
+        .shadow_md()
+        .child(each(
+            recent,
+            |item| item.clone(),
+            move |item, _| {
+                menu_item()
+                    .on_select(move || filter.set(item.with(|text| text.clone())))
+                    .h(px(30.0))
+                    .px_2p5()
+                    .rounded(px(6.0))
+                    .flex_row()
+                    .items_center()
+                    .hover(|style| style.bg(bg_control_hover()))
+                    .cursor(Cursor::Pointer)
+                    .child(
+                        control_text(move || item.with(|text| text.clone()))
+                            .number_of_lines(1)
+                            .ellipsize_mode(EllipsizeMode::Tail)
+                            .text_color(fg_secondary()),
+                    )
+            },
+        ))
+}
+
+const RECENT_FILTER_CAP: usize = 8;
+
+/// Newest first, without blanks or duplicates. The current text stays, and
+/// older copies of it drop. At most eight.
+fn push_recent_filter(recent: &[String], current: &str) -> Vec<String> {
+    let current = current.trim();
+    if current.is_empty() {
+        return recent.to_vec();
+    }
+    let mut next: Vec<String> = recent
+        .iter()
+        .filter(|item| item.trim() != current)
+        .cloned()
+        .collect();
+    next.insert(0, current.to_string());
+    next.truncate(RECENT_FILTER_CAP);
+    next
+}
+
+fn remember_filter(current: &str, recent: Signal<Vec<String>>) {
+    let next = push_recent_filter(&recent.get(), current);
+    let current = current.trim().to_string();
+    if next != recent.get() {
+        recent.set(next.clone());
+    }
+    let saved = saved_config();
+    if saved.filter == current && saved.recent_filters == next {
+        return;
+    }
+    if let Err(err) = save_config(|config| {
+        config.filter = current.clone();
+        config.recent_filters = next.clone();
+    }) {
+        // The box still has the text. A status line is enough if the file
+        // cannot be written; the next pause tries again.
+        let _ = err;
+    }
+}
 
 fn filter_chips(
     filter: Signal<String>,
@@ -1145,6 +1360,7 @@ fn capture_config(
     width: Signal<f32>,
     rules_on: Signal<bool>,
     breaks_on: Signal<bool>,
+    show_tunnels: Signal<bool>,
 ) -> impl IntoElement {
     let bypass_for_panel = bypass_text;
     let rules_for_panel = rules_text;
@@ -1171,6 +1387,7 @@ fn capture_config(
             width,
             rules_on,
             breaks_on,
+            show_tunnels,
         ))
 }
 
@@ -1263,7 +1480,9 @@ fn config_panel(
     width: Signal<f32>,
     rules_on: Signal<bool>,
     breaks_on: Signal<bool>,
+    show_tunnels: Signal<bool>,
 ) -> impl IntoElement {
+    let tunnel_controls = rules_controls.clone();
     view()
         .w(move || px((width.get() - LIST_INSET - LIST_PAD_END).max(200.0)))
         .p_3()
@@ -1274,6 +1493,25 @@ fn config_panel(
         .bg(bg_card())
         .shadow_md()
         .child(rule_switches(rules_on, breaks_on, rules_controls.clone()))
+        .child(
+            view().flex_row().child(enable_switch(
+                show_tunnels,
+                "隧道失败",
+                "Tunnel errors",
+                move |on| {
+                    tunnel_controls.hub.set_show_tunnel_failures(on);
+                    if let Err(err) = save_config(|config| config.show_tunnel_failures = on) {
+                        set_status(
+                            &tunnel_controls,
+                            StatusMsg::PrefUnsaved {
+                                name: PrefName::Tunnel,
+                                err: err.to_string(),
+                            },
+                        );
+                    }
+                },
+            )),
+        )
         .child(config_field(
             "直通",
             "Bypass",
@@ -1652,132 +1890,284 @@ fn list_menu(
     rows: Signal<Vec<RowLine>>,
     selected: Signal<Option<u64>>,
     compose: Compose,
-    width: Signal<f32>,
     columns: Signal<ListColumns>,
     controls: Arc<Controls>,
     filter: Signal<String>,
     shown: Shown,
     baseline: Signal<Option<u64>>,
     rules_text: Signal<String>,
-    hovered: Signal<Option<u64>>,
     picked: Signal<Option<u64>>,
+    menu_open: Signal<bool>,
+    menu_at: Signal<Point<Points>>,
 ) -> impl IntoElement {
-    context_menu()
-        .offset(px(4.0))
-        .margin(px(8.0))
-        .on_open_change(move |event: &nsh_base::MenuEvent| {
-            let nsh_base::MenuEvent::OpenChange(open, _) = event else {
-                return;
-            };
-            if !open {
-                return;
-            }
-            let next = hovered.get();
-            picked.set(next);
-            if selected.get() != next {
-                reset_compose(compose);
-            }
-            selected.set(next);
-        })
-        .trigger(
-            when(
-                move || rows.with(Vec::is_empty),
-                move || list_empty(filter),
-            )
-            .otherwise(move || {
-                flow_rows(rows, selected, compose, width, columns, hovered)
-            }),
-        )
-        .child(row_context_menu(
-            picked, controls, filter, shown, baseline, rules_text,
+    let header_menu = signal(false);
+    let header_controls = controls.clone();
+    // The table is a direct flex child. Wrapping it in `context_menu` gave
+    // that component a content-sized root, so the rows collapsed to nothing
+    // while the toolbar count still updated.
+    view()
+        .flex_1()
+        .min_h(px(0.0))
+        .w_full()
+        .child(flow_table(
+            rows,
+            selected,
+            compose,
+            columns,
+            controls.clone(),
+            filter,
+            picked,
+            menu_open,
+            header_menu,
+            menu_at,
+        ))
+        .child(when(
+            move || menu_open.get(),
+            move || {
+                overlay()
+                    .anchor_point(menu_at)
+                    .placement(Placement::Bottom)
+                    .align(Align::Start)
+                    .offset(px(4.0))
+                    .margin(px(8.0))
+                    .on_press_outside(move |_: &Point<Points>| menu_open.set(false))
+                    .on_cancel(move || menu_open.set(false))
+                    .child(row_context_menu(
+                        picked, controls.clone(), filter, shown, baseline, rules_text, menu_open,
+                    ))
+            },
+        ))
+        .child(when(
+            move || header_menu.get(),
+            move || {
+                overlay()
+                    .anchor_point(menu_at)
+                    .placement(Placement::Bottom)
+                    .align(Align::Start)
+                    .offset(px(4.0))
+                    .margin(px(8.0))
+                    .on_press_outside(move |_: &Point<Points>| header_menu.set(false))
+                    .on_cancel(move || header_menu.set(false))
+                    .child(column_picker_panel(columns, header_controls.clone()))
+            },
         ))
 }
 
-fn flow_rows(
+fn flow_table(
     rows: Signal<Vec<RowLine>>,
     selected: Signal<Option<u64>>,
     compose: Compose,
-    width: Signal<f32>,
-    columns: Signal<ListColumns>,
-    hovered: Signal<Option<u64>>,
-) -> impl IntoElement {
-    virtual_list(
-        move || rows.with(Vec::len),
-        move |at| {
-            flow_row(
-                rows,
-                selected,
-                compose,
-                width,
-                columns,
-                at,
-                hovered,
-            )
-        },
-    )
-    .keys(move || rows.with(|rows| rows.iter().map(|row| row.id).collect::<Vec<_>>()))
-    .estimated_item_size(px(34.0))
-    // Newest stays at the bottom. Follow it while the viewport is still on
-    // that last row; scrolling further up keeps the visible rows put.
-    .follow_end(px(36.0))
-    .flex_1()
-}
-
-fn column_header(
-    width: Signal<f32>,
     columns: Signal<ListColumns>,
     controls: Arc<Controls>,
+    filter: Signal<String>,
+    picked: Signal<Option<u64>>,
+    menu_open: Signal<bool>,
+    header_menu: Signal<bool>,
+    menu_at: Signal<Point<Points>>,
 ) -> impl IntoElement {
-    context_menu()
-        .offset(px(4.0))
-        .margin(px(8.0))
-        .trigger(column_header_row(width, columns))
-        .child(column_picker_panel(columns, controls))
-}
+    let widths = signal(saved_config().column_widths);
+    let table = component_ref::<DataTable>();
+    let blur_job = stored(None::<Spawned<()>>);
+    // A click focuses the table, and its arrow keys would step the row again
+    // on top of the window's. Take the keys back, including after the click's
+    // own focus lands.
+    let blur_table: Rc<dyn Fn()> = Rc::new(move || {
+        if let Some(api) = table.api::<DataTableApi>() {
+            api.blur();
+        }
+        let table = table;
+        blur_job.replace(Some(set_timeout(Duration::from_millis(0), move || {
+            if let Some(api) = table.api::<DataTableApi>() {
+                api.blur();
+            }
+        })));
+    });
+    let follow = stored(true);
+    let followed_count = stored(0_u32);
+    let hover = CellHover {
+        text: signal(None::<String>),
+        at: signal(Point::<Points>::default()),
+    };
+    let save_job = stored(None::<Spawned<()>>);
+    let widths_for_cols = widths;
+    let rows_for_cells = rows;
+    let selected_for_cells = selected;
+    let blur_header = Rc::clone(&blur_table);
+    let blur_press = Rc::clone(&blur_table);
+    let blur_menu = Rc::clone(&blur_table);
+    let blur_select = Rc::clone(&blur_table);
 
-fn column_header_row(width: Signal<f32>, columns: Signal<ListColumns>) -> impl IntoElement {
-    view()
-        .w(move || px(width.get()))
-        .flex_shrink_0()
-        .h(px(28.0))
-        .px_3()
-        .gap_2()
-        .flex_row()
-        .items_center()
-        .bg(bg_col_header())
-        .border_b_1()
-        .border_b_color(border_strong())
-        .border_l(px(2.0))
-        .border_l_color(bg_col_header())
-        .child(column_labels(columns))
-}
+    effect(move || {
+        if !menu_open.get() && !header_menu.get()
+            && let Some(api) = table.api::<DataTableApi>()
+        {
+            api.clear_menu_target();
+        }
+    });
 
-fn column_labels(columns: Signal<ListColumns>) -> impl IntoElement {
+    // The hover bubble stays beside the table. A tooltip inside a cell is
+    // disposed when DataTable recycles that cell, and the binding then
+    // reads a prop whose owner is gone.
     view()
         .flex_1()
-        .min_w(px(0.0))
-        .h_full()
-        .overflow_hidden()
-        .flex_row()
-        .items_center()
-        .gap_2()
-        .child(header_label("方法", "Method").w(px(COL_METHOD)).flex_shrink_0())
-        .child(when(move || columns.get().path, move || path_slot().child(header_label("路径", "Path"))))
-        .child(when(move || columns.get().status, move || {
-            header_label("状态", "Status").w(px(COL_STATUS)).flex_shrink_0()
-        }))
-        .child(when(move || columns.get().protocol, move || {
-            header_label("协议", "Protocol").w(px(COL_PROTOCOL)).flex_shrink_0()
-        }))
-        .child(when(move || columns.get().gap, move || {
-            header_label("间隔", "Gap").w(px(COL_TIME)).flex_shrink_0()
-        }))
-        .child(when(move || columns.get().host, move || {
-            header_label("主机", "Host").w(px(COL_HOST)).flex_shrink_0()
-        }))
-        .child(when(move || columns.get().size, move || {
-            header_label("大小", "Size").w(px(COL_SIZE)).flex_shrink_0()
-        }))
+        .min_h(px(0.0))
+        .w_full()
+        .child(
+    data_table()
+        .component_ref(&table)
+        .flex_1()
+        .min_h(px(0.0))
+        .w_full()
+        .classes(flow_table_classes())
+        .columns(move || {
+            let shown = columns.get();
+            // A drag must not rebuild `columns`: the table keeps the width
+            // until this prop changes, and a new width here replaces the drag.
+            // `flow_column_title` reads the language signal, so a language
+            // change still rebuilds the titles.
+            let widths = untracked(|| widths_for_cols.get());
+            let mut built = flow_table_columns(shown, &widths);
+            for column in &mut built {
+                let key = column.key.to_string();
+                column.title = Some(flow_column_title(&key).into());
+            }
+            built
+        })
+        .data(DataTableRows::default())
+        .row_count(move || Some(rows.with(Vec::len) as u32))
+        .row_height(px(34.0))
+        .header_height(px(28.0))
+        .font_size(px(12.0))
+        .row_header(false)
+        .column_selectable(false)
+        .cell_selectable(false)
+        .movable_columns(false)
+        .loop_selection(false)
+        .stripe(true)
+        .selection(move || {
+            let id = selected.get();
+            let row = rows.with(|rows| rows.iter().position(|row| Some(row.id) == id));
+            row.map(|row| {
+                let mut selection = DataTableSelection::default();
+                selection.row = Some(row as u32);
+                selection
+            })
+        })
+        .render_cell(move |cell: &DataTableCell| {
+            flow_cell(rows_for_cells, selected_for_cells, hover, cell)
+        })
+        .render_header_cell(move |cell: &DataTableHeaderCell| {
+            let blur_header = Rc::clone(&blur_header);
+            flow_header(cell).on_press(move || blur_header())
+        })
+        .empty(list_empty(filter))
+        .on_row_press(move |_: &DataTablePress| blur_press())
+        .on_selection_change(move |selection: &Option<DataTableSelection>| {
+            blur_select();
+            let next = selection.and_then(|selection| selection.row).and_then(|row| {
+                rows.with(|rows| rows.get(row as usize).map(|row| row.id))
+            });
+            if selected.get() != next {
+                reset_compose(compose);
+                selected.set(next);
+            }
+        })
+        .on_context_menu(move |event: &DataTableContextMenu| {
+            blur_menu();
+            menu_at.set(Point {
+                x: event.x,
+                y: event.y,
+            });
+            if let Some(row) = event.row {
+                header_menu.set(false);
+                let next = rows.with(|rows| rows.get(row as usize).map(|row| row.id));
+                picked.set(next);
+                if selected.get() != next {
+                    reset_compose(compose);
+                }
+                selected.set(next);
+                menu_open.set(true);
+            } else {
+                menu_open.set(false);
+                header_menu.set(true);
+            }
+        })
+        .on_visible_rows_change(move |range: &DataTableRange| {
+            hover.text.set(None);
+            let count = rows.with(Vec::len) as u32;
+            if count == 0 {
+                follow.replace(true);
+                followed_count.replace(0);
+                return;
+            }
+            let near = range.end.saturating_add(1) >= count;
+            if follow.get() && count > followed_count.get() {
+                followed_count.replace(count);
+                if !near && let Some(api) = table.api::<DataTableApi>() {
+                    api.scroll_to_row(count - 1, Some(false));
+                }
+                return;
+            }
+            follow.replace(near);
+        })
+        .on_column_resize(move |event: &DataTableEvent| {
+            let DataTableEvent::ColumnResize(key, width) = event else {
+                return;
+            };
+            let Some(limit) = config::column_width_limit(key.as_ref()) else {
+                return;
+            };
+            let px = (width.0.round() as u32).clamp(limit.min, limit.max);
+            widths.update(|map| {
+                if px == limit.default {
+                    map.remove(key.as_ref());
+                } else {
+                    map.insert(key.to_string(), px);
+                }
+            });
+            let widths = widths;
+            let controls = controls.clone();
+            save_job.replace(Some(set_timeout(Duration::from_millis(300), move || {
+                let map = widths.get();
+                if let Err(err) = save_config(|config| config.column_widths = map) {
+                    set_status(
+                        &controls,
+                        StatusMsg::PrefUnsaved {
+                            name: PrefName::List,
+                            err: err.to_string(),
+                        },
+                    );
+                }
+            })));
+        })
+        )
+        .child(when(
+            move || hover.text.get().is_some(),
+            move || {
+                overlay()
+                    .anchor_point(hover.at)
+                    .placement(Placement::Top)
+                    .align(Align::Start)
+                    .offset(px(6.0))
+                    .margin(px(8.0))
+                    .child(cell_tip(move || hover.text.get().unwrap_or_default()))
+            },
+        ))
+}
+
+#[derive(Clone, Copy)]
+struct CellHover {
+    text: Signal<Option<String>>,
+    at: Signal<Point<Points>>,
+}
+
+fn show_cell_hover(hover: CellHover, event: &HoverEvent, text: String) {
+    if text.is_empty() {
+        hover.text.set(None);
+        return;
+    }
+    hover.at.set(event.page_position);
+    hover.text.set(Some(text));
 }
 
 fn column_menu(columns: Signal<ListColumns>, controls: Arc<Controls>) -> impl IntoElement {
@@ -1819,6 +2209,7 @@ fn column_picker_panel(columns: Signal<ListColumns>, controls: Arc<Controls>) ->
         .child(column_toggle(columns, controls.clone(), ListColumn::Protocol, "协议", "Protocol"))
         .child(column_toggle(columns, controls.clone(), ListColumn::Path, "路径", "Path"))
         .child(column_toggle(columns, controls.clone(), ListColumn::Gap, "间隔", "Gap"))
+        .child(column_toggle(columns, controls.clone(), ListColumn::Elapsed, "耗时", "Elapsed"))
         .child(column_toggle(columns, controls.clone(), ListColumn::Host, "主机", "Host"))
         .child(column_toggle(columns, controls, ListColumn::Size, "大小", "Size"))
 }
@@ -1850,76 +2241,6 @@ fn column_toggle(
     )
 }
 
-fn header_label(zh: &'static str, en: &'static str) -> Text {
-    text(tr(zh, en))
-        .number_of_lines(1)
-        .text_size(px(11.0))
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(fg_muted())
-}
-
-fn flow_row(
-    rows: Signal<Vec<RowLine>>,
-    selected: Signal<Option<u64>>,
-    compose: Compose,
-    width: Signal<f32>,
-    columns: Signal<ListColumns>,
-    at: Position,
-    hovered: Signal<Option<u64>>,
-) -> impl IntoElement {
-    let row_id = move || rows.with(|rows| rows.get(at.index()).map(|row| row.id));
-    let is_selected = move || selected.get() == row_id();
-    view()
-        .w(move || px(width.get()))
-        .h(px(34.0))
-        .px_3()
-        .gap_2()
-        .flex_row()
-        .items_center()
-        .border_b_1()
-        .border_b_color(border_subtle())
-        .border_l(px(2.0))
-        .border_l_color(move || {
-            if is_selected() {
-                accent_blue()
-            } else if at.index() % 2 == 1 {
-                bg_row_alt()
-            } else {
-                bg_list()
-            }
-        })
-        .overflow_hidden()
-        .cursor(Cursor::Pointer)
-        .bg(move || {
-            if is_selected() {
-                bg_row_selected()
-            } else if at.index() % 2 == 1 {
-                bg_row_alt()
-            } else {
-                bg_list()
-            }
-        })
-        .hover(|style| {
-            style.bg(move || {
-                if is_selected() {
-                    bg_row_selected()
-                } else {
-                    bg_row_hover()
-                }
-            })
-        })
-        .on_hover_in(move || hovered.set(row_id()))
-        .on_hover_move(move |_: &HoverEvent| hovered.set(row_id()))
-        .on_press(move || {
-            let next = row_id();
-            if selected.get() != next {
-                reset_compose(compose);
-            }
-            selected.set(next);
-        })
-        .child(row_cells(rows, columns, at))
-}
-
 fn row_context_menu(
     picked: Signal<Option<u64>>,
     controls: Arc<Controls>,
@@ -1927,6 +2248,7 @@ fn row_context_menu(
     shown: Shown,
     baseline: Signal<Option<u64>>,
     rules_text: Signal<String>,
+    menu_open: Signal<bool>,
 ) -> impl IntoElement {
     let copy_url = controls.clone();
     let break_controls = controls.clone();
@@ -1947,19 +2269,19 @@ fn row_context_menu(
         .border_color(border_strong())
         .bg(bg_card())
         .shadow_md()
-        .child(action_item(tr("复制 URL", "Copy URL"), move || {
+        .child(action_item(tr("复制 URL", "Copy URL"), closing(menu_open, move || {
             copy_part(&copy_url, picked.get(), CopyPart::Url);
-        }))
-        .child(action_item("cURL", move || {
+        })))
+        .child(action_item("cURL", closing(menu_open, move || {
             copy_part(&copy_curl, picked.get(), CopyPart::Curl);
-        }))
+        })))
         .child(menu_rule())
-        .child(action_item(tr("只看", "Focus"), move || {
+        .child(action_item(tr("只看", "Focus"), closing(menu_open, move || {
             focus_host(&focus_controls, picked.get(), filter);
-        }))
-        .child(action_item(tr("屏蔽", "Mute"), move || {
+        })))
+        .child(action_item(tr("屏蔽", "Mute"), closing(menu_open, move || {
             mute_host(&mute_controls, picked.get(), filter);
-        }))
+        })))
         .child(menu_rule())
         .child(marked_action(
             move || flow_pinned(&pin_mark, picked.get()),
@@ -1973,14 +2295,14 @@ fn row_context_menu(
                     }
                 }
             },
-            move || toggle_pin(&pin_controls, picked.get()),
+            closing(menu_open, move || toggle_pin(&pin_controls, picked.get())),
         ))
         .child(marked_action(
             move || baseline.get().is_some_and(|id| picked.get() == Some(id)),
             tr("基准", "Baseline"),
             {
                 let langs = ui_langs();
-                move || {
+                closing(menu_open, move || {
                     set_baseline(
                         &base_controls,
                         picked.get(),
@@ -1988,16 +2310,23 @@ fn row_context_menu(
                         &shown,
                         ui_lang(langs),
                     );
-                }
+                })
             },
         ))
         .child(menu_rule())
-        .child(action_item(tr("重放", "Replay"), move || {
+        .child(action_item(tr("重放", "Replay"), closing(menu_open, move || {
             replay_flow(&replay_controls, picked.get(), ReplayOverride::default());
-        }))
-        .child(action_item(tr("填入断点", "Add break"), move || {
+        })))
+        .child(action_item(tr("填入断点", "Add break"), closing(menu_open, move || {
             fill_break_rule(&break_controls, picked.get(), rules_text);
-        }))
+        })))
+}
+
+fn closing(open: Signal<bool>, run: impl Fn() + 'static) -> impl Fn() + 'static {
+    move || {
+        open.set(false);
+        run();
+    }
 }
 
 fn quick_kind(kind: u8) -> crate::rules::QuickRule {
@@ -2037,32 +2366,72 @@ fn flow_pinned(controls: &Controls, id: Option<u64>) -> bool {
     id.is_some_and(|id| controls.hub.with_session(|session| session.get(id).is_some_and(|flow| flow.pinned)))
 }
 
-fn row_cells(rows: Signal<Vec<RowLine>>, columns: Signal<ListColumns>, at: Position) -> impl IntoElement {
-    view()
-        .flex_1()
-        .min_w(px(0.0))
-        .overflow_hidden()
-        .flex_row()
-        .items_center()
-        .gap_2()
-        .child(method_cell(rows, at))
-        .child(when(move || columns.get().path, move || path_cell(rows, at)))
-        .child(when(move || columns.get().status, move || status_text(rows, at)))
-        .child(when(move || columns.get().protocol, move || protocol_cell(rows, at)))
-        .child(when(move || columns.get().gap, move || time_cell(rows, at)))
-        .child(when(move || columns.get().host, move || host_cell(rows, at)))
-        .child(when(move || columns.get().size, move || size_cell(rows, at)))
+fn flow_cell(
+    rows: Signal<Vec<RowLine>>,
+    selected: Signal<Option<u64>>,
+    hover: CellHover,
+    cell: &DataTableCell,
+) -> AnyElement {
+    let index = cell.row as usize;
+    match cell.key.as_ref() {
+        "method" => method_cell(rows, selected, index).into_element(),
+        "path" => path_cell(rows, hover, index).into_element(),
+        "status" => status_text(rows, index).into_element(),
+        "protocol" => protocol_cell(rows, index).into_element(),
+        "gap" => time_cell(rows, hover, index).into_element(),
+        "elapsed" => elapsed_cell(rows, index).into_element(),
+        "host" => host_cell(rows, hover, index).into_element(),
+        "size" => size_cell(rows, index).into_element(),
+        _ => view().into_element(),
+    }
 }
 
-fn method_cell(rows: Signal<Vec<RowLine>>, at: Position) -> impl IntoElement {
+fn flow_header(cell: &DataTableHeaderCell) -> View {
+    let lead = cell.key.as_ref() == "method";
     view()
-        .w(px(COL_METHOD))
-        .flex_shrink_0()
+        .w_full()
+        .h_full()
+        .min_w(px(0.0))
+        .pl(px(if lead { 14.0 } else { 4.0 }))
+        .pr(px(4.0))
+        .flex_row()
+        .items_center()
+        .overflow_hidden()
+        .child(
+            text(cell.title.clone())
+                .number_of_lines(1)
+                .text_size(px(11.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(fg_muted()),
+        )
+}
+
+fn method_cell(
+    rows: Signal<Vec<RowLine>>,
+    selected: Signal<Option<u64>>,
+    index: usize,
+) -> impl IntoElement {
+    let marked = selected;
+    view()
+        .w_full()
+        .h_full()
+        .min_w(px(0.0))
+        .pl(px(12.0))
+        .pr(px(4.0))
+        .border_l(px(2.0))
+        .border_l_color(move || {
+            let id = rows.with(|rows| rows.get(index).map(|row| row.id));
+            if id.is_some() && marked.get() == id {
+                accent_blue()
+            } else {
+                AdaptiveColor::TRANSPARENT
+            }
+        })
         .flex_row()
         .items_center()
         .gap_1()
         .child(when(
-            move || rows.with(|rows| rows.get(at.index()).is_some_and(|row| row.pinned)),
+            move || rows.with(|rows| rows.get(index).is_some_and(|row| row.pinned)),
             || {
                 view()
                     .w(px(6.0))
@@ -2079,7 +2448,7 @@ fn method_cell(rows: Signal<Vec<RowLine>>, at: Position) -> impl IntoElement {
                 .rounded(px(4.0))
                 .bg(move || {
                     rows.with(|rows| {
-                        rows.get(at.index())
+                        rows.get(index)
                             .map(|row| method_bg(&row.method))
                             .unwrap_or_else(bg_control)
                     })
@@ -2087,7 +2456,7 @@ fn method_cell(rows: Signal<Vec<RowLine>>, at: Position) -> impl IntoElement {
                 .child(
                     mono(move || {
                         rows.with(|rows| {
-                            rows.get(at.index())
+                            rows.get(index)
                                 .map(|row| row.method.clone())
                                 .unwrap_or_default()
                         })
@@ -2097,7 +2466,7 @@ fn method_cell(rows: Signal<Vec<RowLine>>, at: Position) -> impl IntoElement {
                     .font_weight(FontWeight::BOLD)
                     .text_color(move || {
                         rows.with(|rows| {
-                            rows.get(at.index())
+                            rows.get(index)
                                 .map(|row| method_fg(&row.method))
                                 .unwrap_or_else(fg_secondary)
                         })
@@ -2106,21 +2475,21 @@ fn method_cell(rows: Signal<Vec<RowLine>>, at: Position) -> impl IntoElement {
         )
 }
 
-fn status_text(rows: Signal<Vec<RowLine>>, at: Position) -> Text {
+fn status_text(rows: Signal<Vec<RowLine>>, index: usize) -> Text {
     mono(move || {
         rows.with(|rows| {
-            rows.get(at.index())
+            rows.get(index)
                 .map(|row| list_status(row.status, row.failed))
                 .unwrap_or_default()
         })
     })
-    .w(px(COL_STATUS))
-    .flex_shrink_0()
+    .pl(px(4.0))
+    .pr(px(4.0))
     .number_of_lines(1)
     .text_size(px(12.0))
     .font_weight(FontWeight::SEMIBOLD)
     .text_color(move || {
-        let row = rows.with(|rows| rows.get(at.index()).cloned());
+        let row = rows.with(|rows| rows.get(index).cloned());
         match row {
             Some(row) => http_status_fg(row.status, row.failed),
             None => fg_muted(),
@@ -2128,55 +2497,82 @@ fn status_text(rows: Signal<Vec<RowLine>>, at: Position) -> Text {
     })
 }
 
-fn time_cell(rows: Signal<Vec<RowLine>>, at: Position) -> Text {
-    let tip_rows = rows;
+fn time_cell(rows: Signal<Vec<RowLine>>, hover: CellHover, index: usize) -> Text {
+    let clock_rows = rows;
     mono(move || {
         rows.with(|rows| {
-            rows.get(at.index())
+            rows.get(index)
                 .map(|row| row.time.clone())
                 .unwrap_or_default()
         })
     })
-    .w(px(COL_TIME))
-    .flex_shrink_0()
+    .pl(px(4.0))
+    .pr(px(4.0))
     .number_of_lines(1)
     .text_size(px(12.0))
     .text_color(move || {
-        if rows.with(|rows| rows.get(at.index()).is_some_and(|row| row.slow)) {
+        if rows.with(|rows| rows.get(index).is_some_and(|row| row.slow)) {
             status_warn_fg()
         } else {
             fg_muted()
         }
     })
-    .tooltip(cell_tip(move || {
-        tip_rows.with(|rows| {
-            rows.get(at.index())
+    .on_hover_move(move |event: &HoverEvent| {
+        let clock = clock_rows.with(|rows| {
+            rows.get(index)
                 .map(|row| row.clock.clone())
                 .unwrap_or_default()
-        })
-    }))
+        });
+        show_cell_hover(hover, event, clock);
+    })
+    .on_hover_out(move || hover.text.set(None))
 }
 
-fn host_cell(rows: Signal<Vec<RowLine>>, at: Position) -> impl IntoElement {
+fn elapsed_cell(rows: Signal<Vec<RowLine>>, index: usize) -> Text {
+    mono(move || {
+        rows.with(|rows| {
+            rows.get(index)
+                .map(|row| row.elapsed.clone())
+                .unwrap_or_default()
+        })
+    })
+    .pl(px(4.0))
+    .pr(px(4.0))
+    .number_of_lines(1)
+    .text_size(px(12.0))
+    .text_color(move || {
+        if rows.with(|rows| rows.get(index).is_some_and(|row| row.elapsed_slow)) {
+            status_warn_fg()
+        } else {
+            fg_muted()
+        }
+    })
+}
+
+fn host_cell(rows: Signal<Vec<RowLine>>, hover: CellHover, index: usize) -> impl IntoElement {
     let tip_rows = rows;
     view()
-        .w(px(COL_HOST))
-        .flex_shrink_0()
+        .w_full()
+        .h_full()
         .min_w(px(0.0))
+        .pl(px(4.0))
+        .pr(px(4.0))
         .flex_row()
         .items_center()
         .gap_1()
-        .tooltip(cell_tip(move || {
-            tip_rows.with(|rows| {
-                rows.get(at.index())
+        .on_hover_move(move |event: &HoverEvent| {
+            let host = tip_rows.with(|rows| {
+                rows.get(index)
                     .map(|row| row.host.clone())
                     .unwrap_or_default()
-            })
-        }))
+            });
+            show_cell_hover(hover, event, host);
+        })
+        .on_hover_out(move || hover.text.set(None))
         .child(
             mono(move || {
                 rows.with(|rows| {
-                    rows.get(at.index())
+                    rows.get(index)
                         .map(|row| row.host.clone())
                         .unwrap_or_default()
                 })
@@ -2191,49 +2587,51 @@ fn host_cell(rows: Signal<Vec<RowLine>>, at: Position) -> impl IntoElement {
         )
 }
 
-fn protocol_cell(rows: Signal<Vec<RowLine>>, at: Position) -> Text {
+fn protocol_cell(rows: Signal<Vec<RowLine>>, index: usize) -> Text {
     mono(move || {
         rows.with(|rows| {
-            rows.get(at.index())
+            rows.get(index)
                 .map(|row| row.protocol.clone())
                 .unwrap_or_default()
         })
     })
-    .w(px(COL_PROTOCOL))
-    .flex_shrink_0()
+    .pl(px(4.0))
+    .pr(px(4.0))
     .number_of_lines(1)
     .text_size(px(12.0))
     .text_color(fg_secondary())
 }
 
-fn size_cell(rows: Signal<Vec<RowLine>>, at: Position) -> Text {
+fn size_cell(rows: Signal<Vec<RowLine>>, index: usize) -> Text {
     mono(move || {
         rows.with(|rows| {
-            rows.get(at.index())
+            rows.get(index)
                 .map(|row| row.size.clone())
                 .unwrap_or_default()
         })
     })
-    .w(px(COL_SIZE))
-    .flex_shrink_0()
+    .pl(px(4.0))
+    .pr(px(4.0))
     .number_of_lines(1)
     .text_size(px(12.0))
     .text_color(fg_muted())
 }
 
-/// The path column takes whatever width the fixed columns leave.
-/// A text node keeps its own min-content width, so the slot is a view.
-fn path_slot() -> View {
-    view().flex_1().w(px(0.0)).min_w(px(0.0)).overflow_hidden()
-}
-
-fn path_cell(rows: Signal<Vec<RowLine>>, at: Position) -> impl IntoElement {
+fn path_cell(rows: Signal<Vec<RowLine>>, hover: CellHover, index: usize) -> impl IntoElement {
     let tip_rows = rows;
-    path_slot()
+    view()
+        .w_full()
+        .h_full()
+        .min_w(px(0.0))
+        .pl(px(4.0))
+        .pr(px(4.0))
+        .overflow_hidden()
+        .flex_row()
+        .items_center()
         .child(
             mono(move || {
                 rows.with(|rows| {
-                    rows.get(at.index())
+                    rows.get(index)
                         .map(|row| row.path.clone())
                         .unwrap_or_default()
                 })
@@ -2244,20 +2642,22 @@ fn path_cell(rows: Signal<Vec<RowLine>>, at: Position) -> impl IntoElement {
             .ellipsize_mode(EllipsizeMode::Middle)
             .text_size(px(12.0))
             .text_color(move || {
-                if rows.with(|rows| rows.get(at.index()).is_some_and(|row| row.failed)) {
+                if rows.with(|rows| rows.get(index).is_some_and(|row| row.failed)) {
                     status_err_fg()
                 } else {
                     fg_secondary()
                 }
             }),
         )
-        .tooltip(cell_tip(move || {
-            tip_rows.with(|rows| {
-                rows.get(at.index())
+        .on_hover_move(move |event: &HoverEvent| {
+            let path = tip_rows.with(|rows| {
+                rows.get(index)
                     .map(|row| row.path.clone())
                     .unwrap_or_default()
-            })
-        }))
+            });
+            show_cell_hover(hover, event, path);
+        })
+        .on_hover_out(move || hover.text.set(None))
 }
 
 fn label_tip(zh: &'static str, en: &'static str) -> impl IntoTooltip {
@@ -2277,9 +2677,9 @@ fn label_tip(zh: &'static str, en: &'static str) -> impl IntoTooltip {
     )
 }
 
-/// A reactive bubble. A view, not the Tooltip component: list cells are
-/// rebuilt on every new row, and disposing that component panics.
-fn cell_tip(full: impl Fn() -> String + 'static) -> impl IntoTooltip {
+/// The list's one hover bubble. It lives beside the table, not inside a
+/// cell: DataTable disposes a cell when the row in that slot changes.
+fn cell_tip(full: impl Fn() -> String + 'static) -> impl IntoElement {
     view()
         .max_w(px(420.0))
         .px_2p5()
@@ -2398,18 +2798,6 @@ fn ready_detail(
             move || compose_box(compose),
         ))
         .child(when(
-            move || !shown.query.with(Vec::is_empty),
-            move || header_section("查询参数", "Query", shown.query, folded, FOLD_QUERY),
-        ))
-        .child(when(
-            move || !shown.diff.get().is_empty(),
-            move || diff_card(shown, folded),
-        ))
-        .child(when(
-            move || !shown.messages.with(Vec::is_empty),
-            move || header_section("消息", "Messages", shown.messages, folded, FOLD_MESSAGES),
-        ))
-        .child(when(
             move || {
                 !shown.response_body.get().is_empty()
                     || !shown.response_note.get().is_empty()
@@ -2422,6 +2810,7 @@ fn ready_detail(
                         "响应 body",
                         "Response body",
                         shown.response_body,
+                        shown.response_hex,
                         shown.response_note,
                         shown.response_language,
                         no_form,
@@ -2443,13 +2832,6 @@ fn ready_detail(
             folded,
             FOLD_RES_HEADERS,
         ))
-        .child(header_section(
-            "请求头",
-            "Request headers",
-            shown.request_headers,
-            folded,
-            FOLD_REQ_HEADERS,
-        ))
         .child(when(
             move || {
                 !shown.request_body.get().is_empty()
@@ -2461,6 +2843,7 @@ fn ready_detail(
                     "请求 body",
                     "Request body",
                     shown.request_body,
+                    shown.request_hex,
                     shown.request_note,
                     shown.request_language,
                     shown.request_form,
@@ -2473,6 +2856,25 @@ fn ready_detail(
                     FOLD_REQ_BODY,
                 )
             },
+        ))
+        .child(when(
+            move || !shown.query.with(Vec::is_empty),
+            move || header_section("查询参数", "Query", shown.query, folded, FOLD_QUERY),
+        ))
+        .child(header_section(
+            "请求头",
+            "Request headers",
+            shown.request_headers,
+            folded,
+            FOLD_REQ_HEADERS,
+        ))
+        .child(when(
+            move || !shown.diff.get().is_empty(),
+            move || diff_card(shown, folded),
+        ))
+        .child(when(
+            move || !shown.messages.with(Vec::is_empty),
+            move || header_section("消息", "Messages", shown.messages, folded, FOLD_MESSAGES),
         ))
 }
 
@@ -2581,6 +2983,7 @@ fn summary(
                 .bg(bg_code())
                 .border_1()
                 .border_color(border_subtle())
+                .on_press_up(|| dismiss_keyboard())
                 .child(
                     mono(move || shown.url.get())
                         .selectable(true)
@@ -2591,6 +2994,7 @@ fn summary(
         .child(
             mono(move || shown.metrics.get())
                 .selectable(true)
+                .on_press_up(|| dismiss_keyboard())
                 .text_size(px(11.5))
                 .text_color(fg_muted()),
         )
@@ -2611,6 +3015,7 @@ fn summary(
                                 move || localize_error(ui_lang(langs), &shown.error.get())
                             })
                                 .selectable(true)
+                                .on_press_up(|| dismiss_keyboard())
                                 .text_size(px(12.0))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(status_err_fg()),
@@ -2713,6 +3118,7 @@ fn header_section(
                                         }
                                     })
                                     .border_t_color(border_subtle())
+                                    .on_press_up(|| dismiss_keyboard())
                                     .child(
                                         mono(move || line.with(|line| line.name.clone()))
                                             .w(px(176.0))
@@ -2785,6 +3191,7 @@ fn body_section(
     zh: &'static str,
     en: &'static str,
     body: Signal<String>,
+    hex: Signal<Vec<u8>>,
     note: Signal<String>,
     code: Signal<String>,
     form: Signal<Vec<HeaderLine>>,
@@ -2851,8 +3258,13 @@ fn body_section(
                 .px_3()
                 .py_3()
                 .gap_1p5()
+                .flex_row()
+                .justify_center()
                 .child(
                     view()
+                        .w(move || px(shown.preview_w.get()))
+                        .h(move || px(shown.preview_h.get()))
+                        .flex_shrink_0()
                         .rounded(px(8.0))
                         .border_1()
                         .border_color(border_strong())
@@ -2861,8 +3273,8 @@ fn body_section(
                         .child(
                             image(move || shown.preview.get())
                                 .w_full()
-                                .h(px(200.0))
-                                .resize_mode(ResizeMode::Contain),
+                                .h_full()
+                                .resize_mode(ResizeMode::ScaleDown),
                         ),
                 )
                 .child(when(
@@ -2879,17 +3291,47 @@ fn body_section(
             },
             move || {
                 let divided = image_on() || !note.get().is_empty();
+                let height_body = body;
+                let height_hex = hex;
                 view()
                     .bg(bg_code())
-                    .px_3p5()
-                    .py_2p5()
+                    .h(move || {
+                        let lines = if height_hex.with(Vec::is_empty) {
+                            body_line_count(&height_body.get())
+                        } else {
+                            let count = height_hex.with(Vec::len);
+                            let cols = shown.hex_cols.get().max(1);
+                            count.div_ceil(cols).max(1)
+                        };
+                        px(body_box_height(lines))
+                    })
+                    .overflow_hidden()
                     .border_t(move || if divided { px(1.0) } else { px(0.0) })
                     .border_t_color(border_subtle())
+                    .on_layout(move |bounds: &Bounds<Points>| {
+                        // The frame includes this view's horizontal padding.
+                        let next = hex_row_bytes(bounds.size.width.0 - 28.0);
+                        if shown.hex_cols.get() != next {
+                            shown.hex_cols.set(next);
+                        }
+                    })
                     .child(
-                        mono(move || body.get())
+                        scroll().size_full().child(
+                            mono(move || {
+                                let bytes = hex.with(|bytes| bytes.clone());
+                                if bytes.is_empty() {
+                                    body.get()
+                                } else {
+                                    hex_display_rows(&bytes, shown.hex_cols.get())
+                                }
+                            })
+                            .px_3p5()
+                            .py_2()
                             .selectable(true)
+                            .on_press_up(|| dismiss_keyboard())
                             .text_size(px(12.0))
                             .text_color(fg_primary()),
+                        ),
                     )
             },
         ))
@@ -2920,6 +3362,7 @@ fn body_section(
                         .bg(move || if index.get() % 2 == 1 { bg_code() } else { bg_card() })
                         .border_t(move || if index.get() > 0 { px(1.0) } else { px(0.0) })
                         .border_t_color(border_subtle())
+                        .on_press_up(|| dismiss_keyboard())
                         .child(
                             mono(move || line.with(|line| line.name.clone()))
                                 .w(px(176.0))
@@ -2943,9 +3386,23 @@ fn body_section(
         ))
 }
 
+const BODY_LINE_H: f32 = 18.0;
+const BODY_LINES: usize = 10;
+const BODY_CHROME: f32 = 16.0;
+
+fn body_line_count(text: &str) -> usize {
+    text.lines().count().max(1)
+}
+
+/// One line of body grows the card. Past [`BODY_LINES`] the card stays put
+/// and the text scrolls inside it.
+fn body_box_height(lines: usize) -> f32 {
+    let shown = lines.max(1).min(BODY_LINES) as f32;
+    shown * BODY_LINE_H + BODY_CHROME
+}
+
 fn editor_box_height(text: &str) -> f32 {
-    let lines = text.lines().count().max(1) as f32;
-    (lines * 18.0 + 16.0).clamp(96.0, 360.0)
+    body_box_height(body_line_count(text))
 }
 
 fn code_body(body: Signal<String>, code: Signal<String>) -> impl IntoElement {
@@ -3251,6 +3708,7 @@ fn marked_action(
     on_select: impl Fn() + 'static,
 ) -> impl IntoElement {
     let dot = marked.clone();
+    let dot_fill = marked.clone();
     let label_on = marked;
     menu_item()
         .on_select(on_select)
@@ -3265,11 +3723,19 @@ fn marked_action(
         .cursor(Cursor::Pointer)
         .child(
             view()
-                .w(px(6.0))
-                .h(px(6.0))
+                .w(px(8.0))
+                .h(px(8.0))
                 .rounded(px(99.0))
-                .bg(move || {
+                .border_1()
+                .border_color(move || {
                     if dot() {
+                        accent_blue()
+                    } else {
+                        fg_muted()
+                    }
+                })
+                .bg(move || {
+                    if dot_fill() {
                         accent_blue()
                     } else {
                         bg_card()
@@ -3713,6 +4179,7 @@ fn toolbar_menu(
     flow_total: Signal<usize>,
     filter: Signal<String>,
     pretty: Signal<bool>,
+    share_id: Signal<String>,
 ) -> impl IntoElement {
     menu()
         .placement(Placement::Bottom)
@@ -3735,6 +4202,7 @@ fn toolbar_menu(
             flow_total,
             filter,
             pretty,
+            share_id,
         ))
 }
 
@@ -3766,19 +4234,20 @@ fn flow_count_badge(
     filter: Signal<String>,
 ) -> impl IntoElement {
     view()
-        .h(px(22.0))
-        .px_2()
+        .h(px(CONTROL_H))
+        .px_2p5()
         .flex_shrink_0()
         .flex_row()
         .items_center()
-        .rounded(px(6.0))
+        .justify_center()
+        .rounded(px(CONTROL_RADIUS))
         .bg(bg_control())
         .border_1()
         .border_color(border_control())
         .child(
             mono(move || SharedString::from(flow_count_now(rows, flow_total, filter)))
                 .number_of_lines(1)
-                .text_size(px(11.5))
+                .text_size(px(CONTROL_TEXT))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(fg_secondary()),
         )
@@ -3874,12 +4343,13 @@ fn more_menu(
     flow_total: Signal<usize>,
     filter: Signal<String>,
     pretty: Signal<bool>,
+    share_id: Signal<String>,
 ) -> impl IntoElement {
     let export_har = Rc::new(export_har);
     let export_all = Rc::clone(&export_har);
     let export_filtered = Rc::clone(&export_har);
     view()
-        .w(px(248.0))
+        .w(px(280.0))
         .p_1()
         .gap_0p5()
         .rounded(px(10.0))
@@ -3911,6 +4381,44 @@ fn more_menu(
                 menu_action(Glyph::Download, tr("导出", "Export"), move || export_all())
             }),
         )
+        .child(menu_action(Glyph::Download, tr("导出 HTML", "Export HTML"), {
+            let controls = import_controls.clone();
+            let filter = filter;
+            let langs = ui_langs();
+            move || export_html_file(&controls, &filter.get(), ui_lang(langs) == Lang::Zh)
+        }))
+        .child(menu_action(Glyph::Prompt, tr("分享 15 分钟", "Share 15 min"), {
+            let controls = import_controls.clone();
+            let share_id = share_id;
+            let filter = filter;
+            move || begin_share(&controls, 15, &filter.get(), share_id)
+        }))
+        .child(menu_action(Glyph::Prompt, tr("分享 1 小时", "Share 1 hour"), {
+            let controls = import_controls.clone();
+            let share_id = share_id;
+            let filter = filter;
+            move || begin_share(&controls, 60, &filter.get(), share_id)
+        }))
+        .child(menu_action(Glyph::Prompt, tr("分享 8 小时", "Share 8 hours"), {
+            let controls = import_controls.clone();
+            let share_id = share_id;
+            let filter = filter;
+            move || begin_share(&controls, 480, &filter.get(), share_id)
+        }))
+        .child({
+            let stop_controls = import_controls.clone();
+            let share_id = share_id;
+            when(
+                move || !share_id.get().is_empty(),
+                move || {
+                    let controls = stop_controls.clone();
+                    let share_id = share_id;
+                    menu_action(Glyph::Trash, tr("停止分享", "Stop sharing"), move || {
+                        end_share(&controls, share_id);
+                    })
+                },
+            )
+        })
         .child(import_menu(import_path, import_controls.clone()))
         .child(menu_action(
             Glyph::Prompt,
@@ -4266,6 +4774,13 @@ fn row_lines(hub: &Hub, filter: &str, lang: Lang) -> Vec<RowLine> {
                     status: flow.status,
                     time: present::format_gap(previous, flow.started),
                     clock: present::format_clock(flow.started),
+                    elapsed: present::format_elapsed(flow.started, flow.finished_at),
+                    elapsed_slow: flow.finished_at.is_some()
+                        && present::is_slow(
+                            flow.started,
+                            flow.finished_at,
+                            std::time::SystemTime::now(),
+                        ),
                     host: flow.host.clone(),
                     path: list_path(&flow.path, flow.error.as_deref(), failed, lang),
                     protocol: flow.protocol.label().to_string(),
@@ -4286,7 +4801,11 @@ fn row_lines(hub: &Hub, filter: &str, lang: Lang) -> Vec<RowLine> {
 fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baseline: Option<u64>) {
     let Some(id) = id else {
         shown.phase.set(Phase::Empty);
+        shown.request_hex.set(Vec::new());
+        shown.response_hex.set(Vec::new());
         shown.preview.set(String::new());
+        shown.preview_w.set(0.0);
+        shown.preview_h.set(0.0);
         shown.image_caption.set(String::new());
         shown.diff.set(String::new());
         shown.diff_old.set(String::new());
@@ -4301,7 +4820,11 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baselin
     let snapshot = hub.with_session(|session| session.get(id).cloned());
     let Some(flow) = snapshot else {
         shown.phase.set(Phase::Gone);
+        shown.request_hex.set(Vec::new());
+        shown.response_hex.set(Vec::new());
         shown.preview.set(String::new());
+        shown.preview_w.set(0.0);
+        shown.preview_h.set(0.0);
         shown.image_caption.set(String::new());
         shown.diff.set(String::new());
         shown.diff_old.set(String::new());
@@ -4350,6 +4873,7 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baselin
         pretty,
         lang,
     );
+    let response_hex = response.hex;
     let preview = image_preview_path(id, &flow);
     let response = present::image_body(
         pretty,
@@ -4429,10 +4953,25 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baselin
     } else {
         String::new()
     });
+    shown.request_hex.set(if shown.request_form.with(Vec::is_empty) {
+        request.hex
+    } else {
+        Vec::new()
+    });
     shown.response_body.set(response.text);
+    shown.response_hex.set(if preview.is_empty() {
+        response_hex
+    } else {
+        Vec::new()
+    });
     shown.request_note.set(request.note);
     shown.response_note.set(response.note);
+    let (box_w, box_h) = present::image_pixel_size(&flow.response_body)
+        .map(|(w, h)| present::preview_box(w, h))
+        .unwrap_or((160, 160));
     shown.preview.set(preview);
+    shown.preview_w.set(box_w as f32);
+    shown.preview_h.set(box_h as f32);
     shown.image_caption.set(response.caption);
     shown.messages.set(messages);
     shown.diff.set(diff);
@@ -4532,6 +5071,8 @@ fn annotated(name: &str, value: &str) -> String {
 struct BodyText {
     text: String,
     note: String,
+    /// Set for a binary body. The view breaks it into 16 or 32 byte rows.
+    hex: Vec<u8>,
 }
 
 fn display_body(
@@ -4543,6 +5084,9 @@ fn display_body(
     lang: Lang,
 ) -> BodyText {
     let mut presented = body_text(body, truncated, encoding_error, lang);
+    if pretty && std::str::from_utf8(body).is_ok() {
+        presented.hex.clear();
+    }
     if pretty {
         apply_pretty(&mut presented, body, content_type, lang);
     }
@@ -4574,6 +5118,7 @@ fn apply_pretty(presented: &mut BodyText, body: &[u8], content_type: Option<&str
 
 fn body_text(body: &[u8], truncated: bool, encoding_error: Option<&str>, lang: Lang) -> BodyText {
     let mut note = String::new();
+    let mut hex = Vec::new();
     if let Some(error) = encoding_error {
         note.push_str(t(
             lang,
@@ -4603,7 +5148,8 @@ fn body_text(body: &[u8], truncated: bool, encoding_error: Option<&str>, lang: L
     } else {
         const HEX_CAP: usize = 4096;
         let shown = body.len().min(HEX_CAP);
-        let out = hex_display(&body[..shown]);
+        hex = body[..shown].to_vec();
+        let out = hex_display_rows(&hex, 16);
         if body.len() > shown {
             if !note.is_empty() {
                 note.push('\n');
@@ -4626,7 +5172,7 @@ fn body_text(body: &[u8], truncated: bool, encoding_error: Option<&str>, lang: L
             "The body passed 1 MB. The record is truncated; forwarding continued.",
         ));
     }
-    BodyText { text, note }
+    BodyText { text, note, hex }
 }
 
 fn open_controls() -> Arc<Controls> {
@@ -4788,6 +5334,7 @@ fn start_capture(controls: &Controls) {
             },
         );
     }
+    remember_capturing(controls, true);
 }
 
 fn stop_capture(controls: &Controls) {
@@ -4800,6 +5347,7 @@ fn stop_capture(controls: &Controls) {
     {
         capture.stop();
     }
+    controls.hub.end_share();
     *controls
         .listen
         .lock()
@@ -4809,11 +5357,24 @@ fn stop_capture(controls: &Controls) {
     set_bool(&controls.running, false);
     if !applied {
         set_status(controls, StatusMsg::Stopped);
-        return;
+    } else {
+        match sysproxy::disable() {
+            Ok(()) => set_status(controls, StatusMsg::StoppedRestored),
+            Err(err) => set_status(controls, StatusMsg::StopRestoreFailed(format!("{err:#}"))),
+        }
     }
-    match sysproxy::disable() {
-        Ok(()) => set_status(controls, StatusMsg::StoppedRestored),
-        Err(err) => set_status(controls, StatusMsg::StopRestoreFailed(format!("{err:#}"))),
+    remember_capturing(controls, false);
+}
+
+fn remember_capturing(controls: &Controls, on: bool) {
+    if let Err(err) = save_config(|config| config.capturing = on) {
+        set_status(
+            controls,
+            StatusMsg::PrefUnsaved {
+                name: PrefName::Capture,
+                err: err.to_string(),
+            },
+        );
     }
 }
 
@@ -5096,20 +5657,36 @@ fn bytes_for_copy(body: &[u8], side: Side) -> (String, StatusMsg) {
     }
 }
 
-/// Display rows are `0001  ` plus 16 bytes. Copy uses `hex_dump`, which has no row numbers.
-fn hex_display(body: &[u8]) -> String {
+/// `0001  ` plus `per_row` bytes. Copy uses `hex_dump`, which has no row numbers.
+fn hex_display_rows(body: &[u8], per_row: usize) -> String {
+    let per_row = per_row.max(1);
     let mut out = String::with_capacity(body.len() * 4);
     for (index, byte) in body.iter().enumerate() {
-        if index % 16 == 0 {
+        if index % per_row == 0 {
             if index > 0 {
                 out.push('\n');
             }
-            let row = index / 16 + 1;
+            let row = index / per_row + 1;
             out.push_str(&format!("{row:04}  "));
         }
         out.push_str(&format!("{byte:02x} "));
     }
     out
+}
+
+/// 12px monospace is about 7.2px wide. A row is `0001  ` plus `xx ` per byte.
+fn hex_line_width(bytes: usize) -> f32 {
+    const CHAR: f32 = 7.2;
+    (6.0 + 3.0 * bytes as f32) * CHAR
+}
+
+/// Use 32 only when that line fits; otherwise stay at 16.
+fn hex_row_bytes(width: f32) -> usize {
+    if width + 0.01 >= hex_line_width(32) {
+        32
+    } else {
+        16
+    }
 }
 
 fn hex_dump(body: &[u8]) -> String {
@@ -5754,6 +6331,70 @@ fn export_har_file(controls: &Controls, filter: &str) {
     set_status(controls, StatusMsg::Exported(path.display().to_string()));
 }
 
+fn export_html_file(controls: &Controls, filter: &str, zh: bool) {
+    let flows = controls
+        .hub
+        .with_session(|session| session.flows_matching(filter));
+    let json = share::document(&flows, SystemTime::now(), filter);
+    let html = share::page(&json, "", zh);
+    let dir = ca::data_dir().join("exports");
+    if let Err(err) = std::fs::create_dir_all(&dir) {
+        set_status(controls, StatusMsg::ExportFailed(err.to_string()));
+        return;
+    }
+    let secs = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    let path = dir.join(format!("zniff-{secs}.html"));
+    if let Err(err) = std::fs::write(&path, html) {
+        set_status(controls, StatusMsg::ExportFailed(err.to_string()));
+        return;
+    }
+    set_clipboard(path.display().to_string());
+    set_status(controls, StatusMsg::Exported(path.display().to_string()));
+}
+
+fn begin_share(controls: &Controls, minutes: u64, filter: &str, share_id: Signal<String>) {
+    if !lock_bool(&controls.running) {
+        set_status(controls, StatusMsg::ShareNeedsCapture);
+        return;
+    }
+    let (id, _expires) =
+        controls
+            .hub
+            .begin_share(Duration::from_secs(minutes.saturating_mul(60)), filter);
+    let (base, local_only) = share_base(controls);
+    let url = format!("{base}/s/{id}");
+    share_id.set(id);
+    set_clipboard(url.clone());
+    set_status(
+        controls,
+        StatusMsg::Shared {
+            url,
+            minutes,
+            local_only,
+        },
+    );
+}
+
+fn end_share(controls: &Controls, share_id: Signal<String>) {
+    controls.hub.end_share();
+    share_id.set(String::new());
+    set_status(controls, StatusMsg::ShareStopped);
+}
+
+/// Address other people can open. `local_only` when the listener is not on every interface.
+fn share_base(controls: &Controls) -> (String, bool) {
+    let port = lock_port(&controls.listen_port);
+    if lock_bool(&controls.listen_all) {
+        if let Some(ip) = choose_lan(&lan_addrs(), routed_v4(), "").map(|addr| addr.ip) {
+            return (format!("http://{ip}:{port}"), false);
+        }
+    }
+    (format!("http://127.0.0.1:{port}"), true)
+}
+
 fn import_dropped(controls: &Controls, event: &FileDropEvent, lang: Lang) {
     let mut found = false;
     for uri in &event.uris {
@@ -5870,6 +6511,7 @@ fn apply_saved_prefs(hub: &Hub) {
     hub.set_bypass(&saved.bypass_hosts);
     hub.set_rules(&saved.rules);
     hub.set_upstream(&saved.upstream_proxy);
+    hub.set_show_tunnel_failures(saved.show_tunnel_failures);
 }
 
 fn load_listen_all() -> bool {
@@ -6288,6 +6930,22 @@ mod tests {
     }
 
     #[test]
+    fn recent_filters_keep_the_newest_eight_without_duplicates() {
+        let first = super::push_recent_filter(&[], "  api.test ");
+        assert_eq!(first, vec!["api.test".to_string()]);
+        let again = super::push_recent_filter(&first, "pin:");
+        let again = super::push_recent_filter(&again, "api.test");
+        assert_eq!(again, vec!["api.test".to_string(), "pin:".to_string()]);
+        assert!(super::push_recent_filter(&again, "   ").eq(&again));
+        let mut many = Vec::new();
+        for index in 0..10 {
+            many = super::push_recent_filter(&many, &format!("h{index}"));
+        }
+        assert_eq!(many.len(), super::RECENT_FILTER_CAP);
+        assert_eq!(many[0], "h9");
+    }
+
+    #[test]
     fn neighbor_steps_the_filtered_ids_and_clamps() {
         assert_eq!(super::neighbor(&[], None, 1), None);
         assert_eq!(super::neighbor(&[], Some(1), -1), None);
@@ -6332,16 +6990,33 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
     #[test]
     fn hex_display_numbers_each_row_and_copy_does_not() {
         let body: Vec<u8> = (0..20).collect();
-        let shown = super::hex_display(&body);
+        let shown = super::hex_display_rows(&body, 16);
         let mut lines = shown.lines();
         let first = lines.next().unwrap();
         let second = lines.next().unwrap();
         assert!(first.starts_with("0001  "), "{first}");
         assert!(second.starts_with("0002  "), "{second}");
         assert!(first.split_whitespace().skip(1).count() == 16);
+        let wide = super::hex_display_rows(&body, 32);
+        assert_eq!(wide.lines().count(), 1, "{wide}");
+        assert!(wide.split_whitespace().skip(1).count() == 20);
+        assert_eq!(super::hex_row_bytes(400.0), 16);
+        assert_eq!(super::hex_row_bytes(super::hex_line_width(32)), 32);
+        assert_eq!(super::hex_row_bytes(super::hex_line_width(32) - 1.0), 16);
         let copied = super::hex_dump(&body);
         assert!(!copied.contains("0001"), "{copied}");
         assert!(copied.starts_with("00 01 02 "));
+    }
+
+    #[test]
+    fn body_box_follows_the_text_and_stops_at_ten_lines() {
+        assert_eq!(super::body_box_height(1), 34.0);
+        assert_eq!(super::body_box_height(super::body_line_count("a\nb")), 52.0);
+        assert_eq!(super::body_box_height(10), 196.0);
+        assert_eq!(super::body_box_height(40), 196.0);
+        assert_eq!(super::editor_box_height("only"), 34.0);
+        let long = "x\n".repeat(30);
+        assert_eq!(super::editor_box_height(&long), 196.0);
     }
 
     #[test]
@@ -6372,7 +7047,13 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
     #[test]
     fn list_columns_round_trip_and_the_pane_clamps() {
         let mut config = crate::config::Config::default();
-        assert!(config.show_status && config.show_path && config.show_gap && config.show_host);
+        assert!(
+            config.show_status
+                && config.show_path
+                && config.show_gap
+                && config.show_elapsed
+                && config.show_host
+        );
         assert!(!config.show_protocol && !config.show_size);
         let columns = super::ListColumns::from_config(&config)
             .toggle(super::ListColumn::Protocol)
@@ -6386,6 +7067,40 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
         assert_eq!(super::clamp_list_px(5_000.0), crate::config::LIST_WIDTH_MAX as f32);
         assert_eq!(super::clamp_list_px(640.6), 641.0);
         assert_eq!(super::clamp_list_px(-20.0), crate::config::LIST_WIDTH_MIN as f32);
+    }
+
+    #[test]
+    fn flow_columns_pin_method_and_path_and_keep_a_dragged_width() {
+        let shown = super::ListColumns {
+            status: true,
+            protocol: false,
+            path: true,
+            gap: true,
+            elapsed: true,
+            host: false,
+            size: false,
+        };
+        let mut widths = std::collections::HashMap::new();
+        widths.insert("path".to_string(), 400);
+        let cols = super::flow_table_columns(shown, &widths);
+        let keys: Vec<&str> = cols.iter().map(|column| column.key.as_ref()).collect();
+        assert_eq!(keys, ["method", "path", "status", "gap", "elapsed"]);
+        assert!(cols[0].fixed && cols[1].fixed);
+        assert!(cols[2..].iter().all(|column| !column.fixed));
+        assert_eq!(cols[0].width.unwrap().0, 72.0);
+        assert_eq!(cols[1].width.unwrap().0, 400.0);
+        assert_eq!(cols[1].min_width.unwrap().0, 80.0);
+        assert!(cols.iter().all(|column| {
+            column.movable == Some(false) && column.resizable == Some(true)
+        }));
+        let hidden_path = super::ListColumns {
+            path: false,
+            ..shown
+        };
+        let cols = super::flow_table_columns(hidden_path, &widths);
+        assert_eq!(cols[0].key.as_ref(), "method");
+        assert!(cols.iter().all(|column| column.key.as_ref() != "path"));
+        assert_eq!(cols.iter().filter(|column| column.fixed).count(), 1);
     }
 
     #[test]

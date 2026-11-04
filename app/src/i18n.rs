@@ -46,6 +46,8 @@ pub enum PrefName {
     Lan,
     List,
     Pretty,
+    Tunnel,
+    Capture,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,6 +88,13 @@ pub enum StatusMsg {
     ReplayFailed(String),
     ExportFailed(String),
     Exported(String),
+    Shared {
+        url: String,
+        minutes: u64,
+        local_only: bool,
+    },
+    ShareNeedsCapture,
+    ShareStopped,
     ImportFailed(String),
     Imported { count: usize, path: String },
     CopiedEnv,
@@ -97,6 +106,14 @@ pub enum StatusMsg {
     BaselineSet,
 }
 
+fn port_in_use(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("address already in use")
+        || lower.contains("os error 48")
+        || lower.contains("os error 10048")
+        || lower.contains("only one usage of each socket address")
+}
+
 impl StatusMsg {
     pub fn text(&self, lang: Lang) -> String {
         match self {
@@ -106,7 +123,22 @@ impl StatusMsg {
             }
             Self::Starting => t(lang, "正在启动代理…", "Starting the proxy…").into(),
             Self::BindFailed { port, err } => {
-                format!("{} {port} {}: {err}", t(lang, "端口", "Port"), t(lang, "没有绑上", "did not bind"))
+                if port_in_use(err) {
+                    match lang {
+                        Lang::Zh => format!(
+                            "端口 {port} 已被占用。多半是另一个 zniff 窗口还在抓包。关掉那个窗口，或在底栏改一个端口再按开始。"
+                        ),
+                        Lang::En => format!(
+                            "Port {port} is already in use. Another zniff window is probably still capturing. Close that window, or change the port in the footer and press Start."
+                        ),
+                    }
+                } else {
+                    format!(
+                        "{} {port} {}: {err}",
+                        t(lang, "端口", "Port"),
+                        t(lang, "没有绑上", "did not bind")
+                    )
+                }
             }
             Self::Listening { port, via_system_proxy } => {
                 if *via_system_proxy {
@@ -151,6 +183,8 @@ impl StatusMsg {
                     PrefName::Lan => t(lang, "局域网开关没有记住:", "LAN switch was not saved:"),
                     PrefName::List => t(lang, "列表设置没有记住:", "List layout was not saved:"),
                     PrefName::Pretty => t(lang, "默认展示没有记住:", "Default view was not saved:"),
+                    PrefName::Tunnel => t(lang, "隧道失败开关没有记住:", "Tunnel failure switch was not saved:"),
+                    PrefName::Capture => t(lang, "抓包开关没有记住:", "Capture switch was not saved:"),
                 };
                 format!("{name} {err}")
             }
@@ -187,6 +221,28 @@ impl StatusMsg {
             Self::ReplayFailed(err) => format!("{} {err}", t(lang, "重放失败:", "Replay failed:")),
             Self::ExportFailed(err) => format!("{} {err}", t(lang, "导出失败:", "Export failed:")),
             Self::Exported(path) => format!("{} {path}", t(lang, "已导出", "Exported")),
+            Self::Shared {
+                url,
+                minutes,
+                local_only,
+            } => {
+                let base = match lang {
+                    Lang::Zh => format!("已复制分享地址，{minutes} 分钟内有效 · {url}"),
+                    Lang::En => format!("Copied the share link, valid for {minutes} min · {url}"),
+                };
+                if *local_only {
+                    format!(
+                        "{base} · {}",
+                        t(lang, "只在本机可打开。打开局域网后，别人才能访问。", "This computer only. Turn on LAN for other people.")
+                    )
+                } else {
+                    base
+                }
+            }
+            Self::ShareNeedsCapture => {
+                t(lang, "先按开始，分享地址才打得开", "Press Start first. The share link needs the proxy.").into()
+            }
+            Self::ShareStopped => t(lang, "已停止分享", "Sharing stopped").into(),
             Self::ImportFailed(err) => format!("{} {err}", t(lang, "导入失败:", "Import failed:")),
             Self::Imported { count, path } => format!(
                 "{} {count} {} · {path}",
@@ -224,9 +280,31 @@ pub fn localize_error(lang: Lang, text: &str) -> String {
     const EXACT: &[(&str, &str)] = &[
         ("直通名单，未解密", "Bypass list, not decrypted"),
         ("证书被拒绝", "Certificate rejected"),
+        (
+            "证书被拒绝。猜测：客户端不信任 zniff CA，请安装并信任根证书。",
+            "Certificate rejected. Guess: the client does not trust the zniff CA. Install and trust the root.",
+        ),
+        (
+            "证书被拒绝。猜测：该客户端多半做了证书钉扎，不接受代理签发的证书。把主机加入直通名单。若还没安装 zniff CA，先安装。",
+            "Certificate rejected. Guess: the client likely pins certificates and will not accept the proxy leaf. Add the host to the bypass list. Install the zniff CA first if it is missing.",
+        ),
+        (
+            "证书被拒绝。猜测：先确认系统已信任 zniff CA。若已信任，就是这个客户端自带证书库或做了钉扎，把主机加入直通名单。",
+            "Certificate rejected. Guess: confirm the system trusts the zniff CA. If it does, this client has its own store or pins certificates. Add the host to the bypass list.",
+        ),
         ("不是 TLS，已改为隧道", "Not TLS, tunneled instead"),
         ("读取 ClientHello 超时", "Timed out reading ClientHello"),
         ("连接源站超时，已改为隧道", "Timed out connecting to the origin, tunneled instead"),
+        ("源站证书不在内置根证书里，已改为隧道", "Origin certificate is not signed by a built-in root, tunneled instead"),
+        ("源站证书已过期，已改为隧道", "Origin certificate has expired, tunneled instead"),
+        ("源站证书还没到生效时间，已改为隧道", "Origin certificate is not valid yet, tunneled instead"),
+        ("源站证书域名对不上，已改为隧道", "Origin certificate name does not match, tunneled instead"),
+        ("源站证书已吊销，已改为隧道", "Origin certificate is revoked, tunneled instead"),
+        ("源站证书无效，已改为隧道", "Origin certificate is invalid, tunneled instead"),
+        ("源站不接受客户端的协议，已改为隧道", "Origin rejected the client protocol, tunneled instead"),
+        ("源站没有给出证书，已改为隧道", "Origin presented no certificate, tunneled instead"),
+        ("源站 TLS 版本或算法不兼容，已改为隧道", "Origin TLS version or cipher is incompatible, tunneled instead"),
+        ("源站 TLS 失败，已改为隧道", "Origin TLS failed, tunneled instead"),
         ("客户端 TLS 超时", "Client TLS timed out"),
         ("断点丢弃", "Dropped at the break"),
         ("响应断点跳过，body 超过 1 MB", "Response break skipped, body is over 1 MB"),
@@ -238,6 +316,7 @@ pub fn localize_error(lang: Lang, text: &str) -> String {
     const PREFIX: &[(&str, &str)] = &[
         ("读取 ClientHello 失败: ", "Failed to read ClientHello: "),
         ("源站 TLS 失败，已改为隧道: ", "Origin TLS failed, tunneled instead: "),
+        ("源站中止握手（", "Origin aborted the handshake ("),
         ("客户端 TLS 失败: ", "Client TLS failed: "),
         ("响应断点读 body 失败: ", "Failed to read the body for a response break: "),
     ];
@@ -290,6 +369,18 @@ mod tests {
 
     #[test]
     fn status_and_errors_follow_the_language() {
+        let busy = StatusMsg::BindFailed {
+            port: 8877,
+            err: "Address already in use (os error 48)".into(),
+        };
+        assert!(busy.text(Lang::Zh).contains("另一个 zniff"));
+        assert!(busy.text(Lang::En).contains("already in use"));
+        assert!(!busy.text(Lang::Zh).contains("os error"));
+        let other = StatusMsg::BindFailed {
+            port: 8877,
+            err: "permission denied".into(),
+        };
+        assert!(other.text(Lang::Zh).contains("没有绑上"));
         assert_eq!(StatusMsg::Idle.text(Lang::En), "Idle");
         assert_eq!(StatusMsg::Idle.text(Lang::Zh), "未开始");
         let listening = StatusMsg::Listening { port: 8877, via_system_proxy: false };

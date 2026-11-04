@@ -447,8 +447,8 @@ impl Session {
             .collect()
     }
 
-    /// Matching ids, oldest first. The time is when the previous flow in
-    /// arrival order started, including a neighbor the filter hides.
+    /// Matching ids, oldest first. The time is when the previous *visible*
+    /// flow started. A row the filter hides does not count.
     pub fn matching_with_previous_start(&self, filter: &str) -> Vec<(u64, Option<SystemTime>)> {
         let query = FlowQuery::parse(filter);
         let mut previous = None;
@@ -457,9 +457,10 @@ impl Session {
             let Some(flow) = self.flows.get(id) else {
                 continue;
             };
-            if query.matches(flow) {
-                out.push((*id, previous));
+            if !query.matches(flow) {
+                continue;
             }
+            out.push((*id, previous));
             previous = Some(flow.started);
         }
         out
@@ -717,7 +718,7 @@ mod tests {
     }
 
     #[test]
-    fn gap_keeps_the_hidden_neighbor() {
+    fn gap_skips_the_hidden_neighbor() {
         let mut session = Session::default();
         let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         let mut open = |host: &str, path: &str| {
@@ -741,7 +742,7 @@ mod tests {
         assert_eq!(rows[0].0, first);
         assert_eq!(rows[0].1, None);
         assert_eq!(rows[1].0, third);
-        assert_eq!(rows[1].1, Some(base + Duration::from_millis(45)));
+        assert_eq!(rows[1].1, Some(base));
     }
 
     #[test]

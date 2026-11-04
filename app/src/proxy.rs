@@ -54,11 +54,15 @@ pub struct Hub {
     apply_rules: AtomicBool,
     /// Session-only. Off drops `break` and `break-res` and keeps the other rules.
     apply_breaks: AtomicBool,
+    /// Off by default. On records an origin TLS probe that fell back to a tunnel.
+    show_tunnel_failures: AtomicBool,
     upstream: Mutex<Option<Upstream>>,
     /// Idle plaintext origin sockets, used only on the proxy runtime.
     pool: tokio::sync::Mutex<HashMap<(String, u16), Vec<TcpStream>>>,
     h2_pool: Mutex<HashMap<(String, u16), hyper::client::conn::http2::SendRequest<RecordingBody<Incoming>>>>,
     break_slot: Mutex<Option<BreakSlot>>,
+    /// One live HTML share. A new call replaces the id.
+    share: Mutex<Option<crate::share::LiveShare>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,11 +115,61 @@ impl Hub {
             rules: Mutex::new(Vec::new()),
             apply_rules: AtomicBool::new(true),
             apply_breaks: AtomicBool::new(true),
+            show_tunnel_failures: AtomicBool::new(false),
             upstream: Mutex::new(None),
             pool: tokio::sync::Mutex::new(HashMap::new()),
             h2_pool: Mutex::new(HashMap::new()),
             break_slot: Mutex::new(None),
+            share: Mutex::new(None),
         })
+    }
+
+    /// Replaces any previous link. The id is unguessable and dies at `ttl`.
+    pub fn begin_share(&self, ttl: std::time::Duration, filter: &str) -> (String, std::time::SystemTime) {
+        let id = crate::share::new_id();
+        let expires = std::time::SystemTime::now() + ttl;
+        *self.share.lock().unwrap_or_else(|err| err.into_inner()) = Some(crate::share::LiveShare {
+            id: id.clone(),
+            expires,
+            filter: filter.to_string(),
+        });
+        (id, expires)
+    }
+
+    pub fn end_share(&self) {
+        *self.share.lock().unwrap_or_else(|err| err.into_inner()) = None;
+    }
+
+    /// The current id while it is still before its deadline.
+    pub fn share_id(&self) -> Option<String> {
+        let mut slot = self.share.lock().unwrap_or_else(|err| err.into_inner());
+        let Some(share) = slot.as_ref() else {
+            return None;
+        };
+        if std::time::SystemTime::now() < share.expires {
+            return Some(share.id.clone());
+        }
+        *slot = None;
+        None
+    }
+
+    fn share_document(&self, id: &str) -> Option<String> {
+        let mut slot = self.share.lock().unwrap_or_else(|err| err.into_inner());
+        let Some(share) = slot.as_ref() else {
+            return None;
+        };
+        let now = std::time::SystemTime::now();
+        if !crate::share::grant_ok(share, id, now) {
+            if share.id == id {
+                *slot = None;
+            }
+            return None;
+        }
+        let expires = share.expires;
+        let filter = share.filter.clone();
+        drop(slot);
+        let flows = self.with_session(|session| session.flows_matching(&filter));
+        Some(crate::share::document(&flows, expires, &filter))
     }
 
     pub fn set_bypass(&self, text: &str) {
@@ -132,6 +186,10 @@ impl Hub {
 
     pub fn set_breaks_enabled(&self, enabled: bool) {
         self.apply_breaks.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn set_show_tunnel_failures(&self, show: bool) {
+        self.show_tunnel_failures.store(show, Ordering::Relaxed);
     }
 
     pub fn set_upstream(&self, text: &str) {
@@ -551,6 +609,9 @@ async fn handle_conn(mut socket: TcpStream, hub: Arc<Hub>) -> Result<()> {
     match local_route(&method, &target) {
         Some(LocalRoute::Cert) => return serve_ca_cert(&mut socket, &hub, &head).await,
         Some(LocalRoute::Install) => return serve_install_page(&mut socket, &hub, &head).await,
+        Some(LocalRoute::Share(id, kind)) => {
+            return serve_share(&mut socket, &hub, &head, &id, kind).await;
+        }
         None => {}
     }
     if method.eq_ignore_ascii_case("CONNECT") {
@@ -621,13 +682,13 @@ where
             intercept(client, hello.raw, origin, &sni_host, port, selected, hub).await
         }
         Ok(Err(err)) => {
-            log::debug!("源站 TLS 失败，改隧道 {sni_host}:{port}: {err:#}");
-            record_tunnel(
-                &hub,
-                &sni_host,
-                port,
-                format!("源站 TLS 失败，已改为隧道: {err}"),
-            );
+            // The bytes still go through as a tunnel, so the site keeps
+            // working and there is no decrypted request. The row is optional.
+            let reason = origin_tls_reason(&err);
+            log::debug!("源站 TLS 失败，改隧道 {sni_host}:{port}: {reason} ({err:#})");
+            if hub.show_tunnel_failures.load(Ordering::Relaxed) {
+                record_tunnel(&hub, &sni_host, port, reason);
+            }
             tunnel_after_hello(&mut client, hello.raw, host, port, &hub).await
         }
         Err(_) => {
@@ -688,7 +749,7 @@ where
     let client_tls = match timeout(IO_TIMEOUT, acceptor.accept(rewound)).await {
         Ok(Ok(tls)) => tls,
         Ok(Err(err)) => {
-            let reason = client_tls_reason(&err);
+            let reason = client_tls_reason(&err, host);
             record_note(&hub, host, port, Protocol::Http11, reason.clone());
             return Err(anyhow!(reason));
         }
@@ -705,23 +766,105 @@ where
     }
 }
 
-fn client_tls_reason(err: &io::Error) -> String {
+fn client_tls_reason(err: &io::Error, host: &str) -> String {
+    if let Some(alert) = client_tls_alert(err) {
+        return match alert {
+            rustls::AlertDescription::UnknownCA
+            | rustls::AlertDescription::BadCertificate
+            | rustls::AlertDescription::CertificateUnknown
+            | rustls::AlertDescription::CertificateExpired
+            | rustls::AlertDescription::CertificateRevoked
+            | rustls::AlertDescription::UnsupportedCertificate => {
+                "证书被拒绝。猜测：客户端不信任 zniff CA，请安装并信任根证书。".into()
+            }
+            rustls::AlertDescription::HandshakeFailure
+            | rustls::AlertDescription::InsufficientSecurity
+            | rustls::AlertDescription::AccessDenied => pinned_guess(),
+            _ => reset_guess(host),
+        };
+    }
     match err.kind() {
         io::ErrorKind::UnexpectedEof
         | io::ErrorKind::ConnectionReset
         | io::ErrorKind::ConnectionAborted
-        | io::ErrorKind::BrokenPipe => "证书被拒绝".into(),
+        | io::ErrorKind::BrokenPipe => reset_guess(host),
         _ => {
             let text = err.to_string();
             let lower = text.to_ascii_lowercase();
-            if lower.contains("certificate") || lower.contains("alert") || lower.contains("close_notify")
+            if lower.contains("unknown_ca") || lower.contains("bad_certificate") {
+                "证书被拒绝。猜测：客户端不信任 zniff CA，请安装并信任根证书。".into()
+            } else if lower.contains("certificate")
+                || lower.contains("alert")
+                || lower.contains("close_notify")
             {
-                "证书被拒绝".into()
+                reset_guess(host)
             } else {
                 format!("客户端 TLS 失败: {text}")
             }
         }
     }
+}
+
+fn client_tls_alert(err: &io::Error) -> Option<rustls::AlertDescription> {
+    let tls = err.get_ref()?.downcast_ref::<rustls::Error>()?;
+    match tls {
+        rustls::Error::AlertReceived(alert) => Some(*alert),
+        _ => None,
+    }
+}
+
+/// Connection closed with no TLS alert. A pinned host is the usual case;
+/// otherwise the CA is the first thing to check.
+fn reset_guess(host: &str) -> String {
+    if likely_pinned(host) {
+        pinned_guess()
+    } else {
+        "证书被拒绝。猜测：先确认系统已信任 zniff CA。若已信任，就是这个客户端自带证书库或做了钉扎，把主机加入直通名单。".into()
+    }
+}
+
+fn pinned_guess() -> String {
+    "证书被拒绝。猜测：该客户端多半做了证书钉扎，不接受代理签发的证书。把主机加入直通名单。若还没安装 zniff CA，先安装。".into()
+}
+
+fn likely_pinned(host: &str) -> bool {
+    let host = host.trim().trim_matches(|ch| ch == '[' || ch == ']');
+    let host = host.split('%').next().unwrap_or(host);
+    const SUFFIXES: &[&str] = &[
+        "google.com",
+        "googleapis.com",
+        "gstatic.com",
+        "googleusercontent.com",
+        "gvt1.com",
+        "gvt2.com",
+        "youtube.com",
+        "ytimg.com",
+        "ggpht.com",
+        "apple.com",
+        "icloud.com",
+        "mzstatic.com",
+        "cdn-apple.com",
+        "microsoft.com",
+        "live.com",
+        "office.com",
+        "office365.com",
+        "windows.com",
+        "windows.net",
+        "facebook.com",
+        "fbcdn.net",
+        "instagram.com",
+        "whatsapp.net",
+        "whatsapp.com",
+    ];
+    SUFFIXES
+        .iter()
+        .any(|suffix| host.eq_ignore_ascii_case(suffix) || host_ends_with(host, suffix))
+}
+
+fn host_ends_with(host: &str, suffix: &str) -> bool {
+    host.len() > suffix.len()
+        && host.as_bytes().get(host.len() - suffix.len() - 1) == Some(&b'.')
+        && host[host.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
 }
 
 async fn serve_h1<C, O>(client: C, origin: O, host: String, port: u16, hub: Arc<Hub>) -> Result<()>
@@ -821,7 +964,7 @@ where
     let client_tls = match timeout(IO_TIMEOUT, acceptor.accept(rewound)).await {
         Ok(Ok(tls)) => tls,
         Ok(Err(err)) => {
-            let reason = client_tls_reason(&err);
+            let reason = client_tls_reason(&err, host);
             record_note(&hub, host, port, Protocol::Http2, reason.clone());
             return Err(anyhow!(reason));
         }
@@ -868,6 +1011,73 @@ fn server_name(host: &str) -> Result<ServerName<'static>> {
     } else {
         ServerName::try_from(host.to_string()).context("SNI")
     }
+}
+
+/// Short reason for a probe that never reached ServerHello. `{err}` alone is
+/// only the `context("源站 TLS")` label, so the list would repeat that label.
+fn origin_tls_reason(err: &anyhow::Error) -> String {
+    if let Some(tls) = rustls_error(err) {
+        return match tls {
+            rustls::Error::InvalidCertificate(cert) => match cert {
+                rustls::CertificateError::UnknownIssuer => {
+                    "源站证书不在内置根证书里，已改为隧道"
+                }
+                rustls::CertificateError::Expired
+                | rustls::CertificateError::ExpiredContext { .. } => {
+                    "源站证书已过期，已改为隧道"
+                }
+                rustls::CertificateError::NotValidYet
+                | rustls::CertificateError::NotValidYetContext { .. } => {
+                    "源站证书还没到生效时间，已改为隧道"
+                }
+                rustls::CertificateError::NotValidForName
+                | rustls::CertificateError::NotValidForNameContext { .. } => {
+                    "源站证书域名对不上，已改为隧道"
+                }
+                rustls::CertificateError::Revoked => "源站证书已吊销，已改为隧道",
+                _ => "源站证书无效，已改为隧道",
+            }
+            .to_string(),
+            rustls::Error::AlertReceived(alert) => {
+                format!("源站中止握手（{alert:?}），已改为隧道")
+            }
+            rustls::Error::NoApplicationProtocol => {
+                "源站不接受客户端的协议，已改为隧道".to_string()
+            }
+            rustls::Error::NoCertificatesPresented => {
+                "源站没有给出证书，已改为隧道".to_string()
+            }
+            rustls::Error::PeerIncompatible(_) => {
+                "源站 TLS 版本或算法不兼容，已改为隧道".to_string()
+            }
+            other => format!("源站 TLS 失败，已改为隧道: {other}"),
+        };
+    }
+    for cause in err.chain().rev() {
+        let text = cause.to_string();
+        if text != "源站 TLS" && !text.is_empty() {
+            return format!("源站 TLS 失败，已改为隧道: {text}");
+        }
+    }
+    "源站 TLS 失败，已改为隧道".to_string()
+}
+
+fn rustls_error(err: &anyhow::Error) -> Option<&rustls::Error> {
+    for cause in err.chain() {
+        if let Some(tls) = cause.downcast_ref::<rustls::Error>() {
+            return Some(tls);
+        }
+        let Some(io_err) = cause.downcast_ref::<io::Error>() else {
+            continue;
+        };
+        if let Some(tls) = io_err
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<rustls::Error>())
+        {
+            return Some(tls);
+        }
+    }
+    None
 }
 
 fn record_tunnel(hub: &Hub, host: &str, port: u16, reason: String) {
@@ -1014,6 +1224,15 @@ where
             }
         }
         Some(Action::BreakResponse) | None => {}
+    }
+    if let Some(next) = rules::replace_target(&path, &plan.request_replaces) {
+        path = next;
+        hub.retarget(
+            id,
+            host.clone(),
+            path.clone(),
+            format!("http://{}{path}", display_authority(&host, port, "http")),
+        );
     }
     if body_override.is_none() && !plan.request_replaces.is_empty() {
         if let Some(len) = content_length(&head.headers) {
@@ -1512,6 +1731,7 @@ fn parse_http_url(url: &str) -> Option<(&str, String, u16, String)> {
 enum LocalRoute {
     Cert,
     Install,
+    Share(String, crate::share::SharePath),
 }
 
 /// A request the proxy answers itself. Origin-form `/` is the install page.
@@ -1542,7 +1762,60 @@ fn local_route(method: &str, target: &str) -> Option<LocalRoute> {
     if path == "/zniff" || path == "/zniff/" || (origin_form && path == "/") {
         return Some(LocalRoute::Install);
     }
+    // Only a browser hitting this proxy directly. An absolute-form request
+    // for some other host must still be forwarded.
+    if origin_form {
+        if let Some((id, kind)) = crate::share::parse_share_path(path) {
+            return Some(LocalRoute::Share(id, kind));
+        }
+    }
     None
+}
+
+async fn serve_share<S>(
+    socket: &mut S,
+    hub: &Hub,
+    head: &Head,
+    id: &str,
+    kind: crate::share::SharePath,
+) -> Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
+    let zh = crate::share::prefers_zh(header_value(&head.headers, "accept-language").as_deref());
+    let Some(json) = hub.share_document(id) else {
+        let body = crate::share::expired_page(zh);
+        return write_untracked(socket, 404, "Not Found", "text/html; charset=utf-8", body.as_bytes()).await;
+    };
+    match kind {
+        crate::share::SharePath::Data => {
+            write_untracked(socket, 200, "OK", "application/json; charset=utf-8", json.as_bytes()).await
+        }
+        crate::share::SharePath::Page => {
+            let live = format!("/s/{id}/flows.json");
+            let body = crate::share::page(&json, &live, zh);
+            write_untracked(socket, 200, "OK", "text/html; charset=utf-8", body.as_bytes()).await
+        }
+    }
+}
+
+async fn write_untracked<S>(
+    socket: &mut S,
+    status: u16,
+    reason: &str,
+    content_type: &str,
+    body: &[u8],
+) -> Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
+    let head = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n",
+        body.len()
+    );
+    socket.write_all(head.as_bytes()).await?;
+    socket.write_all(body).await?;
+    Ok(())
 }
 
 const INSTALL_PAGE: &str = r#"<!DOCTYPE html>
@@ -2731,6 +3004,16 @@ async fn forward_request(
             Some(Action::BreakResponse) => break_response = true,
             None => {}
         }
+        if let Some(next) = rules::replace_target(&path, &plan.request_replaces) {
+            path = next;
+            let authority = display_authority(&host, port, &scheme);
+            hub.retarget(
+                id,
+                host.clone(),
+                path.clone(),
+                format!("{scheme}://{authority}{path}"),
+            );
+        }
         if body_override.is_none() && !plan.request_replaces.is_empty() {
             let known = parts
                 .headers
@@ -3328,6 +3611,51 @@ async fn splice_upgrades(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn client_tls_reason_guesses_pinning_or_an_untrusted_ca() {
+        let reset = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "connection reset");
+        assert!(super::client_tls_reason(&reset, "www.google.com").contains("证书钉扎"));
+        assert!(super::client_tls_reason(&reset, "api.example.com").contains("zniff CA"));
+        let alert = std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            rustls::Error::AlertReceived(rustls::AlertDescription::UnknownCA),
+        );
+        assert!(super::client_tls_reason(&alert, "api.example.com").contains("不信任 zniff CA"));
+        assert!(!super::likely_pinned("notgoogle.com"));
+        assert!(super::likely_pinned("mail.google.com"));
+    }
+
+    #[test]
+    fn origin_tls_reason_names_the_certificate_or_handshake() {
+        use anyhow::Context as _;
+        let unknown = std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer),
+        );
+        let unknown = anyhow::Error::from(unknown).context("源站 TLS");
+        assert_eq!(
+            super::origin_tls_reason(&unknown),
+            "源站证书不在内置根证书里，已改为隧道"
+        );
+
+        let alert = std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            rustls::Error::AlertReceived(rustls::AlertDescription::HandshakeFailure),
+        );
+        let alert = anyhow::Error::from(alert).context("源站 TLS");
+        assert_eq!(
+            super::origin_tls_reason(&alert),
+            "源站中止握手（HandshakeFailure），已改为隧道"
+        );
+
+        let reset = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "connection reset");
+        let reset = anyhow::Error::from(reset).context("源站 TLS");
+        assert_eq!(
+            super::origin_tls_reason(&reset),
+            "源站 TLS 失败，已改为隧道: connection reset"
+        );
+    }
+
     #[test]
     fn install_page_follows_accept_language() {
         assert!(super::install_page_for(None).contains("安装 zniff"));
@@ -4213,6 +4541,12 @@ mod tests {
         ));
         assert!(local_route("GET", "http://example.com/").is_none());
         assert!(local_route("GET", "http://example.com/index").is_none());
+        let id = "550e8400-e29b-41d4-a716-446655440000";
+        assert!(matches!(
+            local_route("GET", &format!("/s/{id}")),
+            Some(LocalRoute::Share(_, crate::share::SharePath::Page))
+        ));
+        assert!(local_route("GET", &format!("http://example.com/s/{id}")).is_none());
         assert!(matches!(
             local_route("GET", "http://127.0.0.1/zniff-ca.crt"),
             Some(LocalRoute::Cert)

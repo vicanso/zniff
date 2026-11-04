@@ -130,6 +130,108 @@ fn is_hex_cap_note(line: &str) -> bool {
     line.starts_with("十六进制只显示前 ") || line.starts_with("Hex shows the first ")
 }
 
+/// Pixel size of a PNG, JPEG, GIF, or WebP body. Unknown bytes are skipped.
+pub fn image_pixel_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    png_size(bytes)
+        .or_else(|| gif_size(bytes))
+        .or_else(|| webp_size(bytes))
+        .or_else(|| jpeg_size(bytes))
+        .filter(|&(w, h)| w > 0 && h > 0 && w <= 32_768 && h <= 32_768)
+}
+
+/// Display size. A small icon stays at its own pixels. A larger picture
+/// shrinks so neither side passes 200.
+pub fn preview_box(width: u32, height: u32) -> (u32, u32) {
+    const MAX: f32 = 200.0;
+    if width == 0 || height == 0 {
+        return (160, 160);
+    }
+    let scale = (MAX / width as f32).min(MAX / height as f32).min(1.0);
+    let w = ((width as f32) * scale).round().max(1.0) as u32;
+    let h = ((height as f32) * scale).round().max(1.0) as u32;
+    (w, h)
+}
+
+fn png_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() < 24 || !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return None;
+    }
+    Some((
+        u32::from_be_bytes(bytes[16..20].try_into().ok()?),
+        u32::from_be_bytes(bytes[20..24].try_into().ok()?),
+    ))
+}
+
+fn gif_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() < 10 || !(bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a")) {
+        return None;
+    }
+    Some((
+        u16::from_le_bytes(bytes[6..8].try_into().ok()?) as u32,
+        u16::from_le_bytes(bytes[8..10].try_into().ok()?) as u32,
+    ))
+}
+
+fn webp_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() < 30 || !bytes.starts_with(b"RIFF") || &bytes[8..12] != b"WEBP" {
+        return None;
+    }
+    match &bytes[12..16] {
+        b"VP8X" => Some((
+            1 + u32::from_le_bytes([bytes[24], bytes[25], bytes[26], 0]),
+            1 + u32::from_le_bytes([bytes[27], bytes[28], bytes[29], 0]),
+        )),
+        b"VP8 " if bytes.len() >= 30 && bytes[23..26] == [0x9d, 0x01, 0x2a] => Some((
+            u16::from_le_bytes(bytes[26..28].try_into().ok()?) as u32 & 0x3fff,
+            u16::from_le_bytes(bytes[28..30].try_into().ok()?) as u32 & 0x3fff,
+        )),
+        b"VP8L" if bytes.len() >= 25 && bytes[20] == 0x2f => {
+            let bits = u32::from_le_bytes(bytes[21..25].try_into().ok()?);
+            Some(((bits & 0x3fff) + 1, ((bits >> 14) & 0x3fff) + 1))
+        }
+        _ => None,
+    }
+}
+
+fn jpeg_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() < 4 || bytes[0] != 0xff || bytes[1] != 0xd8 {
+        return None;
+    }
+    let mut i = 2;
+    while i + 8 < bytes.len() {
+        if bytes[i] != 0xff {
+            i += 1;
+            continue;
+        }
+        while i < bytes.len() && bytes[i] == 0xff {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        let marker = bytes[i];
+        i += 1;
+        if marker == 0xd8 || marker == 0xd9 || (0xd0..=0xd7).contains(&marker) {
+            continue;
+        }
+        if i + 1 >= bytes.len() {
+            break;
+        }
+        let len = u16::from_be_bytes([bytes[i], bytes[i + 1]]) as usize;
+        if len < 2 || i + len > bytes.len() {
+            break;
+        }
+        let sof = (0xc0..=0xcf).contains(&marker) && !matches!(marker, 0xc4 | 0xc8 | 0xcc);
+        if sof && len >= 7 {
+            let height = u16::from_be_bytes([bytes[i + 3], bytes[i + 4]]) as u32;
+            let width = u16::from_be_bytes([bytes[i + 5], bytes[i + 6]]) as u32;
+            return Some((width, height));
+        }
+        i += len;
+    }
+    None
+}
+
 pub fn image_extension(content_type: &str) -> Option<&'static str> {
     let kind = content_type.to_ascii_lowercase();
     if kind.contains("png") {
@@ -1000,6 +1102,18 @@ fn local_offset_secs() -> i64 {
     })
 }
 
+/// From the request start until the full response is stored. An unfinished
+/// flow has no total yet.
+pub fn format_elapsed(started: SystemTime, finished: Option<SystemTime>) -> String {
+    let Some(finished) = finished else {
+        return "—".into();
+    };
+    match finished.duration_since(started) {
+        Ok(duration) => format_duration(duration),
+        Err(_) => "—".into(),
+    }
+}
+
 fn format_duration(duration: Duration) -> String {
     let ms = duration.as_millis();
     if ms >= 1000 {
@@ -1260,6 +1374,22 @@ mod tests {
     }
 
     #[test]
+    fn preview_keeps_a_small_icon_and_shrinks_a_large_one() {
+        let mut png = vec![0u8; 24];
+        png[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        png[16..20].copy_from_slice(&80u32.to_be_bytes());
+        png[20..24].copy_from_slice(&40u32.to_be_bytes());
+        assert_eq!(image_pixel_size(&png), Some((80, 40)));
+        assert_eq!(preview_box(80, 40), (80, 40));
+        assert_eq!(preview_box(400, 200), (200, 100));
+        assert_eq!(preview_box(100, 400), (50, 200));
+        let mut gif = b"GIF89a".to_vec();
+        gif.extend_from_slice(&16u16.to_le_bytes());
+        gif.extend_from_slice(&32u16.to_le_bytes());
+        assert_eq!(image_pixel_size(&gif), Some((16, 32)));
+    }
+
+    #[test]
     fn editor_language_follows_the_content_type() {
         assert_eq!(
             editor_language(Some("application/json; charset=utf-8"), "{\"a\":1}"),
@@ -1289,6 +1419,12 @@ mod tests {
     #[test]
     fn gap_and_clock_keep_milliseconds() {
         let start = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        assert_eq!(format_elapsed(start, None), "—");
+        assert_eq!(format_elapsed(start, Some(start + Duration::from_millis(45))), "45 ms");
+        assert_eq!(
+            format_elapsed(start, Some(start + Duration::from_millis(1_240))),
+            "1.24 s"
+        );
         assert_eq!(format_gap(None, start), "+0 ms");
         assert_eq!(format_gap(Some(start + Duration::from_secs(2)), start), "+0 ms");
         assert_eq!(format_gap(Some(start), start + Duration::from_millis(45)), "+45 ms");

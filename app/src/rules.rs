@@ -16,8 +16,10 @@
 //! replace example.com/api res hello -> hi there
 //! ```
 //!
-//! `replace` changes UTF-8 text in the body and leaves the rest of the bytes.
+//! `replace` changes UTF-8 text. `res` changes the response body. `req`
+//! changes the request target (`/path?query`) and the request body.
 //! `from` is one token. `to` may contain spaces. It is not a terminal rule.
+//! A request-target replacement that does not still start with `/` is ignored.
 //!
 //! `delay` is capped at 30s. A response break buffers at most 1 MB.
 
@@ -418,7 +420,15 @@ fn parse_line(line: &str) -> Option<Rule> {
         "replace" => {
             let side = parts.next()?;
             let rest = parts.collect::<Vec<_>>().join(" ");
-            let (from, to) = rest.split_once(" -> ")?;
+            // `from ->` with nothing after the arrow deletes that text.
+            // Whitespace around the arrow is not part of either side.
+            let (from, to) = if let Some((from, to)) = rest.split_once(" -> ") {
+                (from, to)
+            } else if let Some(from) = rest.strip_suffix(" ->") {
+                (from, "")
+            } else {
+                return None;
+            };
             if from.is_empty() {
                 return None;
             }
@@ -439,7 +449,7 @@ fn parse_line(line: &str) -> Option<Rule> {
     }
 }
 
-/// Replaces each pair in order. `None` when the body is not UTF-8, `from` is
+/// Replaces each pair in order. `None` when the text is not UTF-8, `from` is
 /// empty, or nothing changed. Callers keep the original bytes in that case.
 pub fn apply_replaces(body: &[u8], pairs: &[(String, String)]) -> Option<Vec<u8>> {
     if pairs.is_empty() {
@@ -455,6 +465,14 @@ pub fn apply_replaces(body: &[u8], pairs: &[(String, String)]) -> Option<Vec<u8>
         changed = true;
     }
     changed.then(|| text.into_bytes())
+}
+
+/// Applies `req` pairs to the request target, path and query together.
+/// `None` when nothing changes or the result would not still start with `/`.
+pub fn replace_target(path: &str, pairs: &[(String, String)]) -> Option<String> {
+    let next = apply_replaces(path.as_bytes(), pairs)?;
+    let next = String::from_utf8(next).ok()?;
+    next.starts_with('/').then_some(next)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -777,5 +795,37 @@ break example.com/api
         assert_eq!(kept.response_headers.len(), 1);
         assert_eq!(stopped, "break example.com/pay\n");
         assert!(append_break_line("", "has space", "/pay").is_none());
+    }
+
+    #[test]
+    fn req_replace_rewrites_the_path_and_query() {
+        let rules = parse_rules(
+            "replace baidu.com/finance-api/online-hall-v2/configs req ?supportCrypto=true -> ?supportCrypto=false\n",
+        );
+        let path = "/finance-api/online-hall-v2/configs?supportCrypto=true";
+        assert!(rules[0].matches("baidu.com", path));
+        let applied = effect(&rules, "baidu.com", path);
+        assert_eq!(
+            replace_target(path, &applied.request_replaces).as_deref(),
+            Some("/finance-api/online-hall-v2/configs?supportCrypto=false")
+        );
+        assert!(replace_target(path, &applied.request_replaces)
+            .unwrap()
+            .starts_with('/'));
+        let dropped = effect(
+            &parse_rules(
+                "replace baidu.com/finance-api/online-hall-v2/configs req ?supportCrypto=true -> \n",
+            ),
+            "baidu.com",
+            path,
+        );
+        assert_eq!(
+            replace_target(path, &dropped.request_replaces).as_deref(),
+            Some("/finance-api/online-hall-v2/configs")
+        );
+        assert!(replace_target("/keep", &[("/keep".into(), "away".into())]).is_none());
+        assert!(parse_rules("replace /online-hall-v2/configs req ?supportCrypto=true -> ?supportCrypto=false")[0]
+            .matches("baidu.com", path)
+            == false);
     }
 }

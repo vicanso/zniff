@@ -15,6 +15,7 @@ pub enum Glyph {
     Shield,
     Badge,
     List,
+    History,
     Prompt,
     Columns,
 }
@@ -76,6 +77,9 @@ fn draw(kind: Glyph, paint: Hsla, size: f32) -> Painter {
             .stroke_svg("M3 4.4 H13")
             .stroke_svg("M3 8 H13")
             .stroke_svg("M3 11.6 H9"),
+        Glyph::History => painter
+            .stroke_svg("M3.4 8.2 a4.8 4.8 0 1 0 2.1 -4.4")
+            .stroke_svg("M3.4 3.2 V6.4 H6.6"),
         Glyph::Columns => painter
             .stroke_svg("M2.6 3.2 H13.4 V12.8 H2.6 Z")
             .stroke_svg("M6.2 3.2 V12.8")

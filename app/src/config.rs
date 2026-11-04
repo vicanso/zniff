@@ -2,6 +2,7 @@
 //! own file: a failed write while restoring the proxy must not take the port
 //! and rules with it.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::{ErrorKind, Result};
 use std::path::{Path, PathBuf};
@@ -59,6 +60,9 @@ pub struct Config {
     pub show_path: bool,
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub show_gap: bool,
+    /// On unless the file says otherwise. Time from the request to the full response.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub show_elapsed: bool,
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub show_host: bool,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -68,6 +72,21 @@ pub struct Config {
     /// Pretty is the body default unless the file says otherwise.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub default_pretty: bool,
+    /// Origin TLS probe failures stay out of the list unless this is on.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub show_tunnel_failures: bool,
+    /// Restored into the filter box on the next launch.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub filter: String,
+    /// The last window was capturing. The next launch presses Start itself.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub capturing: bool,
+    /// Newest first. The filter menu offers these.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_filters: Vec<String>,
+    /// Dragged list-column widths, in points, keyed by `method`, `path`, and the rest.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub column_widths: HashMap<String, u32>,
 }
 
 impl Default for Config {
@@ -84,12 +103,83 @@ impl Default for Config {
             show_protocol: false,
             show_path: true,
             show_gap: true,
+            show_elapsed: true,
             show_host: true,
             show_size: false,
             list_width: default_list_width(),
             default_pretty: true,
+            show_tunnel_failures: false,
+            filter: String::new(),
+            capturing: false,
+            recent_filters: Vec::new(),
+            column_widths: HashMap::new(),
         }
     }
+}
+
+/// Default, narrowest, and widest width of one list column, in points.
+pub struct ColumnWidth {
+    pub default: u32,
+    pub min: u32,
+    pub max: u32,
+}
+
+/// `None` when `key` is not a list column.
+pub fn column_width_limit(key: &str) -> Option<ColumnWidth> {
+    Some(match key {
+        "method" => ColumnWidth {
+            default: 72,
+            min: 56,
+            max: 220,
+        },
+        "path" => ColumnWidth {
+            default: 240,
+            min: 80,
+            max: 800,
+        },
+        "status" => ColumnWidth {
+            default: 56,
+            min: 40,
+            max: 160,
+        },
+        "protocol" => ColumnWidth {
+            default: 84,
+            min: 52,
+            max: 200,
+        },
+        "gap" => ColumnWidth {
+            default: 72,
+            min: 52,
+            max: 200,
+        },
+        "elapsed" => ColumnWidth {
+            default: 76,
+            min: 52,
+            max: 200,
+        },
+        "host" => ColumnWidth {
+            default: 120,
+            min: 64,
+            max: 480,
+        },
+        "size" => ColumnWidth {
+            default: 72,
+            min: 48,
+            max: 180,
+        },
+        _ => return None,
+    })
+}
+
+/// Drops unknown keys and clamps the rest to [`column_width_limit`].
+pub fn clamp_column_widths(widths: &mut HashMap<String, u32>) {
+    widths.retain(|key, width| match column_width_limit(key) {
+        Some(limit) => {
+            *width = (*width).clamp(limit.min, limit.max);
+            true
+        }
+        None => false,
+    });
 }
 
 fn default_port() -> u16 {
@@ -216,6 +306,7 @@ fn normalize(mut config: Config) -> Config {
     }
     config.language = language_name(config.language.as_deref().and_then(parse_pref));
     config.list_width = clamp_list_width(config.list_width);
+    clamp_column_widths(&mut config.column_widths);
     config
 }
 
@@ -371,7 +462,13 @@ mod tests {
         let dir = Scratch::new();
         fs::write(dir.path().join("config.toml"), "listen_port = 8877\n").unwrap();
         let config = load(dir.path());
-        assert!(config.show_status && config.show_path && config.show_gap && config.show_host);
+        assert!(
+            config.show_status
+                && config.show_path
+                && config.show_gap
+                && config.show_elapsed
+                && config.show_host
+        );
         assert!(!config.show_protocol && !config.show_size);
         assert_eq!(config.list_width, LIST_WIDTH_DEFAULT);
         let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
@@ -410,6 +507,24 @@ mod tests {
     }
 
     #[test]
+    fn column_widths_clamp_and_drop_unknown_keys() {
+        let dir = Scratch::new();
+        update(dir.path(), |config| {
+            config.column_widths.insert("path".into(), 9_999);
+            config.column_widths.insert("method".into(), 1);
+            config.column_widths.insert("nope".into(), 80);
+        })
+        .unwrap();
+        let config = load(dir.path());
+        assert_eq!(config.column_widths.get("path").copied(), Some(800));
+        assert_eq!(config.column_widths.get("method").copied(), Some(56));
+        assert!(!config.column_widths.contains_key("nope"));
+        let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(text.contains("path = 800"), "{text}");
+        assert!(!text.contains("nope"), "{text}");
+    }
+
+    #[test]
     fn default_pretty_stays_on_unless_the_file_turns_it_off() {
         let dir = Scratch::new();
         fs::write(dir.path().join("config.toml"), "listen_port = 8877\n").unwrap();
@@ -421,5 +536,58 @@ mod tests {
         update(dir.path(), |config| config.default_pretty = true).unwrap();
         let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
         assert!(!text.contains("default_pretty"), "{text}");
+    }
+
+    #[test]
+    fn tunnel_failures_stay_hidden_unless_the_file_shows_them() {
+        let dir = Scratch::new();
+        fs::write(dir.path().join("config.toml"), "listen_port = 8877\n").unwrap();
+        assert!(!load(dir.path()).show_tunnel_failures);
+        update(dir.path(), |config| config.show_tunnel_failures = true).unwrap();
+        let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(text.contains("show_tunnel_failures = true"), "{text}");
+        assert!(load(dir.path()).show_tunnel_failures);
+        update(dir.path(), |config| config.show_tunnel_failures = false).unwrap();
+        let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(!text.contains("show_tunnel_failures"), "{text}");
+    }
+
+    #[test]
+    fn filter_text_is_kept_and_absent_until_set() {
+        let dir = Scratch::new();
+        fs::write(dir.path().join("config.toml"), "listen_port = 8877\n").unwrap();
+        let config = load(dir.path());
+        assert!(config.filter.is_empty());
+        assert!(config.recent_filters.is_empty());
+        update(dir.path(), |config| {
+            config.filter = "api.test".into();
+            config.recent_filters = vec!["api.test".into(), "pin:".into()];
+        })
+        .unwrap();
+        let loaded = load(dir.path());
+        assert_eq!(loaded.filter, "api.test");
+        assert_eq!(loaded.recent_filters, vec!["api.test".to_string(), "pin:".to_string()]);
+        update(dir.path(), |config| {
+            config.filter.clear();
+            config.recent_filters.clear();
+        })
+        .unwrap();
+        let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(!text.contains("filter"), "{text}");
+        assert!(!text.contains("recent_filters"), "{text}");
+    }
+
+    #[test]
+    fn capturing_stays_off_unless_the_file_says_so() {
+        let dir = Scratch::new();
+        fs::write(dir.path().join("config.toml"), "listen_port = 8877\n").unwrap();
+        assert!(!load(dir.path()).capturing);
+        update(dir.path(), |config| config.capturing = true).unwrap();
+        let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(text.contains("capturing = true"), "{text}");
+        assert!(load(dir.path()).capturing);
+        update(dir.path(), |config| config.capturing = false).unwrap();
+        let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(!text.contains("capturing"), "{text}");
     }
 }
