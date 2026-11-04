@@ -10,7 +10,7 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
-use crate::i18n::{parse_pref, Lang};
+use crate::i18n::{Lang, parse_pref};
 use crate::present::DEFAULT_PORT;
 
 const FILE_NAME: &str = "config.toml";
@@ -74,7 +74,10 @@ pub struct Config {
     pub show_host: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub show_size: bool,
-    #[serde(default = "default_list_width", skip_serializing_if = "is_default_list_width")]
+    #[serde(
+        default = "default_list_width",
+        skip_serializing_if = "is_default_list_width"
+    )]
     pub list_width: u32,
     /// Pretty is the body default unless the file says otherwise.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
@@ -227,7 +230,7 @@ fn lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 enum Read {
-    Ready(Config),
+    Ready(Box<Config>),
     Missing,
     Broken(std::io::Error),
 }
@@ -237,7 +240,7 @@ enum Read {
 pub fn load(dir: &Path) -> Config {
     let _guard = lock();
     match read_config(dir) {
-        Read::Ready(config) => config,
+        Read::Ready(config) => *config,
         Read::Broken(_) => Config::default(),
         Read::Missing => {
             let config = migrate_legacy(dir);
@@ -254,7 +257,7 @@ pub fn load(dir: &Path) -> Config {
 pub fn update(dir: &Path, change: impl FnOnce(&mut Config)) -> Result<()> {
     let _guard = lock();
     let mut config = match read_config(dir) {
-        Read::Ready(config) => config,
+        Read::Ready(config) => *config,
         Read::Missing => migrate_legacy(dir),
         Read::Broken(err) => return Err(err),
     };
@@ -269,7 +272,7 @@ fn read_config(dir: &Path) -> Read {
     let path = dir.join(FILE_NAME);
     match fs::read_to_string(&path) {
         Ok(text) => match toml::from_str::<Config>(&text) {
-            Ok(config) => Read::Ready(normalize(config)),
+            Ok(config) => Read::Ready(Box::new(normalize(config))),
             Err(err) => Read::Broken(std::io::Error::new(ErrorKind::InvalidData, err)),
         },
         Err(err) if err.kind() == ErrorKind::NotFound => Read::Missing,
@@ -279,10 +282,10 @@ fn read_config(dir: &Path) -> Read {
 
 fn migrate_legacy(dir: &Path) -> Config {
     let mut config = Config::default();
-    if let Some(text) = read_legacy(dir, "listen-port") {
-        if let Some(port) = crate::present::parse_port(&text) {
-            config.listen_port = port;
-        }
+    if let Some(text) = read_legacy(dir, "listen-port")
+        && let Some(port) = crate::present::parse_port(&text)
+    {
+        config.listen_port = port;
     }
     if let Some(text) = read_legacy(dir, "listen-all") {
         config.listen_all = text.trim() == "1";
@@ -387,10 +390,10 @@ fn store_unlocked(dir: &Path, config: &Config) -> Result<()> {
 }
 
 fn write_atomic(path: &Path, text: &str) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
     }
     let tmp = temp_path(path);
     fs::write(&tmp, text)?;
@@ -440,8 +443,13 @@ mod tests {
 
     #[test]
     fn system_proxy_is_on_only_for_the_old_one_file() {
-        for (text, on) in [("", false), ("0\n", false), ("true", false), ("1", true), ("1\n", true)]
-        {
+        for (text, on) in [
+            ("", false),
+            ("0\n", false),
+            ("true", false),
+            ("1", true),
+            ("1\n", true),
+        ] {
             let dir = Scratch::new();
             fs::write(dir.path().join("use-system-proxy"), text).unwrap();
             assert_eq!(load(dir.path()).use_system_proxy, on, "{text:?}");
@@ -485,7 +493,10 @@ mod tests {
             config.rules = "map-local / \"quoted\"\n# keep\n".to_string();
         })
         .unwrap();
-        update(dir.path(), |config| config.language = Some("en".to_string())).unwrap();
+        update(dir.path(), |config| {
+            config.language = Some("en".to_string())
+        })
+        .unwrap();
         update(dir.path(), |config| config.language = None).unwrap();
 
         let config = load(dir.path());
@@ -514,7 +525,10 @@ mod tests {
         assert_eq!(load(dir.path()).listen_port, DEFAULT_PORT);
         let err = update(dir.path(), |config| config.listen_port = 9).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::InvalidData);
-        assert_eq!(fs::read_to_string(dir.path().join("config.toml")).unwrap(), broken);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("config.toml")).unwrap(),
+            broken
+        );
     }
 
     #[test]
@@ -551,7 +565,10 @@ mod tests {
         assert!(text.contains("show_host = false"), "{text}");
         assert!(!text.contains("show_status"), "{text}");
         assert!(!text.contains("show_size"), "{text}");
-        assert!(text.contains(&format!("list_width = {LIST_WIDTH_MAX}")), "{text}");
+        assert!(
+            text.contains(&format!("list_width = {LIST_WIDTH_MAX}")),
+            "{text}"
+        );
 
         fs::write(
             dir.path().join("config.toml"),
@@ -626,7 +643,10 @@ mod tests {
         .unwrap();
         let loaded = load(dir.path());
         assert_eq!(loaded.filter, "api.test");
-        assert_eq!(loaded.recent_filters, vec!["api.test".to_string(), "pin:".to_string()]);
+        assert_eq!(
+            loaded.recent_filters,
+            vec!["api.test".to_string(), "pin:".to_string()]
+        );
         update(dir.path(), |config| {
             config.filter.clear();
             config.recent_filters.clear();

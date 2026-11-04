@@ -3,7 +3,7 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::i18n::{t, Lang};
+use crate::i18n::{Lang, t};
 use crate::session::Flow;
 
 pub const DEFAULT_PORT: u16 = 8877;
@@ -26,11 +26,11 @@ pub fn curl_command(flow: &Flow) -> String {
         command.push_str(" -H ");
         command.push_str(&shell_quote(&format!("{name}: {value}")));
     }
-    if !flow.request_body.is_empty() {
-        if let Ok(text) = std::str::from_utf8(&flow.request_body) {
-            command.push_str(" --data-binary ");
-            command.push_str(&shell_quote(text));
-        }
+    if !flow.request_body.is_empty()
+        && let Ok(text) = std::str::from_utf8(&flow.request_body)
+    {
+        command.push_str(" --data-binary ");
+        command.push_str(&shell_quote(text));
     }
     command
 }
@@ -59,14 +59,14 @@ pub fn query_pairs(url: &str) -> Vec<(String, String)> {
 
 pub fn pretty_body(content_type: Option<&str>, body: &str) -> String {
     let kind = content_type.unwrap_or("").to_ascii_lowercase();
-    if kind.contains("json") || looks_like_json(body) {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(body) {
-            if let Ok(pretty) = serde_json::to_string_pretty(&value) {
-                return pretty;
-            }
-        }
+    if (kind.contains("json") || looks_like_json(body))
+        && let Ok(value) = serde_json::from_str::<serde_json::Value>(body)
+        && let Ok(pretty) = serde_json::to_string_pretty(&value)
+    {
+        return pretty;
     }
-    if kind.contains("x-www-form-urlencoded") || (!kind.contains('/') && body.contains('=') && body.contains('&'))
+    if kind.contains("x-www-form-urlencoded")
+        || (!kind.contains('/') && body.contains('=') && body.contains('&'))
     {
         return pretty_form(body);
     }
@@ -76,7 +76,7 @@ pub fn pretty_body(content_type: Option<&str>, body: &str) -> String {
     body.to_string()
 }
 
-pub fn content_type<'a>(headers: &'a [(String, String)]) -> Option<&'a str> {
+pub fn content_type(headers: &[(String, String)]) -> Option<&str> {
     headers
         .iter()
         .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
@@ -364,10 +364,10 @@ pub fn fetch_snippet(flow: &Flow) -> String {
         }
         lines.push("  },".into());
     }
-    if let Ok(text) = std::str::from_utf8(&flow.request_body) {
-        if !text.is_empty() {
-            lines.push(format!("  body: {},", js_string(text)));
-        }
+    if let Ok(text) = std::str::from_utf8(&flow.request_body)
+        && !text.is_empty()
+    {
+        lines.push(format!("  body: {},", js_string(text)));
     }
     lines.push("});".into());
     lines.join("\n")
@@ -384,14 +384,18 @@ pub fn python_requests(flow: &Flow) -> String {
     if !headers.is_empty() {
         lines.push("    headers={".into());
         for (name, value) in &headers {
-            lines.push(format!("        {}: {},", py_string(name), py_string(value)));
+            lines.push(format!(
+                "        {}: {},",
+                py_string(name),
+                py_string(value)
+            ));
         }
         lines.push("    },".into());
     }
-    if let Ok(text) = std::str::from_utf8(&flow.request_body) {
-        if !text.is_empty() {
-            lines.push(format!("    data={},", py_string(text)));
-        }
+    if let Ok(text) = std::str::from_utf8(&flow.request_body)
+        && !text.is_empty()
+    {
+        lines.push(format!("    data={},", py_string(text)));
     }
     lines.push(")".into());
     lines.join("\n")
@@ -483,7 +487,11 @@ pub fn parse_curl(text: &str) -> Option<CurlRequest> {
         return None;
     }
     if method.is_empty() {
-        method = if saw_body { "POST".into() } else { "GET".into() };
+        method = if saw_body {
+            "POST".into()
+        } else {
+            "GET".into()
+        };
     }
     Some(CurlRequest {
         method,
@@ -516,7 +524,11 @@ pub fn cookie_pairs(value: &str) -> Vec<(String, String)> {
 
 /// Case-insensitive `a–z`. Equal names keep their original order and case.
 pub fn sort_headers_pretty(headers: &mut [(String, String)]) {
-    headers.sort_by(|left, right| left.0.to_ascii_lowercase().cmp(&right.0.to_ascii_lowercase()));
+    headers.sort_by(|left, right| {
+        left.0
+            .to_ascii_lowercase()
+            .cmp(&right.0.to_ascii_lowercase())
+    });
 }
 
 /// Pretty rows for one `Cookie` or `Set-Cookie` header. Other headers return `None`.
@@ -735,7 +747,10 @@ fn js_string(text: &str) -> String {
 }
 
 fn py_string(text: &str) -> String {
-    format!("'''{}'''", text.replace('\\', "\\\\").replace("'''", "\\'\\'\\'"))
+    format!(
+        "'''{}'''",
+        text.replace('\\', "\\\\").replace("'''", "\\'\\'\\'")
+    )
 }
 
 #[derive(Default)]
@@ -801,11 +816,7 @@ fn pascal(key: &str) -> String {
             upper = true;
         }
     }
-    if out.is_empty() {
-        "Value".into()
-    } else {
-        out
-    }
+    if out.is_empty() { "Value".into() } else { out }
 }
 
 fn ts_key(key: &str) -> String {
@@ -942,7 +953,7 @@ fn timestamp_hint(value: &str) -> Option<String> {
 }
 
 fn base64_hint(value: &str) -> Option<String> {
-    if value.len() < 16 || value.len() % 4 != 0 || value.contains('.') {
+    if value.len() < 16 || !value.len().is_multiple_of(4) || value.contains('.') {
         return None;
     }
     if !value
@@ -953,7 +964,11 @@ fn base64_hint(value: &str) -> Option<String> {
     }
     let bytes = base64_decode(value)?;
     let text = String::from_utf8(bytes).ok()?;
-    if text.len() < 8 || text.chars().any(|ch| ch.is_control() && ch != '\n' && ch != '\t') {
+    if text.len() < 8
+        || text
+            .chars()
+            .any(|ch| ch.is_control() && ch != '\n' && ch != '\t')
+    {
         return None;
     }
     Some(format!("base64 {text}"))
@@ -961,7 +976,7 @@ fn base64_hint(value: &str) -> Option<String> {
 
 fn base64url_decode(text: &str) -> Option<Vec<u8>> {
     let mut standard = text.replace('-', "+").replace('_', "/");
-    while standard.len() % 4 != 0 {
+    while !standard.len().is_multiple_of(4) {
         standard.push('=');
     }
     base64_decode(&standard)
@@ -1189,7 +1204,11 @@ fn pretty_markup(body: &str) -> String {
             depth += 1;
         }
     }
-    if out.is_empty() { body.to_string() } else { out }
+    if out.is_empty() {
+        body.to_string()
+    } else {
+        out
+    }
 }
 
 fn percent_decode(text: &str) -> String {
@@ -1218,7 +1237,8 @@ fn percent_decode(text: &str) -> String {
             }
         }
     }
-    String::from_utf8(out).unwrap_or_else(|err| String::from_utf8_lossy(err.as_bytes()).into_owned())
+    String::from_utf8(out)
+        .unwrap_or_else(|err| String::from_utf8_lossy(err.as_bytes()).into_owned())
 }
 
 #[cfg(test)]
@@ -1297,7 +1317,10 @@ mod tests {
         ];
         sort_headers_pretty(&mut headers);
         assert_eq!(
-            headers.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(),
+            headers
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
             vec!["accept", "Accept", "Content-Type", "X-Trace"]
         );
         assert_eq!(headers[0].1, "a");
@@ -1395,10 +1418,7 @@ mod tests {
             editor_language(Some("application/json; charset=utf-8"), "{\"a\":1}"),
             Some("json")
         );
-        assert_eq!(
-            editor_language(Some("text/html"), "<p>"),
-            Some("html")
-        );
+        assert_eq!(editor_language(Some("text/html"), "<p>"), Some("html"));
         assert_eq!(editor_language(Some("text/xml"), "<a/>"), Some("xml"));
         let long = "a\n".repeat(50);
         assert_eq!(
@@ -1420,14 +1440,23 @@ mod tests {
     fn gap_and_clock_keep_milliseconds() {
         let start = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         assert_eq!(format_elapsed(start, None), "—");
-        assert_eq!(format_elapsed(start, Some(start + Duration::from_millis(45))), "45 ms");
+        assert_eq!(
+            format_elapsed(start, Some(start + Duration::from_millis(45))),
+            "45 ms"
+        );
         assert_eq!(
             format_elapsed(start, Some(start + Duration::from_millis(1_240))),
             "1.24 s"
         );
         assert_eq!(format_gap(None, start), "+0 ms");
-        assert_eq!(format_gap(Some(start + Duration::from_secs(2)), start), "+0 ms");
-        assert_eq!(format_gap(Some(start), start + Duration::from_millis(45)), "+45 ms");
+        assert_eq!(
+            format_gap(Some(start + Duration::from_secs(2)), start),
+            "+0 ms"
+        );
+        assert_eq!(
+            format_gap(Some(start), start + Duration::from_millis(45)),
+            "+45 ms"
+        );
         assert_eq!(
             format_gap(Some(start), start + Duration::from_millis(1_240)),
             "+1.24 s"
@@ -1488,7 +1517,8 @@ mod tests {
         assert!(ts.contains("tags: string[];"));
         let payload = base64url_encode(br#"{"sub":"a","exp":1700000000}"#);
         let header = base64url_encode(br#"{"alg":"none"}"#);
-        let hint = annotate_value("Authorization", &format!("Bearer {header}.{payload}.x")).unwrap();
+        let hint =
+            annotate_value("Authorization", &format!("Bearer {header}.{payload}.x")).unwrap();
         assert!(hint.contains("\"sub\": \"a\""));
         assert!(hint.contains("2023-11-14 22:13:20 UTC"));
         let stamp = annotate_value("X-Time", "1700000000").unwrap();
@@ -1497,12 +1527,21 @@ mod tests {
         let decoded = annotate_value("X-Data", &encoded).unwrap();
         assert!(decoded.contains("hello-zniff"));
         let diff = line_diff("a\nb\nc", "a\nc\nd");
-        assert!(diff.iter().any(|line| line.kind == DiffKind::Remove && line.text == "b"));
-        assert!(diff.iter().any(|line| line.kind == DiffKind::Add && line.text == "d"));
+        assert!(
+            diff.iter()
+                .any(|line| line.kind == DiffKind::Remove && line.text == "b")
+        );
+        assert!(
+            diff.iter()
+                .any(|line| line.kind == DiffKind::Add && line.text == "d")
+        );
     }
 
     fn base64url_encode(bytes: &[u8]) -> String {
-        base64_encode(bytes).replace('+', "-").replace('/', "_").replace('=', "")
+        base64_encode(bytes)
+            .replace('+', "-")
+            .replace('/', "_")
+            .replace('=', "")
     }
 
     fn base64_encode(bytes: &[u8]) -> String {
@@ -1510,7 +1549,9 @@ mod tests {
         let mut out = String::new();
         let mut index = 0;
         while index + 3 <= bytes.len() {
-            let n = ((bytes[index] as u32) << 16) | ((bytes[index + 1] as u32) << 8) | bytes[index + 2] as u32;
+            let n = ((bytes[index] as u32) << 16)
+                | ((bytes[index + 1] as u32) << 8)
+                | bytes[index + 2] as u32;
             out.push(TABLE[((n >> 18) & 63) as usize] as char);
             out.push(TABLE[((n >> 12) & 63) as usize] as char);
             out.push(TABLE[((n >> 6) & 63) as usize] as char);

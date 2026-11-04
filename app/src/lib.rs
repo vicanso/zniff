@@ -1,6 +1,8 @@
 //! zniff: a desktop HTTP(S) capture app. The window is an nsh Rust view.
 //! The proxy runs on its own tokio runtime in this process.
 
+#![allow(clippy::too_many_arguments)]
+
 mod bypass;
 mod ca;
 mod client_hello;
@@ -26,19 +28,18 @@ use std::time::{Duration, SystemTime};
 use nsh_base::{
     DataTable, DataTableApi, DataTableCell, DataTableClasses, DataTableColumn,
     DataTableContextMenu, DataTableEvent, DataTableHeaderCell, DataTablePress, DataTableRange,
-    DataTableRows, DataTableSelection, DiffLayout, data_table, diff_view, editor,
-    input, menu,
+    DataTableRows, DataTableSelection, DiffLayout, data_table, diff_view, editor, input, menu,
     menu_item, popover, theme, tooltip,
 };
-use nsh_core::prelude::*;
 use nsh_core::EllipsizeMode;
+use nsh_core::prelude::*;
 
 use crate::ca::Ca;
 use crate::i18n::{
-    direction_name, lang_from_tag, localize_error, parse_pref, t, ws_kind, Lang, PrefName, Side,
-    StatusMsg,
+    Lang, PrefName, Side, StatusMsg, direction_name, lang_from_tag, localize_error, parse_pref, t,
+    ws_kind,
 };
-use crate::icon::{glyph, glyph_px, Glyph};
+use crate::icon::{Glyph, glyph, glyph_px};
 use crate::proxy::{BreakDecision, BreakSide, Capture, Hub, ReplayOverride};
 use crate::session::Direction;
 
@@ -359,10 +360,7 @@ impl ListColumns {
 /// Path, when shown, is the next fixed column. The rest scroll under them.
 /// Widths are the last saved drag, not a live value: the table keeps a drag
 /// until this list changes, and a changed width here would fight the drag.
-fn flow_table_columns(
-    shown: ListColumns,
-    widths: &HashMap<String, u32>,
-) -> Vec<DataTableColumn> {
+fn flow_table_columns(shown: ListColumns, widths: &HashMap<String, u32>) -> Vec<DataTableColumn> {
     let specs = [
         ("method", true, true),
         ("path", true, shown.path),
@@ -426,7 +424,8 @@ fn flow_table_classes() -> DataTableClasses {
     // The table draws a 1px rule after the pinned columns. Painting it made
     // a line only beside the first scrolling column. The drag target stays
     // and shows on hover.
-    classes.resize_handle = Some("bg-transparent hover:bg-[#2563eb] dark:hover:bg-[#3b82f6]".into());
+    classes.resize_handle =
+        Some("bg-transparent hover:bg-[#2563eb] dark:hover:bg-[#3b82f6]".into());
     classes
 }
 
@@ -602,7 +601,12 @@ pub fn App() -> impl IntoElement {
             share_id_tick.set(share_now);
         }
         status.set(lock_status(&controls_tick));
-        running.set(*controls_tick.running.lock().unwrap_or_else(|err| err.into_inner()));
+        running.set(
+            *controls_tick
+                .running
+                .lock()
+                .unwrap_or_else(|err| err.into_inner()),
+        );
         let listen_now = lock_string(&controls_tick.listen);
         listen.set(listen_now.clone());
         ca_installed.set(lock_bool(&controls_tick.ca_installed));
@@ -624,9 +628,10 @@ pub fn App() -> impl IntoElement {
         if filter_now != filter_pending.get() {
             filter_pending.replace(filter_now.clone());
             filter_since.replace(Some(SystemTime::now()));
-        } else if filter_since.get().is_some_and(|at| {
-            at.elapsed().unwrap_or_default() >= Duration::from_millis(500)
-        }) {
+        } else if filter_since
+            .get()
+            .is_some_and(|at| at.elapsed().unwrap_or_default() >= Duration::from_millis(500))
+        {
             remember_filter(&filter_now, recent_tick);
             filter_since.replace(None);
         }
@@ -651,7 +656,9 @@ pub fn App() -> impl IntoElement {
             total_tick.set(controls_tick.hub.with_session(|session| session.len()));
             rows_tick.set(lines);
             memory.set(format_bytes(
-                controls_tick.hub.with_session(|session| session.memory_bytes()),
+                controls_tick
+                    .hub
+                    .with_session(|session| session.memory_bytes()),
             ));
             dropped.set(controls_tick.hub.with_session(|session| session.dropped()));
             publish_detail(
@@ -741,7 +748,12 @@ pub fn App() -> impl IntoElement {
             move || remove_ca(controls_remove.clone()),
             move || toggle_system_proxy(controls_proxy.clone()),
             move || {
-                clear_captured(&controls_clear, selected_clear, baseline_clear, compose_clear);
+                clear_captured(
+                    &controls_clear,
+                    selected_clear,
+                    baseline_clear,
+                    compose_clear,
+                );
             },
             move || export_har_file(&controls_export, &filter.get()),
             move || copy_proxy_env(&controls_env),
@@ -762,9 +774,7 @@ pub fn App() -> impl IntoElement {
         ))
         .child(when(
             move || paused.get().is_some(),
-            move || {
-                break_bar(paused, compose, selected, controls_break.clone())
-            },
+            move || break_bar(paused, compose, selected, controls_break.clone()),
         ))
         .child(
             view()
@@ -795,17 +805,8 @@ pub fn App() -> impl IntoElement {
                 )),
         )
         .child(footer(
-            listen,
-            running,
-            memory,
-            dropped,
-            port_text,
-            lan_url,
-            lan_choice,
-            lan_addrs,
-            qr_path,
-            listen_all,
-            controls,
+            listen, running, memory, dropped, port_text, lan_url, lan_choice, lan_addrs, qr_path,
+            listen_all, controls,
         ))
 }
 
@@ -1058,23 +1059,21 @@ fn saved_filter_menu(
                             || capture_muted(rules_on, breaks_on)
                     },
                     move || {
-                        view()
-                            .w(px(6.0))
-                            .h(px(6.0))
-                            .rounded(px(99.0))
-                            .bg(move || {
-                                if capture_muted(rules_on, breaks_on) {
-                                    status_warn_fg()
-                                } else if !filter.get().trim().is_empty() {
-                                    accent_blue()
-                                } else {
-                                    status_ok_fg()
-                                }
-                            })
+                        view().w(px(6.0)).h(px(6.0)).rounded(px(99.0)).bg(move || {
+                            if capture_muted(rules_on, breaks_on) {
+                                status_warn_fg()
+                            } else if !filter.get().trim().is_empty() {
+                                accent_blue()
+                            } else {
+                                status_ok_fg()
+                            }
+                        })
                     },
                 ))
-                .child(
-                    glyph_px(13.5, || Glyph::Sliders, move || {
+                .child(glyph_px(
+                    13.5,
+                    || Glyph::Sliders,
+                    move || {
                         color(if capture_muted(rules_on, breaks_on) {
                             status_warn_fg()
                         } else if !filter.get().trim().is_empty()
@@ -1084,8 +1083,8 @@ fn saved_filter_menu(
                         } else {
                             fg_secondary()
                         })
-                    }),
-                )
+                    },
+                ))
                 .child(control_text(tr("过滤", "Filters")).text_color(move || {
                     if capture_muted(rules_on, breaks_on) {
                         status_warn_fg()
@@ -1413,12 +1412,12 @@ fn saved_filter_panel(
                             saved,
                             |item| item.clone(),
                             move |item, _| {
-                                let apply = item.clone();
-                                let remove = item.clone();
-                                let mark = item.clone();
-                                let display_name = item.clone();
-                                let display_expr = item.clone();
-                                let has_name = item.clone();
+                                let apply = item;
+                                let remove = item;
+                                let mark = item;
+                                let display_name = item;
+                                let display_expr = item;
+                                let has_name = item;
                                 let filter_apply = filter;
                                 let filter_mark = filter;
                                 let saved_remove = saved;
@@ -1461,7 +1460,7 @@ fn saved_filter_panel(
                                                         .with(|text| !split_saved_filter(text).0.is_empty())
                                                 },
                                                 move || {
-                                                    let name_sig = display_name.clone();
+                                                    let name_sig = display_name;
                                                     view()
                                                         .h(px(18.0))
                                                         .px_1p5()
@@ -1573,9 +1572,9 @@ fn saved_filter_panel(
                                         recent,
                                         |item| item.clone(),
                                         move |item, _| {
-                                            let apply = item.clone();
-                                            let mark = item.clone();
-                                            let remove = item.clone();
+                                            let apply = item;
+                                            let mark = item;
+                                            let remove = item;
                                             let recent_remove = recent;
                                             view()
                                                 .h(px(24.0))
@@ -1850,8 +1849,8 @@ fn saved_filter_panel(
                                                 &draft_host.get(),
                                                 &draft_path.get(),
                                             );
-                                            if !combined.is_empty() {
-                                                if let Some(next) = crate::rules::append_quick_rule(
+                                            if !combined.is_empty()
+                                                && let Some(next) = crate::rules::append_quick_rule(
                                                     &rules_text.get(),
                                                     quick_kind(draft_kind.get()),
                                                     &combined,
@@ -1868,7 +1867,6 @@ fn saved_filter_panel(
                                                     draft_from.set(String::new());
                                                     draft_to.set(String::new());
                                                 }
-                                            }
                                             let current = rules_text.get();
                                             if !current.trim().is_empty() {
                                                 store_saved_rule(
@@ -1941,11 +1939,11 @@ fn saved_filter_panel(
                                     saved_rules,
                                     |item| format!("{}\t{}", item.name, item.rules),
                                     move |item, _| {
-                                        let apply = item.clone();
-                                        let remove = item.clone();
-                                        let mark = item.clone();
-                                        let display_name = item.clone();
-                                        let display_rules = item.clone();
+                                        let apply = item;
+                                        let remove = item;
+                                        let mark = item;
+                                        let display_name = item;
+                                        let display_rules = item;
                                         let preset_controls = rules_preset_controls.clone();
                                         view()
                                             .h(px(28.0))
@@ -2273,7 +2271,13 @@ fn column_splitter(width: Signal<f32>, controls: Arc<Controls>) -> impl IntoElem
             view()
                 .w(move || if hot.get() { px(3.0) } else { px(1.0) })
                 .h_full()
-                .bg(move || if hot.get() { accent_blue() } else { border_strong() }),
+                .bg(move || {
+                    if hot.get() {
+                        accent_blue()
+                    } else {
+                        border_strong()
+                    }
+                }),
         )
 }
 
@@ -2333,19 +2337,17 @@ fn flow_list(
                         .flex_row()
                         .items_center()
                         .gap_1()
-                        .child(
-                            view().flex_1().min_w(px(0.0)).child(focused_input(
-                                filter,
-                                tr(
-                                    "主机、路径，或点击顶栏「过滤」配置规则",
-                                    "Host, path, or click Filters in toolbar",
-                                ),
-                                30.0,
-                                false,
-                                move |text| filter.set(text.to_string()),
-                                Some(filter_focus),
-                            )),
-                        )
+                        .child(view().flex_1().min_w(px(0.0)).child(focused_input(
+                            filter,
+                            tr(
+                                "主机、路径，或点击顶栏「过滤」配置规则",
+                                "Host, path, or click Filters in toolbar",
+                            ),
+                            30.0,
+                            false,
+                            move |text| filter.set(text.to_string()),
+                            Some(filter_focus),
+                        )))
                         .child(when(
                             move || !filter.get().is_empty(),
                             move || {
@@ -2477,19 +2479,13 @@ fn filter_chip(
         })
         .cursor(Cursor::Pointer)
         .on_press(move || filter.set(toggle_filter_chip(&filter.get(), token, aliases)))
-        .child(
-            view()
-                .w(px(5.0))
-                .h(px(5.0))
-                .rounded(px(99.0))
-                .bg(move || {
-                    if filter_has_token(&filter.get(), aliases) {
-                        accent_blue()
-                    } else {
-                        fg_muted()
-                    }
-                }),
-        )
+        .child(view().w(px(5.0)).h(px(5.0)).rounded(px(99.0)).bg(move || {
+            if filter_has_token(&filter.get(), aliases) {
+                accent_blue()
+            } else {
+                fg_muted()
+            }
+        }))
         .child(
             text(tr(zh, en))
                 .number_of_lines(1)
@@ -2538,7 +2534,10 @@ fn split_ui_or_items(text: &str) -> Vec<String> {
         .map(str::trim)
         .filter(|item| !item.is_empty())
     {
-        if !out.iter().any(|existing: &String| existing.eq_ignore_ascii_case(item)) {
+        if !out
+            .iter()
+            .any(|existing: &String| existing.eq_ignore_ascii_case(item))
+        {
             out.push(item.to_string());
         }
     }
@@ -2555,7 +2554,10 @@ fn extract_host_or(filter: &str) -> String {
             .or_else(|| lower.strip_prefix("domain:"))
         {
             for part in split_ui_or_items(rest) {
-                if !items.iter().any(|existing: &String| existing.eq_ignore_ascii_case(&part)) {
+                if !items
+                    .iter()
+                    .any(|existing: &String| existing.eq_ignore_ascii_case(&part))
+                {
                     items.push(part);
                 }
             }
@@ -2593,7 +2595,10 @@ fn extract_path_or(filter: &str) -> String {
         let lower = token.to_ascii_lowercase();
         if let Some(rest) = lower.strip_prefix("path:") {
             for part in split_ui_or_items(rest) {
-                if !items.iter().any(|existing: &String| existing.eq_ignore_ascii_case(&part)) {
+                if !items
+                    .iter()
+                    .any(|existing: &String| existing.eq_ignore_ascii_case(&part))
+                {
                     items.push(part);
                 }
             }
@@ -2636,7 +2641,10 @@ fn extract_exclude_or(filter: &str) -> String {
         });
         if let Some(rest) = rest {
             for part in split_ui_or_items(rest) {
-                if !items.iter().any(|existing: &String| existing.eq_ignore_ascii_case(&part)) {
+                if !items
+                    .iter()
+                    .any(|existing: &String| existing.eq_ignore_ascii_case(&part))
+                {
                     items.push(part);
                 }
             }
@@ -2787,7 +2795,13 @@ fn enable_switch(
             text(tr(zh, en))
                 .number_of_lines(1)
                 .text_size(px(12.0))
-                .text_color(move || if on.get() { accent_blue_text() } else { fg_secondary() }),
+                .text_color(move || {
+                    if on.get() {
+                        accent_blue_text()
+                    } else {
+                        fg_secondary()
+                    }
+                }),
         )
 }
 
@@ -2991,12 +3005,8 @@ fn replace_row(
                                     "Delay duration: 2000ms or 2s",
                                 )
                                 .to_string(),
-                                6 => t(
-                                    lang,
-                                    "Header 名称: X-Debug",
-                                    "Header name: X-Debug",
-                                )
-                                .to_string(),
+                                6 => t(lang, "Header 名称: X-Debug", "Header name: X-Debug")
+                                    .to_string(),
                                 _ => t(lang, "查找原文 (from)", "Find text (from)").to_string(),
                             }
                         };
@@ -3015,7 +3025,8 @@ fn replace_row(
                         let placeholder = move || {
                             let lang = ui_lang(ui_langs());
                             if kind.get() == 6 {
-                                t(lang, "Header 值 (留空删除)", "Value (empty to delete)").to_string()
+                                t(lang, "Header 值 (留空删除)", "Value (empty to delete)")
+                                    .to_string()
                             } else {
                                 t(lang, "替换成 (to)", "Replace with (to)").to_string()
                             }
@@ -3131,7 +3142,12 @@ fn list_empty(filter: Signal<String>) -> impl IntoElement {
                 move || -> SharedString {
                     let lang = ui_lang(langs);
                     if filter.get().is_empty() {
-                        t(lang, "点击右上角「开始」捕获 HTTP(S) 请求", "Press Start to capture HTTP(S)").into()
+                        t(
+                            lang,
+                            "点击右上角「开始」捕获 HTTP(S) 请求",
+                            "Press Start to capture HTTP(S)",
+                        )
+                        .into()
                     } else {
                         t(lang, "试试调整上方的过滤关键词", "Try a different filter").into()
                     }
@@ -3189,7 +3205,13 @@ fn list_menu(
                     .on_press_outside(move |_: &Point<Points>| menu_open.set(false))
                     .on_cancel(move || menu_open.set(false))
                     .child(row_context_menu(
-                        picked, controls.clone(), filter, shown, baseline, rules_text, menu_open,
+                        picked,
+                        controls.clone(),
+                        filter,
+                        shown,
+                        baseline,
+                        rules_text,
+                        menu_open,
                     ))
             },
         ))
@@ -3254,7 +3276,8 @@ fn flow_table(
     let blur_select = Rc::clone(&blur_table);
 
     effect(move || {
-        if !menu_open.get() && !header_menu.get()
+        if !menu_open.get()
+            && !header_menu.get()
             && let Some(api) = table.api::<DataTableApi>()
         {
             api.clear_menu_target();
@@ -3269,133 +3292,133 @@ fn flow_table(
         .min_h(px(0.0))
         .w_full()
         .child(
-    data_table()
-        .component_ref(&table)
-        .flex_1()
-        .min_h(px(0.0))
-        .w_full()
-        .classes(flow_table_classes())
-        .columns(move || {
-            let shown = columns.get();
-            // A drag must not rebuild `columns`: the table keeps the width
-            // until this prop changes, and a new width here replaces the drag.
-            // `flow_column_title` reads the language signal, so a language
-            // change still rebuilds the titles.
-            let widths = untracked(|| widths_for_cols.get());
-            let mut built = flow_table_columns(shown, &widths);
-            for column in &mut built {
-                let key = column.key.to_string();
-                column.title = Some(flow_column_title(&key).into());
-            }
-            built
-        })
-        .data(DataTableRows::default())
-        .row_count(move || Some(rows.with(Vec::len) as u32))
-        .row_height(px(34.0))
-        .header_height(px(28.0))
-        .font_size(px(12.0))
-        .row_header(false)
-        .column_selectable(false)
-        .cell_selectable(false)
-        .movable_columns(false)
-        .loop_selection(false)
-        .stripe(true)
-        .selection(move || {
-            let id = selected.get();
-            let row = rows.with(|rows| rows.iter().position(|row| Some(row.id) == id));
-            row.map(|row| {
-                let mut selection = DataTableSelection::default();
-                selection.row = Some(row as u32);
-                selection
-            })
-        })
-        .render_cell(move |cell: &DataTableCell| {
-            flow_cell(rows_for_cells, selected_for_cells, hover, cell)
-        })
-        .render_header_cell(move |cell: &DataTableHeaderCell| {
-            let blur_header = Rc::clone(&blur_header);
-            flow_header(cell).on_press(move || blur_header())
-        })
-        .empty(list_empty(filter))
-        .on_row_press(move |_: &DataTablePress| blur_press())
-        .on_selection_change(move |selection: &Option<DataTableSelection>| {
-            blur_select();
-            let next = selection.and_then(|selection| selection.row).and_then(|row| {
-                rows.with(|rows| rows.get(row as usize).map(|row| row.id))
-            });
-            if selected.get() != next {
-                reset_compose(compose);
-                selected.set(next);
-            }
-        })
-        .on_context_menu(move |event: &DataTableContextMenu| {
-            blur_menu();
-            menu_at.set(Point {
-                x: event.x,
-                y: event.y,
-            });
-            if let Some(row) = event.row {
-                header_menu.set(false);
-                let next = rows.with(|rows| rows.get(row as usize).map(|row| row.id));
-                picked.set(next);
-                if selected.get() != next {
-                    reset_compose(compose);
-                }
-                selected.set(next);
-                menu_open.set(true);
-            } else {
-                menu_open.set(false);
-                header_menu.set(true);
-            }
-        })
-        .on_visible_rows_change(move |range: &DataTableRange| {
-            hover.text.set(None);
-            let count = rows.with(Vec::len) as u32;
-            if count == 0 {
-                follow.replace(true);
-                followed_count.replace(0);
-                return;
-            }
-            let near = range.end.saturating_add(1) >= count;
-            if follow.get() && count > followed_count.get() {
-                followed_count.replace(count);
-                if !near && let Some(api) = table.api::<DataTableApi>() {
-                    api.scroll_to_row(count - 1, Some(false));
-                }
-                return;
-            }
-            follow.replace(near);
-        })
-        .on_column_resize(move |event: &DataTableEvent| {
-            let DataTableEvent::ColumnResize(key, width) = event else {
-                return;
-            };
-            let Some(limit) = config::column_width_limit(key.as_ref()) else {
-                return;
-            };
-            let px = (width.0.round() as u32).clamp(limit.min, limit.max);
-            widths.update(|map| {
-                if px == limit.default {
-                    map.remove(key.as_ref());
-                } else {
-                    map.insert(key.to_string(), px);
-                }
-            });
-            let widths = widths;
-            let controls = controls.clone();
-            save_job.replace(Some(set_timeout(Duration::from_millis(300), move || {
-                let map = widths.get();
-                if let Err(err) = save_config(|config| config.column_widths = map) {
-                    set_status(
-                        &controls,
-                        StatusMsg::PrefUnsaved {
-                            name: PrefName::List,
-                            err: err.to_string(),
-                        },
-                    );
-                }
-            })));
-        })
+            data_table()
+                .component_ref(&table)
+                .flex_1()
+                .min_h(px(0.0))
+                .w_full()
+                .classes(flow_table_classes())
+                .columns(move || {
+                    let shown = columns.get();
+                    // A drag must not rebuild `columns`: the table keeps the width
+                    // until this prop changes, and a new width here replaces the drag.
+                    // `flow_column_title` reads the language signal, so a language
+                    // change still rebuilds the titles.
+                    let widths = untracked(|| widths_for_cols.get());
+                    let mut built = flow_table_columns(shown, &widths);
+                    for column in &mut built {
+                        let key = column.key.to_string();
+                        column.title = Some(flow_column_title(&key).into());
+                    }
+                    built
+                })
+                .data(DataTableRows::default())
+                .row_count(move || Some(rows.with(Vec::len) as u32))
+                .row_height(px(34.0))
+                .header_height(px(28.0))
+                .font_size(px(12.0))
+                .row_header(false)
+                .column_selectable(false)
+                .cell_selectable(false)
+                .movable_columns(false)
+                .loop_selection(false)
+                .stripe(true)
+                .selection(move || {
+                    let id = selected.get();
+                    let row = rows.with(|rows| rows.iter().position(|row| Some(row.id) == id));
+                    row.map(|row| {
+                        let mut selection = DataTableSelection::default();
+                        selection.row = Some(row as u32);
+                        selection
+                    })
+                })
+                .render_cell(move |cell: &DataTableCell| {
+                    flow_cell(rows_for_cells, selected_for_cells, hover, cell)
+                })
+                .render_header_cell(move |cell: &DataTableHeaderCell| {
+                    let blur_header = Rc::clone(&blur_header);
+                    flow_header(cell).on_press(move || blur_header())
+                })
+                .empty(list_empty(filter))
+                .on_row_press(move |_: &DataTablePress| blur_press())
+                .on_selection_change(move |selection: &Option<DataTableSelection>| {
+                    blur_select();
+                    let next = selection
+                        .and_then(|selection| selection.row)
+                        .and_then(|row| rows.with(|rows| rows.get(row as usize).map(|row| row.id)));
+                    if selected.get() != next {
+                        reset_compose(compose);
+                        selected.set(next);
+                    }
+                })
+                .on_context_menu(move |event: &DataTableContextMenu| {
+                    blur_menu();
+                    menu_at.set(Point {
+                        x: event.x,
+                        y: event.y,
+                    });
+                    if let Some(row) = event.row {
+                        header_menu.set(false);
+                        let next = rows.with(|rows| rows.get(row as usize).map(|row| row.id));
+                        picked.set(next);
+                        if selected.get() != next {
+                            reset_compose(compose);
+                        }
+                        selected.set(next);
+                        menu_open.set(true);
+                    } else {
+                        menu_open.set(false);
+                        header_menu.set(true);
+                    }
+                })
+                .on_visible_rows_change(move |range: &DataTableRange| {
+                    hover.text.set(None);
+                    let count = rows.with(Vec::len) as u32;
+                    if count == 0 {
+                        follow.replace(true);
+                        followed_count.replace(0);
+                        return;
+                    }
+                    let near = range.end.saturating_add(1) >= count;
+                    if follow.get() && count > followed_count.get() {
+                        followed_count.replace(count);
+                        if !near && let Some(api) = table.api::<DataTableApi>() {
+                            api.scroll_to_row(count - 1, Some(false));
+                        }
+                        return;
+                    }
+                    follow.replace(near);
+                })
+                .on_column_resize(move |event: &DataTableEvent| {
+                    let DataTableEvent::ColumnResize(key, width) = event else {
+                        return;
+                    };
+                    let Some(limit) = config::column_width_limit(key.as_ref()) else {
+                        return;
+                    };
+                    let px = (width.0.round() as u32).clamp(limit.min, limit.max);
+                    widths.update(|map| {
+                        if px == limit.default {
+                            map.remove(key.as_ref());
+                        } else {
+                            map.insert(key.to_string(), px);
+                        }
+                    });
+                    let widths = widths;
+                    let controls = controls.clone();
+                    save_job.replace(Some(set_timeout(Duration::from_millis(300), move || {
+                        let map = widths.get();
+                        if let Err(err) = save_config(|config| config.column_widths = map) {
+                            set_status(
+                                &controls,
+                                StatusMsg::PrefUnsaved {
+                                    name: PrefName::List,
+                                    err: err.to_string(),
+                                },
+                            );
+                        }
+                    })));
+                }),
         )
         .child(when(
             move || hover.text.get().is_some(),
@@ -3464,13 +3487,55 @@ fn column_picker_panel(columns: Signal<ListColumns>, controls: Arc<Controls>) ->
         .border_color(border_strong())
         .bg(bg_card())
         .shadow_md()
-        .child(column_toggle(columns, controls.clone(), ListColumn::Status, "状态", "Status"))
-        .child(column_toggle(columns, controls.clone(), ListColumn::Protocol, "协议", "Protocol"))
-        .child(column_toggle(columns, controls.clone(), ListColumn::Path, "路径", "Path"))
-        .child(column_toggle(columns, controls.clone(), ListColumn::Gap, "间隔", "Gap"))
-        .child(column_toggle(columns, controls.clone(), ListColumn::Elapsed, "耗时", "Elapsed"))
-        .child(column_toggle(columns, controls.clone(), ListColumn::Host, "主机", "Host"))
-        .child(column_toggle(columns, controls, ListColumn::Size, "大小", "Size"))
+        .child(column_toggle(
+            columns,
+            controls.clone(),
+            ListColumn::Status,
+            "状态",
+            "Status",
+        ))
+        .child(column_toggle(
+            columns,
+            controls.clone(),
+            ListColumn::Protocol,
+            "协议",
+            "Protocol",
+        ))
+        .child(column_toggle(
+            columns,
+            controls.clone(),
+            ListColumn::Path,
+            "路径",
+            "Path",
+        ))
+        .child(column_toggle(
+            columns,
+            controls.clone(),
+            ListColumn::Gap,
+            "间隔",
+            "Gap",
+        ))
+        .child(column_toggle(
+            columns,
+            controls.clone(),
+            ListColumn::Elapsed,
+            "耗时",
+            "Elapsed",
+        ))
+        .child(column_toggle(
+            columns,
+            controls.clone(),
+            ListColumn::Host,
+            "主机",
+            "Host",
+        ))
+        .child(column_toggle(
+            columns,
+            controls,
+            ListColumn::Size,
+            "大小",
+            "Size",
+        ))
 }
 
 fn column_toggle(
@@ -3528,19 +3593,31 @@ fn row_context_menu(
         .border_color(border_strong())
         .bg(bg_card())
         .shadow_md()
-        .child(action_item(tr("复制 URL", "Copy URL"), closing(menu_open, move || {
-            copy_part(&copy_url, picked.get(), CopyPart::Url);
-        })))
-        .child(action_item("cURL", closing(menu_open, move || {
-            copy_part(&copy_curl, picked.get(), CopyPart::Curl);
-        })))
+        .child(action_item(
+            tr("复制 URL", "Copy URL"),
+            closing(menu_open, move || {
+                copy_part(&copy_url, picked.get(), CopyPart::Url);
+            }),
+        ))
+        .child(action_item(
+            "cURL",
+            closing(menu_open, move || {
+                copy_part(&copy_curl, picked.get(), CopyPart::Curl);
+            }),
+        ))
         .child(menu_rule())
-        .child(action_item(tr("只看", "Focus"), closing(menu_open, move || {
-            focus_host(&focus_controls, picked.get(), filter);
-        })))
-        .child(action_item(tr("屏蔽", "Mute"), closing(menu_open, move || {
-            mute_host(&mute_controls, picked.get(), filter);
-        })))
+        .child(action_item(
+            tr("只看", "Focus"),
+            closing(menu_open, move || {
+                focus_host(&focus_controls, picked.get(), filter);
+            }),
+        ))
+        .child(action_item(
+            tr("屏蔽", "Mute"),
+            closing(menu_open, move || {
+                mute_host(&mute_controls, picked.get(), filter);
+            }),
+        ))
         .child(menu_rule())
         .child(marked_action(
             move || flow_pinned(&pin_mark, picked.get()),
@@ -3573,12 +3650,18 @@ fn row_context_menu(
             },
         ))
         .child(menu_rule())
-        .child(action_item(tr("重放", "Replay"), closing(menu_open, move || {
-            replay_flow(&replay_controls, picked.get(), ReplayOverride::default());
-        })))
-        .child(action_item(tr("填入断点", "Add break"), closing(menu_open, move || {
-            fill_break_rule(&break_controls, picked.get(), rules_text);
-        })))
+        .child(action_item(
+            tr("重放", "Replay"),
+            closing(menu_open, move || {
+                replay_flow(&replay_controls, picked.get(), ReplayOverride::default());
+            }),
+        ))
+        .child(action_item(
+            tr("填入断点", "Add break"),
+            closing(menu_open, move || {
+                fill_break_rule(&break_controls, picked.get(), rules_text);
+            }),
+        ))
 }
 
 fn closing(open: Signal<bool>, run: impl Fn() + 'static) -> impl Fn() + 'static {
@@ -3624,7 +3707,11 @@ fn fill_break_rule(controls: &Controls, id: Option<u64>, rules_text: Signal<Stri
 }
 
 fn flow_pinned(controls: &Controls, id: Option<u64>) -> bool {
-    id.is_some_and(|id| controls.hub.with_session(|session| session.get(id).is_some_and(|flow| flow.pinned)))
+    id.is_some_and(|id| {
+        controls
+            .hub
+            .with_session(|session| session.get(id).is_some_and(|flow| flow.pinned))
+    })
 }
 
 fn flow_cell(
@@ -3996,7 +4083,9 @@ fn detail_pane(
                         move || -> SharedString {
                             let lang = ui_lang(langs);
                             match shown.phase.get() {
-                                Phase::Gone => t(lang, "这条记录已经不在了", "That flow is gone").into(),
+                                Phase::Gone => {
+                                    t(lang, "这条记录已经不在了", "That flow is gone").into()
+                                }
                                 _ => t(lang, "还没有选择", "Nothing selected").into(),
                             }
                         }
@@ -4244,7 +4333,7 @@ fn summary(
                 .bg(bg_code())
                 .border_1()
                 .border_color(border_subtle())
-                .on_press_up(|| dismiss_keyboard())
+                .on_press_up(dismiss_keyboard)
                 .child(
                     mono(move || shown.url.get())
                         .selectable(true)
@@ -4255,35 +4344,33 @@ fn summary(
         .child(
             mono(move || shown.metrics.get())
                 .selectable(true)
-                .on_press_up(|| dismiss_keyboard())
+                .on_press_up(dismiss_keyboard)
                 .text_size(px(11.5))
                 .text_color(fg_muted()),
         )
-        .child(
-            when(
-                move || !shown.error.get().is_empty(),
-                move || {
-                    view()
-                        .px_3()
-                        .py_2()
-                        .rounded(px(7.0))
-                        .bg(status_err_bg())
-                        .border_1()
-                        .border_color(status_err_fg())
-                        .child(
-                            text({
-                                let langs = ui_langs();
-                                move || localize_error(ui_lang(langs), &shown.error.get())
-                            })
-                                .selectable(true)
-                                .on_press_up(|| dismiss_keyboard())
-                                .text_size(px(12.0))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(status_err_fg()),
-                        )
-                },
-            ),
-        )
+        .child(when(
+            move || !shown.error.get().is_empty(),
+            move || {
+                view()
+                    .px_3()
+                    .py_2()
+                    .rounded(px(7.0))
+                    .bg(status_err_bg())
+                    .border_1()
+                    .border_color(status_err_fg())
+                    .child(
+                        text({
+                            let langs = ui_langs();
+                            move || localize_error(ui_lang(langs), &shown.error.get())
+                        })
+                        .selectable(true)
+                        .on_press_up(dismiss_keyboard)
+                        .text_size(px(12.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(status_err_fg()),
+                    )
+            },
+        ))
 }
 
 fn card_folded(folded: Signal<u8>, bit: u8) -> bool {
@@ -4327,7 +4414,13 @@ fn header_section(
                 .gap_1p5()
                 .px_3p5()
                 .py_2()
-                .border_b(move || if card_folded(folded, bit) { px(0.0) } else { px(1.0) })
+                .border_b(move || {
+                    if card_folded(folded, bit) {
+                        px(0.0)
+                    } else {
+                        px(1.0)
+                    }
+                })
                 .border_b_color(border_subtle())
                 .cursor(Cursor::Pointer)
                 .on_press(move || toggle_card(folded, bit))
@@ -4350,57 +4443,51 @@ fn header_section(
         .child(when(
             move || !card_folded(folded, bit),
             move || {
-                    when(
-                        move || lines.with(Vec::is_empty),
-                        || view().px_3p5().py_2p5().child(muted_line(tr("无", "None"))),
+                when(
+                    move || lines.with(Vec::is_empty),
+                    || view().px_3p5().py_2p5().child(muted_line(tr("无", "None"))),
+                )
+                .otherwise(move || {
+                    each(
+                        lines,
+                        |line| line.key,
+                        |line, index| {
+                            view()
+                                .flex_row()
+                                .gap_3()
+                                .px_3p5()
+                                .py_2()
+                                .bg(move || {
+                                    if index.get() % 2 == 1 {
+                                        bg_code()
+                                    } else {
+                                        bg_card()
+                                    }
+                                })
+                                .border_t(move || if index.get() > 0 { px(1.0) } else { px(0.0) })
+                                .border_t_color(border_subtle())
+                                .on_press_up(dismiss_keyboard)
+                                .child(
+                                    mono(move || line.with(|line| line.name.clone()))
+                                        .w(px(176.0))
+                                        .flex_shrink_0()
+                                        .selectable(true)
+                                        .number_of_lines(1)
+                                        .ellipsize_mode(EllipsizeMode::Tail)
+                                        .text_size(px(12.0))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(fg_muted()),
+                                )
+                                .child(
+                                    mono(move || line.with(|line| line.value.clone()))
+                                        .flex_1()
+                                        .selectable(true)
+                                        .text_size(px(12.0))
+                                        .text_color(fg_primary()),
+                                )
+                        },
                     )
-                    .otherwise(move || {
-                        each(
-                            lines,
-                            |line| line.key,
-                            |line, index| {
-                                view()
-                                    .flex_row()
-                                    .gap_3()
-                                    .px_3p5()
-                                    .py_2()
-                                    .bg(move || {
-                                        if index.get() % 2 == 1 {
-                                            bg_code()
-                                        } else {
-                                            bg_card()
-                                        }
-                                    })
-                                    .border_t(move || {
-                                        if index.get() > 0 {
-                                            px(1.0)
-                                        } else {
-                                            px(0.0)
-                                        }
-                                    })
-                                    .border_t_color(border_subtle())
-                                    .on_press_up(|| dismiss_keyboard())
-                                    .child(
-                                        mono(move || line.with(|line| line.name.clone()))
-                                            .w(px(176.0))
-                                            .flex_shrink_0()
-                                            .selectable(true)
-                                            .number_of_lines(1)
-                                            .ellipsize_mode(EllipsizeMode::Tail)
-                                            .text_size(px(12.0))
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(fg_muted()),
-                                    )
-                                    .child(
-                                        mono(move || line.with(|line| line.value.clone()))
-                                            .flex_1()
-                                            .selectable(true)
-                                            .text_size(px(12.0))
-                                            .text_color(fg_primary()),
-                                    )
-                            },
-                        )
-                    })
+                })
             },
         ))
 }
@@ -4419,7 +4506,13 @@ fn diff_card(shown: Shown, folded: Signal<u8>) -> impl IntoElement {
                 .gap_1p5()
                 .px_3p5()
                 .py_2()
-                .border_b(move || if card_folded(folded, FOLD_DIFF) { px(0.0) } else { px(1.0) })
+                .border_b(move || {
+                    if card_folded(folded, FOLD_DIFF) {
+                        px(0.0)
+                    } else {
+                        px(1.0)
+                    }
+                })
                 .border_b_color(border_subtle())
                 .cursor(Cursor::Pointer)
                 .on_press(move || toggle_card(folded, FOLD_DIFF))
@@ -4429,21 +4522,17 @@ fn diff_card(shown: Shown, folded: Signal<u8>) -> impl IntoElement {
         .child(when(
             move || !card_folded(folded, FOLD_DIFF),
             move || {
-                view()
-                    .bg(bg_code())
-                    .h(px(320.0))
-                    .overflow_hidden()
-                    .child(
-                        diff_view()
-                            .old_value(move || SharedString::from(shown.diff_old.get()))
-                            .new_value(move || SharedString::from(shown.diff_new.get()))
-                            .layout(DiffLayout::Unified)
-                            .language("plaintext")
-                            .soft_wrap(true)
-                            .font_size(Points(12.0))
-                            .line_height(Points(18.0))
-                            .size_full(),
-                    )
+                view().bg(bg_code()).h(px(320.0)).overflow_hidden().child(
+                    diff_view()
+                        .old_value(move || SharedString::from(shown.diff_old.get()))
+                        .new_value(move || SharedString::from(shown.diff_new.get()))
+                        .layout(DiffLayout::Unified)
+                        .language("plaintext")
+                        .soft_wrap(true)
+                        .font_size(Points(12.0))
+                        .line_height(Points(18.0))
+                        .size_full(),
+                )
             },
         ))
 }
@@ -4479,7 +4568,13 @@ fn body_section(
                 .gap_2()
                 .px_3p5()
                 .py_2()
-                .border_b(move || if card_folded(folded, bit) { px(0.0) } else { px(1.0) })
+                .border_b(move || {
+                    if card_folded(folded, bit) {
+                        px(0.0)
+                    } else {
+                        px(1.0)
+                    }
+                })
                 .border_b_color(border_subtle())
                 .child(
                     view()
@@ -4514,35 +4609,38 @@ fn body_section(
                 )
             },
         ))
-        .child(when(move || !card_folded(folded, bit) && image_on(), move || {
-            view()
-                .px_3()
-                .py_3()
-                .gap_1p5()
-                .flex_row()
-                .justify_center()
-                .child(
-                    view()
-                        .w(move || px(shown.preview_w.get()))
-                        .h(move || px(shown.preview_h.get()))
-                        .flex_shrink_0()
-                        .rounded(px(8.0))
-                        .border_1()
-                        .border_color(border_strong())
-                        .bg(bg_code())
-                        .overflow_hidden()
-                        .child(
-                            image(move || shown.preview.get())
-                                .w_full()
-                                .h_full()
-                                .resize_mode(ResizeMode::ScaleDown),
-                        ),
-                )
-                .child(when(
-                    move || !shown.image_caption.get().is_empty(),
-                    move || muted_line(move || shown.image_caption.get()),
-                ))
-        }))
+        .child(when(
+            move || !card_folded(folded, bit) && image_on(),
+            move || {
+                view()
+                    .px_3()
+                    .py_3()
+                    .gap_1p5()
+                    .flex_row()
+                    .justify_center()
+                    .child(
+                        view()
+                            .w(move || px(shown.preview_w.get()))
+                            .h(move || px(shown.preview_h.get()))
+                            .flex_shrink_0()
+                            .rounded(px(8.0))
+                            .border_1()
+                            .border_color(border_strong())
+                            .bg(bg_code())
+                            .overflow_hidden()
+                            .child(
+                                image(move || shown.preview.get())
+                                    .w_full()
+                                    .h_full()
+                                    .resize_mode(ResizeMode::ScaleDown),
+                            ),
+                    )
+                    .child(when(
+                        move || !shown.image_caption.get().is_empty(),
+                        move || muted_line(move || shown.image_caption.get()),
+                    ))
+            },
+        ))
         .child(when(
             move || {
                 !card_folded(folded, bit)
@@ -4589,7 +4687,7 @@ fn body_section(
                             .px_3p5()
                             .py_2()
                             .selectable(true)
-                            .on_press_up(|| dismiss_keyboard())
+                            .on_press_up(dismiss_keyboard)
                             .text_size(px(12.0))
                             .text_color(fg_primary()),
                         ),
@@ -4614,35 +4712,45 @@ fn body_section(
         .child(when(
             move || !card_folded(folded, bit) && !form.with(Vec::is_empty),
             move || {
-                each(form, |line| line.key, |line, index| {
-                    view()
-                        .flex_row()
-                        .gap_3()
-                        .px_3p5()
-                        .py_2()
-                        .bg(move || if index.get() % 2 == 1 { bg_code() } else { bg_card() })
-                        .border_t(move || if index.get() > 0 { px(1.0) } else { px(0.0) })
-                        .border_t_color(border_subtle())
-                        .on_press_up(|| dismiss_keyboard())
-                        .child(
-                            mono(move || line.with(|line| line.name.clone()))
-                                .w(px(176.0))
-                                .flex_shrink_0()
-                                .selectable(true)
-                                .number_of_lines(1)
-                                .ellipsize_mode(EllipsizeMode::Tail)
-                                .text_size(px(12.0))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(fg_muted()),
-                        )
-                        .child(
-                            mono(move || line.with(|line| line.value.clone()))
-                                .flex_1()
-                                .selectable(true)
-                                .text_size(px(12.0))
-                                .text_color(fg_primary()),
-                        )
-                })
+                each(
+                    form,
+                    |line| line.key,
+                    |line, index| {
+                        view()
+                            .flex_row()
+                            .gap_3()
+                            .px_3p5()
+                            .py_2()
+                            .bg(move || {
+                                if index.get() % 2 == 1 {
+                                    bg_code()
+                                } else {
+                                    bg_card()
+                                }
+                            })
+                            .border_t(move || if index.get() > 0 { px(1.0) } else { px(0.0) })
+                            .border_t_color(border_subtle())
+                            .on_press_up(dismiss_keyboard)
+                            .child(
+                                mono(move || line.with(|line| line.name.clone()))
+                                    .w(px(176.0))
+                                    .flex_shrink_0()
+                                    .selectable(true)
+                                    .number_of_lines(1)
+                                    .ellipsize_mode(EllipsizeMode::Tail)
+                                    .text_size(px(12.0))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(fg_muted()),
+                            )
+                            .child(
+                                mono(move || line.with(|line| line.value.clone()))
+                                    .flex_1()
+                                    .selectable(true)
+                                    .text_size(px(12.0))
+                                    .text_color(fg_primary()),
+                            )
+                    },
+                )
             },
         ))
 }
@@ -4658,7 +4766,7 @@ fn body_line_count(text: &str) -> usize {
 /// One line of body grows the card. Past [`BODY_LINES`] the card stays put
 /// and the text scrolls inside it.
 fn body_box_height(lines: usize) -> f32 {
-    let shown = lines.max(1).min(BODY_LINES) as f32;
+    let shown = lines.clamp(1, BODY_LINES) as f32;
     shown * BODY_LINE_H + BODY_CHROME
 }
 
@@ -4701,7 +4809,13 @@ fn pretty_switch(
         .border_color(border_control())
         .overflow_hidden()
         .child(pretty_chip(
-            shown, controls.clone(), selected, baseline, true, "美化", "Pretty",
+            shown,
+            controls.clone(),
+            selected,
+            baseline,
+            true,
+            "美化",
+            "Pretty",
         ))
         .child(pretty_chip(
             shown, controls, selected, baseline, false, "原文", "Raw",
@@ -4823,9 +4937,12 @@ fn detail_actions(
                 .child(action_item(tr("复制请求", "Copy request"), move || {
                     copy_part(&copy_request, selected.get(), CopyPart::Request);
                 }))
-                .child(action_item(tr("复制响应", "Copy response"), move || {
-                    copy_part(&copy_response, selected.get(), CopyPart::Response);
-                }))
+                .child(action_item(
+                    tr("复制响应", "Copy response"),
+                    move || {
+                        copy_part(&copy_response, selected.get(), CopyPart::Response);
+                    },
+                ))
                 .child(action_item(tr("另存", "Save"), move || {
                     export_response(&save, selected.get());
                 }))
@@ -4852,7 +4969,11 @@ fn detail_actions(
                     move || toggle_pin(&pin_controls, selected.get()),
                 ))
                 .child(marked_action(
-                    move || baseline_mark.get().is_some_and(|id| selected_mark.get() == Some(id)),
+                    move || {
+                        baseline_mark
+                            .get()
+                            .is_some_and(|id| selected_mark.get() == Some(id))
+                    },
                     tr("基准", "Baseline"),
                     {
                         let langs = ui_langs();
@@ -4988,20 +5109,8 @@ fn marked_action(
                 .h(px(8.0))
                 .rounded(px(99.0))
                 .border_1()
-                .border_color(move || {
-                    if dot() {
-                        accent_blue()
-                    } else {
-                        fg_muted()
-                    }
-                })
-                .bg(move || {
-                    if dot_fill() {
-                        accent_blue()
-                    } else {
-                        bg_card()
-                    }
-                }),
+                .border_color(move || if dot() { accent_blue() } else { fg_muted() })
+                .bg(move || if dot_fill() { accent_blue() } else { bg_card() }),
         )
         .child(control_text(label).text_color(move || {
             if label_on() {
@@ -5047,9 +5156,7 @@ fn section_title(label: impl IntoReactive<SharedString>) -> Text {
 }
 
 fn muted_line(label: impl IntoReactive<SharedString>) -> Text {
-    text(label)
-        .text_size(px(12.0))
-        .text_color(fg_muted())
+    text(label).text_size(px(12.0)).text_color(fg_muted())
 }
 
 fn footer(
@@ -5138,9 +5245,9 @@ fn footer(
                     )
                 }
             })
-                .flex_shrink_0()
-                .text_size(px(11.5))
-                .text_color(fg_muted()),
+            .flex_shrink_0()
+            .text_size(px(11.5))
+            .text_color(fg_muted()),
         )
 }
 
@@ -5157,9 +5264,7 @@ fn cert_qr(
         .offset(px(6.0))
         .margin(px(8.0))
         .trigger(qr_trigger(lan_choice))
-        .child(qr_panel(
-            listen, lan_url, lan_choice, lan_addrs, qr_path,
-        ))
+        .child(qr_panel(listen, lan_url, lan_choice, lan_addrs, qr_path))
 }
 
 fn qr_trigger(choice: Signal<String>) -> impl IntoElement {
@@ -5191,9 +5296,9 @@ fn qr_trigger(choice: Signal<String>) -> impl IntoElement {
                     format!("{} {}", t(ui_lang(langs), "扫码", "Scan"), choice.get()).into()
                 }
             })
-                .number_of_lines(1)
-                .text_size(px(11.5))
-                .text_color(fg_secondary()),
+            .number_of_lines(1)
+            .text_size(px(11.5))
+            .text_color(fg_secondary()),
         )
 }
 
@@ -5308,8 +5413,8 @@ fn lan_choice_row(
     qr_path: Signal<String>,
 ) -> impl IntoElement {
     let picked = move || lan_choice.get() == addr.with(|item| item.ip.to_string());
-    let picked_bg = picked.clone();
-    let picked_dot = picked.clone();
+    let picked_bg = picked;
+    let picked_dot = picked;
     view()
         .h(px(28.0))
         .px_2()
@@ -5336,14 +5441,7 @@ fn lan_choice_row(
         .cursor(Cursor::Pointer)
         .on_press(move || {
             let ip = addr.with(|item| item.ip.to_string());
-            publish_lan(
-                &listen.get(),
-                &ip,
-                lan_addrs,
-                lan_choice,
-                lan_url,
-                qr_path,
-            );
+            publish_lan(&listen.get(), &ip, lan_addrs, lan_choice, lan_url, qr_path);
         })
         .child(
             view()
@@ -5555,28 +5653,22 @@ fn more_trigger(installed: Signal<bool>, proxy_on: Signal<bool>) -> impl IntoEle
         .child(when(
             move || dot_proxy.get() || !dot_installed.get(),
             move || {
-                view()
-                    .w(px(6.0))
-                    .h(px(6.0))
-                    .rounded(px(99.0))
-                    .bg(move || {
-                        if dot_proxy.get() {
-                            accent_blue()
-                        } else {
-                            status_warn_fg()
-                        }
-                    })
+                view().w(px(6.0)).h(px(6.0)).rounded(px(99.0)).bg(move || {
+                    if dot_proxy.get() {
+                        accent_blue()
+                    } else {
+                        status_warn_fg()
+                    }
+                })
             },
         ))
-        .child(
-            control_text(tr("更多", "More")).text_color(move || {
-                if label_proxy.get() {
-                    accent_blue_text()
-                } else {
-                    fg_secondary()
-                }
-            }),
-        )
+        .child(control_text(tr("更多", "More")).text_color(move || {
+            if label_proxy.get() {
+                accent_blue_text()
+            } else {
+                fg_secondary()
+            }
+        }))
         .child(glyph(
             || Glyph::Chevron,
             move || {
@@ -5639,44 +5731,57 @@ fn more_menu(
             )
             .otherwise(move || {
                 let export_all = Rc::clone(&export_all);
-                menu_action(Glyph::Download, tr("导出", "Export"), move || export_all())
+                menu_action(Glyph::Download, tr("导出", "Export"), move || {
+                    export_all()
+                })
             }),
         )
-        .child(menu_action(Glyph::Download, tr("导出 HTML", "Export HTML"), {
-            let controls = import_controls.clone();
-            let filter = filter;
-            let langs = ui_langs();
-            move || export_html_file(&controls, &filter.get(), ui_lang(langs) == Lang::Zh)
-        }))
-        .child(menu_action(Glyph::Prompt, tr("分享 15 分钟", "Share 15 min"), {
-            let controls = import_controls.clone();
-            let share_id = share_id;
-            let filter = filter;
-            move || begin_share(&controls, 15, &filter.get(), share_id)
-        }))
-        .child(menu_action(Glyph::Prompt, tr("分享 1 小时", "Share 1 hour"), {
-            let controls = import_controls.clone();
-            let share_id = share_id;
-            let filter = filter;
-            move || begin_share(&controls, 60, &filter.get(), share_id)
-        }))
-        .child(menu_action(Glyph::Prompt, tr("分享 8 小时", "Share 8 hours"), {
-            let controls = import_controls.clone();
-            let share_id = share_id;
-            let filter = filter;
-            move || begin_share(&controls, 480, &filter.get(), share_id)
-        }))
+        .child(menu_action(
+            Glyph::Download,
+            tr("导出 HTML", "Export HTML"),
+            {
+                let controls = import_controls.clone();
+                let langs = ui_langs();
+                move || export_html_file(&controls, &filter.get(), ui_lang(langs) == Lang::Zh)
+            },
+        ))
+        .child(menu_action(
+            Glyph::Prompt,
+            tr("分享 15 分钟", "Share 15 min"),
+            {
+                let controls = import_controls.clone();
+                move || begin_share(&controls, 15, &filter.get(), share_id)
+            },
+        ))
+        .child(menu_action(
+            Glyph::Prompt,
+            tr("分享 1 小时", "Share 1 hour"),
+            {
+                let controls = import_controls.clone();
+                move || begin_share(&controls, 60, &filter.get(), share_id)
+            },
+        ))
+        .child(menu_action(
+            Glyph::Prompt,
+            tr("分享 8 小时", "Share 8 hours"),
+            {
+                let controls = import_controls.clone();
+                move || begin_share(&controls, 480, &filter.get(), share_id)
+            },
+        ))
         .child({
             let stop_controls = import_controls.clone();
-            let share_id = share_id;
             when(
                 move || !share_id.get().is_empty(),
                 move || {
                     let controls = stop_controls.clone();
-                    let share_id = share_id;
-                    menu_action(Glyph::Trash, tr("停止分享", "Stop sharing"), move || {
-                        end_share(&controls, share_id);
-                    })
+                    menu_action(
+                        Glyph::Trash,
+                        tr("停止分享", "Stop sharing"),
+                        move || {
+                            end_share(&controls, share_id);
+                        },
+                    )
                 },
             )
         })
@@ -5690,20 +5795,27 @@ fn more_menu(
         .child(proxy_menu_item(proxy_on, toggle_proxy))
         .child(menu_rule())
         .child(cert_menu_status(installed))
-        .child(when(
-            move || installed.get(),
-            move || {
-                let remove = remove.clone();
-                menu_action(Glyph::Badge, tr("移除证书", "Remove certificate"), move || {
-                    remove.as_ref()()
-                })
-            },
-        ).otherwise(move || {
-            let install = install.clone();
-            menu_action(Glyph::Badge, tr("安装证书", "Install certificate"), move || {
-                install.as_ref()()
-            })
-        }))
+        .child(
+            when(
+                move || installed.get(),
+                move || {
+                    let remove = remove.clone();
+                    menu_action(
+                        Glyph::Badge,
+                        tr("移除证书", "Remove certificate"),
+                        move || remove.as_ref()(),
+                    )
+                },
+            )
+            .otherwise(move || {
+                let install = install.clone();
+                menu_action(
+                    Glyph::Badge,
+                    tr("安装证书", "Install certificate"),
+                    move || install.as_ref()(),
+                )
+            }),
+        )
         .child(menu_rule())
         .child(marked_action(
             move || pretty.get(),
@@ -5799,23 +5911,21 @@ fn lang_choice(choice: Option<Lang>, zh: &'static str, en: &'static str) -> impl
                 } else {
                     bg_card()
                 });
-                Painter::new().fill_color(paint).fill_svg(
-                    "M6.5 6.5 m-3 0 a3 3 0 1 0 6 0 a3 3 0 1 0 -6 0",
-                )
+                Painter::new()
+                    .fill_color(paint)
+                    .fill_svg("M6.5 6.5 m-3 0 a3 3 0 1 0 6 0 a3 3 0 1 0 -6 0")
             })
             .w(px(13.0))
             .h(px(13.0))
             .flex_shrink_0(),
         )
-        .child(
-            control_text(tr(zh, en)).text_color(move || {
-                if mark.get() == choice {
-                    accent_blue_text()
-                } else {
-                    fg_secondary()
-                }
-            }),
-        )
+        .child(control_text(tr(zh, en)).text_color(move || {
+            if mark.get() == choice {
+                accent_blue_text()
+            } else {
+                fg_secondary()
+            }
+        }))
 }
 
 fn proxy_menu_item(on: Signal<bool>, toggle: impl Fn() + 'static) -> impl IntoElement {
@@ -5860,19 +5970,13 @@ fn proxy_menu_item(on: Signal<bool>, toggle: impl Fn() + 'static) -> impl IntoEl
                 })
             },
         ))
-        .child(
-            view()
-                .w(px(6.0))
-                .h(px(6.0))
-                .rounded(px(99.0))
-                .bg(move || {
-                    if dot_on.get() {
-                        accent_blue()
-                    } else {
-                        fg_muted()
-                    }
-                }),
-        )
+        .child(view().w(px(6.0)).h(px(6.0)).rounded(px(99.0)).bg(move || {
+            if dot_on.get() {
+                accent_blue()
+            } else {
+                fg_muted()
+            }
+        }))
         .child(
             control_text(tr("系统代理", "System proxy"))
                 .flex_1()
@@ -5914,19 +6018,13 @@ fn cert_menu_status(installed: Signal<bool>) -> impl IntoElement {
         .flex_row()
         .items_center()
         .child(glyph(|| Glyph::Badge, || color(fg_muted())))
-        .child(
-            view()
-                .w(px(6.0))
-                .h(px(6.0))
-                .rounded(px(99.0))
-                .bg(move || {
-                    if dot_installed.get() {
-                        status_ok_fg()
-                    } else {
-                        status_warn_fg()
-                    }
-                }),
-        )
+        .child(view().w(px(6.0)).h(px(6.0)).rounded(px(99.0)).bg(move || {
+            if dot_installed.get() {
+                status_ok_fg()
+            } else {
+                status_warn_fg()
+            }
+        }))
         .child(
             control_text({
                 let langs = ui_langs();
@@ -5943,10 +6041,7 @@ fn cert_menu_status(installed: Signal<bool>) -> impl IntoElement {
 }
 
 fn menu_rule() -> impl IntoElement {
-    view()
-        .h(px(1.0))
-        .mx(px(6.0))
-        .bg(border_strong())
+    view().h(px(1.0)).mx(px(6.0)).bg(border_strong())
 }
 
 fn primary_button(
@@ -5992,7 +6087,7 @@ fn primary_button(
                     Glyph::Play
                 }
             },
-            || white(),
+            white,
         ))
         .child(
             control_text(label)
@@ -6175,8 +6270,12 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baselin
     shown.rules.set(flow.rule_hit.clone());
     shown.status.set(flow.status);
     shown.error.set(flow.error.clone().unwrap_or_default());
-    shown.request_headers.set(header_lines(&flow.request_headers, pretty));
-    shown.response_headers.set(header_lines(&flow.response_headers, pretty));
+    shown
+        .request_headers
+        .set(header_lines(&flow.request_headers, pretty));
+    shown
+        .response_headers
+        .set(header_lines(&flow.response_headers, pretty));
     let form = if pretty {
         std::str::from_utf8(&flow.request_body)
             .ok()
@@ -6197,28 +6296,34 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baselin
         Vec::new()
     };
     shown.request_form.set(form);
-    shown.request_language.set(if shown.request_form.with(Vec::is_empty) {
-        present::editor_language(request_type, &request.text)
-            .unwrap_or("")
-            .to_string()
-    } else {
-        String::new()
-    });
+    shown
+        .request_language
+        .set(if shown.request_form.with(Vec::is_empty) {
+            present::editor_language(request_type, &request.text)
+                .unwrap_or("")
+                .to_string()
+        } else {
+            String::new()
+        });
     shown.response_language.set(
         present::editor_language(response_type, &response.text)
             .unwrap_or("")
             .to_string(),
     );
-    shown.request_body.set(if shown.request_form.with(Vec::is_empty) {
-        request.text
-    } else {
-        String::new()
-    });
-    shown.request_hex.set(if shown.request_form.with(Vec::is_empty) {
-        request.hex
-    } else {
-        Vec::new()
-    });
+    shown
+        .request_body
+        .set(if shown.request_form.with(Vec::is_empty) {
+            request.text
+        } else {
+            String::new()
+        });
+    shown
+        .request_hex
+        .set(if shown.request_form.with(Vec::is_empty) {
+            request.hex
+        } else {
+            Vec::new()
+        });
     shown.response_body.set(response.text);
     shown.response_hex.set(if preview.is_empty() {
         response_hex
@@ -6299,18 +6404,16 @@ fn header_lines(headers: &[(String, String)], pretty: bool) -> Vec<HeaderLine> {
     };
     let mut lines = Vec::new();
     for (name, value) in headers {
-        if pretty {
-            if let Some(rows) = present::pretty_cookie_rows(name, value) {
-                for (row_name, shown) in rows {
-                    let key = lines.len() as u32;
-                    lines.push(HeaderLine {
-                        key,
-                        name: row_name,
-                        value: shown,
-                    });
-                }
-                continue;
+        if pretty && let Some(rows) = present::pretty_cookie_rows(name, value) {
+            for (row_name, shown) in rows {
+                let key = lines.len() as u32;
+                lines.push(HeaderLine {
+                    key,
+                    name: row_name,
+                    value: shown,
+                });
             }
+            continue;
         }
         let key = lines.len() as u32;
         lines.push(HeaderLine {
@@ -6368,9 +6471,11 @@ fn apply_pretty(presented: &mut BodyText, body: &[u8], content_type: Option<&str
             if !presented.note.is_empty() {
                 presented.note.push('\n');
             }
-            presented
-                .note
-                .push_str(t(lang, "界面只显示前 256KB。", "Showing only the first 256 KB."));
+            presented.note.push_str(t(
+                lang,
+                "界面只显示前 256KB。",
+                "Showing only the first 256 KB.",
+            ));
         }
     } else {
         presented.text = pretty;
@@ -6513,7 +6618,10 @@ fn set_ca_installed(controls: &Controls, installed: bool) {
 }
 
 fn set_status(controls: &Controls, message: StatusMsg) {
-    *controls.status.lock().unwrap_or_else(|err| err.into_inner()) = message;
+    *controls
+        .status
+        .lock()
+        .unwrap_or_else(|err| err.into_inner()) = message;
 }
 
 fn lock_status(controls: &Controls) -> StatusMsg {
@@ -6526,7 +6634,10 @@ fn lock_status(controls: &Controls) -> StatusMsg {
 
 fn toggle_capture(controls: Arc<Controls>) {
     std::thread::spawn(move || {
-        let running = *controls.running.lock().unwrap_or_else(|err| err.into_inner());
+        let running = *controls
+            .running
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
         if running {
             stop_capture(&controls);
         } else {
@@ -6645,11 +6756,11 @@ fn toggle_system_proxy(controls: Arc<Controls>) {
         let on = !lock_bool(&controls.use_system_proxy);
         set_bool(&controls.use_system_proxy, on);
         let running = lock_bool(&controls.running);
-        if let Err(err) = store_use_system_proxy(on) {
-            if !running {
-                set_status(&controls, StatusMsg::ProxyOptionUnsaved(err.to_string()));
-                return;
-            }
+        if let Err(err) = store_use_system_proxy(on)
+            && !running
+        {
+            set_status(&controls, StatusMsg::ProxyOptionUnsaved(err.to_string()));
+            return;
         }
         if !running {
             return;
@@ -6825,7 +6936,10 @@ fn focus_host(controls: &Controls, id: Option<u64>, filter: Signal<String>) {
     }
     let current = filter.get();
     let existing = split_ui_or_items(&extract_host_or(&current));
-    if existing.len() == 1 && existing[0].eq_ignore_ascii_case(host) && current.trim().starts_with("host:") {
+    if existing.len() == 1
+        && existing[0].eq_ignore_ascii_case(host)
+        && current.trim().starts_with("host:")
+    {
         return;
     }
     let next_hosts = if existing.is_empty() {
@@ -6901,9 +7015,12 @@ fn copy_part(controls: &Controls, id: Option<u64>, part: CopyPart) {
     let (text, note) = match part {
         CopyPart::Url => (flow.url, StatusMsg::CopiedUrl),
         CopyPart::Curl => {
-            let binary = !flow.request_body.is_empty()
-                && std::str::from_utf8(&flow.request_body).is_err();
-            (present::curl_command(&flow), StatusMsg::CopiedCurl { binary })
+            let binary =
+                !flow.request_body.is_empty() && std::str::from_utf8(&flow.request_body).is_err();
+            (
+                present::curl_command(&flow),
+                StatusMsg::CopiedCurl { binary },
+            )
         }
         CopyPart::Request => bytes_for_copy(&flow.request_body, Side::Request),
         CopyPart::Response => bytes_for_copy(&flow.response_body, Side::Response),
@@ -7019,10 +7136,9 @@ fn download_dir() -> std::path::PathBuf {
 #[cfg(all(unix, not(target_os = "macos")))]
 fn read_xdg_download() -> Option<std::path::PathBuf> {
     let home = std::env::var("HOME").ok()?;
-    let text = std::fs::read_to_string(
-        std::path::PathBuf::from(&home).join(".config/user-dirs.dirs"),
-    )
-    .ok()?;
+    let text =
+        std::fs::read_to_string(std::path::PathBuf::from(&home).join(".config/user-dirs.dirs"))
+            .ok()?;
     xdg_download_dir(&home, &text)
 }
 
@@ -7083,7 +7199,9 @@ fn body_extension(headers: &[(String, String)], body: &[u8]) -> &'static str {
 
 fn selected_flow(controls: &Controls, id: Option<u64>) -> Option<crate::session::Flow> {
     let id = id?;
-    let flow = controls.hub.with_session(|session| session.get(id).cloned());
+    let flow = controls
+        .hub
+        .with_session(|session| session.get(id).cloned());
     if flow.is_none() {
         set_status(controls, StatusMsg::FlowGone);
     }
@@ -7104,10 +7222,10 @@ fn image_preview_path(id: u64, flow: &crate::session::Flow) -> String {
     }
     let dir = ca::data_dir().join("preview");
     let path = dir.join(format!("{id}.{ext}"));
-    if let Ok(meta) = std::fs::metadata(&path) {
-        if meta.len() == flow.response_body.len() as u64 {
-            return path.to_string_lossy().into_owned();
-        }
+    if let Ok(meta) = std::fs::metadata(&path)
+        && meta.len() == flow.response_body.len() as u64
+    {
+        return path.to_string_lossy().into_owned();
     }
     if std::fs::create_dir_all(&dir).is_err() || std::fs::write(&path, &flow.response_body).is_err()
     {
@@ -7235,27 +7353,22 @@ fn compose_box(compose: Compose) -> impl IntoElement {
                         ))
                     },
                 ))
-                .child(
-                    view()
-                        .w(px(88.0))
-                        .flex_shrink_0()
-                        .child(compose_input(compose.method, "POST", 30.0, false)),
-                )
-                .child(
-                    view()
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .child(compose_input_on(
-                            compose.url,
-                            tr(
-                                "https://example.com/path，或粘贴 curl",
-                                "https://example.com/path, or paste curl",
-                            ),
-                            30.0,
-                            false,
-                            move |text| apply_url_edit(compose, text),
-                        )),
-                ),
+                .child(view().w(px(88.0)).flex_shrink_0().child(compose_input(
+                    compose.method,
+                    "POST",
+                    30.0,
+                    false,
+                )))
+                .child(view().flex_1().min_w(px(0.0)).child(compose_input_on(
+                    compose.url,
+                    tr(
+                        "https://example.com/path，或粘贴 curl",
+                        "https://example.com/path, or paste curl",
+                    ),
+                    30.0,
+                    false,
+                    move |text| apply_url_edit(compose, text),
+                ))),
         )
         .child(compose_editor(
             compose.headers,
@@ -7263,7 +7376,12 @@ fn compose_box(compose: Compose) -> impl IntoElement {
             120.0,
             "plaintext",
         ))
-        .child(compose_editor(compose.body, tr("body", "body"), 180.0, "json"))
+        .child(compose_editor(
+            compose.body,
+            tr("body", "body"),
+            180.0,
+            "json",
+        ))
 }
 
 fn compose_editor(
@@ -7333,14 +7451,14 @@ fn compose_input_on(
 }
 
 fn apply_url_edit(compose: Compose, text: &str) {
-    if looks_like_curl(text) {
-        if let Some(parsed) = present::parse_curl(text) {
-            compose.method.set(parsed.method);
-            compose.url.set(parsed.url);
-            compose.headers.set(header_text(&parsed.headers));
-            compose.body.set(parsed.body);
-            return;
-        }
+    if looks_like_curl(text)
+        && let Some(parsed) = present::parse_curl(text)
+    {
+        compose.method.set(parsed.method);
+        compose.url.set(parsed.url);
+        compose.headers.set(header_text(&parsed.headers));
+        compose.body.set(parsed.body);
+        return;
     }
     compose.url.set(text.to_string());
 }
@@ -7453,20 +7571,27 @@ fn begin_compose(controls: &Controls, id: Option<u64>, compose: Compose) {
         set_status(controls, StatusMsg::NeedSelection);
         return;
     };
-    let response = controls.hub.paused().is_some_and(|(paused_id, side)| {
-        id == Some(paused_id) && side == BreakSide::Response
-    });
+    let response = controls
+        .hub
+        .paused()
+        .is_some_and(|(paused_id, side)| id == Some(paused_id) && side == BreakSide::Response);
     compose.response.set(response);
     compose.method.set(flow.method);
     compose.url.set(flow.url);
     if response {
-        compose.status.set(flow.status.map(|code| code.to_string()).unwrap_or_default());
+        compose
+            .status
+            .set(flow.status.map(|code| code.to_string()).unwrap_or_default());
         compose.headers.set(header_text(&flow.response_headers));
-        compose.body.set(String::from_utf8_lossy(&flow.response_body).into_owned());
+        compose
+            .body
+            .set(String::from_utf8_lossy(&flow.response_body).into_owned());
     } else {
         compose.status.set(String::new());
         compose.headers.set(header_text(&flow.request_headers));
-        compose.body.set(String::from_utf8_lossy(&flow.request_body).into_owned());
+        compose
+            .body
+            .set(String::from_utf8_lossy(&flow.request_body).into_owned());
     }
     compose.composing.set(true);
 }
@@ -7626,10 +7751,9 @@ fn begin_share(controls: &Controls, minutes: u64, filter: &str, share_id: Signal
         set_status(controls, StatusMsg::ShareNeedsCapture);
         return;
     }
-    let (id, _expires) =
-        controls
-            .hub
-            .begin_share(Duration::from_secs(minutes.saturating_mul(60)), filter);
+    let (id, _expires) = controls
+        .hub
+        .begin_share(Duration::from_secs(minutes.saturating_mul(60)), filter);
     let (base, local_only) = share_base(controls);
     let url = format!("{base}/s/{id}");
     share_id.set(id);
@@ -7653,10 +7777,10 @@ fn end_share(controls: &Controls, share_id: Signal<String>) {
 /// Address other people can open. `local_only` when the listener is not on every interface.
 fn share_base(controls: &Controls) -> (String, bool) {
     let port = lock_port(&controls.listen_port);
-    if lock_bool(&controls.listen_all) {
-        if let Some(ip) = choose_lan(&lan_addrs(), routed_v4(), "").map(|addr| addr.ip) {
-            return (format!("http://{ip}:{port}"), false);
-        }
+    if lock_bool(&controls.listen_all)
+        && let Some(ip) = choose_lan(&lan_addrs(), routed_v4(), "").map(|addr| addr.ip)
+    {
+        return (format!("http://{ip}:{port}"), false);
     }
     (format!("http://127.0.0.1:{port}"), true)
 }
@@ -7853,16 +7977,22 @@ fn choose_lan(addrs: &[LanAddr], routed: Option<Ipv4Addr>, previous: &str) -> Op
         return Some(found.clone());
     }
     if let Some(ip) = routed
-        && let Some(found) = addrs.iter().find(|addr| addr.ip == ip && lan_rank(addr) < 9)
+        && let Some(found) = addrs
+            .iter()
+            .find(|addr| addr.ip == ip && lan_rank(addr) < 9)
     {
         return Some(found.clone());
     }
-    if let Some(found) = addrs.iter().filter(|addr| lan_rank(addr) < 9).min_by(|left, right| {
-        lan_rank(left)
-            .cmp(&lan_rank(right))
-            .then(left.name.cmp(&right.name))
-            .then(left.ip.octets().cmp(&right.ip.octets()))
-    }) {
+    if let Some(found) = addrs
+        .iter()
+        .filter(|addr| lan_rank(addr) < 9)
+        .min_by(|left, right| {
+            lan_rank(left)
+                .cmp(&lan_rank(right))
+                .then(left.name.cmp(&right.name))
+                .then(left.ip.octets().cmp(&right.ip.octets()))
+        })
+    {
         return Some(found.clone());
     }
     addrs.first().cloned().or_else(|| {
@@ -8002,7 +8132,8 @@ fn list_v4_addrs() -> Vec<LanAddr> {
         while !cursor.is_null() {
             let adapter = &*cursor;
             let name = c_array_to_string(&adapter.Description);
-            let mut address = &adapter.IpAddressList as *const windows_sys::Win32::NetworkManagement::IpHelper::IP_ADDR_STRING;
+            let mut address = &adapter.IpAddressList
+                as *const windows_sys::Win32::NetworkManagement::IpHelper::IP_ADDR_STRING;
             while !address.is_null() {
                 let item = &*address;
                 let text = c_array_to_string(&item.IpAddress.String);
@@ -8025,8 +8156,14 @@ fn list_v4_addrs() -> Vec<LanAddr> {
 
 #[cfg(windows)]
 fn c_array_to_string(bytes: &[i8]) -> String {
-    let end = bytes.iter().position(|byte| *byte == 0).unwrap_or(bytes.len());
-    let raw = bytes[..end].iter().map(|byte| *byte as u8).collect::<Vec<_>>();
+    let end = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len());
+    let raw = bytes[..end]
+        .iter()
+        .map(|byte| *byte as u8)
+        .collect::<Vec<_>>();
     String::from_utf8_lossy(&raw).into_owned()
 }
 
@@ -8107,6 +8244,16 @@ fn crc32(data: &[u8]) -> u32 {
     !crc
 }
 
+fn format_bytes(bytes: usize) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::Ipv4Addr;
@@ -8176,7 +8323,10 @@ mod tests {
 
     #[test]
     fn filter_chips_toggle_a_whole_token() {
-        assert_eq!(super::toggle_filter_chip("", "type:json", super::JSON_ALIASES), "type:json");
+        assert_eq!(
+            super::toggle_filter_chip("", "type:json", super::JSON_ALIASES),
+            "type:json"
+        );
         assert_eq!(
             super::toggle_filter_chip("api.test type:json", "type:json", super::JSON_ALIASES),
             "api.test"
@@ -8189,8 +8339,14 @@ mod tests {
             super::toggle_filter_chip("fail example", "失败", super::FAIL_ALIASES),
             "example"
         );
-        assert_eq!(super::toggle_filter_chip("example", "失败", super::FAIL_ALIASES), "example 失败");
-        assert_eq!(super::toggle_filter_chip("pin: slow:", "slow:", super::SLOW_ALIASES), "pin:");
+        assert_eq!(
+            super::toggle_filter_chip("example", "失败", super::FAIL_ALIASES),
+            "example 失败"
+        );
+        assert_eq!(
+            super::toggle_filter_chip("pin: slow:", "slow:", super::SLOW_ALIASES),
+            "pin:"
+        );
         assert!(!super::filter_has_token("type:jsonl", super::JSON_ALIASES));
         assert!(super::filter_has_token("pin:", super::PIN_ALIASES));
     }
@@ -8260,10 +8416,7 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
         let path = super::xdg_download_dir("/home/ada", text).unwrap();
         assert_eq!(path, std::path::PathBuf::from("/home/ada/Downloads"));
         let absolute = super::xdg_download_dir("/home/ada", "XDG_DOWNLOAD_DIR=/srv/downloads\n");
-        assert_eq!(
-            absolute,
-            Some(std::path::PathBuf::from("/srv/downloads"))
-        );
+        assert_eq!(absolute, Some(std::path::PathBuf::from("/srv/downloads")));
         assert!(super::xdg_download_dir("/home/ada", "XDG_DOWNLOAD_DIR=\"\"\n").is_none());
         assert!(
             super::xdg_download_dir("/home/ada", "XDG_DESKTOP_DIR=\"$HOME/Desktop\"\n").is_none()
@@ -8317,7 +8470,11 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
         let ascii = vec![b'x'; 256 * 1024 + 10];
         let ascii_shown = super::body_text(&ascii, false, None, super::Lang::En);
         assert_eq!(ascii_shown.text.len(), 256 * 1024);
-        assert!(ascii_shown.note.contains("10 more bytes"), "{}", ascii_shown.note);
+        assert!(
+            ascii_shown.note.contains("10 more bytes"),
+            "{}",
+            ascii_shown.note
+        );
     }
 
     #[test]
@@ -8346,10 +8503,19 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
         assert!(!config.show_host);
         assert!(config.show_path);
         assert_eq!(super::ListColumns::from_config(&config), columns);
-        assert_eq!(super::clamp_list_px(10.0), crate::config::LIST_WIDTH_MIN as f32);
-        assert_eq!(super::clamp_list_px(5_000.0), crate::config::LIST_WIDTH_MAX as f32);
+        assert_eq!(
+            super::clamp_list_px(10.0),
+            crate::config::LIST_WIDTH_MIN as f32
+        );
+        assert_eq!(
+            super::clamp_list_px(5_000.0),
+            crate::config::LIST_WIDTH_MAX as f32
+        );
         assert_eq!(super::clamp_list_px(640.6), 641.0);
-        assert_eq!(super::clamp_list_px(-20.0), crate::config::LIST_WIDTH_MIN as f32);
+        assert_eq!(
+            super::clamp_list_px(-20.0),
+            crate::config::LIST_WIDTH_MIN as f32
+        );
     }
 
     #[test]
@@ -8373,9 +8539,10 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
         assert_eq!(cols[0].width.unwrap().0, 72.0);
         assert_eq!(cols[1].width.unwrap().0, 400.0);
         assert_eq!(cols[1].min_width.unwrap().0, 80.0);
-        assert!(cols.iter().all(|column| {
-            column.movable == Some(false) && column.resizable == Some(true)
-        }));
+        assert!(
+            cols.iter()
+                .all(|column| { column.movable == Some(false) && column.resizable == Some(true) })
+        );
         let hidden_path = super::ListColumns {
             path: false,
             ..shown
@@ -8404,10 +8571,7 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
             super::list_path(":443", Some("证书被拒绝"), true, super::Lang::En),
             "Certificate rejected"
         );
-        assert_eq!(
-            super::list_path("/", None, true, super::Lang::En),
-            ""
-        );
+        assert_eq!(super::list_path("/", None, true, super::Lang::En), "");
     }
 
     #[test]
@@ -8455,14 +8619,21 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
     #[test]
     fn named_filters_and_rules_store_and_deduplicate() {
         let saved = super::push_saved_filter_named(&[], "理财接口", "host:baidu.com type:json");
-        assert_eq!(saved, vec!["理财接口\thost:baidu.com type:json".to_string()]);
+        assert_eq!(
+            saved,
+            vec!["理财接口\thost:baidu.com type:json".to_string()]
+        );
         assert_eq!(
             super::split_saved_filter(&saved[0]),
             ("理财接口", "host:baidu.com type:json")
         );
         // Updating the same expression with a new name replaces the old entry.
-        let saved = super::push_saved_filter_named(&saved, "线上理财", "host:baidu.com type:json");
-        assert_eq!(saved, vec!["线上理财\thost:baidu.com type:json".to_string()]);
+        let saved =
+            super::push_saved_filter_named(&saved, "线上理财", "host:baidu.com type:json");
+        assert_eq!(
+            saved,
+            vec!["线上理财\thost:baidu.com type:json".to_string()]
+        );
 
         let rules = super::push_saved_rule(
             &[],
@@ -8477,14 +8648,3 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
         assert_eq!(rules[0].name, "break api.test/v1");
     }
 }
-
-fn format_bytes(bytes: usize) -> String {
-    if bytes >= 1024 * 1024 {
-        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
-    } else if bytes >= 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
-    } else {
-        format!("{bytes} B")
-    }
-}
-

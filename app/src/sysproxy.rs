@@ -61,7 +61,9 @@ pub enum EnableOutcome {
     Applied,
     /// The listener is still useful; the user points a browser at it.
     #[allow(dead_code)]
-    Manual { reason: String },
+    Manual {
+        reason: String,
+    },
 }
 
 fn snapshot_path(dir: &Path) -> PathBuf {
@@ -83,11 +85,11 @@ pub fn restore_if_dirty() -> Result<bool> {
 }
 
 pub fn enable(port: u16) -> Result<EnableOutcome> {
-    if let Some(existing) = read_snapshot_in(&data_dir())? {
-        if existing.active {
-            apply_snoop(port, &existing)?;
-            return Ok(EnableOutcome::Applied);
-        }
+    if let Some(existing) = read_snapshot_in(&data_dir())?
+        && existing.active
+    {
+        apply_snoop(port, &existing)?;
+        return Ok(EnableOutcome::Applied);
     }
     let mut snapshot = capture_current()?;
     snapshot.active = true;
@@ -178,8 +180,8 @@ fn read_snapshot_in(dir: &Path) -> Result<Option<Snapshot>> {
     if toml_path.is_file() {
         let text = fs::read_to_string(&toml_path)
             .with_context(|| format!("读取 {}", toml_path.display()))?;
-        let snapshot: Snapshot = toml::from_str(&text)
-            .with_context(|| format!("解析 {}", toml_path.display()))?;
+        let snapshot: Snapshot =
+            toml::from_str(&text).with_context(|| format!("解析 {}", toml_path.display()))?;
         if json_path.is_file() {
             let _ = fs::remove_file(&json_path);
         }
@@ -207,10 +209,10 @@ fn write_snapshot_in(dir: &Path, snapshot: &Snapshot) -> Result<()> {
 }
 
 fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
     }
     let mut tmp_name = path.as_os_str().to_os_string();
     tmp_name.push(".tmp");
@@ -248,16 +250,8 @@ fn capture_macos() -> Result<Vec<MacService>> {
 #[cfg(target_os = "macos")]
 fn enable_macos(port: u16, services: &[MacService]) -> Result<()> {
     for service in services {
-        run_setup(&[
-            "-setautoproxystate",
-            &service.name,
-            "off",
-        ])?;
-        run_setup(&[
-            "-setsocksfirewallproxystate",
-            &service.name,
-            "off",
-        ])?;
+        run_setup(&["-setautoproxystate", &service.name, "off"])?;
+        run_setup(&["-setsocksfirewallproxystate", &service.name, "off"])?;
         run_setup(&[
             "-setwebproxy",
             &service.name,
@@ -286,7 +280,12 @@ fn enable_macos(port: u16, services: &[MacService]) -> Result<()> {
 #[cfg(target_os = "macos")]
 fn restore_macos(services: &[MacService]) -> Result<()> {
     for service in services {
-        write_endpoint(&service.name, "-setwebproxy", "-setwebproxystate", &service.web)?;
+        write_endpoint(
+            &service.name,
+            "-setwebproxy",
+            "-setwebproxystate",
+            &service.web,
+        )?;
         write_endpoint(
             &service.name,
             "-setsecurewebproxy",
@@ -334,11 +333,7 @@ fn write_endpoint(service: &str, set: &str, state: &str, endpoint: &Endpoint) ->
         endpoint.port.to_string()
     };
     run_setup(&[set, service, server, &port, "off", "", ""])?;
-    run_setup(&[
-        state,
-        service,
-        if endpoint.enabled { "on" } else { "off" },
-    ])?;
+    run_setup(&[state, service, if endpoint.enabled { "on" } else { "off" }])?;
     Ok(())
 }
 
@@ -443,10 +438,11 @@ fn run_setup(args: &[&str]) -> Result<()> {
 
 #[cfg(target_os = "windows")]
 fn capture_windows() -> Result<Option<WindowsProxy>> {
-    use winreg::enums::*;
     use winreg::RegKey;
+    use winreg::enums::*;
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let key = hkcu.open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings")?;
+    let key =
+        hkcu.open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings")?;
     Ok(Some(WindowsProxy {
         enable: key.get_value("ProxyEnable").unwrap_or(0),
         server: key.get_value("ProxyServer").unwrap_or_default(),
@@ -461,8 +457,8 @@ fn capture_windows() -> Result<Option<WindowsProxy>> {
 
 #[cfg(target_os = "windows")]
 fn write_windows(proxy: &WindowsProxy) -> Result<()> {
-    use winreg::enums::*;
     use winreg::RegKey;
+    use winreg::enums::*;
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let key = hkcu.open_subkey_with_flags(
         "Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings",
@@ -479,7 +475,7 @@ fn write_windows(proxy: &WindowsProxy) -> Result<()> {
 fn refresh_wininet() {
     use std::ptr::null_mut;
     use windows_sys::Win32::Networking::WinInet::{
-        InternetSetOptionW, INTERNET_OPTION_REFRESH, INTERNET_OPTION_SETTINGS_CHANGED,
+        INTERNET_OPTION_REFRESH, INTERNET_OPTION_SETTINGS_CHANGED, InternetSetOptionW,
     };
     unsafe {
         InternetSetOptionW(null_mut(), INTERNET_OPTION_SETTINGS_CHANGED, null_mut(), 0);
@@ -518,7 +514,11 @@ fn capture_gnome() -> Result<Option<GnomeProxy>> {
 #[cfg(all(unix, not(target_os = "macos")))]
 fn write_gnome(proxy: &GnomeProxy) -> Result<()> {
     gsettings_set("org.gnome.system.proxy", "mode", &quote(&proxy.mode))?;
-    gsettings_set("org.gnome.system.proxy.http", "host", &quote(&proxy.http_host))?;
+    gsettings_set(
+        "org.gnome.system.proxy.http",
+        "host",
+        &quote(&proxy.http_host),
+    )?;
     gsettings_set(
         "org.gnome.system.proxy.http",
         "port",
@@ -599,10 +599,7 @@ mod tests {
     #[test]
     fn parses_bypass_domains() {
         let text = "localhost\n127.0.0.0/8\n::1\n";
-        assert_eq!(
-            parse_bypass(text),
-            vec!["localhost", "127.0.0.0/8", "::1"]
-        );
+        assert_eq!(parse_bypass(text), vec!["localhost", "127.0.0.0/8", "::1"]);
     }
 
     #[test]

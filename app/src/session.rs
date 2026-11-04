@@ -192,7 +192,13 @@ impl Session {
         }
     }
 
-    pub fn add_message(&mut self, id: u64, direction: Direction, kind: impl Into<String>, text: impl Into<String>) {
+    pub fn add_message(
+        &mut self,
+        id: u64,
+        direction: Direction,
+        kind: impl Into<String>,
+        text: impl Into<String>,
+    ) {
         const COUNT_CAP: usize = 200;
         const BYTE_CAP: usize = 256 * 1024;
         let Some(flow) = self.flows.get_mut(&id) else {
@@ -229,12 +235,7 @@ impl Session {
         }
     }
 
-    pub fn replace_request(
-        &mut self,
-        id: u64,
-        headers: Vec<(String, String)>,
-        body: Vec<u8>,
-    ) {
+    pub fn replace_request(&mut self, id: u64, headers: Vec<(String, String)>, body: Vec<u8>) {
         let Some(flow) = self.flows.get_mut(&id) else {
             return;
         };
@@ -294,10 +295,10 @@ impl Session {
     }
 
     pub fn mark_finished(&mut self, id: u64) {
-        if let Some(flow) = self.flows.get_mut(&id) {
-            if flow.finished_at.is_none() {
-                flow.finished_at = Some(SystemTime::now());
-            }
+        if let Some(flow) = self.flows.get_mut(&id)
+            && flow.finished_at.is_none()
+        {
+            flow.finished_at = Some(SystemTime::now());
         }
     }
 
@@ -331,6 +332,7 @@ impl Session {
         flow.response_bytes = response_bytes.unwrap_or(flow.response_body.len() as u64);
     }
 
+    #[cfg(test)]
     pub fn flows(&self) -> Vec<Flow> {
         self.flows_matching("")
     }
@@ -468,9 +470,11 @@ impl Session {
 
     fn evict(&mut self, keep: u64) {
         while self.bytes > SESSION_CAP && self.order.len() > 1 {
-            let Some(pos) = self.order.iter().position(|id| {
-                *id != keep && self.flows.get(id).is_some_and(|flow| !flow.pinned)
-            }) else {
+            let Some(pos) = self
+                .order
+                .iter()
+                .position(|id| *id != keep && self.flows.get(id).is_some_and(|flow| !flow.pinned))
+            else {
                 break;
             };
             let Some(old) = self.order.remove(pos) else {
@@ -499,7 +503,8 @@ fn header_contains(flow: &Flow, keyword: &str) -> bool {
         .iter()
         .chain(flow.response_headers.iter())
         .any(|(name, value)| {
-            name.to_ascii_lowercase().contains(keyword) || value.to_ascii_lowercase().contains(keyword)
+            name.to_ascii_lowercase().contains(keyword)
+                || value.to_ascii_lowercase().contains(keyword)
         })
 }
 
@@ -520,13 +525,12 @@ impl StatusMatch {
         if lower == "fail" || lower == "失败" || lower == "err" || lower == "error" {
             return Some(Self::Failed);
         }
-        if let Some(class) = lower.strip_suffix("xx") {
-            if class.len() == 1
-                && let Ok(digit) = class.parse::<u16>()
-                && (1..6).contains(&digit)
-            {
-                return Some(Self::Class(digit));
-            }
+        if let Some(class) = lower.strip_suffix("xx")
+            && class.len() == 1
+            && let Ok(digit) = class.parse::<u16>()
+            && (1..6).contains(&digit)
+        {
+            return Some(Self::Class(digit));
         }
         if lower.len() == 3
             && lower.bytes().all(|byte| byte.is_ascii_digit())
@@ -695,7 +699,10 @@ impl FlowQuery {
                 }
                 continue;
             }
-            if let Some(kind) = lower.strip_prefix("type:").or_else(|| lower.strip_prefix("ct:")) {
+            if let Some(kind) = lower
+                .strip_prefix("type:")
+                .or_else(|| lower.strip_prefix("ct:"))
+            {
                 query.content_types.extend(split_or_terms(kind));
                 continue;
             }
@@ -724,9 +731,11 @@ impl FlowQuery {
                 .filter(|part| !part.is_empty())
                 .collect();
             if !parts.is_empty()
-                && parts
-                    .iter()
-                    .all(|part| METHODS.iter().any(|method| method.eq_ignore_ascii_case(part)))
+                && parts.iter().all(|part| {
+                    METHODS
+                        .iter()
+                        .any(|method| method.eq_ignore_ascii_case(part))
+                })
             {
                 for part in parts {
                     let upper = part.to_ascii_uppercase();
@@ -769,9 +778,7 @@ impl FlowQuery {
         {
             return false;
         }
-        if !self.statuses.is_empty()
-            && !self.statuses.iter().any(|status| status.matches(flow))
-        {
+        if !self.statuses.is_empty() && !self.statuses.iter().any(|status| status.matches(flow)) {
             return false;
         }
         if !self.content_types.is_empty() {
@@ -781,11 +788,9 @@ impl FlowQuery {
                 .chain(flow.request_headers.iter())
                 .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
                 .map(|(_, value)| value.to_ascii_lowercase());
-            if !header.is_some_and(|value| {
-                self.content_types
-                    .iter()
-                    .any(|kind| value.contains(kind))
-            }) {
+            if !header
+                .is_some_and(|value| self.content_types.iter().any(|kind| value.contains(kind)))
+            {
                 return false;
             }
         }
@@ -989,7 +994,9 @@ mod tests {
     fn filter_matches_body_and_header_keywords() {
         let mut session = Session::default();
         let mut first = draft("api.example.com");
-        first.request_headers.push(("X-Trace".into(), "alpha-1".into()));
+        first
+            .request_headers
+            .push(("X-Trace".into(), "alpha-1".into()));
         let id = session.open(first);
         session.append_body(id, Direction::Request, b"{\"code\":1001}");
         session.set_response(
@@ -1092,25 +1099,10 @@ mod tests {
             session.ids_matching("host:*.example.com | *.third.net"),
             vec![id_a, id_c]
         );
-        assert_eq!(
-            session.ids_matching("path:/v1|/auth"),
-            vec![id_a, id_b]
-        );
-        assert_eq!(
-            session.ids_matching("path:/v1 | /auth"),
-            vec![id_a, id_b]
-        );
-        assert_eq!(
-            session.ids_matching("GET|POST"),
-            vec![id_a, id_b]
-        );
-        assert_eq!(
-            session.ids_matching("2xx|5xx"),
-            vec![id_a, id_c]
-        );
-        assert_eq!(
-            session.ids_matching("mute:other.org|third.net"),
-            vec![id_a]
-        );
+        assert_eq!(session.ids_matching("path:/v1|/auth"), vec![id_a, id_b]);
+        assert_eq!(session.ids_matching("path:/v1 | /auth"), vec![id_a, id_b]);
+        assert_eq!(session.ids_matching("GET|POST"), vec![id_a, id_b]);
+        assert_eq!(session.ids_matching("2xx|5xx"), vec![id_a, id_c]);
+        assert_eq!(session.ids_matching("mute:other.org|third.net"), vec![id_a]);
     }
 }

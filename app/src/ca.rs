@@ -11,11 +11,11 @@ use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use rcgen::{
-    BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose,
-    IsCa, Issuer, KeyPair, KeyUsagePurpose, SanType,
+    BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
+    Issuer, KeyPair, KeyUsagePurpose, SanType,
 };
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::ServerConfig;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 
 const CA_NAME: &str = "zniff CA";
 /// The previous product name. Still removed so an already-trusted root does not linger.
@@ -40,7 +40,7 @@ pub fn data_dir() -> PathBuf {
     #[cfg(target_os = "macos")]
     {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        return PathBuf::from(home).join("Library/Application Support/zniff");
+        PathBuf::from(home).join("Library/Application Support/zniff")
     }
     #[cfg(target_os = "windows")]
     {
@@ -194,7 +194,7 @@ fn ca_der_from_pem(pem: &str) -> Result<CertificateDer<'static>> {
 
 /// Tiny base64 decoder so the CA module does not take another dependency.
 mod base64_decode {
-    use anyhow::{bail, Result};
+    use anyhow::{Result, bail};
 
     pub fn decode(text: &str) -> Result<Vec<u8>> {
         fn val(byte: u8) -> Result<u8> {
@@ -246,7 +246,7 @@ fn write_secret(path: &Path, bytes: &[u8]) -> Result<()> {
 pub fn install(ca: &Ca) -> Result<String> {
     #[cfg(target_os = "macos")]
     {
-        return install_macos(ca);
+        install_macos(ca)
     }
     #[cfg(target_os = "windows")]
     {
@@ -336,7 +336,12 @@ fn delete_named_cert(name: &str) -> Result<bool> {
 #[cfg(target_os = "windows")]
 fn install_windows(ca: &Ca) -> Result<String> {
     let status = std::process::Command::new("certutil")
-        .args(["-user", "-addstore", "Root", ca.cert_path().to_str().unwrap_or("ca.crt")])
+        .args([
+            "-user",
+            "-addstore",
+            "Root",
+            ca.cert_path().to_str().unwrap_or("ca.crt"),
+        ])
         .status()
         .context("运行 certutil")?;
     if status.success() {

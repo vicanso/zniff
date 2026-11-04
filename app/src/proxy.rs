@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use anyhow::{anyhow, Context as _, Result};
+use anyhow::{Context as _, Result, anyhow};
 use bytes::Bytes;
 use http::{HeaderMap, HeaderName, Method, Request, Response, StatusCode, Uri, Version};
 use http_body::Body;
@@ -22,11 +22,11 @@ use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::upgrade::Upgraded;
 use hyper_util::rt::{TokioExecutor, TokioIo};
+use rustls::RootCertStore;
 use rustls::client::ClientConfig;
-use rustls::pki_types::ServerName;
 #[cfg(test)]
 use rustls::pki_types::CertificateDer;
-use rustls::RootCertStore;
+use rustls::pki_types::ServerName;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
@@ -35,7 +35,7 @@ use tokio_rustls::TlsConnector;
 
 use crate::bypass::BypassRules;
 use crate::ca::Ca;
-use crate::client_hello::{read_client_hello, ReadHello};
+use crate::client_hello::{ReadHello, read_client_hello};
 use crate::decompress::Decoder;
 use crate::rules::{self, Action, Rule};
 use crate::session::{Direction, FlowDraft, Protocol, Session};
@@ -59,7 +59,10 @@ pub struct Hub {
     upstream: Mutex<Option<Upstream>>,
     /// Idle plaintext origin sockets, used only on the proxy runtime.
     pool: tokio::sync::Mutex<HashMap<(String, u16), Vec<TcpStream>>>,
-    h2_pool: Mutex<HashMap<(String, u16), hyper::client::conn::http2::SendRequest<RecordingBody<Incoming>>>>,
+    #[allow(clippy::type_complexity)]
+    h2_pool: Mutex<
+        HashMap<(String, u16), hyper::client::conn::http2::SendRequest<RecordingBody<Incoming>>>,
+    >,
     break_slot: Mutex<Option<BreakSlot>>,
     /// One live HTML share. A new call replaces the id.
     share: Mutex<Option<crate::share::LiveShare>>,
@@ -125,7 +128,11 @@ impl Hub {
     }
 
     /// Replaces any previous link. The id is unguessable and dies at `ttl`.
-    pub fn begin_share(&self, ttl: std::time::Duration, filter: &str) -> (String, std::time::SystemTime) {
+    pub fn begin_share(
+        &self,
+        ttl: std::time::Duration,
+        filter: &str,
+    ) -> (String, std::time::SystemTime) {
         let id = crate::share::new_id();
         let expires = std::time::SystemTime::now() + ttl;
         *self.share.lock().unwrap_or_else(|err| err.into_inner()) = Some(crate::share::LiveShare {
@@ -143,9 +150,7 @@ impl Hub {
     /// The current id while it is still before its deadline.
     pub fn share_id(&self) -> Option<String> {
         let mut slot = self.share.lock().unwrap_or_else(|err| err.into_inner());
-        let Some(share) = slot.as_ref() else {
-            return None;
-        };
+        let share = slot.as_ref()?;
         if std::time::SystemTime::now() < share.expires {
             return Some(share.id.clone());
         }
@@ -155,9 +160,7 @@ impl Hub {
 
     fn share_document(&self, id: &str) -> Option<String> {
         let mut slot = self.share.lock().unwrap_or_else(|err| err.into_inner());
-        let Some(share) = slot.as_ref() else {
-            return None;
-        };
+        let share = slot.as_ref()?;
         let now = std::time::SystemTime::now();
         if !crate::share::grant_ok(share, id, now) {
             if share.id == id {
@@ -197,11 +200,17 @@ impl Hub {
     }
 
     fn upstream(&self) -> Option<Upstream> {
-        self.upstream.lock().unwrap_or_else(|err| err.into_inner()).clone()
+        self.upstream
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
     }
 
     fn skips_tls(&self, host: &str) -> bool {
-        self.bypass.lock().unwrap_or_else(|err| err.into_inner()).skips(host)
+        self.bypass
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .skips(host)
     }
 
     fn plan(&self, host: &str, path: &str) -> rules::Effect {
@@ -262,16 +271,24 @@ impl Hub {
     }
 
     pub fn resolve_break(&self, decision: BreakDecision) -> bool {
-        let mut slot = self.break_slot.lock().unwrap_or_else(|err| err.into_inner());
+        let mut slot = self
+            .break_slot
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
         let Some(slot) = slot.take() else {
             return false;
         };
-        slot.reply.map(|reply| reply.send(decision).is_ok()).unwrap_or(false)
+        slot.reply
+            .map(|reply| reply.send(decision).is_ok())
+            .unwrap_or(false)
     }
 
     async fn wait_break(&self, id: u64, side: BreakSide) -> BreakDecision {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        *self.break_slot.lock().unwrap_or_else(|err| err.into_inner()) = Some(BreakSlot {
+        *self
+            .break_slot
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = Some(BreakSlot {
             id,
             side,
             reply: Some(tx),
@@ -286,7 +303,10 @@ impl Hub {
                 status: None,
             },
         };
-        let mut slot = self.break_slot.lock().unwrap_or_else(|err| err.into_inner());
+        let mut slot = self
+            .break_slot
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
         if slot.as_ref().map(|slot| slot.id) == Some(id) {
             *slot = None;
         }
@@ -326,7 +346,11 @@ impl Hub {
     }
 
     async fn take_idle(&self, key: (String, u16)) -> Option<TcpStream> {
-        self.pool.lock().await.get_mut(&key).and_then(|slots| slots.pop())
+        self.pool
+            .lock()
+            .await
+            .get_mut(&key)
+            .and_then(|slots| slots.pop())
     }
 
     async fn park_idle(&self, key: (String, u16), stream: TcpStream) {
@@ -407,10 +431,6 @@ impl Hub {
         self.touch();
     }
 
-    pub fn export_har(&self) -> serde_json::Value {
-        self.export_har_matching("")
-    }
-
     /// Exports the flows the list is showing. An empty filter exports the session.
     pub fn export_har_matching(&self, filter: &str) -> serde_json::Value {
         let flows = self.with_session(|session| session.flows_matching(filter));
@@ -455,12 +475,8 @@ impl Hub {
     /// Replays one stored request on a fresh runtime. Map and break rules are
     /// not applied. The callback runs on the worker thread and may only touch
     /// mutexes, not nsh signals.
-    pub fn replay_later<F>(
-        self: &Arc<Self>,
-        id: u64,
-        edit: ReplayOverride,
-        on_done: F,
-    ) where
+    pub fn replay_later<F>(self: &Arc<Self>, id: u64, edit: ReplayOverride, on_done: F)
+    where
         F: FnOnce(Result<u64>) + Send + 'static,
     {
         let flow = self.with_session(|session| session.get(id).cloned());
@@ -500,7 +516,13 @@ impl Hub {
         self.touch();
     }
 
-    fn replace_response(&self, id: u64, status: u16, headers: Vec<(String, String)>, body: Vec<u8>) {
+    fn replace_response(
+        &self,
+        id: u64,
+        status: u16,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    ) {
         self.with_session(|session| session.replace_response(id, status, headers, body));
         self.touch();
     }
@@ -516,12 +538,14 @@ impl Hub {
     }
 }
 
-pub async fn serve(
-    listener: TcpListener,
-    hub: Arc<Hub>,
-    mut shutdown: watch::Receiver<bool>,
-) {
-    log::info!("代理监听 {}", listener.local_addr().map(|a| a.to_string()).unwrap_or_default());
+pub async fn serve(listener: TcpListener, hub: Arc<Hub>, mut shutdown: watch::Receiver<bool>) {
+    log::info!(
+        "代理监听 {}",
+        listener
+            .local_addr()
+            .map(|a| a.to_string())
+            .unwrap_or_default()
+    );
     loop {
         tokio::select! {
             _ = shutdown.changed() => {
@@ -663,14 +687,12 @@ where
         return tunnel_after_hello(&mut client, hello.raw, host, port, &hub).await;
     }
     let offers_h2 = hello.alpn.iter().any(|proto| proto == b"h2");
-    if offers_h2 {
-        if let Some(mut sender) = hub.cached_h2(&(sni_host.clone(), port)) {
-            let ready = timeout(Duration::from_secs(2), sender.ready()).await;
-            if matches!(ready, Ok(Ok(()))) {
-                return intercept_h2_pooled(client, hello.raw, sender, &sni_host, port, hub).await;
-            }
-            hub.drop_h2(&(sni_host.clone(), port));
+    if offers_h2 && let Some(mut sender) = hub.cached_h2(&(sni_host.clone(), port)) {
+        let ready = timeout(Duration::from_secs(2), sender.ready()).await;
+        if matches!(ready, Ok(Ok(()))) {
+            return intercept_h2_pooled(client, hello.raw, sender, &sni_host, port, hub).await;
         }
+        hub.drop_h2(&(sni_host.clone(), port));
     }
     let alpn = if hello.alpn.is_empty() {
         vec![b"http/1.1".to_vec()]
@@ -736,10 +758,7 @@ async fn intercept<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let config = hub
-        .ca
-        .server_config(host, &selected)
-        .context("叶子证书")?;
+    let config = hub.ca.server_config(host, &selected).context("叶子证书")?;
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
     let rewound = Prefixed {
         prefix: client_hello,
@@ -903,9 +922,17 @@ where
         let hub = hub.clone();
         let host = host_for_service.clone();
         async move {
-            forward_request(&mut sender, req, hub, &host, port, "https", Protocol::Http11)
-                .await
-                .map_err(|err| io::Error::other(err.to_string()))
+            forward_request(
+                &mut sender,
+                req,
+                hub,
+                &host,
+                port,
+                "https",
+                Protocol::Http11,
+            )
+            .await
+            .map_err(|err| io::Error::other(err.to_string()))
         }
     });
     hyper::server::conn::http1::Builder::new()
@@ -918,13 +945,7 @@ where
     Ok(())
 }
 
-async fn serve_h2<C, O>(
-    client: C,
-    origin: O,
-    host: String,
-    port: u16,
-    hub: Arc<Hub>,
-) -> Result<()>
+async fn serve_h2<C, O>(client: C, origin: O, host: String, port: u16, hub: Arc<Hub>) -> Result<()>
 where
     C: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     O: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -973,7 +994,15 @@ where
             return Err(anyhow!("客户端 TLS 超时"));
         }
     };
-    serve_h2_sender(client_tls, sender, host.to_string(), port, hub, TokioExecutor::new()).await
+    serve_h2_sender(
+        client_tls,
+        sender,
+        host.to_string(),
+        port,
+        hub,
+        TokioExecutor::new(),
+    )
+    .await
 }
 
 async fn serve_h2_sender<C>(
@@ -1019,13 +1048,9 @@ fn origin_tls_reason(err: &anyhow::Error) -> String {
     if let Some(tls) = rustls_error(err) {
         return match tls {
             rustls::Error::InvalidCertificate(cert) => match cert {
-                rustls::CertificateError::UnknownIssuer => {
-                    "源站证书不在内置根证书里，已改为隧道"
-                }
+                rustls::CertificateError::UnknownIssuer => "源站证书不在内置根证书里，已改为隧道",
                 rustls::CertificateError::Expired
-                | rustls::CertificateError::ExpiredContext { .. } => {
-                    "源站证书已过期，已改为隧道"
-                }
+                | rustls::CertificateError::ExpiredContext { .. } => "源站证书已过期，已改为隧道",
                 rustls::CertificateError::NotValidYet
                 | rustls::CertificateError::NotValidYetContext { .. } => {
                     "源站证书还没到生效时间，已改为隧道"
@@ -1044,9 +1069,7 @@ fn origin_tls_reason(err: &anyhow::Error) -> String {
             rustls::Error::NoApplicationProtocol => {
                 "源站不接受客户端的协议，已改为隧道".to_string()
             }
-            rustls::Error::NoCertificatesPresented => {
-                "源站没有给出证书，已改为隧道".to_string()
-            }
+            rustls::Error::NoCertificatesPresented => "源站没有给出证书，已改为隧道".to_string(),
             rustls::Error::PeerIncompatible(_) => {
                 "源站 TLS 版本或算法不兼容，已改为隧道".to_string()
             }
@@ -1214,12 +1237,18 @@ where
                     id,
                     host.clone(),
                     path.clone(),
-                    format!("{scheme}://{}{path}", display_authority(&host, port, scheme)),
+                    format!(
+                        "{scheme}://{}{path}",
+                        display_authority(&host, port, scheme)
+                    ),
                 );
                 if scheme == "https" {
                     let _ = drain_request(client, &headers, &hub, id).await;
                     let body = body_override.unwrap_or_default();
-                    return exchange_tls(client, &hub, id, &method, &host, port, &path, &headers, &body).await;
+                    return exchange_tls(
+                        client, &hub, id, &method, &host, port, &path, &headers, &body,
+                    )
+                    .await;
                 }
             }
         }
@@ -1234,21 +1263,19 @@ where
             format!("http://{}{path}", display_authority(&host, port, "http")),
         );
     }
-    if body_override.is_none() && !plan.request_replaces.is_empty() {
-        if let Some(len) = content_length(&head.headers) {
-            if len <= crate::session::BODY_CAP {
-                let raw = read_exact(client, len).await?;
-                request_taken = true;
-                let encoding = header_value(&head.headers, "content-encoding");
-                if let Some(next) =
-                    replaced_body(&raw, encoding.as_deref(), &plan.request_replaces)
-                {
-                    strip_request_encoding = true;
-                    body_override = Some(next);
-                } else {
-                    body_override = Some(raw);
-                }
-            }
+    if body_override.is_none()
+        && !plan.request_replaces.is_empty()
+        && let Some(len) = content_length(&head.headers)
+        && len <= crate::session::BODY_CAP
+    {
+        let raw = read_exact(client, len).await?;
+        request_taken = true;
+        let encoding = header_value(&head.headers, "content-encoding");
+        if let Some(next) = replaced_body(&raw, encoding.as_deref(), &plan.request_replaces) {
+            strip_request_encoding = true;
+            body_override = Some(next);
+        } else {
+            body_override = Some(raw);
         }
     }
     let pool_key = pool_key(&host, port, &hub);
@@ -1257,9 +1284,8 @@ where
         None => timeout(IO_TIMEOUT, dial(&host, port, &hub, false))
             .await
             .context("连接源站超时")
-            .map_err(|err| {
+            .inspect_err(|err| {
                 hub.set_error(id, err.to_string());
-                err
             })??,
     };
     origin.set_nodelay(true).ok();
@@ -1363,31 +1389,30 @@ where
         pos: 0,
         inner: origin,
     };
-    if !websocket && !break_response && !plan.response_replaces.is_empty() {
-        if let Some(len) = content_length(&resp_headers) {
-            if len <= crate::session::BODY_CAP {
-                let raw = read_exact(&mut origin, len).await?;
-                let encoding = header_value(&resp_headers, "content-encoding");
-                if let Some(next) =
-                    replaced_body(&raw, encoding.as_deref(), &plan.response_replaces)
-                {
-                    resp_headers.retain(|(name, _)| {
-                        !name.eq_ignore_ascii_case("content-encoding")
-                            && !name.eq_ignore_ascii_case("transfer-encoding")
-                    });
-                    hub.replace_response(id, status, resp_headers.clone(), next.clone());
-                    write_bytes(client, status, &reason, &resp_headers, &next).await?;
-                    hub.mark_finished(id);
-                    return Ok(());
-                }
-                let head = render_response_head(status, &reason, &resp_headers);
-                client.write_all(head.as_bytes()).await?;
-                client.write_all(&raw).await?;
-                note_decoded(&hub, id, Direction::Response, &raw, encoding.as_deref());
-                hub.mark_finished(id);
-                return Ok(());
-            }
+    if !websocket
+        && !break_response
+        && !plan.response_replaces.is_empty()
+        && let Some(len) = content_length(&resp_headers)
+        && len <= crate::session::BODY_CAP
+    {
+        let raw = read_exact(&mut origin, len).await?;
+        let encoding = header_value(&resp_headers, "content-encoding");
+        if let Some(next) = replaced_body(&raw, encoding.as_deref(), &plan.response_replaces) {
+            resp_headers.retain(|(name, _)| {
+                !name.eq_ignore_ascii_case("content-encoding")
+                    && !name.eq_ignore_ascii_case("transfer-encoding")
+            });
+            hub.replace_response(id, status, resp_headers.clone(), next.clone());
+            write_bytes(client, status, &reason, &resp_headers, &next).await?;
+            hub.mark_finished(id);
+            return Ok(());
         }
+        let head = render_response_head(status, &reason, &resp_headers);
+        client.write_all(head.as_bytes()).await?;
+        client.write_all(&raw).await?;
+        note_decoded(&hub, id, Direction::Response, &raw, encoding.as_deref());
+        hub.mark_finished(id);
+        return Ok(());
     }
     if break_response {
         match read_capped_body(&mut origin, &resp_headers, crate::session::BODY_CAP).await {
@@ -1405,8 +1430,7 @@ where
                 let replaced_body = decision.body.is_some();
                 let next_body = decision.body.unwrap_or(body);
                 if replaced_body {
-                    next_headers
-                        .retain(|(name, _)| !name.eq_ignore_ascii_case("content-encoding"));
+                    next_headers.retain(|(name, _)| !name.eq_ignore_ascii_case("content-encoding"));
                 }
                 if let Some(code) = decision.status {
                     status = code;
@@ -1455,10 +1479,13 @@ where
     hub.mark_finished(id);
     let response_close = header_value(&resp.headers, "connection")
         .is_some_and(|value| value.eq_ignore_ascii_case("close"));
-    if reusable && !connection_close && !response_close && status != 101 {
-        if let Some(stream) = origin.into_idle() {
-            hub.park_idle(pool_key, stream).await;
-        }
+    if reusable
+        && !connection_close
+        && !response_close
+        && status != 101
+        && let Some(stream) = origin.into_idle()
+    {
+        hub.park_idle(pool_key, stream).await;
     }
     Ok(())
 }
@@ -1508,7 +1535,12 @@ fn parse_upstream(text: &str) -> Option<Upstream> {
     Some(Upstream { host, port })
 }
 
-async fn drain_request<S>(client: &mut S, headers: &[(String, String)], hub: &Hub, id: u64) -> Result<()>
+async fn drain_request<S>(
+    client: &mut S,
+    headers: &[(String, String)],
+    hub: &Hub,
+    id: u64,
+) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -1546,11 +1578,9 @@ where
         loop {
             let size_line = read_line(client).await?;
             let text = String::from_utf8_lossy(&size_line);
-            let size = usize::from_str_radix(
-                text.trim().split(';').next().unwrap_or("0").trim(),
-                16,
-            )
-            .unwrap_or(0);
+            let size =
+                usize::from_str_radix(text.trim().split(';').next().unwrap_or("0").trim(), 16)
+                    .unwrap_or(0);
             if size == 0 {
                 let _ = read_line(client).await?;
                 break;
@@ -1594,7 +1624,16 @@ where
                 rules::ensure_cors(&mut headers);
             }
             rules::apply_header_ops(&mut headers, response_ops);
-            write_static(client, hub, id, status, reason_phrase(status), &headers, &body).await
+            write_static(
+                client,
+                hub,
+                id,
+                status,
+                reason_phrase(status),
+                &headers,
+                &body,
+            )
+            .await
         }
         Err(err) => {
             let body = format!("map-local 读不到文件: {err}");
@@ -1625,7 +1664,10 @@ async fn write_static<S>(
 where
     S: AsyncWrite + Unpin,
 {
-    let mut head = format!("HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n", body.len());
+    let mut head = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n",
+        body.len()
+    );
     for (name, value) in headers {
         if name.eq_ignore_ascii_case("content-length") {
             continue;
@@ -1639,7 +1681,10 @@ where
     client.write_all(head.as_bytes()).await?;
     client.write_all(body).await?;
     let mut recorded = headers.to_vec();
-    if !recorded.iter().any(|(name, _)| name.eq_ignore_ascii_case("content-length")) {
+    if !recorded
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+    {
         recorded.push(("Content-Length".into(), body.len().to_string()));
     }
     hub.set_response(id, status, recorded, None);
@@ -1648,6 +1693,7 @@ where
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn exchange_tls<S>(
     client: &mut S,
     hub: &Hub,
@@ -1666,7 +1712,9 @@ where
     let mut outbound = format!("{method} {path} HTTP/1.1\r\n");
     let mut has_host = false;
     for (name, value) in headers {
-        if name.eq_ignore_ascii_case("proxy-connection") || name.eq_ignore_ascii_case("content-length") {
+        if name.eq_ignore_ascii_case("proxy-connection")
+            || name.eq_ignore_ascii_case("content-length")
+        {
             continue;
         }
         if name.eq_ignore_ascii_case("host") {
@@ -1678,9 +1726,15 @@ where
         outbound.push_str("\r\n");
     }
     if !has_host {
-        outbound.push_str(&format!("Host: {}\r\n", display_authority(host, port, "https")));
+        outbound.push_str(&format!(
+            "Host: {}\r\n",
+            display_authority(host, port, "https")
+        ));
     }
-    outbound.push_str(&format!("Content-Length: {}\r\nConnection: close\r\n\r\n", body.len()));
+    outbound.push_str(&format!(
+        "Content-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    ));
     origin.write_all(outbound.as_bytes()).await?;
     origin.write_all(body).await?;
     let (resp_bytes, resp_rest) = read_header_block(&mut origin).await?;
@@ -1764,10 +1818,8 @@ fn local_route(method: &str, target: &str) -> Option<LocalRoute> {
     }
     // Only a browser hitting this proxy directly. An absolute-form request
     // for some other host must still be forwarded.
-    if origin_form {
-        if let Some((id, kind)) = crate::share::parse_share_path(path) {
-            return Some(LocalRoute::Share(id, kind));
-        }
+    if origin_form && let Some((id, kind)) = crate::share::parse_share_path(path) {
+        return Some(LocalRoute::Share(id, kind));
     }
     None
 }
@@ -1785,16 +1837,37 @@ where
     let zh = crate::share::prefers_zh(header_value(&head.headers, "accept-language").as_deref());
     let Some(json) = hub.share_document(id) else {
         let body = crate::share::expired_page(zh);
-        return write_untracked(socket, 404, "Not Found", "text/html; charset=utf-8", body.as_bytes()).await;
+        return write_untracked(
+            socket,
+            404,
+            "Not Found",
+            "text/html; charset=utf-8",
+            body.as_bytes(),
+        )
+        .await;
     };
     match kind {
         crate::share::SharePath::Data => {
-            write_untracked(socket, 200, "OK", "application/json; charset=utf-8", json.as_bytes()).await
+            write_untracked(
+                socket,
+                200,
+                "OK",
+                "application/json; charset=utf-8",
+                json.as_bytes(),
+            )
+            .await
         }
         crate::share::SharePath::Page => {
             let live = format!("/s/{id}/flows.json");
             let body = crate::share::page(&json, &live, zh);
-            write_untracked(socket, 200, "OK", "text/html; charset=utf-8", body.as_bytes()).await
+            write_untracked(
+                socket,
+                200,
+                "OK",
+                "text/html; charset=utf-8",
+                body.as_bytes(),
+            )
+            .await
         }
     }
 }
@@ -1928,17 +2001,15 @@ where
         url: format!("http://{host}/zniff"),
         request_headers: head.headers.clone(),
     });
-    let body = install_page_for(header_value(&head.headers, "accept-language").as_deref()).as_bytes();
+    let body =
+        install_page_for(header_value(&head.headers, "accept-language").as_deref()).as_bytes();
     write_static(
         socket,
         hub,
         id,
         200,
         "OK",
-        &[(
-            "Content-Type".into(),
-            "text/html; charset=utf-8".into(),
-        )],
+        &[("Content-Type".into(), "text/html; charset=utf-8".into())],
         body,
     )
     .await
@@ -2010,7 +2081,10 @@ async fn replay_once(
         method: method.clone(),
         host: host.clone(),
         path: path.clone(),
-        url: format!("{scheme}://{}{path}", display_authority(&host, port, scheme)),
+        url: format!(
+            "{scheme}://{}{path}",
+            display_authority(&host, port, scheme)
+        ),
         request_headers: headers.clone(),
     });
     hub.replace_request(id, headers.clone(), body.clone());
@@ -2026,6 +2100,7 @@ async fn replay_once(
     Ok(id)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn replay_http(
     hub: &Hub,
     id: u64,
@@ -2044,9 +2119,22 @@ async fn replay_http(
     } else {
         path.to_string()
     };
-    write_replay(hub, id, &mut origin, method, host, port, "http", &target, headers, body).await
+    write_replay(
+        hub,
+        id,
+        &mut origin,
+        method,
+        host,
+        port,
+        "http",
+        &target,
+        headers,
+        body,
+    )
+    .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn replay_tls(
     hub: &Hub,
     id: u64,
@@ -2058,9 +2146,13 @@ async fn replay_tls(
     body: &[u8],
 ) -> Result<()> {
     let (origin, _) = connect_origin(host, port, &[b"http/1.1".to_vec()], hub).await?;
-    write_replay(hub, id, origin, method, host, port, "https", path, headers, body).await
+    write_replay(
+        hub, id, origin, method, host, port, "https", path, headers, body,
+    )
+    .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn write_replay<S>(
     hub: &Hub,
     id: u64,
@@ -2095,7 +2187,10 @@ where
         outbound.push_str("\r\n");
     }
     if !has_host {
-        outbound.push_str(&format!("Host: {}\r\n", display_authority(host, port, scheme)));
+        outbound.push_str(&format!(
+            "Host: {}\r\n",
+            display_authority(host, port, scheme)
+        ));
     }
     outbound.push_str(&format!(
         "Content-Length: {}\r\nConnection: close\r\n\r\n",
@@ -2322,11 +2417,9 @@ where
         loop {
             let size_line = read_line(reader).await?;
             let text = String::from_utf8_lossy(&size_line);
-            let size = usize::from_str_radix(
-                text.trim().split(';').next().unwrap_or("0").trim(),
-                16,
-            )
-            .unwrap_or(0);
+            let size =
+                usize::from_str_radix(text.trim().split(';').next().unwrap_or("0").trim(), 16)
+                    .unwrap_or(0);
             if size == 0 {
                 let _ = read_line(reader).await?;
                 break;
@@ -2418,7 +2511,11 @@ fn request_target(head: &Head) -> Result<(String, String, u16, String)> {
             Some(index) => (&rest[..index], rest[index..].to_string()),
             None => (rest, "/".to_string()),
         };
-        let default_port = if target.starts_with("https://") { 443 } else { 80 };
+        let default_port = if target.starts_with("https://") {
+            443
+        } else {
+            80
+        };
         let (host, port) = split_host_port(authority, default_port)?;
         let path = if path.is_empty() { "/".into() } else { path };
         return Ok((method, host, port, path));
@@ -2439,10 +2536,10 @@ fn split_host_port(authority: &str, default_port: u16) -> Result<(String, u16)> 
         };
         return Ok((host.to_string(), port));
     }
-    if let Some((host, port)) = authority.rsplit_once(':') {
-        if let Ok(port) = port.parse::<u16>() {
-            return Ok((host.to_string(), port));
-        }
+    if let Some((host, port)) = authority.rsplit_once(':')
+        && let Ok(port) = port.parse::<u16>()
+    {
+        return Ok((host.to_string(), port));
     }
     if authority.is_empty() {
         anyhow::bail!("缺少主机名");
@@ -2497,7 +2594,9 @@ async fn read_header_block<R: AsyncRead + Unpin>(reader: &mut R) -> Result<(Vec<
 }
 
 fn header_end(buf: &[u8]) -> Option<usize> {
-    buf.windows(4).position(|window| window == b"\r\n\r\n").map(|index| index + 4)
+    buf.windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| index + 4)
 }
 
 async fn read_line<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Vec<u8>> {
@@ -2599,7 +2698,13 @@ where
     let mut to_origin = FrameFeed::default();
     let mut to_client = FrameFeed::default();
     if !already_to_client.is_empty() {
-        note_frames(&mut to_client, already_to_client, hub, id, Direction::Response);
+        note_frames(
+            &mut to_client,
+            already_to_client,
+            hub,
+            id,
+            Direction::Response,
+        );
     }
     let mut client_buf = vec![0u8; 16 * 1024];
     let mut origin_buf = vec![0u8; 16 * 1024];
@@ -2964,8 +3069,7 @@ async fn forward_request(
                 body_override = decision.body;
             }
             Some(Action::MapRemote { url }) => {
-                if let Some((next_scheme, next_host, next_port, next_path)) = parse_http_url(url)
-                {
+                if let Some((next_scheme, next_host, next_port, next_path)) = parse_http_url(url) {
                     let same = next_scheme == scheme && next_host == host && next_port == port;
                     host = next_host;
                     port = next_port;
@@ -3028,8 +3132,7 @@ async fn forward_request(
                     encoding.as_deref(),
                 )
                 .await?;
-                if let Some(next) =
-                    replaced_body(&raw, encoding.as_deref(), &plan.request_replaces)
+                if let Some(next) = replaced_body(&raw, encoding.as_deref(), &plan.request_replaces)
                 {
                     strip_request_encoding = true;
                     body_override = Some(next);
@@ -3129,8 +3232,7 @@ async fn forward_request(
                 .await
                 .map_err(|err| anyhow!("读取响应体: {err}"))?;
             let raw = collected.to_bytes();
-            if let Some(next) = replaced_body(&raw, resp_encoding.as_deref(), &response_replaces)
-            {
+            if let Some(next) = replaced_body(&raw, resp_encoding.as_deref(), &response_replaces) {
                 parts.headers.remove(http::header::CONTENT_ENCODING);
                 parts.headers.remove(http::header::CONTENT_LENGTH);
                 if let Ok(value) = http::HeaderValue::from_str(&next.len().to_string()) {
@@ -3144,7 +3246,12 @@ async fn forward_request(
                     next,
                 );
             }
-            hub.set_response(id, parts.status.as_u16(), header_pairs(&parts.headers), None);
+            hub.set_response(
+                id,
+                parts.status.as_u16(),
+                header_pairs(&parts.headers),
+                None,
+            );
             note_decoded(
                 &hub,
                 id,
@@ -3159,17 +3266,16 @@ async fn forward_request(
     if break_response && !websocket {
         return hold_hyper_response(hub, id, parts, body, resp_encoding).await;
     }
-    hub.set_response(id, parts.status.as_u16(), header_pairs(&parts.headers), None);
+    hub.set_response(
+        id,
+        parts.status.as_u16(),
+        header_pairs(&parts.headers),
+        None,
+    );
     let body = if websocket {
         RecordingBody::passthrough(body)
     } else {
-        RecordingBody::new(
-            body,
-            hub,
-            id,
-            Direction::Response,
-            resp_encoding.as_deref(),
-        )
+        RecordingBody::new(body, hub, id, Direction::Response, resp_encoding.as_deref())
     };
     Ok(Response::from_parts(parts, body))
 }
@@ -3189,20 +3295,24 @@ async fn hold_hyper_response(
         .is_some_and(|len| len > crate::session::BODY_CAP);
     if too_big {
         hub.set_error(id, "响应断点跳过，body 超过 1 MB");
-        hub.set_response(id, parts.status.as_u16(), header_pairs(&parts.headers), None);
-        let body = RecordingBody::new(
-            body,
-            hub,
+        hub.set_response(
             id,
-            Direction::Response,
-            encoding.as_deref(),
+            parts.status.as_u16(),
+            header_pairs(&parts.headers),
+            None,
         );
+        let body = RecordingBody::new(body, hub, id, Direction::Response, encoding.as_deref());
         return Ok(Response::from_parts(parts, body));
     }
     match take_limited(body, crate::session::BODY_CAP).await? {
         Take::Overflow { prefix, rest } => {
             hub.set_error(id, "响应断点跳过，body 超过 1 MB");
-            hub.set_response(id, parts.status.as_u16(), header_pairs(&parts.headers), None);
+            hub.set_response(
+                id,
+                parts.status.as_u16(),
+                header_pairs(&parts.headers),
+                None,
+            );
             note_decoded(&hub, id, Direction::Response, &prefix, encoding.as_deref());
             let body = RecordingBody::prefixed(
                 prefix,
@@ -3216,7 +3326,12 @@ async fn hold_hyper_response(
         }
         Take::Whole(bytes) => {
             note_decoded(&hub, id, Direction::Response, &bytes, encoding.as_deref());
-            hub.set_response(id, parts.status.as_u16(), header_pairs(&parts.headers), None);
+            hub.set_response(
+                id,
+                parts.status.as_u16(),
+                header_pairs(&parts.headers),
+                None,
+            );
             let decision = hub.wait_break(id, BreakSide::Response).await;
             if decision.drop {
                 hub.set_error(id, "断点丢弃");
@@ -3429,6 +3544,7 @@ fn replace_header_map(headers: &mut HeaderMap, pairs: &[(String, String)]) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn fetch_remote(
     hub: &Arc<Hub>,
     id: u64,
@@ -3442,13 +3558,20 @@ async fn fetch_remote(
 ) -> Result<Response<RecordingBody<Incoming>>> {
     if scheme == "https" {
         let (tls, _) = connect_origin(host, port, &[b"http/1.1".to_vec()], hub).await?;
-        fetch_on(tls, hub, id, method, scheme, host, port, path, headers, body).await
+        fetch_on(
+            tls, hub, id, method, scheme, host, port, path, headers, body,
+        )
+        .await
     } else {
         let tcp = dial(host, port, hub, false).await?;
-        fetch_on(tcp, hub, id, method, scheme, host, port, path, headers, body).await
+        fetch_on(
+            tcp, hub, id, method, scheme, host, port, path, headers, body,
+        )
+        .await
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn fetch_on<IO>(
     io: IO,
     hub: &Arc<Hub>,
@@ -3475,12 +3598,13 @@ where
     outbound.headers_mut().remove(http::header::CONTENT_LENGTH);
     outbound.headers_mut().insert(
         http::header::CONTENT_LENGTH,
-        http::HeaderValue::from_str(&body.len().to_string()).unwrap_or(http::HeaderValue::from_static("0")),
+        http::HeaderValue::from_str(&body.len().to_string())
+            .unwrap_or(http::HeaderValue::from_static("0")),
     );
-    if !outbound.headers().contains_key(http::header::HOST) {
-        if let Ok(value) = http::HeaderValue::from_str(&authority) {
-            outbound.headers_mut().insert(http::header::HOST, value);
-        }
+    if !outbound.headers().contains_key(http::header::HOST)
+        && let Ok(value) = http::HeaderValue::from_str(&authority)
+    {
+        outbound.headers_mut().insert(http::header::HOST, value);
     }
     let (mut sender, connection) = hyper::client::conn::http1::Builder::new()
         .preserve_header_case(true)
@@ -3492,17 +3616,19 @@ where
         let _ = connection.await;
     });
     sender.ready().await.context("映射连接未就绪")?;
-    let response = sender
-        .send_request(outbound)
-        .await
-        .context("映射请求")?;
+    let response = sender.send_request(outbound).await.context("映射请求")?;
     let encoding = response
         .headers()
         .get(http::header::CONTENT_ENCODING)
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
     let (parts, resp_body) = response.into_parts();
-    hub.set_response(id, parts.status.as_u16(), header_pairs(&parts.headers), None);
+    hub.set_response(
+        id,
+        parts.status.as_u16(),
+        header_pairs(&parts.headers),
+        None,
+    );
     let body = RecordingBody::new(
         resp_body,
         hub.clone(),
@@ -3607,8 +3733,6 @@ async fn splice_upgrades(
     hub.mark_finished(id);
 }
 
-
-
 #[cfg(test)]
 mod tests {
     #[test]
@@ -3627,7 +3751,6 @@ mod tests {
 
     #[test]
     fn origin_tls_reason_names_the_certificate_or_handshake() {
-        use anyhow::Context as _;
         let unknown = std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer),
@@ -3854,7 +3977,10 @@ mod tests {
         .await
         .expect("客户端 TLS 超时")
         .expect("客户端 TLS");
-        assert_eq!(tls.get_ref().1.alpn_protocol(), Some(b"http/1.1".as_slice()));
+        assert_eq!(
+            tls.get_ref().1.alpn_protocol(),
+            Some(b"http/1.1".as_slice())
+        );
 
         let req = format!(
             "GET /hi HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
@@ -3951,10 +4077,11 @@ mod tests {
         .expect("客户端 TLS");
         assert_eq!(tls.get_ref().1.alpn_protocol(), Some(b"h2".as_slice()));
 
-        let (mut sender, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
-            .handshake::<_, http_body_util::Full<Bytes>>(TokioIo::new(tls))
-            .await
-            .expect("客户端 HTTP/2");
+        let (mut sender, connection) =
+            hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+                .handshake::<_, http_body_util::Full<Bytes>>(TokioIo::new(tls))
+                .await
+                .expect("客户端 HTTP/2");
         tokio::spawn(async move {
             let _ = connection.await;
         });
@@ -4117,7 +4244,9 @@ mod tests {
         let hub_serve = hub.clone();
         tokio::spawn(async move {
             loop {
-                let Ok((socket, _)) = proxy.accept().await else { break };
+                let Ok((socket, _)) = proxy.accept().await else {
+                    break;
+                };
                 let hub = hub_serve.clone();
                 tokio::spawn(async move {
                     let _ = handle_conn(socket, hub).await;
@@ -4198,9 +4327,9 @@ mod tests {
             .with_no_client_auth()
             .with_single_cert(
                 vec![origin_leaf.der().clone(), origin_ca.der().clone()],
-                rustls::pki_types::PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
-                    leaf_key.serialize_der(),
-                )),
+                rustls::pki_types::PrivateKeyDer::Pkcs8(
+                    rustls::pki_types::PrivatePkcs8KeyDer::from(leaf_key.serialize_der()),
+                ),
             )
             .unwrap();
         server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
@@ -4254,7 +4383,9 @@ mod tests {
             .unwrap();
         let text = String::from_utf8_lossy(&resp);
         assert!(text.contains("tunnel-ok"), "{read:?} {text}");
-        let flow = hub.with_session(|session| session.get(1).cloned()).expect("flow");
+        let flow = hub
+            .with_session(|session| session.get(1).cloned())
+            .expect("flow");
         assert_eq!(flow.protocol, Protocol::Tunnel);
         let reason = flow.error.unwrap_or_default();
         assert!(reason.contains("直通"), "{reason}");
@@ -4307,7 +4438,9 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(&frame, &[0x81, 0x02, b'h', b'i']);
-        let flow = hub.with_session(|session| session.get(1).cloned()).expect("flow");
+        let flow = hub
+            .with_session(|session| session.get(1).cloned())
+            .expect("flow");
         assert_eq!(flow.protocol, Protocol::WebSocket);
         assert_eq!(flow.messages.len(), 1);
         assert_eq!(flow.messages[0].kind, "文本");
@@ -4381,7 +4514,8 @@ mod tests {
         assert!(text.contains("429"), "{text}");
         assert!(text.to_ascii_lowercase().contains("x-zniff: yes"), "{text}");
         assert!(
-            text.to_ascii_lowercase().contains("access-control-allow-origin: *"),
+            text.to_ascii_lowercase()
+                .contains("access-control-allow-origin: *"),
             "{text}"
         );
 
@@ -4405,7 +4539,8 @@ mod tests {
         let text = String::from_utf8_lossy(&resp);
         assert!(text.contains("204"), "{text}");
         assert!(
-            text.to_ascii_lowercase().contains("access-control-allow-origin: *"),
+            text.to_ascii_lowercase()
+                .contains("access-control-allow-origin: *"),
             "{text}"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -4444,7 +4579,10 @@ mod tests {
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
             loop {
                 if hub_wait.paused_id() == Some(1) {
-                    assert_eq!(hub_wait.paused().map(|(_, side)| side), Some(BreakSide::Response));
+                    assert_eq!(
+                        hub_wait.paused().map(|(_, side)| side),
+                        Some(BreakSide::Response)
+                    );
                     hub_wait.resolve_break(BreakDecision {
                         drop: false,
                         headers: None,
@@ -4460,7 +4598,9 @@ mod tests {
             }
         });
         let mut client = TcpStream::connect(proxy_addr).await.unwrap();
-        let req = format!("GET http://{origin_addr}/hi HTTP/1.1\r\nHost: {origin_addr}\r\nConnection: close\r\n\r\n");
+        let req = format!(
+            "GET http://{origin_addr}/hi HTTP/1.1\r\nHost: {origin_addr}\r\nConnection: close\r\n\r\n"
+        );
         client.write_all(req.as_bytes()).await.unwrap();
         let mut resp = Vec::new();
         timeout(Duration::from_secs(5), client.read_to_end(&mut resp))
@@ -4471,7 +4611,9 @@ mod tests {
         let text = String::from_utf8_lossy(&resp);
         assert!(text.contains("201"), "{text}");
         assert!(text.contains("edited"), "{text}");
-        let flow = hub.with_session(|session| session.get(1).cloned()).expect("flow");
+        let flow = hub
+            .with_session(|session| session.get(1).cloned())
+            .expect("flow");
         assert_eq!(flow.status, Some(201));
         assert_eq!(flow.response_body, b"edited");
         let _ = std::fs::remove_dir_all(&dir);
@@ -4523,7 +4665,9 @@ mod tests {
         waiter.await.unwrap();
         let text = String::from_utf8_lossy(&resp);
         assert!(text.contains("204"), "{text}");
-        let flow = hub.with_session(|session| session.get(1).cloned()).expect("flow");
+        let flow = hub
+            .with_session(|session| session.get(1).cloned())
+            .expect("flow");
         assert_eq!(flow.error.as_deref(), Some("断点丢弃"));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -4582,7 +4726,9 @@ mod tests {
         assert!(text.contains("200"), "{text}");
         assert!(text.contains("text/html"), "{text}");
         assert!(text.contains("href=\"/zniff-ca.crt\""), "{text}");
-        let flow = hub.with_session(|session| session.get(1).cloned()).expect("flow");
+        let flow = hub
+            .with_session(|session| session.get(1).cloned())
+            .expect("flow");
         assert_eq!(flow.path, "/zniff");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -4614,8 +4760,13 @@ mod tests {
         let text = String::from_utf8_lossy(&resp);
         assert!(text.contains("200"), "{text}");
         assert!(text.contains("application/x-x509-ca-cert"), "{text}");
-        assert!(resp.windows(pem.len()).any(|window| window == pem.as_slice()));
-        let flow = hub.with_session(|session| session.get(1).cloned()).expect("flow");
+        assert!(
+            resp.windows(pem.len())
+                .any(|window| window == pem.as_slice())
+        );
+        let flow = hub
+            .with_session(|session| session.get(1).cloned())
+            .expect("flow");
         assert_eq!(flow.path, "/zniff-ca.crt");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -4636,7 +4787,11 @@ mod tests {
     fn strip_ws_extension_drops_only_that_header() {
         let raw = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nSec-WebSocket-Extensions: permessage-deflate\r\nConnection: Upgrade\r\n\r\n";
         let text = String::from_utf8(strip_ws_extension(raw)).unwrap();
-        assert!(!text.to_ascii_lowercase().contains("sec-websocket-extensions"));
+        assert!(
+            !text
+                .to_ascii_lowercase()
+                .contains("sec-websocket-extensions")
+        );
         assert!(text.contains("Upgrade: websocket"));
         assert!(text.contains("Connection: Upgrade"));
         assert!(text.ends_with("\r\n\r\n"));
@@ -4660,7 +4815,10 @@ mod tests {
         hub.set_rules_enabled(false);
         assert_eq!(hub.plan("example.com", "/"), rules::Effect::default());
         assert_eq!(
-            hub.rules.lock().unwrap_or_else(|err| err.into_inner()).len(),
+            hub.rules
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .len(),
             2
         );
         let id = hub.with_session(|session| {
@@ -4752,7 +4910,9 @@ mod tests {
             sock.write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nSec-WebSocket-Extensions: permessage-deflate\r\nConnection: Upgrade\r\n\r\n")
                 .await
                 .unwrap();
-            sock.write_all(&[0x81, 0x05, b'p', b'l', b'a', b'i', b'n']).await.unwrap();
+            sock.write_all(&[0x81, 0x05, b'p', b'l', b'a', b'i', b'n'])
+                .await
+                .unwrap();
         });
         let proxy = listen().await.unwrap();
         let proxy_addr = proxy.local_addr().unwrap();
@@ -4766,7 +4926,9 @@ mod tests {
         let header_text = String::from_utf8_lossy(&header);
         assert!(header_text.contains("101"), "{header_text}");
         assert!(
-            !header_text.to_ascii_lowercase().contains("sec-websocket-extensions"),
+            !header_text
+                .to_ascii_lowercase()
+                .contains("sec-websocket-extensions"),
             "{header_text}"
         );
         let mut frame = [0u8; 7];
@@ -4777,11 +4939,20 @@ mod tests {
         assert_eq!(&frame, &[0x81, 0x05, b'p', b'l', b'a', b'i', b'n']);
         let origin_text = seen.lock().unwrap().clone();
         assert!(
-            !origin_text.to_ascii_lowercase().contains("sec-websocket-extensions"),
+            !origin_text
+                .to_ascii_lowercase()
+                .contains("sec-websocket-extensions"),
             "{origin_text}"
         );
-        assert!(origin_text.to_ascii_lowercase().contains("upgrade: websocket"), "{origin_text}");
-        let flow = hub.with_session(|session| session.get(1).cloned()).expect("flow");
+        assert!(
+            origin_text
+                .to_ascii_lowercase()
+                .contains("upgrade: websocket"),
+            "{origin_text}"
+        );
+        let flow = hub
+            .with_session(|session| session.get(1).cloned())
+            .expect("flow");
         assert_eq!(flow.messages.len(), 1);
         assert_eq!(flow.messages[0].text, "plain");
         let _ = std::fs::remove_dir_all(&dir);
@@ -4804,9 +4975,11 @@ mod tests {
             let (mut sock, _) = origin.accept().await.unwrap();
             let req = read_h1_message(&mut sock).await;
             *seen_task.lock().unwrap() = req;
-            sock.write_all(b"HTTP/1.1 201 Created\r\nContent-Length: 4\r\nConnection: close\r\n\r\nokay")
-                .await
-                .unwrap();
+            sock.write_all(
+                b"HTTP/1.1 201 Created\r\nContent-Length: 4\r\nConnection: close\r\n\r\nokay",
+            )
+            .await
+            .unwrap();
         });
         let id = hub.with_session(|session| {
             session.open(FlowDraft {
@@ -4850,9 +5023,14 @@ mod tests {
         assert!(!text.contains("Content-Length: 1"), "{text}");
         assert!(text.contains("X-Edit: yes"), "{text}");
         assert!(!text.contains("X-Old"), "{text}");
-        assert!(!text.to_ascii_lowercase().contains("host: wrong.test"), "{text}");
+        assert!(
+            !text.to_ascii_lowercase().contains("host: wrong.test"),
+            "{text}"
+        );
         assert!(text.ends_with("abcdef"), "{text}");
-        let flow = hub.with_session(|session| session.get(new_id).cloned()).unwrap();
+        let flow = hub
+            .with_session(|session| session.get(new_id).cloned())
+            .unwrap();
         assert_eq!(flow.method, "POST");
         assert!(flow.url.contains("/new?x=1"), "{}", flow.url);
         assert_eq!(flow.status, Some(201));
@@ -4890,9 +5068,9 @@ mod tests {
                     };
                     let service = hyper::service::service_fn(|req: Request<Incoming>| async move {
                         let body = format!("h2-{}", req.uri().path());
-                        Ok::<_, std::convert::Infallible>(Response::new(
-                            http_body_util::Full::new(Bytes::from(body)),
-                        ))
+                        Ok::<_, std::convert::Infallible>(Response::new(http_body_util::Full::new(
+                            Bytes::from(body),
+                        )))
                     });
                     let _ = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
                         .serve_connection(TokioIo::new(tls), service)
@@ -4946,7 +5124,10 @@ mod tests {
         assert!(text.contains("200"), "{text}");
         assert!(text.contains("from-file"), "{text}");
         tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(seen.lock().unwrap().is_empty(), "map local 仍把请求送到了源站");
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "map local 仍把请求送到了源站"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -4971,9 +5152,11 @@ mod tests {
             let (mut sock, _) = remote.accept().await.unwrap();
             let req = read_h1_message(&mut sock).await;
             *seen_task.lock().unwrap() = String::from_utf8_lossy(&req).into_owned();
-            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\nConnection: close\r\n\r\nremote-ok")
-                .await
-                .unwrap();
+            sock.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\nConnection: close\r\n\r\nremote-ok",
+            )
+            .await
+            .unwrap();
         });
         let server = origin_tls_config(
             &origin_ca,
@@ -5027,9 +5210,11 @@ mod tests {
             let mut tls = acceptor.accept(sock).await.unwrap();
             let req = read_h1_message(&mut tls).await;
             *seen_task.lock().unwrap() = String::from_utf8_lossy(&req).into_owned();
-            tls.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\nConnection: close\r\n\r\ncontinued")
-                .await
-                .unwrap();
+            tls.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\nConnection: close\r\n\r\ncontinued",
+            )
+            .await
+            .unwrap();
         });
         let proxy = listen().await.unwrap();
         let proxy_addr = proxy.local_addr().unwrap();
@@ -5138,7 +5323,9 @@ mod tests {
         assert_eq!(status, StatusCode::NO_CONTENT);
         assert!(body.is_empty());
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
-        let flow = hub.with_session(|session| session.flows().into_iter().next()).unwrap();
+        let flow = hub
+            .with_session(|session| session.flows().into_iter().next())
+            .unwrap();
         assert_eq!(flow.error.as_deref(), Some("断点丢弃"));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -5420,10 +5607,7 @@ mod tests {
 
     #[test]
     fn recording_body_finishes_on_end_of_stream_without_a_none_poll() {
-        let dir = std::env::temp_dir().join(format!(
-            "zniff-body-end-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("zniff-body-end-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let ca = Arc::new(Ca::open(&dir).unwrap());
         let hub = Arc::new(Hub::new(ca).unwrap());
@@ -5440,24 +5624,26 @@ mod tests {
                 None,
             );
             poll_once(&mut body);
-            let flow = hub.with_session(|session| session.get(id).cloned()).unwrap();
+            let flow = hub
+                .with_session(|session| session.get(id).cloned())
+                .unwrap();
             assert_eq!(flow.response_body, b"hi");
-            assert!(flow.finished_at.is_some(), "last frame must finish the flow");
+            assert!(
+                flow.finished_at.is_some(),
+                "last frame must finish the flow"
+            );
         }
 
         let empty = open_recorded(&hub);
         hub.with_session(|session| session.set_response(empty, 304, Vec::new(), None));
         {
-            let body = RecordingBody::new(
-                AlreadyEnded,
-                hub.clone(),
-                empty,
-                Direction::Response,
-                None,
-            );
+            let body =
+                RecordingBody::new(AlreadyEnded, hub.clone(), empty, Direction::Response, None);
             drop(body);
         }
-        let flow = hub.with_session(|session| session.get(empty).cloned()).unwrap();
+        let flow = hub
+            .with_session(|session| session.get(empty).cloned())
+            .unwrap();
         assert!(flow.response_body.is_empty());
         assert!(
             flow.finished_at.is_some(),
@@ -5466,13 +5652,8 @@ mod tests {
 
         let request = open_recorded(&hub);
         {
-            let body = RecordingBody::new(
-                AlreadyEnded,
-                hub.clone(),
-                request,
-                Direction::Request,
-                None,
-            );
+            let body =
+                RecordingBody::new(AlreadyEnded, hub.clone(), request, Direction::Request, None);
             drop(body);
         }
         let flow = hub

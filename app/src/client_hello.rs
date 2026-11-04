@@ -15,7 +15,9 @@ pub struct ClientHello {
 pub enum ReadHello {
     Hello(ClientHello),
     /// Not a ClientHello. `raw` is what was consumed and must be replayed.
-    NotTls { raw: Vec<u8> },
+    NotTls {
+        raw: Vec<u8>,
+    },
 }
 
 /// Reads one ClientHello. Stops once the handshake message is complete,
@@ -70,7 +72,10 @@ pub async fn read_client_hello<R: AsyncRead + Unpin>(reader: &mut R) -> std::io:
 enum Parse {
     NeedMore,
     NotHello,
-    Done { sni: Option<String>, alpn: Vec<Vec<u8>> },
+    Done {
+        sni: Option<String>,
+        alpn: Vec<Vec<u8>>,
+    },
 }
 
 fn parse_handshake(buf: &[u8]) -> Parse {

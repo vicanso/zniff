@@ -256,10 +256,7 @@ pub fn effect(rules: &[Rule], host: &str, path: &str) -> Effect {
             }
             Rule::Cors { .. } => effect.cors = true,
             Rule::Replace {
-                response,
-                from,
-                to,
-                ..
+                response, from, to, ..
             } => {
                 let pair = (from.clone(), to.clone());
                 if *response {
@@ -354,10 +351,9 @@ fn parse_line(line: &str) -> Option<Rule> {
                         return None;
                     }
                     status = Some(code);
-                } else if let Some(text) = token.strip_prefix("delay=") {
-                    delay = parse_delay(text)?;
                 } else {
-                    return None;
+                    let text = token.strip_prefix("delay=")?;
+                    delay = parse_delay(text)?;
                 }
             }
             Some(Rule::MapLocal {
@@ -424,10 +420,9 @@ fn parse_line(line: &str) -> Option<Rule> {
             // Whitespace around the arrow is not part of either side.
             let (from, to) = if let Some((from, to)) = rest.split_once(" -> ") {
                 (from, to)
-            } else if let Some(from) = rest.strip_suffix(" ->") {
-                (from, "")
             } else {
-                return None;
+                let from = rest.strip_suffix(" ->")?;
+                (from, "")
             };
             if from.is_empty() {
                 return None;
@@ -521,10 +516,7 @@ pub fn invalid_rule_lines(text: &str) -> Vec<usize> {
 pub fn request_pattern(host: &str, path: &str) -> Option<String> {
     let host = host.trim();
     let path = path.split('?').next().unwrap_or(path).trim();
-    if host.is_empty()
-        || host.contains(char::is_whitespace)
-        || path.contains(char::is_whitespace)
-    {
+    if host.is_empty() || host.contains(char::is_whitespace) || path.contains(char::is_whitespace) {
         return None;
     }
     let path = if path.is_empty() || !path.starts_with('/') {
@@ -662,7 +654,10 @@ fn parse_delay(text: &str) -> Option<Duration> {
 pub fn combine_rule_pattern(host_input: &str, path_input: &str) -> String {
     let host_trimmed = host_input.trim();
     let path_trimmed = path_input.trim();
-    if path_trimmed.is_empty() && host_trimmed.contains('/') && !host_trimmed.contains(char::is_whitespace) {
+    if path_trimmed.is_empty()
+        && host_trimmed.contains('/')
+        && !host_trimmed.contains(char::is_whitespace)
+    {
         return host_trimmed.to_string();
     }
     let hosts: Vec<String> = host_trimmed
@@ -748,7 +743,10 @@ fn path_matches(prefix: &str, path: &str) -> bool {
                 return true;
             }
             let trimmed = p.trim_end_matches('/');
-            path == p || path == trimmed || path.starts_with(&format!("{trimmed}/")) || path.starts_with(&p)
+            path == p
+                || path == trimmed
+                || path.starts_with(&format!("{trimmed}/"))
+                || path.starts_with(&p)
         })
 }
 
@@ -804,11 +802,7 @@ break example.com/api
             &applied.response_headers[0],
             HeaderOp::Remove { name } if name == "Set-Cookie"
         ));
-        let capped = effect(
-            &parse_rules("delay example.com 40s"),
-            "example.com",
-            "/",
-        );
+        let capped = effect(&parse_rules("delay example.com 40s"), "example.com", "/");
         assert_eq!(capped.delay, DELAY_CAP);
     }
 
@@ -854,7 +848,14 @@ break example.com/api
         assert_eq!(line, "replace example.com/api res hello -> hi there\n");
         assert!(append_replace_line("", "has space", true, "a", "b").is_none());
         assert!(append_replace_line("", "example.com", true, "a -> b", "c").is_none());
-        let broken = append_quick_rule("", QuickRule::Remote, "example.com/api", true, "not-a-url", "");
+        let broken = append_quick_rule(
+            "",
+            QuickRule::Remote,
+            "example.com/api",
+            true,
+            "not-a-url",
+            "",
+        );
         assert!(broken.is_none());
         let forwarded = append_quick_rule(
             "",
@@ -865,11 +866,16 @@ break example.com/api
             "",
         )
         .unwrap();
-        assert_eq!(forwarded, "map-remote example.com/api https://other.test/v1\n");
+        assert_eq!(
+            forwarded,
+            "map-remote example.com/api https://other.test/v1\n"
+        );
         let stopped = append_break_line("", "example.com", "/pay?x=1").unwrap();
         assert_eq!(
             hit_summary(
-                &parse_rules("delay example.com 1s\nreplace example.com res a -> b\nbreak example.com\nbreak-res example.com"),
+                &parse_rules(
+                    "delay example.com 1s\nreplace example.com res a -> b\nbreak example.com\nbreak-res example.com"
+                ),
                 "example.com",
                 "/",
             ),
@@ -905,9 +911,11 @@ break example.com/api
             replace_target(path, &applied.request_replaces).as_deref(),
             Some("/finance-api/online-hall-v2/configs?supportCrypto=false")
         );
-        assert!(replace_target(path, &applied.request_replaces)
-            .unwrap()
-            .starts_with('/'));
+        assert!(
+            replace_target(path, &applied.request_replaces)
+                .unwrap()
+                .starts_with('/')
+        );
         let dropped = effect(
             &parse_rules(
                 "replace baidu.com/finance-api/online-hall-v2/configs req ?supportCrypto=true -> \n",
@@ -920,27 +928,55 @@ break example.com/api
             Some("/finance-api/online-hall-v2/configs")
         );
         assert!(replace_target("/keep", &[("/keep".into(), "away".into())]).is_none());
-        assert!(parse_rules("replace /online-hall-v2/configs req ?supportCrypto=true -> ?supportCrypto=false")[0]
+        assert!(
+            !parse_rules(
+                "replace /online-hall-v2/configs req ?supportCrypto=true -> ?supportCrypto=false"
+            )[0]
             .matches("baidu.com", path)
-            == false);
+        );
     }
 
     #[test]
     fn rules_support_domain_or_and_path_prefix_or() {
-        let pattern = combine_rule_pattern("baidu.com | baidu.com", "/finance-api | /online-hall");
-        assert_eq!(pattern, "baidu.com|baidu.com/finance-api|/online-hall");
+        let pattern =
+            combine_rule_pattern("baidu.com | baidu.com", "/finance-api | /online-hall");
+        assert_eq!(
+            pattern,
+            "baidu.com|baidu.com/finance-api|/online-hall"
+        );
         let rules = parse_rules(&format!("break {pattern}\n"));
         assert!(rules[0].matches("baidu.com", "/finance-api/v1"));
         assert!(rules[0].matches("baidu.com", "/online-hall/configs"));
         assert!(!rules[0].matches("baidu.com", "/finance-api/v1"));
         assert!(!rules[0].matches("baidu.com", "/other"));
 
-        let hdr_set = append_quick_rule("", QuickRule::Header, "example.com/api", true, "X-Debug", "1").unwrap();
+        let hdr_set = append_quick_rule(
+            "",
+            QuickRule::Header,
+            "example.com/api",
+            true,
+            "X-Debug",
+            "1",
+        )
+        .unwrap();
         assert_eq!(hdr_set, "header example.com/api res set X-Debug 1\n");
-        let hdr_del = append_quick_rule("", QuickRule::Header, "example.com/api", false, "Cookie", "").unwrap();
+        let hdr_del = append_quick_rule(
+            "",
+            QuickRule::Header,
+            "example.com/api",
+            false,
+            "Cookie",
+            "",
+        )
+        .unwrap();
         assert_eq!(hdr_del, "header example.com/api req del Cookie\n");
         let cors = append_quick_rule("", QuickRule::Cors, "example.com", true, "", "").unwrap();
         assert_eq!(cors, "cors example.com\n");
-        assert_eq!(invalid_rule_lines("break example.com\nbad-rule foo\n# comment\nmap-remote a.com not_url"), vec![2, 4]);
+        assert_eq!(
+            invalid_rule_lines(
+                "break example.com\nbad-rule foo\n# comment\nmap-remote a.com not_url"
+            ),
+            vec![2, 4]
+        );
     }
 }

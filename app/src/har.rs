@@ -2,7 +2,7 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::session::{Flow, Protocol};
 
@@ -163,7 +163,11 @@ fn import_entry(entry: &Value) -> Option<Imported> {
         .and_then(parse_iso)
         .unwrap_or_else(SystemTime::now);
     let wait = non_negative_ms(entry.get("timings").and_then(|timings| timings.get("wait")));
-    let receive = non_negative_ms(entry.get("timings").and_then(|timings| timings.get("receive")));
+    let receive = non_negative_ms(
+        entry
+            .get("timings")
+            .and_then(|timings| timings.get("receive")),
+    );
     let total = non_negative_ms(entry.get("time")).or_else(|| match (wait, receive) {
         (Some(wait), Some(receive)) => Some(wait.saturating_add(receive)),
         (Some(wait), None) => Some(wait),
@@ -227,7 +231,10 @@ fn headers_from(value: &Value) -> Vec<(String, String)> {
 }
 
 fn body_from_post(post: &Value) -> Vec<u8> {
-    let text = post.get("text").and_then(|text| text.as_str()).unwrap_or("");
+    let text = post
+        .get("text")
+        .and_then(|text| text.as_str())
+        .unwrap_or("");
     if post.get("encoding").and_then(|encoding| encoding.as_str()) == Some("base64") {
         b64_decode(text)
     } else {
@@ -236,8 +243,15 @@ fn body_from_post(post: &Value) -> Vec<u8> {
 }
 
 fn body_from_content(content: &Value) -> Vec<u8> {
-    let text = content.get("text").and_then(|text| text.as_str()).unwrap_or("");
-    if content.get("encoding").and_then(|encoding| encoding.as_str()) == Some("base64") {
+    let text = content
+        .get("text")
+        .and_then(|text| text.as_str())
+        .unwrap_or("");
+    if content
+        .get("encoding")
+        .and_then(|encoding| encoding.as_str())
+        == Some("base64")
+    {
         b64_decode(text)
     } else {
         text.as_bytes().to_vec()
@@ -245,10 +259,7 @@ fn body_from_content(content: &Value) -> Vec<u8> {
 }
 
 fn split_url(url: &str) -> (String, String) {
-    let rest = url
-        .split_once("://")
-        .map(|(_, rest)| rest)
-        .unwrap_or(url);
+    let rest = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
     let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
     let host = authority.split('@').next_back().unwrap_or(authority);
     let host = host.split(':').next().unwrap_or(host);
@@ -346,7 +357,9 @@ fn b64(bytes: &[u8]) -> String {
     let mut out = String::new();
     let mut index = 0;
     while index + 3 <= bytes.len() {
-        let n = ((bytes[index] as u32) << 16) | ((bytes[index + 1] as u32) << 8) | bytes[index + 2] as u32;
+        let n = ((bytes[index] as u32) << 16)
+            | ((bytes[index + 1] as u32) << 8)
+            | bytes[index + 2] as u32;
         out.push(TABLE[((n >> 18) & 63) as usize] as char);
         out.push(TABLE[((n >> 12) & 63) as usize] as char);
         out.push(TABLE[((n >> 6) & 63) as usize] as char);
@@ -391,10 +404,15 @@ fn b64_decode(text: &str) -> Vec<u8> {
             break;
         }
         let Some(a) = val(bytes[index]) else { break };
-        let Some(b) = val(bytes[index + 1]) else { break };
+        let Some(b) = val(bytes[index + 1]) else {
+            break;
+        };
         let c = val(bytes[index + 2]);
         let d = val(bytes[index + 3]);
-        let n = ((a as u32) << 18) | ((b as u32) << 12) | ((c.unwrap_or(0) as u32) << 6) | d.unwrap_or(0) as u32;
+        let n = ((a as u32) << 18)
+            | ((b as u32) << 12)
+            | ((c.unwrap_or(0) as u32) << 6)
+            | d.unwrap_or(0) as u32;
         out.push((n >> 16) as u8);
         if bytes[index + 2] != b'=' {
             out.push((n >> 8) as u8);
@@ -484,11 +502,19 @@ mod tests {
         assert_eq!(imported.len(), 1);
         let started = imported[0].started;
         assert_eq!(
-            imported[0].response_at.unwrap().duration_since(started).unwrap(),
+            imported[0]
+                .response_at
+                .unwrap()
+                .duration_since(started)
+                .unwrap(),
             Duration::from_millis(15)
         );
         assert_eq!(
-            imported[0].finished_at.unwrap().duration_since(started).unwrap(),
+            imported[0]
+                .finished_at
+                .unwrap()
+                .duration_since(started)
+                .unwrap(),
             Duration::from_millis(40)
         );
         assert_eq!(imported[0].request_bytes, Some(18));

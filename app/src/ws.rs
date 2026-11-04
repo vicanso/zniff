@@ -104,11 +104,11 @@ fn take_frame(buf: &[u8]) -> Result<Option<(usize, WsFrame)>, ()> {
         }
         len = u64::from_be_bytes(buf[2..10].try_into().unwrap());
         offset = 10;
-        if len < 65536 || len > 8 * 1024 * 1024 {
+        if !(65536..=8 * 1024 * 1024).contains(&len) {
             return Err(());
         }
     }
-    if matches!(opcode, 0x8 | 0x9 | 0xA) && len > 125 {
+    if matches!(opcode, 0x8..=0xA) && len > 125 {
         return Err(());
     }
     let mask_len = if masked { 4 } else { 0 };
@@ -123,10 +123,7 @@ fn take_frame(buf: &[u8]) -> Result<Option<(usize, WsFrame)>, ()> {
             *byte ^= key[index % 4];
         }
     }
-    Ok(Some((
-        total,
-        WsFrame { opcode, payload },
-    )))
+    Ok(Some((total, WsFrame { opcode, payload })))
 }
 
 #[cfg(test)]

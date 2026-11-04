@@ -9,12 +9,7 @@ pub enum Lang {
 }
 
 pub fn lang_from_tag(tag: &str) -> Lang {
-    let primary = tag
-        .trim()
-        .split(['-', '_'])
-        .next()
-        .unwrap_or("")
-        .trim();
+    let primary = tag.trim().split(['-', '_']).next().unwrap_or("").trim();
     if primary.eq_ignore_ascii_case("zh") {
         Lang::Zh
     } else {
@@ -61,23 +56,43 @@ pub enum StatusMsg {
     Idle,
     CaUnavailable(String),
     Starting,
-    BindFailed { port: u16, err: String },
-    Listening { port: u16, via_system_proxy: bool },
-    PortUnsaved { base: Box<StatusMsg>, err: String },
+    BindFailed {
+        port: u16,
+        err: String,
+    },
+    Listening {
+        port: u16,
+        via_system_proxy: bool,
+    },
+    PortUnsaved {
+        base: Box<StatusMsg>,
+        err: String,
+    },
     Stopped,
     StoppedRestored,
     StopRestoreFailed(String),
     ProxyOptionUnsaved(String),
     ProxyManual(String),
-    ProxyApplyFailed { port: u16, err: String },
+    ProxyApplyFailed {
+        port: u16,
+        err: String,
+    },
     ProxyRestoreFailed(String),
-    PrefUnsaved { name: PrefName, err: String },
+    PrefUnsaved {
+        name: PrefName,
+        err: String,
+    },
     InstallFailed(String),
     RemoveFailed(String),
     CopiedUrl,
-    CopiedCurl { binary: bool },
+    CopiedCurl {
+        binary: bool,
+    },
     EmptyCopy(Side),
-    CopiedBody { side: Side, hex: bool },
+    CopiedBody {
+        side: Side,
+        hex: bool,
+    },
     EmptyResponse,
     SaveFailed(String),
     Saved(String),
@@ -96,7 +111,10 @@ pub enum StatusMsg {
     ShareNeedsCapture,
     ShareStopped,
     ImportFailed(String),
-    Imported { count: usize, path: String },
+    Imported {
+        count: usize,
+        path: String,
+    },
     CopiedEnv,
     CopiedFetch,
     CopiedPython,
@@ -119,7 +137,14 @@ impl StatusMsg {
         match self {
             Self::Idle => t(lang, "未开始", "Idle").into(),
             Self::CaUnavailable(err) => {
-                format!("{} {err}", t(lang, "证书目录不可用:", "Certificate directory unavailable:"))
+                format!(
+                    "{} {err}",
+                    t(
+                        lang,
+                        "证书目录不可用:",
+                        "Certificate directory unavailable:"
+                    )
+                )
             }
             Self::Starting => t(lang, "正在启动代理…", "Starting the proxy…").into(),
             Self::BindFailed { port, err } => {
@@ -140,7 +165,10 @@ impl StatusMsg {
                     )
                 }
             }
-            Self::Listening { port, via_system_proxy } => {
+            Self::Listening {
+                port,
+                via_system_proxy,
+            } => {
                 if *via_system_proxy {
                     format!("{} · 127.0.0.1:{port}", t(lang, "抓包中", "Capturing"))
                 } else {
@@ -152,18 +180,36 @@ impl StatusMsg {
                 }
             }
             Self::PortUnsaved { base, err } => {
-                format!("{} · {} {err}", base.text(lang), t(lang, "端口没有记住:", "Port was not saved:"))
+                format!(
+                    "{} · {} {err}",
+                    base.text(lang),
+                    t(lang, "端口没有记住:", "Port was not saved:")
+                )
             }
             Self::Stopped => t(lang, "已停止", "Stopped").into(),
-            Self::StoppedRestored => {
-                t(lang, "已停止，系统代理已恢复", "Stopped, system proxy restored").into()
-            }
+            Self::StoppedRestored => t(
+                lang,
+                "已停止，系统代理已恢复",
+                "Stopped, system proxy restored",
+            )
+            .into(),
             Self::StopRestoreFailed(err) => format!(
                 "{} {err}",
-                t(lang, "代理已停，恢复系统代理失败:", "Proxy stopped, restoring the system proxy failed:")
+                t(
+                    lang,
+                    "代理已停，恢复系统代理失败:",
+                    "Proxy stopped, restoring the system proxy failed:"
+                )
             ),
             Self::ProxyOptionUnsaved(err) => {
-                format!("{} {err}", t(lang, "系统代理选项没有记住:", "System proxy option was not saved:"))
+                format!(
+                    "{} {err}",
+                    t(
+                        lang,
+                        "系统代理选项没有记住:",
+                        "System proxy option was not saved:"
+                    )
+                )
             }
             Self::ProxyManual(reason) => reason.clone(),
             Self::ProxyApplyFailed { port, err } => format!(
@@ -172,28 +218,50 @@ impl StatusMsg {
                 t(lang, "系统代理没有改成:", "system proxy was not changed:")
             ),
             Self::ProxyRestoreFailed(err) => {
-                format!("{} {err}", t(lang, "恢复系统代理失败:", "Restoring the system proxy failed:"))
+                format!(
+                    "{} {err}",
+                    t(
+                        lang,
+                        "恢复系统代理失败:",
+                        "Restoring the system proxy failed:"
+                    )
+                )
             }
             Self::PrefUnsaved { name, err } => {
                 let name = match name {
                     PrefName::Bypass => t(lang, "直通名单没有记住:", "Bypass list was not saved:"),
                     PrefName::Rules => t(lang, "规则没有记住:", "Rules were not saved:"),
-                    PrefName::Upstream => t(lang, "上游代理没有记住:", "Upstream proxy was not saved:"),
+                    PrefName::Upstream => {
+                        t(lang, "上游代理没有记住:", "Upstream proxy was not saved:")
+                    }
                     PrefName::Port => t(lang, "端口没有记住:", "Port was not saved:"),
                     PrefName::Lan => t(lang, "局域网开关没有记住:", "LAN switch was not saved:"),
                     PrefName::List => t(lang, "列表设置没有记住:", "List layout was not saved:"),
                     PrefName::Pretty => t(lang, "默认展示没有记住:", "Default view was not saved:"),
-                    PrefName::Tunnel => t(lang, "隧道失败开关没有记住:", "Tunnel failure switch was not saved:"),
-                    PrefName::Capture => t(lang, "抓包开关没有记住:", "Capture switch was not saved:"),
+                    PrefName::Tunnel => t(
+                        lang,
+                        "隧道失败开关没有记住:",
+                        "Tunnel failure switch was not saved:",
+                    ),
+                    PrefName::Capture => {
+                        t(lang, "抓包开关没有记住:", "Capture switch was not saved:")
+                    }
                 };
                 format!("{name} {err}")
             }
-            Self::InstallFailed(err) => format!("{} {err}", t(lang, "安装失败:", "Install failed:")),
+            Self::InstallFailed(err) => {
+                format!("{} {err}", t(lang, "安装失败:", "Install failed:"))
+            }
             Self::RemoveFailed(err) => format!("{} {err}", t(lang, "移除失败:", "Remove failed:")),
             Self::CopiedUrl => t(lang, "已复制 URL", "Copied the URL").into(),
             Self::CopiedCurl { binary } => {
                 if *binary {
-                    t(lang, "已复制 cURL，二进制 body 未写入命令", "Copied cURL; the binary body was left out").into()
+                    t(
+                        lang,
+                        "已复制 cURL，二进制 body 未写入命令",
+                        "Copied cURL; the binary body was left out",
+                    )
+                    .into()
                 } else {
                     t(lang, "已复制 cURL", "Copied cURL").into()
                 }
@@ -201,18 +269,28 @@ impl StatusMsg {
             Self::EmptyCopy(side) => format!(
                 "{} {}",
                 side_name(lang, *side),
-                t(lang, "body 是空的，已复制空文本", "body is empty; copied an empty string")
+                t(
+                    lang,
+                    "body 是空的，已复制空文本",
+                    "body is empty; copied an empty string"
+                )
             ),
             Self::CopiedBody { side, hex } => {
                 let side = side_name(lang, *side);
                 if *hex {
-                    format!("{side} {}", t(lang, "body 已按十六进制复制", "body copied as hex"))
+                    format!(
+                        "{side} {}",
+                        t(lang, "body 已按十六进制复制", "body copied as hex")
+                    )
                 } else {
                     format!("{} {side} body", t(lang, "已复制", "Copied"))
                 }
             }
             Self::EmptyResponse => t(lang, "响应 body 是空的", "Response body is empty").into(),
-            Self::SaveFailed(err) => format!("{} {err}", t(lang, "没有写成文件:", "Could not write the file:")),
+            Self::SaveFailed(err) => format!(
+                "{} {err}",
+                t(lang, "没有写成文件:", "Could not write the file:")
+            ),
             Self::Saved(path) => format!("{} {path}", t(lang, "已保存", "Saved")),
             Self::FlowGone => t(lang, "这条记录已经不在了", "That flow is gone").into(),
             Self::BreakDone => t(lang, "这个断点已经结束", "That break already finished").into(),
@@ -233,15 +311,22 @@ impl StatusMsg {
                 if *local_only {
                     format!(
                         "{base} · {}",
-                        t(lang, "只在本机可打开。打开局域网后，别人才能访问。", "This computer only. Turn on LAN for other people.")
+                        t(
+                            lang,
+                            "只在本机可打开。打开局域网后，别人才能访问。",
+                            "This computer only. Turn on LAN for other people."
+                        )
                     )
                 } else {
                     base
                 }
             }
-            Self::ShareNeedsCapture => {
-                t(lang, "先按开始，分享地址才打得开", "Press Start first. The share link needs the proxy.").into()
-            }
+            Self::ShareNeedsCapture => t(
+                lang,
+                "先按开始，分享地址才打得开",
+                "Press Start first. The share link needs the proxy.",
+            )
+            .into(),
             Self::ShareStopped => t(lang, "已停止分享", "Sharing stopped").into(),
             Self::ImportFailed(err) => format!("{} {err}", t(lang, "导入失败:", "Import failed:")),
             Self::Imported { count, path } => format!(
@@ -251,13 +336,21 @@ impl StatusMsg {
             ),
             Self::CopiedEnv => t(lang, "已复制代理环境变量", "Copied the proxy environment").into(),
             Self::CopiedFetch => t(lang, "已复制 fetch", "Copied fetch").into(),
-            Self::CopiedPython => t(lang, "已复制 Python requests", "Copied Python requests").into(),
-            Self::CopiedInterface => {
-                t(lang, "已复制 TypeScript interface", "Copied the TypeScript interface").into()
+            Self::CopiedPython => {
+                t(lang, "已复制 Python requests", "Copied Python requests").into()
             }
-            Self::InterfaceUnavailable => {
-                t(lang, "响应不是 JSON 对象或数组", "Response is not a JSON object or array").into()
-            }
+            Self::CopiedInterface => t(
+                lang,
+                "已复制 TypeScript interface",
+                "Copied the TypeScript interface",
+            )
+            .into(),
+            Self::InterfaceUnavailable => t(
+                lang,
+                "响应不是 JSON 对象或数组",
+                "Response is not a JSON object or array",
+            )
+            .into(),
             Self::PinLimit => t(lang, "星标已满 32 条", "The star list is full at 32").into(),
             Self::BaselineSet => t(lang, "已设为对比基准", "Set as the comparison baseline").into(),
         }
@@ -294,20 +387,56 @@ pub fn localize_error(lang: Lang, text: &str) -> String {
         ),
         ("不是 TLS，已改为隧道", "Not TLS, tunneled instead"),
         ("读取 ClientHello 超时", "Timed out reading ClientHello"),
-        ("连接源站超时，已改为隧道", "Timed out connecting to the origin, tunneled instead"),
-        ("源站证书不在内置根证书里，已改为隧道", "Origin certificate is not signed by a built-in root, tunneled instead"),
-        ("源站证书已过期，已改为隧道", "Origin certificate has expired, tunneled instead"),
-        ("源站证书还没到生效时间，已改为隧道", "Origin certificate is not valid yet, tunneled instead"),
-        ("源站证书域名对不上，已改为隧道", "Origin certificate name does not match, tunneled instead"),
-        ("源站证书已吊销，已改为隧道", "Origin certificate is revoked, tunneled instead"),
-        ("源站证书无效，已改为隧道", "Origin certificate is invalid, tunneled instead"),
-        ("源站不接受客户端的协议，已改为隧道", "Origin rejected the client protocol, tunneled instead"),
-        ("源站没有给出证书，已改为隧道", "Origin presented no certificate, tunneled instead"),
-        ("源站 TLS 版本或算法不兼容，已改为隧道", "Origin TLS version or cipher is incompatible, tunneled instead"),
-        ("源站 TLS 失败，已改为隧道", "Origin TLS failed, tunneled instead"),
+        (
+            "连接源站超时，已改为隧道",
+            "Timed out connecting to the origin, tunneled instead",
+        ),
+        (
+            "源站证书不在内置根证书里，已改为隧道",
+            "Origin certificate is not signed by a built-in root, tunneled instead",
+        ),
+        (
+            "源站证书已过期，已改为隧道",
+            "Origin certificate has expired, tunneled instead",
+        ),
+        (
+            "源站证书还没到生效时间，已改为隧道",
+            "Origin certificate is not valid yet, tunneled instead",
+        ),
+        (
+            "源站证书域名对不上，已改为隧道",
+            "Origin certificate name does not match, tunneled instead",
+        ),
+        (
+            "源站证书已吊销，已改为隧道",
+            "Origin certificate is revoked, tunneled instead",
+        ),
+        (
+            "源站证书无效，已改为隧道",
+            "Origin certificate is invalid, tunneled instead",
+        ),
+        (
+            "源站不接受客户端的协议，已改为隧道",
+            "Origin rejected the client protocol, tunneled instead",
+        ),
+        (
+            "源站没有给出证书，已改为隧道",
+            "Origin presented no certificate, tunneled instead",
+        ),
+        (
+            "源站 TLS 版本或算法不兼容，已改为隧道",
+            "Origin TLS version or cipher is incompatible, tunneled instead",
+        ),
+        (
+            "源站 TLS 失败，已改为隧道",
+            "Origin TLS failed, tunneled instead",
+        ),
         ("客户端 TLS 超时", "Client TLS timed out"),
         ("断点丢弃", "Dropped at the break"),
-        ("响应断点跳过，body 超过 1 MB", "Response break skipped, body is over 1 MB"),
+        (
+            "响应断点跳过，body 超过 1 MB",
+            "Response break skipped, body is over 1 MB",
+        ),
         ("消息已截断", "Messages truncated"),
     ];
     if let Some((_, en)) = EXACT.iter().find(|(zh, _)| *zh == text) {
@@ -315,10 +444,16 @@ pub fn localize_error(lang: Lang, text: &str) -> String {
     }
     const PREFIX: &[(&str, &str)] = &[
         ("读取 ClientHello 失败: ", "Failed to read ClientHello: "),
-        ("源站 TLS 失败，已改为隧道: ", "Origin TLS failed, tunneled instead: "),
+        (
+            "源站 TLS 失败，已改为隧道: ",
+            "Origin TLS failed, tunneled instead: ",
+        ),
         ("源站中止握手（", "Origin aborted the handshake ("),
         ("客户端 TLS 失败: ", "Client TLS failed: "),
-        ("响应断点读 body 失败: ", "Failed to read the body for a response break: "),
+        (
+            "响应断点读 body 失败: ",
+            "Failed to read the body for a response break: ",
+        ),
     ];
     for (zh, en) in PREFIX {
         if let Some(rest) = text.strip_prefix(zh) {
@@ -383,7 +518,10 @@ mod tests {
         assert!(other.text(Lang::Zh).contains("没有绑上"));
         assert_eq!(StatusMsg::Idle.text(Lang::En), "Idle");
         assert_eq!(StatusMsg::Idle.text(Lang::Zh), "未开始");
-        let listening = StatusMsg::Listening { port: 8877, via_system_proxy: false };
+        let listening = StatusMsg::Listening {
+            port: 8877,
+            via_system_proxy: false,
+        };
         assert!(listening.text(Lang::En).contains("system proxy unchanged"));
         assert_eq!(localize_error(Lang::Zh, "断点丢弃"), "断点丢弃");
         assert_eq!(localize_error(Lang::En, "断点丢弃"), "Dropped at the break");

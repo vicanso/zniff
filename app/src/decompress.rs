@@ -236,8 +236,8 @@ impl OutputBuf for zstd::stream::write::Decoder<'static, Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flate2::write::GzEncoder;
     use flate2::Compression;
+    use flate2::write::GzEncoder;
     use std::io::Write;
 
     #[test]

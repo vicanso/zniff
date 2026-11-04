@@ -69,9 +69,10 @@ pub fn valid_id(id: &str) -> bool {
         && bytes[13] == b'-'
         && bytes[18] == b'-'
         && bytes[23] == b'-'
-        && bytes.iter().enumerate().all(|(index, byte)| {
-            matches!(index, 8 | 13 | 18 | 23) || byte.is_ascii_hexdigit()
-        })
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 8 | 13 | 18 | 23) || byte.is_ascii_hexdigit())
 }
 
 /// Origin-form `/s/{id}` or `/s/{id}/flows.json`.
@@ -341,7 +342,10 @@ mod tests {
     fn share_paths_accept_only_the_id() {
         let id = "550e8400-e29b-41d4-a716-446655440000";
         assert!(valid_id(id));
-        assert_eq!(parse_share_path(&format!("/s/{id}")), Some((id.into(), SharePath::Page)));
+        assert_eq!(
+            parse_share_path(&format!("/s/{id}")),
+            Some((id.into(), SharePath::Page))
+        );
         assert_eq!(
             parse_share_path(&format!("/s/{id}/flows.json")),
             Some((id.into(), SharePath::Data))
@@ -358,8 +362,16 @@ mod tests {
             expires: UNIX_EPOCH + std::time::Duration::from_secs(100),
             filter: "header:cookie".into(),
         };
-        assert!(grant_ok(&share, &share.id, UNIX_EPOCH + std::time::Duration::from_secs(99)));
-        assert!(!grant_ok(&share, &share.id, UNIX_EPOCH + std::time::Duration::from_secs(100)));
+        assert!(grant_ok(
+            &share,
+            &share.id,
+            UNIX_EPOCH + std::time::Duration::from_secs(99)
+        ));
+        assert!(!grant_ok(
+            &share,
+            &share.id,
+            UNIX_EPOCH + std::time::Duration::from_secs(100)
+        ));
         assert!(!grant_ok(&share, "other", UNIX_EPOCH));
     }
 

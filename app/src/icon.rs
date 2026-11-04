@@ -20,7 +20,10 @@ pub enum Glyph {
     Columns,
 }
 
-pub fn glyph(kind: impl Fn() -> Glyph + 'static, paint: impl Fn() -> Hsla + 'static) -> impl IntoElement {
+pub fn glyph(
+    kind: impl Fn() -> Glyph + 'static,
+    paint: impl Fn() -> Hsla + 'static,
+) -> impl IntoElement {
     glyph_px(13.0, kind, paint)
 }
 
