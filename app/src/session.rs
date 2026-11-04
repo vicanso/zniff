@@ -514,33 +514,143 @@ enum StatusMatch {
     Failed,
 }
 
+impl StatusMatch {
+    fn parse(token: &str) -> Option<Self> {
+        let lower = token.trim().to_ascii_lowercase();
+        if lower == "fail" || lower == "失败" || lower == "err" || lower == "error" {
+            return Some(Self::Failed);
+        }
+        if let Some(class) = lower.strip_suffix("xx") {
+            if class.len() == 1
+                && let Ok(digit) = class.parse::<u16>()
+                && (1..6).contains(&digit)
+            {
+                return Some(Self::Class(digit));
+            }
+        }
+        if lower.len() == 3
+            && lower.bytes().all(|byte| byte.is_ascii_digit())
+            && let Ok(code) = lower.parse::<u16>()
+        {
+            return Some(Self::Exact(code));
+        }
+        None
+    }
+
+    fn matches(&self, flow: &Flow) -> bool {
+        match self {
+            Self::Failed => flow.error.is_some() && flow.status.is_none(),
+            Self::Exact(code) => flow.status == Some(*code),
+            Self::Class(digit) => flow.status.is_some_and(|code| code / 100 == *digit),
+        }
+    }
+}
+
+fn split_or_terms(text: &str) -> Vec<String> {
+    text.split(['|', ','])
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(|part| part.to_ascii_lowercase())
+        .collect()
+}
+
+/// Joins `|` tokens separated by spaces (`a | b` -> `a|b`) so whitespace
+/// splitting keeps an OR group together.
+pub fn normalize_filter_pipes(filter: &str) -> String {
+    let mut tokens: Vec<String> = Vec::new();
+    let mut join_next = false;
+    for raw in filter.split_whitespace() {
+        if raw == "|" {
+            join_next = true;
+            continue;
+        }
+        if let Some(rest) = raw.strip_prefix('|') {
+            if let Some(last) = tokens.last_mut() {
+                last.push('|');
+                last.push_str(rest);
+            } else if !rest.is_empty() {
+                tokens.push(rest.to_string());
+            }
+            join_next = raw.ends_with('|');
+            continue;
+        }
+        if join_next {
+            if let Some(last) = tokens.last_mut() {
+                if !last.ends_with('|') {
+                    last.push('|');
+                }
+                last.push_str(raw);
+            } else {
+                tokens.push(raw.to_string());
+            }
+            join_next = raw.ends_with('|');
+            continue;
+        }
+        join_next = raw.ends_with('|');
+        tokens.push(raw.to_string());
+    }
+    tokens.join(" ")
+}
+
+fn host_matches(host: &str, pattern: &str) -> bool {
+    let pattern = pattern.trim();
+    if pattern.is_empty() {
+        return true;
+    }
+    if let Some(suffix) = pattern.strip_prefix("*.") {
+        host == suffix || host.ends_with(&format!(".{suffix}"))
+    } else {
+        host.contains(pattern)
+    }
+}
+
+fn path_prefix_matches(path: &str, prefix: &str) -> bool {
+    let prefix = prefix.trim();
+    if prefix.is_empty() {
+        return true;
+    }
+    if prefix.starts_with('/') {
+        path.starts_with(prefix)
+    } else {
+        path.starts_with(prefix)
+            || path
+                .strip_prefix('/')
+                .is_some_and(|rest| rest.starts_with(prefix))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FlowQuery {
-    texts: Vec<String>,
+    texts: Vec<Vec<String>>,
+    hosts: Vec<String>,
+    path_prefixes: Vec<String>,
     excludes: Vec<String>,
-    method: Option<String>,
-    status: Option<StatusMatch>,
-    content_type: Option<String>,
-    bodies: Vec<String>,
-    headers: Vec<String>,
+    methods: Vec<String>,
+    statuses: Vec<StatusMatch>,
+    content_types: Vec<String>,
+    bodies: Vec<Vec<String>>,
+    headers: Vec<Vec<String>>,
     pinned_only: bool,
     slow_only: bool,
 }
 
 impl FlowQuery {
     fn parse(filter: &str) -> Self {
+        let normalized = normalize_filter_pipes(filter);
         let mut query = Self {
             texts: Vec::new(),
+            hosts: Vec::new(),
+            path_prefixes: Vec::new(),
             excludes: Vec::new(),
-            method: None,
-            status: None,
-            content_type: None,
+            methods: Vec::new(),
+            statuses: Vec::new(),
+            content_types: Vec::new(),
             bodies: Vec::new(),
             headers: Vec::new(),
             pinned_only: false,
             slow_only: false,
         };
-        for token in filter.split_whitespace() {
+        for token in normalized.split_whitespace() {
             let lower = token.to_ascii_lowercase();
             if lower == "pin:" {
                 query.pinned_only = true;
@@ -551,58 +661,95 @@ impl FlowQuery {
                 continue;
             }
             if let Some(keyword) = lower.strip_prefix("mute:") {
-                if !keyword.is_empty() {
-                    query.excludes.push(keyword.to_string());
+                query.excludes.extend(split_or_terms(keyword));
+                continue;
+            }
+            if let Some(keyword) = lower.strip_prefix('-') {
+                if !keyword.is_empty() && !keyword.contains(':') {
+                    query.excludes.extend(split_or_terms(keyword));
                 }
                 continue;
             }
-            if let Some(keyword) = lower.strip_prefix("-") {
-                if !keyword.is_empty() && !keyword.contains(':') {
-                    query.excludes.push(keyword.to_string());
-                }
+            if let Some(rest) = lower
+                .strip_prefix("host:")
+                .or_else(|| lower.strip_prefix("domain:"))
+            {
+                query.hosts.extend(split_or_terms(rest));
+                continue;
+            }
+            if let Some(rest) = lower.strip_prefix("path:") {
+                query.path_prefixes.extend(split_or_terms(rest));
                 continue;
             }
             if let Some(keyword) = lower.strip_prefix("body:") {
-                if !keyword.is_empty() {
-                    query.bodies.push(keyword.to_string());
+                let group = split_or_terms(keyword);
+                if !group.is_empty() {
+                    query.bodies.push(group);
                 }
                 continue;
             }
             if let Some(keyword) = lower.strip_prefix("header:") {
-                if !keyword.is_empty() {
-                    query.headers.push(keyword.to_string());
+                let group = split_or_terms(keyword);
+                if !group.is_empty() {
+                    query.headers.push(group);
                 }
                 continue;
             }
             if let Some(kind) = lower.strip_prefix("type:").or_else(|| lower.strip_prefix("ct:")) {
-                if !kind.is_empty() {
-                    query.content_type = Some(kind.to_string());
-                }
+                query.content_types.extend(split_or_terms(kind));
                 continue;
             }
-            if METHODS.iter().any(|method| method.eq_ignore_ascii_case(token)) {
-                query.method = Some(token.to_ascii_uppercase());
-                continue;
-            }
-            if lower == "fail" || lower == "失败" {
-                query.status = Some(StatusMatch::Failed);
-                continue;
-            }
-            if let Some(class) = lower.strip_suffix("xx") {
-                if let Ok(digit) = class.parse::<u16>() {
-                    if (1..6).contains(&digit) && class.len() == 1 {
-                        query.status = Some(StatusMatch::Class(digit));
-                        continue;
+            if let Some(rest) = lower.strip_prefix("method:") {
+                for item in split_or_terms(rest) {
+                    let upper = item.to_ascii_uppercase();
+                    if !query.methods.contains(&upper) {
+                        query.methods.push(upper);
                     }
                 }
+                continue;
             }
-            if token.len() == 3 && token.bytes().all(|byte| byte.is_ascii_digit()) {
-                if let Ok(code) = token.parse::<u16>() {
-                    query.status = Some(StatusMatch::Exact(code));
-                    continue;
+            if let Some(rest) = lower.strip_prefix("status:") {
+                for item in split_or_terms(rest) {
+                    if let Some(status) = StatusMatch::parse(&item)
+                        && !query.statuses.contains(&status)
+                    {
+                        query.statuses.push(status);
+                    }
                 }
+                continue;
             }
-            query.texts.push(lower);
+            let parts: Vec<&str> = token
+                .split(['|', ','])
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+                .collect();
+            if !parts.is_empty()
+                && parts
+                    .iter()
+                    .all(|part| METHODS.iter().any(|method| method.eq_ignore_ascii_case(part)))
+            {
+                for part in parts {
+                    let upper = part.to_ascii_uppercase();
+                    if !query.methods.contains(&upper) {
+                        query.methods.push(upper);
+                    }
+                }
+                continue;
+            }
+            if !parts.is_empty() && parts.iter().all(|part| StatusMatch::parse(part).is_some()) {
+                for part in parts {
+                    if let Some(status) = StatusMatch::parse(part)
+                        && !query.statuses.contains(&status)
+                    {
+                        query.statuses.push(status);
+                    }
+                }
+                continue;
+            }
+            let group = split_or_terms(&lower);
+            if !group.is_empty() {
+                query.texts.push(group);
+            }
         }
         query
     }
@@ -614,62 +761,78 @@ impl FlowQuery {
         if self.slow_only && !is_slow(flow.started, flow.finished_at, SystemTime::now()) {
             return false;
         }
-        if let Some(method) = &self.method {
-            if !flow.method.eq_ignore_ascii_case(method) {
-                return false;
-            }
+        if !self.methods.is_empty()
+            && !self
+                .methods
+                .iter()
+                .any(|method| flow.method.eq_ignore_ascii_case(method))
+        {
+            return false;
         }
-        if let Some(status) = &self.status {
-            match status {
-                StatusMatch::Failed => {
-                    if !(flow.error.is_some() && flow.status.is_none()) {
-                        return false;
-                    }
-                }
-                StatusMatch::Exact(code) => {
-                    if flow.status != Some(*code) {
-                        return false;
-                    }
-                }
-                StatusMatch::Class(digit) => {
-                    let Some(code) = flow.status else {
-                        return false;
-                    };
-                    if code / 100 != *digit {
-                        return false;
-                    }
-                }
-            }
+        if !self.statuses.is_empty()
+            && !self.statuses.iter().any(|status| status.matches(flow))
+        {
+            return false;
         }
-        if let Some(kind) = &self.content_type {
+        if !self.content_types.is_empty() {
             let header = flow
                 .response_headers
                 .iter()
                 .chain(flow.request_headers.iter())
                 .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
                 .map(|(_, value)| value.to_ascii_lowercase());
-            if !header.is_some_and(|value| value.contains(kind)) {
+            if !header.is_some_and(|value| {
+                self.content_types
+                    .iter()
+                    .any(|kind| value.contains(kind))
+            }) {
                 return false;
             }
         }
-        if !self.bodies.iter().all(|keyword| body_contains(flow, keyword)) {
+        if !self
+            .bodies
+            .iter()
+            .all(|group| group.iter().any(|keyword| body_contains(flow, keyword)))
+        {
             return false;
         }
-        if !self.headers.iter().all(|keyword| header_contains(flow, keyword)) {
+        if !self
+            .headers
+            .iter()
+            .all(|group| group.iter().any(|keyword| header_contains(flow, keyword)))
+        {
             return false;
         }
         let host = flow.host.to_ascii_lowercase();
         let path = flow.path.to_ascii_lowercase();
-        if self
-            .excludes
-            .iter()
-            .any(|text| host.contains(text) || path.contains(text))
+        if !self.hosts.is_empty()
+            && !self
+                .hosts
+                .iter()
+                .any(|pattern| host_matches(&host, pattern))
         {
             return false;
         }
-        self.texts
+        if !self.path_prefixes.is_empty()
+            && !self
+                .path_prefixes
+                .iter()
+                .any(|prefix| path_prefix_matches(&path, prefix))
+        {
+            return false;
+        }
+        if self
+            .excludes
             .iter()
-            .all(|text| host.contains(text) || path.contains(text))
+            .any(|text| host_matches(&host, text) || path.contains(text))
+        {
+            return false;
+        }
+        self.texts.iter().all(|group| {
+            group
+                .iter()
+                .any(|text| host_matches(&host, text) || path.contains(text))
+        })
     }
 }
 
@@ -899,5 +1062,55 @@ mod tests {
             Some(now + Duration::from_millis(999)),
             now + Duration::from_secs(5),
         ));
+    }
+
+    #[test]
+    fn filter_supports_domain_or_and_path_prefix_or() {
+        let mut session = Session::default();
+        let mut a = draft("api.example.com");
+        a.path = "/v1/users/list".into();
+        let id_a = session.open(a);
+        session.set_response(id_a, 200, Vec::new(), None);
+
+        let mut b = draft("cdn.other.org");
+        b.method = "POST".into();
+        b.path = "/auth/token".into();
+        let id_b = session.open(b);
+        session.set_response(id_b, 401, Vec::new(), None);
+
+        let mut c = draft("sub.third.net");
+        c.method = "DELETE".into();
+        c.path = "/legacy/v1/users".into();
+        let id_c = session.open(c);
+        session.set_response(id_c, 502, Vec::new(), None);
+
+        assert_eq!(
+            session.ids_matching("host:example.com|other.org"),
+            vec![id_a, id_b]
+        );
+        assert_eq!(
+            session.ids_matching("host:*.example.com | *.third.net"),
+            vec![id_a, id_c]
+        );
+        assert_eq!(
+            session.ids_matching("path:/v1|/auth"),
+            vec![id_a, id_b]
+        );
+        assert_eq!(
+            session.ids_matching("path:/v1 | /auth"),
+            vec![id_a, id_b]
+        );
+        assert_eq!(
+            session.ids_matching("GET|POST"),
+            vec![id_a, id_b]
+        );
+        assert_eq!(
+            session.ids_matching("2xx|5xx"),
+            vec![id_a, id_c]
+        );
+        assert_eq!(
+            session.ids_matching("mute:other.org|third.net"),
+            vec![id_a]
+        );
     }
 }

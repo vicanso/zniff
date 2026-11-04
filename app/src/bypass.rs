@@ -26,7 +26,7 @@ impl BypassRules {
         let mut all = false;
         let mut exact = HashSet::new();
         let mut suffixes = Vec::new();
-        for raw in text.split(|ch: char| ch.is_whitespace() || ch == ',' || ch == ';') {
+        for raw in text.split(|ch: char| ch.is_whitespace() || ch == ',' || ch == ';' || ch == '|') {
             let token = raw.trim();
             if token.is_empty() {
                 continue;

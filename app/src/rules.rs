@@ -625,6 +625,44 @@ fn parse_delay(text: &str) -> Option<Duration> {
     Some(Duration::from_millis(ms.min(DELAY_CAP.as_millis() as u64)))
 }
 
+/// Builds a single-token rule pattern from a domain input (which may already
+/// include a path, or multiple domains separated by `|` / `,` / spaces) and an
+/// optional path-prefix input (multiple prefixes separated by `|` / `,` / spaces).
+pub fn combine_rule_pattern(host_input: &str, path_input: &str) -> String {
+    let host_trimmed = host_input.trim();
+    let path_trimmed = path_input.trim();
+    if path_trimmed.is_empty() && host_trimmed.contains('/') && !host_trimmed.contains(char::is_whitespace) {
+        return host_trimmed.to_string();
+    }
+    let hosts: Vec<String> = host_trimmed
+        .split(|ch: char| ch == '|' || ch == ',' || ch.is_whitespace())
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(|part| part.trim_end_matches('/').to_string())
+        .collect();
+    if hosts.is_empty() {
+        return String::new();
+    }
+    let host_part = hosts.join("|");
+    let paths: Vec<String> = path_trimmed
+        .split(|ch: char| ch == '|' || ch == ',' || ch.is_whitespace())
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            if part.starts_with('/') {
+                part.to_string()
+            } else {
+                format!("/{part}")
+            }
+        })
+        .collect();
+    if paths.is_empty() {
+        host_part
+    } else {
+        format!("{host_part}{}", paths.join("|"))
+    }
+}
+
 fn split_pattern(pattern: &str) -> (String, String) {
     let pattern = pattern.trim();
     if let Some((host, path)) = pattern.split_once('/') {
@@ -633,27 +671,54 @@ fn split_pattern(pattern: &str) -> (String, String) {
         } else {
             format!("/{path}")
         };
-        (normalize_host(host), path)
+        (normalize_host_list(host), path)
     } else {
-        (normalize_host(pattern), "/".to_string())
+        (normalize_host_list(pattern), "/".to_string())
     }
+}
+
+fn normalize_host_list(rule: &str) -> String {
+    rule.split(['|', ','])
+        .map(normalize_host)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("|")
 }
 
 fn host_matches(rule: &str, host: &str) -> bool {
     let host = normalize_host(host);
-    if let Some(rest) = rule.strip_prefix("*.") {
-        host.ends_with(&format!(".{rest}"))
-    } else {
-        rule == host
-    }
+    rule.split(['|', ','])
+        .map(normalize_host)
+        .filter(|part| !part.is_empty())
+        .any(|part| {
+            if part == "*" {
+                true
+            } else if let Some(rest) = part.strip_prefix("*.") {
+                host.ends_with(&format!(".{rest}"))
+            } else {
+                part == host
+            }
+        })
 }
 
 fn path_matches(prefix: &str, path: &str) -> bool {
     let path = path.split('?').next().unwrap_or(path);
-    if prefix == "/" {
-        return true;
-    }
-    path == prefix || path.starts_with(&format!("{prefix}/"))
+    prefix
+        .split(['|', ','])
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .any(|part| {
+            let p = if part.starts_with('/') {
+                part.to_string()
+            } else {
+                format!("/{part}")
+            };
+            if p == "/" {
+                return true;
+            }
+            let trimmed = p.trim_end_matches('/');
+            path == p || path == trimmed || path.starts_with(&format!("{trimmed}/")) || path.starts_with(&p)
+        })
 }
 
 fn normalize_host(host: &str) -> String {
@@ -827,5 +892,16 @@ break example.com/api
         assert!(parse_rules("replace /online-hall-v2/configs req ?supportCrypto=true -> ?supportCrypto=false")[0]
             .matches("baidu.com", path)
             == false);
+    }
+
+    #[test]
+    fn rules_support_domain_or_and_path_prefix_or() {
+        let pattern = combine_rule_pattern("baidu.com | baidu.com", "/finance-api | /online-hall");
+        assert_eq!(pattern, "baidu.com|baidu.com/finance-api|/online-hall");
+        let rules = parse_rules(&format!("break {pattern}\n"));
+        assert!(rules[0].matches("baidu.com", "/finance-api/v1"));
+        assert!(rules[0].matches("baidu.com", "/online-hall/configs"));
+        assert!(!rules[0].matches("baidu.com", "/finance-api/v1"));
+        assert!(!rules[0].matches("baidu.com", "/other"));
     }
 }

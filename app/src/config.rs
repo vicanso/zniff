@@ -84,6 +84,9 @@ pub struct Config {
     /// Newest first. The filter menu offers these.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recent_filters: Vec<String>,
+    /// Filters the user saved on purpose. Newest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub saved_filters: Vec<String>,
     /// Dragged list-column widths, in points, keyed by `method`, `path`, and the rest.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub column_widths: HashMap<String, u32>,
@@ -112,6 +115,7 @@ impl Default for Config {
             filter: String::new(),
             capturing: false,
             recent_filters: Vec::new(),
+            saved_filters: Vec::new(),
             column_widths: HashMap::new(),
         }
     }
@@ -307,7 +311,25 @@ fn normalize(mut config: Config) -> Config {
     config.language = language_name(config.language.as_deref().and_then(parse_pref));
     config.list_width = clamp_list_width(config.list_width);
     clamp_column_widths(&mut config.column_widths);
+    clamp_saved_filters(&mut config.saved_filters);
     config
+}
+
+const SAVED_FILTER_CAP: usize = 16;
+
+fn clamp_saved_filters(items: &mut Vec<String>) {
+    let mut kept = Vec::new();
+    for item in items.drain(..) {
+        let item = item.trim().to_string();
+        if item.is_empty() || kept.iter().any(|existing: &String| existing == &item) {
+            continue;
+        }
+        kept.push(item);
+        if kept.len() == SAVED_FILTER_CAP {
+            break;
+        }
+    }
+    *items = kept;
 }
 
 fn read_legacy(dir: &Path, name: &str) -> Option<String> {

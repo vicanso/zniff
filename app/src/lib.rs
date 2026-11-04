@@ -83,8 +83,6 @@ fn native(registry: &mut Registry) {
 /// Header and rows keep a 2pt selection bar plus `px_3` (12pt). The filter uses the same inset.
 const LIST_INSET: f32 = 14.0;
 const LIST_PAD_END: f32 = 12.0;
-/// Column picker on the filter-chip row.
-const COL_PICKER: f32 = 28.0;
 /// A set bit collapses that detail card. Zero leaves every card open for this window only.
 const FOLD_QUERY: u8 = 1;
 const FOLD_DIFF: u8 = 1 << 1;
@@ -503,6 +501,7 @@ pub fn App() -> impl IntoElement {
     let saved_filter = saved_config();
     let filter = signal(saved_filter.filter);
     let recent_filters = signal(saved_filter.recent_filters);
+    let saved_filters = signal(saved_filter.saved_filters);
     let selected = signal(None::<u64>);
     let rows = signal(Vec::<RowLine>::new());
     let flow_total = signal(0_usize);
@@ -753,6 +752,11 @@ pub fn App() -> impl IntoElement {
             filter,
             shown.pretty,
             share_id,
+            saved_filters,
+            recent_filters,
+            bypass_text,
+            rules_text,
+            upstream_text,
         ))
         .child(when(
             move || paused.get().is_some(),
@@ -769,10 +773,7 @@ pub fn App() -> impl IntoElement {
                     selected,
                     compose,
                     filter,
-                    recent_filters,
-                    bypass_text,
                     rules_text,
-                    upstream_text,
                     list_width,
                     columns,
                     controls_list,
@@ -825,9 +826,16 @@ fn toolbar(
     filter: Signal<String>,
     pretty: Signal<bool>,
     share_id: Signal<String>,
+    saved_filters: Signal<Vec<String>>,
+    recent_filters: Signal<Vec<String>>,
+    bypass_text: Signal<String>,
+    rules_text: Signal<String>,
+    upstream_text: Signal<String>,
 ) -> impl IntoElement {
     let install = Rc::new(install);
+    let clear = Rc::new(clear);
     let remove = Rc::new(remove);
+    let filter_controls = import_controls.clone();
     view()
         .flex_row()
         .items_center()
@@ -907,6 +915,19 @@ fn toolbar(
                 ),
         )
         .child(flow_count_badge(rows, flow_total, filter))
+        .child(toolbar_text_button(tr("清空", "Clear"), {
+            let clear = Rc::clone(&clear);
+            move || clear()
+        }))
+        .child(saved_filter_menu(
+            filter,
+            saved_filters,
+            recent_filters,
+            bypass_text,
+            rules_text,
+            upstream_text,
+            filter_controls,
+        ))
         .child(toolbar_menu(
             ca_installed,
             use_system_proxy,
@@ -915,7 +936,10 @@ fn toolbar(
             toggle_proxy,
             export_har,
             copy_env,
-            clear,
+            {
+                let clear = Rc::clone(&clear);
+                move || clear()
+            },
             import_path,
             import_controls,
             rows,
@@ -938,6 +962,755 @@ fn toolbar(
             move || running.get(),
             toggle,
         ))
+}
+
+fn toolbar_text_button(
+    label: impl IntoReactive<SharedString>,
+    on_press: impl Fn() + 'static,
+) -> impl IntoElement {
+    view()
+        .h(px(CONTROL_H))
+        .px_3()
+        .flex_shrink_0()
+        .flex_row()
+        .items_center()
+        .rounded(px(CONTROL_RADIUS))
+        .border_1()
+        .border_color(border_control())
+        .bg(bg_control())
+        .hover(|style| style.bg(bg_control_hover()))
+        .cursor(Cursor::Pointer)
+        .active(|style| style.opacity(0.8))
+        .on_press(on_press)
+        .child(control_text(label).text_color(fg_primary()))
+}
+
+const SAVED_FILTER_CAP: usize = 16;
+
+fn saved_filter_menu(
+    filter: Signal<String>,
+    saved: Signal<Vec<String>>,
+    recent: Signal<Vec<String>>,
+    bypass_text: Signal<String>,
+    rules_text: Signal<String>,
+    upstream_text: Signal<String>,
+    controls: Arc<Controls>,
+) -> impl IntoElement {
+    let rules_on = signal(true);
+    let breaks_on = signal(true);
+    let show_tunnels = signal(saved_config().show_tunnel_failures);
+    popover()
+        .placement(Placement::Bottom)
+        .align(Align::End)
+        .offset(px(6.0))
+        .margin(px(8.0))
+        .trigger(
+            view()
+                .h(px(CONTROL_H))
+                .px_3()
+                .flex_shrink_0()
+                .flex_row()
+                .items_center()
+                .gap_1p5()
+                .rounded(px(CONTROL_RADIUS))
+                .border_1()
+                .border_color(move || {
+                    if capture_muted(rules_on, breaks_on) {
+                        status_warn_fg()
+                    } else if !filter.get().trim().is_empty()
+                        || !saved.with(Vec::is_empty)
+                        || config_set(bypass_text, rules_text, upstream_text)
+                    {
+                        accent_blue_border()
+                    } else {
+                        border_control()
+                    }
+                })
+                .bg(move || {
+                    if !filter.get().trim().is_empty() {
+                        accent_blue_soft()
+                    } else {
+                        bg_control()
+                    }
+                })
+                .hover(|style| {
+                    style.bg(move || {
+                        if !filter.get().trim().is_empty() {
+                            accent_blue_soft()
+                        } else {
+                            bg_control_hover()
+                        }
+                    })
+                })
+                .cursor(Cursor::Pointer)
+                .tooltip(label_tip("过滤与规则配置", "Filters & Rules Config"))
+                .child(when(
+                    move || {
+                        !filter.get().trim().is_empty()
+                            || config_set(bypass_text, rules_text, upstream_text)
+                            || capture_muted(rules_on, breaks_on)
+                    },
+                    move || {
+                        view()
+                            .w(px(6.0))
+                            .h(px(6.0))
+                            .rounded(px(99.0))
+                            .bg(move || {
+                                if capture_muted(rules_on, breaks_on) {
+                                    status_warn_fg()
+                                } else if !filter.get().trim().is_empty() {
+                                    accent_blue()
+                                } else {
+                                    status_ok_fg()
+                                }
+                            })
+                    },
+                ))
+                .child(
+                    glyph_px(13.5, || Glyph::Sliders, move || {
+                        color(if capture_muted(rules_on, breaks_on) {
+                            status_warn_fg()
+                        } else if !filter.get().trim().is_empty()
+                            || config_set(bypass_text, rules_text, upstream_text)
+                        {
+                            accent_blue_text()
+                        } else {
+                            fg_secondary()
+                        })
+                    }),
+                )
+                .child(control_text(tr("过滤", "Filters")).text_color(move || {
+                    if capture_muted(rules_on, breaks_on) {
+                        status_warn_fg()
+                    } else if !filter.get().trim().is_empty() {
+                        accent_blue_text()
+                    } else {
+                        fg_primary()
+                    }
+                })),
+        )
+        .child(saved_filter_panel(
+            filter,
+            saved,
+            recent,
+            bypass_text,
+            rules_text,
+            upstream_text,
+            controls,
+            rules_on,
+            breaks_on,
+            show_tunnels,
+        ))
+}
+
+fn saved_filter_panel(
+    filter: Signal<String>,
+    saved: Signal<Vec<String>>,
+    recent: Signal<Vec<String>>,
+    bypass_text: Signal<String>,
+    rules_text: Signal<String>,
+    upstream_text: Signal<String>,
+    controls: Arc<Controls>,
+    rules_on: Signal<bool>,
+    breaks_on: Signal<bool>,
+    show_tunnels: Signal<bool>,
+) -> impl IntoElement {
+    let field = filter;
+    let save_filter = filter;
+    let reset_filter = filter;
+    let save_saved = saved;
+    let host_field = signal(extract_host_or(&filter.get_untracked()));
+    let path_field = signal(extract_path_or(&filter.get_untracked()));
+    let exclude_field = signal(extract_exclude_or(&filter.get_untracked()));
+    effect(move || {
+        let current = filter.get();
+        if extract_host_or(&set_host_or("", &host_field.get_untracked()))
+            != extract_host_or(&current)
+        {
+            host_field.set(extract_host_or(&current));
+        }
+        if extract_path_or(&set_path_or("", &path_field.get_untracked()))
+            != extract_path_or(&current)
+        {
+            path_field.set(extract_path_or(&current));
+        }
+        if extract_exclude_or(&set_exclude_or("", &exclude_field.get_untracked()))
+            != extract_exclude_or(&current)
+        {
+            exclude_field.set(extract_exclude_or(&current));
+        }
+    });
+
+    let bypass_controls = controls.clone();
+    let rules_controls = controls.clone();
+    let upstream_controls = controls.clone();
+    let tunnel_controls = controls;
+
+    view()
+        .w(px(760.0))
+        .p_3()
+        .gap_3()
+        .flex_row()
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(border_strong())
+        .bg(bg_card())
+        .shadow_md()
+        .child(
+            view()
+                .flex_1()
+                .min_w(px(0.0))
+                .gap_2p5()
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            text(tr("流量过滤", "Traffic Filter"))
+                                .text_size(px(13.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(fg_primary()),
+                        )
+                        .child(
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .gap_1p5()
+                                .child(when(
+                                    move || {
+                                        let current = save_filter.get();
+                                        let current = current.trim();
+                                        !current.is_empty()
+                                            && !save_saved.with(|items| {
+                                                items.iter().any(|item| item == current)
+                                            })
+                                    },
+                                    move || {
+                                        view()
+                                            .h(px(24.0))
+                                            .px_2()
+                                            .rounded(px(6.0))
+                                            .flex_row()
+                                            .items_center()
+                                            .bg(accent_blue())
+                                            .hover(|style| style.bg(accent_blue_hover()))
+                                            .cursor(Cursor::Pointer)
+                                            .on_press(move || {
+                                                store_saved_filter(&save_filter.get(), save_saved)
+                                            })
+                                            .child(
+                                                text(tr("保存过滤", "Save"))
+                                                    .text_size(px(11.5))
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .text_color(white()),
+                                            )
+                                    },
+                                ))
+                                .child(when(
+                                    move || !reset_filter.get().trim().is_empty(),
+                                    move || {
+                                        view()
+                                            .h(px(24.0))
+                                            .px_2()
+                                            .rounded(px(6.0))
+                                            .border_1()
+                                            .border_color(border_control())
+                                            .bg(bg_control())
+                                            .hover(|style| style.bg(bg_control_hover()))
+                                            .flex_row()
+                                            .items_center()
+                                            .cursor(Cursor::Pointer)
+                                            .on_press(move || reset_filter.set(String::new()))
+                                            .child(
+                                                text(tr("清空条件", "Reset"))
+                                                    .text_size(px(11.5))
+                                                    .text_color(fg_secondary()),
+                                            )
+                                    },
+                                )),
+                        ),
+                )
+                .child(focused_input(
+                    field,
+                    tr(
+                        "完整过滤表达式，支持 | 表示 OR",
+                        "Filter expression, use | for OR",
+                    ),
+                    30.0,
+                    false,
+                    move |text| field.set(text.to_string()),
+                    None,
+                ))
+                .child(config_field(
+                    "域名 (支持多个 OR，用 | 、逗号或空格分隔)",
+                    "Domains (OR — separate with |, comma, or space)",
+                    side_input(
+                        host_field,
+                        tr(
+                            "api.example.com | *.cdn.com",
+                            "api.example.com | *.cdn.com",
+                        ),
+                        28.0,
+                        false,
+                        move |text| {
+                            host_field.set(text.to_string());
+                            filter.set(set_host_or(&filter.get(), text));
+                        },
+                    ),
+                ))
+                .child(config_field(
+                    "Path 前缀 (支持多个 OR，用 | 、逗号或空格分隔)",
+                    "Path Prefixes (OR — separate with |, comma, or space)",
+                    side_input(
+                        path_field,
+                        tr("/api/v1 | /auth | /graphql", "/api/v1 | /auth | /graphql"),
+                        28.0,
+                        false,
+                        move |text| {
+                            path_field.set(text.to_string());
+                            filter.set(set_path_or(&filter.get(), text));
+                        },
+                    ),
+                ))
+                .child(config_field(
+                    "排除域名或路径 (支持多个 OR)",
+                    "Exclude Host / Path (OR)",
+                    side_input(
+                        exclude_field,
+                        tr("ads.example.com | /health", "ads.example.com | /health"),
+                        28.0,
+                        false,
+                        move |text| {
+                            exclude_field.set(text.to_string());
+                            filter.set(set_exclude_or(&filter.get(), text));
+                        },
+                    ),
+                ))
+                .child(
+                    view()
+                        .gap_1()
+                        .w_full()
+                        .child(
+                            text(tr("快捷筛选", "Quick Filters"))
+                                .text_size(px(11.5))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(fg_muted()),
+                        )
+                        .child(
+                            view()
+                                .flex_row()
+                                .flex_wrap()
+                                .items_center()
+                                .gap_1()
+                                .child(filter_chip(
+                                    filter,
+                                    "JSON",
+                                    "JSON",
+                                    "type:json",
+                                    JSON_ALIASES,
+                                ))
+                                .child(filter_chip(
+                                    filter,
+                                    "报错",
+                                    "Errors",
+                                    "失败",
+                                    FAIL_ALIASES,
+                                ))
+                                .child(filter_chip(
+                                    filter,
+                                    "星标",
+                                    "Starred",
+                                    "pin:",
+                                    PIN_ALIASES,
+                                ))
+                                .child(filter_chip(
+                                    filter,
+                                    "慢请求",
+                                    "Slow",
+                                    "slow:",
+                                    SLOW_ALIASES,
+                                )),
+                        ),
+                )
+                .child(view().w_full().h(px(1.0)).bg(border_subtle()))
+                .child(
+                    view()
+                        .gap_1()
+                        .w_full()
+                        .child(
+                            text(tr("已保存的过滤", "Saved Filters"))
+                                .text_size(px(11.5))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(fg_muted()),
+                        )
+                        .child(when(
+                            move || saved.with(Vec::is_empty),
+                            || {
+                                view().h(px(24.0)).flex_row().items_center().child(
+                                    control_text(tr("还没有保存的过滤", "No saved filters"))
+                                        .text_color(fg_muted()),
+                                )
+                            },
+                        ))
+                        .child(each(
+                            saved,
+                            |item| item.clone(),
+                            move |item, _| {
+                                let apply = item.clone();
+                                let remove = item.clone();
+                                let mark = item.clone();
+                                let filter_apply = filter;
+                                let filter_mark = filter;
+                                let saved_remove = saved;
+                                view()
+                                    .h(px(28.0))
+                                    .gap_1()
+                                    .flex_row()
+                                    .items_center()
+                                    .child(
+                                        view()
+                                            .flex_1()
+                                            .min_w(px(0.0))
+                                            .h_full()
+                                            .px_2p5()
+                                            .rounded(px(6.0))
+                                            .flex_row()
+                                            .items_center()
+                                            .border_1()
+                                            .border_color(move || {
+                                                let current = filter_mark.get();
+                                                if mark.with(|text| text == current.trim()) {
+                                                    accent_blue_border()
+                                                } else {
+                                                    border_control()
+                                                }
+                                            })
+                                            .hover(|style| style.bg(bg_control_hover()))
+                                            .cursor(Cursor::Pointer)
+                                            .on_press(move || {
+                                                filter_apply.set(apply.with(|text| text.clone()))
+                                            })
+                                            .child(
+                                                control_text(move || item.with(|text| text.clone()))
+                                                    .number_of_lines(1)
+                                                    .ellipsize_mode(EllipsizeMode::Tail)
+                                                    .text_color(fg_secondary()),
+                                            ),
+                                    )
+                                    .child(
+                                        view()
+                                            .w(px(26.0))
+                                            .h(px(26.0))
+                                            .flex_shrink_0()
+                                            .flex_row()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded(px(6.0))
+                                            .cursor(Cursor::Pointer)
+                                            .hover(|style| style.bg(bg_control_hover()))
+                                            .tooltip(label_tip("移除", "Remove"))
+                                            .on_press(move || {
+                                                drop_saved_filter(
+                                                    &remove.with(|text| text.clone()),
+                                                    saved_remove,
+                                                )
+                                            })
+                                            .child(control_text("×").text_color(fg_muted())),
+                                    )
+                            },
+                        )),
+                )
+                .child(when(
+                    move || !recent.with(Vec::is_empty),
+                    move || {
+                        let recent_clear = recent;
+                        view()
+                            .gap_1()
+                            .w_full()
+                            .child(
+                                view()
+                                    .flex_row()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(
+                                        view()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap_1()
+                                            .child(glyph_px(
+                                                13.0,
+                                                || Glyph::History,
+                                                || color(fg_muted()),
+                                            ))
+                                            .child(
+                                                text(tr("最近使用", "Recent Filters"))
+                                                    .text_size(px(11.5))
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(fg_muted()),
+                                            ),
+                                    )
+                                    .child(
+                                        view()
+                                            .h(px(20.0))
+                                            .px_2()
+                                            .rounded(px(5.0))
+                                            .flex_row()
+                                            .items_center()
+                                            .cursor(Cursor::Pointer)
+                                            .hover(|style| style.bg(bg_control_hover()))
+                                            .on_press(move || clear_recent_filters(recent_clear))
+                                            .child(
+                                                text(tr("清除", "Clear"))
+                                                    .text_size(px(11.0))
+                                                    .text_color(fg_muted()),
+                                            ),
+                                    ),
+                            )
+                            .child(
+                                view()
+                                    .flex_row()
+                                    .flex_wrap()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(each(
+                                        recent,
+                                        |item| item.clone(),
+                                        move |item, _| {
+                                            let apply = item.clone();
+                                            let mark = item.clone();
+                                            let remove = item.clone();
+                                            let recent_remove = recent;
+                                            view()
+                                                .h(px(24.0))
+                                                .max_w(px(185.0))
+                                                .pl_2()
+                                                .pr_1()
+                                                .rounded(px(6.0))
+                                                .border_1()
+                                                .border_color(move || {
+                                                    let current = filter.get();
+                                                    if mark.with(|text| text == current.trim()) {
+                                                        accent_blue_border()
+                                                    } else {
+                                                        border_control()
+                                                    }
+                                                })
+                                                .bg(bg_control())
+                                                .flex_row()
+                                                .items_center()
+                                                .gap_1()
+                                                .child(
+                                                    view()
+                                                        .flex_1()
+                                                        .min_w(px(0.0))
+                                                        .h_full()
+                                                        .flex_row()
+                                                        .items_center()
+                                                        .cursor(Cursor::Pointer)
+                                                        .on_press(move || {
+                                                            filter.set(
+                                                                apply.with(|text| text.clone()),
+                                                            )
+                                                        })
+                                                        .child(
+                                                            text(move || {
+                                                                item.with(|text| text.clone())
+                                                            })
+                                                            .number_of_lines(1)
+                                                            .ellipsize_mode(EllipsizeMode::Tail)
+                                                            .text_size(px(11.5))
+                                                            .text_color(fg_secondary()),
+                                                        ),
+                                                )
+                                                .child(
+                                                    view()
+                                                        .w(px(16.0))
+                                                        .h(px(16.0))
+                                                        .flex_shrink_0()
+                                                        .flex_row()
+                                                        .items_center()
+                                                        .justify_center()
+                                                        .rounded(px(4.0))
+                                                        .cursor(Cursor::Pointer)
+                                                        .hover(|style| style.bg(bg_control_hover()))
+                                                        .tooltip(label_tip("移除", "Remove"))
+                                                        .on_press(move || {
+                                                            drop_recent_filter(
+                                                                &remove.with(|text| text.clone()),
+                                                                recent_remove,
+                                                            )
+                                                        })
+                                                        .child(
+                                                            control_text("×")
+                                                                .text_size(px(11.0))
+                                                                .text_color(fg_muted()),
+                                                        ),
+                                                )
+                                        },
+                                    )),
+                            )
+                    },
+                )),
+        )
+        .child(view().w(px(1.0)).self_stretch().bg(border_subtle()))
+        .child(
+            view()
+                .flex_1()
+                .min_w(px(0.0))
+                .gap_2p5()
+                .child(
+                    text(tr("规则与代理配置", "Rules & Proxy Config"))
+                        .text_size(px(13.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(fg_primary()),
+                )
+                .child(
+                    view()
+                        .w_full()
+                        .flex_row()
+                        .gap_1p5()
+                        .child(enable_switch(rules_on, "启用规则", "Rules", {
+                            let controls = rules_controls.clone();
+                            move |enabled| {
+                                controls.hub.set_rules_enabled(enabled);
+                            }
+                        }))
+                        .child(enable_switch(breaks_on, "启用断点", "Breaks", {
+                            let controls = rules_controls.clone();
+                            move |enabled| {
+                                controls.hub.set_breaks_enabled(enabled);
+                            }
+                        }))
+                        .child(enable_switch(
+                            show_tunnels,
+                            "隧道失败",
+                            "Tunnel errors",
+                            move |on| {
+                                tunnel_controls.hub.set_show_tunnel_failures(on);
+                                if let Err(err) =
+                                    save_config(|config| config.show_tunnel_failures = on)
+                                {
+                                    set_status(
+                                        &tunnel_controls,
+                                        StatusMsg::PrefUnsaved {
+                                            name: PrefName::Tunnel,
+                                            err: err.to_string(),
+                                        },
+                                    );
+                                }
+                            },
+                        )),
+                )
+                .child(config_field(
+                    "直通 (支持多个域名 OR 或 only: 白名单)",
+                    "Bypass (Domains OR or only: allowlist)",
+                    side_input(
+                        bypass_text,
+                        tr(
+                            "example.com | *.pin.dev 或 only:api.example.com",
+                            "example.com | *.pin.dev or only:api.example.com",
+                        ),
+                        28.0,
+                        false,
+                        move |text| {
+                            bypass_text.set(text.to_string());
+                            bypass_controls.hub.set_bypass(text);
+                            if let Err(err) =
+                                save_config(|config| config.bypass_hosts = text.to_string())
+                            {
+                                set_status(
+                                    &bypass_controls,
+                                    StatusMsg::PrefUnsaved {
+                                        name: PrefName::Bypass,
+                                        err: err.to_string(),
+                                    },
+                                );
+                            }
+                        },
+                    ),
+                ))
+                .child(config_field(
+                    "规则 (域名与 Path 前缀均支持 | 表示 OR)",
+                    "Rules (Domain & Path Prefix support | for OR)",
+                    rules_editor(rules_text, rules_controls.clone()),
+                ))
+                .child(replace_row(rules_text, rules_controls))
+                .child(config_field(
+                    "上游",
+                    "Upstream",
+                    side_input(
+                        upstream_text,
+                        tr("host:port，空着直连", "host:port, empty means direct"),
+                        28.0,
+                        false,
+                        move |text| {
+                            upstream_text.set(text.to_string());
+                            upstream_controls.hub.set_upstream(text);
+                            if let Err(err) =
+                                save_config(|config| config.upstream_proxy = text.to_string())
+                            {
+                                set_status(
+                                    &upstream_controls,
+                                    StatusMsg::PrefUnsaved {
+                                        name: PrefName::Upstream,
+                                        err: err.to_string(),
+                                    },
+                                );
+                            }
+                        },
+                    ),
+                )),
+        )
+}
+
+fn store_saved_filter(current: &str, saved: Signal<Vec<String>>) {
+    let next = push_saved_filter(&saved.get(), current);
+    if next == saved.get() {
+        return;
+    }
+    saved.set(next.clone());
+    let _ = save_config(|config| config.saved_filters = next);
+}
+
+fn drop_saved_filter(current: &str, saved: Signal<Vec<String>>) {
+    let next: Vec<String> = saved
+        .get()
+        .into_iter()
+        .filter(|item| item != current)
+        .collect();
+    saved.set(next.clone());
+    let _ = save_config(|config| config.saved_filters = next);
+}
+
+fn drop_recent_filter(current: &str, recent: Signal<Vec<String>>) {
+    let next: Vec<String> = recent
+        .get()
+        .into_iter()
+        .filter(|item| item != current)
+        .collect();
+    recent.set(next.clone());
+    let _ = save_config(|config| config.recent_filters = next);
+}
+
+fn clear_recent_filters(recent: Signal<Vec<String>>) {
+    recent.set(Vec::new());
+    let _ = save_config(|config| config.recent_filters.clear());
+}
+
+fn push_saved_filter(saved: &[String], current: &str) -> Vec<String> {
+    let current = current.trim();
+    if current.is_empty() {
+        return saved.to_vec();
+    }
+    let mut next: Vec<String> = saved
+        .iter()
+        .filter(|item| item.trim() != current)
+        .cloned()
+        .collect();
+    next.insert(0, current.to_string());
+    next.truncate(SAVED_FILTER_CAP);
+    next
 }
 
 fn clamp_list_px(width: f32) -> f32 {
@@ -1007,10 +1780,7 @@ fn flow_list(
     selected: Signal<Option<u64>>,
     compose: Compose,
     filter: Signal<String>,
-    recent_filters: Signal<Vec<String>>,
-    bypass_text: Signal<String>,
     rules_text: Signal<String>,
-    upstream_text: Signal<String>,
     width: Signal<f32>,
     columns: Signal<ListColumns>,
     controls: Arc<Controls>,
@@ -1018,17 +1788,11 @@ fn flow_list(
     baseline: Signal<Option<u64>>,
     filter_focus: ElementRef,
 ) -> impl IntoElement {
-    let bypass_controls = controls.clone();
     let row_controls = controls.clone();
-    let rules_controls = controls.clone();
-    let column_controls = controls.clone();
-    let rules_on = signal(true);
-    let breaks_on = signal(true);
-    let show_tunnels = signal(saved_config().show_tunnel_failures);
+    let column_controls = controls;
     let picked = signal(None::<u64>);
     let menu_open = signal(false);
     let menu_at = signal(Point::<Points>::default());
-    let upstream_controls = controls;
     view()
         .w(move || px(width.get()))
         .flex_shrink_0()
@@ -1051,8 +1815,8 @@ fn flow_list(
                     view().flex_1().min_w(px(0.0)).child(focused_input(
                         filter,
                         tr(
-                            "主机、路径、GET、404、-host、mute:、pin:",
-                            "host, path, GET, 404, -host, mute:, pin:",
+                            "主机、路径，或点击顶栏「过滤」配置规则",
+                            "Host, path, or click Filters in toolbar",
                         ),
                         30.0,
                         false,
@@ -1060,21 +1824,8 @@ fn flow_list(
                         Some(filter_focus),
                     )),
                 )
-                .child(recent_filter_menu(filter, recent_filters))
-                .child(capture_config(
-                    bypass_text,
-                    rules_text,
-                    upstream_text,
-                    bypass_controls,
-                    rules_controls,
-                    upstream_controls,
-                    width,
-                    rules_on,
-                    breaks_on,
-                    show_tunnels,
-                )),
+                .child(column_menu(columns, column_controls)),
         )
-        .child(filter_chips(filter, columns, column_controls.clone()))
         .child(view().flex_1().min_h(px(0.0)).child(list_menu(
             rows,
             selected,
@@ -1092,73 +1843,9 @@ fn flow_list(
 }
 
 const JSON_ALIASES: &[&str] = &["type:json", "ct:json"];
-const FAIL_ALIASES: &[&str] = &["失败", "fail"];
+const FAIL_ALIASES: &[&str] = &["失败", "fail", "err", "error"];
 const PIN_ALIASES: &[&str] = &["pin:"];
 const SLOW_ALIASES: &[&str] = &["slow:"];
-
-fn recent_filter_menu(filter: Signal<String>, recent: Signal<Vec<String>>) -> impl IntoElement {
-    when(
-        move || !recent.with(Vec::is_empty),
-        move || {
-            menu()
-                .placement(Placement::Bottom)
-                .align(Align::End)
-                .offset(px(4.0))
-                .margin(px(8.0))
-                .trigger(
-                    view()
-                        .h(px(30.0))
-                        .w(px(30.0))
-                        .flex_shrink_0()
-                        .flex_row()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(CONTROL_RADIUS))
-                        .border_1()
-                        .border_color(border_control())
-                        .bg(bg_control())
-                        .hover(|style| style.bg(bg_control_hover()))
-                        .cursor(Cursor::Pointer)
-                        .tooltip(label_tip("最近的过滤", "Recent filters"))
-                        .child(glyph(|| Glyph::History, || color(fg_secondary()))),
-                )
-                .child(recent_filter_panel(filter, recent))
-        },
-    )
-}
-
-fn recent_filter_panel(filter: Signal<String>, recent: Signal<Vec<String>>) -> impl IntoElement {
-    view()
-        .w(px(240.0))
-        .p_1()
-        .gap_0p5()
-        .rounded(px(10.0))
-        .border_1()
-        .border_color(border_strong())
-        .bg(bg_card())
-        .shadow_md()
-        .child(each(
-            recent,
-            |item| item.clone(),
-            move |item, _| {
-                menu_item()
-                    .on_select(move || filter.set(item.with(|text| text.clone())))
-                    .h(px(30.0))
-                    .px_2p5()
-                    .rounded(px(6.0))
-                    .flex_row()
-                    .items_center()
-                    .hover(|style| style.bg(bg_control_hover()))
-                    .cursor(Cursor::Pointer)
-                    .child(
-                        control_text(move || item.with(|text| text.clone()))
-                            .number_of_lines(1)
-                            .ellipsize_mode(EllipsizeMode::Tail)
-                            .text_color(fg_secondary()),
-                    )
-            },
-        ))
-}
 
 const RECENT_FILTER_CAP: usize = 8;
 
@@ -1197,39 +1884,6 @@ fn remember_filter(current: &str, recent: Signal<Vec<String>>) {
         // cannot be written; the next pause tries again.
         let _ = err;
     }
-}
-
-fn filter_chips(
-    filter: Signal<String>,
-    columns: Signal<ListColumns>,
-    controls: Arc<Controls>,
-) -> impl IntoElement {
-    view()
-        .w_full()
-        .h(px(32.0))
-        .flex_shrink_0()
-        .flex_row()
-        .items_center()
-        .gap_1p5()
-        .pl(px(LIST_INSET))
-        .pr(px(LIST_PAD_END))
-        .bg(bg_chrome())
-        .border_b_1()
-        .border_b_color(border_strong())
-        .child(
-            view()
-                .flex_1()
-                .min_w(px(0.0))
-                .overflow_hidden()
-                .flex_row()
-                .items_center()
-                .gap_1()
-                .child(filter_chip(filter, "JSON", "JSON", "type:json", JSON_ALIASES))
-                .child(filter_chip(filter, "报错", "Errors", "失败", FAIL_ALIASES))
-                .child(filter_chip(filter, "星标", "Starred", "pin:", PIN_ALIASES))
-                .child(filter_chip(filter, "慢请求", "Slow", "slow:", SLOW_ALIASES)),
-        )
-        .child(column_menu(columns, controls))
 }
 
 fn filter_chip(
@@ -1286,7 +1940,8 @@ fn filter_chip(
 }
 
 fn filter_has_token(filter: &str, aliases: &[&str]) -> bool {
-    filter.split_whitespace().any(|part| {
+    let normalized = crate::session::normalize_filter_pipes(filter);
+    normalized.split_whitespace().any(|part| {
         let lower = part.to_ascii_lowercase();
         aliases.iter().any(|alias| lower == *alias)
     })
@@ -1294,9 +1949,10 @@ fn filter_has_token(filter: &str, aliases: &[&str]) -> bool {
 
 /// Adds `token` as its own word, or removes every alias of that chip.
 fn toggle_filter_chip(filter: &str, token: &str, aliases: &[&str]) -> String {
+    let normalized = crate::session::normalize_filter_pipes(filter);
     let mut kept = Vec::new();
     let mut found = false;
-    for part in filter.split_whitespace() {
+    for part in normalized.split_whitespace() {
         let lower = part.to_ascii_lowercase();
         if aliases.iter().any(|alias| lower == *alias) {
             found = true;
@@ -1308,6 +1964,155 @@ fn toggle_filter_chip(filter: &str, token: &str, aliases: &[&str]) -> String {
         kept.push(token.to_string());
     }
     kept.join(" ")
+}
+
+fn split_ui_or_items(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for item in text
+        .split(|ch: char| ch == '|' || ch == ',' || ch.is_whitespace())
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+    {
+        if !out.iter().any(|existing: &String| existing.eq_ignore_ascii_case(item)) {
+            out.push(item.to_string());
+        }
+    }
+    out
+}
+
+fn extract_host_or(filter: &str) -> String {
+    let normalized = crate::session::normalize_filter_pipes(filter);
+    let mut items = Vec::new();
+    for token in normalized.split_whitespace() {
+        let lower = token.to_ascii_lowercase();
+        if let Some(rest) = lower
+            .strip_prefix("host:")
+            .or_else(|| lower.strip_prefix("domain:"))
+        {
+            for part in split_ui_or_items(rest) {
+                if !items.iter().any(|existing: &String| existing.eq_ignore_ascii_case(&part)) {
+                    items.push(part);
+                }
+            }
+        }
+    }
+    items.join(" | ")
+}
+
+fn set_host_or(filter: &str, input: &str) -> String {
+    let normalized = crate::session::normalize_filter_pipes(filter);
+    let items = split_ui_or_items(input);
+    let mut out = Vec::new();
+    let mut inserted = false;
+    for token in normalized.split_whitespace() {
+        let lower = token.to_ascii_lowercase();
+        if lower.starts_with("host:") || lower.starts_with("domain:") {
+            if !inserted && !items.is_empty() {
+                out.push(format!("host:{}", items.join("|")));
+                inserted = true;
+            }
+            continue;
+        }
+        out.push(token.to_string());
+    }
+    if !inserted && !items.is_empty() {
+        out.insert(0, format!("host:{}", items.join("|")));
+    }
+    out.join(" ")
+}
+
+fn extract_path_or(filter: &str) -> String {
+    let normalized = crate::session::normalize_filter_pipes(filter);
+    let mut items = Vec::new();
+    for token in normalized.split_whitespace() {
+        let lower = token.to_ascii_lowercase();
+        if let Some(rest) = lower.strip_prefix("path:") {
+            for part in split_ui_or_items(rest) {
+                if !items.iter().any(|existing: &String| existing.eq_ignore_ascii_case(&part)) {
+                    items.push(part);
+                }
+            }
+        }
+    }
+    items.join(" | ")
+}
+
+fn set_path_or(filter: &str, input: &str) -> String {
+    let normalized = crate::session::normalize_filter_pipes(filter);
+    let items = split_ui_or_items(input);
+    let mut out = Vec::new();
+    let mut inserted = false;
+    for token in normalized.split_whitespace() {
+        let lower = token.to_ascii_lowercase();
+        if lower.starts_with("path:") {
+            if !inserted && !items.is_empty() {
+                out.push(format!("path:{}", items.join("|")));
+                inserted = true;
+            }
+            continue;
+        }
+        out.push(token.to_string());
+    }
+    if !inserted && !items.is_empty() {
+        out.push(format!("path:{}", items.join("|")));
+    }
+    out.join(" ")
+}
+
+fn extract_exclude_or(filter: &str) -> String {
+    let normalized = crate::session::normalize_filter_pipes(filter);
+    let mut items = Vec::new();
+    for token in normalized.split_whitespace() {
+        let lower = token.to_ascii_lowercase();
+        let rest = lower.strip_prefix("mute:").or_else(|| {
+            lower
+                .strip_prefix('-')
+                .filter(|rest| !rest.is_empty() && !rest.contains(':'))
+        });
+        if let Some(rest) = rest {
+            for part in split_ui_or_items(rest) {
+                if !items.iter().any(|existing: &String| existing.eq_ignore_ascii_case(&part)) {
+                    items.push(part);
+                }
+            }
+        }
+    }
+    items.join(" | ")
+}
+
+fn set_exclude_or(filter: &str, input: &str) -> String {
+    let normalized = crate::session::normalize_filter_pipes(filter);
+    let items: Vec<String> = split_ui_or_items(input)
+        .into_iter()
+        .map(|item| {
+            item.strip_prefix("mute:")
+                .or_else(|| item.strip_prefix('-'))
+                .unwrap_or(&item)
+                .to_string()
+        })
+        .filter(|item| !item.is_empty())
+        .collect();
+    let mut out = Vec::new();
+    let mut inserted = false;
+    for token in normalized.split_whitespace() {
+        let lower = token.to_ascii_lowercase();
+        let is_exclude = lower.starts_with("mute:")
+            || lower
+                .strip_prefix('-')
+                .is_some_and(|rest| !rest.is_empty() && !rest.contains(':'));
+        if is_exclude {
+            if !inserted && !items.is_empty() {
+                out.push(format!("mute:{}", items.join("|")));
+                inserted = true;
+            }
+            continue;
+        }
+        out.push(token.to_string());
+    }
+    if !inserted && !items.is_empty() {
+        out.push(format!("mute:{}", items.join("|")));
+    }
+    out.join(" ")
 }
 
 fn side_input(
@@ -1350,47 +2155,6 @@ fn focused_input(
     }
 }
 
-fn capture_config(
-    bypass_text: Signal<String>,
-    rules_text: Signal<String>,
-    upstream_text: Signal<String>,
-    bypass_controls: Arc<Controls>,
-    rules_controls: Arc<Controls>,
-    upstream_controls: Arc<Controls>,
-    width: Signal<f32>,
-    rules_on: Signal<bool>,
-    breaks_on: Signal<bool>,
-    show_tunnels: Signal<bool>,
-) -> impl IntoElement {
-    let bypass_for_panel = bypass_text;
-    let rules_for_panel = rules_text;
-    let upstream_for_panel = upstream_text;
-    popover()
-        .placement(Placement::Bottom)
-        .align(Align::End)
-        .offset(px(6.0))
-        .margin(px(8.0))
-        .trigger(config_trigger(
-            bypass_for_panel,
-            rules_for_panel,
-            upstream_for_panel,
-            rules_on,
-            breaks_on,
-        ))
-        .child(config_panel(
-            bypass_for_panel,
-            rules_for_panel,
-            upstream_for_panel,
-            bypass_controls,
-            rules_controls,
-            upstream_controls,
-            width,
-            rules_on,
-            breaks_on,
-            show_tunnels,
-        ))
-}
-
 fn config_set(bypass: Signal<String>, rules: Signal<String>, upstream: Signal<String>) -> bool {
     !bypass.get().trim().is_empty()
         || !rules.get().trim().is_empty()
@@ -1399,192 +2163,6 @@ fn config_set(bypass: Signal<String>, rules: Signal<String>, upstream: Signal<St
 
 fn capture_muted(rules_on: Signal<bool>, breaks_on: Signal<bool>) -> bool {
     !rules_on.get() || !breaks_on.get()
-}
-
-fn config_trigger(
-    bypass_text: Signal<String>,
-    rules_text: Signal<String>,
-    upstream_text: Signal<String>,
-    rules_on: Signal<bool>,
-    breaks_on: Signal<bool>,
-) -> impl IntoElement {
-    let border_bypass = bypass_text;
-    let border_rules = rules_text;
-    let border_upstream = upstream_text;
-    let dot_bypass = bypass_text;
-    let dot_rules = rules_text;
-    let dot_upstream = upstream_text;
-    let label_bypass = bypass_text;
-    let label_rules = rules_text;
-    let label_upstream = upstream_text;
-    view()
-        .h(px(30.0))
-        .px_2p5()
-        .flex_shrink_0()
-        .flex_row()
-        .items_center()
-        .gap_1p5()
-        .rounded(px(CONTROL_RADIUS))
-        .border_1()
-        .border_color(move || {
-            if capture_muted(rules_on, breaks_on) {
-                status_warn_fg()
-            } else if config_set(border_bypass, border_rules, border_upstream) {
-                accent_blue_border()
-            } else {
-                border_control()
-            }
-        })
-        .bg(bg_control())
-        .hover(|style| style.bg(bg_control_hover()))
-        .cursor(Cursor::Pointer)
-        .active(|style| style.opacity(0.75))
-        .child(when(
-            move || config_set(dot_bypass, dot_rules, dot_upstream) || capture_muted(rules_on, breaks_on),
-            move || {
-                view()
-                    .w(px(6.0))
-                    .h(px(6.0))
-                    .rounded(px(99.0))
-                    .bg(move || {
-                        if capture_muted(rules_on, breaks_on) {
-                            status_warn_fg()
-                        } else {
-                            status_ok_fg()
-                        }
-                    })
-            },
-        ))
-        .tooltip(label_tip("配置", "Config"))
-        .child(glyph(
-            || Glyph::Sliders,
-            move || {
-                color(if capture_muted(rules_on, breaks_on) {
-                    status_warn_fg()
-                } else if config_set(label_bypass, label_rules, label_upstream) {
-                    accent_blue_text()
-                } else {
-                    fg_secondary()
-                })
-            },
-        ))
-}
-
-fn config_panel(
-    bypass_text: Signal<String>,
-    rules_text: Signal<String>,
-    upstream_text: Signal<String>,
-    bypass_controls: Arc<Controls>,
-    rules_controls: Arc<Controls>,
-    upstream_controls: Arc<Controls>,
-    width: Signal<f32>,
-    rules_on: Signal<bool>,
-    breaks_on: Signal<bool>,
-    show_tunnels: Signal<bool>,
-) -> impl IntoElement {
-    let tunnel_controls = rules_controls.clone();
-    view()
-        .w(move || px((width.get() - LIST_INSET - LIST_PAD_END).max(200.0)))
-        .p_3()
-        .gap_3()
-        .rounded(px(10.0))
-        .border_1()
-        .border_color(border_strong())
-        .bg(bg_card())
-        .shadow_md()
-        .child(rule_switches(rules_on, breaks_on, rules_controls.clone()))
-        .child(
-            view().flex_row().child(enable_switch(
-                show_tunnels,
-                "隧道失败",
-                "Tunnel errors",
-                move |on| {
-                    tunnel_controls.hub.set_show_tunnel_failures(on);
-                    if let Err(err) = save_config(|config| config.show_tunnel_failures = on) {
-                        set_status(
-                            &tunnel_controls,
-                            StatusMsg::PrefUnsaved {
-                                name: PrefName::Tunnel,
-                                err: err.to_string(),
-                            },
-                        );
-                    }
-                },
-            )),
-        )
-        .child(config_field(
-            "直通",
-            "Bypass",
-            side_input(
-                bypass_text,
-                tr(
-                    "example.com *.pin.dev 或 only:api.example.com",
-                    "example.com *.pin.dev or only:api.example.com",
-                ),
-                30.0,
-                false,
-                move |text| {
-                    bypass_text.set(text.to_string());
-                    bypass_controls.hub.set_bypass(text);
-                    if let Err(err) = save_config(|config| config.bypass_hosts = text.to_string()) {
-                        set_status(
-                            &bypass_controls,
-                            StatusMsg::PrefUnsaved {
-                                name: PrefName::Bypass,
-                                err: err.to_string(),
-                            },
-                        );
-                    }
-                },
-            ),
-        ))
-        .child(config_field(
-            "规则",
-            "Rules",
-            rules_editor(rules_text, rules_controls.clone()),
-        ))
-        .child(replace_row(rules_text, rules_controls))
-        .child(config_field(
-            "上游",
-            "Upstream",
-            side_input(
-                upstream_text,
-                tr("host:port，空着直连", "host:port, empty means direct"),
-                30.0,
-                false,
-                move |text| {
-                    upstream_text.set(text.to_string());
-                    upstream_controls.hub.set_upstream(text);
-                    if let Err(err) = save_config(|config| config.upstream_proxy = text.to_string()) {
-                        set_status(
-                            &upstream_controls,
-                            StatusMsg::PrefUnsaved {
-                                name: PrefName::Upstream,
-                                err: err.to_string(),
-                            },
-                        );
-                    }
-                },
-            ),
-        ))
-}
-
-fn rule_switches(
-    rules_on: Signal<bool>,
-    breaks_on: Signal<bool>,
-    controls: Arc<Controls>,
-) -> impl IntoElement {
-    let break_controls = controls.clone();
-    view()
-        .w_full()
-        .flex_row()
-        .gap_1p5()
-        .child(enable_switch(rules_on, "启用规则", "Rules", move |enabled| {
-            controls.hub.set_rules_enabled(enabled);
-        }))
-        .child(enable_switch(breaks_on, "启用断点", "Breaks", move |enabled| {
-            break_controls.hub.set_breaks_enabled(enabled);
-        }))
 }
 
 fn enable_switch(
@@ -1692,7 +2270,8 @@ fn rules_editor(value: Signal<String>, controls: Arc<Controls>) -> impl IntoElem
 }
 
 fn replace_row(rules_text: Signal<String>, controls: Arc<Controls>) -> impl IntoElement {
-    let pattern = signal(String::new());
+    let host_pattern = signal(String::new());
+    let path_pattern = signal(String::new());
     let from = signal(String::new());
     let to = signal(String::new());
     let response = signal(true);
@@ -1706,7 +2285,7 @@ fn replace_row(rules_text: Signal<String>, controls: Arc<Controls>) -> impl Into
                 .items_center()
                 .justify_between()
                 .child(
-                    text(tr("添加规则", "Add rule"))
+                    text(tr("添加规则 (支持域名 OR 与 Path 前缀 OR)", "Add rule (supports domain OR & path prefix OR)"))
                         .text_size(px(11.5))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(fg_muted()),
@@ -1736,11 +2315,18 @@ fn replace_row(rules_text: Signal<String>, controls: Arc<Controls>) -> impl Into
                 .flex_row()
                 .gap_1()
                 .child(view().flex_1().min_w(px(0.0)).child(side_input(
-                    pattern,
-                    tr("example.com/api", "example.com/api"),
+                    host_pattern,
+                    tr("域名: a.com | b.com", "Domain: a.com | b.com"),
                     28.0,
                     false,
-                    move |text| pattern.set(text.to_string()),
+                    move |text| host_pattern.set(text.to_string()),
+                )))
+                .child(view().flex_1().min_w(px(0.0)).child(side_input(
+                    path_pattern,
+                    tr("Path前缀: /api | /v2", "Path prefix: /api | /v2"),
+                    28.0,
+                    false,
+                    move |text| path_pattern.set(text.to_string()),
                 )))
                 .child(
                     view()
@@ -1797,10 +2383,14 @@ fn replace_row(rules_text: Signal<String>, controls: Arc<Controls>) -> impl Into
                         .bg(accent_blue())
                         .cursor(Cursor::Pointer)
                         .on_press(move || {
+                            let combined_pattern = crate::rules::combine_rule_pattern(
+                                &host_pattern.get(),
+                                &path_pattern.get(),
+                            );
                             let Some(next) = crate::rules::append_quick_rule(
                                 &rules_text.get(),
                                 quick_kind(kind.get()),
-                                &pattern.get(),
+                                &combined_pattern,
                                 response.get(),
                                 &from.get(),
                                 &to.get(),
@@ -1818,7 +2408,8 @@ fn replace_row(rules_text: Signal<String>, controls: Arc<Controls>) -> impl Into
                                     },
                                 );
                             }
-                            pattern.set(String::new());
+                            host_pattern.set(String::new());
+                            path_pattern.set(String::new());
                             from.set(String::new());
                             to.set(String::new());
                         })
@@ -2182,13 +2773,16 @@ fn column_menu(columns: Signal<ListColumns>, controls: Arc<Controls>) -> impl In
 
 fn column_picker_trigger() -> impl IntoElement {
     view()
-        .w(px(COL_PICKER))
-        .h(px(22.0))
+        .w(px(30.0))
+        .h(px(30.0))
         .flex_shrink_0()
         .flex_row()
         .items_center()
         .justify_center()
-        .rounded(px(5.0))
+        .rounded(px(CONTROL_RADIUS))
+        .border_1()
+        .border_color(border_control())
+        .bg(bg_control())
         .hover(|style| style.bg(bg_control_hover()))
         .cursor(Cursor::Pointer)
         .tooltip(label_tip("列", "Columns"))
@@ -6946,6 +7540,23 @@ mod tests {
     }
 
     #[test]
+    fn saved_filters_keep_the_newest_sixteen_without_duplicates() {
+        let saved: Vec<String> = (0..16).map(|n| format!("f{n}")).collect();
+        let next = super::push_saved_filter(&saved, "fresh");
+        assert_eq!(next.len(), 16);
+        assert_eq!(next[0], "fresh");
+        assert!(!next.iter().any(|item| item == "f15"));
+        assert_eq!(
+            super::push_saved_filter(&["a".into()], "  "),
+            vec!["a".to_string()]
+        );
+        assert_eq!(
+            super::push_saved_filter(&["a".into(), "b".into()], "b"),
+            vec!["b".to_string(), "a".to_string()]
+        );
+    }
+
+    #[test]
     fn neighbor_steps_the_filtered_ids_and_clamps() {
         assert_eq!(super::neighbor(&[], None, 1), None);
         assert_eq!(super::neighbor(&[], Some(1), -1), None);
@@ -7149,6 +7760,24 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
         assert!(super::dropped_har_path("/tmp/a.har").is_none());
         assert!(super::dropped_har_path("file://server/tmp/a.har").is_none());
         assert!(super::dropped_har_path("file:///tmp/notes.har.bak").is_none());
+    }
+
+    #[test]
+    fn structured_filter_fields_sync_host_path_and_exclude_or() {
+        let f = super::set_host_or("GET", "api.example.com | *.cdn.com, sub.test");
+        assert_eq!(f, "host:api.example.com|*.cdn.com|sub.test GET");
+        assert_eq!(
+            super::extract_host_or(&f),
+            "api.example.com | *.cdn.com | sub.test"
+        );
+        let f = super::set_path_or(&f, "/v1 | /auth");
+        assert_eq!(
+            f,
+            "host:api.example.com|*.cdn.com|sub.test GET path:/v1|/auth"
+        );
+        assert_eq!(super::extract_path_or(&f), "/v1 | /auth");
+        let f = super::set_exclude_or(&f, "ads.test | /health");
+        assert_eq!(super::extract_exclude_or(&f), "ads.test | /health");
     }
 }
 
