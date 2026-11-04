@@ -902,14 +902,14 @@ break example.com/api
     #[test]
     fn req_replace_rewrites_the_path_and_query() {
         let rules = parse_rules(
-            "replace baidu.com/finance-api/online-hall-v2/configs req ?supportCrypto=true -> ?supportCrypto=false\n",
+            "replace example.com/api req ?draft=1 -> ?draft=0\n",
         );
-        let path = "/finance-api/online-hall-v2/configs?supportCrypto=true";
-        assert!(rules[0].matches("baidu.com", path));
-        let applied = effect(&rules, "baidu.com", path);
+        let path = "/api?draft=1";
+        assert!(rules[0].matches("example.com", path));
+        let applied = effect(&rules, "example.com", path);
         assert_eq!(
             replace_target(path, &applied.request_replaces).as_deref(),
-            Some("/finance-api/online-hall-v2/configs?supportCrypto=false")
+            Some("/api?draft=0")
         );
         assert!(
             replace_target(path, &applied.request_replaces)
@@ -918,32 +918,27 @@ break example.com/api
         );
         let dropped = effect(
             &parse_rules(
-                "replace baidu.com/finance-api/online-hall-v2/configs req ?supportCrypto=true -> \n",
+                "replace example.com/api req ?draft=1 -> \n",
             ),
-            "baidu.com",
+            "example.com",
             path,
         );
         assert_eq!(
             replace_target(path, &dropped.request_replaces).as_deref(),
-            Some("/finance-api/online-hall-v2/configs")
+            Some("/api")
         );
         assert!(replace_target("/keep", &[("/keep".into(), "away".into())]).is_none());
-        assert!(
-            !parse_rules(
-                "replace /online-hall-v2/configs req ?supportCrypto=true -> ?supportCrypto=false"
-            )[0]
-            .matches("baidu.com", path)
-        );
+        assert!(!parse_rules("replace /api req ?draft=1 -> ?draft=0")[0].matches("example.com", path));
     }
 
     #[test]
     fn rules_support_domain_or_and_path_prefix_or() {
-        let pattern = combine_rule_pattern("a.test | b.test", "/finance-api | /online-hall");
-        assert_eq!(pattern, "a.test|b.test/finance-api|/online-hall");
+        let pattern = combine_rule_pattern("a.test | b.test", "/api | /v2");
+        assert_eq!(pattern, "a.test|b.test/api|/v2");
         let rules = parse_rules(&format!("break {pattern}\n"));
-        assert!(rules[0].matches("a.test", "/finance-api/v1"));
-        assert!(rules[0].matches("b.test", "/online-hall/configs"));
-        assert!(!rules[0].matches("c.test", "/finance-api/v1"));
+        assert!(rules[0].matches("a.test", "/api/v1"));
+        assert!(rules[0].matches("b.test", "/v2/items"));
+        assert!(!rules[0].matches("c.test", "/api/v1"));
         assert!(!rules[0].matches("a.test", "/other"));
 
         let hdr_set = append_quick_rule(

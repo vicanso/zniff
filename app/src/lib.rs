@@ -1361,7 +1361,7 @@ fn saved_filter_panel(
                                 .child(view().flex_1().min_w(px(0.0)).child(side_input(
                                     filter_name,
                                     tr(
-                                        "过滤名称 (可选，如：理财接口)",
+                                        "过滤名称 (可选，如：调试接口)",
                                         "Filter name (optional)",
                                     ),
                                     28.0,
@@ -1825,7 +1825,7 @@ fn saved_filter_panel(
                                 .child(view().flex_1().min_w(px(0.0)).child(side_input(
                                     rule_name,
                                     tr(
-                                        "规则名称 (如：线上去加密参数)",
+                                        "规则名称 (如：模拟接口)",
                                         "Rule preset name (e.g. Mock API)",
                                     ),
                                     28.0,
@@ -8618,30 +8618,29 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
 
     #[test]
     fn named_filters_and_rules_store_and_deduplicate() {
-        let saved = super::push_saved_filter_named(&[], "理财接口", "host:baidu.com type:json");
+        let saved = super::push_saved_filter_named(&[], "调试接口", "host:example.com type:json");
         assert_eq!(
             saved,
-            vec!["理财接口\thost:baidu.com type:json".to_string()]
+            vec!["调试接口\thost:example.com type:json".to_string()]
         );
         assert_eq!(
             super::split_saved_filter(&saved[0]),
-            ("理财接口", "host:baidu.com type:json")
+            ("调试接口", "host:example.com type:json")
         );
         // Updating the same expression with a new name replaces the old entry.
-        let saved =
-            super::push_saved_filter_named(&saved, "线上理财", "host:baidu.com type:json");
+        let saved = super::push_saved_filter_named(&saved, "预发接口", "host:example.com type:json");
         assert_eq!(
             saved,
-            vec!["线上理财\thost:baidu.com type:json".to_string()]
+            vec!["预发接口\thost:example.com type:json".to_string()]
         );
 
         let rules = super::push_saved_rule(
             &[],
-            "去加密参数",
-            "replace baidu.com/finance-api req ?supportCrypto=true -> ?",
+            "改文案",
+            "replace example.com/api req hello -> hi",
         );
         assert_eq!(rules.len(), 1);
-        assert_eq!(rules[0].name, "去加密参数");
+        assert_eq!(rules[0].name, "改文案");
         // Unnamed rule auto-generates name from the first rule line.
         let rules = super::push_saved_rule(&rules, "", "break api.test/v1");
         assert_eq!(rules.len(), 2);
