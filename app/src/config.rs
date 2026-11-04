@@ -34,6 +34,13 @@ const LEGACY: &[&str] = &[
     "upstream-proxy",
 ];
 
+/// One named set of proxy rules saved by the user.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedRuleSet {
+    pub name: String,
+    pub rules: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default = "default_port")]
@@ -87,6 +94,9 @@ pub struct Config {
     /// Filters the user saved on purpose. Newest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub saved_filters: Vec<String>,
+    /// Named rule presets the user saved on purpose. Newest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub saved_rules: Vec<SavedRuleSet>,
     /// Dragged list-column widths, in points, keyed by `method`, `path`, and the rest.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub column_widths: HashMap<String, u32>,
@@ -116,6 +126,7 @@ impl Default for Config {
             capturing: false,
             recent_filters: Vec::new(),
             saved_filters: Vec::new(),
+            saved_rules: Vec::new(),
             column_widths: HashMap::new(),
         }
     }
@@ -312,10 +323,12 @@ fn normalize(mut config: Config) -> Config {
     config.list_width = clamp_list_width(config.list_width);
     clamp_column_widths(&mut config.column_widths);
     clamp_saved_filters(&mut config.saved_filters);
+    clamp_saved_rules(&mut config.saved_rules);
     config
 }
 
 const SAVED_FILTER_CAP: usize = 16;
+const SAVED_RULE_CAP: usize = 16;
 
 fn clamp_saved_filters(items: &mut Vec<String>) {
     let mut kept = Vec::new();
@@ -326,6 +339,31 @@ fn clamp_saved_filters(items: &mut Vec<String>) {
         }
         kept.push(item);
         if kept.len() == SAVED_FILTER_CAP {
+            break;
+        }
+    }
+    *items = kept;
+}
+
+fn clamp_saved_rules(items: &mut Vec<SavedRuleSet>) {
+    let mut kept = Vec::new();
+    for item in items.drain(..) {
+        let name = item.name.trim().to_string();
+        let rules = item.rules.trim().to_string();
+        if rules.is_empty()
+            || kept
+                .iter()
+                .any(|existing: &SavedRuleSet| existing.name == name && existing.rules == rules)
+        {
+            continue;
+        }
+        let name = if name.is_empty() {
+            rules.lines().next().unwrap_or("规则").trim().to_string()
+        } else {
+            name
+        };
+        kept.push(SavedRuleSet { name, rules });
+        if kept.len() == SAVED_RULE_CAP {
             break;
         }
     }
