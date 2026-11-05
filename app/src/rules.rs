@@ -901,9 +901,7 @@ break example.com/api
 
     #[test]
     fn req_replace_rewrites_the_path_and_query() {
-        let rules = parse_rules(
-            "replace example.com/api req ?draft=1 -> ?draft=0\n",
-        );
+        let rules = parse_rules("replace example.com/api req ?draft=1 -> ?draft=0\n");
         let path = "/api?draft=1";
         assert!(rules[0].matches("example.com", path));
         let applied = effect(&rules, "example.com", path);
@@ -917,9 +915,7 @@ break example.com/api
                 .starts_with('/')
         );
         let dropped = effect(
-            &parse_rules(
-                "replace example.com/api req ?draft=1 -> \n",
-            ),
+            &parse_rules("replace example.com/api req ?draft=1 -> \n"),
             "example.com",
             path,
         );
@@ -928,7 +924,9 @@ break example.com/api
             Some("/api")
         );
         assert!(replace_target("/keep", &[("/keep".into(), "away".into())]).is_none());
-        assert!(!parse_rules("replace /api req ?draft=1 -> ?draft=0")[0].matches("example.com", path));
+        assert!(
+            !parse_rules("replace /api req ?draft=1 -> ?draft=0")[0].matches("example.com", path)
+        );
     }
 
     #[test]

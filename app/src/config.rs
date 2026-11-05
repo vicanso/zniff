@@ -41,6 +41,26 @@ pub struct SavedRuleSet {
     pub rules: String,
 }
 
+/// One named snapshot of the filter panel and the rules panel.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedProfile {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub filter: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub bypass_hosts: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub rules: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub upstream_proxy: String,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub rules_enabled: bool,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub breaks_enabled: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub show_tunnel_failures: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default = "default_port")]
@@ -100,6 +120,9 @@ pub struct Config {
     /// Named rule presets the user saved on purpose. Newest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub saved_rules: Vec<SavedRuleSet>,
+    /// Filter, bypass, rules, and upstream saved as one preset. Newest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub saved_profiles: Vec<SavedProfile>,
     /// Dragged list-column widths, in points, keyed by `method`, `path`, and the rest.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub column_widths: HashMap<String, u32>,
@@ -130,6 +153,7 @@ impl Default for Config {
             recent_filters: Vec::new(),
             saved_filters: Vec::new(),
             saved_rules: Vec::new(),
+            saved_profiles: Vec::new(),
             column_widths: HashMap::new(),
         }
     }
@@ -327,7 +351,91 @@ fn normalize(mut config: Config) -> Config {
     clamp_column_widths(&mut config.column_widths);
     clamp_saved_filters(&mut config.saved_filters);
     clamp_saved_rules(&mut config.saved_rules);
+    migrate_saved_profiles(&mut config);
     config
+}
+
+fn migrate_saved_profiles(config: &mut Config) {
+    if !config.saved_profiles.is_empty() {
+        clamp_saved_profiles(&mut config.saved_profiles);
+        return;
+    }
+    for entry in &config.saved_filters {
+        let (name, expr) = entry.split_once('\t').unwrap_or(("", entry));
+        let expr = expr.trim();
+        if expr.is_empty() {
+            continue;
+        }
+        let name = name.trim();
+        config.saved_profiles.push(SavedProfile {
+            name: if name.is_empty() {
+                expr.chars().take(28).collect()
+            } else {
+                name.to_string()
+            },
+            filter: expr.to_string(),
+            bypass_hosts: String::new(),
+            rules: String::new(),
+            upstream_proxy: String::new(),
+            rules_enabled: true,
+            breaks_enabled: true,
+            show_tunnel_failures: false,
+        });
+    }
+    for rule in &config.saved_rules {
+        let rules = rule.rules.trim();
+        if rules.is_empty() {
+            continue;
+        }
+        let name = rule.name.trim();
+        config.saved_profiles.push(SavedProfile {
+            name: if name.is_empty() {
+                rules.lines().next().unwrap_or("规则").trim().to_string()
+            } else {
+                name.to_string()
+            },
+            filter: String::new(),
+            bypass_hosts: String::new(),
+            rules: rules.to_string(),
+            upstream_proxy: String::new(),
+            rules_enabled: true,
+            breaks_enabled: true,
+            show_tunnel_failures: false,
+        });
+    }
+    clamp_saved_profiles(&mut config.saved_profiles);
+}
+
+const SAVED_PROFILE_CAP: usize = 16;
+
+fn clamp_saved_profiles(items: &mut Vec<SavedProfile>) {
+    let mut kept = Vec::new();
+    for item in items.drain(..) {
+        let name = item.name.trim().to_string();
+        if item.filter.trim().is_empty()
+            && item.bypass_hosts.trim().is_empty()
+            && item.rules.trim().is_empty()
+            && item.upstream_proxy.trim().is_empty()
+        {
+            continue;
+        }
+        if kept
+            .iter()
+            .any(|existing: &SavedProfile| existing.name.eq_ignore_ascii_case(&name))
+        {
+            continue;
+        }
+        let name = if name.is_empty() {
+            "配置".to_string()
+        } else {
+            name
+        };
+        kept.push(SavedProfile { name, ..item });
+        if kept.len() == SAVED_PROFILE_CAP {
+            break;
+        }
+    }
+    *items = kept;
 }
 
 const SAVED_FILTER_CAP: usize = 16;
