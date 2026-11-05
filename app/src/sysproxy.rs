@@ -4,6 +4,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process::Command;
 
 use anyhow::{Context, Result};
@@ -375,6 +376,7 @@ fn read_flag(service: &str, flag: &str, key: &str) -> Result<bool> {
     Ok(parse_yes(parse_field(&text, key).unwrap_or_default()))
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn parse_endpoint(text: &str) -> Endpoint {
     Endpoint {
         enabled: parse_yes(parse_field(text, "Enabled").unwrap_or_default()),
@@ -386,6 +388,7 @@ pub fn parse_endpoint(text: &str) -> Endpoint {
     }
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn parse_bypass(text: &str) -> Vec<String> {
     let lower = text.to_ascii_lowercase();
     if lower.contains("aren't any") || lower.contains("there are no") {
@@ -398,6 +401,7 @@ pub fn parse_bypass(text: &str) -> Vec<String> {
         .collect()
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn parse_field(text: &str, key: &str) -> Option<String> {
     let prefix = format!("{key}:");
     text.lines().find_map(|line| {
@@ -407,6 +411,7 @@ fn parse_field(text: &str, key: &str) -> Option<String> {
     })
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn parse_yes(value: impl AsRef<str>) -> bool {
     matches!(
         value.as_ref().trim().to_ascii_lowercase().as_str(),

@@ -45,14 +45,14 @@ pub fn data_dir() -> PathBuf {
     #[cfg(target_os = "windows")]
     {
         let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
-        return PathBuf::from(base).join("zniff");
+        PathBuf::from(base).join("zniff")
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
-            if !xdg.is_empty() {
-                return PathBuf::from(xdg).join("zniff");
-            }
+        if let Ok(xdg) = std::env::var("XDG_DATA_HOME")
+            && !xdg.is_empty()
+        {
+            return PathBuf::from(xdg).join("zniff");
         }
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
         PathBuf::from(home).join(".local/share/zniff")
@@ -250,11 +250,11 @@ pub fn install(ca: &Ca) -> Result<String> {
     }
     #[cfg(target_os = "windows")]
     {
-        return install_windows(ca);
+        install_windows(ca)
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        return install_linux(ca);
+        install_linux(ca)
     }
 }
 
