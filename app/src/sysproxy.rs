@@ -142,7 +142,6 @@ fn apply_snoop(port: u16, snapshot: &Snapshot) -> Result<()> {
             anyhow::bail!("没有找到已启用的网络服务");
         }
         enable_macos(port, &snapshot.macos)?;
-        return Ok(());
     }
     #[cfg(target_os = "windows")]
     {
@@ -151,7 +150,6 @@ fn apply_snoop(port: u16, snapshot: &Snapshot) -> Result<()> {
             server: format!("127.0.0.1:{port}"),
             override_list: String::new(),
         })?;
-        return Ok(());
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
@@ -166,13 +164,9 @@ fn apply_snoop(port: u16, snapshot: &Snapshot) -> Result<()> {
             https_port: port as i32,
             ignore_hosts: "@as []".into(),
         })?;
-        return Ok(());
     }
-    #[allow(unreachable_code)]
-    {
-        let _ = (port, snapshot);
-        Ok(())
-    }
+    let _ = (port, snapshot);
+    Ok(())
 }
 
 fn read_snapshot_in(dir: &Path) -> Result<Option<Snapshot>> {
