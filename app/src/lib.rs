@@ -1443,7 +1443,7 @@ fn saved_filter_panel(
                                                                         })
                                                                     })
                                                                     .number_of_lines(1)
-                                                                    .ellipsize_mode(
+                                                                    .text_overflow(
                                                                         EllipsizeMode::Tail,
                                                                     )
                                                                     .text_size(px(11.5))
@@ -1819,193 +1819,8 @@ fn profile_dock(
         .w_full()
         .px_3()
         .py_2p5()
-        .gap_2()
         .border_t_1()
         .border_t_color(border_subtle())
-        .child(when(
-            move || dropdown_open.get() && !saved.with(Vec::is_empty),
-            move || {
-                let preset_controls = preset_controls.clone();
-                view()
-                    .w_full()
-                    .max_h(px(156.0))
-                    .p_1()
-                    .rounded(px(8.0))
-                    .border_1()
-                    .border_color(border_strong())
-                    .bg(bg_code())
-                    .child(
-                        scroll()
-                            .w_full()
-                            .max_h(px(146.0))
-                            .child(view().w_full().gap_1().child(each(
-                                saved,
-                                |item| {
-                                    format!(
-                                        "{}\t{}\t{}\t{}\t{}",
-                                        item.name,
-                                        item.filter,
-                                        item.bypass_hosts,
-                                        item.rules,
-                                        item.upstream_proxy
-                                    )
-                                },
-                                move |item, _| {
-                                    let apply = item;
-                                    let remove = item;
-                                    let mark = item;
-                                    let display_name = item;
-                                    let display_rules = item;
-                                    let preset_controls = preset_controls.clone();
-                                    let filter_apply = filter;
-                                    let bypass_apply = bypass_text;
-                                    let rules_apply = rules_text;
-                                    let upstream_apply = upstream_text;
-                                    let rules_on_apply = rules_on;
-                                    let breaks_on_apply = breaks_on;
-                                    let tunnels_apply = show_tunnels;
-                                    let is_active = move || {
-                                        mark.with(|preset| {
-                                            preset.filter.trim() == filter.get().trim()
-                                                && preset.bypass_hosts.trim()
-                                                    == bypass_text.get().trim()
-                                                && preset.rules.trim() == rules_text.get().trim()
-                                                && preset.upstream_proxy.trim()
-                                                    == upstream_text.get().trim()
-                                        })
-                                    };
-                                    view()
-                                        .h(px(28.0))
-                                        .gap_1()
-                                        .flex_row()
-                                        .items_center()
-                                        .child(
-                                            view()
-                                                .flex_1()
-                                                .min_w(px(0.0))
-                                                .h_full()
-                                                .px_2()
-                                                .rounded(px(6.0))
-                                                .flex_row()
-                                                .items_center()
-                                                .gap_2()
-                                                .border_1()
-                                                .border_color(move || {
-                                                    if is_active() {
-                                                        accent_blue_border()
-                                                    } else {
-                                                        AdaptiveColor::TRANSPARENT
-                                                    }
-                                                })
-                                                .bg(move || {
-                                                    if is_active() {
-                                                        accent_blue_soft()
-                                                    } else {
-                                                        AdaptiveColor::TRANSPARENT
-                                                    }
-                                                })
-                                                .hover(|style| style.bg(bg_control_hover()))
-                                                .cursor(Cursor::Pointer)
-                                                .on_press(move || {
-                                                    let preset =
-                                                        apply.with(|preset| preset.clone());
-                                                    rule_name.set(preset.name.clone());
-                                                    clear_rule_draft(
-                                                        draft_host,
-                                                        draft_path,
-                                                        draft_from,
-                                                        draft_to,
-                                                        draft_response,
-                                                        draft_kind,
-                                                    );
-                                                    apply_saved_profile(
-                                                        &preset,
-                                                        filter_apply,
-                                                        bypass_apply,
-                                                        rules_apply,
-                                                        upstream_apply,
-                                                        rules_on_apply,
-                                                        breaks_on_apply,
-                                                        tunnels_apply,
-                                                        &preset_controls,
-                                                    );
-                                                    dropdown_open.set(false);
-                                                })
-                                                .child(
-                                                    view()
-                                                        .w(px(6.0))
-                                                        .h(px(6.0))
-                                                        .rounded(px(99.0))
-                                                        .flex_shrink_0()
-                                                        .bg(move || {
-                                                            if is_active() {
-                                                                accent_blue()
-                                                            } else {
-                                                                fg_muted()
-                                                            }
-                                                        }),
-                                                )
-                                                .child(
-                                                    view()
-                                                        .h(px(18.0))
-                                                        .px_1p5()
-                                                        .rounded(px(4.0))
-                                                        .flex_shrink_0()
-                                                        .flex_row()
-                                                        .items_center()
-                                                        .bg(accent_blue_soft())
-                                                        .child(
-                                                            text(move || {
-                                                                display_name.with(|preset| {
-                                                                    preset.name.clone()
-                                                                })
-                                                            })
-                                                            .text_size(px(11.0))
-                                                            .font_weight(FontWeight::MEDIUM)
-                                                            .text_color(accent_blue_text()),
-                                                        ),
-                                                )
-                                                .child(
-                                                    control_text(move || {
-                                                        display_rules.with(profile_preview)
-                                                    })
-                                                    .flex_1()
-                                                    .number_of_lines(1)
-                                                    .ellipsize_mode(EllipsizeMode::Tail)
-                                                    .text_color(fg_secondary()),
-                                                ),
-                                        )
-                                        .child(
-                                            view()
-                                                .w(px(26.0))
-                                                .h(px(26.0))
-                                                .flex_shrink_0()
-                                                .flex_row()
-                                                .items_center()
-                                                .justify_center()
-                                                .rounded(px(6.0))
-                                                .cursor(Cursor::Pointer)
-                                                .hover(|style| style.bg(bg_control_hover()))
-                                                .tooltip(label_tip("删除配置", "Delete setup"))
-                                                .on_press(move || {
-                                                    let target =
-                                                        remove.with(|preset| preset.clone());
-                                                    drop_saved_profile(&target, saved);
-                                                    if saved.with(Vec::is_empty) {
-                                                        dropdown_open.set(false);
-                                                    }
-                                                })
-                                                .child(glyph_px(
-                                                    12.0,
-                                                    || Glyph::Trash,
-                                                    || color(fg_muted()),
-                                                )),
-                                        )
-                                },
-                            ))),
-                    )
-            },
-        ))
         .child(
             view()
                 .w_full()
@@ -2014,109 +1829,300 @@ fn profile_dock(
                 .items_center()
                 .gap_1p5()
                 .child(
-                    view()
-                        .w(px(210.0))
-                        .h(px(30.0))
-                        .px_2p5()
-                        .flex_shrink_0()
-                        .rounded(px(7.0))
-                        .border_1()
-                        .border_color(move || {
-                            if dropdown_open.get() || active_name().is_some() {
-                                accent_blue_border()
-                            } else {
-                                border_control()
+                    menu()
+                        .open(move || Some(dropdown_open.get() && !saved.with(Vec::is_empty)))
+                        .on_open_change(move |event: &nsh_base::MenuEvent| {
+                            if let nsh_base::MenuEvent::OpenChange(next, _) = event {
+                                dropdown_open.set(*next && !saved.with(Vec::is_empty));
                             }
                         })
-                        .bg(move || {
-                            if active_name().is_some() {
-                                accent_blue_soft()
-                            } else {
-                                bg_control()
-                            }
-                        })
-                        .hover(|style| {
-                            style.bg(move || {
-                                if active_name().is_some() {
-                                    accent_blue_soft()
-                                } else {
-                                    bg_control_hover()
-                                }
-                            })
-                        })
-                        .flex_row()
-                        .items_center()
-                        .gap_1p5()
-                        .cursor(Cursor::Pointer)
-                        .on_press(move || {
-                            if !saved.with(Vec::is_empty) {
-                                dropdown_open.set(!dropdown_open.get());
-                            }
-                        })
-                        .child(
+                        .placement(Placement::Top)
+                        .align(Align::Start)
+                        .offset(px(6.0))
+                        .margin(px(8.0))
+                        .trigger(
                             view()
-                                .w(px(6.0))
-                                .h(px(6.0))
-                                .rounded(px(99.0))
+                                .w(px(210.0))
+                                .h(px(30.0))
+                                .px_2p5()
                                 .flex_shrink_0()
+                                .rounded(px(7.0))
+                                .border_1()
+                                .border_color(move || {
+                                    if dropdown_open.get() || active_name().is_some() {
+                                        accent_blue_border()
+                                    } else {
+                                        border_control()
+                                    }
+                                })
                                 .bg(move || {
                                     if active_name().is_some() {
-                                        accent_blue()
+                                        accent_blue_soft()
                                     } else {
-                                        fg_muted()
+                                        bg_control()
                                     }
-                                }),
+                                })
+                                .hover(|style| {
+                                    style.bg(move || {
+                                        if active_name().is_some() {
+                                            accent_blue_soft()
+                                        } else {
+                                            bg_control_hover()
+                                        }
+                                    })
+                                })
+                                .flex_row()
+                                .items_center()
+                                .gap_1p5()
+                                .cursor(Cursor::Pointer)
+                                .child(
+                                    view()
+                                        .w(px(6.0))
+                                        .h(px(6.0))
+                                        .rounded(px(99.0))
+                                        .flex_shrink_0()
+                                        .bg(move || {
+                                            if active_name().is_some() {
+                                                accent_blue()
+                                            } else {
+                                                fg_muted()
+                                            }
+                                        }),
+                                )
+                                .child(
+                                    text({
+                                        let langs = ui_langs();
+                                        move || -> SharedString {
+                                            let lang = ui_lang(langs);
+                                            if let Some(name) = active_name() {
+                                                name.into()
+                                            } else if saved.with(Vec::is_empty) {
+                                                t(lang, "暂无已保存配置", "No saved setups").into()
+                                            } else {
+                                                t(lang, "选择已保存配置", "Saved setups").into()
+                                            }
+                                        }
+                                    })
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .number_of_lines(1)
+                                    .text_overflow(EllipsizeMode::Tail)
+                                    .text_size(px(12.0))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(move || {
+                                        if active_name().is_some() {
+                                            accent_blue_text()
+                                        } else if saved.with(Vec::is_empty) {
+                                            fg_muted()
+                                        } else {
+                                            fg_secondary()
+                                        }
+                                    }),
+                                )
+                                .child(when(
+                                    move || !saved.with(Vec::is_empty),
+                                    move || {
+                                        view()
+                                            .h(px(16.0))
+                                            .px_1()
+                                            .rounded(px(4.0))
+                                            .flex_shrink_0()
+                                            .flex_row()
+                                            .items_center()
+                                            .bg(bg_card())
+                                            .child(
+                                                mono(move || saved.with(Vec::len).to_string())
+                                                    .text_size(px(10.5))
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(fg_muted()),
+                                            )
+                                    },
+                                ))
+                                .child(glyph_px(12.0, || Glyph::Chevron, || color(fg_muted()))),
                         )
                         .child(
-                            text({
-                                let langs = ui_langs();
-                                move || -> SharedString {
-                                    let lang = ui_lang(langs);
-                                    if let Some(name) = active_name() {
-                                        name.into()
-                                    } else if saved.with(Vec::is_empty) {
-                                        t(lang, "暂无已保存配置", "No saved setups").into()
-                                    } else {
-                                        t(lang, "选择已保存配置", "Saved setups").into()
-                                    }
-                                }
-                            })
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .number_of_lines(1)
-                            .ellipsize_mode(EllipsizeMode::Tail)
-                            .text_size(px(12.0))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(move || {
-                                if active_name().is_some() {
-                                    accent_blue_text()
-                                } else if saved.with(Vec::is_empty) {
-                                    fg_muted()
-                                } else {
-                                    fg_secondary()
-                                }
-                            }),
-                        )
-                        .child(when(
-                            move || !saved.with(Vec::is_empty),
-                            move || {
-                                view()
-                                    .h(px(16.0))
-                                    .px_1()
-                                    .rounded(px(4.0))
-                                    .flex_shrink_0()
-                                    .flex_row()
-                                    .items_center()
-                                    .bg(bg_card())
-                                    .child(
-                                        mono(move || saved.with(Vec::len).to_string())
-                                            .text_size(px(10.5))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(fg_muted()),
-                                    )
-                            },
-                        ))
-                        .child(glyph_px(12.0, || Glyph::Chevron, || color(fg_muted()))),
+                            view()
+                                .w(px(360.0))
+                                .max_h(px(220.0))
+                                .p_1()
+                                .rounded(px(10.0))
+                                .border_1()
+                                .border_color(border_strong())
+                                .bg(bg_card())
+                                .shadow_md()
+                                .child(scroll().w_full().max_h(px(210.0)).child(
+                                    view().w_full().gap_0p5().child(each(
+                                        saved,
+                                        |item| {
+                                            format!(
+                                                "{}\t{}\t{}\t{}\t{}",
+                                                item.name,
+                                                item.filter,
+                                                item.bypass_hosts,
+                                                item.rules,
+                                                item.upstream_proxy
+                                            )
+                                        },
+                                        move |item, _| {
+                                            let apply = item;
+                                            let remove = item;
+                                            let mark = item;
+                                            let display_name = item;
+                                            let display_rules = item;
+                                            let preset_controls = preset_controls.clone();
+                                            let filter_apply = filter;
+                                            let bypass_apply = bypass_text;
+                                            let rules_apply = rules_text;
+                                            let upstream_apply = upstream_text;
+                                            let rules_on_apply = rules_on;
+                                            let breaks_on_apply = breaks_on;
+                                            let tunnels_apply = show_tunnels;
+                                            let is_active = move || {
+                                                mark.with(|preset| {
+                                                    preset.filter.trim() == filter.get().trim()
+                                                        && preset.bypass_hosts.trim()
+                                                            == bypass_text.get().trim()
+                                                        && preset.rules.trim()
+                                                            == rules_text.get().trim()
+                                                        && preset.upstream_proxy.trim()
+                                                            == upstream_text.get().trim()
+                                                })
+                                            };
+                                            view()
+                                                .h(px(30.0))
+                                                .gap_1()
+                                                .flex_row()
+                                                .items_center()
+                                                .child(
+                                                    menu_item()
+                                                        .flex_1()
+                                                        .min_w(px(0.0))
+                                                        .h_full()
+                                                        .px_2()
+                                                        .rounded(px(6.0))
+                                                        .flex_row()
+                                                        .items_center()
+                                                        .gap_2()
+                                                        .border_1()
+                                                        .border_color(move || {
+                                                            if is_active() {
+                                                                accent_blue_border()
+                                                            } else {
+                                                                AdaptiveColor::TRANSPARENT
+                                                            }
+                                                        })
+                                                        .bg(move || {
+                                                            if is_active() {
+                                                                accent_blue_soft()
+                                                            } else {
+                                                                AdaptiveColor::TRANSPARENT
+                                                            }
+                                                        })
+                                                        .hover(|style| style.bg(bg_control_hover()))
+                                                        .cursor(Cursor::Pointer)
+                                                        .on_select(move || {
+                                                            let preset =
+                                                                apply.with(|preset| preset.clone());
+                                                            rule_name.set(preset.name.clone());
+                                                            clear_rule_draft(
+                                                                draft_host,
+                                                                draft_path,
+                                                                draft_from,
+                                                                draft_to,
+                                                                draft_response,
+                                                                draft_kind,
+                                                            );
+                                                            apply_saved_profile(
+                                                                &preset,
+                                                                filter_apply,
+                                                                bypass_apply,
+                                                                rules_apply,
+                                                                upstream_apply,
+                                                                rules_on_apply,
+                                                                breaks_on_apply,
+                                                                tunnels_apply,
+                                                                &preset_controls,
+                                                            );
+                                                        })
+                                                        .child(
+                                                            view()
+                                                                .w(px(6.0))
+                                                                .h(px(6.0))
+                                                                .rounded(px(99.0))
+                                                                .flex_shrink_0()
+                                                                .bg(move || {
+                                                                    if is_active() {
+                                                                        accent_blue()
+                                                                    } else {
+                                                                        fg_muted()
+                                                                    }
+                                                                }),
+                                                        )
+                                                        .child(
+                                                            view()
+                                                                .h(px(18.0))
+                                                                .px_1p5()
+                                                                .rounded(px(4.0))
+                                                                .flex_shrink_0()
+                                                                .flex_row()
+                                                                .items_center()
+                                                                .bg(accent_blue_soft())
+                                                                .child(
+                                                                    text(move || {
+                                                                        display_name.with(
+                                                                            |preset| {
+                                                                                preset.name.clone()
+                                                                            },
+                                                                        )
+                                                                    })
+                                                                    .text_size(px(11.0))
+                                                                    .font_weight(FontWeight::MEDIUM)
+                                                                    .text_color(accent_blue_text()),
+                                                                ),
+                                                        )
+                                                        .child(
+                                                            control_text(move || {
+                                                                display_rules.with(profile_preview)
+                                                            })
+                                                            .flex_1()
+                                                            .number_of_lines(1)
+                                                            .text_overflow(EllipsizeMode::Tail)
+                                                            .text_color(fg_secondary()),
+                                                        ),
+                                                )
+                                                .child(
+                                                    view()
+                                                        .w(px(26.0))
+                                                        .h(px(26.0))
+                                                        .flex_shrink_0()
+                                                        .flex_row()
+                                                        .items_center()
+                                                        .justify_center()
+                                                        .rounded(px(6.0))
+                                                        .cursor(Cursor::Pointer)
+                                                        .hover(|style| style.bg(bg_control_hover()))
+                                                        .tooltip(label_tip(
+                                                            "删除配置",
+                                                            "Delete setup",
+                                                        ))
+                                                        .on_press(move || {
+                                                            let target = remove
+                                                                .with(|preset| preset.clone());
+                                                            drop_saved_profile(&target, saved);
+                                                            if saved.with(Vec::is_empty) {
+                                                                dropdown_open.set(false);
+                                                            }
+                                                        })
+                                                        .child(glyph_px(
+                                                            12.0,
+                                                            || Glyph::Trash,
+                                                            || color(fg_muted()),
+                                                        )),
+                                                )
+                                        },
+                                    )),
+                                )),
+                        ),
                 )
                 .child(view().flex_1().min_w(px(0.0)).child(side_input(
                     rule_name,
@@ -2595,8 +2601,8 @@ fn column_splitter(width: Signal<f32>, controls: Arc<Controls>) -> impl IntoElem
         .cursor(Cursor::ColResize)
         .claim_touches(TouchClaim::on_start())
         .keep_touches(true)
-        .on_hover_in(move || hot.set(true))
-        .on_hover_out(move || hot.set(false))
+        .on_mouse_enter(move |_: &MouseEvent| hot.set(true))
+        .on_mouse_leave(move |_: &MouseEvent| hot.set(false))
         .on_responder_grant(move |_event: &ResponderEvent| {
             origin.set(width_grant.get());
         })
@@ -3863,7 +3869,7 @@ struct CellHover {
     at: Signal<Point<Points>>,
 }
 
-fn show_cell_hover(hover: CellHover, event: &HoverEvent, text: String) {
+fn show_cell_hover(hover: CellHover, event: &MouseEvent, text: String) {
     if text.is_empty() {
         hover.text.set(None);
         return;
@@ -4288,7 +4294,7 @@ fn time_cell(rows: Signal<Vec<RowLine>>, hover: CellHover, index: usize) -> Text
             fg_muted()
         }
     })
-    .on_hover_move(move |event: &HoverEvent| {
+    .on_mouse_move(move |event: &MouseEvent| {
         let clock = clock_rows.with(|rows| {
             rows.get(index)
                 .map(|row| row.clock.clone())
@@ -4296,7 +4302,7 @@ fn time_cell(rows: Signal<Vec<RowLine>>, hover: CellHover, index: usize) -> Text
         });
         show_cell_hover(hover, event, clock);
     })
-    .on_hover_out(move || hover.text.set(None))
+    .on_mouse_leave(move |_: &MouseEvent| hover.text.set(None))
 }
 
 fn elapsed_cell(rows: Signal<Vec<RowLine>>, index: usize) -> Text {
@@ -4331,7 +4337,7 @@ fn host_cell(rows: Signal<Vec<RowLine>>, hover: CellHover, index: usize) -> impl
         .flex_row()
         .items_center()
         .gap_1()
-        .on_hover_move(move |event: &HoverEvent| {
+        .on_mouse_move(move |event: &MouseEvent| {
             let host = tip_rows.with(|rows| {
                 rows.get(index)
                     .map(|row| row.host.clone())
@@ -4339,7 +4345,7 @@ fn host_cell(rows: Signal<Vec<RowLine>>, hover: CellHover, index: usize) -> impl
             });
             show_cell_hover(hover, event, host);
         })
-        .on_hover_out(move || hover.text.set(None))
+        .on_mouse_leave(move |_: &MouseEvent| hover.text.set(None))
         .child(
             mono(move || {
                 rows.with(|rows| {
@@ -4351,7 +4357,7 @@ fn host_cell(rows: Signal<Vec<RowLine>>, hover: CellHover, index: usize) -> impl
             .flex_1()
             .min_w(px(0.0))
             .number_of_lines(1)
-            .ellipsize_mode(EllipsizeMode::Middle)
+            .text_overflow(EllipsizeMode::Middle)
             .text_size(px(12.5))
             .font_weight(FontWeight::MEDIUM)
             .text_color(fg_primary()),
@@ -4410,7 +4416,7 @@ fn path_cell(rows: Signal<Vec<RowLine>>, hover: CellHover, index: usize) -> impl
             .w_full()
             .min_w(px(0.0))
             .number_of_lines(1)
-            .ellipsize_mode(EllipsizeMode::Middle)
+            .text_overflow(EllipsizeMode::Middle)
             .text_size(px(12.0))
             .text_color(move || {
                 if rows.with(|rows| rows.get(index).is_some_and(|row| row.failed)) {
@@ -4420,7 +4426,7 @@ fn path_cell(rows: Signal<Vec<RowLine>>, hover: CellHover, index: usize) -> impl
                 }
             }),
         )
-        .on_hover_move(move |event: &HoverEvent| {
+        .on_mouse_move(move |event: &MouseEvent| {
             let path = tip_rows.with(|rows| {
                 rows.get(index)
                     .map(|row| row.path.clone())
@@ -4428,7 +4434,7 @@ fn path_cell(rows: Signal<Vec<RowLine>>, hover: CellHover, index: usize) -> impl
             });
             show_cell_hover(hover, event, path);
         })
-        .on_hover_out(move || hover.text.set(None))
+        .on_mouse_leave(move |_: &MouseEvent| hover.text.set(None))
 }
 
 fn label_tip(zh: &'static str, en: &'static str) -> impl IntoTooltip {
@@ -4896,7 +4902,7 @@ fn header_section(
                                         .flex_shrink_0()
                                         .selectable(true)
                                         .number_of_lines(1)
-                                        .ellipsize_mode(EllipsizeMode::Tail)
+                                        .text_overflow(EllipsizeMode::Tail)
                                         .text_size(px(12.0))
                                         .font_weight(FontWeight::MEDIUM)
                                         .text_color(fg_muted()),
@@ -5055,7 +5061,7 @@ fn body_section(
                                 image(move || shown.preview.get())
                                     .w_full()
                                     .h_full()
-                                    .resize_mode(ResizeMode::ScaleDown),
+                                    .object_fit(ResizeMode::ScaleDown),
                             ),
                     )
                     .child(when(
@@ -5160,7 +5166,7 @@ fn body_section(
                                     .flex_shrink_0()
                                     .selectable(true)
                                     .number_of_lines(1)
-                                    .ellipsize_mode(EllipsizeMode::Tail)
+                                    .text_overflow(EllipsizeMode::Tail)
                                     .text_size(px(12.0))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(fg_muted()),
