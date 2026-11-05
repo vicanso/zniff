@@ -1197,16 +1197,30 @@ fn saved_filter_panel(
                                 .items_center()
                                 .justify_between()
                                 .child(
-                                    text(tr("流量过滤", "Traffic Filter"))
-                                        .text_size(px(13.0))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(fg_primary()),
+                                    view()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            text(tr("流量过滤", "Traffic Filter"))
+                                                .text_size(px(13.0))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(fg_primary()),
+                                        )
+                                        .child(
+                                            text(tr(
+                                                "多项用 | 或逗号分隔",
+                                                "Separate OR items with | or comma",
+                                            ))
+                                            .text_size(px(11.0))
+                                            .text_color(fg_muted()),
+                                        ),
                                 )
                                 .child(view().flex_row().items_center().gap_1p5().child(when(
                                     move || !reset_filter.get().trim().is_empty(),
                                     move || {
                                         view()
-                                            .h(px(28.0))
+                                            .h(px(24.0))
                                             .px_2()
                                             .rounded(px(6.0))
                                             .border_1()
@@ -1225,20 +1239,24 @@ fn saved_filter_panel(
                                     },
                                 ))),
                         )
-                        .child(focused_input(
-                            field,
-                            tr(
-                                "完整过滤表达式，支持 | 表示 OR",
-                                "Filter expression, use | for OR",
+                        .child(config_field(
+                            "过滤表达式",
+                            "Filter Expression",
+                            focused_input(
+                                field,
+                                tr(
+                                    "host:a.com path:/api type:json，支持 | 表示 OR",
+                                    "host:a.com path:/api type:json, use | for OR",
+                                ),
+                                28.0,
+                                false,
+                                move |text| field.set(text.to_string()),
+                                None,
                             ),
-                            28.0,
-                            false,
-                            move |text| field.set(text.to_string()),
-                            None,
                         ))
                         .child(config_field(
-                            "域名 (支持多个 OR，用 | 、逗号或空格分隔)",
-                            "Domains (OR — separate with |, comma, or space)",
+                            "包含域名",
+                            "Include Domains",
                             side_input(
                                 host_field,
                                 tr("api.example.com | *.cdn.com", "api.example.com | *.cdn.com"),
@@ -1251,8 +1269,8 @@ fn saved_filter_panel(
                             ),
                         ))
                         .child(config_field(
-                            "Path 前缀 (支持多个 OR，用 | 、逗号或空格分隔)",
-                            "Path Prefixes (OR — separate with |, comma, or space)",
+                            "包含 Path 前缀",
+                            "Include Path Prefixes",
                             side_input(
                                 path_field,
                                 tr("/api/v1 | /auth | /graphql", "/api/v1 | /auth | /graphql"),
@@ -1265,8 +1283,8 @@ fn saved_filter_panel(
                             ),
                         ))
                         .child(config_field(
-                            "排除域名或路径 (支持多个 OR)",
-                            "Exclude Host / Path (OR)",
+                            "排除域名或路径",
+                            "Exclude Host / Path",
                             side_input(
                                 exclude_field,
                                 tr("ads.example.com | /health", "ads.example.com | /health"),
@@ -1556,8 +1574,8 @@ fn saved_filter_panel(
                                 )),
                         )
                         .child(config_field(
-                            "直通 (支持多个域名 OR 或 only: 白名单)",
-                            "Bypass (Domains OR or only: allowlist)",
+                            "直通名单 (不解密)",
+                            "TLS Bypass (No MITM)",
                             side_input(
                                 bypass_text,
                                 tr(
@@ -1593,83 +1611,91 @@ fn saved_filter_panel(
                                         .items_center()
                                         .justify_between()
                                         .child(
-                                            text(tr(
-                                                "规则 (域名与 Path 前缀均支持 | 表示 OR)",
-                                                "Rules (Domain & Path Prefix support | for OR)",
-                                            ))
-                                            .text_size(px(11.5))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(fg_muted()),
+                                            text(tr("转发与改写规则", "Rules"))
+                                                .text_size(px(11.5))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(fg_muted()),
                                         )
-                                        .child(when(
-                                            move || {
-                                                !crate::rules::invalid_rule_lines(&rules_text.get())
-                                                    .is_empty()
-                                            },
-                                            move || {
-                                                view()
-                                            .h(px(18.0))
-                                            .px_1p5()
-                                            .rounded(px(4.0))
-                                            .flex_row()
-                                            .items_center()
-                                            .bg(status_warn_bg())
-                                            .child(
-                                                text(move || {
-                                                    let bad = crate::rules::invalid_rule_lines(
-                                                        &rules_text.get(),
-                                                    );
-                                                    let lines = bad
-                                                        .iter()
-                                                        .map(usize::to_string)
-                                                        .collect::<Vec<_>>()
-                                                        .join(", ");
-                                                    let lang = ui_lang(ui_langs());
-                                                    match lang {
-                                                        Lang::Zh => {
-                                                            format!("第 {lines} 行语法有误")
-                                                        }
-                                                        Lang::En => {
-                                                            format!("Syntax error on line {lines}")
-                                                        }
-                                                    }
-                                                })
-                                                .text_size(px(10.5))
-                                                .font_weight(FontWeight::MEDIUM)
-                                                .text_color(status_warn_fg()),
-                                            )
-                                            },
-                                        ))
-                                        .child(when(
-                                            move || !rules_text.get().trim().is_empty(),
-                                            move || {
-                                                let clear_controls = rules_clear_controls.clone();
-                                                view()
-                                                    .h(px(22.0))
-                                                    .px_2()
-                                                    .flex_shrink_0()
-                                                    .rounded(px(6.0))
-                                                    .border_1()
-                                                    .border_color(border_control())
-                                                    .bg(bg_control())
-                                                    .hover(|style| style.bg(bg_control_hover()))
-                                                    .flex_row()
-                                                    .items_center()
-                                                    .cursor(Cursor::Pointer)
-                                                    .on_press(move || {
-                                                        rules_text.set(String::new());
-                                                        clear_controls.hub.set_rules("");
-                                                        let _ = save_config(|config| {
-                                                            config.rules.clear()
-                                                        });
-                                                    })
-                                                    .child(
-                                                        text(tr("清空", "Clear"))
-                                                            .text_size(px(11.5))
-                                                            .text_color(fg_secondary()),
-                                                    )
-                                            },
-                                        )),
+                                        .child(
+                                            view()
+                                                .flex_row()
+                                                .items_center()
+                                                .gap_1p5()
+                                                .child(when(
+                                                    move || {
+                                                        !crate::rules::invalid_rule_lines(
+                                                            &rules_text.get(),
+                                                        )
+                                                        .is_empty()
+                                                    },
+                                                    move || {
+                                                        view()
+                                                            .h(px(20.0))
+                                                            .px_1p5()
+                                                            .rounded(px(4.0))
+                                                            .flex_row()
+                                                            .items_center()
+                                                            .bg(status_warn_bg())
+                                                            .child(
+                                                                text(move || {
+                                                                    let bad = crate::rules::invalid_rule_lines(
+                                                                        &rules_text.get(),
+                                                                    );
+                                                                    let lines = bad
+                                                                        .iter()
+                                                                        .map(usize::to_string)
+                                                                        .collect::<Vec<_>>()
+                                                                        .join(", ");
+                                                                    let lang = ui_lang(ui_langs());
+                                                                    match lang {
+                                                                        Lang::Zh => {
+                                                                            format!("第 {lines} 行语法有误")
+                                                                        }
+                                                                        Lang::En => {
+                                                                            format!("Syntax error on line {lines}")
+                                                                        }
+                                                                    }
+                                                                })
+                                                                .text_size(px(10.5))
+                                                                .font_weight(FontWeight::MEDIUM)
+                                                                .text_color(status_warn_fg()),
+                                                            )
+                                                    },
+                                                ))
+                                                .child(when(
+                                                    move || !rules_text.get().trim().is_empty(),
+                                                    move || {
+                                                        let clear_controls =
+                                                            rules_clear_controls.clone();
+                                                        view()
+                                                            .h(px(22.0))
+                                                            .px_2()
+                                                            .flex_shrink_0()
+                                                            .rounded(px(6.0))
+                                                            .border_1()
+                                                            .border_color(border_control())
+                                                            .bg(bg_control())
+                                                            .hover(|style| {
+                                                                style.bg(bg_control_hover())
+                                                            })
+                                                            .flex_row()
+                                                            .items_center()
+                                                            .cursor(Cursor::Pointer)
+                                                            .on_press(move || {
+                                                                rules_text.set(String::new());
+                                                                clear_controls.hub.set_rules("");
+                                                                let _ = save_config(|config| {
+                                                                    config.rules.clear()
+                                                                });
+                                                            })
+                                                            .child(
+                                                                text(tr("清空", "Clear"))
+                                                                    .text_size(px(11.5))
+                                                                    .text_color(fg_secondary()),
+                                                            )
+                                                    },
+                                                )),
+                                        ),
                                 )
                                 .child(rules_editor(rules_text, rules_controls.clone())),
                         )
@@ -1684,8 +1710,8 @@ fn saved_filter_panel(
                             draft_kind,
                         ))
                         .child(config_field(
-                            "上游",
-                            "Upstream",
+                            "上游代理",
+                            "Upstream Proxy",
                             side_input(
                                 upstream_text,
                                 tr("host:port，空着直连", "host:port, empty means direct"),
@@ -1730,6 +1756,31 @@ fn saved_filter_panel(
         ))
 }
 
+fn matched_saved_profile(
+    saved: &[config::SavedProfile],
+    filter: &str,
+    bypass: &str,
+    rules: &str,
+    upstream: &str,
+) -> Option<String> {
+    let filter = filter.trim();
+    let bypass = bypass.trim();
+    let rules = rules.trim();
+    let upstream = upstream.trim();
+    if filter.is_empty() && bypass.is_empty() && rules.is_empty() && upstream.is_empty() {
+        return None;
+    }
+    saved
+        .iter()
+        .find(|preset| {
+            preset.filter.trim() == filter
+                && preset.bypass_hosts.trim() == bypass
+                && preset.rules.trim() == rules
+                && preset.upstream_proxy.trim() == upstream
+        })
+        .map(|preset| preset.name.clone())
+}
+
 fn profile_dock(
     rule_name: Signal<String>,
     filter: Signal<String>,
@@ -1751,204 +1802,335 @@ fn profile_dock(
     let preset_controls = controls.clone();
     let blank_controls = controls.clone();
     let save_controls = controls;
+    let dropdown_open = signal(false);
+    let active_name = move || {
+        saved.with(|items| {
+            matched_saved_profile(
+                items,
+                &filter.get(),
+                &bypass_text.get(),
+                &rules_text.get(),
+                &upstream_text.get(),
+            )
+        })
+    };
+
     view()
         .w_full()
         .px_3()
-        .pt_3()
-        .pb_3()
+        .py_2p5()
         .gap_2()
         .border_t_1()
         .border_t_color(border_subtle())
-        .child(
-            view()
-                .w_full()
-                .gap_1()
-                .child(
-                    text(tr("已保存的配置", "Saved setups"))
-                        .text_size(px(11.5))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(fg_muted()),
-                )
-                .child(when(
-                    move || saved.with(Vec::is_empty),
-                    || {
-                        view().h(px(28.0)).flex_row().items_center().child(
-                            control_text(tr("还没有保存的配置", "No saved setups"))
-                                .text_color(fg_muted()),
-                        )
-                    },
-                ))
-                .child(when(
-                    move || !saved.with(Vec::is_empty),
-                    move || {
-                        let preset_controls = preset_controls.clone();
-                        view().w_full().max_h(px(124.0)).child(
-                            scroll().w_full().max_h(px(124.0)).child(
-                                view().w_full().gap_1().child(each(
-                                    saved,
-                                    |item| {
-                                        format!(
-                                            "{}\t{}\t{}\t{}\t{}",
-                                            item.name,
-                                            item.filter,
-                                            item.bypass_hosts,
-                                            item.rules,
-                                            item.upstream_proxy
-                                        )
-                                    },
-                                    move |item, _| {
-                                        let apply = item;
-                                        let remove = item;
-                                        let mark = item;
-                                        let display_name = item;
-                                        let display_rules = item;
-                                        let preset_controls = preset_controls.clone();
-                                        let filter_apply = filter;
-                                        let bypass_apply = bypass_text;
-                                        let rules_apply = rules_text;
-                                        let upstream_apply = upstream_text;
-                                        let rules_on_apply = rules_on;
-                                        let breaks_on_apply = breaks_on;
-                                        let tunnels_apply = show_tunnels;
-                                        view()
-                                            .h(px(28.0))
-                                            .gap_1()
-                                            .flex_row()
-                                            .items_center()
-                                            .child(
-                                                view()
-                                                    .flex_1()
-                                                    .min_w(px(0.0))
-                                                    .h_full()
-                                                    .px_2p5()
-                                                    .rounded(px(6.0))
-                                                    .flex_row()
-                                                    .items_center()
-                                                    .gap_1p5()
-                                                    .border_1()
-                                                    .border_color(move || {
-                                                        let same = mark.with(|preset| {
-                                                            preset.filter.trim()
-                                                                == filter.get().trim()
-                                                                && preset.bypass_hosts.trim()
-                                                                    == bypass_text.get().trim()
-                                                                && preset.rules.trim()
-                                                                    == rules_text.get().trim()
-                                                                && preset.upstream_proxy.trim()
-                                                                    == upstream_text.get().trim()
-                                                        });
-                                                        if same {
-                                                            accent_blue_border()
-                                                        } else {
-                                                            border_control()
-                                                        }
-                                                    })
-                                                    .hover(|style| style.bg(bg_control_hover()))
-                                                    .cursor(Cursor::Pointer)
-                                                    .on_press(move || {
-                                                        let preset =
-                                                            apply.with(|preset| preset.clone());
-                                                        rule_name.set(preset.name.clone());
-                                                        clear_rule_draft(
-                                                            draft_host,
-                                                            draft_path,
-                                                            draft_from,
-                                                            draft_to,
-                                                            draft_response,
-                                                            draft_kind,
-                                                        );
-                                                        apply_saved_profile(
-                                                            &preset,
-                                                            filter_apply,
-                                                            bypass_apply,
-                                                            rules_apply,
-                                                            upstream_apply,
-                                                            rules_on_apply,
-                                                            breaks_on_apply,
-                                                            tunnels_apply,
-                                                            &preset_controls,
-                                                        );
-                                                    })
-                                                    .child(
-                                                        view()
-                                                            .h(px(18.0))
-                                                            .px_1p5()
-                                                            .rounded(px(4.0))
-                                                            .flex_shrink_0()
-                                                            .flex_row()
-                                                            .items_center()
-                                                            .bg(accent_blue_soft())
-                                                            .child(
-                                                                text(move || {
-                                                                    display_name.with(|preset| {
-                                                                        preset.name.clone()
-                                                                    })
+        .child(when(
+            move || dropdown_open.get() && !saved.with(Vec::is_empty),
+            move || {
+                let preset_controls = preset_controls.clone();
+                view()
+                    .w_full()
+                    .max_h(px(156.0))
+                    .p_1()
+                    .rounded(px(8.0))
+                    .border_1()
+                    .border_color(border_strong())
+                    .bg(bg_code())
+                    .child(
+                        scroll()
+                            .w_full()
+                            .max_h(px(146.0))
+                            .child(view().w_full().gap_1().child(each(
+                                saved,
+                                |item| {
+                                    format!(
+                                        "{}\t{}\t{}\t{}\t{}",
+                                        item.name,
+                                        item.filter,
+                                        item.bypass_hosts,
+                                        item.rules,
+                                        item.upstream_proxy
+                                    )
+                                },
+                                move |item, _| {
+                                    let apply = item;
+                                    let remove = item;
+                                    let mark = item;
+                                    let display_name = item;
+                                    let display_rules = item;
+                                    let preset_controls = preset_controls.clone();
+                                    let filter_apply = filter;
+                                    let bypass_apply = bypass_text;
+                                    let rules_apply = rules_text;
+                                    let upstream_apply = upstream_text;
+                                    let rules_on_apply = rules_on;
+                                    let breaks_on_apply = breaks_on;
+                                    let tunnels_apply = show_tunnels;
+                                    let is_active = move || {
+                                        mark.with(|preset| {
+                                            preset.filter.trim() == filter.get().trim()
+                                                && preset.bypass_hosts.trim()
+                                                    == bypass_text.get().trim()
+                                                && preset.rules.trim() == rules_text.get().trim()
+                                                && preset.upstream_proxy.trim()
+                                                    == upstream_text.get().trim()
+                                        })
+                                    };
+                                    view()
+                                        .h(px(28.0))
+                                        .gap_1()
+                                        .flex_row()
+                                        .items_center()
+                                        .child(
+                                            view()
+                                                .flex_1()
+                                                .min_w(px(0.0))
+                                                .h_full()
+                                                .px_2()
+                                                .rounded(px(6.0))
+                                                .flex_row()
+                                                .items_center()
+                                                .gap_2()
+                                                .border_1()
+                                                .border_color(move || {
+                                                    if is_active() {
+                                                        accent_blue_border()
+                                                    } else {
+                                                        AdaptiveColor::TRANSPARENT
+                                                    }
+                                                })
+                                                .bg(move || {
+                                                    if is_active() {
+                                                        accent_blue_soft()
+                                                    } else {
+                                                        AdaptiveColor::TRANSPARENT
+                                                    }
+                                                })
+                                                .hover(|style| style.bg(bg_control_hover()))
+                                                .cursor(Cursor::Pointer)
+                                                .on_press(move || {
+                                                    let preset =
+                                                        apply.with(|preset| preset.clone());
+                                                    rule_name.set(preset.name.clone());
+                                                    clear_rule_draft(
+                                                        draft_host,
+                                                        draft_path,
+                                                        draft_from,
+                                                        draft_to,
+                                                        draft_response,
+                                                        draft_kind,
+                                                    );
+                                                    apply_saved_profile(
+                                                        &preset,
+                                                        filter_apply,
+                                                        bypass_apply,
+                                                        rules_apply,
+                                                        upstream_apply,
+                                                        rules_on_apply,
+                                                        breaks_on_apply,
+                                                        tunnels_apply,
+                                                        &preset_controls,
+                                                    );
+                                                    dropdown_open.set(false);
+                                                })
+                                                .child(
+                                                    view()
+                                                        .w(px(6.0))
+                                                        .h(px(6.0))
+                                                        .rounded(px(99.0))
+                                                        .flex_shrink_0()
+                                                        .bg(move || {
+                                                            if is_active() {
+                                                                accent_blue()
+                                                            } else {
+                                                                fg_muted()
+                                                            }
+                                                        }),
+                                                )
+                                                .child(
+                                                    view()
+                                                        .h(px(18.0))
+                                                        .px_1p5()
+                                                        .rounded(px(4.0))
+                                                        .flex_shrink_0()
+                                                        .flex_row()
+                                                        .items_center()
+                                                        .bg(accent_blue_soft())
+                                                        .child(
+                                                            text(move || {
+                                                                display_name.with(|preset| {
+                                                                    preset.name.clone()
                                                                 })
-                                                                .text_size(px(11.0))
-                                                                .font_weight(FontWeight::MEDIUM)
-                                                                .text_color(accent_blue_text()),
-                                                            ),
-                                                    )
-                                                    .child(
-                                                        control_text(move || {
-                                                            display_rules.with(|preset| {
-                                                                profile_preview(preset)
                                                             })
-                                                        })
-                                                        .flex_1()
-                                                        .number_of_lines(1)
-                                                        .ellipsize_mode(EllipsizeMode::Tail)
-                                                        .text_color(fg_secondary()),
-                                                    ),
-                                            )
-                                            .child(
-                                                view()
-                                                    .w(px(28.0))
-                                                    .h(px(28.0))
-                                                    .flex_shrink_0()
-                                                    .flex_row()
-                                                    .items_center()
-                                                    .justify_center()
-                                                    .rounded(px(6.0))
-                                                    .cursor(Cursor::Pointer)
-                                                    .hover(|style| style.bg(bg_control_hover()))
-                                                    .tooltip(label_tip("移除", "Remove"))
-                                                    .on_press(move || {
-                                                        let target =
-                                                            remove.with(|preset| preset.clone());
-                                                        drop_saved_profile(&target, saved);
+                                                            .text_size(px(11.0))
+                                                            .font_weight(FontWeight::MEDIUM)
+                                                            .text_color(accent_blue_text()),
+                                                        ),
+                                                )
+                                                .child(
+                                                    control_text(move || {
+                                                        display_rules.with(profile_preview)
                                                     })
-                                                    .child(
-                                                        control_text("×").text_color(fg_muted()),
-                                                    ),
-                                            )
-                                    },
-                                )),
-                            ),
-                        )
-                    },
-                )),
-        )
+                                                    .flex_1()
+                                                    .number_of_lines(1)
+                                                    .ellipsize_mode(EllipsizeMode::Tail)
+                                                    .text_color(fg_secondary()),
+                                                ),
+                                        )
+                                        .child(
+                                            view()
+                                                .w(px(26.0))
+                                                .h(px(26.0))
+                                                .flex_shrink_0()
+                                                .flex_row()
+                                                .items_center()
+                                                .justify_center()
+                                                .rounded(px(6.0))
+                                                .cursor(Cursor::Pointer)
+                                                .hover(|style| style.bg(bg_control_hover()))
+                                                .tooltip(label_tip("删除配置", "Delete setup"))
+                                                .on_press(move || {
+                                                    let target =
+                                                        remove.with(|preset| preset.clone());
+                                                    drop_saved_profile(&target, saved);
+                                                    if saved.with(Vec::is_empty) {
+                                                        dropdown_open.set(false);
+                                                    }
+                                                })
+                                                .child(glyph_px(
+                                                    12.0,
+                                                    || Glyph::Trash,
+                                                    || color(fg_muted()),
+                                                )),
+                                        )
+                                },
+                            ))),
+                    )
+            },
+        ))
         .child(
             view()
                 .w_full()
-                .h(px(28.0))
+                .h(px(30.0))
                 .flex_row()
                 .items_center()
                 .gap_1p5()
+                .child(
+                    view()
+                        .w(px(210.0))
+                        .h(px(30.0))
+                        .px_2p5()
+                        .flex_shrink_0()
+                        .rounded(px(7.0))
+                        .border_1()
+                        .border_color(move || {
+                            if dropdown_open.get() || active_name().is_some() {
+                                accent_blue_border()
+                            } else {
+                                border_control()
+                            }
+                        })
+                        .bg(move || {
+                            if active_name().is_some() {
+                                accent_blue_soft()
+                            } else {
+                                bg_control()
+                            }
+                        })
+                        .hover(|style| {
+                            style.bg(move || {
+                                if active_name().is_some() {
+                                    accent_blue_soft()
+                                } else {
+                                    bg_control_hover()
+                                }
+                            })
+                        })
+                        .flex_row()
+                        .items_center()
+                        .gap_1p5()
+                        .cursor(Cursor::Pointer)
+                        .on_press(move || {
+                            if !saved.with(Vec::is_empty) {
+                                dropdown_open.set(!dropdown_open.get());
+                            }
+                        })
+                        .child(
+                            view()
+                                .w(px(6.0))
+                                .h(px(6.0))
+                                .rounded(px(99.0))
+                                .flex_shrink_0()
+                                .bg(move || {
+                                    if active_name().is_some() {
+                                        accent_blue()
+                                    } else {
+                                        fg_muted()
+                                    }
+                                }),
+                        )
+                        .child(
+                            text({
+                                let langs = ui_langs();
+                                move || -> SharedString {
+                                    let lang = ui_lang(langs);
+                                    if let Some(name) = active_name() {
+                                        name.into()
+                                    } else if saved.with(Vec::is_empty) {
+                                        t(lang, "暂无已保存配置", "No saved setups").into()
+                                    } else {
+                                        t(lang, "选择已保存配置", "Saved setups").into()
+                                    }
+                                }
+                            })
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .number_of_lines(1)
+                            .ellipsize_mode(EllipsizeMode::Tail)
+                            .text_size(px(12.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(move || {
+                                if active_name().is_some() {
+                                    accent_blue_text()
+                                } else if saved.with(Vec::is_empty) {
+                                    fg_muted()
+                                } else {
+                                    fg_secondary()
+                                }
+                            }),
+                        )
+                        .child(when(
+                            move || !saved.with(Vec::is_empty),
+                            move || {
+                                view()
+                                    .h(px(16.0))
+                                    .px_1()
+                                    .rounded(px(4.0))
+                                    .flex_shrink_0()
+                                    .flex_row()
+                                    .items_center()
+                                    .bg(bg_card())
+                                    .child(
+                                        mono(move || saved.with(Vec::len).to_string())
+                                            .text_size(px(10.5))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(fg_muted()),
+                                    )
+                            },
+                        ))
+                        .child(glyph_px(12.0, || Glyph::Chevron, || color(fg_muted()))),
+                )
                 .child(view().flex_1().min_w(px(0.0)).child(side_input(
                     rule_name,
-                    tr("配置名称", "Setup name"),
-                    28.0,
+                    tr("配置名称 (可选，同名覆盖)", "Setup name (optional)"),
+                    30.0,
                     false,
                     move |text| rule_name.set(text.to_string()),
                 )))
                 .child(
                     view()
-                        .h(px(28.0))
+                        .h(px(30.0))
                         .px_3()
                         .flex_shrink_0()
-                        .rounded(px(6.0))
+                        .rounded(px(7.0))
                         .border_1()
                         .border_color(border_control())
                         .bg(bg_control())
@@ -1958,6 +2140,7 @@ fn profile_dock(
                         .justify_center()
                         .cursor(Cursor::Pointer)
                         .on_press(move || {
+                            dropdown_open.set(false);
                             blank_working_setup(
                                 rule_name,
                                 filter,
@@ -1985,10 +2168,10 @@ fn profile_dock(
                 )
                 .child(
                     view()
-                        .h(px(28.0))
-                        .px_3()
+                        .h(px(30.0))
+                        .px_3p5()
                         .flex_shrink_0()
-                        .rounded(px(6.0))
+                        .rounded(px(7.0))
                         .flex_row()
                         .items_center()
                         .justify_center()
@@ -1996,6 +2179,7 @@ fn profile_dock(
                         .hover(|style| style.bg(accent_blue_hover()))
                         .cursor(Cursor::Pointer)
                         .on_press(move || {
+                            dropdown_open.set(false);
                             // A filled add-rule row is part of this setup even
                             // before 「添加规则」. Commit it, then snapshot.
                             let combined = crate::rules::combine_rule_pattern(
@@ -2977,7 +3161,7 @@ fn rules_editor(value: Signal<String>, controls: Arc<Controls>) -> impl IntoElem
                 .value(move || SharedString::from(value.get()))
                 .language("plaintext")
                 .line_numbers(true)
-                .folding(true)
+                .folding(false)
                 .soft_wrap(true)
                 .font_size(Points(12.0))
                 .line_height(Points(18.0))
@@ -3006,6 +3190,53 @@ fn rules_editor(value: Signal<String>, controls: Arc<Controls>) -> impl IntoElem
         )
 }
 
+fn quick_side_chip(
+    response: Signal<bool>,
+    target_res: bool,
+    zh: &'static str,
+    en: &'static str,
+) -> impl IntoElement {
+    view()
+        .h(px(26.0))
+        .px_2()
+        .flex_row()
+        .items_center()
+        .justify_center()
+        .border_r(move || if !target_res { px(1.0) } else { px(0.0) })
+        .border_r_color(border_control())
+        .bg(move || {
+            if response.get() == target_res {
+                accent_blue_soft()
+            } else {
+                bg_control()
+            }
+        })
+        .hover(|style| {
+            style.bg(move || {
+                if response.get() == target_res {
+                    accent_blue_soft()
+                } else {
+                    bg_control_hover()
+                }
+            })
+        })
+        .cursor(Cursor::Pointer)
+        .on_press(move || response.set(target_res))
+        .child(
+            text(tr(zh, en))
+                .number_of_lines(1)
+                .text_size(px(11.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(move || {
+                    if response.get() == target_res {
+                        accent_blue_text()
+                    } else {
+                        fg_secondary()
+                    }
+                }),
+        )
+}
+
 fn replace_row(
     rules_text: Signal<String>,
     controls: Arc<Controls>,
@@ -3017,243 +3248,275 @@ fn replace_row(
     kind: Signal<u8>,
 ) -> impl IntoElement {
     let kinds = [0_u8, 1, 2, 3, 4, 5, 6, 7];
+    let ready_to_add = move || {
+        let combined = crate::rules::combine_rule_pattern(&host_pattern.get(), &path_pattern.get());
+        crate::rules::append_quick_rule(
+            "",
+            quick_kind(kind.get()),
+            &combined,
+            response.get(),
+            &from.get(),
+            &to.get(),
+        )
+        .is_some()
+    };
     view()
-        .gap_1p5()
+        .gap_1()
         .w_full()
         .child(
-            text(tr(
-                "添加规则 (域名与 Path 前缀均支持 | 表示 OR)",
-                "Add Rule (Domain & Path Prefix support | for OR)",
-            ))
-            .text_size(px(11.5))
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_color(fg_muted()),
+            text(tr("快速添加规则", "Quick Add Rule"))
+                .text_size(px(11.5))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(fg_muted()),
         )
         .child(
             view()
                 .w_full()
-                .flex_row()
-                .items_center()
-                .gap_1()
-                .children(kinds.into_iter().map(move |idx| {
-                    let (zh, en) = quick_kind(idx).label();
-                    view()
-                        .h(px(28.0))
-                        .px_1()
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .flex_row()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(6.0))
-                        .border_1()
-                        .border_color(move || {
-                            if kind.get() == idx {
-                                accent_blue_border()
-                            } else {
-                                border_control()
-                            }
-                        })
-                        .bg(move || {
-                            if kind.get() == idx {
-                                accent_blue_soft()
-                            } else {
-                                bg_control()
-                            }
-                        })
-                        .hover(|style| {
-                            style.bg(move || {
-                                if kind.get() == idx {
-                                    accent_blue_soft()
-                                } else {
-                                    bg_control_hover()
-                                }
-                            })
-                        })
-                        .cursor(Cursor::Pointer)
-                        .on_press(move || kind.set(idx))
-                        .child(
-                            text(tr(zh, en))
-                                .number_of_lines(1)
-                                .text_size(px(11.0))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(move || {
-                                    if kind.get() == idx {
-                                        accent_blue_text()
-                                    } else {
-                                        fg_secondary()
-                                    }
-                                }),
-                        )
-                })),
-        )
-        .child(
-            view()
-                .flex_row()
-                .gap_1()
-                .child(view().flex_1().min_w(px(0.0)).child(side_input(
-                    host_pattern,
-                    tr("域名: a.com | *.b.com", "Domain: a.com | *.b.com"),
-                    28.0,
-                    false,
-                    move |text| host_pattern.set(text.to_string()),
-                )))
-                .child(view().flex_1().min_w(px(0.0)).child(side_input(
-                    path_pattern,
-                    tr("Path前缀: /api | /v2", "Path prefix: /api | /v2"),
-                    28.0,
-                    false,
-                    move |text| path_pattern.set(text.to_string()),
-                )))
-                .child(when(
-                    move || kind.get() == 0 || kind.get() == 6,
-                    move || {
+                .p_2()
+                .gap_1p5()
+                .rounded(px(8.0))
+                .border_1()
+                .border_color(border_subtle())
+                .bg(bg_canvas())
+                .child(view().w_full().flex_row().items_center().gap_1().children(
+                    kinds.into_iter().map(move |idx| {
+                        let (zh, en) = quick_kind(idx).label();
                         view()
-                            .w(px(54.0))
-                            .h(px(28.0))
-                            .flex_shrink_0()
+                            .h(px(26.0))
+                            .px_1()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .flex_row()
                             .items_center()
                             .justify_center()
                             .rounded(px(6.0))
                             .border_1()
-                            .border_color(border_control())
-                            .bg(bg_control())
-                            .hover(|style| style.bg(bg_control_hover()))
-                            .cursor(Cursor::Pointer)
-                            .on_press(move || response.set(!response.get()))
-                            .child(
-                                text(move || {
-                                    if response.get() {
-                                        tr("响应", "Res")()
+                            .border_color(move || {
+                                if kind.get() == idx {
+                                    accent_blue_border()
+                                } else {
+                                    border_control()
+                                }
+                            })
+                            .bg(move || {
+                                if kind.get() == idx {
+                                    accent_blue_soft()
+                                } else {
+                                    bg_control()
+                                }
+                            })
+                            .hover(|style| {
+                                style.bg(move || {
+                                    if kind.get() == idx {
+                                        accent_blue_soft()
                                     } else {
-                                        tr("请求", "Req")()
+                                        bg_control_hover()
                                     }
                                 })
-                                .text_size(px(11.0))
-                                .text_color(fg_secondary()),
+                            })
+                            .cursor(Cursor::Pointer)
+                            .on_press(move || kind.set(idx))
+                            .child(
+                                text(tr(zh, en))
+                                    .number_of_lines(1)
+                                    .text_size(px(11.0))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(move || {
+                                        if kind.get() == idx {
+                                            accent_blue_text()
+                                        } else {
+                                            fg_secondary()
+                                        }
+                                    }),
                             )
-                    },
-                )),
-        )
-        .child(
-            view()
-                .flex_row()
-                .gap_1()
-                .child(when(
-                    move || kind.get() < 4 || kind.get() == 6,
-                    move || {
-                        let placeholder = move || {
-                            let lang = ui_lang(ui_langs());
-                            match kind.get() {
-                                1 => t(
-                                    lang,
-                                    "目标地址: https://other.test/v1",
-                                    "Target URL: https://other.test/v1",
-                                )
-                                .to_string(),
-                                2 => t(
-                                    lang,
-                                    "本地文件路径: ./mock.json",
-                                    "Local file path: ./mock.json",
-                                )
-                                .to_string(),
-                                3 => t(
-                                    lang,
-                                    "延迟时长: 2000ms 或 2s",
-                                    "Delay duration: 2000ms or 2s",
-                                )
-                                .to_string(),
-                                6 => t(lang, "Header 名称: X-Debug", "Header name: X-Debug")
-                                    .to_string(),
-                                _ => t(lang, "查找原文 (from)", "Find text (from)").to_string(),
-                            }
-                        };
-                        view().flex_1().min_w(px(0.0)).child(side_input(
-                            from,
-                            placeholder,
-                            28.0,
-                            false,
-                            move |text| from.set(text.to_string()),
-                        ))
-                    },
-                ))
-                .child(when(
-                    move || kind.get() == 0 || kind.get() == 6,
-                    move || {
-                        let placeholder = move || {
-                            let lang = ui_lang(ui_langs());
-                            if kind.get() == 6 {
-                                t(lang, "Header 值 (留空删除)", "Value (empty to delete)")
-                                    .to_string()
-                            } else {
-                                t(lang, "替换成 (to)", "Replace with (to)").to_string()
-                            }
-                        };
-                        view().flex_1().min_w(px(0.0)).child(side_input(
-                            to,
-                            placeholder,
-                            28.0,
-                            false,
-                            move |text| to.set(text.to_string()),
-                        ))
-                    },
+                    }),
                 ))
                 .child(
                     view()
-                        .h(px(28.0))
-                        .px_3()
-                        .flex_grow(move || {
-                            if matches!(kind.get(), 4 | 5 | 7) {
-                                1.0_f32
-                            } else {
-                                0.0_f32
-                            }
-                        })
-                        .flex_shrink_0()
+                        .flex_row()
                         .items_center()
-                        .justify_center()
-                        .rounded(px(6.0))
-                        .border_1()
-                        .border_color(border_control())
-                        .bg(bg_control())
-                        .hover(|style| style.bg(bg_control_hover()))
-                        .cursor(Cursor::Pointer)
-                        .on_press(move || {
-                            let combined_pattern = crate::rules::combine_rule_pattern(
-                                &host_pattern.get(),
-                                &path_pattern.get(),
-                            );
-                            let Some(next) = crate::rules::append_quick_rule(
-                                &rules_text.get(),
-                                quick_kind(kind.get()),
-                                &combined_pattern,
-                                response.get(),
-                                &from.get(),
-                                &to.get(),
-                            ) else {
-                                return;
-                            };
-                            rules_text.set(next.clone());
-                            controls.hub.set_rules(&next);
-                            if let Err(err) = save_config(|config| config.rules = next) {
-                                set_status(
-                                    &controls,
-                                    StatusMsg::PrefUnsaved {
-                                        name: PrefName::Rules,
-                                        err: err.to_string(),
-                                    },
-                                );
-                            }
-                            host_pattern.set(String::new());
-                            path_pattern.set(String::new());
-                            from.set(String::new());
-                            to.set(String::new());
-                        })
+                        .gap_1()
+                        .child(view().flex_1().min_w(px(0.0)).child(side_input(
+                            host_pattern,
+                            tr("域名: a.com | *.b.com", "Domain: a.com | *.b.com"),
+                            28.0,
+                            false,
+                            move |text| host_pattern.set(text.to_string()),
+                        )))
+                        .child(view().flex_1().min_w(px(0.0)).child(side_input(
+                            path_pattern,
+                            tr("Path前缀: /api | /v2", "Path prefix: /api | /v2"),
+                            28.0,
+                            false,
+                            move |text| path_pattern.set(text.to_string()),
+                        )))
+                        .child(when(
+                            move || kind.get() == 0 || kind.get() == 6,
+                            move || {
+                                view()
+                                    .h(px(28.0))
+                                    .flex_shrink_0()
+                                    .flex_row()
+                                    .items_center()
+                                    .rounded(px(6.0))
+                                    .border_1()
+                                    .border_color(border_control())
+                                    .overflow_hidden()
+                                    .child(quick_side_chip(response, false, "请求", "Req"))
+                                    .child(quick_side_chip(response, true, "响应", "Res"))
+                            },
+                        )),
+                )
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_1()
+                        .child(when(
+                            move || kind.get() < 4 || kind.get() == 6,
+                            move || {
+                                let placeholder = move || {
+                                    let lang = ui_lang(ui_langs());
+                                    match kind.get() {
+                                        1 => t(
+                                            lang,
+                                            "目标地址: https://other.test/v1",
+                                            "Target URL: https://other.test/v1",
+                                        )
+                                        .to_string(),
+                                        2 => t(
+                                            lang,
+                                            "本地文件路径: ./mock.json",
+                                            "Local file path: ./mock.json",
+                                        )
+                                        .to_string(),
+                                        3 => t(
+                                            lang,
+                                            "延迟时长: 2000ms 或 2s",
+                                            "Delay duration: 2000ms or 2s",
+                                        )
+                                        .to_string(),
+                                        6 => {
+                                            t(lang, "Header 名称: X-Debug", "Header name: X-Debug")
+                                                .to_string()
+                                        }
+                                        _ => t(lang, "查找原文 (from)", "Find text (from)")
+                                            .to_string(),
+                                    }
+                                };
+                                view().flex_1().min_w(px(0.0)).child(side_input(
+                                    from,
+                                    placeholder,
+                                    28.0,
+                                    false,
+                                    move |text| from.set(text.to_string()),
+                                ))
+                            },
+                        ))
+                        .child(when(
+                            move || kind.get() == 0 || kind.get() == 6,
+                            move || {
+                                let placeholder = move || {
+                                    let lang = ui_lang(ui_langs());
+                                    if kind.get() == 6 {
+                                        t(lang, "Header 值 (留空删除)", "Value (empty to delete)")
+                                            .to_string()
+                                    } else {
+                                        t(lang, "替换成 (to)", "Replace with (to)").to_string()
+                                    }
+                                };
+                                view().flex_1().min_w(px(0.0)).child(side_input(
+                                    to,
+                                    placeholder,
+                                    28.0,
+                                    false,
+                                    move |text| to.set(text.to_string()),
+                                ))
+                            },
+                        ))
                         .child(
-                            text(tr("添加规则", "Add"))
-                                .text_size(px(11.5))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(fg_secondary()),
+                            view()
+                                .h(px(28.0))
+                                .px_3()
+                                .flex_grow(move || {
+                                    if matches!(kind.get(), 4 | 5 | 7) {
+                                        1.0_f32
+                                    } else {
+                                        0.0_f32
+                                    }
+                                })
+                                .flex_shrink_0()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(6.0))
+                                .border_1()
+                                .border_color(move || {
+                                    if ready_to_add() {
+                                        accent_blue_border()
+                                    } else {
+                                        border_control()
+                                    }
+                                })
+                                .bg(move || {
+                                    if ready_to_add() {
+                                        accent_blue_soft()
+                                    } else {
+                                        bg_control()
+                                    }
+                                })
+                                .hover(|style| {
+                                    style.bg(move || {
+                                        if ready_to_add() {
+                                            accent_blue_soft()
+                                        } else {
+                                            bg_control_hover()
+                                        }
+                                    })
+                                })
+                                .cursor(Cursor::Pointer)
+                                .on_press(move || {
+                                    let combined_pattern = crate::rules::combine_rule_pattern(
+                                        &host_pattern.get(),
+                                        &path_pattern.get(),
+                                    );
+                                    let Some(next) = crate::rules::append_quick_rule(
+                                        &rules_text.get(),
+                                        quick_kind(kind.get()),
+                                        &combined_pattern,
+                                        response.get(),
+                                        &from.get(),
+                                        &to.get(),
+                                    ) else {
+                                        return;
+                                    };
+                                    rules_text.set(next.clone());
+                                    controls.hub.set_rules(&next);
+                                    if let Err(err) = save_config(|config| config.rules = next) {
+                                        set_status(
+                                            &controls,
+                                            StatusMsg::PrefUnsaved {
+                                                name: PrefName::Rules,
+                                                err: err.to_string(),
+                                            },
+                                        );
+                                    }
+                                    host_pattern.set(String::new());
+                                    path_pattern.set(String::new());
+                                    from.set(String::new());
+                                    to.set(String::new());
+                                })
+                                .child(
+                                    text(tr("+ 添加规则", "+ Add"))
+                                        .text_size(px(11.5))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(move || {
+                                            if ready_to_add() {
+                                                accent_blue_text()
+                                            } else {
+                                                fg_muted()
+                                            }
+                                        }),
+                                ),
                         ),
                 ),
         )
