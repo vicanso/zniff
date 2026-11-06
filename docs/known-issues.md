@@ -7,7 +7,7 @@ P0 到 P3 里点名的能力已经接上。下面是仍然接受的缺口，不�
 - HTTP/3、QUIC。UDP 不经过 HTTP 代理。
 - Firefox 的证书库。Firefox 默认也不代理 localhost。验收浏览器是 Chrome、Safari、Edge。
 - 透明代理、JSON 树、SQLite、cyberapi、Web 界面。
-- 会话只在内存里。重启清空。单条 body 解压后最多 1 MB，整段会话最多 256 MB，超出丢掉最旧的未星标 flow。星标最多 32 条，不参与淘汰，因此星标集合可以让内存超过 256 MB。线字节和 WebSocket 消息文本不计入这两个上限。过滤写在 `config.toml` 的 `filter`，下次打开恢复。不再自动记下最近过滤词；要留住一套条件，用「保存」。顶栏「过滤」最底一行是名称、「新建配置」和「保存」。「保存」把当前过滤、直通、规则、上游和三个开关写进 `saved_profiles`，最多 16 条。点一条一起恢复。添加规则写进当前规则，底栏仍停在名称框里的那条。「新建配置」清空当前这套并回到默认开关，不删已保存的条目。过滤、规则、直通、上游都空着时不保存。名称对得上当前这条、内容也没变时「保存」是灰的，有改动才可以点。旧的 `saved_filters` 和 `saved_rules` 在还没有 `saved_profiles` 时并进来。停半秒才写入，避免每敲一个字都改文件。
+- 会话只在内存里。重启清空。单条 body 解压后最多 1 MB，整段会话最多 256 MB，超出丢掉最旧的未星标 flow。星标最多 32 条，不参与淘汰，因此星标集合可以让内存超过 256 MB。线字节和 WebSocket 消息文本不计入这两个上限。过滤写在 `config.toml` 的 `filter`，下次打开恢复。不再自动记下最近过滤词；要留住一套条件，用「保存」。顶栏「过滤」最底一行是已保存配置下拉选择、名称、「新建配置」和「保存」。「保存」把当前过滤、直通、规则、上游和三个开关写进 `saved_profiles`，最多 16 条。点一条一起恢复。添加规则写进当前规则，底栏仍停在名称框里的那条。「新建配置」清空当前这套并回到默认开关，不删已保存的条目。过滤、规则、直通、上游都空着时不保存。名称对得上当前这条、内容也没变时「保存」是灰的，有改动才可以点。旧的 `saved_filters` 和 `saved_rules` 在还没有 `saved_profiles` 时并进来。停半秒才写入，避免每敲一个字都改文件。
 
 ## 平台
 
@@ -16,8 +16,8 @@ P0 到 P3 里点名的能力已经接上。下面是仍然接受的缺口，不�
 - Windows 只改当前用户的 WinINET，不改 WinHTTP。
 - macOS `security add-trusted-cert` 可能要用户点确认。`security find-certificate` 只说明证书在登录钥匙串里，不保证 SSL 信任策略已经生效。
 - 带密码的系统代理：`networksetup` 读不回密码，停止后可能恢复不完整。
-- Windows、Linux 上「移除证书」还没接上。macOS 用 `security delete-certificate`。
-- 窗口位置和大小不记。nsh 0.3 的 `AppOptions` 仍只有初始 `size`，没有坐标。公开的窗口接口是 `set_title_bar`、`title_bar`、`close_window`。`window()` 只返回表面尺寸。`set_frame` 和 `desktop_command` 仍是 `pub(crate)`。`nsh-platform-macos` 重导出了 `objc2_app_kit`，应用拿不到 nsh 正在用的那扇 `NSWindow`；用 `NSApplication` 的窗口列表去猜，会和 nsh 自己的标题栏、全屏状态抢外框。多显示器 UUID、重叠面积，以及 Windows、Linux 的同一套恢复因此先不做。启动尺寸仍是 `app/src/main.rs` 里的 `(1200, 760)`。
+- Windows、Linux 上「移除证书」和「证书已安装」状态检测还没接上（`ca::remove` 直接报错，`ca::is_installed` 在非 macOS 下返回 `false`）。macOS 用 `security find-certificate` 与 `security delete-certificate`。
+- 窗口位置和大小不记。nsh 0.4 的 `AppOptions` 仍只有初始 `size`，没有坐标。公开的窗口接口是 `set_title_bar`、`title_bar`、`close_window`。`window()` 只返回表面尺寸。`set_frame` 和 `desktop_command` 仍是 `pub(crate)`。`nsh-platform-macos` 重导出了 `objc2_app_kit`，应用拿不到 nsh 正在用的那扇 `NSWindow`；用 `NSApplication` 的窗口列表去猜，会和 nsh 自己的标题栏、全屏状态抢外框。多显示器 UUID、重叠面积，以及 Windows、Linux 的同一套恢复因此先不做。启动尺寸仍是 `app/src/main.rs` 里的 `(1200, 760)`。
 
 ## 代理行为
 
@@ -75,3 +75,43 @@ P0 到 P3 里点名的能力已经接上。下面是仍然接受的缺口，不�
 - **正则表达式（Regex）过滤与正则替换**。当前多域名 OR（`host:a.com|*.b.com`）与多 Path 前缀 OR（`path:/v1|/auth`）已覆盖绝大多数多服务联调场景；引入正则会带来转义负担与全量流量匹配开销，暂不引入。
 - **单条规则独立开关与拖拽排序**。规则框保持纯文本一行一条（支持 `#` 注释禁用某一行），并配有顶部「启用规则 / 启用断点」总开关与实时语法行号校验，暂不拆成复杂的表格行编辑器。
 - **跨 Path 前缀的笛卡尔积之外的独立规则绑定**。一条规则里的 `a.com|b.com/v1|/v2` 对列出的所有域名统一匹配列出的所有 Path 前缀；若不同域名需要完全不同的 Path 前缀，直接分写两行规则即可。
+- **独立的 `jsAppend://` 网页脚本注入协议语法**。类似 Whistle `baidu.com jsAppend://baidu.com/sdk.js` 的网页脚本注入需求，直接用现有 `replace baidu.com res </body> -> <script src="https://baidu.com/sdk.js"></script></body>`（或替换 `</head>`）即可覆盖，支持多域名/多 Path 前缀 OR；不单独引入 `jsAppend://` 语法，以免为了追加脚本而将所有分块编码（Chunked）响应强行缓冲，或误伤同域名下的 JSON/JS 等非 HTML 响应。
+
+## 待办与未完成事项整理
+
+### 一、已评估待实现的体验与工程增强
+
+以下事项已完成开发价值与方案评估，按优先级排列作为后续迭代待办：
+
+1. **开发与正式环境配置隔离**（高优先级）：
+   - 现状：开发模式（`make dev` / `cargo run`）与正式打包版本读写同一份 `config.toml` 和 `proxy-snapshot.toml`，共用默认端口 `8877`，开发调试容易覆盖正式版配置，且启动时 `restore_if_dirty()` 可能误将正在运行的正式版系统代理恢复关闭。
+   - 方案：`ca.crt` 与 `ca.key` 保持共用（避免重复安装信任根证书）；在 `cfg!(debug_assertions)` 或设置 `ZNIFF_DEV=1` 时，配置文件与代理快照分别读写 `config.dev.toml`（默认端口可设为 `8878`）与 `proxy-snapshot.dev.toml`。
+2. **列显示切换菜单顺序与表格列顺序一致**（高优先级）：
+   - 现状：表头从左到右实际顺序是 `方法、路径、状态、协议、间隔、耗时、主机、大小`，而列图标弹出菜单与表头右键菜单里的可切换项顺序是 `状态、协议、路径、间隔、耗时、主机、大小`（「路径」排在第三项）。
+   - 方案：将可切换列菜单调整为 `路径、状态、协议、间隔、耗时、主机、大小`，与表格实际列顺序完全对齐（「方法」固定常显）。
+3. **过滤与规则配置窗口随应用窗口自适应调整**（中高优先级）：
+   - 现状：顶栏「过滤」弹出层固定宽 `780px`、规则编辑器固定高 `105px`（约 5 行）、主窗口左栏拖拽上限固定 `1100px`。窗口拉大时规则编辑区偏局促，窗口缩小时左栏或弹出层可能超出可视区。
+   - 方案：结合 `window()` 实时尺寸动态计算——过滤弹出层宽度 `clamp(window_w - 48, 680, 1080)`，规则编辑器高度 `clamp(window_h - 460, 105, 360)`，左栏宽度上限受 `window_w - 340` 动态约束以始终保留右栏详情空间。
+4. **规则配置（`SavedProfile`）导出与导入**（中高优先级）：
+   - 现状：`saved_profiles` 保存在本机 `config.toml` 中，尚无界面入口单独导出或导入某套规则与过滤配置。
+   - 方案：在顶栏「过滤」弹出层底栏提供导出/导入入口——支持将当前或全部 `SavedProfile` 序列化为可读的 `.toml` 写出到数据目录 `exports/` 并复制到剪贴板；支持从剪贴板或拖拽 `.toml` 配置文件到窗口导入（同名忽略大小写覆盖，保持 16 条上限）。
+5. **列表 Path 列支持切换「仅展示 Path」或「完整 URL」**（中优先级）：
+   - 现状：列表「路径」列固定只渲染 `flow.path`（不含 scheme 与 host），需要看完整地址时需同时开启「主机」列或点击查看右栏详情。
+   - 方案：在列设置菜单底部增加 `仅路径 / 完整 URL`（`Path only / Full URL`）切换并记入 `config.toml`（默认仅路径）；切为完整 URL 时该列直接显示 `flow.url`（隧道与失败原因显示逻辑不变），悬停提示同步跟随。
+6. **列表 URL/路径与主机省略位置支持三种模式（开头 / 中间 / 结尾）**（中低优先级）：
+   - 现状：`path_cell` 与 `host_cell` 固定使用 `EllipsizeMode::Middle`（中间省略）。
+   - 方案：利用 `nsh_core::EllipsizeMode` 已有的 `Head`（开头 `...`）、`Middle`（中间 `...`）、`Tail`（结尾 `...`），在列设置菜单底部提供省略位置切换并记入 `config.toml`，默认保持 `Middle`。
+
+### 二、既有文档中尚未接上或受限的事项汇总
+
+除上述待实现增强外，现有代码与文档中保留的未完成项及平台限制汇总如下：
+
+1. **Windows / Linux 证书状态检测与卸载尚未接上**：`app/src/ca.rs` 中仅实现了安装（Windows `certutil -user -addstore Root`、Linux NSS `certutil -A`），`ca::remove` 在 Windows 与 Linux 上仍直接报错返回，`ca::is_installed` 在非 macOS 下固定返回 `false`。
+2. **窗口位置与尺寸记忆恢复未接入**：受限于 `nsh 0.4` 的 `AppOptions` 仅提供初始 `size`、未暴露窗口坐标及跨平台 `set_frame` 接口，暂不持久化窗口位置与大小，每次启动尺寸固定为 `(1200, 760)`。
+3. **已有规则行无独立表单回填编辑**：过滤面板右栏底部的 8 项分段标签用于快速追加新规则行，修改已有规则仍直接在上方带行号与语法校验的纯文本编辑器中编辑。
+4. **规则语法的空格限制**：规则文本按空白字符分词，因此 `map-local` 的本地文件路径不能包含空格，`replace` 的匹配原文不能包含空格（替换目标文本可以包含空格）。
+5. **无系统原生文件选择框**：HAR/HTML 导出固定写入数据目录 `exports/`，另存响应固定写入下载目录 `zniff/`，HAR 导入默认读取数据目录 `import.har` 或通过拖拽文件到窗口触发。
+6. **各平台系统代理能力边界**：
+   - Linux 非 GNOME 环境无统一系统代理设置接口，开启「系统代理」后仅启动监听并在状态栏提示手动指向 `127.0.0.1:端口`。
+   - Windows 仅修改当前用户的 WinINET 注册表项，不修改 WinHTTP。
+   - macOS 带密码认证的系统代理无法通过 `networksetup` 读回密码，停止抓包后密码项无法自动还原；`security find-certificate` 仅能确认证书存在于登录钥匙串，无法直接判定 SSL 信任策略是否已被用户勾选生效。
