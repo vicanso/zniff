@@ -16,7 +16,7 @@ P0 到 P3 里点名的能力已经接上。下面是仍然接受的缺口，不�
 - Windows 只改当前用户的 WinINET，不改 WinHTTP。
 - macOS `security add-trusted-cert` 可能要用户点确认。`security find-certificate` 只说明证书在登录钥匙串里，不保证 SSL 信任策略已经生效。
 - 带密码的系统代理：`networksetup` 读不回密码，停止后可能恢复不完整。
-- Windows、Linux 上「移除证书」和「证书已安装」状态检测还没接上（`ca::remove` 直接报错，`ca::is_installed` 在非 macOS 下返回 `false`）。macOS 用 `security find-certificate` 与 `security delete-certificate`。
+- 证书状态检测与移除：macOS 用 `security find-certificate` 与 `security delete-certificate`，Windows 用 `certutil -user -verifystore / -delstore Root`，Linux 用 NSS `certutil -d sql:$HOME/.pki/nssdb -L / -D`（仅针对 Chromium 系使用的 `~/.pki/nssdb`，不改系统级 `/etc/ssl/certs`）。移除时同时清理旧名 `Snoop CA`。
 - 窗口位置和大小不记。nsh 0.4 的 `AppOptions` 仍只有初始 `size`，没有坐标。公开的窗口接口是 `set_title_bar`、`title_bar`、`close_window`。`window()` 只返回表面尺寸。`set_frame` 和 `desktop_command` 仍是 `pub(crate)`。`nsh-platform-macos` 重导出了 `objc2_app_kit`，应用拿不到 nsh 正在用的那扇 `NSWindow`；用 `NSApplication` 的窗口列表去猜，会和 nsh 自己的标题栏、全屏状态抢外框。多显示器 UUID、重叠面积，以及 Windows、Linux 的同一套恢复因此先不做。启动尺寸仍是 `app/src/main.rs` 里的 `(1200, 760)`。
 
 ## 代理行为
@@ -101,7 +101,7 @@ P0 到 P3 里点名的能力已经接上。下面是仍然接受的缺口，不�
 
 除上述待实现增强外，现有代码与文档中保留的未完成项及平台限制汇总如下：
 
-1. **Windows / Linux 证书状态检测与卸载尚未接上**：`app/src/ca.rs` 中仅实现了安装（Windows `certutil -user -addstore Root`、Linux NSS `certutil -A`），`ca::remove` 在 Windows 与 Linux 上仍直接报错返回，`ca::is_installed` 在非 macOS 下固定返回 `false`。
+1. **Windows / Linux 证书状态检测与卸载**（已完成）：`app/src/ca.rs` 已接上 Windows `certutil -user -verifystore / -delstore Root` 与 Linux NSS `certutil -d sql:$HOME/.pki/nssdb -L / -D`（Linux 仅管理用户级 `~/.pki/nssdb`，不写入需要 root 权限的系统级 CA 目录）。
 2. **窗口位置与尺寸记忆恢复未接入**：受限于 `nsh 0.4` 的 `AppOptions` 仅提供初始 `size`、未暴露窗口坐标及跨平台 `set_frame` 接口，暂不持久化窗口位置与大小，每次启动尺寸固定为 `(1200, 760)`。
 3. **已有规则行无独立表单回填编辑**：过滤面板右栏底部的 8 项分段标签用于快速追加新规则行，修改已有规则仍直接在上方带行号与语法校验的纯文本编辑器中编辑。
 4. **规则语法的空格限制**：规则文本按空白字符分词，因此 `map-local` 的本地文件路径不能包含空格，`replace` 的匹配原文不能包含空格（替换目标文本可以包含空格）。

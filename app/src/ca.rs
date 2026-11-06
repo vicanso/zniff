@@ -19,7 +19,6 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 
 const CA_NAME: &str = "zniff CA";
 /// The previous product name. Still removed so an already-trusted root does not linger.
-#[cfg(target_os = "macos")]
 const LEGACY_CA_NAME: &str = "Snoop CA";
 
 pub struct Ca {
@@ -272,11 +271,11 @@ pub fn remove(ca: &Ca) -> Result<String> {
     }
     #[cfg(target_os = "windows")]
     {
-        anyhow::bail!("Windows 上移除证书尚未接上，见 docs/known-issues.md")
+        remove_windows()
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        anyhow::bail!("Linux 上移除 NSS 证书尚未接上，见 docs/known-issues.md")
+        remove_linux()
     }
 }
 
@@ -290,10 +289,49 @@ pub fn is_installed() -> bool {
             .map(|output| output.status.success())
             .unwrap_or(false)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     {
-        false
+        std::process::Command::new("certutil")
+            .args(windows_certutil_verify_args(CA_NAME))
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
     }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let db = linux_nss_db(&home);
+        std::process::Command::new("certutil")
+            .args(linux_certutil_list_args(&db, CA_NAME))
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    }
+}
+
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+fn windows_certutil_verify_args(name: &str) -> [&str; 4] {
+    ["-user", "-verifystore", "Root", name]
+}
+
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+fn windows_certutil_del_args(name: &str) -> [&str; 4] {
+    ["-user", "-delstore", "Root", name]
+}
+
+#[cfg_attr(not(any(all(unix, not(target_os = "macos")), test)), allow(dead_code))]
+fn linux_nss_db(home: &str) -> String {
+    format!("sql:{home}/.pki/nssdb")
+}
+
+#[cfg_attr(not(any(all(unix, not(target_os = "macos")), test)), allow(dead_code))]
+fn linux_certutil_list_args<'a>(db: &'a str, name: &'a str) -> [&'a str; 5] {
+    ["-d", db, "-L", "-n", name]
+}
+
+#[cfg_attr(not(any(all(unix, not(target_os = "macos")), test)), allow(dead_code))]
+fn linux_certutil_del_args<'a>(db: &'a str, name: &'a str) -> [&'a str; 5] {
+    ["-d", db, "-D", "-n", name]
 }
 
 #[cfg(target_os = "macos")]
@@ -351,10 +389,30 @@ fn install_windows(ca: &Ca) -> Result<String> {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn remove_windows() -> Result<String> {
+    let current = delete_windows_cert(CA_NAME)?;
+    let legacy = delete_windows_cert(LEGACY_CA_NAME)?;
+    if current || legacy {
+        Ok("已从当前用户的 Root 存储移除".into())
+    } else {
+        anyhow::bail!("当前用户的 Root 存储里没有 {CA_NAME}")
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn delete_windows_cert(name: &str) -> Result<bool> {
+    let status = std::process::Command::new("certutil")
+        .args(windows_certutil_del_args(name))
+        .status()
+        .with_context(|| format!("运行 certutil -delstore {name}"))?;
+    Ok(status.success())
+}
+
 #[cfg(all(unix, not(target_os = "macos")))]
 fn install_linux(ca: &Ca) -> Result<String> {
     let home = std::env::var("HOME").unwrap_or_default();
-    let db = format!("sql:{home}/.pki/nssdb");
+    let db = linux_nss_db(&home);
     let _ = std::process::Command::new("mkdir")
         .args(["-p", &format!("{home}/.pki/nssdb")])
         .status();
@@ -379,6 +437,28 @@ fn install_linux(ca: &Ca) -> Result<String> {
     }
 }
 
+#[cfg(all(unix, not(target_os = "macos")))]
+fn remove_linux() -> Result<String> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let db = linux_nss_db(&home);
+    let current = delete_linux_cert(&db, CA_NAME)?;
+    let legacy = delete_linux_cert(&db, LEGACY_CA_NAME)?;
+    if current || legacy {
+        Ok("已从 ~/.pki/nssdb 移除".into())
+    } else {
+        anyhow::bail!("~/.pki/nssdb 里没有 {CA_NAME}")
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn delete_linux_cert(db: &str, name: &str) -> Result<bool> {
+    let status = std::process::Command::new("certutil")
+        .args(linux_certutil_del_args(db, name))
+        .status()
+        .with_context(|| format!("运行 certutil（NSS）移除 {name}"))?;
+    Ok(status.success())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,5 +472,27 @@ mod tests {
         let config = ca.server_config("example.com", b"http/1.1").unwrap();
         assert_eq!(config.alpn_protocols, vec![b"http/1.1".to_vec()]);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn certutil_args_target_user_store_and_nss_db() {
+        assert_eq!(
+            windows_certutil_verify_args(CA_NAME),
+            ["-user", "-verifystore", "Root", "zniff CA"]
+        );
+        assert_eq!(
+            windows_certutil_del_args(LEGACY_CA_NAME),
+            ["-user", "-delstore", "Root", "Snoop CA"]
+        );
+        let db = linux_nss_db("/home/alice");
+        assert_eq!(db, "sql:/home/alice/.pki/nssdb");
+        assert_eq!(
+            linux_certutil_list_args(&db, CA_NAME),
+            ["-d", "sql:/home/alice/.pki/nssdb", "-L", "-n", "zniff CA"]
+        );
+        assert_eq!(
+            linux_certutil_del_args(&db, CA_NAME),
+            ["-d", "sql:/home/alice/.pki/nssdb", "-D", "-n", "zniff CA"]
+        );
     }
 }
