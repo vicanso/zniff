@@ -135,11 +135,13 @@ scenario_hex() {
 
 # 8. Content-Encoding decompression (gzip / brotli / deflate)
 scenario_encoding() {
-  run_curl "[encoding] Gzip compressed JSON" \
-    --compressed "https://httpbin.org/gzip"
-  run_curl "[encoding] Brotli compressed JSON" \
+  run_curl "[encoding] Gzip compressed JSON (httpbin.org/gzip)" \
+    -H "Accept-Encoding: gzip" "https://httpbin.org/gzip"
+  run_curl "[encoding] Gzip compressed JSON (postman-echo.com/gzip)" \
+    -H "Accept-Encoding: gzip" "https://postman-echo.com/gzip"
+  run_curl "[encoding] Brotli compressed JSON (httpbin.org/brotli)" \
     -H "Accept-Encoding: br" "https://httpbin.org/brotli"
-  run_curl "[encoding] Deflate compressed JSON" \
+  run_curl "[encoding] Deflate compressed JSON (httpbin.org/deflate)" \
     -H "Accept-Encoding: deflate" "https://httpbin.org/deflate"
 }
 
@@ -184,7 +186,7 @@ case "$GROUP" in
   cookie)   scenario_cookie ;;
   image)    scenario_image ;;
   hex)      scenario_hex ;;
-  encoding) scenario_encoding ;;
+  encoding|gzip) scenario_encoding ;;
   slow)     scenario_slow ;;
   status)   scenario_status ;;
   sse)      scenario_sse ;;
