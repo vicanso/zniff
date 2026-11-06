@@ -306,15 +306,51 @@ struct ListColumns {
     size: bool,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ListColumn {
+    Path,
     Status,
     Protocol,
-    Path,
     Gap,
     Elapsed,
     Host,
     Size,
+}
+
+impl ListColumn {
+    const ORDERED: [Self; 7] = [
+        Self::Path,
+        Self::Status,
+        Self::Protocol,
+        Self::Gap,
+        Self::Elapsed,
+        Self::Host,
+        Self::Size,
+    ];
+
+    fn key(self) -> &'static str {
+        match self {
+            Self::Path => "path",
+            Self::Status => "status",
+            Self::Protocol => "protocol",
+            Self::Gap => "gap",
+            Self::Elapsed => "elapsed",
+            Self::Host => "host",
+            Self::Size => "size",
+        }
+    }
+
+    fn labels(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Path => ("路径", "Path"),
+            Self::Status => ("状态", "Status"),
+            Self::Protocol => ("协议", "Protocol"),
+            Self::Gap => ("间隔", "Gap"),
+            Self::Elapsed => ("耗时", "Elapsed"),
+            Self::Host => ("主机", "Host"),
+            Self::Size => ("大小", "Size"),
+        }
+    }
 }
 
 impl ListColumns {
@@ -372,18 +408,12 @@ impl ListColumns {
 /// Widths are the last saved drag, not a live value: the table keeps a drag
 /// until this list changes, and a changed width here would fight the drag.
 fn flow_table_columns(shown: ListColumns, widths: &HashMap<String, u32>) -> Vec<DataTableColumn> {
-    let specs = [
-        ("method", true, true),
-        ("path", true, shown.path),
-        ("status", false, shown.status),
-        ("protocol", false, shown.protocol),
-        ("gap", false, shown.gap),
-        ("elapsed", false, shown.elapsed),
-        ("host", false, shown.host),
-        ("size", false, shown.size),
-    ];
-    specs
-        .into_iter()
+    std::iter::once(("method", true, true))
+        .chain(
+            ListColumn::ORDERED
+                .into_iter()
+                .map(|col| (col.key(), col == ListColumn::Path, shown.on(col))),
+        )
         .filter(|spec| spec.2)
         .map(|(key, fixed, _)| {
             let limit = config::column_width_limit(key).expect("known column");
@@ -3924,55 +3954,10 @@ fn column_picker_panel(columns: Signal<ListColumns>, controls: Arc<Controls>) ->
         .border_color(border_strong())
         .bg(bg_card())
         .shadow_md()
-        .child(column_toggle(
-            columns,
-            controls.clone(),
-            ListColumn::Status,
-            "状态",
-            "Status",
-        ))
-        .child(column_toggle(
-            columns,
-            controls.clone(),
-            ListColumn::Protocol,
-            "协议",
-            "Protocol",
-        ))
-        .child(column_toggle(
-            columns,
-            controls.clone(),
-            ListColumn::Path,
-            "路径",
-            "Path",
-        ))
-        .child(column_toggle(
-            columns,
-            controls.clone(),
-            ListColumn::Gap,
-            "间隔",
-            "Gap",
-        ))
-        .child(column_toggle(
-            columns,
-            controls.clone(),
-            ListColumn::Elapsed,
-            "耗时",
-            "Elapsed",
-        ))
-        .child(column_toggle(
-            columns,
-            controls.clone(),
-            ListColumn::Host,
-            "主机",
-            "Host",
-        ))
-        .child(column_toggle(
-            columns,
-            controls,
-            ListColumn::Size,
-            "大小",
-            "Size",
-        ))
+        .children(ListColumn::ORDERED.into_iter().map(move |column| {
+            let (zh, en) = column.labels();
+            column_toggle(columns, controls.clone(), column, zh, en)
+        }))
 }
 
 fn column_toggle(
@@ -9119,6 +9104,23 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
         assert_eq!(cols[0].key.as_ref(), "method");
         assert!(cols.iter().all(|column| column.key.as_ref() != "path"));
         assert_eq!(cols.iter().filter(|column| column.fixed).count(), 1);
+
+        let all_shown = super::ListColumns {
+            path: true,
+            status: true,
+            protocol: true,
+            gap: true,
+            elapsed: true,
+            host: true,
+            size: true,
+        };
+        let all_cols = super::flow_table_columns(all_shown, &widths);
+        let toggle_keys: Vec<&str> = super::ListColumn::ORDERED.iter().map(|c| c.key()).collect();
+        let table_keys: Vec<&str> = all_cols[1..]
+            .iter()
+            .map(|column| column.key.as_ref())
+            .collect();
+        assert_eq!(toggle_keys, table_keys);
     }
 
     #[test]
