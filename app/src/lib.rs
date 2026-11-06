@@ -6961,7 +6961,17 @@ fn list_path(path: &str, error: Option<&str>, failed: bool, lang: Lang) -> Strin
     if failed {
         localize_error(lang, error.unwrap_or(""))
     } else {
+        path.split('?').next().unwrap_or(path).to_string()
+    }
+}
+
+fn list_url(url: &str, path: &str, error: Option<&str>, failed: bool, lang: Lang) -> String {
+    if failed {
+        localize_error(lang, error.unwrap_or(""))
+    } else if url.is_empty() {
         path.to_string()
+    } else {
+        url.to_string()
     }
 }
 
@@ -6988,16 +6998,7 @@ fn row_lines(hub: &Hub, filter: &str, lang: Lang) -> Vec<RowLine> {
                         ),
                     host: flow.host.clone(),
                     path: list_path(&flow.path, flow.error.as_deref(), failed, lang),
-                    url: list_path(
-                        if flow.url.is_empty() {
-                            &flow.path
-                        } else {
-                            &flow.url
-                        },
-                        flow.error.as_deref(),
-                        failed,
-                        lang,
-                    ),
+                    url: list_url(&flow.url, &flow.path, flow.error.as_deref(), failed, lang),
                     protocol: flow.protocol.label_in(lang).to_string(),
                     size: format_bytes(flow.response_bytes as usize),
                     failed,
@@ -9785,6 +9786,24 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
         assert_eq!(
             super::list_path("/index", None, false, super::Lang::Zh),
             "/index"
+        );
+        assert_eq!(
+            super::list_path("/get?env=staging&ts=1", None, false, super::Lang::Zh),
+            "/get"
+        );
+        assert_eq!(
+            super::list_url(
+                "https://httpbin.org/get?env=staging&ts=1",
+                "/get?env=staging&ts=1",
+                None,
+                false,
+                super::Lang::Zh,
+            ),
+            "https://httpbin.org/get?env=staging&ts=1"
+        );
+        assert_eq!(
+            super::list_url("", "/get?env=staging&ts=1", None, false, super::Lang::Zh),
+            "/get?env=staging&ts=1"
         );
         assert_eq!(
             super::list_path("/", Some("证书被拒绝"), true, super::Lang::Zh),
