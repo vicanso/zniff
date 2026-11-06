@@ -6013,7 +6013,7 @@ fn port_field(port_text: Signal<String>, controls: Arc<Controls>) -> impl IntoEl
         .child(
             input()
                 .value(port_text)
-                .placeholder(present::DEFAULT_PORT.to_string())
+                .placeholder(config::default_listen_port(config::is_dev_mode()).to_string())
                 .placeholder_color(move || color(fg_muted()))
                 .w(px(72.0))
                 .h(px(22.0))
@@ -7380,11 +7380,11 @@ fn lock_ops(controls: &Controls) -> std::sync::MutexGuard<'_, ()> {
 }
 
 fn saved_config() -> config::Config {
-    config::load(&ca::data_dir())
+    config::load_mode(&ca::data_dir(), config::is_dev_mode())
 }
 
 fn save_config(change: impl FnOnce(&mut config::Config)) -> std::io::Result<()> {
-    config::update(&ca::data_dir(), change)
+    config::update_mode(&ca::data_dir(), config::is_dev_mode(), change)
 }
 
 fn load_use_system_proxy() -> bool {

@@ -40,7 +40,7 @@ help:
 # Debug build + launch. bacon keeps the console attached, so tracing and
 # panics land in the terminal (a release build detaches on Windows).
 dev:
-	bacon --project app run $(if $(ARGS),-- $(ARGS))
+	ZNIFF_DEV=1 bacon --project app run $(if $(ARGS),-- $(ARGS))
 
 debug:
 	RUST_LOG=debug $(MAKE) dev

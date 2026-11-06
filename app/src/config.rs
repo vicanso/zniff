@@ -14,6 +14,30 @@ use crate::i18n::{Lang, parse_pref};
 use crate::present::DEFAULT_PORT;
 
 const FILE_NAME: &str = "config.toml";
+const DEV_FILE_NAME: &str = "config.dev.toml";
+pub const DEV_DEFAULT_PORT: u16 = 8878;
+
+/// True in debug builds (outside `cargo test`) or when `ZNIFF_DEV` is enabled.
+/// Dev mode isolates `config.dev.toml` and `proxy-snapshot.dev.toml` while
+/// sharing `ca.crt` and `ca.key`.
+pub fn is_dev_mode() -> bool {
+    cfg!(all(debug_assertions, not(test))) || is_dev_env(std::env::var("ZNIFF_DEV").ok().as_deref())
+}
+
+pub fn is_dev_env(val: Option<&str>) -> bool {
+    val.is_some_and(|text| {
+        let trimmed = text.trim();
+        trimmed == "1" || trimmed.eq_ignore_ascii_case("true")
+    })
+}
+
+pub fn config_file_name(dev: bool) -> &'static str {
+    if dev { DEV_FILE_NAME } else { FILE_NAME }
+}
+
+pub fn default_listen_port(dev: bool) -> u16 {
+    if dev { DEV_DEFAULT_PORT } else { DEFAULT_PORT }
+}
 
 /// Left pane width when `config.toml` has no `list_width`.
 pub const LIST_WIDTH_DEFAULT: u32 = 560;
@@ -63,7 +87,7 @@ pub struct SavedProfile {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
-    #[serde(default = "default_port")]
+    #[serde(default)]
     pub listen_port: u16,
     #[serde(default)]
     pub listen_all: bool,
@@ -151,6 +175,15 @@ impl Default for Config {
             saved_rules: Vec::new(),
             saved_profiles: Vec::new(),
             column_widths: HashMap::new(),
+        }
+    }
+}
+
+impl Config {
+    pub fn default_for(dev: bool) -> Self {
+        Self {
+            listen_port: default_listen_port(dev),
+            ..Self::default()
         }
     }
 }
@@ -257,14 +290,26 @@ enum Read {
 
 /// Reads `config.toml`, or the old one-file-per-setting layout the first time.
 /// A broken file stays on disk and this returns the defaults.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn load(dir: &Path) -> Config {
+    load_mode(dir, false)
+}
+
+/// Reads `config.toml` (`dev == false`) or `config.dev.toml` (`dev == true`).
+/// Dev mode never touches `config.toml` or legacy single-setting files.
+pub fn load_mode(dir: &Path, dev: bool) -> Config {
     let _guard = lock();
-    match read_config(dir) {
+    match read_config(dir, dev) {
         Read::Ready(config) => *config,
-        Read::Broken(_) => Config::default(),
+        Read::Broken(_) => Config::default_for(dev),
+        Read::Missing if dev => {
+            let config = Config::default_for(true);
+            let _ = store_unlocked(dir, true, &config);
+            config
+        }
         Read::Missing => {
             let config = migrate_legacy(dir);
-            if store_unlocked(dir, &config).is_ok() {
+            if store_unlocked(dir, false, &config).is_ok() {
                 remove_legacy(dir);
             }
             config
@@ -274,25 +319,33 @@ pub fn load(dir: &Path) -> Config {
 
 /// Changes one or more fields and writes the whole file back.
 /// A broken `config.toml` is left untouched.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn update(dir: &Path, change: impl FnOnce(&mut Config)) -> Result<()> {
+    update_mode(dir, false, change)
+}
+
+pub fn update_mode(dir: &Path, dev: bool, change: impl FnOnce(&mut Config)) -> Result<()> {
     let _guard = lock();
-    let mut config = match read_config(dir) {
+    let mut config = match read_config(dir, dev) {
         Read::Ready(config) => *config,
+        Read::Missing if dev => Config::default_for(true),
         Read::Missing => migrate_legacy(dir),
         Read::Broken(err) => return Err(err),
     };
     change(&mut config);
-    config = normalize(config);
-    store_unlocked(dir, &config)?;
-    remove_legacy(dir);
+    config = normalize_for(config, dev);
+    store_unlocked(dir, dev, &config)?;
+    if !dev {
+        remove_legacy(dir);
+    }
     Ok(())
 }
 
-fn read_config(dir: &Path) -> Read {
-    let path = dir.join(FILE_NAME);
+fn read_config(dir: &Path, dev: bool) -> Read {
+    let path = dir.join(config_file_name(dev));
     match fs::read_to_string(&path) {
         Ok(text) => match toml::from_str::<Config>(&text) {
-            Ok(config) => Read::Ready(Box::new(normalize(config))),
+            Ok(config) => Read::Ready(Box::new(normalize_for(config, dev))),
             Err(err) => Read::Broken(std::io::Error::new(ErrorKind::InvalidData, err)),
         },
         Err(err) if err.kind() == ErrorKind::NotFound => Read::Missing,
@@ -338,9 +391,9 @@ pub fn language_name(lang: Option<Lang>) -> Option<String> {
     })
 }
 
-fn normalize(mut config: Config) -> Config {
+fn normalize_for(mut config: Config, dev: bool) -> Config {
     if config.listen_port == 0 {
-        config.listen_port = default_port();
+        config.listen_port = default_listen_port(dev);
     }
     config.language = language_name(config.language.as_deref().and_then(parse_pref));
     config.list_width = clamp_list_width(config.list_width);
@@ -487,10 +540,10 @@ fn remove_legacy(dir: &Path) {
     }
 }
 
-fn store_unlocked(dir: &Path, config: &Config) -> Result<()> {
+fn store_unlocked(dir: &Path, dev: bool, config: &Config) -> Result<()> {
     let text = toml::to_string_pretty(config)
         .map_err(|err| std::io::Error::new(ErrorKind::InvalidData, err))?;
-    write_atomic(&dir.join(FILE_NAME), &text)
+    write_atomic(&dir.join(config_file_name(dev)), &text)
 }
 
 fn write_atomic(path: &Path, text: &str) -> Result<()> {
@@ -771,5 +824,43 @@ mod tests {
         update(dir.path(), |config| config.capturing = false).unwrap();
         let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
         assert!(!text.contains("capturing"), "{text}");
+    }
+
+    #[test]
+    fn dev_mode_isolates_config_file_and_default_port() {
+        let dir = Scratch::new();
+        fs::write(
+            dir.path().join("config.toml"),
+            "listen_port = 8877\ncapturing = true\nrules = \"break prod.test /\"\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("listen-port"), "9000\n").unwrap();
+
+        let dev = load_mode(dir.path(), true);
+        assert_eq!(dev.listen_port, DEV_DEFAULT_PORT);
+        assert!(!dev.capturing);
+        assert!(dev.rules.is_empty());
+        assert!(dir.path().join("config.dev.toml").is_file());
+        assert!(dir.path().join("listen-port").is_file());
+
+        update_mode(dir.path(), true, |config| {
+            config.rules = "delay dev.test / 100ms".into();
+            config.listen_port = 0;
+        })
+        .unwrap();
+
+        let dev_again = load_mode(dir.path(), true);
+        assert_eq!(dev_again.listen_port, DEV_DEFAULT_PORT);
+        assert_eq!(dev_again.rules, "delay dev.test / 100ms");
+
+        let prod = load_mode(dir.path(), false);
+        assert_eq!(prod.listen_port, 8877);
+        assert!(prod.capturing);
+        assert_eq!(prod.rules, "break prod.test /");
+
+        assert!(is_dev_env(Some("1")));
+        assert!(is_dev_env(Some(" true ")));
+        assert!(!is_dev_env(Some("0")));
+        assert!(!is_dev_env(None));
     }
 }

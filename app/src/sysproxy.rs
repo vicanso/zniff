@@ -67,12 +67,17 @@ pub enum EnableOutcome {
     },
 }
 
-fn snapshot_path(dir: &Path) -> PathBuf {
-    dir.join("proxy-snapshot.toml")
+fn snapshot_path(dir: &Path, dev: bool) -> PathBuf {
+    dir.join(if dev {
+        "proxy-snapshot.dev.toml"
+    } else {
+        "proxy-snapshot.toml"
+    })
 }
 
 pub fn restore_if_dirty() -> Result<bool> {
-    let Some(snapshot) = read_snapshot_in(&data_dir())? else {
+    let dev = crate::config::is_dev_mode();
+    let Some(snapshot) = read_snapshot_in_mode(&data_dir(), dev)? else {
         return Ok(false);
     };
     if !snapshot.active {
@@ -86,7 +91,8 @@ pub fn restore_if_dirty() -> Result<bool> {
 }
 
 pub fn enable(port: u16) -> Result<EnableOutcome> {
-    if let Some(existing) = read_snapshot_in(&data_dir())?
+    let dev = crate::config::is_dev_mode();
+    if let Some(existing) = read_snapshot_in_mode(&data_dir(), dev)?
         && existing.active
     {
         apply_snoop(port, &existing)?;
@@ -169,36 +175,46 @@ fn apply_snoop(port: u16, snapshot: &Snapshot) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn read_snapshot_in(dir: &Path) -> Result<Option<Snapshot>> {
-    let toml_path = snapshot_path(dir);
+    read_snapshot_in_mode(dir, false)
+}
+
+fn read_snapshot_in_mode(dir: &Path, dev: bool) -> Result<Option<Snapshot>> {
+    let toml_path = snapshot_path(dir, dev);
     let json_path = dir.join("proxy-snapshot.json");
     if toml_path.is_file() {
         let text = fs::read_to_string(&toml_path)
             .with_context(|| format!("读取 {}", toml_path.display()))?;
         let snapshot: Snapshot =
             toml::from_str(&text).with_context(|| format!("解析 {}", toml_path.display()))?;
-        if json_path.is_file() {
+        if !dev && json_path.is_file() {
             let _ = fs::remove_file(&json_path);
         }
         return Ok(Some(snapshot));
     }
-    if !json_path.is_file() {
+    if dev || !json_path.is_file() {
         return Ok(None);
     }
     let snapshot: Snapshot = serde_json::from_slice(&fs::read(&json_path)?)
         .with_context(|| format!("解析 {}", json_path.display()))?;
-    write_snapshot_in(dir, &snapshot)?;
+    write_snapshot_in_mode(dir, false, &snapshot)?;
     let _ = fs::remove_file(&json_path);
     Ok(Some(snapshot))
 }
 
 fn write_snapshot(snapshot: &Snapshot) -> Result<()> {
-    write_snapshot_in(&data_dir(), snapshot)
+    write_snapshot_in_mode(&data_dir(), crate::config::is_dev_mode(), snapshot)
 }
 
+#[cfg(test)]
 fn write_snapshot_in(dir: &Path, snapshot: &Snapshot) -> Result<()> {
+    write_snapshot_in_mode(dir, false, snapshot)
+}
+
+fn write_snapshot_in_mode(dir: &Path, dev: bool, snapshot: &Snapshot) -> Result<()> {
     let text = toml::to_string_pretty(snapshot).context("编码系统代理快照")?;
-    let path = snapshot_path(dir);
+    let path = snapshot_path(dir, dev);
     write_atomic(&path, &text).with_context(|| format!("写入 {}", path.display()))?;
     Ok(())
 }
@@ -645,6 +661,39 @@ mod tests {
         idle.active = false;
         write_snapshot_in(&dir, &idle).unwrap();
         assert!(!read_snapshot_in(&dir).unwrap().expect("idle").active);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dev_snapshot_stays_separate_from_prod_snapshot() {
+        let dir = std::env::temp_dir().join(format!(
+            "zniff-dev-snapshot-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let prod = Snapshot {
+            active: true,
+            macos: Vec::new(),
+            windows: None,
+            gnome: None,
+        };
+        write_snapshot_in_mode(&dir, false, &prod).unwrap();
+        assert!(read_snapshot_in_mode(&dir, true).unwrap().is_none());
+
+        let dev = Snapshot {
+            active: false,
+            macos: Vec::new(),
+            windows: None,
+            gnome: None,
+        };
+        write_snapshot_in_mode(&dir, true, &dev).unwrap();
+        assert!(dir.join("proxy-snapshot.dev.toml").is_file());
+        assert!(read_snapshot_in_mode(&dir, false).unwrap().unwrap().active);
+        assert!(!read_snapshot_in_mode(&dir, true).unwrap().unwrap().active);
         let _ = fs::remove_dir_all(&dir);
     }
 }

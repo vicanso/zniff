@@ -15,7 +15,7 @@
 - `app/src/client_hello.rs`、`app/src/decompress.rs`：ClientHello 和 `Content-Encoding`。
 - `app/src/bypass.rs`、`app/src/rules.rs`、`app/src/har.rs`、`app/src/share.rs`、`app/src/present.rs`、`app/src/ws.rs`：直通名单、Map/断点、HAR、HTML 快照与实时分享、展示格式、WebSocket 帧。
 - `app/src/i18n.rs`、`app/src/icon.rs`：界面语言和单色描边图标。
-- `app/src/config.rs`：用户配置，数据目录里的一份 `config.toml`。
+- `app/src/config.rs`：用户配置，正式版读写数据目录里的 `config.toml`，开发模式（`debug_assertions` 或 `ZNIFF_DEV=1`）读写 `config.dev.toml`（默认端口 `8878`）与 `proxy-snapshot.dev.toml`，根证书 `ca.crt`/`ca.key` 共用。
 - `docs/known-issues.md`：已经接受的缺口。新的缺口补在这里，不要为了绕开它停掉当前开发。
 - 依赖 nsh 0.4。edition 是 2024，`gen` 是保留字。原语从 `nsh_core::prelude` 引入，不再使用 `nsh_core::ui`。窗口位置和大小不写入配置：`AppOptions` 只有初始 `size`，公开的窗口接口是 `set_title_bar`、`title_bar`、`close_window`。启动尺寸仍是 `app/src/main.rs` 里的 `(1200, 760)`。
 - 写组件之前先看 [nsh elements](https://nsh.dev/elements/) 有没有现成的。原语用 `nsh_core::prelude`，基础组件用 `nsh_base`。
