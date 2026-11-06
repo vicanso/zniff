@@ -288,6 +288,7 @@ struct RowLine {
     elapsed_slow: bool,
     host: String,
     path: String,
+    url: String,
     protocol: String,
     size: String,
     failed: bool,
@@ -304,6 +305,8 @@ struct ListColumns {
     elapsed: bool,
     host: bool,
     size: bool,
+    full_url: bool,
+    ellipsize: config::ListEllipsize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -363,6 +366,8 @@ impl ListColumns {
             elapsed: config.show_elapsed,
             host: config.show_host,
             size: config.show_size,
+            full_url: config.show_full_url,
+            ellipsize: config.ellipsize,
         }
     }
 
@@ -392,6 +397,22 @@ impl ListColumns {
         next
     }
 
+    fn with_full_url(self, full_url: bool) -> Self {
+        Self { full_url, ..self }
+    }
+
+    fn with_ellipsize(self, ellipsize: config::ListEllipsize) -> Self {
+        Self { ellipsize, ..self }
+    }
+
+    fn ellipsize_mode(self) -> EllipsizeMode {
+        match self.ellipsize {
+            config::ListEllipsize::Head => EllipsizeMode::Head,
+            config::ListEllipsize::Middle => EllipsizeMode::Middle,
+            config::ListEllipsize::Tail => EllipsizeMode::Tail,
+        }
+    }
+
     fn write(self, config: &mut config::Config) {
         config.show_status = self.status;
         config.show_protocol = self.protocol;
@@ -400,6 +421,8 @@ impl ListColumns {
         config.show_elapsed = self.elapsed;
         config.show_host = self.host;
         config.show_size = self.size;
+        config.show_full_url = self.full_url;
+        config.ellipsize = self.ellipsize;
     }
 }
 
@@ -434,10 +457,16 @@ fn flow_table_columns(shown: ListColumns, widths: &HashMap<String, u32>) -> Vec<
 
 /// Column titles follow the same `tr` pair as the rest of the window.
 /// Called while the `.columns` prop runs, so a language change rebuilds them.
-fn flow_column_title(key: &str) -> String {
+fn flow_column_title(key: &str, full_url: bool) -> String {
     match key {
         "method" => tr("方法", "Method")(),
-        "path" => tr("路径", "Path")(),
+        "path" => {
+            if full_url {
+                "URL".to_string()
+            } else {
+                tr("路径", "Path")()
+            }
+        }
         "status" => tr("状态", "Status")(),
         "protocol" => tr("协议", "Protocol")(),
         "gap" => tr("间隔", "Gap")(),
@@ -3769,7 +3798,7 @@ fn flow_table(
                     let mut built = flow_table_columns(shown, &widths);
                     for column in &mut built {
                         let key = column.key.to_string();
-                        column.title = Some(flow_column_title(&key).into());
+                        column.title = Some(flow_column_title(&key, shown.full_url).into());
                     }
                     built
                 })
@@ -3798,6 +3827,7 @@ fn flow_table(
                         rows_for_cells,
                         selected_for_cells,
                         baseline_for_cells,
+                        columns,
                         hover,
                         cell,
                     )
@@ -3945,8 +3975,9 @@ fn column_picker_trigger() -> impl IntoElement {
 }
 
 fn column_picker_panel(columns: Signal<ListColumns>, controls: Arc<Controls>) -> impl IntoElement {
+    let toggle_controls = controls.clone();
     view()
-        .w(px(168.0))
+        .w(px(176.0))
         .p_1()
         .gap_0p5()
         .rounded(px(10.0))
@@ -3956,8 +3987,105 @@ fn column_picker_panel(columns: Signal<ListColumns>, controls: Arc<Controls>) ->
         .shadow_md()
         .children(ListColumn::ORDERED.into_iter().map(move |column| {
             let (zh, en) = column.labels();
-            column_toggle(columns, controls.clone(), column, zh, en)
+            column_toggle(columns, toggle_controls.clone(), column, zh, en)
         }))
+        .child(menu_rule())
+        .child(column_full_url_choice(
+            columns,
+            controls.clone(),
+            false,
+            "仅展示 Path",
+            "Path only",
+        ))
+        .child(column_full_url_choice(
+            columns,
+            controls.clone(),
+            true,
+            "完整 URL",
+            "Full URL",
+        ))
+        .child(menu_rule())
+        .child(column_ellipsize_choice(
+            columns,
+            controls.clone(),
+            config::ListEllipsize::Head,
+            "开头省略",
+            "Ellipsize head",
+        ))
+        .child(column_ellipsize_choice(
+            columns,
+            controls.clone(),
+            config::ListEllipsize::Middle,
+            "中间省略",
+            "Ellipsize middle",
+        ))
+        .child(column_ellipsize_choice(
+            columns,
+            controls,
+            config::ListEllipsize::Tail,
+            "结尾省略",
+            "Ellipsize tail",
+        ))
+}
+
+fn column_full_url_choice(
+    columns: Signal<ListColumns>,
+    controls: Arc<Controls>,
+    full_url: bool,
+    zh: &'static str,
+    en: &'static str,
+) -> impl IntoElement {
+    let marked = columns;
+    marked_action(
+        move || marked.get().full_url == full_url,
+        tr(zh, en),
+        move || {
+            let next = columns.get().with_full_url(full_url);
+            if next == columns.get() {
+                return;
+            }
+            columns.set(next);
+            if let Err(err) = save_config(|config| next.write(config)) {
+                set_status(
+                    &controls,
+                    StatusMsg::PrefUnsaved {
+                        name: PrefName::List,
+                        err: err.to_string(),
+                    },
+                );
+            }
+        },
+    )
+}
+
+fn column_ellipsize_choice(
+    columns: Signal<ListColumns>,
+    controls: Arc<Controls>,
+    ellipsize: config::ListEllipsize,
+    zh: &'static str,
+    en: &'static str,
+) -> impl IntoElement {
+    let marked = columns;
+    marked_action(
+        move || marked.get().ellipsize == ellipsize,
+        tr(zh, en),
+        move || {
+            let next = columns.get().with_ellipsize(ellipsize);
+            if next == columns.get() {
+                return;
+            }
+            columns.set(next);
+            if let Err(err) = save_config(|config| next.write(config)) {
+                set_status(
+                    &controls,
+                    StatusMsg::PrefUnsaved {
+                        name: PrefName::List,
+                        err: err.to_string(),
+                    },
+                );
+            }
+        },
+    )
 }
 
 fn column_toggle(
@@ -4154,18 +4282,19 @@ fn flow_cell(
     rows: Signal<Vec<RowLine>>,
     selected: Signal<Option<u64>>,
     baseline: Signal<Option<u64>>,
+    columns: Signal<ListColumns>,
     hover: CellHover,
     cell: &DataTableCell,
 ) -> AnyElement {
     let index = cell.row as usize;
     match cell.key.as_ref() {
         "method" => method_cell(rows, selected, baseline, index).into_element(),
-        "path" => path_cell(rows, hover, index).into_element(),
+        "path" => path_cell(rows, columns, hover, index).into_element(),
         "status" => status_text(rows, index).into_element(),
         "protocol" => protocol_cell(rows, index).into_element(),
         "gap" => time_cell(rows, hover, index).into_element(),
         "elapsed" => elapsed_cell(rows, index).into_element(),
-        "host" => host_cell(rows, hover, index).into_element(),
+        "host" => host_cell(rows, columns, hover, index).into_element(),
         "size" => size_cell(rows, index).into_element(),
         _ => view().into_element(),
     }
@@ -4336,7 +4465,12 @@ fn elapsed_cell(rows: Signal<Vec<RowLine>>, index: usize) -> Text {
     })
 }
 
-fn host_cell(rows: Signal<Vec<RowLine>>, hover: CellHover, index: usize) -> impl IntoElement {
+fn host_cell(
+    rows: Signal<Vec<RowLine>>,
+    columns: Signal<ListColumns>,
+    hover: CellHover,
+    index: usize,
+) -> impl IntoElement {
     let tip_rows = rows;
     view()
         .w_full()
@@ -4367,7 +4501,7 @@ fn host_cell(rows: Signal<Vec<RowLine>>, hover: CellHover, index: usize) -> impl
             .flex_1()
             .min_w(px(0.0))
             .number_of_lines(1)
-            .text_overflow(EllipsizeMode::Middle)
+            .text_overflow(move || columns.get().ellipsize_mode())
             .text_size(px(12.5))
             .font_weight(FontWeight::MEDIUM)
             .text_color(fg_primary()),
@@ -4404,7 +4538,12 @@ fn size_cell(rows: Signal<Vec<RowLine>>, index: usize) -> Text {
     .text_color(fg_muted())
 }
 
-fn path_cell(rows: Signal<Vec<RowLine>>, hover: CellHover, index: usize) -> impl IntoElement {
+fn path_cell(
+    rows: Signal<Vec<RowLine>>,
+    columns: Signal<ListColumns>,
+    hover: CellHover,
+    index: usize,
+) -> impl IntoElement {
     let tip_rows = rows;
     view()
         .w_full()
@@ -4417,16 +4556,17 @@ fn path_cell(rows: Signal<Vec<RowLine>>, hover: CellHover, index: usize) -> impl
         .items_center()
         .child(
             mono(move || {
+                let full_url = columns.get().full_url;
                 rows.with(|rows| {
                     rows.get(index)
-                        .map(|row| row.path.clone())
+                        .map(|row| row_target_text(row, full_url).to_string())
                         .unwrap_or_default()
                 })
             })
             .w_full()
             .min_w(px(0.0))
             .number_of_lines(1)
-            .text_overflow(EllipsizeMode::Middle)
+            .text_overflow(move || columns.get().ellipsize_mode())
             .text_size(px(12.0))
             .text_color(move || {
                 if rows.with(|rows| rows.get(index).is_some_and(|row| row.failed)) {
@@ -4437,14 +4577,23 @@ fn path_cell(rows: Signal<Vec<RowLine>>, hover: CellHover, index: usize) -> impl
             }),
         )
         .on_mouse_move(move |event: &MouseEvent| {
+            let full_url = columns.get().full_url;
             let path = tip_rows.with(|rows| {
                 rows.get(index)
-                    .map(|row| row.path.clone())
+                    .map(|row| row_target_text(row, full_url).to_string())
                     .unwrap_or_default()
             });
             show_cell_hover(hover, event, path);
         })
         .on_mouse_leave(move |_: &MouseEvent| hover.text.set(None))
+}
+
+fn row_target_text(row: &RowLine, full_url: bool) -> &str {
+    if full_url && !row.url.is_empty() {
+        &row.url
+    } else {
+        &row.path
+    }
 }
 
 fn label_tip(zh: &'static str, en: &'static str) -> impl IntoTooltip {
@@ -6651,6 +6800,16 @@ fn row_lines(hub: &Hub, filter: &str, lang: Lang) -> Vec<RowLine> {
                         ),
                     host: flow.host.clone(),
                     path: list_path(&flow.path, flow.error.as_deref(), failed, lang),
+                    url: list_path(
+                        if flow.url.is_empty() {
+                            &flow.path
+                        } else {
+                            &flow.url
+                        },
+                        flow.error.as_deref(),
+                        failed,
+                        lang,
+                    ),
                     protocol: flow.protocol.label().to_string(),
                     size: format_bytes(flow.response_bytes as usize),
                     failed,
@@ -9050,12 +9209,44 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
         assert!(!config.show_protocol && !config.show_size);
         let columns = super::ListColumns::from_config(&config)
             .toggle(super::ListColumn::Protocol)
-            .toggle(super::ListColumn::Host);
+            .toggle(super::ListColumn::Host)
+            .with_full_url(true)
+            .with_ellipsize(crate::config::ListEllipsize::Tail);
         columns.write(&mut config);
         assert!(config.show_protocol);
         assert!(!config.show_host);
         assert!(config.show_path);
+        assert!(config.show_full_url);
+        assert_eq!(config.ellipsize, crate::config::ListEllipsize::Tail);
         assert_eq!(super::ListColumns::from_config(&config), columns);
+        assert_eq!(columns.ellipsize_mode(), super::EllipsizeMode::Tail);
+        let row = super::RowLine {
+            id: 1,
+            method: "GET".to_string(),
+            status: Some(200),
+            time: "+0 ms".to_string(),
+            clock: "12:00:00.000".to_string(),
+            elapsed: "10 ms".to_string(),
+            elapsed_slow: false,
+            host: "api.example.com".to_string(),
+            path: "/v1/users".to_string(),
+            url: "https://api.example.com/v1/users".to_string(),
+            protocol: "HTTP/2".to_string(),
+            size: "128 B".to_string(),
+            failed: false,
+            slow: false,
+            pinned: false,
+        };
+        assert_eq!(super::row_target_text(&row, false), "/v1/users");
+        assert_eq!(
+            super::row_target_text(&row, true),
+            "https://api.example.com/v1/users"
+        );
+        let empty_url_row = super::RowLine {
+            url: String::new(),
+            ..row
+        };
+        assert_eq!(super::row_target_text(&empty_url_row, true), "/v1/users");
         assert_eq!(
             super::clamp_list_px(10.0),
             crate::config::LIST_WIDTH_MIN as f32
@@ -9081,6 +9272,8 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
             elapsed: true,
             host: false,
             size: false,
+            full_url: false,
+            ellipsize: crate::config::ListEllipsize::Middle,
         };
         let mut widths = std::collections::HashMap::new();
         widths.insert("path".to_string(), 400);
@@ -9113,6 +9306,8 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
             elapsed: true,
             host: true,
             size: true,
+            full_url: false,
+            ellipsize: crate::config::ListEllipsize::Middle,
         };
         let all_cols = super::flow_table_columns(all_shown, &widths);
         let toggle_keys: Vec<&str> = super::ListColumn::ORDERED.iter().map(|c| c.key()).collect();

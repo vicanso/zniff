@@ -58,6 +58,55 @@ const LEGACY: &[&str] = &[
     "upstream-proxy",
 ];
 
+/// How long paths/URLs and hosts are truncated in the flow list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ListEllipsize {
+    Head,
+    #[default]
+    Middle,
+    Tail,
+}
+
+impl ListEllipsize {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Head => "head",
+            Self::Middle => "middle",
+            Self::Tail => "tail",
+        }
+    }
+
+    pub fn parse(text: &str) -> Self {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "head" | "start" => Self::Head,
+            "tail" | "end" => Self::Tail,
+            _ => Self::Middle,
+        }
+    }
+
+    pub fn is_default(&self) -> bool {
+        *self == Self::Middle
+    }
+}
+
+impl Serialize for ListEllipsize {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ListEllipsize {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        Ok(Self::parse(&text))
+    }
+}
+
 /// One named set of proxy rules saved by the user.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedRuleSet {
@@ -118,6 +167,12 @@ pub struct Config {
     pub show_host: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub show_size: bool,
+    /// False shows only `flow.path` in the Path column; true shows `flow.url`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub show_full_url: bool,
+    /// Where to ellipsize overflowing Path/URL and Host cells (`head`, `middle`, `tail`).
+    #[serde(default, skip_serializing_if = "ListEllipsize::is_default")]
+    pub ellipsize: ListEllipsize,
     #[serde(
         default = "default_list_width",
         skip_serializing_if = "is_default_list_width"
@@ -166,6 +221,8 @@ impl Default for Config {
             show_elapsed: true,
             show_host: true,
             show_size: false,
+            show_full_url: false,
+            ellipsize: ListEllipsize::Middle,
             list_width: default_list_width(),
             default_pretty: true,
             show_tunnel_failures: false,
@@ -862,5 +919,40 @@ mod tests {
         assert!(is_dev_env(Some(" true ")));
         assert!(!is_dev_env(Some("0")));
         assert!(!is_dev_env(None));
+    }
+
+    #[test]
+    fn full_url_and_ellipsize_persist_and_default_cleanly() {
+        let dir = Scratch::new();
+        let initial = load(dir.path());
+        assert!(!initial.show_full_url);
+        assert_eq!(initial.ellipsize, ListEllipsize::Middle);
+        let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(!text.contains("show_full_url"), "{text}");
+        assert!(!text.contains("ellipsize"), "{text}");
+
+        update(dir.path(), |config| {
+            config.show_full_url = true;
+            config.ellipsize = ListEllipsize::Head;
+        })
+        .unwrap();
+        let updated = load(dir.path());
+        assert!(updated.show_full_url);
+        assert_eq!(updated.ellipsize, ListEllipsize::Head);
+        let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(text.contains("show_full_url = true"), "{text}");
+        assert!(text.contains("ellipsize = \"head\""), "{text}");
+
+        fs::write(
+            dir.path().join("config.toml"),
+            "ellipsize = \"tail\"\nshow_full_url = false\n",
+        )
+        .unwrap();
+        let tail = load(dir.path());
+        assert!(!tail.show_full_url);
+        assert_eq!(tail.ellipsize, ListEllipsize::Tail);
+
+        fs::write(dir.path().join("config.toml"), "ellipsize = \"invalid\"\n").unwrap();
+        assert_eq!(load(dir.path()).ellipsize, ListEllipsize::Middle);
     }
 }
