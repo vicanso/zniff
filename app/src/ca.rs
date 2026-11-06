@@ -291,11 +291,7 @@ pub fn is_installed() -> bool {
     }
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("certutil")
-            .args(windows_certutil_verify_args(CA_NAME))
-            .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false)
+        windows_has_cert(CA_NAME)
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
@@ -307,6 +303,15 @@ pub fn is_installed() -> bool {
             .map(|output| output.status.success())
             .unwrap_or(false)
     }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_has_cert(name: &str) -> bool {
+    std::process::Command::new("certutil")
+        .args(windows_certutil_verify_args(name))
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
 }
 
 #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
@@ -364,11 +369,11 @@ fn login_keychain() -> String {
 
 #[cfg(target_os = "macos")]
 fn delete_named_cert(name: &str) -> Result<bool> {
-    let status = std::process::Command::new("security")
+    let output = std::process::Command::new("security")
         .args(["delete-certificate", "-c", name, &login_keychain()])
-        .status()
+        .output()
         .with_context(|| format!("运行 security delete-certificate {name}"))?;
-    Ok(status.success())
+    Ok(output.status.success())
 }
 
 #[cfg(target_os = "windows")]
@@ -402,11 +407,14 @@ fn remove_windows() -> Result<String> {
 
 #[cfg(target_os = "windows")]
 fn delete_windows_cert(name: &str) -> Result<bool> {
-    let status = std::process::Command::new("certutil")
+    if !windows_has_cert(name) {
+        return Ok(false);
+    }
+    let output = std::process::Command::new("certutil")
         .args(windows_certutil_del_args(name))
-        .status()
+        .output()
         .with_context(|| format!("运行 certutil -delstore {name}"))?;
-    Ok(status.success())
+    Ok(output.status.success())
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -452,11 +460,11 @@ fn remove_linux() -> Result<String> {
 
 #[cfg(all(unix, not(target_os = "macos")))]
 fn delete_linux_cert(db: &str, name: &str) -> Result<bool> {
-    let status = std::process::Command::new("certutil")
+    let output = std::process::Command::new("certutil")
         .args(linux_certutil_del_args(db, name))
-        .status()
+        .output()
         .with_context(|| format!("运行 certutil（NSS）移除 {name}"))?;
-    Ok(status.success())
+    Ok(output.status.success())
 }
 
 #[cfg(test)]

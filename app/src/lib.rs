@@ -65,6 +65,19 @@ struct Controls {
 }
 
 #[derive(Clone, Copy)]
+struct ProfileSignals {
+    saved: Signal<Vec<config::SavedProfile>>,
+    name: Signal<String>,
+    filter: Signal<String>,
+    bypass: Signal<String>,
+    rules: Signal<String>,
+    upstream: Signal<String>,
+    rules_on: Signal<bool>,
+    breaks_on: Signal<bool>,
+    show_tunnels: Signal<bool>,
+}
+
+#[derive(Clone, Copy)]
 struct Compose {
     composing: Signal<bool>,
     /// True when the open editor is the paused response, not the request.
@@ -627,6 +640,17 @@ pub fn App() -> impl IntoElement {
     let bypass_text = signal(saved.bypass_hosts);
     let rules_text = signal(saved.rules);
     let upstream_text = signal(saved.upstream_proxy);
+    let profile_signals = ProfileSignals {
+        saved: saved_profiles,
+        name: signal(String::new()),
+        filter,
+        bypass: bypass_text,
+        rules: rules_text,
+        upstream: upstream_text,
+        rules_on: signal(true),
+        breaks_on: signal(true),
+        show_tunnels: signal(saved.show_tunnel_failures),
+    };
     let import_path = signal(String::new());
     let lan_url = signal(String::new());
     let lan_choice = signal(String::new());
@@ -816,16 +840,7 @@ pub fn App() -> impl IntoElement {
         .bg(bg_canvas())
         .text_color(fg_primary())
         .on_file_drop(move |event: &FileDropEvent| {
-            import_dropped(
-                &controls_drop,
-                event,
-                ui_lang(drop_langs),
-                saved_profiles,
-                filter,
-                bypass_text,
-                rules_text,
-                upstream_text,
-            );
+            import_dropped(&controls_drop, event, ui_lang(drop_langs), profile_signals);
         })
         .child(toolbar(
             status,
@@ -853,10 +868,7 @@ pub fn App() -> impl IntoElement {
             filter,
             shown.pretty,
             share_id,
-            saved_profiles,
-            bypass_text,
-            rules_text,
-            upstream_text,
+            profile_signals,
         ))
         .child(when(
             move || paused.get().is_some(),
@@ -916,10 +928,7 @@ fn toolbar(
     filter: Signal<String>,
     pretty: Signal<bool>,
     share_id: Signal<String>,
-    saved_profiles: Signal<Vec<config::SavedProfile>>,
-    bypass_text: Signal<String>,
-    rules_text: Signal<String>,
-    upstream_text: Signal<String>,
+    profiles: ProfileSignals,
 ) -> impl IntoElement {
     let install = Rc::new(install);
     let clear = Rc::new(clear);
@@ -1008,14 +1017,7 @@ fn toolbar(
             let clear = Rc::clone(&clear);
             move || clear()
         }))
-        .child(saved_filter_menu(
-            filter,
-            saved_profiles,
-            bypass_text,
-            rules_text,
-            upstream_text,
-            filter_controls,
-        ))
+        .child(saved_filter_menu(profiles, filter_controls))
         .child(toolbar_menu(
             ca_installed,
             use_system_proxy,
@@ -1075,17 +1077,14 @@ fn toolbar_text_button(
 
 const SAVED_RULE_CAP: usize = 16;
 
-fn saved_filter_menu(
-    filter: Signal<String>,
-    saved: Signal<Vec<config::SavedProfile>>,
-    bypass_text: Signal<String>,
-    rules_text: Signal<String>,
-    upstream_text: Signal<String>,
-    controls: Arc<Controls>,
-) -> impl IntoElement {
-    let rules_on = signal(true);
-    let breaks_on = signal(true);
-    let show_tunnels = signal(saved_config().show_tunnel_failures);
+fn saved_filter_menu(profiles: ProfileSignals, controls: Arc<Controls>) -> impl IntoElement {
+    let filter = profiles.filter;
+    let saved = profiles.saved;
+    let bypass_text = profiles.bypass;
+    let rules_text = profiles.rules;
+    let upstream_text = profiles.upstream;
+    let rules_on = profiles.rules_on;
+    let breaks_on = profiles.breaks_on;
     let active_rules_count = move || crate::rules::parse_rules(&rules_text.get()).len();
     popover()
         .placement(Placement::Bottom)
@@ -1194,33 +1193,21 @@ fn saved_filter_menu(
                     },
                 )),
         )
-        .child(saved_filter_panel(
-            filter,
-            saved,
-            bypass_text,
-            rules_text,
-            upstream_text,
-            controls,
-            rules_on,
-            breaks_on,
-            show_tunnels,
-        ))
+        .child(saved_filter_panel(profiles, controls))
 }
 
-fn saved_filter_panel(
-    filter: Signal<String>,
-    saved: Signal<Vec<config::SavedProfile>>,
-    bypass_text: Signal<String>,
-    rules_text: Signal<String>,
-    upstream_text: Signal<String>,
-    controls: Arc<Controls>,
-    rules_on: Signal<bool>,
-    breaks_on: Signal<bool>,
-    show_tunnels: Signal<bool>,
-) -> impl IntoElement {
+fn saved_filter_panel(profiles: ProfileSignals, controls: Arc<Controls>) -> impl IntoElement {
+    let filter = profiles.filter;
+    let saved = profiles.saved;
+    let bypass_text = profiles.bypass;
+    let rules_text = profiles.rules;
+    let upstream_text = profiles.upstream;
+    let rules_on = profiles.rules_on;
+    let breaks_on = profiles.breaks_on;
+    let show_tunnels = profiles.show_tunnels;
+    let rule_name = profiles.name;
     let field = filter;
     let reset_filter = filter;
-    let rule_name = signal(String::new());
     let host_field = signal(extract_host_or(&filter.get_untracked()));
     let path_field = signal(extract_path_or(&filter.get_untracked()));
     let exclude_field = signal(extract_exclude_or(&filter.get_untracked()));
@@ -2126,12 +2113,21 @@ fn profile_dock(
                         ))
                         .on_press(move || {
                             dropdown_open.set(false);
+                            let rules_now = draft_rules(
+                                &rules_text.get(),
+                                &draft_host.get(),
+                                &draft_path.get(),
+                                &draft_from.get(),
+                                &draft_to.get(),
+                                draft_response.get(),
+                                draft_kind.get(),
+                            );
                             let profiles = profiles_for_export(
                                 &saved.get(),
                                 &rule_name.get(),
                                 &filter.get(),
                                 &bypass_text.get(),
-                                &rules_text.get(),
+                                &rules_now,
                                 &upstream_text.get(),
                                 rules_on.get(),
                                 breaks_on.get(),
@@ -2854,7 +2850,10 @@ fn column_splitter(width: Signal<f32>, controls: Arc<Controls>) -> impl IntoElem
             ));
         })
         .on_responder_release(move |_event: &ResponderEvent| {
-            store_list_width(width_release.get(), &controls_release);
+            store_list_width(
+                clamp_list_px_for_window(width_release.get(), window().width.0),
+                &controls_release,
+            );
         })
         .on_responder_terminate(move |_event: &ResponderEvent| {
             store_list_width(width_cancel.get(), &controls_cancel);
@@ -8669,21 +8668,22 @@ fn profiles_for_export(
     breaks_enabled: bool,
     show_tunnel_failures: bool,
 ) -> Vec<config::SavedProfile> {
-    if !name.trim().is_empty() || saved.is_empty() {
-        push_saved_profile(
-            saved,
-            name,
-            filter,
-            bypass,
-            rules,
-            upstream,
-            rules_enabled,
-            breaks_enabled,
-            show_tunnel_failures,
-        )
+    let effective_name = if !name.trim().is_empty() {
+        name.trim().to_string()
     } else {
-        saved.to_vec()
-    }
+        matched_saved_profile(saved, filter, bypass, rules, upstream).unwrap_or_default()
+    };
+    push_saved_profile(
+        saved,
+        &effective_name,
+        filter,
+        bypass,
+        rules,
+        upstream,
+        rules_enabled,
+        breaks_enabled,
+        show_tunnel_failures,
+    )
 }
 
 fn export_profiles_file(controls: &Controls, profiles: &[config::SavedProfile]) {
@@ -8725,7 +8725,8 @@ fn parse_profiles_from_text_or_path(
     if trimmed.is_empty() {
         return Err("empty clipboard".to_string());
     }
-    let candidate = std::path::Path::new(trimmed);
+    let candidate_str = dropped_toml_path(trimmed).unwrap_or_else(|| trimmed.to_string());
+    let candidate = std::path::Path::new(&candidate_str);
     if candidate
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("toml"))
@@ -8737,15 +8738,7 @@ fn parse_profiles_from_text_or_path(
     config::parse_profiles_toml(trimmed)
 }
 
-fn import_profiles_file(
-    controls: &Controls,
-    path_text: &str,
-    saved: Signal<Vec<config::SavedProfile>>,
-    filter: Signal<String>,
-    bypass: Signal<String>,
-    rules: Signal<String>,
-    upstream: Signal<String>,
-) {
+fn import_profiles_file(controls: &Controls, path_text: &str, profiles: ProfileSignals) {
     let content = match std::fs::read_to_string(path_text.trim()) {
         Ok(content) => content,
         Err(err) => {
@@ -8761,35 +8754,22 @@ fn import_profiles_file(
         }
     };
     let count = incoming.len();
-    let merged = config::merge_imported_profiles(&saved.get(), &incoming, SAVED_RULE_CAP);
-    saved.set(merged.clone());
+    let merged = config::merge_imported_profiles(&profiles.saved.get(), &incoming, SAVED_RULE_CAP);
+    profiles.saved.set(merged.clone());
     let _ = save_config(|config| config.saved_profiles = merged);
-    if filter.get().trim().is_empty()
-        && bypass.get().trim().is_empty()
-        && rules.get().trim().is_empty()
-        && upstream.get().trim().is_empty()
-        && let Some(first) = incoming.first()
-    {
-        filter.set(first.filter.clone());
-        bypass.set(first.bypass_hosts.clone());
-        rules.set(first.rules.clone());
-        upstream.set(first.upstream_proxy.clone());
-        controls.hub.set_bypass(&first.bypass_hosts);
-        controls.hub.set_rules(&first.rules);
-        controls.hub.set_upstream(&first.upstream_proxy);
-        controls.hub.set_rules_enabled(first.rules_enabled);
-        controls.hub.set_breaks_enabled(first.breaks_enabled);
-        controls
-            .hub
-            .set_show_tunnel_failures(first.show_tunnel_failures);
-        let first = first.clone();
-        let _ = save_config(move |config| {
-            config.filter = first.filter.clone();
-            config.bypass_hosts = first.bypass_hosts.clone();
-            config.rules = first.rules.clone();
-            config.upstream_proxy = first.upstream_proxy.clone();
-            config.show_tunnel_failures = first.show_tunnel_failures;
-        });
+    if let Some(first) = incoming.first() {
+        profiles.name.set(first.name.clone());
+        apply_saved_profile(
+            first,
+            profiles.filter,
+            profiles.bypass,
+            profiles.rules,
+            profiles.upstream,
+            profiles.rules_on,
+            profiles.breaks_on,
+            profiles.show_tunnels,
+            controls,
+        );
     }
     set_status(controls, StatusMsg::ProfilesImported { count });
 }
@@ -8798,11 +8778,7 @@ fn import_dropped(
     controls: &Controls,
     event: &FileDropEvent,
     lang: Lang,
-    saved: Signal<Vec<config::SavedProfile>>,
-    filter: Signal<String>,
-    bypass: Signal<String>,
-    rules: Signal<String>,
-    upstream: Signal<String>,
+    profiles: ProfileSignals,
 ) {
     let mut found = false;
     for uri in &event.uris {
@@ -8811,7 +8787,7 @@ fn import_dropped(
             import_har_file(controls, &path);
         } else if let Some(path) = dropped_toml_path(uri) {
             found = true;
-            import_profiles_file(controls, &path, saved, filter, bypass, rules, upstream);
+            import_profiles_file(controls, &path, profiles);
         }
     }
     if !found {
@@ -9697,6 +9673,10 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
             super::dropped_toml_path("file:///Users/tree/profiles.toml").as_deref(),
             Some("/Users/tree/profiles.toml")
         );
+        assert_eq!(
+            super::dropped_toml_path("file:///C:/Users/tree/My%20Setups/dev.TOML").as_deref(),
+            Some("C:/Users/tree/My Setups/dev.TOML")
+        );
         assert!(super::dropped_toml_path("file:///Users/tree/a.har").is_none());
     }
 
@@ -9719,6 +9699,40 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
         let parsed = super::parse_profiles_from_text_or_path(&toml_text).unwrap();
         assert_eq!(parsed, exported);
         assert!(super::parse_profiles_from_text_or_path("   ").is_err());
+
+        // When `saved` already has a profile and the unnamed working setup matches it,
+        // `profiles_for_export` updates that profile without creating a duplicate.
+        let same_unnamed = super::profiles_for_export(
+            &exported,
+            "",
+            "host:api.dev",
+            "",
+            "delay api.dev/v1 100ms",
+            "",
+            false,
+            true,
+            false,
+        );
+        assert_eq!(same_unnamed.len(), 1);
+        assert_eq!(same_unnamed[0].name, "Dev");
+        assert!(!same_unnamed[0].rules_enabled);
+
+        // When `saved` has a profile and the user is editing a new unnamed setup,
+        // `profiles_for_export` includes both the new setup and the existing saved profile.
+        let with_new_unnamed = super::profiles_for_export(
+            &exported,
+            "",
+            "host:staging.dev",
+            "",
+            "",
+            "",
+            true,
+            true,
+            false,
+        );
+        assert_eq!(with_new_unnamed.len(), 2);
+        assert_eq!(with_new_unnamed[0].name, "host:staging.dev");
+        assert_eq!(with_new_unnamed[1].name, "Dev");
     }
 
     #[test]
