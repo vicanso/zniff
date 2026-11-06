@@ -666,10 +666,6 @@ pub fn combine_rule_pattern(host_input: &str, path_input: &str) -> String {
         .filter(|part| !part.is_empty())
         .map(|part| part.trim_end_matches('/').to_string())
         .collect();
-    if hosts.is_empty() {
-        return String::new();
-    }
-    let host_part = hosts.join("|");
     let paths: Vec<String> = path_trimmed
         .split(|ch: char| ch == '|' || ch == ',' || ch.is_whitespace())
         .map(str::trim)
@@ -682,6 +678,16 @@ pub fn combine_rule_pattern(host_input: &str, path_input: &str) -> String {
             }
         })
         .collect();
+    // An empty scope matches every host and every path. `*` is all hosts;
+    // a missing path is `/`, which already matches every path.
+    if hosts.is_empty() && paths.is_empty() {
+        return "*".to_string();
+    }
+    let host_part = if hosts.is_empty() {
+        "*".to_string()
+    } else {
+        hosts.join("|")
+    };
     if paths.is_empty() {
         host_part
     } else {
@@ -938,6 +944,18 @@ break example.com/api
         assert!(rules[0].matches("b.test", "/v2/items"));
         assert!(!rules[0].matches("c.test", "/api/v1"));
         assert!(!rules[0].matches("a.test", "/other"));
+        assert_eq!(combine_rule_pattern("", ""), "*");
+        assert_eq!(combine_rule_pattern("example.com", ""), "example.com");
+        assert_eq!(combine_rule_pattern("", "/api | /v2"), "*/api|/v2");
+        assert_eq!(
+            append_quick_rule("", QuickRule::Break, "*", false, "", "").as_deref(),
+            Some("break *\n")
+        );
+        let every = parse_rules("break *\n");
+        assert!(every[0].matches("z.test", "/anywhere"));
+        let paths_only = parse_rules(&format!("break {}\n", combine_rule_pattern("", "/api")));
+        assert!(paths_only[0].matches("z.test", "/api/v1"));
+        assert!(!paths_only[0].matches("z.test", "/other"));
 
         let hdr_set = append_quick_rule(
             "",

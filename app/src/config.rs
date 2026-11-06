@@ -111,9 +111,6 @@ pub struct Config {
     /// The last window was capturing. The next launch presses Start itself.
     #[serde(default, skip_serializing_if = "is_false")]
     pub capturing: bool,
-    /// Newest first. The filter menu offers these.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub recent_filters: Vec<String>,
     /// Filters the user saved on purpose. Newest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub saved_filters: Vec<String>,
@@ -150,7 +147,6 @@ impl Default for Config {
             show_tunnel_failures: false,
             filter: String::new(),
             capturing: false,
-            recent_filters: Vec::new(),
             saved_filters: Vec::new(),
             saved_rules: Vec::new(),
             saved_profiles: Vec::new(),
@@ -740,29 +736,27 @@ mod tests {
     #[test]
     fn filter_text_is_kept_and_absent_until_set() {
         let dir = Scratch::new();
-        fs::write(dir.path().join("config.toml"), "listen_port = 8877\n").unwrap();
+        fs::write(
+            dir.path().join("config.toml"),
+            "listen_port = 8877\nrecent_filters = [\"api.test\"]\n",
+        )
+        .unwrap();
         let config = load(dir.path());
         assert!(config.filter.is_empty());
-        assert!(config.recent_filters.is_empty());
         update(dir.path(), |config| {
             config.filter = "api.test".into();
-            config.recent_filters = vec!["api.test".into(), "pin:".into()];
         })
         .unwrap();
         let loaded = load(dir.path());
         assert_eq!(loaded.filter, "api.test");
-        assert_eq!(
-            loaded.recent_filters,
-            vec!["api.test".to_string(), "pin:".to_string()]
-        );
+        let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(!text.contains("recent_filters"), "{text}");
         update(dir.path(), |config| {
             config.filter.clear();
-            config.recent_filters.clear();
         })
         .unwrap();
         let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
         assert!(!text.contains("filter"), "{text}");
-        assert!(!text.contains("recent_filters"), "{text}");
     }
 
     #[test]

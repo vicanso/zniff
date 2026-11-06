@@ -19,6 +19,7 @@ mod share;
 mod sysproxy;
 mod ws;
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::rc::Rc;
@@ -182,6 +183,16 @@ fn accent_blue_border() -> AdaptiveColor {
 
 fn accent_blue_text() -> AdaptiveColor {
     AdaptiveColor::rgb(0x1d4ed8, 0x93c5fd)
+}
+
+/// The baseline row's leading bar. Same red as the diff view's old side.
+fn baseline_mark() -> AdaptiveColor {
+    AdaptiveColor::rgb(0xdc2626, 0xf87171)
+}
+
+/// The current row in a diff. Same green as the diff view's new side.
+fn diff_current_mark() -> AdaptiveColor {
+    AdaptiveColor::rgb(0x16a34a, 0x4ade80)
 }
 
 fn status_ok_fg() -> AdaptiveColor {
@@ -458,7 +469,8 @@ struct Shown {
     response_body: Signal<String>,
     request_hex: Signal<Vec<u8>>,
     response_hex: Signal<Vec<u8>>,
-    hex_cols: Signal<usize>,
+    /// Detail-pane viewport width. The hex line uses it after the pane is shown.
+    pane_width: Signal<f32>,
     request_language: Signal<String>,
     response_language: Signal<String>,
     request_form: Signal<Vec<HeaderLine>>,
@@ -499,7 +511,6 @@ pub fn App() -> impl IntoElement {
     let dropped = signal(0_u64);
     let saved_filter = saved_config();
     let filter = signal(saved_filter.filter);
-    let recent_filters = signal(saved_filter.recent_filters);
     let saved_profiles = signal(saved_filter.saved_profiles);
     let selected = signal(None::<u64>);
     let rows = signal(Vec::<RowLine>::new());
@@ -520,7 +531,7 @@ pub fn App() -> impl IntoElement {
         response_body: signal(String::new()),
         request_hex: signal(Vec::new()),
         response_hex: signal(Vec::new()),
-        hex_cols: signal(16),
+        pane_width: signal(0.0),
         request_language: signal(String::new()),
         response_language: signal(String::new()),
         request_form: signal(Vec::new()),
@@ -575,7 +586,6 @@ pub fn App() -> impl IntoElement {
 
     let controls_tick = controls.clone();
     let filter_tick = filter;
-    let recent_tick = recent_filters;
     let filter_pending = stored(filter.get());
     let filter_since = stored(None::<SystemTime>);
     let selected_tick = selected;
@@ -593,7 +603,18 @@ pub fn App() -> impl IntoElement {
     let share_id = signal(String::new());
     let share_id_tick = share_id;
     let seen_share = stored(String::new());
+    // The hex text's own box is only as wide as the current line, so measuring
+    // it always says 16 bytes fit. The pane viewport is the width the card
+    // actually has. Publishing it from this tick rebuilds the text; a signal
+    // write inside `on_layout` can miss that text.
+    let pane_px = Rc::new(Cell::new(0.0_f32));
+    let pane_tick = pane_px.clone();
     set_interval(Duration::from_millis(16), move || {
+        let width = pane_tick.get();
+        let published = shown_tick.pane_width.get_untracked();
+        if hex_cols_for_pane(width) != hex_cols_for_pane(published) {
+            shown_tick.pane_width.set(width);
+        }
         let share_now = controls_tick.hub.share_id().unwrap_or_default();
         if share_now != seen_share.get() {
             seen_share.replace(share_now.clone());
@@ -631,7 +652,7 @@ pub fn App() -> impl IntoElement {
             .get()
             .is_some_and(|at| at.elapsed().unwrap_or_default() >= Duration::from_millis(500))
         {
-            remember_filter(&filter_now, recent_tick);
+            remember_filter(&filter_now);
             filter_since.replace(None);
         }
         let selected_now = selected_tick.get();
@@ -765,7 +786,6 @@ pub fn App() -> impl IntoElement {
             shown.pretty,
             share_id,
             saved_profiles,
-            recent_filters,
             bypass_text,
             rules_text,
             upstream_text,
@@ -800,6 +820,7 @@ pub fn App() -> impl IntoElement {
                     filter,
                     baseline,
                     folded,
+                    pane_px,
                 )),
         )
         .child(footer(
@@ -828,7 +849,6 @@ fn toolbar(
     pretty: Signal<bool>,
     share_id: Signal<String>,
     saved_profiles: Signal<Vec<config::SavedProfile>>,
-    recent_filters: Signal<Vec<String>>,
     bypass_text: Signal<String>,
     rules_text: Signal<String>,
     upstream_text: Signal<String>,
@@ -923,7 +943,6 @@ fn toolbar(
         .child(saved_filter_menu(
             filter,
             saved_profiles,
-            recent_filters,
             bypass_text,
             rules_text,
             upstream_text,
@@ -991,7 +1010,6 @@ const SAVED_RULE_CAP: usize = 16;
 fn saved_filter_menu(
     filter: Signal<String>,
     saved: Signal<Vec<config::SavedProfile>>,
-    recent: Signal<Vec<String>>,
     bypass_text: Signal<String>,
     rules_text: Signal<String>,
     upstream_text: Signal<String>,
@@ -1111,7 +1129,6 @@ fn saved_filter_menu(
         .child(saved_filter_panel(
             filter,
             saved,
-            recent,
             bypass_text,
             rules_text,
             upstream_text,
@@ -1125,7 +1142,6 @@ fn saved_filter_menu(
 fn saved_filter_panel(
     filter: Signal<String>,
     saved: Signal<Vec<config::SavedProfile>>,
-    recent: Signal<Vec<String>>,
     bypass_text: Signal<String>,
     rules_text: Signal<String>,
     upstream_text: Signal<String>,
@@ -1341,151 +1357,7 @@ fn saved_filter_panel(
                                             SLOW_ALIASES,
                                         )),
                                 ),
-                        )
-                        .child(when(
-                            move || !recent.with(Vec::is_empty),
-                            move || {
-                                let recent_clear = recent;
-                                view()
-                                    .gap_1()
-                                    .w_full()
-                                    .child(
-                                        view()
-                                            .flex_row()
-                                            .items_center()
-                                            .justify_between()
-                                            .child(
-                                                view()
-                                                    .flex_row()
-                                                    .items_center()
-                                                    .gap_1()
-                                                    .child(glyph_px(
-                                                        13.0,
-                                                        || Glyph::History,
-                                                        || color(fg_muted()),
-                                                    ))
-                                                    .child(
-                                                        text(tr("最近使用", "Recent Filters"))
-                                                            .text_size(px(11.5))
-                                                            .font_weight(FontWeight::SEMIBOLD)
-                                                            .text_color(fg_muted()),
-                                                    ),
-                                            )
-                                            .child(
-                                                view()
-                                                    .h(px(20.0))
-                                                    .px_2()
-                                                    .rounded(px(5.0))
-                                                    .flex_row()
-                                                    .items_center()
-                                                    .cursor(Cursor::Pointer)
-                                                    .hover(|style| style.bg(bg_control_hover()))
-                                                    .on_press(move || {
-                                                        clear_recent_filters(recent_clear)
-                                                    })
-                                                    .child(
-                                                        text(tr("清除", "Clear"))
-                                                            .text_size(px(11.0))
-                                                            .text_color(fg_muted()),
-                                                    ),
-                                            ),
-                                    )
-                                    .child(
-                                        view().flex_row().flex_wrap().items_center().gap_1().child(
-                                            each(
-                                                recent,
-                                                |item| item.clone(),
-                                                move |item, _| {
-                                                    let apply = item;
-                                                    let mark = item;
-                                                    let remove = item;
-                                                    let recent_remove = recent;
-                                                    view()
-                                                        .h(px(24.0))
-                                                        .pl_2()
-                                                        .pr_1()
-                                                        .rounded(px(6.0))
-                                                        .border_1()
-                                                        .border_color(move || {
-                                                            let current = filter.get();
-                                                            if mark
-                                                                .with(|text| text == current.trim())
-                                                            {
-                                                                accent_blue_border()
-                                                            } else {
-                                                                border_control()
-                                                            }
-                                                        })
-                                                        .bg(bg_control())
-                                                        .flex_row()
-                                                        .items_center()
-                                                        .gap_1()
-                                                        .child(
-                                                            view()
-                                                                .max_w(px(240.0))
-                                                                .h_full()
-                                                                .flex_row()
-                                                                .items_center()
-                                                                .overflow_hidden()
-                                                                .cursor(Cursor::Pointer)
-                                                                .hover(|style| style.opacity(0.85))
-                                                                .on_press(move || {
-                                                                    filter.set(
-                                                                        apply.with(|text| {
-                                                                            text.clone()
-                                                                        }),
-                                                                    )
-                                                                })
-                                                                .child(
-                                                                    text(move || {
-                                                                        item.with(|text| {
-                                                                            text.clone()
-                                                                        })
-                                                                    })
-                                                                    .number_of_lines(1)
-                                                                    .text_overflow(
-                                                                        EllipsizeMode::Tail,
-                                                                    )
-                                                                    .text_size(px(11.5))
-                                                                    .text_color(fg_secondary()),
-                                                                ),
-                                                        )
-                                                        .child(
-                                                            view()
-                                                                .w(px(16.0))
-                                                                .h(px(16.0))
-                                                                .flex_shrink_0()
-                                                                .flex_row()
-                                                                .items_center()
-                                                                .justify_center()
-                                                                .rounded(px(4.0))
-                                                                .cursor(Cursor::Pointer)
-                                                                .hover(|style| {
-                                                                    style.bg(bg_control_hover())
-                                                                })
-                                                                .tooltip(label_tip(
-                                                                    "移除", "Remove",
-                                                                ))
-                                                                .on_press(move || {
-                                                                    drop_recent_filter(
-                                                                        &remove.with(|text| {
-                                                                            text.clone()
-                                                                        }),
-                                                                        recent_remove,
-                                                                    )
-                                                                })
-                                                                .child(
-                                                                    control_text("×")
-                                                                        .text_size(px(11.0))
-                                                                        .text_color(fg_muted()),
-                                                                ),
-                                                        )
-                                                },
-                                            ),
-                                        ),
-                                    )
-                            },
-                        )),
+                        ),
                 )
                 .child(view().w(px(1.0)).self_stretch().bg(border_subtle()))
                 .child(
@@ -1803,7 +1675,7 @@ fn profile_dock(
     let blank_controls = controls.clone();
     let save_controls = controls;
     let dropdown_open = signal(false);
-    let active_name = move || {
+    let matched_name = move || {
         saved.with(|items| {
             matched_saved_profile(
                 items,
@@ -1814,6 +1686,32 @@ fn profile_dock(
             )
         })
     };
+    // The dropdown follows the name field. Adding a rule changes the live
+    // text, so a content match would drop the current setup. Seed the name
+    // once from that match, then leave it until 新建配置.
+    let shown_name = move || {
+        let typed = rule_name.get();
+        let typed = typed.trim();
+        if !typed.is_empty() {
+            return Some(typed.to_string());
+        }
+        matched_name()
+    };
+    let adopted = signal(false);
+    effect(move || {
+        if adopted.get() {
+            return;
+        }
+        let typed = rule_name.get();
+        if !typed.trim().is_empty() {
+            adopted.set(true);
+            return;
+        }
+        if let Some(name) = matched_name() {
+            rule_name.set(name);
+            adopted.set(true);
+        }
+    });
 
     view()
         .w_full()
@@ -1849,14 +1747,14 @@ fn profile_dock(
                                 .rounded(px(7.0))
                                 .border_1()
                                 .border_color(move || {
-                                    if dropdown_open.get() || active_name().is_some() {
+                                    if dropdown_open.get() || shown_name().is_some() {
                                         accent_blue_border()
                                     } else {
                                         border_control()
                                     }
                                 })
                                 .bg(move || {
-                                    if active_name().is_some() {
+                                    if shown_name().is_some() {
                                         accent_blue_soft()
                                     } else {
                                         bg_control()
@@ -1864,7 +1762,7 @@ fn profile_dock(
                                 })
                                 .hover(|style| {
                                     style.bg(move || {
-                                        if active_name().is_some() {
+                                        if shown_name().is_some() {
                                             accent_blue_soft()
                                         } else {
                                             bg_control_hover()
@@ -1882,7 +1780,7 @@ fn profile_dock(
                                         .rounded(px(99.0))
                                         .flex_shrink_0()
                                         .bg(move || {
-                                            if active_name().is_some() {
+                                            if shown_name().is_some() {
                                                 accent_blue()
                                             } else {
                                                 fg_muted()
@@ -1894,7 +1792,7 @@ fn profile_dock(
                                         let langs = ui_langs();
                                         move || -> SharedString {
                                             let lang = ui_lang(langs);
-                                            if let Some(name) = active_name() {
+                                            if let Some(name) = shown_name() {
                                                 name.into()
                                             } else if saved.with(Vec::is_empty) {
                                                 t(lang, "暂无已保存配置", "No saved setups").into()
@@ -1910,7 +1808,7 @@ fn profile_dock(
                                     .text_size(px(12.0))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(move || {
-                                        if active_name().is_some() {
+                                        if shown_name().is_some() {
                                             accent_blue_text()
                                         } else if saved.with(Vec::is_empty) {
                                             fg_muted()
@@ -1978,6 +1876,13 @@ fn profile_dock(
                                             let breaks_on_apply = breaks_on;
                                             let tunnels_apply = show_tunnels;
                                             let is_active = move || {
+                                                let typed = rule_name.get();
+                                                let typed = typed.trim();
+                                                if !typed.is_empty() {
+                                                    return mark.with(|preset| {
+                                                        preset.name.eq_ignore_ascii_case(typed)
+                                                    });
+                                                }
                                                 mark.with(|preset| {
                                                     preset.filter.trim() == filter.get().trim()
                                                         && preset.bypass_hosts.trim()
@@ -2147,6 +2052,7 @@ fn profile_dock(
                         .cursor(Cursor::Pointer)
                         .on_press(move || {
                             dropdown_open.set(false);
+                            adopted.set(true);
                             blank_working_setup(
                                 rule_name,
                                 filter,
@@ -2172,41 +2078,93 @@ fn profile_dock(
                                 .text_color(fg_secondary()),
                         ),
                 )
-                .child(
+                .child({
+                    let save_ready: Rc<dyn Fn() -> bool> = Rc::new(move || {
+                        profile_save_ready(
+                            &saved.get(),
+                            &rule_name.get(),
+                            &filter.get(),
+                            &bypass_text.get(),
+                            &rules_text.get(),
+                            &upstream_text.get(),
+                            rules_on.get(),
+                            breaks_on.get(),
+                            show_tunnels.get(),
+                            &draft_host.get(),
+                            &draft_path.get(),
+                            &draft_from.get(),
+                            &draft_to.get(),
+                            draft_response.get(),
+                            draft_kind.get(),
+                        )
+                    });
+                    let ready_bg = save_ready.clone();
+                    let ready_border = save_ready.clone();
+                    let ready_hover = save_ready.clone();
+                    let ready_off = save_ready.clone();
+                    let ready_press = save_ready.clone();
+                    let ready_text = save_ready;
                     view()
                         .h(px(30.0))
                         .px_3p5()
                         .flex_shrink_0()
                         .rounded(px(7.0))
+                        .border_1()
+                        .border_color(move || {
+                            if ready_border() {
+                                accent_blue()
+                            } else {
+                                border_control()
+                            }
+                        })
                         .flex_row()
                         .items_center()
                         .justify_center()
-                        .bg(accent_blue())
-                        .hover(|style| style.bg(accent_blue_hover()))
+                        .bg(move || {
+                            if ready_bg() {
+                                accent_blue()
+                            } else {
+                                bg_control()
+                            }
+                        })
+                        .hover(|style| {
+                            style.bg(move || {
+                                if ready_hover() {
+                                    accent_blue_hover()
+                                } else {
+                                    bg_control()
+                                }
+                            })
+                        })
                         .cursor(Cursor::Pointer)
+                        .disabled(move || !ready_off())
+                        .disabled_style(|style| style.cursor(Cursor::Default))
                         .on_press(move || {
+                            if !ready_press() {
+                                return;
+                            }
                             dropdown_open.set(false);
-                            // A filled add-rule row is part of this setup even
-                            // before 「添加规则」. Commit it, then snapshot.
-                            let combined = crate::rules::combine_rule_pattern(
-                                &draft_host.get(),
-                                &draft_path.get(),
+                            // A row the user actually filled is part of this
+                            // setup. An untouched row must not become `*`.
+                            let host = draft_host.get();
+                            let path = draft_path.get();
+                            let from = draft_from.get();
+                            let to = draft_to.get();
+                            let current = rules_text.get();
+                            let rules_now = draft_rules(
+                                &current,
+                                &host,
+                                &path,
+                                &from,
+                                &to,
+                                draft_response.get(),
+                                draft_kind.get(),
                             );
-                            let mut rules_now = rules_text.get();
-                            if !combined.is_empty()
-                                && let Some(next) = crate::rules::append_quick_rule(
-                                    &rules_now,
-                                    quick_kind(draft_kind.get()),
-                                    &combined,
-                                    draft_response.get(),
-                                    &draft_from.get(),
-                                    &draft_to.get(),
-                                )
-                            {
-                                rules_now = next.clone();
-                                rules_text.set(next.clone());
-                                save_controls.hub.set_rules(&next);
-                                let _ = save_config(|config| config.rules = next);
+                            if rules_now != current {
+                                rules_text.set(rules_now.clone());
+                                save_controls.hub.set_rules(&rules_now);
+                                let persisted = rules_now.clone();
+                                let _ = save_config(|config| config.rules = persisted);
                                 draft_host.set(String::new());
                                 draft_path.set(String::new());
                                 draft_from.set(String::new());
@@ -2223,15 +2181,20 @@ fn profile_dock(
                                 show_tunnels.get(),
                                 saved,
                             );
-                            rule_name.set(String::new());
                         })
                         .child(
                             text(tr("保存", "Save"))
                                 .text_size(px(11.5))
                                 .font_weight(FontWeight::MEDIUM)
-                                .text_color(white()),
-                        ),
-                ),
+                                .text_color(move || {
+                                    if ready_text() {
+                                        AdaptiveColor::rgb(0xffffff, 0xffffff)
+                                    } else {
+                                        fg_muted()
+                                    }
+                                }),
+                        )
+                }),
         )
 }
 
@@ -2297,21 +2260,6 @@ fn blank_working_setup(
         config.upstream_proxy.clear();
         config.show_tunnel_failures = false;
     });
-}
-
-fn drop_recent_filter(current: &str, recent: Signal<Vec<String>>) {
-    let next: Vec<String> = recent
-        .get()
-        .into_iter()
-        .filter(|item| item != current)
-        .collect();
-    recent.set(next.clone());
-    let _ = save_config(|config| config.recent_filters = next);
-}
-
-fn clear_recent_filters(recent: Signal<Vec<String>>) {
-    recent.set(Vec::new());
-    let _ = save_config(|config| config.recent_filters.clear());
 }
 
 #[cfg(test)]
@@ -2515,6 +2463,102 @@ fn drop_saved_profile(target: &config::SavedProfile, saved: Signal<Vec<config::S
     let _ = save_config(|config| config.saved_profiles = next);
 }
 
+/// Rules after 保存 commits a filled add-rule row. An empty row stays out,
+/// so it cannot turn into a global `*`.
+fn draft_rules(
+    rules: &str,
+    host: &str,
+    path: &str,
+    from: &str,
+    to: &str,
+    response: bool,
+    kind: u8,
+) -> String {
+    let touched = !host.trim().is_empty()
+        || !path.trim().is_empty()
+        || !from.trim().is_empty()
+        || !to.trim().is_empty();
+    if !touched {
+        return rules.to_string();
+    }
+    let combined = crate::rules::combine_rule_pattern(host, path);
+    crate::rules::append_quick_rule(rules, quick_kind(kind), &combined, response, from, to)
+        .unwrap_or_else(|| rules.to_string())
+}
+
+fn resolve_profile_name(name: &str, filter: &str, rules: &str) -> String {
+    let name = name.trim();
+    if !name.is_empty() {
+        return name.to_string();
+    }
+    if !filter.is_empty() {
+        return filter.chars().take(28).collect();
+    }
+    if !rules.is_empty() {
+        return rules
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty() && !line.starts_with('#'))
+            .unwrap_or("配置")
+            .chars()
+            .take(28)
+            .collect();
+    }
+    "配置".to_string()
+}
+
+/// True when 保存 would store a different snapshot. The open setup is the
+/// saved profile with the same name; an unchanged one stays disabled.
+fn profile_save_ready(
+    saved: &[config::SavedProfile],
+    name: &str,
+    filter: &str,
+    bypass: &str,
+    rules: &str,
+    upstream: &str,
+    rules_enabled: bool,
+    breaks_enabled: bool,
+    show_tunnel_failures: bool,
+    draft_host: &str,
+    draft_path: &str,
+    draft_from: &str,
+    draft_to: &str,
+    draft_response: bool,
+    draft_kind: u8,
+) -> bool {
+    let rules = draft_rules(
+        rules,
+        draft_host,
+        draft_path,
+        draft_from,
+        draft_to,
+        draft_response,
+        draft_kind,
+    );
+    let filter = filter.trim();
+    let bypass = bypass.trim();
+    let rules = rules.trim();
+    let upstream = upstream.trim();
+    if filter.is_empty() && bypass.is_empty() && rules.is_empty() && upstream.is_empty() {
+        return false;
+    }
+    let resolved = resolve_profile_name(name, filter, rules);
+    let Some(preset) = saved
+        .iter()
+        .find(|item| item.name.eq_ignore_ascii_case(&resolved))
+    else {
+        return true;
+    };
+    preset.name != resolved
+        || preset.filter.trim() != filter
+        || preset.bypass_hosts.trim() != bypass
+        || preset.rules.trim() != rules
+        || preset.upstream_proxy.trim() != upstream
+        || preset.rules_enabled != rules_enabled
+        || preset.breaks_enabled != breaks_enabled
+        || preset.show_tunnel_failures != show_tunnel_failures
+}
+
 fn push_saved_profile(
     saved: &[config::SavedProfile],
     name: &str,
@@ -2533,25 +2577,7 @@ fn push_saved_profile(
     if filter.is_empty() && bypass.is_empty() && rules.is_empty() && upstream.is_empty() {
         return saved.to_vec();
     }
-    let name = name.trim();
-    let resolved_name = if name.is_empty() {
-        if !filter.is_empty() {
-            filter.chars().take(28).collect()
-        } else if !rules.is_empty() {
-            rules
-                .lines()
-                .map(str::trim)
-                .find(|line| !line.is_empty() && !line.starts_with('#'))
-                .unwrap_or("配置")
-                .chars()
-                .take(28)
-                .collect()
-        } else {
-            "配置".to_string()
-        }
-    } else {
-        name.to_string()
-    };
+    let resolved_name = resolve_profile_name(name, filter, rules);
     let mut next: Vec<config::SavedProfile> = saved
         .iter()
         .filter(|item| !item.name.eq_ignore_ascii_case(&resolved_name))
@@ -2745,39 +2771,12 @@ const FAIL_ALIASES: &[&str] = &["失败", "fail", "err", "error"];
 const PIN_ALIASES: &[&str] = &["pin:"];
 const SLOW_ALIASES: &[&str] = &["slow:"];
 
-const RECENT_FILTER_CAP: usize = 8;
-
-/// Newest first, without blanks or duplicates. The current text stays, and
-/// older copies of it drop. At most eight.
-fn push_recent_filter(recent: &[String], current: &str) -> Vec<String> {
-    let current = current.trim();
-    if current.is_empty() {
-        return recent.to_vec();
-    }
-    let mut next: Vec<String> = recent
-        .iter()
-        .filter(|item| item.trim() != current)
-        .cloned()
-        .collect();
-    next.insert(0, current.to_string());
-    next.truncate(RECENT_FILTER_CAP);
-    next
-}
-
-fn remember_filter(current: &str, recent: Signal<Vec<String>>) {
-    let next = push_recent_filter(&recent.get(), current);
+fn remember_filter(current: &str) {
     let current = current.trim().to_string();
-    if next != recent.get() {
-        recent.set(next.clone());
-    }
-    let saved = saved_config();
-    if saved.filter == current && saved.recent_filters == next {
+    if saved_config().filter == current {
         return;
     }
-    if let Err(err) = save_config(|config| {
-        config.filter = current.clone();
-        config.recent_filters = next.clone();
-    }) {
+    if let Err(err) = save_config(|config| config.filter = current.clone()) {
         // The box still has the text. A status line is enough if the file
         // cannot be written; the next pause tries again.
         let _ = err;
@@ -3344,14 +3343,14 @@ fn replace_row(
                         .gap_1()
                         .child(view().flex_1().min_w(px(0.0)).child(side_input(
                             host_pattern,
-                            tr("域名: a.com | *.b.com", "Domain: a.com | *.b.com"),
+                            tr("域名，空着匹配全部", "Domain, empty matches all"),
                             28.0,
                             false,
                             move |text| host_pattern.set(text.to_string()),
                         )))
                         .child(view().flex_1().min_w(px(0.0)).child(side_input(
                             path_pattern,
-                            tr("Path前缀: /api | /v2", "Path prefix: /api | /v2"),
+                            tr("Path 前缀，空着匹配全部", "Path prefix, empty matches all"),
                             28.0,
                             false,
                             move |text| path_pattern.set(text.to_string()),
@@ -3613,6 +3612,7 @@ fn list_menu(
         .child(flow_table(
             rows,
             selected,
+            baseline,
             compose,
             columns,
             controls.clone(),
@@ -3663,6 +3663,7 @@ fn list_menu(
 fn flow_table(
     rows: Signal<Vec<RowLine>>,
     selected: Signal<Option<u64>>,
+    baseline: Signal<Option<u64>>,
     compose: Compose,
     columns: Signal<ListColumns>,
     controls: Arc<Controls>,
@@ -3699,6 +3700,7 @@ fn flow_table(
     let widths_for_cols = widths;
     let rows_for_cells = rows;
     let selected_for_cells = selected;
+    let baseline_for_cells = baseline;
     let blur_header = Rc::clone(&blur_table);
     let blur_press = Rc::clone(&blur_table);
     let blur_menu = Rc::clone(&blur_table);
@@ -3762,7 +3764,13 @@ fn flow_table(
                     })
                 })
                 .render_cell(move |cell: &DataTableCell| {
-                    flow_cell(rows_for_cells, selected_for_cells, hover, cell)
+                    flow_cell(
+                        rows_for_cells,
+                        selected_for_cells,
+                        baseline_for_cells,
+                        hover,
+                        cell,
+                    )
                 })
                 .render_header_cell(move |cell: &DataTableHeaderCell| {
                     let blur_header = Rc::clone(&blur_header);
@@ -4064,7 +4072,21 @@ fn row_context_menu(
         ))
         .child(marked_action(
             move || baseline.get().is_some_and(|id| picked.get() == Some(id)),
-            tr("基准", "Baseline"),
+            {
+                let langs = ui_langs();
+                let picked_label = picked;
+                let baseline_label = baseline;
+                move || -> SharedString {
+                    if baseline_label
+                        .get()
+                        .is_some_and(|id| picked_label.get() == Some(id))
+                    {
+                        t(ui_lang(langs), "取消基准", "Clear baseline").into()
+                    } else {
+                        t(ui_lang(langs), "基准", "Baseline").into()
+                    }
+                }
+            },
             {
                 let langs = ui_langs();
                 closing(menu_open, move || {
@@ -4146,12 +4168,13 @@ fn flow_pinned(controls: &Controls, id: Option<u64>) -> bool {
 fn flow_cell(
     rows: Signal<Vec<RowLine>>,
     selected: Signal<Option<u64>>,
+    baseline: Signal<Option<u64>>,
     hover: CellHover,
     cell: &DataTableCell,
 ) -> AnyElement {
     let index = cell.row as usize;
     match cell.key.as_ref() {
-        "method" => method_cell(rows, selected, index).into_element(),
+        "method" => method_cell(rows, selected, baseline, index).into_element(),
         "path" => path_cell(rows, hover, index).into_element(),
         "status" => status_text(rows, index).into_element(),
         "protocol" => protocol_cell(rows, index).into_element(),
@@ -4186,9 +4209,11 @@ fn flow_header(cell: &DataTableHeaderCell) -> View {
 fn method_cell(
     rows: Signal<Vec<RowLine>>,
     selected: Signal<Option<u64>>,
+    baseline: Signal<Option<u64>>,
     index: usize,
 ) -> impl IntoElement {
     let marked = selected;
+    let base = baseline;
     view()
         .w_full()
         .h_full()
@@ -4198,10 +4223,10 @@ fn method_cell(
         .border_l(px(2.0))
         .border_l_color(move || {
             let id = rows.with(|rows| rows.get(index).map(|row| row.id));
-            if id.is_some() && marked.get() == id {
-                accent_blue()
-            } else {
-                AdaptiveColor::TRANSPARENT
+            match id {
+                Some(id) if marked.get() == Some(id) => accent_blue(),
+                Some(id) if base.get() == Some(id) => baseline_mark(),
+                _ => AdaptiveColor::TRANSPARENT,
             }
         })
         .flex_row()
@@ -4482,73 +4507,85 @@ fn detail_pane(
     filter: Signal<String>,
     baseline: Signal<Option<u64>>,
     folded: Signal<u8>,
+    pane_px: Rc<Cell<f32>>,
 ) -> impl IntoElement {
-    scroll().flex_1().min_w(px(0.0)).bg(bg_canvas()).child(
-        when(
-            move || shown.phase.get() == Phase::Ready,
-            move || {
-                ready_detail(
-                    shown,
-                    controls.clone(),
-                    selected,
-                    compose,
-                    filter,
-                    baseline,
-                    folded,
-                )
-            },
-        )
-        .otherwise(move || {
-            view()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .gap_1p5()
-                .px_6()
-                .child(glyph_px(28.0, || Glyph::List, || color(fg_muted())))
-                .child(
-                    text({
-                        let langs = ui_langs();
-                        move || -> SharedString {
-                            let lang = ui_lang(langs);
-                            match shown.phase.get() {
-                                Phase::Gone => {
-                                    t(lang, "这条记录已经不在了", "That flow is gone").into()
+    scroll()
+        .flex_1()
+        .min_w(px(0.0))
+        .bg(bg_canvas())
+        .on_layout(move |bounds: &Bounds<Points>| {
+            let width = bounds.size.width.0;
+            pane_px.set(width);
+            if hex_cols_for_pane(width) != hex_cols_for_pane(shown.pane_width.get_untracked()) {
+                shown.pane_width.set(width);
+            }
+        })
+        .child(
+            when(
+                move || shown.phase.get() == Phase::Ready,
+                move || {
+                    ready_detail(
+                        shown,
+                        controls.clone(),
+                        selected,
+                        compose,
+                        filter,
+                        baseline,
+                        folded,
+                    )
+                },
+            )
+            .otherwise(move || {
+                view()
+                    .flex_1()
+                    .items_center()
+                    .justify_center()
+                    .gap_1p5()
+                    .px_6()
+                    .child(glyph_px(28.0, || Glyph::List, || color(fg_muted())))
+                    .child(
+                        text({
+                            let langs = ui_langs();
+                            move || -> SharedString {
+                                let lang = ui_lang(langs);
+                                match shown.phase.get() {
+                                    Phase::Gone => {
+                                        t(lang, "这条记录已经不在了", "That flow is gone").into()
+                                    }
+                                    _ => t(lang, "还没有选择", "Nothing selected").into(),
                                 }
-                                _ => t(lang, "还没有选择", "Nothing selected").into(),
                             }
-                        }
-                    })
-                    .text_size(px(13.5))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(fg_secondary()),
-                )
-                .child(
-                    text({
-                        let langs = ui_langs();
-                        move || -> SharedString {
-                            let lang = ui_lang(langs);
-                            match shown.phase.get() {
-                                Phase::Gone => t(
-                                    lang,
-                                    "它因为内存上限被丢掉了。",
-                                    "It was dropped because the session hit its memory cap.",
-                                )
-                                .into(),
-                                _ => t(
-                                    lang,
-                                    "从左边选一条流量，查看请求头、响应头和 body。",
-                                    "Pick a flow on the left to see headers and the body.",
-                                )
-                                .into(),
+                        })
+                        .text_size(px(13.5))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(fg_secondary()),
+                    )
+                    .child(
+                        text({
+                            let langs = ui_langs();
+                            move || -> SharedString {
+                                let lang = ui_lang(langs);
+                                match shown.phase.get() {
+                                    Phase::Gone => t(
+                                        lang,
+                                        "它因为内存上限被丢掉了。",
+                                        "It was dropped because the session hit its memory cap.",
+                                    )
+                                    .into(),
+                                    _ => t(
+                                        lang,
+                                        "从左边选一条流量，查看请求头、响应头和 body。",
+                                        "Pick a flow on the left to see headers and the body.",
+                                    )
+                                    .into(),
+                                }
                             }
-                        }
-                    })
-                    .text_size(px(12.0))
-                    .text_color(fg_muted()),
-                )
-        }),
-    )
+                        })
+                        .text_size(px(12.0))
+                        .text_color(fg_muted()),
+                    )
+            }),
+        )
 }
 
 fn ready_detail(
@@ -4951,19 +4988,62 @@ fn diff_card(shown: Shown, folded: Signal<u8>) -> impl IntoElement {
         .child(when(
             move || !card_folded(folded, FOLD_DIFF),
             move || {
-                view().bg(bg_code()).h(px(320.0)).overflow_hidden().child(
-                    diff_view()
-                        .old_value(move || SharedString::from(shown.diff_old.get()))
-                        .new_value(move || SharedString::from(shown.diff_new.get()))
-                        .layout(DiffLayout::Unified)
-                        .language("plaintext")
-                        .soft_wrap(true)
-                        .font_size(Points(12.0))
-                        .line_height(Points(18.0))
-                        .size_full(),
-                )
+                view()
+                    .bg(bg_code())
+                    .h(px(320.0))
+                    .flex_col()
+                    .overflow_hidden()
+                    .child(diff_legend())
+                    .child(
+                        view().flex_1().min_h(px(0.0)).overflow_hidden().child(
+                            diff_view()
+                                .old_value(move || SharedString::from(shown.diff_old.get()))
+                                .new_value(move || SharedString::from(shown.diff_new.get()))
+                                .layout(DiffLayout::Unified)
+                                .language("plaintext")
+                                .soft_wrap(true)
+                                .font_size(Points(12.0))
+                                .line_height(Points(18.0))
+                                .size_full(),
+                        ),
+                    )
             },
         ))
+}
+
+fn diff_legend() -> impl IntoElement {
+    view()
+        .flex_shrink_0()
+        .flex_row()
+        .items_center()
+        .gap_3()
+        .px_3()
+        .py_1p5()
+        .border_b_1()
+        .border_b_color(border_subtle())
+        .child(diff_key(baseline_mark(), tr("基准", "Baseline")))
+        .child(diff_key(diff_current_mark(), tr("当前", "Current")))
+}
+
+fn diff_key(color: AdaptiveColor, label: impl Fn() -> String + 'static) -> impl IntoElement {
+    view()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .child(
+            view()
+                .w(px(2.0))
+                .h(px(12.0))
+                .rounded(px(1.0))
+                .flex_shrink_0()
+                .bg(color),
+        )
+        .child(
+            text(label)
+                .number_of_lines(1)
+                .text_size(px(11.0))
+                .text_color(fg_muted()),
+        )
 }
 
 fn body_section(
@@ -5082,13 +5162,23 @@ fn body_section(
                 let height_body = body;
                 let height_hex = hex;
                 view()
+                    .w_full()
+                    .min_w(move || px(hex_area_width(shown.pane_width.get())))
+                    .on_layout(move |bounds: &Bounds<Points>| {
+                        let pane = bounds.size.width.0 + HEX_AREA_CHROME;
+                        if hex_cols_for_pane(pane)
+                            != hex_cols_for_pane(shown.pane_width.get_untracked())
+                        {
+                            shown.pane_width.set(pane);
+                        }
+                    })
                     .bg(bg_code())
                     .h(move || {
                         let lines = if height_hex.with(Vec::is_empty) {
                             body_line_count(&height_body.get())
                         } else {
                             let count = height_hex.with(Vec::len);
-                            let cols = shown.hex_cols.get().max(1);
+                            let cols = hex_cols_for_pane(shown.pane_width.get()).max(1);
                             count.div_ceil(cols).max(1)
                         };
                         px(body_box_height(lines))
@@ -5096,13 +5186,6 @@ fn body_section(
                     .overflow_hidden()
                     .border_t(move || if divided { px(1.0) } else { px(0.0) })
                     .border_t_color(border_subtle())
-                    .on_layout(move |bounds: &Bounds<Points>| {
-                        // The frame includes this view's horizontal padding.
-                        let next = hex_row_bytes(bounds.size.width.0 - 28.0);
-                        if shown.hex_cols.get() != next {
-                            shown.hex_cols.set(next);
-                        }
-                    })
                     .child(
                         scroll().size_full().child(
                             mono(move || {
@@ -5110,7 +5193,8 @@ fn body_section(
                                 if bytes.is_empty() {
                                     body.get()
                                 } else {
-                                    hex_display_rows(&bytes, shown.hex_cols.get())
+                                    let cols = hex_cols_for_pane(shown.pane_width.get());
+                                    hex_display_rows(&bytes, cols)
                                 }
                             })
                             .px_3p5()
@@ -5403,7 +5487,21 @@ fn detail_actions(
                             .get()
                             .is_some_and(|id| selected_mark.get() == Some(id))
                     },
-                    tr("基准", "Baseline"),
+                    {
+                        let langs = ui_langs();
+                        let selected_label = selected;
+                        let baseline_label = baseline;
+                        move || -> SharedString {
+                            if baseline_label
+                                .get()
+                                .is_some_and(|id| selected_label.get() == Some(id))
+                            {
+                                t(ui_lang(langs), "取消基准", "Clear baseline").into()
+                            } else {
+                                t(ui_lang(langs), "基准", "Baseline").into()
+                            }
+                        }
+                    },
                     {
                         let langs = ui_langs();
                         move || {
@@ -6754,11 +6852,9 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baselin
             Vec::new()
         });
     shown.response_body.set(response.text);
-    shown.response_hex.set(if preview.is_empty() {
-        response_hex
-    } else {
-        Vec::new()
-    });
+    shown
+        .response_hex
+        .set(response_hex_for_view(pretty, &preview, response_hex));
     shown.request_note.set(request.note);
     shown.response_note.set(response.note);
     let (box_w, box_h) = present::image_pixel_size(&flow.response_body)
@@ -7432,6 +7528,12 @@ fn set_baseline(
     if selected_flow(controls, Some(id)).is_none() {
         return;
     }
+    if baseline.get() == Some(id) {
+        baseline.set(None);
+        set_status(controls, StatusMsg::BaselineCleared);
+        publish_detail(shown, &controls.hub, Some(id), lang, None);
+        return;
+    }
     baseline.set(Some(id));
     set_status(controls, StatusMsg::BaselineSet);
     publish_detail(shown, &controls.hub, Some(id), lang, Some(id));
@@ -7469,7 +7571,8 @@ fn bytes_for_copy(body: &[u8], side: Side) -> (String, StatusMsg) {
     }
 }
 
-/// `0001  ` plus `per_row` bytes. Copy uses `hex_dump`, which has no row numbers.
+/// `0001  ` plus `per_row` bytes. A 32-byte row leaves one extra space after
+/// the 16th byte. Copy uses `hex_dump`, which has no row numbers.
 fn hex_display_rows(body: &[u8], per_row: usize) -> String {
     let per_row = per_row.max(1);
     let mut out = String::with_capacity(body.len() * 4);
@@ -7480,16 +7583,24 @@ fn hex_display_rows(body: &[u8], per_row: usize) -> String {
             }
             let row = index / per_row + 1;
             out.push_str(&format!("{row:04}  "));
+        } else if per_row > 16 && index % 16 == 0 {
+            out.push(' ');
         }
         out.push_str(&format!("{byte:02x} "));
     }
     out
 }
 
-/// 12px monospace is about 7.2px wide. A row is `0001  ` plus `xx ` per byte.
+/// 12px Menlo is about 7.25px wide. A row is `0001  ` plus `xx ` per byte,
+/// and a 32-byte row adds one space between the two halves.
 fn hex_line_width(bytes: usize) -> f32 {
-    const CHAR: f32 = 7.2;
-    (6.0 + 3.0 * bytes as f32) * CHAR
+    const CHAR: f32 = 7.25;
+    let gaps = if bytes > 16 {
+        (bytes / 16 - 1) as f32
+    } else {
+        0.0
+    };
+    (6.0 + 3.0 * bytes as f32 + gaps) * CHAR
 }
 
 /// Use 32 only when that line fits; otherwise stay at 16.
@@ -7498,6 +7609,35 @@ fn hex_row_bytes(width: f32) -> usize {
         32
     } else {
         16
+    }
+}
+
+/// `ready_detail` padding and the card border, between the pane and the hex area.
+const HEX_AREA_CHROME: f32 = 14.0 * 2.0 + 2.0;
+/// Horizontal padding of the hex text (`px_3p5` on each side).
+const HEX_TEXT_PAD: f32 = 28.0;
+
+/// Width the hex area can use inside a detail pane of `pane` points.
+fn hex_area_width(pane: f32) -> f32 {
+    (pane - HEX_AREA_CHROME).max(0.0)
+}
+
+/// Columns once the pane has been shown. Zero stays at 16.
+fn hex_cols_for_pane(pane: f32) -> usize {
+    if pane <= 0.0 {
+        16
+    } else {
+        hex_row_bytes(hex_area_width(pane) - HEX_TEXT_PAD)
+    }
+}
+
+/// Keeps raw hex bytes when switching an image response to "Raw" (`pretty == false`),
+/// so the hex view can reflow between 16 and 32 bytes per row based on pane width.
+fn response_hex_for_view(pretty: bool, preview: &str, response_hex: Vec<u8>) -> Vec<u8> {
+    if pretty && !preview.is_empty() {
+        Vec::new()
+    } else {
+        response_hex
     }
 }
 
@@ -8781,22 +8921,6 @@ mod tests {
     }
 
     #[test]
-    fn recent_filters_keep_the_newest_eight_without_duplicates() {
-        let first = super::push_recent_filter(&[], "  api.test ");
-        assert_eq!(first, vec!["api.test".to_string()]);
-        let again = super::push_recent_filter(&first, "pin:");
-        let again = super::push_recent_filter(&again, "api.test");
-        assert_eq!(again, vec!["api.test".to_string(), "pin:".to_string()]);
-        assert!(super::push_recent_filter(&again, "   ").eq(&again));
-        let mut many = Vec::new();
-        for index in 0..10 {
-            many = super::push_recent_filter(&many, &format!("h{index}"));
-        }
-        assert_eq!(many.len(), super::RECENT_FILTER_CAP);
-        assert_eq!(many[0], "h9");
-    }
-
-    #[test]
     fn saved_filters_keep_the_newest_sixteen_without_duplicates() {
         let saved: Vec<String> = (0..16).map(|n| format!("f{n}")).collect();
         let next = super::push_saved_filter(&saved, "fresh");
@@ -8865,12 +8989,27 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
         let wide = super::hex_display_rows(&body, 32);
         assert_eq!(wide.lines().count(), 1, "{wide}");
         assert!(wide.split_whitespace().skip(1).count() == 20);
+        assert!(wide.contains("0f  10 "), "{wide}");
         assert_eq!(super::hex_row_bytes(400.0), 16);
         assert_eq!(super::hex_row_bytes(super::hex_line_width(32)), 32);
         assert_eq!(super::hex_row_bytes(super::hex_line_width(32) - 1.0), 16);
+        assert_eq!(super::hex_cols_for_pane(0.0), 16);
+        assert_eq!(super::hex_cols_for_pane(400.0), 16);
+        let wide_pane = super::hex_line_width(32) + super::HEX_TEXT_PAD + super::HEX_AREA_CHROME;
+        assert_eq!(super::hex_cols_for_pane(wide_pane), 32);
+        assert_eq!(super::hex_cols_for_pane(wide_pane - 1.0), 16);
         let copied = super::hex_dump(&body);
         assert!(!copied.contains("0001"), "{copied}");
         assert!(copied.starts_with("00 01 02 "));
+        assert!(
+            super::response_hex_for_view(true, "/tmp/preview.png", body.clone()).is_empty(),
+            "pretty image view hides hex bytes"
+        );
+        assert_eq!(
+            super::response_hex_for_view(false, "/tmp/preview.png", body.clone()),
+            body,
+            "raw image view keeps hex bytes for 16/32-byte responsive reflow"
+        );
     }
 
     #[test]
@@ -9072,5 +9211,112 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
         let rules = super::push_saved_rule(&rules, "", "break api.test/v1");
         assert_eq!(rules.len(), 2);
         assert_eq!(rules[0].name, "break api.test/v1");
+    }
+
+    #[test]
+    fn save_stays_off_until_the_open_profile_changes() {
+        let saved = [crate::config::SavedProfile {
+            name: "test".into(),
+            filter: "host:a.test".into(),
+            bypass_hosts: String::new(),
+            rules: "break a.test/api\n".into(),
+            upstream_proxy: String::new(),
+            rules_enabled: true,
+            breaks_enabled: true,
+            show_tunnel_failures: false,
+        }];
+        let ready = |name, filter, rules, rules_on, tunnels, host, from| {
+            super::profile_save_ready(
+                &saved, name, filter, "", rules, "", rules_on, true, tunnels, host, "", from, "",
+                false, 0,
+            )
+        };
+        assert!(!ready(
+            "test",
+            "host:a.test",
+            "break a.test/api\n",
+            true,
+            false,
+            "",
+            ""
+        ));
+        assert!(!ready(
+            "test",
+            " host:a.test ",
+            "break a.test/api",
+            true,
+            false,
+            "",
+            ""
+        ));
+        assert!(ready(
+            "test",
+            "host:b.test",
+            "break a.test/api",
+            true,
+            false,
+            "",
+            ""
+        ));
+        assert!(ready(
+            "test",
+            "host:a.test",
+            "break a.test/api",
+            false,
+            false,
+            "",
+            ""
+        ));
+        assert!(ready(
+            "test",
+            "host:a.test",
+            "break a.test/api",
+            true,
+            true,
+            "",
+            ""
+        ));
+        assert!(ready(
+            "Test",
+            "host:a.test",
+            "break a.test/api",
+            true,
+            false,
+            "",
+            ""
+        ));
+        assert!(ready(
+            "other",
+            "host:a.test",
+            "break a.test/api",
+            true,
+            false,
+            "",
+            ""
+        ));
+        assert!(!ready("test", "", "", true, false, "", ""));
+        assert!(ready("", "host:b.test", "", true, false, "", ""));
+        assert!(ready(
+            "test",
+            "host:a.test",
+            "break a.test/api",
+            true,
+            false,
+            "a.test",
+            "keep"
+        ));
+        assert_eq!(
+            super::draft_rules("break a.test/api", "a.test", "", "keep", "", false, 0),
+            "break a.test/api\nreplace a.test req keep -> \n"
+        );
+        assert!(!ready(
+            "test",
+            "host:a.test",
+            "break a.test/api",
+            true,
+            false,
+            "",
+            "not valid"
+        ));
     }
 }

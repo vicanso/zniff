@@ -122,6 +122,7 @@ pub enum StatusMsg {
     InterfaceUnavailable,
     PinLimit,
     BaselineSet,
+    BaselineCleared,
 }
 
 fn port_in_use(err: &str) -> bool {
@@ -353,6 +354,9 @@ impl StatusMsg {
             .into(),
             Self::PinLimit => t(lang, "星标已满 32 条", "The star list is full at 32").into(),
             Self::BaselineSet => t(lang, "已设为对比基准", "Set as the comparison baseline").into(),
+            Self::BaselineCleared => {
+                t(lang, "已取消对比基准", "Cleared the comparison baseline").into()
+            }
         }
     }
 }
@@ -442,6 +446,9 @@ pub fn localize_error(lang: Lang, text: &str) -> String {
     if let Some((_, en)) = EXACT.iter().find(|(zh, _)| *zh == text) {
         return (*en).to_string();
     }
+    if let Some(translated) = localize_attached_guess(text) {
+        return translated;
+    }
     const PREFIX: &[(&str, &str)] = &[
         ("读取 ClientHello 失败: ", "Failed to read ClientHello: "),
         (
@@ -462,6 +469,142 @@ pub fn localize_error(lang: Lang, text: &str) -> String {
     }
     text.to_string()
 }
+
+/// `步骤名。猜测：原因`. Certificate guesses are already in the exact table.
+fn localize_attached_guess(text: &str) -> Option<String> {
+    let (head, guess) = text.split_once("。猜测：")?;
+    let head_en = FLOW_STEP
+        .iter()
+        .find(|(zh, _)| *zh == head)
+        .map(|(_, en)| *en);
+    let guess_en = FLOW_GUESS
+        .iter()
+        .find(|(zh, _)| *zh == guess)
+        .map(|(_, en)| *en);
+    if head_en.is_none() && guess_en.is_none() {
+        return None;
+    }
+    Some(format!(
+        "{}. Guess: {}",
+        head_en.unwrap_or(head),
+        guess_en.unwrap_or(guess)
+    ))
+}
+
+const FLOW_STEP: &[(&str, &str)] = &[
+    ("HTTP/2 上游", "HTTP/2 upstream"),
+    ("上游 HTTP/2", "Upstream HTTP/2"),
+    ("上游 HTTP/1.1", "Upstream HTTP/1.1"),
+    ("上游 HTTP/1.1 未就绪", "Upstream HTTP/1.1 was not ready"),
+    (
+        "上游 HTTP/1.1 已经关闭",
+        "Upstream HTTP/1.1 was already closed",
+    ),
+    (
+        "上游 HTTP/1.1 没有返回",
+        "Upstream HTTP/1.1 returned nothing",
+    ),
+    ("客户端 HTTP/2", "Client HTTP/2"),
+    ("客户端 HTTP/1.1", "Client HTTP/1.1"),
+    ("连接源站超时", "Connecting to the origin timed out"),
+    ("读请求头超时", "Reading request headers timed out"),
+    ("连接上游代理", "Connecting to the upstream proxy"),
+    ("组装上游 URI", "Building the upstream URI"),
+    ("组装断点响应", "Building the break response"),
+    ("组装映射请求", "Building the mapped request"),
+    ("映射连接", "Map-remote connect"),
+    ("映射连接未就绪", "Map-remote connect was not ready"),
+    ("映射请求", "Map-remote request"),
+    ("SNI", "SNI"),
+];
+
+const FLOW_GUESS: &[(&str, &str)] = &[
+    (
+        "复用的 HTTP/2 连接已经关掉，请求还没送到源站。下一次会重新连接。",
+        "the reused HTTP/2 connection was already closed, so the request never reached the origin. The next request opens a new one.",
+    ),
+    (
+        "到源站的 HTTP/1.1 连接已经结束，这条请求没送出去。",
+        "the HTTP/1.1 connection to the origin was already finished, so this request was not sent.",
+    ),
+    (
+        "连接已经关掉，请求没送出去。",
+        "the connection was already closed, so the request was not sent.",
+    ),
+    (
+        "到源站的发送端已经结束，多半是上一条把连接关掉了。",
+        "the sender to the origin is already gone, usually because an earlier request closed it.",
+    ),
+    (
+        "源站要求改用 HTTP/1.1，不接受这条 HTTP/2。",
+        "the origin requires HTTP/1.1 and rejected this HTTP/2 request.",
+    ),
+    (
+        "源站拒绝继续在这条 HTTP/2 连接上接收请求。",
+        "the origin refused to take more requests on this HTTP/2 connection.",
+    ),
+    (
+        "源站或网络把连接重置了。",
+        "the origin or the network reset the connection.",
+    ),
+    (
+        "源站端口没有服务在听。",
+        "nothing is listening on the origin port.",
+    ),
+    (
+        "对端在消息没收完时把连接关了。",
+        "the peer closed the connection before the message finished.",
+    ),
+    ("主机名没有解析到地址。", "the hostname did not resolve."),
+    (
+        "源站没有在时限内接受连接。可能是网络不通、地址解析慢，或源站没有响应。",
+        "the origin did not accept the connection in time. The network may be down, name lookup may be slow, or the origin did not answer.",
+    ),
+    (
+        "客户端迟迟没有把请求头发完。",
+        "the client did not finish sending the request headers.",
+    ),
+    (
+        "这一步在时限内没有完成。",
+        "this step did not finish in time.",
+    ),
+    (
+        "发往源站的 HTTP/2 请求失败，还没有状态码。常见是这条连接已经失效，或源站把流关掉了。",
+        "the HTTP/2 request to the origin failed before a status code. The connection was often already dead, or the origin closed the stream.",
+    ),
+    (
+        "和源站建立 HTTP/2 失败。源站可能不接受这个协议，或刚连上就把连接关了。",
+        "the HTTP/2 handshake with the origin failed. It may reject the protocol, or it closed the connection right away.",
+    ),
+    (
+        "和源站的 HTTP/1.1 对话中断。",
+        "the HTTP/1.1 exchange with the origin stopped.",
+    ),
+    (
+        "请求送出后，源站没有把响应交回来。",
+        "the request was sent, but the origin did not return a response.",
+    ),
+    (
+        "和客户端的连接中断。源站那边可能已经开始处理。",
+        "the client connection dropped. The origin may already have started handling the request.",
+    ),
+    (
+        "配置里的上游代理没有接通。",
+        "the configured upstream proxy did not connect.",
+    ),
+    (
+        "改写后的地址或响应不是合法的 HTTP。",
+        "the rewritten target or response is not valid HTTP.",
+    ),
+    (
+        "按转发规则去连目标时失败。",
+        "connecting to the map-remote target failed.",
+    ),
+    (
+        "主机名不能当作 TLS 的服务器名。",
+        "the hostname cannot be used as a TLS server name.",
+    ),
+];
 
 pub fn ws_kind(lang: Lang, kind: &str) -> String {
     let en = match kind {
@@ -518,6 +661,11 @@ mod tests {
         assert!(other.text(Lang::Zh).contains("没有绑上"));
         assert_eq!(StatusMsg::Idle.text(Lang::En), "Idle");
         assert_eq!(StatusMsg::Idle.text(Lang::Zh), "未开始");
+        assert_eq!(StatusMsg::BaselineCleared.text(Lang::Zh), "已取消对比基准");
+        assert_eq!(
+            StatusMsg::BaselineCleared.text(Lang::En),
+            "Cleared the comparison baseline"
+        );
         let listening = StatusMsg::Listening {
             port: 8877,
             via_system_proxy: false,
@@ -528,6 +676,13 @@ mod tests {
         assert_eq!(
             localize_error(Lang::En, "客户端 TLS 失败: eof"),
             "Client TLS failed: eof"
+        );
+        let guessed =
+            "HTTP/2 上游。猜测：复用的 HTTP/2 连接已经关掉，请求还没送到源站。下一次会重新连接。";
+        assert_eq!(localize_error(Lang::Zh, guessed), guessed);
+        assert_eq!(
+            localize_error(Lang::En, guessed),
+            "HTTP/2 upstream. Guess: the reused HTTP/2 connection was already closed, so the request never reached the origin. The next request opens a new one."
         );
         assert_eq!(ws_kind(Lang::En, "文本"), "text");
     }
