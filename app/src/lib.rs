@@ -1248,7 +1248,7 @@ fn saved_filter_panel(
     let draft_kind = signal(0_u8);
 
     view()
-        .w(px(780.0))
+        .w(move || px(adaptive_filter_panel_width(window().width.0)))
         .rounded(px(10.0))
         .border_1()
         .border_color(border_strong())
@@ -2668,6 +2668,34 @@ fn clamp_list_px(width: f32) -> f32 {
     config::clamp_list_width(rounded) as f32
 }
 
+fn clamp_list_px_for_window(width: f32, window_w: f32) -> f32 {
+    let base = clamp_list_px(width);
+    if window_w.is_finite() && window_w > 0.0 {
+        let max_for_win = (window_w - 340.0)
+            .round()
+            .clamp(config::LIST_WIDTH_MIN as f32, config::LIST_WIDTH_MAX as f32);
+        base.min(max_for_win)
+    } else {
+        base
+    }
+}
+
+fn adaptive_filter_panel_width(window_w: f32) -> f32 {
+    if window_w.is_finite() && window_w > 0.0 {
+        (window_w - 48.0).round().clamp(680.0, 1080.0)
+    } else {
+        780.0
+    }
+}
+
+fn adaptive_rules_editor_height(window_h: f32) -> f32 {
+    if window_h.is_finite() && window_h > 0.0 {
+        (window_h - 460.0).round().clamp(105.0, 360.0)
+    } else {
+        105.0
+    }
+}
+
 fn column_splitter(width: Signal<f32>, controls: Arc<Controls>) -> impl IntoElement {
     let origin = signal(0.0_f32);
     let width_grant = width;
@@ -2689,10 +2717,16 @@ fn column_splitter(width: Signal<f32>, controls: Arc<Controls>) -> impl IntoElem
         .on_mouse_enter(move |_: &MouseEvent| hot.set(true))
         .on_mouse_leave(move |_: &MouseEvent| hot.set(false))
         .on_responder_grant(move |_event: &ResponderEvent| {
-            origin.set(width_grant.get());
+            origin.set(clamp_list_px_for_window(
+                width_grant.get(),
+                window().width.0,
+            ));
         })
         .on_responder_move(move |event: &ResponderEvent| {
-            width_move.set(clamp_list_px(origin.get() + event.gesture.delta.x.0));
+            width_move.set(clamp_list_px_for_window(
+                origin.get() + event.gesture.delta.x.0,
+                window().width.0,
+            ));
         })
         .on_responder_release(move |_event: &ResponderEvent| {
             store_list_width(width_release.get(), &controls_release);
@@ -2745,14 +2779,15 @@ fn flow_list(
     let picked = signal(None::<u64>);
     let menu_open = signal(false);
     let menu_at = signal(Point::<Points>::default());
+    let effective_width = move || clamp_list_px_for_window(width.get(), window().width.0);
     view()
-        .w(move || px(width.get()))
+        .w(move || px(effective_width()))
         .flex_shrink_0()
         .overflow_hidden()
         .bg(bg_list())
         .child(
             view()
-                .w(move || px(width.get()))
+                .w(move || px(effective_width()))
                 .h(px(46.0))
                 .flex_shrink_0()
                 .flex_row()
@@ -3214,7 +3249,7 @@ fn enable_switch(
 fn rules_editor(value: Signal<String>, controls: Arc<Controls>) -> impl IntoElement {
     view()
         .w_full()
-        .h(px(105.0))
+        .h(move || px(adaptive_rules_editor_height(window().height.0)))
         .rounded(px(7.0))
         .border_1()
         .border_color(border_control())
@@ -9260,6 +9295,17 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
             super::clamp_list_px(-20.0),
             crate::config::LIST_WIDTH_MIN as f32
         );
+        assert_eq!(super::clamp_list_px_for_window(900.0, 1000.0), 660.0);
+        assert_eq!(super::clamp_list_px_for_window(900.0, 0.0), 900.0);
+        assert_eq!(super::clamp_list_px_for_window(900.0, 500.0), 280.0);
+        assert_eq!(super::adaptive_filter_panel_width(0.0), 780.0);
+        assert_eq!(super::adaptive_filter_panel_width(600.0), 680.0);
+        assert_eq!(super::adaptive_filter_panel_width(900.0), 852.0);
+        assert_eq!(super::adaptive_filter_panel_width(1400.0), 1080.0);
+        assert_eq!(super::adaptive_rules_editor_height(0.0), 105.0);
+        assert_eq!(super::adaptive_rules_editor_height(520.0), 105.0);
+        assert_eq!(super::adaptive_rules_editor_height(700.0), 240.0);
+        assert_eq!(super::adaptive_rules_editor_height(1000.0), 360.0);
     }
 
     #[test]
