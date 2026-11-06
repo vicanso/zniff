@@ -324,7 +324,7 @@ pub fn format_timing(
         t(lang, "响应", "response"),
         format_count(response_bytes)
     ));
-    parts.join("  ·  ")
+    parts.join(" · ")
 }
 
 pub fn is_slow(started: SystemTime, finished: Option<SystemTime>, now: SystemTime) -> bool {

@@ -29,11 +29,15 @@ pub enum Protocol {
 
 impl Protocol {
     pub fn label(self) -> &'static str {
+        self.label_in(crate::i18n::Lang::Zh)
+    }
+
+    pub fn label_in(self, lang: crate::i18n::Lang) -> &'static str {
         match self {
             Self::Http11 => "HTTP/1.1",
             Self::Http2 => "HTTP/2",
             Self::WebSocket => "WebSocket",
-            Self::Tunnel => "隧道",
+            Self::Tunnel => crate::i18n::t(lang, "隧道", "Tunnel"),
         }
     }
 }

@@ -305,7 +305,6 @@ struct RowLine {
     protocol: String,
     size: String,
     failed: bool,
-    slow: bool,
     pinned: bool,
 }
 
@@ -1962,6 +1961,7 @@ fn profile_dock(
                                                         .h_full()
                                                         .px_2()
                                                         .rounded(px(6.0))
+                                                        .overflow_hidden()
                                                         .flex_row()
                                                         .items_center()
                                                         .gap_2()
@@ -2023,9 +2023,11 @@ fn profile_dock(
                                                         .child(
                                                             view()
                                                                 .h(px(18.0))
+                                                                .max_w(px(150.0))
                                                                 .px_1p5()
                                                                 .rounded(px(4.0))
                                                                 .flex_shrink_0()
+                                                                .overflow_hidden()
                                                                 .flex_row()
                                                                 .items_center()
                                                                 .bg(accent_blue_soft())
@@ -2037,6 +2039,12 @@ fn profile_dock(
                                                                             },
                                                                         )
                                                                     })
+                                                                    .max_w(px(138.0))
+                                                                    .min_w(px(0.0))
+                                                                    .number_of_lines(1)
+                                                                    .text_overflow(
+                                                                        EllipsizeMode::Tail,
+                                                                    )
                                                                     .text_size(px(11.0))
                                                                     .font_weight(FontWeight::MEDIUM)
                                                                     .text_color(accent_blue_text()),
@@ -2047,6 +2055,7 @@ fn profile_dock(
                                                                 display_rules.with(profile_preview)
                                                             })
                                                             .flex_1()
+                                                            .min_w(px(0.0))
                                                             .number_of_lines(1)
                                                             .text_overflow(EllipsizeMode::Tail)
                                                             .text_color(fg_secondary()),
@@ -3940,142 +3949,155 @@ fn flow_table(
         .flex_1()
         .min_h(px(0.0))
         .w_full()
-        .child(
-            data_table()
-                .component_ref(&table)
-                .flex_1()
-                .min_h(px(0.0))
-                .w_full()
-                .classes(flow_table_classes())
-                .columns(move || {
-                    let shown = columns.get();
-                    // A drag must not rebuild `columns`: the table keeps the width
-                    // until this prop changes, and a new width here replaces the drag.
-                    // `flow_column_title` reads the language signal, so a language
-                    // change still rebuilds the titles.
-                    let widths = untracked(|| widths_for_cols.get());
-                    let mut built = flow_table_columns(shown, &widths);
-                    for column in &mut built {
-                        let key = column.key.to_string();
-                        column.title = Some(flow_column_title(&key, shown.full_url).into());
-                    }
-                    built
-                })
-                .data(DataTableRows::default())
-                .row_count(move || Some(rows.with(Vec::len) as u32))
-                .row_height(px(34.0))
-                .header_height(px(28.0))
-                .font_size(px(12.0))
-                .row_header(false)
-                .column_selectable(false)
-                .cell_selectable(false)
-                .movable_columns(false)
-                .loop_selection(false)
-                .stripe(true)
-                .selection(move || {
-                    let id = selected.get();
-                    let row = rows.with(|rows| rows.iter().position(|row| Some(row.id) == id));
-                    row.map(|row| {
-                        let mut selection = DataTableSelection::default();
-                        selection.row = Some(row as u32);
-                        selection
+        .child(dynamic(move || {
+            let _ = columns.with(|c| {
+                (
+                    c.path, c.status, c.protocol, c.gap, c.elapsed, c.host, c.size,
+                )
+            });
+            let blur_header = Rc::clone(&blur_header);
+            let blur_press = Rc::clone(&blur_press);
+            let blur_menu = Rc::clone(&blur_menu);
+            let blur_select = Rc::clone(&blur_select);
+            let controls = controls.clone();
+            Some(
+                data_table()
+                    .component_ref(&table)
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .w_full()
+                    .classes(flow_table_classes())
+                    .columns(move || {
+                        let shown = columns.get();
+                        let current_widths = untracked(|| widths_for_cols.get());
+                        let mut built = flow_table_columns(shown, &current_widths);
+                        for column in &mut built {
+                            let key = column.key.to_string();
+                            column.title = Some(flow_column_title(&key, shown.full_url).into());
+                        }
+                        built
                     })
-                })
-                .render_cell(move |cell: &DataTableCell| {
-                    flow_cell(
-                        rows_for_cells,
-                        selected_for_cells,
-                        baseline_for_cells,
-                        columns,
-                        hover,
-                        cell,
-                    )
-                })
-                .render_header_cell(move |cell: &DataTableHeaderCell| {
-                    let blur_header = Rc::clone(&blur_header);
-                    flow_header(cell).on_press(move || blur_header())
-                })
-                .empty(list_empty(filter))
-                .on_row_press(move |_: &DataTablePress| blur_press())
-                .on_selection_change(move |selection: &Option<DataTableSelection>| {
-                    blur_select();
-                    let next = selection
-                        .and_then(|selection| selection.row)
-                        .and_then(|row| rows.with(|rows| rows.get(row as usize).map(|row| row.id)));
-                    if selected.get() != next {
-                        reset_compose(compose);
-                        selected.set(next);
-                    }
-                })
-                .on_context_menu(move |event: &DataTableContextMenu| {
-                    blur_menu();
-                    menu_at.set(Point {
-                        x: event.x,
-                        y: event.y,
-                    });
-                    if let Some(row) = event.row {
-                        header_menu.set(false);
-                        let next = rows.with(|rows| rows.get(row as usize).map(|row| row.id));
-                        picked.set(next);
+                    .data(DataTableRows::default())
+                    .row_count(move || Some(rows.with(Vec::len) as u32))
+                    .row_height(px(34.0))
+                    .header_height(px(28.0))
+                    .font_size(px(12.0))
+                    .row_header(false)
+                    .column_selectable(false)
+                    .cell_selectable(false)
+                    .movable_columns(false)
+                    .loop_selection(false)
+                    .stripe(true)
+                    .selection(move || {
+                        let id = selected.get();
+                        let row = rows.with(|rows| rows.iter().position(|row| Some(row.id) == id));
+                        row.map(|row| {
+                            let mut selection = DataTableSelection::default();
+                            selection.row = Some(row as u32);
+                            selection
+                        })
+                    })
+                    .render_cell(move |cell: &DataTableCell| {
+                        flow_cell(
+                            rows_for_cells,
+                            selected_for_cells,
+                            baseline_for_cells,
+                            columns,
+                            hover,
+                            cell,
+                        )
+                    })
+                    .render_header_cell(move |cell: &DataTableHeaderCell| {
+                        let blur_header = Rc::clone(&blur_header);
+                        flow_header(cell, columns).on_press(move || blur_header())
+                    })
+                    .empty(list_empty(filter))
+                    .on_row_press(move |_: &DataTablePress| blur_press())
+                    .on_selection_change(move |selection: &Option<DataTableSelection>| {
+                        blur_select();
+                        let next = selection
+                            .and_then(|selection| selection.row)
+                            .and_then(|row| {
+                                rows.with(|rows| rows.get(row as usize).map(|row| row.id))
+                            });
                         if selected.get() != next {
                             reset_compose(compose);
+                            selected.set(next);
                         }
-                        selected.set(next);
-                        menu_open.set(true);
-                    } else {
-                        menu_open.set(false);
-                        header_menu.set(true);
-                    }
-                })
-                .on_visible_rows_change(move |range: &DataTableRange| {
-                    hover.text.set(None);
-                    let count = rows.with(Vec::len) as u32;
-                    if count == 0 {
-                        follow.replace(true);
-                        followed_count.replace(0);
-                        return;
-                    }
-                    let near = range.end.saturating_add(1) >= count;
-                    if follow.get() && count > followed_count.get() {
-                        followed_count.replace(count);
-                        if !near && let Some(api) = table.api::<DataTableApi>() {
-                            api.scroll_to_row(count - 1, Some(false));
-                        }
-                        return;
-                    }
-                    follow.replace(near);
-                })
-                .on_column_resize(move |event: &DataTableEvent| {
-                    let DataTableEvent::ColumnResize(key, width) = event else {
-                        return;
-                    };
-                    let Some(limit) = config::column_width_limit(key.as_ref()) else {
-                        return;
-                    };
-                    let px = (width.0.round() as u32).clamp(limit.min, limit.max);
-                    widths.update(|map| {
-                        if px == limit.default {
-                            map.remove(key.as_ref());
+                    })
+                    .on_context_menu(move |event: &DataTableContextMenu| {
+                        blur_menu();
+                        menu_at.set(Point {
+                            x: event.x,
+                            y: event.y,
+                        });
+                        if let Some(row) = event.row {
+                            header_menu.set(false);
+                            let next = rows.with(|rows| rows.get(row as usize).map(|row| row.id));
+                            picked.set(next);
+                            if selected.get() != next {
+                                reset_compose(compose);
+                            }
+                            selected.set(next);
+                            menu_open.set(true);
                         } else {
-                            map.insert(key.to_string(), px);
+                            menu_open.set(false);
+                            header_menu.set(true);
                         }
-                    });
-                    let widths = widths;
-                    let controls = controls.clone();
-                    save_job.replace(Some(set_timeout(Duration::from_millis(300), move || {
-                        let map = widths.get();
-                        if let Err(err) = save_config(|config| config.column_widths = map) {
-                            set_status(
-                                &controls,
-                                StatusMsg::PrefUnsaved {
-                                    name: PrefName::List,
-                                    err: err.to_string(),
-                                },
-                            );
+                    })
+                    .on_visible_rows_change(move |range: &DataTableRange| {
+                        hover.text.set(None);
+                        let count = rows.with(Vec::len) as u32;
+                        if count == 0 {
+                            follow.replace(true);
+                            followed_count.replace(0);
+                            return;
                         }
-                    })));
-                }),
-        )
+                        let near = range.end.saturating_add(1) >= count;
+                        if follow.get() && count > followed_count.get() {
+                            followed_count.replace(count);
+                            if !near && let Some(api) = table.api::<DataTableApi>() {
+                                api.scroll_to_row(count - 1, Some(false));
+                            }
+                            return;
+                        }
+                        follow.replace(near);
+                    })
+                    .on_column_resize(move |event: &DataTableEvent| {
+                        let DataTableEvent::ColumnResize(key, width) = event else {
+                            return;
+                        };
+                        let Some(limit) = config::column_width_limit(key.as_ref()) else {
+                            return;
+                        };
+                        let px = (width.0.round() as u32).clamp(limit.min, limit.max);
+                        widths.update(|map| {
+                            if px == limit.default {
+                                map.remove(key.as_ref());
+                            } else {
+                                map.insert(key.to_string(), px);
+                            }
+                        });
+                        let widths = widths;
+                        let controls = controls.clone();
+                        save_job.replace(Some(set_timeout(
+                            Duration::from_millis(300),
+                            move || {
+                                let map = widths.get();
+                                if let Err(err) = save_config(|config| config.column_widths = map) {
+                                    set_status(
+                                        &controls,
+                                        StatusMsg::PrefUnsaved {
+                                            name: PrefName::List,
+                                            err: err.to_string(),
+                                        },
+                                    );
+                                }
+                            },
+                        )));
+                    }),
+            )
+        }))
         .child(when(
             move || hover.text.get().is_some(),
             move || {
@@ -4459,8 +4481,9 @@ fn flow_cell(
     }
 }
 
-fn flow_header(cell: &DataTableHeaderCell) -> View {
-    let lead = cell.key.as_ref() == "method";
+fn flow_header(cell: &DataTableHeaderCell, columns: Signal<ListColumns>) -> View {
+    let key = cell.key.to_string();
+    let lead = key == "method";
     view()
         .w_full()
         .h_full()
@@ -4471,11 +4494,13 @@ fn flow_header(cell: &DataTableHeaderCell) -> View {
         .items_center()
         .overflow_hidden()
         .child(
-            text(cell.title.clone())
-                .number_of_lines(1)
-                .text_size(px(11.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(fg_muted()),
+            text(move || -> SharedString {
+                flow_column_title(&key, columns.get().full_url).into()
+            })
+            .number_of_lines(1)
+            .text_size(px(11.0))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(fg_muted()),
         )
 }
 
@@ -4491,8 +4516,8 @@ fn method_cell(
         .w_full()
         .h_full()
         .min_w(px(0.0))
-        .pl(px(12.0))
-        .pr(px(4.0))
+        .pl(px(2.0))
+        .pr(px(2.0))
         .border_l(px(2.0))
         .border_l_color(move || {
             let id = rows.with(|rows| rows.get(index).map(|row| row.id));
@@ -4504,21 +4529,30 @@ fn method_cell(
         })
         .flex_row()
         .items_center()
-        .gap_1()
-        .child(when(
-            move || rows.with(|rows| rows.get(index).is_some_and(|row| row.pinned)),
-            || {
-                view()
-                    .w(px(6.0))
-                    .h(px(6.0))
-                    .rounded(px(99.0))
-                    .flex_shrink_0()
-                    .bg(accent_blue())
-            },
-        ))
+        .overflow_hidden()
         .child(
             view()
-                .px_1p5()
+                .w(px(10.0))
+                .h_full()
+                .flex_shrink_0()
+                .flex_row()
+                .items_center()
+                .justify_center()
+                .child(when(
+                    move || rows.with(|rows| rows.get(index).is_some_and(|row| row.pinned)),
+                    || {
+                        view()
+                            .w(px(6.0))
+                            .h(px(6.0))
+                            .rounded(px(99.0))
+                            .flex_shrink_0()
+                            .bg(accent_blue())
+                    },
+                )),
+        )
+        .child(
+            view()
+                .px(px(5.0))
                 .py_0p5()
                 .rounded(px(4.0))
                 .bg(move || {
@@ -4537,7 +4571,7 @@ fn method_cell(
                         })
                     })
                     .number_of_lines(1)
-                    .text_size(px(11.0))
+                    .text_size(px(10.5))
                     .font_weight(FontWeight::BOLD)
                     .text_color(move || {
                         rows.with(|rows| {
@@ -4585,13 +4619,7 @@ fn time_cell(rows: Signal<Vec<RowLine>>, hover: CellHover, index: usize) -> Text
     .pr(px(4.0))
     .number_of_lines(1)
     .text_size(px(12.0))
-    .text_color(move || {
-        if rows.with(|rows| rows.get(index).is_some_and(|row| row.slow)) {
-            status_warn_fg()
-        } else {
-            fg_muted()
-        }
-    })
+    .text_color(fg_muted())
     .on_mouse_move(move |event: &MouseEvent| {
         let clock = clock_rows.with(|rows| {
             rows.get(index)
@@ -4637,9 +4665,9 @@ fn host_cell(
         .min_w(px(0.0))
         .pl(px(4.0))
         .pr(px(4.0))
+        .overflow_hidden()
         .flex_row()
         .items_center()
-        .gap_1()
         .on_mouse_move(move |event: &MouseEvent| {
             let host = tip_rows.with(|rows| {
                 rows.get(index)
@@ -4657,13 +4685,12 @@ fn host_cell(
                         .unwrap_or_default()
                 })
             })
-            .flex_1()
+            .w_full()
             .min_w(px(0.0))
             .number_of_lines(1)
             .text_overflow(move || columns.get().ellipsize_mode())
-            .text_size(px(12.5))
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(fg_primary()),
+            .text_size(px(12.0))
+            .text_color(fg_secondary()),
         )
 }
 
@@ -4902,10 +4929,10 @@ fn ready_detail(
             filter,
             baseline,
         ))
-        .child(when(
-            move || compose.composing.get(),
-            move || compose_box(compose),
-        ))
+        .child(when(move || compose.composing.get(), {
+            let controls = controls.clone();
+            move || compose_box(compose, controls.clone(), selected)
+        }))
         .child(when(
             move || {
                 !shown.response_body.get().is_empty()
@@ -5104,6 +5131,8 @@ fn summary(
             mono(move || shown.metrics.get())
                 .selectable(true)
                 .on_press_up(dismiss_keyboard)
+                .number_of_lines(1)
+                .text_overflow(EllipsizeMode::Tail)
                 .text_size(px(11.5))
                 .text_color(fg_muted()),
         )
@@ -5418,7 +5447,7 @@ fn body_section(
                     .px_3()
                     .py_3()
                     .gap_1p5()
-                    .flex_row()
+                    .items_center()
                     .justify_center()
                     .child(
                         view()
@@ -6969,14 +6998,9 @@ fn row_lines(hub: &Hub, filter: &str, lang: Lang) -> Vec<RowLine> {
                         failed,
                         lang,
                     ),
-                    protocol: flow.protocol.label().to_string(),
+                    protocol: flow.protocol.label_in(lang).to_string(),
                     size: format_bytes(flow.response_bytes as usize),
                     failed,
-                    slow: present::is_slow(
-                        flow.started,
-                        flow.finished_at,
-                        std::time::SystemTime::now(),
-                    ),
                     pinned: flow.pinned,
                 })
             })
@@ -7096,7 +7120,7 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baselin
     );
     shown.method.set(flow.method);
     shown.url.set(flow.url);
-    shown.protocol.set(flow.protocol.label().to_string());
+    shown.protocol.set(flow.protocol.label_in(lang).to_string());
     shown.rules.set(flow.rule_hit.clone());
     shown.status.set(flow.status);
     shown.error.set(flow.error.clone().unwrap_or_default());
@@ -8197,63 +8221,173 @@ fn break_bar(
         }))
 }
 
-fn compose_box(compose: Compose) -> impl IntoElement {
+fn compose_box(
+    compose: Compose,
+    controls: Arc<Controls>,
+    selected: Signal<Option<u64>>,
+) -> impl IntoElement {
     view()
-        .gap_1p5()
-        .child(view().px_1().child(section_title({
-            let langs = ui_langs();
-            move || -> SharedString {
-                if compose.response.get() {
-                    t(ui_lang(langs), "编辑响应", "Edit response").into()
-                } else {
-                    t(ui_lang(langs), "编辑重发", "Edit and resend").into()
-                }
-            }
-        })))
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(border_strong())
+        .bg(bg_card())
+        .overflow_hidden()
         .child(
             view()
                 .flex_row()
-                .gap_1p5()
-                .child(when(
-                    move || compose.response.get(),
-                    move || {
-                        view().w(px(72.0)).flex_shrink_0().child(compose_input(
-                            compose.status,
-                            "200",
-                            30.0,
-                            false,
-                        ))
-                    },
-                ))
-                .child(view().w(px(88.0)).flex_shrink_0().child(compose_input(
-                    compose.method,
-                    "POST",
-                    30.0,
-                    false,
-                )))
-                .child(view().flex_1().min_w(px(0.0)).child(compose_input_on(
-                    compose.url,
-                    tr(
-                        "https://example.com/path，或粘贴 curl",
-                        "https://example.com/path, or paste curl",
-                    ),
-                    30.0,
-                    false,
-                    move |text| apply_url_edit(compose, text),
-                ))),
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .px_3p5()
+                .py_2()
+                .border_b_1()
+                .border_b_color(border_subtle())
+                .child(section_title({
+                    let langs = ui_langs();
+                    move || -> SharedString {
+                        if compose.response.get() {
+                            t(ui_lang(langs), "编辑响应", "Edit response").into()
+                        } else {
+                            t(ui_lang(langs), "编辑重发", "Edit and resend").into()
+                        }
+                    }
+                }))
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_1p5()
+                        .child(
+                            view()
+                                .h(px(24.0))
+                                .px_2p5()
+                                .rounded(px(6.0))
+                                .border_1()
+                                .border_color(border_control())
+                                .bg(bg_control())
+                                .hover(|style| style.bg(bg_control_hover()))
+                                .active(|style| style.opacity(0.75))
+                                .cursor(Cursor::Pointer)
+                                .flex_row()
+                                .items_center()
+                                .on_press(move || reset_compose(compose))
+                                .child(
+                                    text(tr("取消", "Cancel"))
+                                        .number_of_lines(1)
+                                        .text_size(px(11.5))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(fg_secondary()),
+                                ),
+                        )
+                        .child(when(
+                            move || !compose.response.get(),
+                            move || {
+                                let controls = controls.clone();
+                                view()
+                                    .h(px(24.0))
+                                    .px_2p5()
+                                    .rounded(px(6.0))
+                                    .bg(accent_blue())
+                                    .hover(|style| style.bg(accent_blue_hover()))
+                                    .active(|style| style.opacity(0.85))
+                                    .cursor(Cursor::Pointer)
+                                    .flex_row()
+                                    .items_center()
+                                    .on_press(move || {
+                                        replay_flow(
+                                            &controls,
+                                            selected.get(),
+                                            ReplayOverride {
+                                                method: Some(compose.method.get()),
+                                                url: Some(compose.url.get()),
+                                                headers: Some(parse_header_text(
+                                                    &compose.headers.get(),
+                                                )),
+                                                body: Some(compose.body.get().into_bytes()),
+                                            },
+                                        );
+                                    })
+                                    .child(
+                                        text(tr("发送", "Send"))
+                                            .number_of_lines(1)
+                                            .text_size(px(11.5))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(white()),
+                                    )
+                            },
+                        )),
+                ),
         )
-        .child(compose_editor(
-            compose.headers,
-            tr("一行一个 Name: value", "One Name: value per line"),
-            120.0,
-            "plaintext",
-        ))
-        .child(compose_editor(
-            compose.body,
-            tr("body", "body"),
-            180.0,
-            "json",
-        ))
+        .child(
+            view()
+                .p_3p5()
+                .gap_2()
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_1p5()
+                        .child(when(
+                            move || compose.response.get(),
+                            move || {
+                                view()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        text(tr("状态码", "Status code"))
+                                            .number_of_lines(1)
+                                            .text_size(px(12.0))
+                                            .text_color(fg_secondary()),
+                                    )
+                                    .child(view().w(px(88.0)).flex_shrink_0().child(compose_input(
+                                        compose.status,
+                                        "200",
+                                        30.0,
+                                        false,
+                                    )))
+                            },
+                        ))
+                        .child(when(
+                            move || !compose.response.get(),
+                            move || {
+                                view()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .flex_row()
+                                    .gap_1p5()
+                                    .child(view().w(px(88.0)).flex_shrink_0().child(compose_input(
+                                        compose.method,
+                                        "POST",
+                                        30.0,
+                                        false,
+                                    )))
+                                    .child(view().flex_1().min_w(px(0.0)).child(compose_input_on(
+                                        compose.url,
+                                        tr(
+                                            "https://example.com/path，或粘贴 curl",
+                                            "https://example.com/path, or paste curl",
+                                        ),
+                                        30.0,
+                                        false,
+                                        move |text| apply_url_edit(compose, text),
+                                    )))
+                            },
+                        )),
+                )
+                .child(compose_editor(
+                    compose.headers,
+                    tr("一行一个 Name: value", "One Name: value per line"),
+                    120.0,
+                    "plaintext",
+                ))
+                .child(compose_editor(
+                    compose.body,
+                    tr("body", "body"),
+                    160.0,
+                    "json",
+                )),
+        )
 }
 
 fn compose_editor(
@@ -9266,9 +9400,20 @@ fn format_bytes(bytes: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+
     use std::net::Ipv4Addr;
 
     use super::{LanAddr, cert_url, choose_lan, usable_v4};
+    use crate::i18n::Lang;
+    use crate::session::Protocol;
+
+    #[test]
+    fn protocol_tunnel_label_is_localized() {
+        assert_eq!(Protocol::Tunnel.label_in(Lang::Zh), "隧道");
+        assert_eq!(Protocol::Tunnel.label_in(Lang::En), "Tunnel");
+        assert_eq!(Protocol::WebSocket.label_in(Lang::En), "WebSocket");
+        assert_eq!(Protocol::Http2.label_in(Lang::En), "HTTP/2");
+    }
 
     #[test]
     fn cert_url_uses_only_the_chosen_lan_address() {
@@ -9531,7 +9676,6 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
             protocol: "HTTP/2".to_string(),
             size: "128 B".to_string(),
             failed: false,
-            slow: false,
             pinned: false,
         };
         assert_eq!(super::row_target_text(&row, false), "/v1/users");
@@ -9605,6 +9749,12 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
         assert_eq!(cols[0].key.as_ref(), "method");
         assert!(cols.iter().all(|column| column.key.as_ref() != "path"));
         assert_eq!(cols.iter().filter(|column| column.fixed).count(), 1);
+
+        let default_shown = super::ListColumns::from_config(&crate::config::Config::default());
+        let default_cols =
+            super::flow_table_columns(default_shown, &std::collections::HashMap::new());
+        let default_sum: f32 = default_cols.iter().map(|c| c.width.unwrap().0).sum();
+        assert_eq!(default_sum, crate::config::LIST_WIDTH_DEFAULT as f32);
 
         let all_shown = super::ListColumns {
             path: true,
