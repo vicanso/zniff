@@ -135,6 +135,90 @@ pub struct SavedProfile {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileExport {
+    #[serde(default, alias = "saved_profiles")]
+    pub profiles: Vec<SavedProfile>,
+}
+
+fn sanitize_profile(mut profile: SavedProfile) -> Option<SavedProfile> {
+    profile.name = profile.name.trim().to_string();
+    profile.filter = profile.filter.trim().to_string();
+    profile.bypass_hosts = profile.bypass_hosts.trim().to_string();
+    profile.rules = profile.rules.trim().to_string();
+    profile.upstream_proxy = profile.upstream_proxy.trim().to_string();
+    if profile.name.is_empty() {
+        return None;
+    }
+    if profile.filter.is_empty()
+        && profile.bypass_hosts.is_empty()
+        && profile.rules.is_empty()
+        && profile.upstream_proxy.is_empty()
+    {
+        return None;
+    }
+    Some(profile)
+}
+
+pub fn export_profiles_toml(profiles: &[SavedProfile]) -> std::result::Result<String, String> {
+    let cleaned: Vec<SavedProfile> = profiles
+        .iter()
+        .cloned()
+        .filter_map(sanitize_profile)
+        .collect();
+    if cleaned.is_empty() {
+        return Err("no saved setups to export".to_string());
+    }
+    toml::to_string_pretty(&ProfileExport { profiles: cleaned }).map_err(|err| err.to_string())
+}
+
+pub fn parse_profiles_toml(text: &str) -> std::result::Result<Vec<SavedProfile>, String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err("empty TOML".to_string());
+    }
+    if let Ok(bundle) = toml::from_str::<ProfileExport>(trimmed) {
+        let cleaned: Vec<SavedProfile> = bundle
+            .profiles
+            .into_iter()
+            .filter_map(sanitize_profile)
+            .collect();
+        if !cleaned.is_empty() {
+            return Ok(cleaned);
+        }
+    }
+    let single = toml::from_str::<SavedProfile>(trimmed).map_err(|err| err.to_string())?;
+    sanitize_profile(single)
+        .map(|profile| vec![profile])
+        .ok_or_else(|| "no valid setup found in TOML".to_string())
+}
+
+pub fn merge_imported_profiles(
+    existing: &[SavedProfile],
+    incoming: &[SavedProfile],
+    cap: usize,
+) -> Vec<SavedProfile> {
+    let mut out: Vec<SavedProfile> = Vec::new();
+    for item in incoming.iter().cloned().filter_map(sanitize_profile) {
+        if !out
+            .iter()
+            .any(|seen| seen.name.eq_ignore_ascii_case(&item.name))
+        {
+            out.push(item);
+        }
+    }
+    for item in existing.iter().cloned() {
+        if !out
+            .iter()
+            .any(|seen| seen.name.eq_ignore_ascii_case(&item.name))
+        {
+            out.push(item);
+        }
+    }
+    out.truncate(cap);
+    out
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub listen_port: u16,
@@ -954,5 +1038,47 @@ mod tests {
 
         fs::write(dir.path().join("config.toml"), "ellipsize = \"invalid\"\n").unwrap();
         assert_eq!(load(dir.path()).ellipsize, ListEllipsize::Middle);
+    }
+
+    #[test]
+    fn saved_profiles_export_import_and_merge_case_insensitively() {
+        let p1 = SavedProfile {
+            name: "Staging".into(),
+            filter: "host:staging.test".into(),
+            bypass_hosts: String::new(),
+            rules: "delay staging.test/api 200ms".into(),
+            upstream_proxy: String::new(),
+            rules_enabled: true,
+            breaks_enabled: false,
+            show_tunnel_failures: true,
+        };
+        let p2 = SavedProfile {
+            name: "Local".into(),
+            filter: String::new(),
+            bypass_hosts: "*.internal".into(),
+            rules: String::new(),
+            upstream_proxy: "127.0.0.1:9090".into(),
+            rules_enabled: true,
+            breaks_enabled: true,
+            show_tunnel_failures: false,
+        };
+        let toml_text = export_profiles_toml(&[p1.clone(), p2.clone()]).unwrap();
+        assert!(toml_text.contains("[[profiles]]"), "{toml_text}");
+        let parsed = parse_profiles_toml(&toml_text).unwrap();
+        assert_eq!(parsed, vec![p1.clone(), p2.clone()]);
+
+        let single_toml = "name = \"staging\"\nfilter = \"host:new.staging.test\"\n";
+        let single_parsed = parse_profiles_toml(single_toml).unwrap();
+        assert_eq!(single_parsed.len(), 1);
+        assert_eq!(single_parsed[0].name, "staging");
+
+        let merged = merge_imported_profiles(&[p1, p2.clone()], &single_parsed, 16);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].name, "staging");
+        assert_eq!(merged[0].filter, "host:new.staging.test");
+        assert_eq!(merged[1], p2);
+
+        assert!(parse_profiles_toml("").is_err());
+        assert!(parse_profiles_toml("name = \"empty_only\"\n").is_err());
     }
 }

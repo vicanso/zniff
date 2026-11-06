@@ -123,6 +123,13 @@ pub enum StatusMsg {
     PinLimit,
     BaselineSet,
     BaselineCleared,
+    ProfilesExported {
+        count: usize,
+        path: String,
+    },
+    ProfilesImported {
+        count: usize,
+    },
 }
 
 fn port_in_use(err: &str) -> bool {
@@ -357,6 +364,14 @@ impl StatusMsg {
             Self::BaselineCleared => {
                 t(lang, "已取消对比基准", "Cleared the comparison baseline").into()
             }
+            Self::ProfilesExported { count, path } => match lang {
+                Lang::Zh => format!("已导出 {count} 套配置并复制到剪贴板 · {path}"),
+                Lang::En => format!("Exported {count} setups and copied to clipboard · {path}"),
+            },
+            Self::ProfilesImported { count } => match lang {
+                Lang::Zh => format!("已导入 {count} 套配置"),
+                Lang::En => format!("Imported {count} setups"),
+            },
         }
     }
 }
@@ -685,5 +700,17 @@ mod tests {
             "HTTP/2 upstream. Guess: the reused HTTP/2 connection was already closed, so the request never reached the origin. The next request opens a new one."
         );
         assert_eq!(ws_kind(Lang::En, "文本"), "text");
+        assert!(
+            StatusMsg::ProfilesExported {
+                count: 2,
+                path: "/tmp/p.toml".into()
+            }
+            .text(Lang::Zh)
+            .contains("已导出 2 套配置")
+        );
+        assert_eq!(
+            StatusMsg::ProfilesImported { count: 3 }.text(Lang::En),
+            "Imported 3 setups"
+        );
     }
 }

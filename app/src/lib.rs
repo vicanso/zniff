@@ -816,7 +816,16 @@ pub fn App() -> impl IntoElement {
         .bg(bg_canvas())
         .text_color(fg_primary())
         .on_file_drop(move |event: &FileDropEvent| {
-            import_dropped(&controls_drop, event, ui_lang(drop_langs));
+            import_dropped(
+                &controls_drop,
+                event,
+                ui_lang(drop_langs),
+                saved_profiles,
+                filter,
+                bypass_text,
+                rules_text,
+                upstream_text,
+            );
         })
         .child(toolbar(
             status,
@@ -1732,6 +1741,8 @@ fn profile_dock(
 ) -> impl IntoElement {
     let preset_controls = controls.clone();
     let blank_controls = controls.clone();
+    let export_controls = controls.clone();
+    let import_controls = controls.clone();
     let save_controls = controls;
     let dropdown_open = signal(false);
     let matched_name = move || {
@@ -2095,6 +2106,120 @@ fn profile_dock(
                     false,
                     move |text| rule_name.set(text.to_string()),
                 )))
+                .child(
+                    view()
+                        .h(px(30.0))
+                        .px_2p5()
+                        .flex_shrink_0()
+                        .rounded(px(7.0))
+                        .border_1()
+                        .border_color(border_control())
+                        .bg(bg_control())
+                        .hover(|style| style.bg(bg_control_hover()))
+                        .flex_row()
+                        .items_center()
+                        .justify_center()
+                        .cursor(Cursor::Pointer)
+                        .tooltip(label_tip(
+                            "导出配置为 TOML 并复制到剪贴板",
+                            "Export setups as TOML and copy",
+                        ))
+                        .on_press(move || {
+                            dropdown_open.set(false);
+                            let profiles = profiles_for_export(
+                                &saved.get(),
+                                &rule_name.get(),
+                                &filter.get(),
+                                &bypass_text.get(),
+                                &rules_text.get(),
+                                &upstream_text.get(),
+                                rules_on.get(),
+                                breaks_on.get(),
+                                show_tunnels.get(),
+                            );
+                            export_profiles_file(&export_controls, &profiles);
+                        })
+                        .child(
+                            text(tr("导出", "Export"))
+                                .text_size(px(11.5))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(fg_secondary()),
+                        ),
+                )
+                .child(
+                    view()
+                        .h(px(30.0))
+                        .px_2p5()
+                        .flex_shrink_0()
+                        .rounded(px(7.0))
+                        .border_1()
+                        .border_color(border_control())
+                        .bg(bg_control())
+                        .hover(|style| style.bg(bg_control_hover()))
+                        .flex_row()
+                        .items_center()
+                        .justify_center()
+                        .cursor(Cursor::Pointer)
+                        .tooltip(label_tip(
+                            "从剪贴板导入 TOML 配置（或拖拽 .toml 到窗口）",
+                            "Import TOML setups from clipboard (or drop .toml)",
+                        ))
+                        .on_press(move || {
+                            dropdown_open.set(false);
+                            let import_controls = import_controls.clone();
+                            spawn(async move {
+                                let clip = clipboard_string().await;
+                                match parse_profiles_from_text_or_path(&clip) {
+                                    Ok(incoming) => {
+                                        let count = incoming.len();
+                                        let merged = config::merge_imported_profiles(
+                                            &saved.get(),
+                                            &incoming,
+                                            SAVED_RULE_CAP,
+                                        );
+                                        saved.set(merged.clone());
+                                        let _ =
+                                            save_config(|config| config.saved_profiles = merged);
+                                        if let Some(first) = incoming.first() {
+                                            rule_name.set(first.name.clone());
+                                            clear_rule_draft(
+                                                draft_host,
+                                                draft_path,
+                                                draft_from,
+                                                draft_to,
+                                                draft_response,
+                                                draft_kind,
+                                            );
+                                            apply_saved_profile(
+                                                first,
+                                                filter,
+                                                bypass_text,
+                                                rules_text,
+                                                upstream_text,
+                                                rules_on,
+                                                breaks_on,
+                                                show_tunnels,
+                                                &import_controls,
+                                            );
+                                        }
+                                        set_status(
+                                            &import_controls,
+                                            StatusMsg::ProfilesImported { count },
+                                        );
+                                    }
+                                    Err(err) => {
+                                        set_status(&import_controls, StatusMsg::ImportFailed(err));
+                                    }
+                                }
+                            });
+                        })
+                        .child(
+                            text(tr("导入", "Import"))
+                                .text_size(px(11.5))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(fg_secondary()),
+                        ),
+                )
                 .child(
                     view()
                         .h(px(30.0))
@@ -8533,20 +8658,172 @@ fn share_base(controls: &Controls) -> (String, bool) {
     (format!("http://127.0.0.1:{port}"), true)
 }
 
-fn import_dropped(controls: &Controls, event: &FileDropEvent, lang: Lang) {
+fn profiles_for_export(
+    saved: &[config::SavedProfile],
+    name: &str,
+    filter: &str,
+    bypass: &str,
+    rules: &str,
+    upstream: &str,
+    rules_enabled: bool,
+    breaks_enabled: bool,
+    show_tunnel_failures: bool,
+) -> Vec<config::SavedProfile> {
+    if !name.trim().is_empty() || saved.is_empty() {
+        push_saved_profile(
+            saved,
+            name,
+            filter,
+            bypass,
+            rules,
+            upstream,
+            rules_enabled,
+            breaks_enabled,
+            show_tunnel_failures,
+        )
+    } else {
+        saved.to_vec()
+    }
+}
+
+fn export_profiles_file(controls: &Controls, profiles: &[config::SavedProfile]) {
+    let toml_text = match config::export_profiles_toml(profiles) {
+        Ok(text) => text,
+        Err(err) => {
+            set_status(controls, StatusMsg::ExportFailed(err));
+            return;
+        }
+    };
+    let dir = ca::data_dir().join("exports");
+    if let Err(err) = std::fs::create_dir_all(&dir) {
+        set_status(controls, StatusMsg::ExportFailed(err.to_string()));
+        return;
+    }
+    let secs = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    let path = dir.join(format!("zniff-profiles-{secs}.toml"));
+    if let Err(err) = std::fs::write(&path, &toml_text) {
+        set_status(controls, StatusMsg::ExportFailed(err.to_string()));
+        return;
+    }
+    set_clipboard(toml_text);
+    set_status(
+        controls,
+        StatusMsg::ProfilesExported {
+            count: profiles.len(),
+            path: path.display().to_string(),
+        },
+    );
+}
+
+fn parse_profiles_from_text_or_path(
+    input: &str,
+) -> std::result::Result<Vec<config::SavedProfile>, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("empty clipboard".to_string());
+    }
+    let candidate = std::path::Path::new(trimmed);
+    if candidate
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("toml"))
+        && candidate.is_file()
+    {
+        let content = std::fs::read_to_string(candidate).map_err(|err| err.to_string())?;
+        return config::parse_profiles_toml(&content);
+    }
+    config::parse_profiles_toml(trimmed)
+}
+
+fn import_profiles_file(
+    controls: &Controls,
+    path_text: &str,
+    saved: Signal<Vec<config::SavedProfile>>,
+    filter: Signal<String>,
+    bypass: Signal<String>,
+    rules: Signal<String>,
+    upstream: Signal<String>,
+) {
+    let content = match std::fs::read_to_string(path_text.trim()) {
+        Ok(content) => content,
+        Err(err) => {
+            set_status(controls, StatusMsg::ImportFailed(err.to_string()));
+            return;
+        }
+    };
+    let incoming = match config::parse_profiles_toml(&content) {
+        Ok(incoming) => incoming,
+        Err(err) => {
+            set_status(controls, StatusMsg::ImportFailed(err));
+            return;
+        }
+    };
+    let count = incoming.len();
+    let merged = config::merge_imported_profiles(&saved.get(), &incoming, SAVED_RULE_CAP);
+    saved.set(merged.clone());
+    let _ = save_config(|config| config.saved_profiles = merged);
+    if filter.get().trim().is_empty()
+        && bypass.get().trim().is_empty()
+        && rules.get().trim().is_empty()
+        && upstream.get().trim().is_empty()
+        && let Some(first) = incoming.first()
+    {
+        filter.set(first.filter.clone());
+        bypass.set(first.bypass_hosts.clone());
+        rules.set(first.rules.clone());
+        upstream.set(first.upstream_proxy.clone());
+        controls.hub.set_bypass(&first.bypass_hosts);
+        controls.hub.set_rules(&first.rules);
+        controls.hub.set_upstream(&first.upstream_proxy);
+        controls.hub.set_rules_enabled(first.rules_enabled);
+        controls.hub.set_breaks_enabled(first.breaks_enabled);
+        controls
+            .hub
+            .set_show_tunnel_failures(first.show_tunnel_failures);
+        let first = first.clone();
+        let _ = save_config(move |config| {
+            config.filter = first.filter.clone();
+            config.bypass_hosts = first.bypass_hosts.clone();
+            config.rules = first.rules.clone();
+            config.upstream_proxy = first.upstream_proxy.clone();
+            config.show_tunnel_failures = first.show_tunnel_failures;
+        });
+    }
+    set_status(controls, StatusMsg::ProfilesImported { count });
+}
+
+fn import_dropped(
+    controls: &Controls,
+    event: &FileDropEvent,
+    lang: Lang,
+    saved: Signal<Vec<config::SavedProfile>>,
+    filter: Signal<String>,
+    bypass: Signal<String>,
+    rules: Signal<String>,
+    upstream: Signal<String>,
+) {
     let mut found = false;
     for uri in &event.uris {
-        let Some(path) = dropped_har_path(uri) else {
-            continue;
-        };
-        found = true;
-        import_har_file(controls, &path);
+        if let Some(path) = dropped_har_path(uri) {
+            found = true;
+            import_har_file(controls, &path);
+        } else if let Some(path) = dropped_toml_path(uri) {
+            found = true;
+            import_profiles_file(controls, &path, saved, filter, bypass, rules, upstream);
+        }
     }
     if !found {
         set_status(
             controls,
             StatusMsg::ImportFailed(
-                t(lang, "放下的文件不是 HAR", "Dropped file is not a HAR").to_string(),
+                t(
+                    lang,
+                    "放下的文件不是 HAR 或 TOML 配置",
+                    "Dropped file is not a HAR or TOML setup",
+                )
+                .to_string(),
             ),
         );
     }
@@ -8555,6 +8832,15 @@ fn import_dropped(controls: &Controls, event: &FileDropEvent, lang: Lang) {
 /// `file:` URL of a `.har`, or nothing. Encoded names are decoded. A Windows
 /// `file:///C:/...` drops the extra slash. Other schemes are ignored.
 fn dropped_har_path(uri: &str) -> Option<String> {
+    dropped_ext_path(uri, "har")
+}
+
+/// `file:` URL of a `.toml` profile file, or nothing.
+fn dropped_toml_path(uri: &str) -> Option<String> {
+    dropped_ext_path(uri, "toml")
+}
+
+fn dropped_ext_path(uri: &str, ext_name: &str) -> Option<String> {
     let rest = uri.strip_prefix("file:")?;
     let rest = rest.strip_prefix("//").unwrap_or(rest);
     let rest = rest
@@ -8565,10 +8851,10 @@ fn dropped_har_path(uri: &str) -> Option<String> {
         return None;
     }
     let path = file_url_path(rest);
-    let har = std::path::Path::new(&path)
+    let matches = std::path::Path::new(&path)
         .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("har"));
-    har.then_some(path)
+        .is_some_and(|ext| ext.eq_ignore_ascii_case(ext_name));
+    matches.then_some(path)
 }
 
 fn file_url_path(path: &str) -> String {
@@ -9407,6 +9693,32 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
         assert!(super::dropped_har_path("/tmp/a.har").is_none());
         assert!(super::dropped_har_path("file://server/tmp/a.har").is_none());
         assert!(super::dropped_har_path("file:///tmp/notes.har.bak").is_none());
+        assert_eq!(
+            super::dropped_toml_path("file:///Users/tree/profiles.toml").as_deref(),
+            Some("/Users/tree/profiles.toml")
+        );
+        assert!(super::dropped_toml_path("file:///Users/tree/a.har").is_none());
+    }
+
+    #[test]
+    fn profiles_export_and_parse_from_text_or_path() {
+        let exported = super::profiles_for_export(
+            &[],
+            "Dev",
+            "host:api.dev",
+            "",
+            "delay api.dev/v1 100ms",
+            "",
+            true,
+            true,
+            false,
+        );
+        assert_eq!(exported.len(), 1);
+        assert_eq!(exported[0].name, "Dev");
+        let toml_text = crate::config::export_profiles_toml(&exported).unwrap();
+        let parsed = super::parse_profiles_from_text_or_path(&toml_text).unwrap();
+        assert_eq!(parsed, exported);
+        assert!(super::parse_profiles_from_text_or_path("   ").is_err());
     }
 
     #[test]
