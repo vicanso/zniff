@@ -2828,13 +2828,13 @@ fn clamp_list_px_for_window(width: f32, window_w: f32) -> f32 {
 fn adaptive_filter_panel_width(window_w: f32, list_w: f32) -> f32 {
     if window_w.is_finite() && window_w > 0.0 {
         let list_px = clamp_list_px_for_window(list_w, window_w);
-        let max_w = (window_w - 20.0).max(580.0);
-        (window_w - list_px - 16.0)
+        let max_w = (window_w - 20.0).max(680.0);
+        (window_w - list_px * 0.7 - 16.0)
             .round()
-            .clamp(580.0, 1280.0)
+            .clamp(680.0, 1360.0)
             .min(max_w)
     } else {
-        680.0
+        760.0
     }
 }
 
@@ -9861,11 +9861,11 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
         assert_eq!(super::clamp_list_px_for_window(900.0, 1000.0), 660.0);
         assert_eq!(super::clamp_list_px_for_window(900.0, 0.0), 900.0);
         assert_eq!(super::clamp_list_px_for_window(900.0, 500.0), 280.0);
-        assert_eq!(super::adaptive_filter_panel_width(0.0, 560.0), 680.0);
-        assert_eq!(super::adaptive_filter_panel_width(900.0, 560.0), 580.0);
-        assert_eq!(super::adaptive_filter_panel_width(1200.0, 560.0), 624.0);
-        assert_eq!(super::adaptive_filter_panel_width(1448.0, 560.0), 872.0);
-        assert_eq!(super::adaptive_filter_panel_width(1448.0, 644.0), 788.0);
+        assert_eq!(super::adaptive_filter_panel_width(0.0, 560.0), 760.0);
+        assert_eq!(super::adaptive_filter_panel_width(900.0, 560.0), 680.0);
+        assert_eq!(super::adaptive_filter_panel_width(1200.0, 560.0), 792.0);
+        assert_eq!(super::adaptive_filter_panel_width(1448.0, 560.0), 1040.0);
+        assert_eq!(super::adaptive_filter_panel_width(1448.0, 644.0), 981.0);
         assert_eq!(super::adaptive_rules_editor_height(0.0), 105.0);
         assert_eq!(super::adaptive_rules_editor_height(520.0), 105.0);
         assert_eq!(super::adaptive_rules_editor_height(700.0), 240.0);
