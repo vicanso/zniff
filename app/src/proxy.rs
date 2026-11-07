@@ -536,7 +536,7 @@ impl Hub {
     where
         F: FnOnce(Result<u64>) + Send + 'static,
     {
-        let flow = self.with_session(|session| session.get(id).cloned());
+        let flow = self.with_session(|session| session.hydrated(id));
         let Some(flow) = flow else {
             on_done(Err(anyhow!("没有这条记录")));
             return;

@@ -1,17 +1,226 @@
-//! In-memory capture session.
+//! In-memory capture session with a ring-segment temporary spill store for large bodies.
 //!
 //! Bodies are already decompressed by the proxy. The 1 MB cap is per
-//! direction. The 256 MB cap drops the oldest whole flow.
+//! direction. Completed unpinned bodies larger than [`INLINE_BODY_CAP`] (32 KB)
+//! spill to rotating temporary segment files so the 256 MB in-memory cap keeps
+//! flow metadata and small payloads resident.
 
 use std::collections::{HashMap, VecDeque};
+use std::fs::{File, OpenOptions};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime};
 
 pub const BODY_CAP: usize = 1024 * 1024;
 pub const SESSION_CAP: usize = 256 * 1024 * 1024;
+/// Bodies up to 32 KB stay inline in RAM; larger finished bodies spill to temporary segment files.
+pub const INLINE_BODY_CAP: usize = 32 * 1024;
+/// Each temporary spill segment file grows up to 64 MB before rolling to a new file.
+pub const SPILL_SEGMENT_CAP: u64 = 64 * 1024 * 1024;
+/// At most 8 segment files (512 MB total) are kept on disk; older segments are unlinked.
+pub const SPILL_MAX_SEGMENTS: usize = 8;
+/// Idle spill segment files older than 30 minutes are automatically unlinked.
+pub const SPILL_SEGMENT_TTL: Duration = Duration::from_secs(30 * 60);
 /// Pinned flows skip eviction. The cap keeps a pinned set from growing without a bound.
 pub const PIN_CAP: usize = 32;
 /// Same line as the warning color on a row: elapsed time from start to finish.
 pub const SLOW_AFTER: Duration = Duration::from_secs(1);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpillRef {
+    pub segment_id: u32,
+    pub offset: u64,
+    pub len: u32,
+}
+
+#[derive(Debug)]
+struct SpillSegment {
+    id: u32,
+    path: PathBuf,
+    file: File,
+    len: u64,
+    last_write: SystemTime,
+}
+
+#[derive(Debug)]
+struct SpillStore {
+    dir: PathBuf,
+    dir_created: bool,
+    segments: VecDeque<SpillSegment>,
+    next_segment_id: u32,
+    inline_cap: usize,
+    segment_cap: u64,
+    max_segments: usize,
+    segment_ttl: Duration,
+}
+
+impl Default for SpillStore {
+    fn default() -> Self {
+        Self::with_limits(
+            INLINE_BODY_CAP,
+            SPILL_SEGMENT_CAP,
+            SPILL_MAX_SEGMENTS,
+            SPILL_SEGMENT_TTL,
+        )
+    }
+}
+
+impl SpillStore {
+    fn with_limits(
+        inline_cap: usize,
+        segment_cap: u64,
+        max_segments: usize,
+        segment_ttl: Duration,
+    ) -> Self {
+        static NEXT_STORE: AtomicUsize = AtomicUsize::new(1);
+        let seq = NEXT_STORE.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("zniff-spill-{}-{seq}", std::process::id()));
+        Self {
+            dir,
+            dir_created: false,
+            segments: VecDeque::new(),
+            next_segment_id: 0,
+            inline_cap,
+            segment_cap: segment_cap.max(1),
+            max_segments: max_segments.max(1),
+            segment_ttl,
+        }
+    }
+
+    fn write(&mut self, data: &[u8], now: SystemTime) -> Option<SpillRef> {
+        if data.is_empty() {
+            return None;
+        }
+        let len = u32::try_from(data.len()).ok()?;
+        self.gc(now);
+        let need_roll = self.segments.back().is_none_or(|seg| {
+            seg.len > 0 && seg.len.saturating_add(data.len() as u64) > self.segment_cap
+        });
+        if need_roll {
+            if !self.dir_created {
+                std::fs::create_dir_all(&self.dir).ok()?;
+                self.dir_created = true;
+            }
+            self.next_segment_id = self.next_segment_id.wrapping_add(1).max(1);
+            let id = self.next_segment_id;
+            let path = self.dir.join(format!("seg-{id:06}.dat"));
+            let file = OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .read(true)
+                .write(true)
+                .open(&path)
+                .ok()?;
+            self.segments.push_back(SpillSegment {
+                id,
+                path,
+                file,
+                len: 0,
+                last_write: now,
+            });
+            while self.segments.len() > self.max_segments {
+                if let Some(old) = self.segments.pop_front() {
+                    let _ = std::fs::remove_file(&old.path);
+                }
+            }
+        }
+        let seg = self.segments.back_mut()?;
+        let offset = seg.len;
+        write_at(&seg.file, data, offset).ok()?;
+        seg.len += data.len() as u64;
+        seg.last_write = now;
+        Some(SpillRef {
+            segment_id: seg.id,
+            offset,
+            len,
+        })
+    }
+
+    fn read(&self, sref: SpillRef) -> Option<Vec<u8>> {
+        let seg = self.segments.iter().find(|seg| seg.id == sref.segment_id)?;
+        let mut buf = vec![0u8; sref.len as usize];
+        read_at(&seg.file, &mut buf, sref.offset).ok()?;
+        Some(buf)
+    }
+
+    fn gc(&mut self, now: SystemTime) -> bool {
+        let before = self.segments.len();
+        self.segments.retain(|seg| {
+            let expired = now
+                .duration_since(seg.last_write)
+                .is_ok_and(|age| age >= self.segment_ttl);
+            if expired {
+                let _ = std::fs::remove_file(&seg.path);
+                false
+            } else {
+                true
+            }
+        });
+        self.segments.len() != before
+    }
+
+    fn clear(&mut self) {
+        for seg in self.segments.drain(..) {
+            let _ = std::fs::remove_file(&seg.path);
+        }
+        if self.dir_created {
+            let _ = std::fs::remove_dir_all(&self.dir);
+            self.dir_created = false;
+        }
+    }
+}
+
+impl Drop for SpillStore {
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
+
+#[cfg(unix)]
+fn read_at(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+    use std::os::unix::fs::FileExt;
+    file.read_exact_at(buf, offset)
+}
+
+#[cfg(windows)]
+fn read_at(file: &File, mut buf: &mut [u8], mut offset: u64) -> std::io::Result<()> {
+    use std::os::windows::fs::FileExt;
+    while !buf.is_empty() {
+        let n = file.seek_read(buf, offset)?;
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "short spill read",
+            ));
+        }
+        buf = &mut buf[n..];
+        offset += n as u64;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn write_at(file: &File, data: &[u8], offset: u64) -> std::io::Result<()> {
+    use std::os::unix::fs::FileExt;
+    file.write_all_at(data, offset)
+}
+
+#[cfg(windows)]
+fn write_at(file: &File, mut data: &[u8], mut offset: u64) -> std::io::Result<()> {
+    use std::os::windows::fs::FileExt;
+    while !data.is_empty() {
+        let n = file.seek_write(data, offset)?;
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "short spill write",
+            ));
+        }
+        data = &data[n..];
+        offset += n as u64;
+    }
+    Ok(())
+}
 
 pub fn is_slow(started: SystemTime, finished: Option<SystemTime>, now: SystemTime) -> bool {
     let end = finished.unwrap_or(now);
@@ -63,6 +272,10 @@ pub struct Flow {
     pub response_headers: Vec<(String, String)>,
     pub request_body: Vec<u8>,
     pub response_body: Vec<u8>,
+    pub request_spill: Option<SpillRef>,
+    pub response_spill: Option<SpillRef>,
+    pub request_expired: Option<usize>,
+    pub response_expired: Option<usize>,
     pub request_truncated: bool,
     pub response_truncated: bool,
     pub request_encoding_error: Option<String>,
@@ -108,13 +321,29 @@ pub struct FlowDraft {
 pub struct Session {
     order: VecDeque<u64>,
     flows: HashMap<u64, Flow>,
+    spill: SpillStore,
     bytes: usize,
     dropped: u64,
     next_id: u64,
 }
 
 impl Session {
+    #[cfg(test)]
+    pub fn with_spill_limits(
+        inline_cap: usize,
+        segment_cap: u64,
+        max_segments: usize,
+        segment_ttl: Duration,
+    ) -> Self {
+        Self {
+            spill: SpillStore::with_limits(inline_cap, segment_cap, max_segments, segment_ttl),
+            ..Self::default()
+        }
+    }
+
     pub fn open(&mut self, draft: FlowDraft) -> u64 {
+        let now = SystemTime::now();
+        self.spill.gc(now);
         self.next_id += 1;
         let id = self.next_id;
         let headers_size = headers_size(&draft.request_headers);
@@ -131,11 +360,15 @@ impl Session {
             response_headers: Vec::new(),
             request_body: Vec::new(),
             response_body: Vec::new(),
+            request_spill: None,
+            response_spill: None,
+            request_expired: None,
+            response_expired: None,
             request_truncated: false,
             response_truncated: false,
             request_encoding_error: None,
             response_encoding_error: None,
-            started: SystemTime::now(),
+            started: now,
             response_at: None,
             finished_at: None,
             request_bytes: 0,
@@ -247,8 +480,11 @@ impl Session {
         let new_size = headers_size(&headers) + body.len();
         flow.request_headers = headers;
         flow.request_body = body;
+        flow.request_spill = None;
+        flow.request_expired = None;
         flow.accounted = flow.accounted.saturating_sub(old) + new_size;
         self.bytes = self.bytes.saturating_sub(old) + new_size;
+        self.spill_flow_if_needed(id, SystemTime::now());
     }
 
     pub fn replace_response(
@@ -266,16 +502,21 @@ impl Session {
         flow.status = Some(status);
         flow.response_headers = headers;
         flow.response_body = body;
+        flow.response_spill = None;
+        flow.response_expired = None;
         flow.response_truncated = false;
         if flow.response_at.is_none() {
             flow.response_at = Some(SystemTime::now());
         }
         flow.accounted = flow.accounted.saturating_sub(old) + new_size;
         self.bytes = self.bytes.saturating_sub(old) + new_size;
+        self.spill_flow_if_needed(id, SystemTime::now());
         self.evict(id);
     }
 
     /// Pins until [`PIN_CAP`]. Returns false when the flow is missing or the cap is full.
+    /// Pinned flows promote any spilled bodies back to inline memory so segment rotation
+    /// cannot expire them.
     pub fn set_pinned(&mut self, id: u64, pinned: bool) -> bool {
         if pinned {
             let count = self.flows.values().filter(|flow| flow.pinned).count();
@@ -289,9 +530,49 @@ impl Session {
                 return false;
             }
             flow.pinned = true;
+            let req_spill = flow.request_spill.take();
+            let res_spill = flow.response_spill.take();
+            let mut added = 0usize;
+            if let Some(sref) = req_spill {
+                match self.spill.read(sref) {
+                    Some(bytes) => {
+                        added += bytes.len();
+                        if let Some(flow) = self.flows.get_mut(&id) {
+                            flow.request_body = bytes;
+                        }
+                    }
+                    None => {
+                        if let Some(flow) = self.flows.get_mut(&id) {
+                            flow.request_expired = Some(sref.len as usize);
+                        }
+                    }
+                }
+            }
+            if let Some(sref) = res_spill {
+                match self.spill.read(sref) {
+                    Some(bytes) => {
+                        added += bytes.len();
+                        if let Some(flow) = self.flows.get_mut(&id) {
+                            flow.response_body = bytes;
+                        }
+                    }
+                    None => {
+                        if let Some(flow) = self.flows.get_mut(&id) {
+                            flow.response_expired = Some(sref.len as usize);
+                        }
+                    }
+                }
+            }
+            if added > 0
+                && let Some(flow) = self.flows.get_mut(&id)
+            {
+                flow.accounted += added;
+                self.bytes += added;
+            }
             true
         } else if let Some(flow) = self.flows.get_mut(&id) {
             flow.pinned = false;
+            self.spill_flow_if_needed(id, SystemTime::now());
             true
         } else {
             false
@@ -299,10 +580,64 @@ impl Session {
     }
 
     pub fn mark_finished(&mut self, id: u64) {
+        self.mark_finished_at(id, SystemTime::now());
+    }
+
+    pub fn mark_finished_at(&mut self, id: u64, now: SystemTime) {
+        self.spill.gc(now);
         if let Some(flow) = self.flows.get_mut(&id)
             && flow.finished_at.is_none()
         {
-            flow.finished_at = Some(SystemTime::now());
+            flow.finished_at = Some(now);
+        }
+        self.spill_flow_if_needed(id, now);
+    }
+
+    /// Removes expired spill segments whose last write is older than [`SPILL_SEGMENT_TTL`].
+    /// Returns `true` if any segment file was unlinked.
+    pub fn gc_spill(&mut self, now: SystemTime) -> bool {
+        self.spill.gc(now)
+    }
+
+    fn spill_flow_if_needed(&mut self, id: u64, now: SystemTime) {
+        let inline_cap = self.spill.inline_cap;
+        let (req_to_spill, res_to_spill) = {
+            let Some(flow) = self.flows.get(&id) else {
+                return;
+            };
+            if flow.pinned || flow.finished_at.is_none() {
+                return;
+            }
+            (
+                flow.request_spill.is_none() && flow.request_body.len() > inline_cap,
+                flow.response_spill.is_none() && flow.response_body.len() > inline_cap,
+            )
+        };
+        if req_to_spill {
+            let body_opt = self.flows.get(&id).map(|flow| flow.request_body.clone());
+            if let Some(body) = body_opt
+                && let Some(sref) = self.spill.write(&body, now)
+                && let Some(flow) = self.flows.get_mut(&id)
+            {
+                let freed = flow.request_body.len();
+                flow.request_body = Vec::new();
+                flow.request_spill = Some(sref);
+                flow.accounted = flow.accounted.saturating_sub(freed);
+                self.bytes = self.bytes.saturating_sub(freed);
+            }
+        }
+        if res_to_spill {
+            let body_opt = self.flows.get(&id).map(|flow| flow.response_body.clone());
+            if let Some(body) = body_opt
+                && let Some(sref) = self.spill.write(&body, now)
+                && let Some(flow) = self.flows.get_mut(&id)
+            {
+                let freed = flow.response_body.len();
+                flow.response_body = Vec::new();
+                flow.response_spill = Some(sref);
+                flow.accounted = flow.accounted.saturating_sub(freed);
+                self.bytes = self.bytes.saturating_sub(freed);
+            }
         }
     }
 
@@ -332,8 +667,16 @@ impl Session {
         if let Some(at) = finished_at {
             flow.finished_at = Some(at);
         }
-        flow.request_bytes = request_bytes.unwrap_or(flow.request_body.len() as u64);
-        flow.response_bytes = response_bytes.unwrap_or(flow.response_body.len() as u64);
+        let req_len = flow
+            .request_spill
+            .map(|sref| sref.len as u64)
+            .unwrap_or(flow.request_body.len() as u64);
+        let res_len = flow
+            .response_spill
+            .map(|sref| sref.len as u64)
+            .unwrap_or(flow.response_body.len() as u64);
+        flow.request_bytes = request_bytes.unwrap_or(req_len);
+        flow.response_bytes = response_bytes.unwrap_or(res_len);
     }
 
     #[cfg(test)]
@@ -341,17 +684,19 @@ impl Session {
         self.flows_matching("")
     }
 
-    /// Flows that match `filter`, oldest first. An empty filter is the whole session.
+    /// Flows that match `filter`, oldest first, with spilled bodies hydrated from disk.
+    /// An empty filter is the whole session.
     pub fn flows_matching(&self, filter: &str) -> Vec<Flow> {
         self.matching_with_previous_start(filter)
             .into_iter()
-            .filter_map(|(id, _)| self.get(id).cloned())
+            .filter_map(|(id, _)| self.hydrated(id))
             .collect()
     }
 
     pub fn clear(&mut self) {
         self.order.clear();
         self.flows.clear();
+        self.spill.clear();
         self.bytes = 0;
         self.dropped = 0;
     }
@@ -433,6 +778,26 @@ impl Session {
         self.flows.get(&id)
     }
 
+    /// Clones flow `id` and loads any spilled request/response bodies from the
+    /// temporary segment store. If a segment was rotated or expired, sets
+    /// `request_expired` / `response_expired` to the original byte length.
+    pub fn hydrated(&self, id: u64) -> Option<Flow> {
+        let mut flow = self.flows.get(&id)?.clone();
+        if let Some(sref) = flow.request_spill {
+            match self.spill.read(sref) {
+                Some(bytes) => flow.request_body = bytes,
+                None => flow.request_expired = Some(sref.len as usize),
+            }
+        }
+        if let Some(sref) = flow.response_spill {
+            match self.spill.read(sref) {
+                Some(bytes) => flow.response_body = bytes,
+                None => flow.response_expired = Some(sref.len as usize),
+            }
+        }
+        Some(flow)
+    }
+
     pub fn len(&self) -> usize {
         self.flows.len()
     }
@@ -463,7 +828,7 @@ impl Session {
             let Some(flow) = self.flows.get(id) else {
                 continue;
             };
-            if !query.matches(flow) {
+            if !query.matches(flow, &self.spill) {
                 continue;
             }
             out.push((*id, previous));
@@ -496,10 +861,23 @@ fn headers_size(headers: &[(String, String)]) -> usize {
     headers.iter().map(|(k, v)| k.len() + v.len()).sum()
 }
 
-fn body_contains(flow: &Flow, keyword: &str) -> bool {
-    let request = String::from_utf8_lossy(&flow.request_body).to_ascii_lowercase();
-    let response = String::from_utf8_lossy(&flow.response_body).to_ascii_lowercase();
-    request.contains(keyword) || response.contains(keyword)
+fn body_groups_match(flow: &Flow, spill: &SpillStore, groups: &[Vec<String>]) -> bool {
+    if groups.is_empty() {
+        return true;
+    }
+    let req_spilled = flow.request_spill.and_then(|sref| spill.read(sref));
+    let req_bytes = req_spilled.as_deref().unwrap_or(&flow.request_body);
+    let request = String::from_utf8_lossy(req_bytes).to_ascii_lowercase();
+
+    let res_spilled = flow.response_spill.and_then(|sref| spill.read(sref));
+    let res_bytes = res_spilled.as_deref().unwrap_or(&flow.response_body);
+    let response = String::from_utf8_lossy(res_bytes).to_ascii_lowercase();
+
+    groups.iter().all(|group| {
+        group
+            .iter()
+            .any(|keyword| request.contains(keyword) || response.contains(keyword))
+    })
 }
 
 fn header_contains(flow: &Flow, keyword: &str) -> bool {
@@ -767,7 +1145,7 @@ impl FlowQuery {
         query
     }
 
-    fn matches(&self, flow: &Flow) -> bool {
+    fn matches(&self, flow: &Flow, spill: &SpillStore) -> bool {
         if self.pinned_only && !flow.pinned {
             return false;
         }
@@ -797,13 +1175,6 @@ impl FlowQuery {
             {
                 return false;
             }
-        }
-        if !self
-            .bodies
-            .iter()
-            .all(|group| group.iter().any(|keyword| body_contains(flow, keyword)))
-        {
-            return false;
         }
         if !self
             .headers
@@ -837,11 +1208,14 @@ impl FlowQuery {
         {
             return false;
         }
-        self.texts.iter().all(|group| {
+        if !self.texts.iter().all(|group| {
             group
                 .iter()
                 .any(|text| host_matches(&host, text) || path.contains(text))
-        })
+        }) {
+            return false;
+        }
+        body_groups_match(flow, spill, &self.bodies)
     }
 }
 
@@ -1108,5 +1482,85 @@ mod tests {
         assert_eq!(session.ids_matching("GET|POST"), vec![id_a, id_b]);
         assert_eq!(session.ids_matching("2xx|5xx"), vec![id_a, id_c]);
         assert_eq!(session.ids_matching("mute:other.org|third.net"), vec![id_a]);
+    }
+
+    #[test]
+    fn large_bodies_spill_to_ring_segments_and_hydrate_or_expire() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        // inline_cap = 1024 B, segment_cap = 4096 B, max_segments = 2, ttl = 60s
+        let mut session = Session::with_spill_limits(1024, 4096, 2, Duration::from_secs(60));
+
+        // 1. Small body (<= 1024 B) stays inline in RAM.
+        let small = session.open(draft("small.test"));
+        session.append_body(small, Direction::Response, b"small-inline-json");
+        session.mark_finished_at(small, now);
+        assert!(session.get(small).unwrap().response_spill.is_none());
+        assert_eq!(
+            session.get(small).unwrap().response_body,
+            b"small-inline-json"
+        );
+
+        // 2. Large body (> 1024 B) spills to segment #1 on mark_finished, freeing RAM.
+        let first_large = session.open(draft("bundle1.test"));
+        let mut payload1 = vec![b'a'; 3000];
+        payload1.extend_from_slice(b"-needle-one");
+        session.append_body(first_large, Direction::Response, &payload1);
+        let ram_before = session.memory_bytes();
+        assert!(ram_before >= payload1.len());
+        session.mark_finished_at(first_large, now);
+        assert!(session.memory_bytes() < ram_before - 2000);
+        assert!(session.get(first_large).unwrap().response_body.is_empty());
+        assert!(session.get(first_large).unwrap().response_spill.is_some());
+
+        // Hydrated flow restores the full spilled payload and `body:` search still matches it.
+        let hydrated1 = session.hydrated(first_large).unwrap();
+        assert_eq!(hydrated1.response_body, payload1);
+        assert_eq!(hydrated1.response_expired, None);
+        assert_eq!(session.ids_matching("body:needle-one"), vec![first_large]);
+
+        // 3. Pinning promotes a spilled body back to inline memory so it survives rotation.
+        let pinned_large = session.open(draft("pinned.test"));
+        let payload_pin = vec![b'p'; 3000];
+        session.append_body(pinned_large, Direction::Response, &payload_pin);
+        session.mark_finished_at(pinned_large, now);
+        assert!(session.get(pinned_large).unwrap().response_spill.is_some());
+        assert!(session.set_pinned(pinned_large, true));
+        assert!(session.get(pinned_large).unwrap().response_spill.is_none());
+        assert_eq!(session.get(pinned_large).unwrap().response_body.len(), 3000);
+
+        // 4. Write two more large bodies to force segment #1 out of the 2-segment ring.
+        let second_large = session.open(draft("bundle2.test"));
+        session.append_body(second_large, Direction::Response, &vec![b'b'; 3000]);
+        session.mark_finished_at(second_large, now + Duration::from_secs(1));
+
+        let third_large = session.open(draft("bundle3.test"));
+        session.append_body(third_large, Direction::Response, &vec![b'c'; 3000]);
+        session.mark_finished_at(third_large, now + Duration::from_secs(2));
+
+        // `first_large` row and metadata remain in the session, while its spilled body is marked expired.
+        let expired1 = session.hydrated(first_large).unwrap();
+        assert_eq!(expired1.host, "bundle1.test");
+        assert!(expired1.response_body.is_empty());
+        assert_eq!(expired1.response_expired, Some(payload1.len()));
+        // Pinned flow and newer segments remain intact.
+        assert_eq!(
+            session.hydrated(pinned_large).unwrap().response_body,
+            payload_pin
+        );
+        assert_eq!(
+            session.hydrated(third_large).unwrap().response_body.len(),
+            3000
+        );
+
+        // 5. Periodic TTL GC expires remaining segments after 60s.
+        assert!(session.gc_spill(now + Duration::from_secs(120)));
+        let expired3 = session.hydrated(third_large).unwrap();
+        assert!(expired3.response_body.is_empty());
+        assert_eq!(expired3.response_expired, Some(3000));
+        // Pinned flow is still in memory.
+        assert_eq!(
+            session.hydrated(pinned_large).unwrap().response_body,
+            payload_pin
+        );
     }
 }

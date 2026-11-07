@@ -700,6 +700,7 @@ pub fn App() -> impl IntoElement {
     let share_id = signal(String::new());
     let share_id_tick = share_id;
     let seen_share = stored(String::new());
+    let spill_gc_at = stored(SystemTime::now());
     // The hex text's own box is only as wide as the current line, so measuring
     // it always says 16 bytes fit. The pane viewport is the width the card
     // actually has. Publishing it from this tick rebuilds the text; a signal
@@ -752,6 +753,16 @@ pub fn App() -> impl IntoElement {
             remember_filter(&filter_now);
             filter_since.replace(None);
         }
+        let spill_expired =
+            if spill_gc_at.get().elapsed().unwrap_or_default() >= Duration::from_secs(15) {
+                let now = SystemTime::now();
+                spill_gc_at.replace(now);
+                controls_tick
+                    .hub
+                    .with_session(|session| session.gc_spill(now))
+            } else {
+                false
+            };
         let selected_now = selected_tick.get();
         let lang_now = ui_lang(langs);
         let baseline_now = baseline_tick.get();
@@ -762,6 +773,7 @@ pub fn App() -> impl IntoElement {
             || lang_now != seen_lang.get()
             || baseline_now != seen_baseline.get()
             || pretty_now != seen_pretty.get()
+            || spill_expired
         {
             seen_gen.replace(generation);
             seen_filter.replace(filter_now.clone());
@@ -7134,7 +7146,7 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baselin
         shown.pinned.set(false);
         return;
     };
-    let snapshot = hub.with_session(|session| session.get(id).cloned());
+    let snapshot = hub.with_session(|session| session.hydrated(id));
     let Some(flow) = snapshot else {
         shown.phase.set(Phase::Gone);
         shown.request_hex.set(Vec::new());
@@ -7155,7 +7167,7 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baselin
     };
     let (diff_old, diff_new) = match baseline {
         Some(base) if base != id => hub
-            .with_session(|session| session.get(base).cloned())
+            .with_session(|session| session.hydrated(base))
             .map(|base| {
                 (
                     present::flow_snapshot(&base, lang),
@@ -7177,6 +7189,7 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baselin
     let request = display_body(
         &flow.request_body,
         flow.request_truncated,
+        flow.request_expired,
         flow.request_encoding_error.as_deref(),
         request_type,
         pretty,
@@ -7185,6 +7198,7 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baselin
     let response = display_body(
         &flow.response_body,
         flow.response_truncated,
+        flow.response_expired,
         flow.response_encoding_error.as_deref(),
         response_type,
         pretty,
@@ -7401,12 +7415,13 @@ struct BodyText {
 fn display_body(
     body: &[u8],
     truncated: bool,
+    expired: Option<usize>,
     encoding_error: Option<&str>,
     content_type: Option<&str>,
     pretty: bool,
     lang: Lang,
 ) -> BodyText {
-    let mut presented = body_text(body, truncated, encoding_error, lang);
+    let mut presented = body_text(body, truncated, expired, encoding_error, lang);
     if pretty && std::str::from_utf8(body).is_ok() {
         presented.hex.clear();
     }
@@ -7441,7 +7456,13 @@ fn apply_pretty(presented: &mut BodyText, body: &[u8], content_type: Option<&str
     }
 }
 
-fn body_text(body: &[u8], truncated: bool, encoding_error: Option<&str>, lang: Lang) -> BodyText {
+fn body_text(
+    body: &[u8],
+    truncated: bool,
+    expired: Option<usize>,
+    encoding_error: Option<&str>,
+    lang: Lang,
+) -> BodyText {
     let mut note = String::new();
     let mut hex = Vec::new();
     if let Some(error) = encoding_error {
@@ -7451,6 +7472,18 @@ fn body_text(body: &[u8], truncated: bool, encoding_error: Option<&str>, lang: L
             "Decompression failed; showing the raw bytes. ",
         ));
         note.push_str(error);
+    }
+    if let Some(expired_bytes) = expired {
+        if !note.is_empty() {
+            note.push('\n');
+        }
+        let size = format_bytes(expired_bytes);
+        note.push_str(&match lang {
+            Lang::Zh => format!("大体积 body（{size}）已随临时分片过期或轮转回收。"),
+            Lang::En => format!(
+                "Large body ({size}) was reclaimed after temporary segment rotation or expiry."
+            ),
+        });
     }
     let text = if body.is_empty() {
         String::new()
@@ -8184,9 +8217,7 @@ fn body_extension(headers: &[(String, String)], body: &[u8]) -> &'static str {
 
 fn selected_flow(controls: &Controls, id: Option<u64>) -> Option<crate::session::Flow> {
     let id = id?;
-    let flow = controls
-        .hub
-        .with_session(|session| session.get(id).cloned());
+    let flow = controls.hub.with_session(|session| session.hydrated(id));
     if flow.is_none() {
         set_status(controls, StatusMsg::FlowGone);
     }
@@ -9770,7 +9801,7 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
         let mut raw = vec![b'a'; 256 * 1024 - 2];
         raw.extend_from_slice("不".as_bytes());
         raw.extend(std::iter::repeat_n(b'b', 40));
-        let shown = super::body_text(&raw, false, None, super::Lang::Zh);
+        let shown = super::body_text(&raw, false, None, None, super::Lang::Zh);
         assert_eq!(shown.text.len(), 256 * 1024 - 2);
         assert!(shown.text.is_char_boundary(shown.text.len()));
         assert!(shown.text.chars().all(|ch| ch == 'a'));
@@ -9778,12 +9809,20 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
         assert!(shown.note.contains(&rest.to_string()), "{}", shown.note);
 
         let ascii = vec![b'x'; 256 * 1024 + 10];
-        let ascii_shown = super::body_text(&ascii, false, None, super::Lang::En);
+        let ascii_shown = super::body_text(&ascii, false, None, None, super::Lang::En);
         assert_eq!(ascii_shown.text.len(), 256 * 1024);
         assert!(
             ascii_shown.note.contains("10 more bytes"),
             "{}",
             ascii_shown.note
+        );
+
+        let expired_shown = super::body_text(&[], false, Some(65536), None, super::Lang::Zh);
+        assert!(expired_shown.text.is_empty());
+        assert!(
+            expired_shown.note.contains("64.0 KB"),
+            "{}",
+            expired_shown.note
         );
     }
 
