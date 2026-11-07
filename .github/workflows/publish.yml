@@ -209,7 +209,7 @@ jobs:
             target: x86_64-pc-windows-msvc
             bin: zniff.exe
           - name: linux-x86_64
-            os: ubuntu-latest
+            os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             bin: zniff
     defaults:
@@ -230,9 +230,21 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: app
-          key: release-${{ matrix.target }}
+          key: release-${{ matrix.os }}-${{ matrix.target }}
       - name: release
         run: cargo build --manifest-path app/Cargo.toml --release --target ${{ matrix.target }}
+      - name: check glibc symbol baseline
+        if: matrix.name == 'linux-x86_64'
+        run: |
+          set -euo pipefail
+          bin="app/target/${{ matrix.target }}/release/${{ matrix.bin }}"
+          max_glibc="$(objdump -T "$bin" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sed 's/GLIBC_//' | sort -uV | tail -n1)"
+          echo "Max required GLIBC version: ${max_glibc}"
+          max_allowed="2.39"
+          if [ "$(printf '%s\n%s\n' "$max_allowed" "$max_glibc" | sort -V | tail -n1)" != "$max_allowed" ]; then
+            echo "Binary requires GLIBC_${max_glibc}, which exceeds the allowed baseline GLIBC_${max_allowed}" >&2
+            exit 1
+          fi
       - name: package
         run: |
           set -euo pipefail

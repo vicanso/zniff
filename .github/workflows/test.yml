@@ -35,7 +35,7 @@ jobs:
           - name: windows
             os: windows-latest
           - name: linux
-            os: ubuntu-latest
+            os: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - name: GTK 4
