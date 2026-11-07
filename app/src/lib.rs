@@ -300,10 +300,12 @@ struct RowLine {
     method: String,
     status: Option<u16>,
     time: String,
+    gap_nanos: u128,
     /// Local `HH:MM:SS.mmm`, shown when the gap cell is hovered.
     clock: String,
     /// Request start until the full response. `—` while it is still open.
     elapsed: String,
+    elapsed_nanos: Option<u128>,
     elapsed_slow: bool,
     host: String,
     client_ip: String,
@@ -311,8 +313,34 @@ struct RowLine {
     url: String,
     protocol: String,
     size: String,
+    size_bytes: u64,
     failed: bool,
     pinned: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ListSort {
+    column: ListColumn,
+    desc: bool,
+}
+
+impl ListSort {
+    fn toggle(current: Option<Self>, column: ListColumn) -> Option<Self> {
+        match current {
+            Some(Self {
+                column: cur,
+                desc: false,
+            }) if cur == column => Some(Self { column, desc: true }),
+            Some(Self {
+                column: cur,
+                desc: true,
+            }) if cur == column => None,
+            _ => Some(Self {
+                column,
+                desc: false,
+            }),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -835,6 +863,7 @@ pub fn App() -> impl IntoElement {
     };
     let list_width = signal(saved.list_width as f32);
     let columns = signal(ListColumns::from_config(&saved));
+    let sort = signal(None::<ListSort>);
     let bypass_text = signal(saved.bypass_hosts);
     let rules_text = signal(saved.rules);
     let upstream_text = signal(saved.upstream_proxy);
@@ -883,6 +912,10 @@ pub fn App() -> impl IntoElement {
     let baseline_tick = baseline;
     let seen_baseline = stored(None::<u64>);
     let seen_pretty = stored(shown_tick.pretty.get());
+    let sort_tick = sort;
+    let seen_sort = stored(None::<ListSort>);
+    let cols_tick = columns;
+    let seen_full_url = stored(columns.get().full_url);
     let seen_paused = stored(None::<(u64, BreakSide)>);
     let compose_tick = compose;
     let share_id = signal(String::new());
@@ -996,12 +1029,16 @@ pub fn App() -> impl IntoElement {
         let lang_now = ui_lang(langs);
         let baseline_now = baseline_tick.get();
         let pretty_now = shown_tick.pretty.get();
+        let sort_now = sort_tick.get();
+        let full_url_now = cols_tick.get().full_url;
         if generation != seen_gen.get()
             || filter_now != seen_filter.get()
             || selected_now != seen_selected.get()
             || lang_now != seen_lang.get()
             || baseline_now != seen_baseline.get()
             || pretty_now != seen_pretty.get()
+            || sort_now != seen_sort.get()
+            || full_url_now != seen_full_url.get()
             || spill_expired
         {
             seen_gen.replace(generation);
@@ -1010,7 +1047,15 @@ pub fn App() -> impl IntoElement {
             seen_lang.replace(lang_now);
             seen_baseline.replace(baseline_now);
             seen_pretty.replace(pretty_now);
-            let lines = row_lines(&controls_tick.hub, &filter_now, lang_now);
+            seen_sort.replace(sort_now);
+            seen_full_url.replace(full_url_now);
+            let lines = row_lines(
+                &controls_tick.hub,
+                &filter_now,
+                lang_now,
+                sort_now,
+                full_url_now,
+            );
             total_tick.set(controls_tick.hub.with_session(|session| session.len()));
             rows_tick.set(lines);
             memory.set(format_bytes(
@@ -1140,6 +1185,7 @@ pub fn App() -> impl IntoElement {
                     rules_text,
                     list_width,
                     columns,
+                    sort,
                     controls_list,
                     shown,
                     baseline,
@@ -3163,6 +3209,7 @@ fn flow_list(
     rules_text: Signal<String>,
     width: Signal<f32>,
     columns: Signal<ListColumns>,
+    sort: Signal<Option<ListSort>>,
     controls: Arc<Controls>,
     shown: Shown,
     baseline: Signal<Option<u64>>,
@@ -3243,6 +3290,7 @@ fn flow_list(
             selected,
             compose,
             columns,
+            sort,
             row_controls,
             filter,
             shown,
@@ -4128,6 +4176,7 @@ fn list_menu(
     selected: Signal<Option<u64>>,
     compose: Compose,
     columns: Signal<ListColumns>,
+    sort: Signal<Option<ListSort>>,
     controls: Arc<Controls>,
     filter: Signal<String>,
     shown: Shown,
@@ -4152,6 +4201,7 @@ fn list_menu(
             baseline,
             compose,
             columns,
+            sort,
             controls.clone(),
             filter,
             picked,
@@ -4203,6 +4253,7 @@ fn flow_table(
     baseline: Signal<Option<u64>>,
     compose: Compose,
     columns: Signal<ListColumns>,
+    sort: Signal<Option<ListSort>>,
     controls: Arc<Controls>,
     filter: Signal<String>,
     picked: Signal<Option<u64>>,
@@ -4334,7 +4385,13 @@ fn flow_table(
                     })
                     .render_header_cell(move |cell: &DataTableHeaderCell| {
                         let blur_header = Rc::clone(&blur_header);
-                        flow_header(cell, columns).on_press(move || blur_header())
+                        let column = ListColumn::from_key(cell.key.as_ref());
+                        flow_header(cell, columns, sort).on_press(move || {
+                            if let Some(column) = column {
+                                sort.set(ListSort::toggle(sort.get(), column));
+                            }
+                            blur_header();
+                        })
                     })
                     .empty(list_empty(filter))
                     .on_row_press(move |_: &DataTablePress| blur_press())
@@ -4996,7 +5053,11 @@ fn column_pad_right(column: Option<ListColumn>, align_right: bool, columns: List
     }
 }
 
-fn flow_header(cell: &DataTableHeaderCell, columns: Signal<ListColumns>) -> View {
+fn flow_header(
+    cell: &DataTableHeaderCell,
+    columns: Signal<ListColumns>,
+    sort: Signal<Option<ListSort>>,
+) -> View {
     let key = cell.key.to_string();
     let column = ListColumn::from_key(&key);
     let align_right = matches!(key.as_str(), "gap" | "elapsed" | "size");
@@ -5005,14 +5066,18 @@ fn flow_header(cell: &DataTableHeaderCell, columns: Signal<ListColumns>) -> View
         "id" => 6.0,
         _ => 4.0,
     };
+    let is_sorted =
+        move || column.is_some_and(|col| sort.get().is_some_and(|current| current.column == col));
     let row = view()
         .w_full()
         .h_full()
         .min_w(px(0.0))
         .pl(px(pad_left))
         .pr(move || column_pad_right(column, align_right, columns.get()))
+        .gap_0p5()
         .flex_row()
         .items_center()
+        .cursor(Cursor::Pointer)
         .overflow_hidden();
     let row = if align_right { row.justify_end() } else { row };
     row.child(
@@ -5020,8 +5085,27 @@ fn flow_header(cell: &DataTableHeaderCell, columns: Signal<ListColumns>) -> View
             .number_of_lines(1)
             .text_size(px(11.0))
             .font_weight(FontWeight::SEMIBOLD)
-            .text_color(fg_muted()),
+            .text_color(move || {
+                if is_sorted() {
+                    accent_blue_text()
+                } else {
+                    fg_muted()
+                }
+            }),
     )
+    .child(when(is_sorted, move || {
+        glyph_px(
+            10.5,
+            move || {
+                if sort.get().is_some_and(|current| current.desc) {
+                    Glyph::Chevron
+                } else {
+                    Glyph::ChevronUp
+                }
+            },
+            move || color(accent_blue_text()),
+        )
+    }))
 }
 
 fn row_edge_mark(
@@ -7748,21 +7832,37 @@ fn list_url(url: &str, path: &str, error: Option<&str>, failed: bool, lang: Lang
     }
 }
 
-fn row_lines(hub: &Hub, filter: &str, lang: Lang) -> Vec<RowLine> {
-    hub.with_session(|session| {
+fn row_lines(
+    hub: &Hub,
+    filter: &str,
+    lang: Lang,
+    sort: Option<ListSort>,
+    full_url: bool,
+) -> Vec<RowLine> {
+    let mut rows: Vec<RowLine> = hub.with_session(|session| {
         session
             .matching_with_previous_start(filter)
             .into_iter()
             .filter_map(|(id, previous)| {
                 let flow = session.get(id)?;
                 let failed = flow.error.is_some() && flow.status.is_none();
+                let gap_nanos = previous
+                    .and_then(|prev| flow.started.duration_since(prev).ok())
+                    .map(|duration| duration.as_nanos())
+                    .unwrap_or(0);
+                let elapsed_nanos = flow
+                    .finished_at
+                    .and_then(|fin| fin.duration_since(flow.started).ok())
+                    .map(|duration| duration.as_nanos());
                 Some(RowLine {
                     id,
                     method: flow.method.clone(),
                     status: flow.status,
                     time: present::format_gap(previous, flow.started),
+                    gap_nanos,
                     clock: present::format_clock(flow.started),
                     elapsed: present::format_elapsed(flow.started, flow.finished_at),
+                    elapsed_nanos,
                     elapsed_slow: flow.finished_at.is_some()
                         && present::is_slow(
                             flow.started,
@@ -7779,12 +7879,67 @@ fn row_lines(hub: &Hub, filter: &str, lang: Lang) -> Vec<RowLine> {
                     url: list_url(&flow.url, &flow.path, flow.error.as_deref(), failed, lang),
                     protocol: flow.protocol.label_in(lang).to_string(),
                     size: format_bytes(flow.response_bytes as usize),
+                    size_bytes: flow.response_bytes,
                     failed,
                     pinned: flow.pinned,
                 })
             })
             .collect()
-    })
+    });
+    if let Some(sort) = sort {
+        sort_row_lines(&mut rows, sort, full_url);
+    }
+    rows
+}
+
+fn sort_row_lines(rows: &mut [RowLine], sort: ListSort, full_url: bool) {
+    rows.sort_by(|a, b| {
+        let primary = match sort.column {
+            ListColumn::Id => a.id.cmp(&b.id),
+            ListColumn::Method => cmp_ignore_ascii_case(&a.method, &b.method),
+            ListColumn::Path => {
+                cmp_ignore_ascii_case(row_target_text(a, full_url), row_target_text(b, full_url))
+            }
+            ListColumn::Status => status_sort_rank(a).cmp(&status_sort_rank(b)),
+            ListColumn::Gap => a.gap_nanos.cmp(&b.gap_nanos),
+            ListColumn::Elapsed => match (a.elapsed_nanos, b.elapsed_nanos) {
+                (Some(da), Some(db)) => da.cmp(&db),
+                (Some(_), None) => return std::cmp::Ordering::Less,
+                (None, Some(_)) => return std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            },
+            ListColumn::Size => a.size_bytes.cmp(&b.size_bytes),
+            ListColumn::Protocol => cmp_ignore_ascii_case(&a.protocol, &b.protocol),
+            ListColumn::Host => cmp_ignore_ascii_case(&a.host, &b.host),
+            ListColumn::ClientIp => match (a.client_ip == "—", b.client_ip == "—") {
+                (false, false) => cmp_ignore_ascii_case(&a.client_ip, &b.client_ip),
+                (false, true) => return std::cmp::Ordering::Less,
+                (true, false) => return std::cmp::Ordering::Greater,
+                (true, true) => std::cmp::Ordering::Equal,
+            },
+        };
+        let ordered = if sort.desc {
+            primary.reverse()
+        } else {
+            primary
+        };
+        ordered.then_with(|| a.id.cmp(&b.id))
+    });
+}
+
+fn cmp_ignore_ascii_case(a: &str, b: &str) -> std::cmp::Ordering {
+    a.bytes()
+        .map(|byte| byte.to_ascii_lowercase())
+        .cmp(b.bytes().map(|byte| byte.to_ascii_lowercase()))
+        .then_with(|| a.cmp(b))
+}
+
+fn status_sort_rank(row: &RowLine) -> (u8, u16) {
+    match (row.status, row.failed) {
+        (Some(code), _) => (0, code),
+        (None, true) => (1, u16::MAX),
+        (None, false) => (2, u16::MAX),
+    }
 }
 
 fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baseline: Option<u64>) {
@@ -10693,8 +10848,10 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
             method: "GET".to_string(),
             status: Some(200),
             time: "0 ms".to_string(),
+            gap_nanos: 0,
             clock: "12:00:00.000".to_string(),
             elapsed: "10 ms".to_string(),
+            elapsed_nanos: Some(10_000_000),
             elapsed_slow: false,
             host: "api.example.com".to_string(),
             client_ip: "127.0.0.1".to_string(),
@@ -10702,6 +10859,7 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
             url: "https://api.example.com/v1/users".to_string(),
             protocol: "HTTP/2".to_string(),
             size: "128 B".to_string(),
+            size_bytes: 128,
             failed: false,
             pinned: false,
         };
@@ -11239,5 +11397,136 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
             |p| p == std::path::Path::new("/work"),
         );
         assert_eq!(cwd_fallback.as_deref(), Some(std::path::Path::new("/work")));
+    }
+
+    #[test]
+    fn list_sort_cycles_asc_desc_none_and_orders_rows() {
+        let s0 = None;
+        let s1 = super::ListSort::toggle(s0, super::ListColumn::Method);
+        assert_eq!(
+            s1,
+            Some(super::ListSort {
+                column: super::ListColumn::Method,
+                desc: false
+            })
+        );
+        let s2 = super::ListSort::toggle(s1, super::ListColumn::Method);
+        assert_eq!(
+            s2,
+            Some(super::ListSort {
+                column: super::ListColumn::Method,
+                desc: true
+            })
+        );
+        let s3 = super::ListSort::toggle(s2, super::ListColumn::Method);
+        assert_eq!(s3, None);
+        let s_other = super::ListSort::toggle(s2, super::ListColumn::Status);
+        assert_eq!(
+            s_other,
+            Some(super::ListSort {
+                column: super::ListColumn::Status,
+                desc: false
+            })
+        );
+
+        let make_row = |id: u64,
+                        method: &str,
+                        status: Option<u16>,
+                        failed: bool,
+                        size_bytes: u64,
+                        elapsed_nanos: Option<u128>,
+                        host: &str,
+                        path: &str| super::RowLine {
+            id,
+            method: method.to_string(),
+            status,
+            time: "0 ms".to_string(),
+            gap_nanos: id as u128 * 10,
+            clock: "12:00:00.000".to_string(),
+            elapsed: "—".to_string(),
+            elapsed_nanos,
+            elapsed_slow: false,
+            host: host.to_string(),
+            client_ip: "127.0.0.1".to_string(),
+            path: path.to_string(),
+            url: format!("https://{host}{path}"),
+            protocol: "HTTP/1.1".to_string(),
+            size: "0 B".to_string(),
+            size_bytes,
+            failed,
+            pinned: false,
+        };
+
+        let base = vec![
+            make_row(
+                1,
+                "POST",
+                Some(500),
+                false,
+                120,
+                Some(300),
+                "b.test",
+                "/users",
+            ),
+            make_row(
+                2,
+                "GET",
+                Some(200),
+                false,
+                4096,
+                Some(50),
+                "a.test",
+                "/alpha",
+            ),
+            make_row(3, "DELETE", None, true, 0, None, "c.test", "/err"),
+            make_row(
+                4,
+                "GET",
+                Some(200),
+                false,
+                512,
+                Some(100),
+                "a.test",
+                "/zeta",
+            ),
+        ];
+
+        let mut by_method_asc = base.clone();
+        super::sort_row_lines(
+            &mut by_method_asc,
+            super::ListSort {
+                column: super::ListColumn::Method,
+                desc: false,
+            },
+            false,
+        );
+        let ids: Vec<u64> = by_method_asc.iter().map(|r| r.id).collect();
+        // DELETE (3), GET (2, then 4 by id tie-breaker), POST (1)
+        assert_eq!(ids, vec![3, 2, 4, 1]);
+
+        let mut by_size_desc = base.clone();
+        super::sort_row_lines(
+            &mut by_size_desc,
+            super::ListSort {
+                column: super::ListColumn::Size,
+                desc: true,
+            },
+            false,
+        );
+        let ids: Vec<u64> = by_size_desc.iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec![2, 4, 1, 3]);
+
+        let mut by_elapsed_desc = base.clone();
+        super::sort_row_lines(
+            &mut by_elapsed_desc,
+            super::ListSort {
+                column: super::ListColumn::Elapsed,
+                desc: true,
+            },
+            false,
+        );
+        let ids: Vec<u64> = by_elapsed_desc.iter().map(|r| r.id).collect();
+        // Unfinished (`None`, id 3) stays at the bottom even in descending sort.
+        assert_eq!(ids, vec![1, 4, 2, 3]);
     }
 }
