@@ -1039,7 +1039,7 @@ where
         .await
         .context("上游 HTTP/1.1")?;
     tokio::spawn(async move {
-        if let Err(err) = connection.await {
+        if let Err(err) = connection.with_upgrades().await {
             log::debug!("上游 HTTP/1.1 连接结束: {err}");
         }
     });
@@ -4972,6 +4972,142 @@ mod tests {
         assert_eq!(flow.messages[0].kind, "文本");
         assert_eq!(flow.messages[0].text, "hi");
         assert!(flow.response_body.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn wss_websocket_echoes_and_records_frames() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let dir = std::env::temp_dir().join(format!("zniff-wss-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let (origin_ca, origin_leaf, leaf_key) = test_origin_cert();
+        let mut hub = Hub::new(ca.clone()).unwrap();
+        hub.add_trust_anchor(origin_ca.der().clone());
+        let hub = Arc::new(hub);
+
+        let mut server_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![origin_leaf.der().clone(), origin_ca.der().clone()],
+                rustls::pki_types::PrivateKeyDer::Pkcs8(
+                    rustls::pki_types::PrivatePkcs8KeyDer::from(leaf_key.serialize_der()),
+                ),
+            )
+            .unwrap();
+        server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
+        let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (sock, _) = origin.accept().await.unwrap();
+            let mut tls = acceptor.accept(sock).await.unwrap();
+            let mut req_head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !req_head.ends_with(b"\r\n\r\n") {
+                let n = tls.read(&mut byte).await.unwrap();
+                assert_ne!(n, 0);
+                req_head.push(byte[0]);
+            }
+            tls.write_all(
+                b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+            )
+            .await
+            .unwrap();
+            // Masked client frame: "ok" with mask [1, 2, 3, 4]
+            let mut client_frame = [0u8; 8];
+            tls.read_exact(&mut client_frame).await.unwrap();
+            let mask = [
+                client_frame[2],
+                client_frame[3],
+                client_frame[4],
+                client_frame[5],
+            ];
+            let payload = [client_frame[6] ^ mask[0], client_frame[7] ^ mask[1]];
+            assert_eq!(&payload, b"ok");
+            // Unmasked server echo frame: "ok"
+            tls.write_all(&[0x81, 0x02, payload[0], payload[1]])
+                .await
+                .unwrap();
+            let _ = tls.shutdown().await;
+        });
+
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        let hub_serve = hub.clone();
+        tokio::spawn(async move {
+            let (socket, _) = proxy.accept().await.unwrap();
+            let _ = handle_conn(socket, hub_serve).await;
+        });
+
+        let mut tcp = TcpStream::connect(proxy_addr).await.unwrap();
+        let connect = format!("CONNECT {origin_addr} HTTP/1.1\r\nHost: {origin_addr}\r\n\r\n");
+        tcp.write_all(connect.as_bytes()).await.unwrap();
+        read_http_head(&mut tcp).await;
+
+        let mut roots = RootCertStore::empty();
+        roots.add(ca.cert_der()).unwrap();
+        let mut client_config = ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        client_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let mut tls = timeout(
+            Duration::from_secs(5),
+            TlsConnector::from(Arc::new(client_config))
+                .connect(ServerName::IpAddress(origin_addr.ip().into()), tcp),
+        )
+        .await
+        .expect("客户端 TLS 超时")
+        .expect("客户端 TLS");
+
+        let req = format!(
+            "GET /ws HTTP/1.1\r\nHost: {origin_addr}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n"
+        );
+        tls.write_all(req.as_bytes()).await.unwrap();
+        let mut header = Vec::new();
+        let mut byte = [0u8; 1];
+        while !header.ends_with(b"\r\n\r\n") {
+            let n = timeout(Duration::from_secs(5), tls.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_ne!(n, 0);
+            header.push(byte[0]);
+        }
+        let head = String::from_utf8_lossy(&header);
+        assert!(head.contains("101"), "{head}");
+
+        // Send masked text frame "ok" with mask [1, 2, 3, 4]
+        let masked = [0x81, 0x82, 1, 2, 3, 4, b'o' ^ 1, b'k' ^ 2];
+        tls.write_all(&masked).await.unwrap();
+
+        let mut frame = [0u8; 4];
+        timeout(Duration::from_secs(5), tls.read_exact(&mut frame))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&frame, &[0x81, 0x02, b'o', b'k']);
+        drop(tls);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let done = hub.with_session(|session| {
+                session
+                    .get(1)
+                    .is_some_and(|flow| flow.messages.len() == 2 && flow.finished_at.is_some())
+            });
+            if done || std::time::Instant::now() > deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let flow = hub
+            .with_session(|session| session.get(1).cloned())
+            .expect("flow");
+        assert_eq!(flow.protocol, Protocol::WebSocket);
+        assert_eq!(flow.messages.len(), 2);
+        assert_eq!(flow.messages[0].text, "ok");
+        assert_eq!(flow.messages[1].text, "ok");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
