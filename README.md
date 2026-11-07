@@ -16,7 +16,7 @@ English | [简体中文](./README-zh.md)
 - **Upstream Proxy**: Optional upstream HTTP/CONNECT proxy chaining (`upstream_proxy`).
 
 ### 2. Fast Filtering & Customizable Flow Table
-- **Customizable Columns**: Toggle and resize columns in matching table/menu order: `#` (`id`), `Method`, `Path` (or full `URL`), `Status`, `Gap`, `Elapsed`, `Size`, `Protocol`, `Host`, and `Client IP`. `#`, `Method`, and `Path` stay pinned on the left during horizontal scrolling.
+- **Customizable Columns**: Toggle, resize, and reorder columns (by dragging table headers directly or using the `↑`/`↓` buttons in the column picker) in matching table/menu order: `#` (`id`), `Method`, `Path` (or full `URL`), `Status`, `Gap`, `Elapsed`, `Size`, `Protocol`, `Host`, and `Client IP`. `#`, `Method`, and `Path` stay pinned in the left fixed zone during horizontal scrolling.
 - **Rich Filter Syntax**: Space-separated `AND` terms with `|` or `,` for `OR` within a term:
   - `host:api.example.com|*.cdn.com` (or `domain:`)
   - `path:/v1|/auth`

@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use nsh_base::{
-    DataTable, DataTableApi, DataTableCell, DataTableClasses, DataTableColumn,
+    DataTable, DataTableApi, DataTableCell, DataTableClasses, DataTableColumn, DataTableColumnMove,
     DataTableContextMenu, DataTableEvent, DataTableHeaderCell, DataTablePress, DataTableRange,
     DataTableRows, DataTableSelection, DiffLayout, data_table, diff_view, editor, input, menu,
     menu_item, popover, theme, tooltip,
@@ -315,7 +315,7 @@ struct RowLine {
     pinned: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 struct ListColumns {
     id: bool,
     method: bool,
@@ -329,7 +329,29 @@ struct ListColumns {
     client_ip: bool,
     full_url: bool,
     ellipsize: config::ListEllipsize,
+    order: [ListColumn; 10],
+    order_rev: u64,
 }
+
+impl PartialEq for ListColumns {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.method == other.method
+            && self.path == other.path
+            && self.status == other.status
+            && self.gap == other.gap
+            && self.elapsed == other.elapsed
+            && self.size == other.size
+            && self.protocol == other.protocol
+            && self.host == other.host
+            && self.client_ip == other.client_ip
+            && self.full_url == other.full_url
+            && self.ellipsize == other.ellipsize
+            && self.order == other.order
+    }
+}
+
+impl Eq for ListColumns {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ListColumn {
@@ -358,6 +380,37 @@ impl ListColumn {
         Self::Host,
         Self::ClientIp,
     ];
+
+    fn from_key(key: &str) -> Option<Self> {
+        match key.trim() {
+            "id" => Some(Self::Id),
+            "method" => Some(Self::Method),
+            "path" => Some(Self::Path),
+            "status" => Some(Self::Status),
+            "gap" => Some(Self::Gap),
+            "elapsed" => Some(Self::Elapsed),
+            "size" => Some(Self::Size),
+            "protocol" => Some(Self::Protocol),
+            "host" => Some(Self::Host),
+            "client_ip" => Some(Self::ClientIp),
+            _ => None,
+        }
+    }
+
+    fn is_fixed(self) -> bool {
+        matches!(self, Self::Id | Self::Method | Self::Path)
+    }
+
+    fn order_from_keys(keys: &[String]) -> [Self; 10] {
+        let resolved = config::resolve_column_order(keys);
+        let mut out = Self::ORDERED;
+        for (slot, key) in out.iter_mut().zip(resolved.iter()) {
+            if let Some(col) = Self::from_key(key) {
+                *slot = col;
+            }
+        }
+        out
+    }
 
     fn key(self) -> &'static str {
         match self {
@@ -405,6 +458,8 @@ impl ListColumns {
             client_ip: config.show_client_ip,
             full_url: config.show_full_url,
             ellipsize: config.ellipsize,
+            order: ListColumn::order_from_keys(&config.column_order),
+            order_rev: 0,
         }
     }
 
@@ -423,11 +478,12 @@ impl ListColumns {
         }
     }
 
+    fn first_visible(self) -> Option<ListColumn> {
+        self.order.into_iter().find(|&col| self.on(col))
+    }
+
     fn visible_count(self) -> usize {
-        ListColumn::ORDERED
-            .into_iter()
-            .filter(|&col| self.on(col))
-            .count()
+        self.order.into_iter().filter(|&col| self.on(col)).count()
     }
 
     fn toggle(self, column: ListColumn) -> Self {
@@ -450,6 +506,79 @@ impl ListColumns {
         next
     }
 
+    fn can_move_slot(slot: usize, delta: isize) -> bool {
+        let Some(target) = slot
+            .checked_add_signed(delta)
+            .filter(|&t| t < ListColumn::ORDERED.len())
+        else {
+            return false;
+        };
+        (slot < 3) == (target < 3)
+    }
+
+    #[cfg(test)]
+    fn can_move(self, column: ListColumn, delta: isize) -> bool {
+        let Some(slot) = self.order.iter().position(|&col| col == column) else {
+            return false;
+        };
+        Self::can_move_slot(slot, delta)
+    }
+
+    fn move_by(mut self, column: ListColumn, delta: isize) -> Self {
+        let Some(slot) = self.order.iter().position(|&col| col == column) else {
+            return self;
+        };
+        if !Self::can_move_slot(slot, delta) {
+            return self;
+        }
+        let target = (slot as isize + delta) as usize;
+        self.order.swap(slot, target);
+        self.order_rev = self.order_rev.wrapping_add(1);
+        self
+    }
+
+    fn apply_visible_order(mut self, visible_keys: &[SharedString]) -> Self {
+        let before = self;
+        for fixed_zone in [true, false] {
+            let picked: Vec<ListColumn> = visible_keys
+                .iter()
+                .filter_map(|key| ListColumn::from_key(key.as_ref()))
+                .filter(|&col| col.is_fixed() == fixed_zone && before.on(col))
+                .collect();
+            let current: Vec<ListColumn> = self
+                .order
+                .into_iter()
+                .filter(|&col| col.is_fixed() == fixed_zone && before.on(col))
+                .collect();
+            if picked.len() != current.len() || !current.iter().all(|col| picked.contains(col)) {
+                continue;
+            }
+            let mut iter = picked.into_iter();
+            for slot in &mut self.order {
+                if slot.is_fixed() == fixed_zone
+                    && before.on(*slot)
+                    && let Some(col) = iter.next()
+                {
+                    *slot = col;
+                }
+            }
+        }
+        self
+    }
+
+    fn has_custom_order(self) -> bool {
+        self.order != ListColumn::ORDERED
+    }
+
+    fn reset_order(mut self) -> Self {
+        if self.order == ListColumn::ORDERED {
+            return self;
+        }
+        self.order = ListColumn::ORDERED;
+        self.order_rev = self.order_rev.wrapping_add(1);
+        self
+    }
+
     fn with_full_url(self, full_url: bool) -> Self {
         Self { full_url, ..self }
     }
@@ -466,6 +595,15 @@ impl ListColumns {
         }
     }
 
+    fn order_keys(self) -> Vec<String> {
+        let keys: Vec<String> = self
+            .order
+            .into_iter()
+            .map(|col| col.key().to_string())
+            .collect();
+        config::normalize_column_order(&keys)
+    }
+
     fn write(self, config: &mut config::Config) {
         config.show_id = self.id;
         config.show_method = self.method;
@@ -479,6 +617,7 @@ impl ListColumns {
         config.show_client_ip = self.client_ip;
         config.show_full_url = self.full_url;
         config.ellipsize = self.ellipsize;
+        config.column_order = self.order_keys();
     }
 }
 
@@ -487,12 +626,13 @@ impl ListColumns {
 /// Widths are the last saved drag, not a live value: the table keeps a drag
 /// until this list changes, and a changed width here would fight the drag.
 fn flow_table_columns(shown: ListColumns, widths: &HashMap<String, u32>) -> Vec<DataTableColumn> {
-    ListColumn::ORDERED
+    shown
+        .order
         .into_iter()
         .filter(|&col| shown.on(col))
         .map(|col| {
             let key = col.key();
-            let fixed = matches!(col, ListColumn::Id | ListColumn::Method | ListColumn::Path);
+            let fixed = col.is_fixed();
             let limit = config::column_width_limit(key).expect("known column");
             let width = widths.get(key).copied().unwrap_or(limit.default);
             let mut column = DataTableColumn::default();
@@ -502,7 +642,7 @@ fn flow_table_columns(shown: ListColumns, widths: &HashMap<String, u32>) -> Vec<
             column.max_width = Some(px(limit.max as f32));
             column.fixed = fixed;
             column.resizable = Some(true);
-            column.movable = Some(false);
+            column.movable = Some(true);
             column.selectable = Some(false);
             column
         })
@@ -539,7 +679,10 @@ fn flow_table_classes() -> DataTableClasses {
     classes.header = Some(
         "bg-[#f1f5f9] dark:bg-[#151b26] border-b border-b-[#e2e8f0] dark:border-b-[#222938]".into(),
     );
-    classes.header_cell = Some("bg-[#f1f5f9] dark:bg-[#151b26]".into());
+    classes.header_cell =
+        Some("bg-[#f1f5f9] dark:bg-[#151b26] cursor-grab active:cursor-grabbing".into());
+    classes.header_cell_dragging = Some("opacity-60 bg-[#e2e8f0] dark:bg-[#222938]".into());
+    classes.move_indicator = Some("bg-[#2563eb] dark:bg-[#3b82f6]".into());
     classes.row = Some(
         "bg-white dark:bg-[#10141d] border-b border-b-[#f1f5f9] dark:border-b-[#19202e] cursor-pointer"
             .into(),
@@ -4086,30 +4229,36 @@ fn flow_table(
     // The hover bubble stays beside the table. A tooltip inside a cell is
     // disposed when DataTable recycles that cell, and the binding then
     // reads a prop whose owner is gone.
+    let table_key = computed(move || {
+        columns.with(|c| {
+            (
+                c.id,
+                c.method,
+                c.path,
+                c.status,
+                c.gap,
+                c.elapsed,
+                c.size,
+                c.protocol,
+                c.host,
+                c.client_ip,
+                c.order_rev,
+            )
+        })
+    });
     view()
         .flex_1()
         .min_h(px(0.0))
         .w_full()
         .child(dynamic(move || {
-            let _ = columns.with(|c| {
-                (
-                    c.id,
-                    c.method,
-                    c.path,
-                    c.status,
-                    c.gap,
-                    c.elapsed,
-                    c.size,
-                    c.protocol,
-                    c.host,
-                    c.client_ip,
-                )
-            });
+            let _ = table_key.get();
+            let shown_at_mount = untracked(|| columns.get());
             let blur_header = Rc::clone(&blur_header);
             let blur_press = Rc::clone(&blur_press);
             let blur_menu = Rc::clone(&blur_menu);
             let blur_select = Rc::clone(&blur_select);
             let controls = controls.clone();
+            let move_controls = controls.clone();
             Some(
                 data_table()
                     .component_ref(&table)
@@ -4120,7 +4269,7 @@ fn flow_table(
                     .columns(move || {
                         let shown = columns.get();
                         let current_widths = untracked(|| widths_for_cols.get());
-                        let mut built = flow_table_columns(shown, &current_widths);
+                        let mut built = flow_table_columns(shown_at_mount, &current_widths);
                         for column in &mut built {
                             let key = column.key.to_string();
                             column.title = Some(flow_column_title(&key, shown.full_url).into());
@@ -4135,7 +4284,7 @@ fn flow_table(
                     .row_header(false)
                     .column_selectable(false)
                     .cell_selectable(false)
-                    .movable_columns(false)
+                    .movable_columns(true)
                     .loop_selection(false)
                     .stripe(true)
                     .selection(move || {
@@ -4212,6 +4361,23 @@ fn flow_table(
                             return;
                         }
                         follow.replace(near);
+                    })
+                    .on_column_move(move |mv: &DataTableColumnMove| {
+                        let current = columns.get();
+                        let next = current.apply_visible_order(&mv.order);
+                        if next == current {
+                            return;
+                        }
+                        columns.set(next);
+                        if let Err(err) = save_config(|config| next.write(config)) {
+                            set_status(
+                                &move_controls,
+                                StatusMsg::PrefUnsaved {
+                                    name: PrefName::List,
+                                    err: err.to_string(),
+                                },
+                            );
+                        }
                     })
                     .on_column_resize(move |event: &DataTableEvent| {
                         let DataTableEvent::ColumnResize(key, width) = event else {
@@ -4306,9 +4472,11 @@ fn column_picker_trigger() -> impl IntoElement {
 }
 
 fn column_picker_panel(columns: Signal<ListColumns>, controls: Arc<Controls>) -> impl IntoElement {
-    let toggle_controls = controls.clone();
+    let fixed_controls = controls.clone();
+    let scroll_controls = controls.clone();
+    let reset_controls = controls.clone();
     view()
-        .w(px(176.0))
+        .w(px(196.0))
         .p_1()
         .gap_0p5()
         .rounded(px(10.0))
@@ -4316,10 +4484,22 @@ fn column_picker_panel(columns: Signal<ListColumns>, controls: Arc<Controls>) ->
         .border_color(border_strong())
         .bg(bg_card())
         .shadow_md()
-        .children(ListColumn::ORDERED.into_iter().map(move |column| {
-            let (zh, en) = column.labels();
-            column_toggle(columns, toggle_controls.clone(), column, zh, en)
-        }))
+        .children((0..3).map(move |slot| column_slot_row(columns, fixed_controls.clone(), slot)))
+        .child(
+            view()
+                .h(px(1.0))
+                .mx(px(8.0))
+                .my(px(1.0))
+                .bg(border_subtle()),
+        )
+        .children(
+            (3..ListColumn::ORDERED.len())
+                .map(move |slot| column_slot_row(columns, scroll_controls.clone(), slot)),
+        )
+        .child(when(
+            move || columns.get().has_custom_order(),
+            move || column_reset_order(columns, reset_controls.clone()),
+        ))
         .child(menu_rule())
         .child(column_full_url_choice(
             columns,
@@ -4357,6 +4537,177 @@ fn column_picker_panel(columns: Signal<ListColumns>, controls: Arc<Controls>) ->
             "结尾省略",
             "Ellipsize tail",
         ))
+}
+
+fn column_slot_row(
+    columns: Signal<ListColumns>,
+    controls: Arc<Controls>,
+    slot: usize,
+) -> impl IntoElement {
+    let toggle_controls = controls.clone();
+    let up_controls = controls.clone();
+    let down_controls = controls;
+    let is_on = move || {
+        let cols = columns.get();
+        cols.on(cols.order[slot])
+    };
+    view()
+        .h(px(30.0))
+        .px_1()
+        .gap_0p5()
+        .flex_row()
+        .items_center()
+        .child(
+            view()
+                .flex_1()
+                .min_w(px(0.0))
+                .h_full()
+                .px_1p5()
+                .gap_2()
+                .rounded(px(6.0))
+                .flex_row()
+                .items_center()
+                .hover(|style| style.bg(bg_control_hover()))
+                .active(|style| style.opacity(0.75))
+                .cursor(Cursor::Pointer)
+                .on_press(move || {
+                    let current = columns.get();
+                    let next = current.toggle(current.order[slot]);
+                    if next == current {
+                        return;
+                    }
+                    columns.set(next);
+                    if let Err(err) = save_config(|config| next.write(config)) {
+                        set_status(
+                            &toggle_controls,
+                            StatusMsg::PrefUnsaved {
+                                name: PrefName::List,
+                                err: err.to_string(),
+                            },
+                        );
+                    }
+                })
+                .child(
+                    view()
+                        .w(px(8.0))
+                        .h(px(8.0))
+                        .flex_shrink_0()
+                        .rounded(px(99.0))
+                        .border_1()
+                        .border_color(move || if is_on() { accent_blue() } else { fg_muted() })
+                        .bg(move || if is_on() { accent_blue() } else { bg_card() }),
+                )
+                .child(
+                    control_text(move || {
+                        let (zh, en) = columns.get().order[slot].labels();
+                        tr(zh, en)()
+                    })
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .number_of_lines(1)
+                    .text_color(move || {
+                        if is_on() {
+                            accent_blue_text()
+                        } else {
+                            fg_secondary()
+                        }
+                    }),
+                ),
+        )
+        .child(column_move_button(columns, up_controls, slot, -1))
+        .child(column_move_button(columns, down_controls, slot, 1))
+}
+
+fn column_move_button(
+    columns: Signal<ListColumns>,
+    controls: Arc<Controls>,
+    slot: usize,
+    delta: isize,
+) -> impl IntoElement {
+    let can_move = ListColumns::can_move_slot(slot, delta);
+    let icon = if delta < 0 {
+        Glyph::ChevronUp
+    } else {
+        Glyph::Chevron
+    };
+    let (zh, en) = if delta < 0 {
+        ("上移", "Move up")
+    } else {
+        ("下移", "Move down")
+    };
+    let btn = view()
+        .w(px(22.0))
+        .h(px(22.0))
+        .flex_shrink_0()
+        .rounded(px(5.0))
+        .flex_row()
+        .items_center()
+        .justify_center()
+        .child(glyph_px(
+            11.5,
+            move || icon,
+            move || color(if can_move { fg_secondary() } else { fg_muted() }),
+        ));
+    if can_move {
+        btn.hover(|style| style.bg(bg_control_hover()))
+            .active(|style| style.opacity(0.75))
+            .cursor(Cursor::Pointer)
+            .tooltip(label_tip(zh, en))
+            .on_press(move || {
+                let current = columns.get();
+                let column = current.order[slot];
+                let next = current.move_by(column, delta);
+                if next == current {
+                    return;
+                }
+                columns.set(next);
+                if let Err(err) = save_config(|config| next.write(config)) {
+                    set_status(
+                        &controls,
+                        StatusMsg::PrefUnsaved {
+                            name: PrefName::List,
+                            err: err.to_string(),
+                        },
+                    );
+                }
+            })
+    } else {
+        btn.opacity(0.28).cursor(Cursor::Default)
+    }
+}
+
+fn column_reset_order(columns: Signal<ListColumns>, controls: Arc<Controls>) -> impl IntoElement {
+    view()
+        .h(px(28.0))
+        .px_2p5()
+        .rounded(px(6.0))
+        .flex_row()
+        .items_center()
+        .hover(|style| style.bg(bg_control_hover()))
+        .active(|style| style.opacity(0.75))
+        .cursor(Cursor::Pointer)
+        .on_press(move || {
+            let current = columns.get();
+            let next = current.reset_order();
+            if next == current {
+                return;
+            }
+            columns.set(next);
+            if let Err(err) = save_config(|config| next.write(config)) {
+                set_status(
+                    &controls,
+                    StatusMsg::PrefUnsaved {
+                        name: PrefName::List,
+                        err: err.to_string(),
+                    },
+                );
+            }
+        })
+        .child(
+            control_text(tr("恢复默认列序", "Reset column order"))
+                .text_size(px(11.5))
+                .text_color(accent_blue_text()),
+        )
 }
 
 fn column_full_url_choice(
@@ -4405,33 +4756,6 @@ fn column_ellipsize_choice(
             if next == columns.get() {
                 return;
             }
-            columns.set(next);
-            if let Err(err) = save_config(|config| next.write(config)) {
-                set_status(
-                    &controls,
-                    StatusMsg::PrefUnsaved {
-                        name: PrefName::List,
-                        err: err.to_string(),
-                    },
-                );
-            }
-        },
-    )
-}
-
-fn column_toggle(
-    columns: Signal<ListColumns>,
-    controls: Arc<Controls>,
-    column: ListColumn,
-    zh: &'static str,
-    en: &'static str,
-) -> impl IntoElement {
-    let marked = columns;
-    marked_action(
-        move || marked.get().on(column),
-        tr(zh, en),
-        move || {
-            let next = columns.get().toggle(column);
             columns.set(next);
             if let Err(err) = save_config(|config| next.write(config)) {
                 set_status(
@@ -4619,7 +4943,7 @@ fn flow_cell(
 ) -> AnyElement {
     let index = cell.row as usize;
     match cell.key.as_ref() {
-        "id" => id_cell(rows, selected, baseline, index).into_element(),
+        "id" => id_cell(rows, selected, baseline, columns, index).into_element(),
         "method" => method_cell(rows, selected, baseline, columns, index).into_element(),
         "path" => path_cell(rows, selected, baseline, columns, hover, index).into_element(),
         "status" => status_text(rows, index).into_element(),
@@ -4689,10 +5013,10 @@ fn method_cell(
         .pr(px(2.0))
         .border_l(px(2.0))
         .border_l_color(move || {
-            if columns.get().id {
-                AdaptiveColor::TRANSPARENT
-            } else {
+            if columns.get().first_visible() == Some(ListColumn::Method) {
                 row_edge_mark(rows, selected, baseline, index)
+            } else {
+                AdaptiveColor::TRANSPARENT
             }
         })
         .flex_row()
@@ -4756,6 +5080,7 @@ fn id_cell(
     rows: Signal<Vec<RowLine>>,
     selected: Signal<Option<u64>>,
     baseline: Signal<Option<u64>>,
+    columns: Signal<ListColumns>,
     index: usize,
 ) -> impl IntoElement {
     view()
@@ -4765,7 +5090,13 @@ fn id_cell(
         .pl(px(4.0))
         .pr(px(4.0))
         .border_l(px(2.0))
-        .border_l_color(move || row_edge_mark(rows, selected, baseline, index))
+        .border_l_color(move || {
+            if columns.get().first_visible() == Some(ListColumn::Id) {
+                row_edge_mark(rows, selected, baseline, index)
+            } else {
+                AdaptiveColor::TRANSPARENT
+            }
+        })
         .flex_row()
         .items_center()
         .overflow_hidden()
@@ -5017,8 +5348,7 @@ fn path_cell(
         .pl(px(4.0))
         .pr(px(4.0))
         .border_l(move || {
-            let cols = columns.get();
-            if !cols.id && !cols.method {
+            if columns.get().first_visible() == Some(ListColumn::Path) {
                 px(2.0)
             } else {
                 px(0.0)
@@ -10209,6 +10539,8 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
             client_ip: false,
             full_url: false,
             ellipsize: crate::config::ListEllipsize::Middle,
+            order: super::ListColumn::ORDERED,
+            order_rev: 0,
         };
         let mut widths = std::collections::HashMap::new();
         widths.insert("path".to_string(), 400);
@@ -10222,7 +10554,7 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
         assert_eq!(cols[1].min_width.unwrap().0, 80.0);
         assert!(
             cols.iter()
-                .all(|column| { column.movable == Some(false) && column.resizable == Some(true) })
+                .all(|column| { column.movable == Some(true) && column.resizable == Some(true) })
         );
         let hidden_path = super::ListColumns {
             path: false,
@@ -10258,6 +10590,8 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
             client_ip: true,
             full_url: false,
             ellipsize: crate::config::ListEllipsize::Middle,
+            order: super::ListColumn::ORDERED,
+            order_rev: 0,
         };
         let all_cols = super::flow_table_columns(all_shown, &widths);
         let toggle_keys: Vec<&str> = super::ListColumn::ORDERED.iter().map(|c| c.key()).collect();
@@ -10278,6 +10612,48 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
             ]
         );
         assert_eq!(toggle_keys, table_keys);
+
+        // Reordering via up/down buttons respects fixed (0..3) and scrolling (3..10) zones.
+        assert!(!default_shown.has_custom_order());
+        assert!(!default_shown.can_move(super::ListColumn::Id, -1));
+        assert!(default_shown.can_move(super::ListColumn::Id, 1));
+        assert!(!default_shown.can_move(super::ListColumn::Path, 1));
+        assert!(!default_shown.can_move(super::ListColumn::Status, -1));
+        assert!(!default_shown.can_move(super::ListColumn::ClientIp, 1));
+
+        let moved = default_shown
+            .move_by(super::ListColumn::Method, -1)
+            .move_by(super::ListColumn::Elapsed, -1);
+        assert!(moved.has_custom_order());
+        assert_eq!(moved.first_visible(), Some(super::ListColumn::Method));
+        let moved_cols = super::flow_table_columns(moved, &std::collections::HashMap::new());
+        let moved_keys: Vec<&str> = moved_cols.iter().map(|c| c.key.as_ref()).collect();
+        assert_eq!(
+            moved_keys,
+            ["method", "id", "path", "status", "elapsed", "gap", "size"]
+        );
+
+        // Dragging visible headers updates visible slots while preserving hidden slots.
+        let dragged = moved.apply_visible_order(&[
+            "path".into(),
+            "method".into(),
+            "id".into(),
+            "size".into(),
+            "status".into(),
+            "elapsed".into(),
+            "gap".into(),
+        ]);
+        assert_eq!(dragged.first_visible(), Some(super::ListColumn::Path));
+        let dragged_cols = super::flow_table_columns(dragged, &std::collections::HashMap::new());
+        let dragged_keys: Vec<&str> = dragged_cols.iter().map(|c| c.key.as_ref()).collect();
+        assert_eq!(
+            dragged_keys,
+            ["path", "method", "id", "size", "status", "elapsed", "gap"]
+        );
+        let mut cfg = crate::config::Config::default();
+        dragged.write(&mut cfg);
+        assert_eq!(super::ListColumns::from_config(&cfg), dragged);
+        assert_eq!(dragged.reset_order(), default_shown);
     }
 
     #[test]

@@ -318,6 +318,9 @@ pub struct Config {
     /// Dragged list-column widths, in points, keyed by `method`, `path`, and the rest.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub column_widths: HashMap<String, u32>,
+    /// Custom list-column order when reordered from [`DEFAULT_COLUMN_ORDER`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub column_order: Vec<String>,
 }
 
 impl Default for Config {
@@ -353,6 +356,7 @@ impl Default for Config {
             saved_rules: Vec::new(),
             saved_profiles: Vec::new(),
             column_widths: HashMap::new(),
+            column_order: Vec::new(),
         }
     }
 }
@@ -428,6 +432,69 @@ pub fn column_width_limit(key: &str) -> Option<ColumnWidth> {
         },
         _ => return None,
     })
+}
+
+/// Default order of all list columns.
+pub const DEFAULT_COLUMN_ORDER: [&str; 10] = [
+    "id",
+    "method",
+    "path",
+    "status",
+    "gap",
+    "elapsed",
+    "size",
+    "protocol",
+    "host",
+    "client_ip",
+];
+
+pub fn is_fixed_column_key(key: &str) -> bool {
+    matches!(key, "id" | "method" | "path")
+}
+
+/// Resolves `order` into all 10 column keys while keeping fixed columns
+/// (`id`, `method`, `path`) in the leading fixed zone and scrolling columns
+/// in the trailing scrolling zone.
+pub fn resolve_column_order(order: &[String]) -> Vec<String> {
+    let mut fixed: Vec<String> = Vec::with_capacity(3);
+    let mut scroll: Vec<String> = Vec::with_capacity(7);
+    for raw in order {
+        let key = raw.trim();
+        let Some(&canonical) = DEFAULT_COLUMN_ORDER.iter().find(|&&k| k == key) else {
+            continue;
+        };
+        let target = if is_fixed_column_key(canonical) {
+            &mut fixed
+        } else {
+            &mut scroll
+        };
+        if !target.iter().any(|seen| seen == canonical) {
+            target.push(canonical.to_string());
+        }
+    }
+    for canonical in DEFAULT_COLUMN_ORDER {
+        let target = if is_fixed_column_key(canonical) {
+            &mut fixed
+        } else {
+            &mut scroll
+        };
+        if !target.iter().any(|seen| seen == canonical) {
+            target.push(canonical.to_string());
+        }
+    }
+    fixed.extend(scroll);
+    fixed
+}
+
+/// Returns an empty `Vec` when `order` resolves to [`DEFAULT_COLUMN_ORDER`]
+/// so default `config.toml` stays compact.
+pub fn normalize_column_order(order: &[String]) -> Vec<String> {
+    let resolved = resolve_column_order(order);
+    if resolved.iter().map(String::as_str).eq(DEFAULT_COLUMN_ORDER) {
+        Vec::new()
+    } else {
+        resolved
+    }
 }
 
 /// Drops unknown keys and clamps the rest to [`column_width_limit`].
@@ -604,6 +671,7 @@ fn normalize_for(mut config: Config, dev: bool) -> Config {
     config.window_width = clamp_window_width(config.window_width);
     config.window_height = clamp_window_height(config.window_height);
     clamp_column_widths(&mut config.column_widths);
+    config.column_order = normalize_column_order(&config.column_order);
     clamp_saved_filters(&mut config.saved_filters);
     clamp_saved_rules(&mut config.saved_rules);
     migrate_saved_profiles(&mut config);
@@ -1186,5 +1254,53 @@ mod tests {
         let clamped = load(dir.path());
         assert_eq!(clamped.window_width, WINDOW_WIDTH_MIN);
         assert_eq!(clamped.window_height, WINDOW_HEIGHT_MAX);
+    }
+
+    #[test]
+    fn column_order_normalizes_zones_and_omits_default_order() {
+        let dir = Scratch::new();
+        let initial = load(dir.path());
+        assert!(initial.column_order.is_empty());
+        let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(!text.contains("column_order"), "{text}");
+
+        update(dir.path(), |config| {
+            config.column_order = vec![
+                "method".into(),
+                "host".into(),
+                "id".into(),
+                "unknown".into(),
+                "client_ip".into(),
+                "status".into(),
+            ];
+        })
+        .unwrap();
+        let loaded = load(dir.path());
+        assert_eq!(
+            loaded.column_order,
+            vec![
+                "method",
+                "id",
+                "path",
+                "host",
+                "client_ip",
+                "status",
+                "gap",
+                "elapsed",
+                "size",
+                "protocol",
+            ]
+        );
+        let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(text.contains("column_order"), "{text}");
+
+        update(dir.path(), |config| {
+            config.column_order = DEFAULT_COLUMN_ORDER.iter().map(|s| s.to_string()).collect();
+        })
+        .unwrap();
+        let reset = load(dir.path());
+        assert!(reset.column_order.is_empty());
+        let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(!text.contains("column_order"), "{text}");
     }
 }
