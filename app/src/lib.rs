@@ -666,7 +666,6 @@ pub fn App() -> impl IntoElement {
         show_tunnels: signal(saved.show_tunnel_failures),
         list_width,
     };
-    let import_path = signal(String::new());
     let lan_url = signal(String::new());
     let lan_choice = signal(String::new());
     let lan_addrs = signal(Vec::<LanAddr>::new());
@@ -873,10 +872,9 @@ pub fn App() -> impl IntoElement {
                     compose_clear,
                 );
             },
-            move || export_har_file(&controls_export, &filter.get()),
+            move || export_har_file(controls_export.clone(), &filter.get()),
             move || copy_proxy_env(&controls_env),
             move || toggle_capture(controls_start.clone()),
-            import_path,
             controls_import,
             rows,
             flow_total,
@@ -936,7 +934,6 @@ fn toolbar(
     export_har: impl Fn() + 'static,
     copy_env: impl Fn() + 'static,
     toggle: impl Fn() + 'static,
-    import_path: Signal<String>,
     import_controls: Arc<Controls>,
     rows: Signal<Vec<RowLine>>,
     flow_total: Signal<usize>,
@@ -1045,7 +1042,6 @@ fn toolbar(
                 let clear = Rc::clone(&clear);
                 move || clear()
             },
-            import_path,
             import_controls,
             rows,
             flow_total,
@@ -2139,8 +2135,8 @@ fn profile_dock(
                         .justify_center()
                         .cursor(Cursor::Pointer)
                         .tooltip(label_tip(
-                            "导出配置为 TOML 并复制到剪贴板",
-                            "Export setups as TOML and copy",
+                            "导出配置为 TOML 文件并复制到剪贴板",
+                            "Export setups to a TOML file and copy",
                         ))
                         .on_press(move || {
                             dropdown_open.set(false);
@@ -2164,7 +2160,7 @@ fn profile_dock(
                                 breaks_on.get(),
                                 show_tunnels.get(),
                             );
-                            export_profiles_file(&export_controls, &profiles);
+                            export_profiles_file(export_controls.clone(), profiles);
                         })
                         .child(
                             text(tr("导出", "Export"))
@@ -2188,27 +2184,19 @@ fn profile_dock(
                         .justify_center()
                         .cursor(Cursor::Pointer)
                         .tooltip(label_tip(
-                            "从剪贴板导入 TOML 配置（或拖拽 .toml 到窗口）",
-                            "Import TOML setups from clipboard (or drop .toml)",
+                            "选择 TOML 配置文件导入（或拖拽 .toml 到窗口）",
+                            "Pick a TOML setup file to import (or drop .toml)",
                         ))
                         .on_press(move || {
                             dropdown_open.set(false);
                             let import_controls = import_controls.clone();
                             spawn(async move {
-                                let clip = clipboard_string().await;
-                                match parse_profiles_from_text_or_path(&clip) {
-                                    Ok(incoming) => {
-                                        let count = incoming.len();
-                                        let merged = config::merge_imported_profiles(
-                                            &saved.get(),
-                                            &incoming,
-                                            SAVED_RULE_CAP,
-                                        );
-                                        saved.set(merged.clone());
-                                        let _ =
-                                            save_config(|config| config.saved_profiles = merged);
-                                        if let Some(first) = incoming.first() {
-                                            rule_name.set(first.name.clone());
+                                let dialog = nsh_core::file_dialog::OpenDialog::files().filter(
+                                    nsh_core::file_dialog::FileFilter::new("TOML", ["toml"]),
+                                );
+                                match pick_paths(dialog).await {
+                                    Ok(Some(paths)) => {
+                                        if let Some(path) = paths.first() {
                                             clear_rule_draft(
                                                 draft_host,
                                                 draft_path,
@@ -2217,23 +2205,27 @@ fn profile_dock(
                                                 draft_response,
                                                 draft_kind,
                                             );
-                                            apply_saved_profile(
-                                                first,
-                                                filter,
-                                                bypass_text,
-                                                rules_text,
-                                                upstream_text,
-                                                rules_on,
-                                                breaks_on,
-                                                show_tunnels,
+                                            import_profiles_file(
                                                 &import_controls,
+                                                &path.to_string_lossy(),
+                                                ProfileSignals {
+                                                    saved,
+                                                    name: rule_name,
+                                                    filter,
+                                                    bypass: bypass_text,
+                                                    rules: rules_text,
+                                                    upstream: upstream_text,
+                                                    rules_on,
+                                                    breaks_on,
+                                                    show_tunnels,
+                                                    list_width: signal(
+                                                        config::LIST_WIDTH_DEFAULT as f32,
+                                                    ),
+                                                },
                                             );
                                         }
-                                        set_status(
-                                            &import_controls,
-                                            StatusMsg::ProfilesImported { count },
-                                        );
                                     }
+                                    Ok(None) => {}
                                     Err(err) => {
                                         set_status(&import_controls, StatusMsg::ImportFailed(err));
                                     }
@@ -3670,6 +3662,42 @@ fn replace_row(
                                     false,
                                     move |text| from.set(text.to_string()),
                                 ))
+                            },
+                        ))
+                        .child(when(
+                            move || kind.get() == 2,
+                            move || {
+                                view()
+                                    .h(px(28.0))
+                                    .px_2p5()
+                                    .flex_shrink_0()
+                                    .flex_row()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(6.0))
+                                    .border_1()
+                                    .border_color(border_control())
+                                    .bg(bg_control())
+                                    .hover(|style| style.bg(bg_control_hover()))
+                                    .cursor(Cursor::Pointer)
+                                    .on_press(move || {
+                                        spawn(async move {
+                                            if let Ok(Some(paths)) = pick_paths(
+                                                nsh_core::file_dialog::OpenDialog::files(),
+                                            )
+                                            .await
+                                                && let Some(path) = paths.first()
+                                            {
+                                                from.set(path.display().to_string());
+                                            }
+                                        });
+                                    })
+                                    .child(
+                                        text(tr("选择文件", "Browse"))
+                                            .text_size(px(11.0))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(fg_secondary()),
+                                    )
                             },
                         ))
                         .child(when(
@@ -5854,7 +5882,7 @@ fn detail_actions(
                     },
                 ))
                 .child(action_item(tr("另存", "Save"), move || {
-                    export_response(&save, selected.get());
+                    export_response(save.clone(), selected.get());
                 }))
                 .child(menu_rule())
                 .child(action_item(tr("只看", "Focus"), move || {
@@ -6456,7 +6484,6 @@ fn toolbar_menu(
     export_har: impl Fn() + 'static,
     copy_env: impl Fn() + 'static,
     clear: impl Fn() + 'static,
-    import_path: Signal<String>,
     import_controls: Arc<Controls>,
     rows: Signal<Vec<RowLine>>,
     flow_total: Signal<usize>,
@@ -6479,7 +6506,6 @@ fn toolbar_menu(
             export_har,
             copy_env,
             clear,
-            import_path,
             import_controls,
             rows,
             flow_total,
@@ -6614,7 +6640,6 @@ fn more_menu(
     export_har: impl Fn() + 'static,
     copy_env: impl Fn() + 'static,
     clear: impl Fn() + 'static,
-    import_path: Signal<String>,
     import_controls: Arc<Controls>,
     rows: Signal<Vec<RowLine>>,
     flow_total: Signal<usize>,
@@ -6666,7 +6691,9 @@ fn more_menu(
             {
                 let controls = import_controls.clone();
                 let langs = ui_langs();
-                move || export_html_file(&controls, &filter.get(), ui_lang(langs) == Lang::Zh)
+                move || {
+                    export_html_file(controls.clone(), &filter.get(), ui_lang(langs) == Lang::Zh)
+                }
             },
         ))
         .child(menu_action(
@@ -6709,7 +6736,10 @@ fn more_menu(
                 },
             )
         })
-        .child(import_menu(import_path, import_controls.clone()))
+        .child(menu_action(Glyph::List, tr("导入 HAR", "Import HAR"), {
+            let controls = import_controls.clone();
+            move || prompt_import_har(controls.clone())
+        }))
         .child(menu_action(
             Glyph::Prompt,
             tr("复制代理环境", "Copy proxy env"),
@@ -8055,68 +8085,50 @@ fn hex_dump(body: &[u8]) -> String {
     out
 }
 
-fn export_response(controls: &Controls, id: Option<u64>) {
-    let Some(flow) = selected_flow(controls, id) else {
+fn export_response(controls: Arc<Controls>, id: Option<u64>) {
+    let Some(flow) = selected_flow(&controls, id) else {
         return;
     };
     if flow.response_body.is_empty() {
-        set_status(controls, StatusMsg::EmptyResponse);
+        set_status(&controls, StatusMsg::EmptyResponse);
         return;
     }
     let ext = present::content_type(&flow.response_headers)
         .and_then(present::image_extension)
         .unwrap_or_else(|| body_extension(&flow.response_headers, &flow.response_body));
-    let dir = download_dir().join("zniff");
-    if let Err(err) = std::fs::create_dir_all(&dir) {
-        set_status(controls, StatusMsg::SaveFailed(err.to_string()));
-        return;
-    }
-    let path = dir.join(format!("{}.{}", flow.id, ext));
-    if let Err(err) = std::fs::write(&path, &flow.response_body) {
-        set_status(controls, StatusMsg::SaveFailed(err.to_string()));
-        return;
-    }
-    let text = path.display().to_string();
-    set_clipboard(text.clone());
-    set_status(controls, StatusMsg::Saved(text));
-}
-
-fn home_dir() -> std::path::PathBuf {
-    let key = if cfg!(target_os = "windows") {
-        "USERPROFILE"
-    } else {
-        "HOME"
-    };
-    std::env::var(key)
-        .ok()
-        .filter(|value| !value.is_empty())
-        .or_else(|| std::env::var("HOME").ok())
-        .filter(|value| !value.is_empty())
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-}
-
-/// macOS and Windows use `~/Downloads`. Linux prefers `XDG_DOWNLOAD_DIR`.
-fn download_dir() -> std::path::PathBuf {
-    #[cfg(all(unix, not(target_os = "macos")))]
-    if let Some(dir) = read_xdg_download() {
-        return dir;
-    }
-    home_dir().join("Downloads")
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-fn read_xdg_download() -> Option<std::path::PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    let text =
-        std::fs::read_to_string(std::path::PathBuf::from(&home).join(".config/user-dirs.dirs"))
-            .ok()?;
-    xdg_download_dir(&home, &text)
+    let dialog = nsh_core::file_dialog::SaveDialog::new()
+        .file_name(format!("{}.{}", flow.id, ext))
+        .filter(nsh_core::file_dialog::FileFilter::new(
+            ext.to_ascii_uppercase(),
+            [ext],
+        ));
+    let body = flow.response_body;
+    spawn(async move {
+        match pick_save_path(dialog).await {
+            Ok(Some(path)) => {
+                if let Some(parent) = path.parent()
+                    && !parent.as_os_str().is_empty()
+                    && let Err(err) = std::fs::create_dir_all(parent)
+                {
+                    set_status(&controls, StatusMsg::SaveFailed(err.to_string()));
+                    return;
+                }
+                if let Err(err) = std::fs::write(&path, &body) {
+                    set_status(&controls, StatusMsg::SaveFailed(err.to_string()));
+                    return;
+                }
+                let text = path.display().to_string();
+                set_clipboard(text.clone());
+                set_status(&controls, StatusMsg::Saved(text));
+            }
+            Ok(None) => {}
+            Err(err) => set_status(&controls, StatusMsg::SaveFailed(err)),
+        }
+    });
 }
 
 /// `XDG_DOWNLOAD_DIR="$HOME/Downloads"` from `user-dirs.dirs`.
-/// Linux calls this. Other platforms keep it for the parser test.
-#[cfg_attr(not(all(unix, not(target_os = "macos"))), allow(dead_code))]
+#[cfg_attr(not(test), allow(dead_code))]
 fn xdg_download_dir(home: &str, text: &str) -> Option<std::path::PathBuf> {
     for line in text.lines() {
         let line = line.trim();
@@ -8618,34 +8630,21 @@ fn lan_toggle(on: Signal<bool>, controls: Arc<Controls>) -> impl IntoElement {
         )
 }
 
-fn import_menu(path_text: Signal<String>, controls: Arc<Controls>) -> impl IntoElement {
-    let import_controls = controls;
-    view()
-        .gap_1()
-        .px_1()
-        .py_0p5()
-        .child(
-            input()
-                .value(path_text)
-                .placeholder("import.har")
-                .placeholder_color(move || color(fg_muted()))
-                .w_full()
-                .h(px(28.0))
-                .px_2()
-                .rounded(px(6.0))
-                .bg(bg_code())
-                .border_1()
-                .border_color(border_control())
-                .focus(|style| style.border_color(accent_blue()))
-                .text_size(px(12.0))
-                .text_color(fg_primary())
-                .on_change(move |text: &str| path_text.set(text.to_string())),
-        )
-        .child(menu_action(
-            Glyph::List,
-            tr("导入 HAR", "Import HAR"),
-            move || import_har_file(&import_controls, &path_text.get()),
-        ))
+fn prompt_import_har(controls: Arc<Controls>) {
+    spawn(async move {
+        let dialog = nsh_core::file_dialog::OpenDialog::files()
+            .multiple(true)
+            .filter(nsh_core::file_dialog::FileFilter::new("HAR", ["har"]));
+        match pick_paths(dialog).await {
+            Ok(Some(paths)) => {
+                for path in paths {
+                    import_har_file(&controls, &path.to_string_lossy());
+                }
+            }
+            Ok(None) => {}
+            Err(err) => set_status(&controls, StatusMsg::ImportFailed(err)),
+        }
+    });
 }
 
 fn begin_compose(controls: &Controls, id: Option<u64>, compose: Compose) {
@@ -8777,55 +8776,84 @@ fn parse_header_text(text: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-fn export_har_file(controls: &Controls, filter: &str) {
+fn export_har_file(controls: Arc<Controls>, filter: &str) {
     let value = controls.hub.export_har_matching(filter);
-    let dir = ca::data_dir().join("exports");
-    if let Err(err) = std::fs::create_dir_all(&dir) {
-        set_status(controls, StatusMsg::ExportFailed(err.to_string()));
-        return;
-    }
+    let bytes = match serde_json::to_vec_pretty(&value) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            set_status(&controls, StatusMsg::ExportFailed(err.to_string()));
+            return;
+        }
+    };
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
-    let path = dir.join(format!("zniff-{secs}.har"));
-    let bytes = match serde_json::to_vec_pretty(&value) {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            set_status(controls, StatusMsg::ExportFailed(err.to_string()));
-            return;
+    let dialog = nsh_core::file_dialog::SaveDialog::new()
+        .file_name(format!("zniff-{secs}.har"))
+        .filter(nsh_core::file_dialog::FileFilter::new("HAR", ["har"]));
+    spawn(async move {
+        match pick_save_path(dialog).await {
+            Ok(Some(path)) => {
+                if let Some(parent) = path.parent()
+                    && !parent.as_os_str().is_empty()
+                    && let Err(err) = std::fs::create_dir_all(parent)
+                {
+                    set_status(&controls, StatusMsg::ExportFailed(err.to_string()));
+                    return;
+                }
+                if let Err(err) = std::fs::write(&path, &bytes) {
+                    set_status(&controls, StatusMsg::ExportFailed(err.to_string()));
+                    return;
+                }
+                let text = path.display().to_string();
+                set_clipboard(text.clone());
+                set_status(&controls, StatusMsg::Exported(text));
+            }
+            Ok(None) => {}
+            Err(err) => set_status(&controls, StatusMsg::ExportFailed(err)),
         }
-    };
-    if let Err(err) = std::fs::write(&path, bytes) {
-        set_status(controls, StatusMsg::ExportFailed(err.to_string()));
-        return;
-    }
-    set_clipboard(path.display().to_string());
-    set_status(controls, StatusMsg::Exported(path.display().to_string()));
+    });
 }
 
-fn export_html_file(controls: &Controls, filter: &str, zh: bool) {
+fn export_html_file(controls: Arc<Controls>, filter: &str, zh: bool) {
     let flows = controls
         .hub
         .with_session(|session| session.flows_matching(filter));
     let json = share::document(&flows, SystemTime::now(), filter);
     let html = share::page(&json, "", zh);
-    let dir = ca::data_dir().join("exports");
-    if let Err(err) = std::fs::create_dir_all(&dir) {
-        set_status(controls, StatusMsg::ExportFailed(err.to_string()));
-        return;
-    }
     let secs = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
-    let path = dir.join(format!("zniff-{secs}.html"));
-    if let Err(err) = std::fs::write(&path, html) {
-        set_status(controls, StatusMsg::ExportFailed(err.to_string()));
-        return;
-    }
-    set_clipboard(path.display().to_string());
-    set_status(controls, StatusMsg::Exported(path.display().to_string()));
+    let dialog = nsh_core::file_dialog::SaveDialog::new()
+        .file_name(format!("zniff-{secs}.html"))
+        .filter(nsh_core::file_dialog::FileFilter::new(
+            "HTML",
+            ["html", "htm"],
+        ));
+    spawn(async move {
+        match pick_save_path(dialog).await {
+            Ok(Some(path)) => {
+                if let Some(parent) = path.parent()
+                    && !parent.as_os_str().is_empty()
+                    && let Err(err) = std::fs::create_dir_all(parent)
+                {
+                    set_status(&controls, StatusMsg::ExportFailed(err.to_string()));
+                    return;
+                }
+                if let Err(err) = std::fs::write(&path, &html) {
+                    set_status(&controls, StatusMsg::ExportFailed(err.to_string()));
+                    return;
+                }
+                let text = path.display().to_string();
+                set_clipboard(text.clone());
+                set_status(&controls, StatusMsg::Exported(text));
+            }
+            Ok(None) => {}
+            Err(err) => set_status(&controls, StatusMsg::ExportFailed(err)),
+        }
+    });
 }
 
 fn begin_share(controls: &Controls, minutes: u64, filter: &str, share_id: Signal<String>) {
@@ -8896,38 +8924,52 @@ fn profiles_for_export(
     )
 }
 
-fn export_profiles_file(controls: &Controls, profiles: &[config::SavedProfile]) {
-    let toml_text = match config::export_profiles_toml(profiles) {
+fn export_profiles_file(controls: Arc<Controls>, profiles: Vec<config::SavedProfile>) {
+    let toml_text = match config::export_profiles_toml(&profiles) {
         Ok(text) => text,
         Err(err) => {
-            set_status(controls, StatusMsg::ExportFailed(err));
+            set_status(&controls, StatusMsg::ExportFailed(err));
             return;
         }
     };
-    let dir = ca::data_dir().join("exports");
-    if let Err(err) = std::fs::create_dir_all(&dir) {
-        set_status(controls, StatusMsg::ExportFailed(err.to_string()));
-        return;
-    }
+    let count = profiles.len();
     let secs = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
-    let path = dir.join(format!("zniff-profiles-{secs}.toml"));
-    if let Err(err) = std::fs::write(&path, &toml_text) {
-        set_status(controls, StatusMsg::ExportFailed(err.to_string()));
-        return;
-    }
-    set_clipboard(toml_text);
-    set_status(
-        controls,
-        StatusMsg::ProfilesExported {
-            count: profiles.len(),
-            path: path.display().to_string(),
-        },
-    );
+    let dialog = nsh_core::file_dialog::SaveDialog::new()
+        .file_name(format!("zniff-profiles-{secs}.toml"))
+        .filter(nsh_core::file_dialog::FileFilter::new("TOML", ["toml"]));
+    spawn(async move {
+        match pick_save_path(dialog).await {
+            Ok(Some(path)) => {
+                if let Some(parent) = path.parent()
+                    && !parent.as_os_str().is_empty()
+                    && let Err(err) = std::fs::create_dir_all(parent)
+                {
+                    set_status(&controls, StatusMsg::ExportFailed(err.to_string()));
+                    return;
+                }
+                if let Err(err) = std::fs::write(&path, &toml_text) {
+                    set_status(&controls, StatusMsg::ExportFailed(err.to_string()));
+                    return;
+                }
+                set_clipboard(toml_text);
+                set_status(
+                    &controls,
+                    StatusMsg::ProfilesExported {
+                        count,
+                        path: path.display().to_string(),
+                    },
+                );
+            }
+            Ok(None) => {}
+            Err(err) => set_status(&controls, StatusMsg::ExportFailed(err)),
+        }
+    });
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn parse_profiles_from_text_or_path(
     input: &str,
 ) -> std::result::Result<Vec<config::SavedProfile>, String> {
