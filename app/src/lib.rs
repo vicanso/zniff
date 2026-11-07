@@ -559,6 +559,9 @@ struct Shown {
     pane_width: Signal<f32>,
     request_language: Signal<String>,
     response_language: Signal<String>,
+    request_doc: Signal<Option<nsh_base::text_view::Document>>,
+    response_doc: Signal<Option<nsh_base::text_view::Document>>,
+    doc_preview: Signal<bool>,
     request_form: Signal<Vec<HeaderLine>>,
     request_note: Signal<String>,
     response_note: Signal<String>,
@@ -620,6 +623,9 @@ pub fn App() -> impl IntoElement {
         pane_width: signal(0.0),
         request_language: signal(String::new()),
         response_language: signal(String::new()),
+        request_doc: signal(None),
+        response_doc: signal(None),
+        doc_preview: signal(false),
         request_form: signal(Vec::new()),
         request_note: signal(String::new()),
         response_note: signal(String::new()),
@@ -5095,6 +5101,7 @@ fn ready_detail(
                         shown.response_hex,
                         shown.response_note,
                         shown.response_language,
+                        shown.response_doc,
                         no_form,
                         true,
                         shown,
@@ -5128,6 +5135,7 @@ fn ready_detail(
                     shown.request_hex,
                     shown.request_note,
                     shown.request_language,
+                    shown.request_doc,
                     shown.request_form,
                     false,
                     shown,
@@ -5514,6 +5522,7 @@ fn diff_key(color: AdaptiveColor, label: impl Fn() -> String + 'static) -> impl 
         )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn body_section(
     zh: &'static str,
     en: &'static str,
@@ -5521,6 +5530,7 @@ fn body_section(
     hex: Signal<Vec<u8>>,
     note: Signal<String>,
     code: Signal<String>,
+    doc: Signal<Option<nsh_base::text_view::Document>>,
     form: Signal<Vec<HeaderLine>>,
     embed_image: bool,
     shown: Shown,
@@ -5531,6 +5541,7 @@ fn body_section(
     bit: u8,
 ) -> impl IntoElement {
     let image_on = move || embed_image && shown.pretty.get() && !shown.preview.get().is_empty();
+    let doc_on = move || shown.doc_preview.get() && doc.with(Option::is_some);
     view()
         .rounded(px(10.0))
         .border_1()
@@ -5565,7 +5576,17 @@ fn body_section(
                         .child(fold_mark(folded, bit))
                         .child(section_title(tr(zh, en))),
                 )
-                .child(pretty_switch(shown, controls, selected, baseline)),
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_1p5()
+                        .child(when(
+                            move || doc.with(Option::is_some),
+                            move || doc_preview_chip(shown),
+                        ))
+                        .child(pretty_switch(shown, controls, selected, baseline)),
+                ),
         )
         .child(when(
             move || !card_folded(folded, bit) && !note.get().is_empty(),
@@ -5587,7 +5608,21 @@ fn body_section(
             },
         ))
         .child(when(
-            move || !card_folded(folded, bit) && image_on(),
+            move || !card_folded(folded, bit) && doc_on(),
+            move || {
+                let divided = !note.get().is_empty();
+                view()
+                    .w_full()
+                    .h(move || px(editor_box_height(&body.get()).max(140.0)))
+                    .bg(bg_code())
+                    .overflow_hidden()
+                    .border_t(move || if divided { px(1.0) } else { px(0.0) })
+                    .border_t_color(border_subtle())
+                    .child(scroll().size_full().px_3p5().py_2p5().child(doc_body(doc)))
+            },
+        ))
+        .child(when(
+            move || !card_folded(folded, bit) && !doc_on() && image_on(),
             move || {
                 view()
                     .px_3()
@@ -5621,6 +5656,7 @@ fn body_section(
         .child(when(
             move || {
                 !card_folded(folded, bit)
+                    && !doc_on()
                     && form.with(Vec::is_empty)
                     && !body.get().is_empty()
                     && code.get().is_empty()
@@ -5678,6 +5714,7 @@ fn body_section(
         .child(when(
             move || {
                 !card_folded(folded, bit)
+                    && !doc_on()
                     && form.with(Vec::is_empty)
                     && !body.get().is_empty()
                     && !code.get().is_empty()
@@ -5691,7 +5728,7 @@ fn body_section(
             },
         ))
         .child(when(
-            move || !card_folded(folded, bit) && !form.with(Vec::is_empty),
+            move || !card_folded(folded, bit) && !doc_on() && !form.with(Vec::is_empty),
             move || {
                 each(
                     form,
@@ -5775,6 +5812,61 @@ fn code_body(body: Signal<String>, code: Signal<String>) -> impl IntoElement {
         )
 }
 
+fn doc_body(doc: Signal<Option<nsh_base::text_view::Document>>) -> impl IntoElement {
+    nsh_base::text_view::text_view()
+        .document(move || doc.get())
+        .selectable(true)
+        .render_image(|img: &nsh_base::text_view::Image| {
+            let label = if img.alt.is_empty() {
+                format!("[img: {}]", img.src)
+            } else {
+                format!("[img: {} ({})]", img.alt, img.src)
+            };
+            mono(label).text_size(px(11.5)).text_color(fg_muted())
+        })
+}
+
+fn doc_preview_chip(shown: Shown) -> impl IntoElement {
+    view()
+        .h(px(22.0))
+        .px_2()
+        .rounded(px(6.0))
+        .border_1()
+        .border_color(move || {
+            if shown.doc_preview.get() {
+                accent_blue()
+            } else {
+                border_control()
+            }
+        })
+        .bg(move || {
+            if shown.doc_preview.get() {
+                accent_blue()
+            } else {
+                bg_card()
+            }
+        })
+        .flex_row()
+        .items_center()
+        .cursor(Cursor::Pointer)
+        .on_press(move || {
+            shown.doc_preview.set(!shown.doc_preview.get());
+        })
+        .child(
+            text(tr("预览", "Preview"))
+                .number_of_lines(1)
+                .text_size(px(11.5))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(move || {
+                    if shown.doc_preview.get() {
+                        AdaptiveColor::rgb(0xffffff, 0xffffff)
+                    } else {
+                        fg_secondary()
+                    }
+                }),
+        )
+}
+
 fn pretty_switch(
     shown: Shown,
     controls: Arc<Controls>,
@@ -5821,7 +5913,7 @@ fn pretty_chip(
         .border_r(move || if on { px(1.0) } else { px(0.0) })
         .border_r_color(border_control())
         .bg(move || {
-            if shown.pretty.get() == on {
+            if !shown.doc_preview.get() && shown.pretty.get() == on {
                 accent_blue()
             } else {
                 bg_card()
@@ -5829,7 +5921,11 @@ fn pretty_chip(
         })
         .cursor(Cursor::Pointer)
         .on_press(move || {
-            if shown.pretty.get() == on {
+            let was_preview = shown.doc_preview.get();
+            if was_preview {
+                shown.doc_preview.set(false);
+            }
+            if !was_preview && shown.pretty.get() == on {
                 return;
             }
             shown.pretty.set(on);
@@ -5847,7 +5943,7 @@ fn pretty_chip(
                 .text_size(px(11.5))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(move || {
-                    if shown.pretty.get() == on {
+                    if !shown.doc_preview.get() && shown.pretty.get() == on {
                         AdaptiveColor::rgb(0xffffff, 0xffffff)
                     } else {
                         fg_secondary()
@@ -7171,6 +7267,8 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baselin
         shown.diff_new.set(String::new());
         shown.request_language.set(String::new());
         shown.response_language.set(String::new());
+        shown.request_doc.set(None);
+        shown.response_doc.set(None);
         shown.request_form.set(Vec::new());
         shown.rules.set(String::new());
         shown.pinned.set(false);
@@ -7190,6 +7288,8 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baselin
         shown.diff_new.set(String::new());
         shown.request_language.set(String::new());
         shown.response_language.set(String::new());
+        shown.request_doc.set(None);
+        shown.response_doc.set(None);
         shown.request_form.set(Vec::new());
         shown.rules.set(String::new());
         shown.pinned.set(false);
@@ -7315,6 +7415,14 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baselin
             .unwrap_or("")
             .to_string(),
     );
+    shown.request_doc.set(present::parse_text_view_doc(
+        request_type,
+        &flow.request_body,
+    ));
+    shown.response_doc.set(present::parse_text_view_doc(
+        response_type,
+        &flow.response_body,
+    ));
     shown
         .request_body
         .set(if shown.request_form.with(Vec::is_empty) {

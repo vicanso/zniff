@@ -657,6 +657,9 @@ pub fn editor_language(content_type: Option<&str>, text: &str) -> Option<&'stati
     if kind.contains("html") {
         return Some("html");
     }
+    if kind.contains("markdown") {
+        return Some("markdown");
+    }
     if kind.contains("xml") {
         return Some("xml");
     }
@@ -676,6 +679,28 @@ pub fn editor_language(content_type: Option<&str>, text: &str) -> Option<&'stati
         });
     }
     None
+}
+
+/// Parses HTML or Markdown bodies into an [`nsh_base::text_view::Document`] when
+/// `content_type` indicates `html` or `markdown` and the parsed document has at
+/// least one visible block (empty SPA shells return `None`).
+pub fn parse_text_view_doc(
+    content_type: Option<&str>,
+    bytes: &[u8],
+) -> Option<nsh_base::text_view::Document> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    if text.trim().is_empty() {
+        return None;
+    }
+    let kind = content_type.unwrap_or("").to_ascii_lowercase();
+    let doc = if kind.contains("markdown") {
+        nsh_base::text_view::Parser::new().markdown(text)
+    } else if kind.contains("html") {
+        nsh_base::text_view::Parser::new().html(text)
+    } else {
+        return None;
+    };
+    (!doc.blocks.is_empty()).then_some(doc)
 }
 
 /// One block the diff view can compare: URL, both header lists, both bodies.
@@ -1420,7 +1445,21 @@ mod tests {
             Some("json")
         );
         assert_eq!(editor_language(Some("text/html"), "<p>"), Some("html"));
+        assert_eq!(
+            editor_language(Some("text/markdown"), "# hi"),
+            Some("markdown")
+        );
         assert_eq!(editor_language(Some("text/xml"), "<a/>"), Some("xml"));
+        assert!(parse_text_view_doc(Some("text/html"), b"<h1>Hello</h1><p>World</p>").is_some());
+        assert!(parse_text_view_doc(Some("text/markdown"), b"# Hello\n\n- item").is_some());
+        assert!(
+            parse_text_view_doc(
+                Some("text/html"),
+                b"<!doctype html><html><head><script src='a.js'></script></head><body><div id='app'></div></body></html>"
+            )
+            .is_none()
+        );
+        assert!(parse_text_view_doc(Some("application/json"), b"{\"a\":1}").is_none());
         let long = "a\n".repeat(50);
         assert_eq!(
             editor_language(Some("text/plain"), &long),
