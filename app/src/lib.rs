@@ -75,6 +75,7 @@ struct ProfileSignals {
     rules_on: Signal<bool>,
     breaks_on: Signal<bool>,
     show_tunnels: Signal<bool>,
+    list_width: Signal<f32>,
 }
 
 #[derive(Clone, Copy)]
@@ -663,6 +664,7 @@ pub fn App() -> impl IntoElement {
         rules_on: signal(true),
         breaks_on: signal(true),
         show_tunnels: signal(saved.show_tunnel_failures),
+        list_width,
     };
     let import_path = signal(String::new());
     let lan_url = signal(String::new());
@@ -1219,6 +1221,7 @@ fn saved_filter_panel(profiles: ProfileSignals, controls: Arc<Controls>) -> impl
     let breaks_on = profiles.breaks_on;
     let show_tunnels = profiles.show_tunnels;
     let rule_name = profiles.name;
+    let list_width = profiles.list_width;
     let field = filter;
     let reset_filter = filter;
     let host_field = signal(extract_host_or(&filter.get_untracked()));
@@ -1257,7 +1260,12 @@ fn saved_filter_panel(profiles: ProfileSignals, controls: Arc<Controls>) -> impl
     let draft_kind = signal(0_u8);
 
     view()
-        .w(move || px(adaptive_filter_panel_width(window().width.0)))
+        .w(move || {
+            px(adaptive_filter_panel_width(
+                window().width.0,
+                list_width.get(),
+            ))
+        })
         .rounded(px(10.0))
         .border_1()
         .border_color(border_strong())
@@ -1810,7 +1818,7 @@ fn profile_dock(
                         .margin(px(8.0))
                         .trigger(
                             view()
-                                .w(px(210.0))
+                                .w(px(176.0))
                                 .h(px(30.0))
                                 .px_2p5()
                                 .flex_shrink_0()
@@ -2824,17 +2832,22 @@ fn clamp_list_px_for_window(width: f32, window_w: f32) -> f32 {
     }
 }
 
-fn adaptive_filter_panel_width(window_w: f32) -> f32 {
+fn adaptive_filter_panel_width(window_w: f32, list_w: f32) -> f32 {
     if window_w.is_finite() && window_w > 0.0 {
-        (window_w - 420.0).round().clamp(640.0, 860.0)
+        let list_px = clamp_list_px_for_window(list_w, window_w);
+        let max_w = (window_w - 20.0).max(580.0);
+        (window_w - list_px - 16.0)
+            .round()
+            .clamp(580.0, 1280.0)
+            .min(max_w)
     } else {
-        740.0
+        680.0
     }
 }
 
 fn adaptive_rules_editor_height(window_h: f32) -> f32 {
     if window_h.is_finite() && window_h > 0.0 {
-        (window_h - 460.0).round().clamp(105.0, 360.0)
+        (window_h - 460.0).round().clamp(105.0, 560.0)
     } else {
         105.0
     }
@@ -9768,14 +9781,15 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
         assert_eq!(super::clamp_list_px_for_window(900.0, 1000.0), 660.0);
         assert_eq!(super::clamp_list_px_for_window(900.0, 0.0), 900.0);
         assert_eq!(super::clamp_list_px_for_window(900.0, 500.0), 280.0);
-        assert_eq!(super::adaptive_filter_panel_width(0.0), 740.0);
-        assert_eq!(super::adaptive_filter_panel_width(900.0), 640.0);
-        assert_eq!(super::adaptive_filter_panel_width(1200.0), 780.0);
-        assert_eq!(super::adaptive_filter_panel_width(1400.0), 860.0);
+        assert_eq!(super::adaptive_filter_panel_width(0.0, 560.0), 680.0);
+        assert_eq!(super::adaptive_filter_panel_width(900.0, 560.0), 580.0);
+        assert_eq!(super::adaptive_filter_panel_width(1200.0, 560.0), 624.0);
+        assert_eq!(super::adaptive_filter_panel_width(1448.0, 560.0), 872.0);
+        assert_eq!(super::adaptive_filter_panel_width(1448.0, 644.0), 788.0);
         assert_eq!(super::adaptive_rules_editor_height(0.0), 105.0);
         assert_eq!(super::adaptive_rules_editor_height(520.0), 105.0);
         assert_eq!(super::adaptive_rules_editor_height(700.0), 240.0);
-        assert_eq!(super::adaptive_rules_editor_height(1000.0), 360.0);
+        assert_eq!(super::adaptive_rules_editor_height(1000.0), 540.0);
     }
 
     #[test]
