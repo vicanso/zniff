@@ -8802,7 +8802,7 @@ fn export_response(controls: Arc<Controls>, id: Option<u64>) {
     let ext = present::content_type(&flow.response_headers)
         .and_then(present::image_extension)
         .unwrap_or_else(|| body_extension(&flow.response_headers, &flow.response_body));
-    let dialog = nsh_core::file_dialog::SaveDialog::new()
+    let dialog = save_dialog_with_default_dir()
         .file_name(format!("{}.{}", flow.id, ext))
         .filter(nsh_core::file_dialog::FileFilter::new(
             ext.to_ascii_uppercase(),
@@ -8827,14 +8827,78 @@ fn export_response(controls: Arc<Controls>, id: Option<u64>) {
                 set_clipboard(text.clone());
                 set_status(&controls, StatusMsg::Saved(text));
             }
-            Ok(None) => {}
+            Ok(None) => set_status(&controls, StatusMsg::SaveCancelled),
             Err(err) => set_status(&controls, StatusMsg::SaveFailed(err)),
         }
     });
 }
 
+fn save_dialog_with_default_dir() -> nsh_core::file_dialog::SaveDialog {
+    let dialog = nsh_core::file_dialog::SaveDialog::new();
+    match default_save_dir() {
+        Some(dir) => dialog.directory(dir),
+        None => dialog,
+    }
+}
+
+fn default_save_dir() -> Option<std::path::PathBuf> {
+    let home = std::env::var("HOME")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            std::env::var("USERPROFILE")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        });
+    let xdg_config = std::env::var("XDG_CONFIG_HOME")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            home.as_deref()
+                .map(|home| std::path::Path::new(home).join(".config"))
+        });
+    let user_dirs =
+        xdg_config.and_then(|dir| std::fs::read_to_string(dir.join("user-dirs.dirs")).ok());
+    default_save_dir_from(
+        home.as_deref(),
+        user_dirs.as_deref(),
+        std::env::current_dir().ok().as_deref(),
+        |path| path.is_dir(),
+    )
+}
+
+fn default_save_dir_from(
+    home: Option<&str>,
+    user_dirs_text: Option<&str>,
+    cwd: Option<&std::path::Path>,
+    mut is_dir: impl FnMut(&std::path::Path) -> bool,
+) -> Option<std::path::PathBuf> {
+    if let (Some(home), Some(text)) = (home, user_dirs_text)
+        && let Some(dir) = xdg_download_dir(home, text)
+        && is_dir(&dir)
+    {
+        return Some(dir);
+    }
+    if let Some(home) = home {
+        let downloads = std::path::Path::new(home).join("Downloads");
+        if is_dir(&downloads) {
+            return Some(downloads);
+        }
+        let home_path = std::path::PathBuf::from(home);
+        if is_dir(&home_path) {
+            return Some(home_path);
+        }
+    }
+    if let Some(cwd) = cwd
+        && is_dir(cwd)
+    {
+        return Some(cwd.to_path_buf());
+    }
+    None
+}
+
 /// `XDG_DOWNLOAD_DIR="$HOME/Downloads"` from `user-dirs.dirs`.
-#[cfg_attr(not(test), allow(dead_code))]
 fn xdg_download_dir(home: &str, text: &str) -> Option<std::path::PathBuf> {
     for line in text.lines() {
         let line = line.trim();
@@ -9584,7 +9648,7 @@ fn export_har_file(controls: Arc<Controls>, filter: &str) {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
-    let dialog = nsh_core::file_dialog::SaveDialog::new()
+    let dialog = save_dialog_with_default_dir()
         .file_name(format!("zniff-{secs}.har"))
         .filter(nsh_core::file_dialog::FileFilter::new("HAR", ["har"]));
     spawn(async move {
@@ -9605,7 +9669,7 @@ fn export_har_file(controls: Arc<Controls>, filter: &str) {
                 set_clipboard(text.clone());
                 set_status(&controls, StatusMsg::Exported(text));
             }
-            Ok(None) => {}
+            Ok(None) => set_status(&controls, StatusMsg::ExportCancelled),
             Err(err) => set_status(&controls, StatusMsg::ExportFailed(err)),
         }
     });
@@ -9621,7 +9685,7 @@ fn export_html_file(controls: Arc<Controls>, filter: &str, zh: bool) {
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
-    let dialog = nsh_core::file_dialog::SaveDialog::new()
+    let dialog = save_dialog_with_default_dir()
         .file_name(format!("zniff-{secs}.html"))
         .filter(nsh_core::file_dialog::FileFilter::new(
             "HTML",
@@ -9645,7 +9709,7 @@ fn export_html_file(controls: Arc<Controls>, filter: &str, zh: bool) {
                 set_clipboard(text.clone());
                 set_status(&controls, StatusMsg::Exported(text));
             }
-            Ok(None) => {}
+            Ok(None) => set_status(&controls, StatusMsg::ExportCancelled),
             Err(err) => set_status(&controls, StatusMsg::ExportFailed(err)),
         }
     });
@@ -9769,7 +9833,7 @@ fn export_profiles_file(
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
     let file_name = profile_export_filename(&preferred_name, &profiles, secs);
-    let dialog = nsh_core::file_dialog::SaveDialog::new()
+    let dialog = save_dialog_with_default_dir()
         .file_name(file_name)
         .filter(nsh_core::file_dialog::FileFilter::new("TOML", ["toml"]));
     spawn(async move {
@@ -9795,7 +9859,7 @@ fn export_profiles_file(
                     },
                 );
             }
-            Ok(None) => {}
+            Ok(None) => set_status(&controls, StatusMsg::ExportCancelled),
             Err(err) => set_status(&controls, StatusMsg::ExportFailed(err)),
         }
     });
@@ -11131,5 +11195,49 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
         assert_eq!(super::parse_status_code("99"), None);
         assert_eq!(super::parse_status_code("600"), None);
         assert_eq!(super::parse_status_code(""), None);
+    }
+
+    #[test]
+    fn default_save_dir_prefers_xdg_downloads_then_home_and_cwd() {
+        let xdg = super::default_save_dir_from(
+            Some("/home/alice"),
+            Some("XDG_DOWNLOAD_DIR=\"$HOME/MyDownloads\"\n"),
+            Some(std::path::Path::new("/work")),
+            |p| p == std::path::Path::new("/home/alice/MyDownloads"),
+        );
+        assert_eq!(
+            xdg.as_deref(),
+            Some(std::path::Path::new("/home/alice/MyDownloads"))
+        );
+
+        let downloads = super::default_save_dir_from(
+            Some("/home/alice"),
+            Some("XDG_DOWNLOAD_DIR=\"$HOME/Missing\"\n"),
+            Some(std::path::Path::new("/work")),
+            |p| p == std::path::Path::new("/home/alice/Downloads"),
+        );
+        assert_eq!(
+            downloads.as_deref(),
+            Some(std::path::Path::new("/home/alice/Downloads"))
+        );
+
+        let home_fallback = super::default_save_dir_from(
+            Some("/home/alice"),
+            None,
+            Some(std::path::Path::new("/work")),
+            |p| p == std::path::Path::new("/home/alice"),
+        );
+        assert_eq!(
+            home_fallback.as_deref(),
+            Some(std::path::Path::new("/home/alice"))
+        );
+
+        let cwd_fallback = super::default_save_dir_from(
+            Some("/home/alice"),
+            None,
+            Some(std::path::Path::new("/work")),
+            |p| p == std::path::Path::new("/work"),
+        );
+        assert_eq!(cwd_fallback.as_deref(), Some(std::path::Path::new("/work")));
     }
 }

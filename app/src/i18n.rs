@@ -94,6 +94,7 @@ pub enum StatusMsg {
         hex: bool,
     },
     EmptyResponse,
+    SaveCancelled,
     SaveFailed(String),
     Saved(String),
     FlowGone,
@@ -101,6 +102,7 @@ pub enum StatusMsg {
     NeedSelection,
     Replayed(u64),
     ReplayFailed(String),
+    ExportCancelled,
     ExportFailed(String),
     Exported(String),
     Shared {
@@ -295,6 +297,7 @@ impl StatusMsg {
                 }
             }
             Self::EmptyResponse => t(lang, "响应 body 是空的", "Response body is empty").into(),
+            Self::SaveCancelled => t(lang, "已取消保存", "Save cancelled").into(),
             Self::SaveFailed(err) => format!(
                 "{} {err}",
                 t(lang, "没有写成文件:", "Could not write the file:")
@@ -305,6 +308,7 @@ impl StatusMsg {
             Self::NeedSelection => t(lang, "先选一条流量", "Select a flow first").into(),
             Self::Replayed(id) => format!("{} #{id}", t(lang, "已重放为", "Replayed as")),
             Self::ReplayFailed(err) => format!("{} {err}", t(lang, "重放失败:", "Replay failed:")),
+            Self::ExportCancelled => t(lang, "已取消导出", "Export cancelled").into(),
             Self::ExportFailed(err) => format!("{} {err}", t(lang, "导出失败:", "Export failed:")),
             Self::Exported(path) => format!("{} {path}", t(lang, "已导出", "Exported")),
             Self::Shared {
@@ -712,5 +716,12 @@ mod tests {
             StatusMsg::ProfilesImported { count: 3 }.text(Lang::En),
             "Imported 3 setups"
         );
+        assert_eq!(StatusMsg::ExportCancelled.text(Lang::Zh), "已取消导出");
+        assert_eq!(
+            StatusMsg::ExportCancelled.text(Lang::En),
+            "Export cancelled"
+        );
+        assert_eq!(StatusMsg::SaveCancelled.text(Lang::Zh), "已取消保存");
+        assert_eq!(StatusMsg::SaveCancelled.text(Lang::En), "Save cancelled");
     }
 }
