@@ -343,13 +343,13 @@ pub struct ColumnWidth {
 pub fn column_width_limit(key: &str) -> Option<ColumnWidth> {
     Some(match key {
         "method" => ColumnWidth {
-            default: 72,
+            default: 76,
             min: 56,
             max: 220,
         },
         "id" => ColumnWidth {
-            default: 44,
-            min: 36,
+            default: 38,
+            min: 34,
             max: 120,
         },
         "path" => ColumnWidth {
@@ -383,7 +383,7 @@ pub fn column_width_limit(key: &str) -> Option<ColumnWidth> {
             max: 480,
         },
         "size" => ColumnWidth {
-            default: 64,
+            default: 66,
             min: 48,
             max: 180,
         },
@@ -724,9 +724,11 @@ mod tests {
 
     impl Scratch {
         fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
             let dir = std::env::temp_dir().join(format!(
-                "zniff-config-{}-{}",
+                "zniff-config-{}-{}-{}",
                 std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .expect("clock")

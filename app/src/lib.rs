@@ -9813,7 +9813,7 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
         assert_eq!(keys, ["method", "path", "status", "gap", "elapsed"]);
         assert!(cols[0].fixed && cols[1].fixed);
         assert!(cols[2..].iter().all(|column| !column.fixed));
-        assert_eq!(cols[0].width.unwrap().0, 72.0);
+        assert_eq!(cols[0].width.unwrap().0, 76.0);
         assert_eq!(cols[1].width.unwrap().0, 400.0);
         assert_eq!(cols[1].min_width.unwrap().0, 80.0);
         assert!(
