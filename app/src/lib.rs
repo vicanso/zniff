@@ -517,9 +517,11 @@ fn flow_table_classes() -> DataTableClasses {
     classes.row_selected = Some("bg-[#eff6ff] dark:bg-[#172542]".into());
     // The table draws a 1px rule after the pinned columns. Painting it made
     // a line only beside the first scrolling column. The drag target stays
-    // and shows on hover.
-    classes.resize_handle =
-        Some("bg-transparent hover:bg-[#2563eb] dark:hover:bg-[#3b82f6]".into());
+    // and shows a thicker 3px bar across the full 5px hit band on hover/drag.
+    classes.resize_handle = Some(
+        "w-[3px] bg-transparent hover:bg-[#2563eb] group-hover:bg-[#2563eb] group-active:bg-[#2563eb] dark:hover:bg-[#3b82f6] dark:group-hover:bg-[#3b82f6] dark:group-active:bg-[#3b82f6]"
+            .into(),
+    );
     classes
 }
 
