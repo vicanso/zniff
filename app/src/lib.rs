@@ -4552,29 +4552,29 @@ fn flow_cell(
 
 fn flow_header(cell: &DataTableHeaderCell, columns: Signal<ListColumns>) -> View {
     let key = cell.key.to_string();
+    let align_right = matches!(key.as_str(), "gap" | "elapsed" | "size");
     let pad_left = match key.as_str() {
         "method" => 14.0,
         "id" => 6.0,
         _ => 4.0,
     };
-    view()
+    let row = view()
         .w_full()
         .h_full()
         .min_w(px(0.0))
         .pl(px(pad_left))
-        .pr(px(4.0))
+        .pr(px(if align_right { 6.0 } else { 4.0 }))
         .flex_row()
         .items_center()
-        .overflow_hidden()
-        .child(
-            text(move || -> SharedString {
-                flow_column_title(&key, columns.get().full_url).into()
-            })
+        .overflow_hidden();
+    let row = if align_right { row.justify_end() } else { row };
+    row.child(
+        text(move || -> SharedString { flow_column_title(&key, columns.get().full_url).into() })
             .number_of_lines(1)
             .text_size(px(11.0))
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(fg_muted()),
-        )
+    )
 }
 
 fn row_edge_mark(
@@ -4722,50 +4722,70 @@ fn status_text(rows: Signal<Vec<RowLine>>, index: usize) -> Text {
     })
 }
 
-fn time_cell(rows: Signal<Vec<RowLine>>, hover: CellHover, index: usize) -> Text {
+fn time_cell(rows: Signal<Vec<RowLine>>, hover: CellHover, index: usize) -> impl IntoElement {
     let clock_rows = rows;
-    mono(move || {
-        rows.with(|rows| {
-            rows.get(index)
-                .map(|row| row.time.clone())
-                .unwrap_or_default()
+    view()
+        .w_full()
+        .h_full()
+        .min_w(px(0.0))
+        .pl(px(4.0))
+        .pr(px(6.0))
+        .flex_row()
+        .items_center()
+        .justify_end()
+        .overflow_hidden()
+        .on_mouse_move(move |event: &MouseEvent| {
+            let clock = clock_rows.with(|rows| {
+                rows.get(index)
+                    .map(|row| row.clock.clone())
+                    .unwrap_or_default()
+            });
+            show_cell_hover(hover, event, clock);
         })
-    })
-    .pl(px(4.0))
-    .pr(px(4.0))
-    .number_of_lines(1)
-    .text_size(px(12.0))
-    .text_color(fg_muted())
-    .on_mouse_move(move |event: &MouseEvent| {
-        let clock = clock_rows.with(|rows| {
-            rows.get(index)
-                .map(|row| row.clock.clone())
-                .unwrap_or_default()
-        });
-        show_cell_hover(hover, event, clock);
-    })
-    .on_mouse_leave(move |_: &MouseEvent| hover.text.set(None))
+        .on_mouse_leave(move |_: &MouseEvent| hover.text.set(None))
+        .child(
+            mono(move || {
+                rows.with(|rows| {
+                    rows.get(index)
+                        .map(|row| row.time.clone())
+                        .unwrap_or_default()
+                })
+            })
+            .number_of_lines(1)
+            .text_size(px(12.0))
+            .text_color(fg_muted()),
+        )
 }
 
-fn elapsed_cell(rows: Signal<Vec<RowLine>>, index: usize) -> Text {
-    mono(move || {
-        rows.with(|rows| {
-            rows.get(index)
-                .map(|row| row.elapsed.clone())
-                .unwrap_or_default()
-        })
-    })
-    .pl(px(4.0))
-    .pr(px(4.0))
-    .number_of_lines(1)
-    .text_size(px(12.0))
-    .text_color(move || {
-        if rows.with(|rows| rows.get(index).is_some_and(|row| row.elapsed_slow)) {
-            status_warn_fg()
-        } else {
-            fg_muted()
-        }
-    })
+fn elapsed_cell(rows: Signal<Vec<RowLine>>, index: usize) -> impl IntoElement {
+    view()
+        .w_full()
+        .h_full()
+        .min_w(px(0.0))
+        .pl(px(4.0))
+        .pr(px(6.0))
+        .flex_row()
+        .items_center()
+        .justify_end()
+        .overflow_hidden()
+        .child(
+            mono(move || {
+                rows.with(|rows| {
+                    rows.get(index)
+                        .map(|row| row.elapsed.clone())
+                        .unwrap_or_default()
+                })
+            })
+            .number_of_lines(1)
+            .text_size(px(12.0))
+            .text_color(move || {
+                if rows.with(|rows| rows.get(index).is_some_and(|row| row.elapsed_slow)) {
+                    status_warn_fg()
+                } else {
+                    fg_muted()
+                }
+            }),
+        )
 }
 
 fn host_cell(
@@ -4825,19 +4845,29 @@ fn protocol_cell(rows: Signal<Vec<RowLine>>, index: usize) -> Text {
     .text_color(fg_secondary())
 }
 
-fn size_cell(rows: Signal<Vec<RowLine>>, index: usize) -> Text {
-    mono(move || {
-        rows.with(|rows| {
-            rows.get(index)
-                .map(|row| row.size.clone())
-                .unwrap_or_default()
-        })
-    })
-    .pl(px(4.0))
-    .pr(px(4.0))
-    .number_of_lines(1)
-    .text_size(px(12.0))
-    .text_color(fg_muted())
+fn size_cell(rows: Signal<Vec<RowLine>>, index: usize) -> impl IntoElement {
+    view()
+        .w_full()
+        .h_full()
+        .min_w(px(0.0))
+        .pl(px(4.0))
+        .pr(px(6.0))
+        .flex_row()
+        .items_center()
+        .justify_end()
+        .overflow_hidden()
+        .child(
+            mono(move || {
+                rows.with(|rows| {
+                    rows.get(index)
+                        .map(|row| row.size.clone())
+                        .unwrap_or_default()
+                })
+            })
+            .number_of_lines(1)
+            .text_size(px(12.0))
+            .text_color(fg_muted()),
+        )
 }
 
 fn path_cell(
