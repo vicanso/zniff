@@ -1,20 +1,21 @@
 //! In-memory capture session with a ring-segment temporary spill store for large bodies.
 //!
 //! Bodies are already decompressed by the proxy. The 1 MB cap is per
-//! direction. Completed unpinned bodies larger than [`INLINE_BODY_CAP`] (32 KB)
+//! direction. Completed unpinned bodies larger than [`INLINE_BODY_CAP`] (16 KB)
 //! spill to rotating temporary segment files so the 256 MB in-memory cap keeps
 //! flow metadata and small payloads resident.
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Once;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime};
 
 pub const BODY_CAP: usize = 1024 * 1024;
 pub const SESSION_CAP: usize = 256 * 1024 * 1024;
-/// Bodies up to 32 KB stay inline in RAM; larger finished bodies spill to temporary segment files.
-pub const INLINE_BODY_CAP: usize = 32 * 1024;
+/// Bodies up to 16 KB stay inline in RAM; larger finished bodies spill to temporary segment files.
+pub const INLINE_BODY_CAP: usize = 16 * 1024;
 /// Each temporary spill segment file grows up to 64 MB before rolling to a new file.
 pub const SPILL_SEGMENT_CAP: u64 = 64 * 1024 * 1024;
 /// At most 8 segment files (512 MB total) are kept on disk; older segments are unlinked.
@@ -65,6 +66,41 @@ impl Default for SpillStore {
     }
 }
 
+fn spill_base_dir() -> PathBuf {
+    std::env::temp_dir().join("zniff-spill")
+}
+
+/// Cleans up leftover spill directories from previous terminated processes.
+fn sweep_orphan_spill_dirs(base: &Path, now: SystemTime, ttl: Duration) {
+    let Ok(entries) = std::fs::read_dir(base) else {
+        return;
+    };
+    let my_prefix = format!("{}-", std::process::id());
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name_str) = name.to_str() else {
+            continue;
+        };
+        if name_str.starts_with(&my_prefix) {
+            continue;
+        }
+        let path = entry.path();
+        // Empty orphan directories can always be removed immediately.
+        if std::fs::remove_dir(&path).is_ok() {
+            continue;
+        }
+        let expired = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age >= ttl);
+        if expired {
+            let _ = std::fs::remove_dir_all(&path);
+        }
+    }
+}
+
 impl SpillStore {
     fn with_limits(
         inline_cap: usize,
@@ -74,7 +110,7 @@ impl SpillStore {
     ) -> Self {
         static NEXT_STORE: AtomicUsize = AtomicUsize::new(1);
         let seq = NEXT_STORE.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("zniff-spill-{}-{seq}", std::process::id()));
+        let dir = spill_base_dir().join(format!("{}-{seq}", std::process::id()));
         Self {
             dir,
             dir_created: false,
@@ -97,6 +133,10 @@ impl SpillStore {
             seg.len > 0 && seg.len.saturating_add(data.len() as u64) > self.segment_cap
         });
         if need_roll {
+            static SWEEP_ONCE: Once = Once::new();
+            SWEEP_ONCE.call_once(|| {
+                sweep_orphan_spill_dirs(&spill_base_dir(), now, SPILL_SEGMENT_TTL);
+            });
             if !self.dir_created {
                 std::fs::create_dir_all(&self.dir).ok()?;
                 self.dir_created = true;
@@ -111,6 +151,15 @@ impl SpillStore {
                 .write(true)
                 .open(&path)
                 .ok()?;
+            // On Unix, unlink the segment file immediately while keeping its File
+            // descriptor open. Positional pread/pwrite continue to work, and the OS
+            // kernel automatically reclaims the disk blocks even on SIGKILL (`kill -9`).
+            #[cfg(unix)]
+            {
+                let _ = std::fs::remove_file(&path);
+                let _ = std::fs::remove_dir(&self.dir);
+                self.dir_created = false;
+            }
             self.segments.push_back(SpillSegment {
                 id,
                 path,
@@ -1562,5 +1611,26 @@ mod tests {
             session.hydrated(pinned_large).unwrap().response_body,
             payload_pin
         );
+    }
+
+    #[test]
+    fn orphan_spill_dirs_sweep_and_unix_segments_unlink_on_open() {
+        assert_eq!(INLINE_BODY_CAP, 16 * 1024);
+        let base = std::env::temp_dir().join(format!("zniff-spill-test-{}", std::process::id()));
+        let empty_orphan = base.join("99999999-1");
+        let stale_orphan = base.join("99999999-2");
+        let own_dir = base.join(format!("{}-1", std::process::id()));
+        std::fs::create_dir_all(&empty_orphan).unwrap();
+        std::fs::create_dir_all(&stale_orphan).unwrap();
+        std::fs::write(stale_orphan.join("seg-000001.dat"), b"stale").unwrap();
+        std::fs::create_dir_all(&own_dir).unwrap();
+        std::fs::write(own_dir.join("seg-000001.dat"), b"active").unwrap();
+
+        let future = SystemTime::now() + Duration::from_secs(3600);
+        sweep_orphan_spill_dirs(&base, future, Duration::from_secs(60));
+        assert!(!empty_orphan.exists());
+        assert!(!stale_orphan.exists());
+        assert!(own_dir.exists());
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
