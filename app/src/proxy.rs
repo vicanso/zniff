@@ -682,16 +682,31 @@ pub async fn listen() -> Result<TcpListener> {
 
 async fn handle_conn(mut socket: TcpStream, hub: Arc<Hub>) -> Result<()> {
     socket.set_nodelay(true).ok();
+    let local_addr = socket.local_addr().ok();
     let (head_bytes, rest) = read_header_block(&mut socket).await?;
     let head = parse_head(&head_bytes)?;
     let mut parts = head.start.split_whitespace();
     let method = parts.next().unwrap_or("").to_string();
     let target = parts.next().unwrap_or("").to_string();
-    match local_route(&method, &target) {
+    let self_target = targets_self(local_addr, &head, &method, &target);
+    match local_route_for(&method, &target, self_target) {
         Some(LocalRoute::Cert) => return serve_ca_cert(&mut socket, &hub, &head).await,
         Some(LocalRoute::Install) => return serve_install_page(&mut socket, &hub, &head).await,
         Some(LocalRoute::Share(id, kind)) => {
             return serve_share(&mut socket, &hub, &head, &id, kind).await;
+        }
+        Some(LocalRoute::Favicon) => {
+            return write_untracked(&mut socket, 204, "No Content", "image/x-icon", b"").await;
+        }
+        None if self_target => {
+            return write_untracked(
+                &mut socket,
+                404,
+                "Not Found",
+                "text/plain; charset=utf-8",
+                b"Not Found",
+            )
+            .await;
         }
         None => {}
     }
@@ -2060,12 +2075,42 @@ enum LocalRoute {
     Cert,
     Install,
     Share(String, crate::share::SharePath),
+    Favicon,
+}
+
+fn targets_self(local_addr: Option<SocketAddr>, head: &Head, method: &str, target: &str) -> bool {
+    let Some(local_addr) = local_addr else {
+        return false;
+    };
+    let parsed = if method.eq_ignore_ascii_case("CONNECT") {
+        split_host_port(target, 443).ok()
+    } else {
+        request_target(head)
+            .ok()
+            .map(|(_, host, port, _)| (host, port))
+    };
+    let Some((host, port)) = parsed else {
+        return false;
+    };
+    if port != local_addr.port() {
+        return false;
+    }
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_loopback() || ip.is_unspecified() || ip == local_addr.ip())
 }
 
 /// A request the proxy answers itself. Origin-form `/` is the install page.
 /// Absolute-form `http://其他主机/` stays a proxied request. `/zniff` is the
 /// page in both forms. `/zniff-ca.crt` is the certificate file.
+#[cfg(test)]
 fn local_route(method: &str, target: &str) -> Option<LocalRoute> {
+    local_route_for(method, target, false)
+}
+
+fn local_route_for(method: &str, target: &str, self_target: bool) -> Option<LocalRoute> {
     if !method.eq_ignore_ascii_case("GET") && !method.eq_ignore_ascii_case("HEAD") {
         return None;
     }
@@ -2084,15 +2129,19 @@ fn local_route(method: &str, target: &str) -> Option<LocalRoute> {
     } else {
         return None;
     };
+    let direct = origin_form || self_target;
     if path == "/zniff-ca.crt" || path.ends_with("/zniff-ca.crt") {
         return Some(LocalRoute::Cert);
     }
-    if path == "/zniff" || path == "/zniff/" || (origin_form && path == "/") {
+    if path == "/zniff" || path == "/zniff/" || (direct && path == "/") {
         return Some(LocalRoute::Install);
     }
-    // Only a browser hitting this proxy directly. An absolute-form request
-    // for some other host must still be forwarded.
-    if origin_form && let Some((id, kind)) = crate::share::parse_share_path(path) {
+    if direct && path == "/favicon.ico" {
+        return Some(LocalRoute::Favicon);
+    }
+    // Only a browser hitting this proxy directly (or via proxy targeting this
+    // listener port). An absolute-form request for some other host must still be forwarded.
+    if direct && let Some((id, kind)) = crate::share::parse_share_path(path) {
         return Some(LocalRoute::Share(id, kind));
     }
     None
@@ -2170,6 +2219,7 @@ const INSTALL_PAGE: &str = r#"<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
 <title>安装 zniff 根证书</title>
 <style>
   body { margin: 0; background: #0d1017; color: #f1f5f9; font: 16px/1.55 -apple-system, BlinkMacSystemFont, sans-serif; }
@@ -2227,6 +2277,7 @@ const INSTALL_PAGE_EN: &str = r#"<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
 <title>Install the zniff root certificate</title>
 <style>
   body { margin: 0; background: #0d1017; color: #f1f5f9; font: 16px/1.55 -apple-system, BlinkMacSystemFont, sans-serif; }
@@ -5082,8 +5133,60 @@ mod tests {
             local_route("GET", "http://127.0.0.1/zniff-ca.crt"),
             Some(LocalRoute::Cert)
         ));
+        assert!(matches!(
+            local_route("GET", "/favicon.ico"),
+            Some(LocalRoute::Favicon)
+        ));
+        assert!(local_route("GET", "http://example.com/favicon.ico").is_none());
+        assert!(matches!(
+            local_route_for("GET", "http://127.0.0.1:8877/favicon.ico", true),
+            Some(LocalRoute::Favicon)
+        ));
+        assert!(matches!(
+            local_route_for("GET", &format!("http://127.0.0.1:8877/s/{id}"), true),
+            Some(LocalRoute::Share(_, crate::share::SharePath::Page))
+        ));
         assert!(local_route("POST", "/zniff").is_none());
         assert!(local_route("CONNECT", "example.com:443").is_none());
+    }
+
+    #[tokio::test]
+    async fn favicon_and_self_targeted_requests_do_not_loop_or_record() {
+        let dir = std::env::temp_dir().join(format!("zniff-self-loop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        serve_proxy(proxy, hub.clone());
+
+        let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+        let req =
+            format!("GET /favicon.ico HTTP/1.1\r\nHost: {proxy_addr}\r\nConnection: close\r\n\r\n");
+        client.write_all(req.as_bytes()).await.unwrap();
+        let mut resp = Vec::new();
+        timeout(Duration::from_secs(5), client.read_to_end(&mut resp))
+            .await
+            .unwrap()
+            .unwrap();
+        let text = String::from_utf8_lossy(&resp);
+        assert!(text.starts_with("HTTP/1.1 204"), "{text}");
+
+        let mut client2 = TcpStream::connect(proxy_addr).await.unwrap();
+        let req2 = format!(
+            "GET http://{proxy_addr}/unknown-local-path HTTP/1.1\r\nHost: {proxy_addr}\r\nConnection: close\r\n\r\n"
+        );
+        client2.write_all(req2.as_bytes()).await.unwrap();
+        let mut resp2 = Vec::new();
+        timeout(Duration::from_secs(5), client2.read_to_end(&mut resp2))
+            .await
+            .unwrap()
+            .unwrap();
+        let text2 = String::from_utf8_lossy(&resp2);
+        assert!(text2.starts_with("HTTP/1.1 404"), "{text2}");
+
+        assert_eq!(hub.with_session(|session| session.flows().len()), 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

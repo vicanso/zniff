@@ -316,6 +316,7 @@ pub fn page(json: &str, live: &str, zh: bool) -> String {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
 <title>{title}</title>
 <style>
   :root {{
@@ -1081,7 +1082,7 @@ pub fn expired_page(zh: bool) -> String {
         "This share link was stopped, or it is past its expiry."
     };
     format!(
-        "<!DOCTYPE html><html lang=\"{lang}\"><meta charset=\"utf-8\"><title>{title}</title><body style=\"background:#0d1017;color:#e2e8f0;font:16px sans-serif;padding:24px\"><h1>{title}</h1><p>{body}</p></body></html>",
+        "<!DOCTYPE html><html lang=\"{lang}\"><head><meta charset=\"utf-8\"><link rel=\"icon\" href=\"data:,\"><title>{title}</title></head><body style=\"background:#0d1017;color:#e2e8f0;font:16px sans-serif;padding:24px\"><h1>{title}</h1><p>{body}</p></body></html>",
         lang = if zh { "zh-CN" } else { "en" },
     )
 }
