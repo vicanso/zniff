@@ -27,7 +27,8 @@ pub struct LiveShare {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SharePath {
     Page,
-    Data,
+    Data { since: Option<u64> },
+    FlowBody(u64),
 }
 
 pub fn new_id() -> String {
@@ -75,11 +76,28 @@ pub fn valid_id(id: &str) -> bool {
             .all(|(index, byte)| matches!(index, 8 | 13 | 18 | 23) || byte.is_ascii_hexdigit())
 }
 
-/// Origin-form `/s/{id}` or `/s/{id}/flows.json`.
-pub fn parse_share_path(path: &str) -> Option<(String, SharePath)> {
+/// Origin-form `/s/{id}`, `/s/{id}/flows.json[?since=N]`, or `/s/{id}/flows/{flow_id}.json`.
+pub fn parse_share_path(path_and_query: &str) -> Option<(String, SharePath)> {
+    let (path, query) = path_and_query
+        .split_once('?')
+        .map_or((path_and_query, ""), |(p, q)| (p, q));
     let rest = path.strip_prefix("/s/")?;
     if let Some(id) = rest.strip_suffix("/flows.json") {
-        return valid_id(id).then(|| (id.to_string(), SharePath::Data));
+        if !valid_id(id) {
+            return None;
+        }
+        let since = query.split('&').find_map(|pair| {
+            let (k, v) = pair.split_once('=')?;
+            (k == "since").then(|| v.parse::<u64>().ok()).flatten()
+        });
+        return Some((id.to_string(), SharePath::Data { since }));
+    }
+    if let Some((id, tail)) = rest.split_once("/flows/") {
+        if !valid_id(id) {
+            return None;
+        }
+        let flow_id = tail.strip_suffix(".json")?.parse::<u64>().ok()?;
+        return Some((id.to_string(), SharePath::FlowBody(flow_id)));
     }
     valid_id(rest).then(|| (rest.to_string(), SharePath::Page))
 }
@@ -93,7 +111,20 @@ struct ShareDoc {
     expires: u64,
     filter: String,
     omitted: usize,
+    rev: u64,
+    incremental: bool,
+    ids: Vec<u64>,
     flows: Vec<ShareFlow>,
+}
+
+#[derive(Serialize)]
+struct ShareFlowBody {
+    id: u64,
+    request_body: String,
+    request_body_pretty: String,
+    response_body: String,
+    response_body_pretty: String,
+    messages: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -120,6 +151,8 @@ struct ShareFlow {
     query: Vec<(String, String)>,
     request_headers: Vec<(String, String)>,
     response_headers: Vec<(String, String)>,
+    request_body_spilled: bool,
+    response_body_spilled: bool,
     request_body: String,
     request_body_pretty: String,
     response_body: String,
@@ -128,17 +161,29 @@ struct ShareFlow {
 }
 
 pub fn document(flows: &[Flow], expires: SystemTime, filter: &str) -> String {
+    document_since(flows, expires, filter, 0, None)
+}
+
+pub fn document_since(
+    flows: &[Flow],
+    expires: SystemTime,
+    filter: &str,
+    session_rev: u64,
+    since: Option<u64>,
+) -> String {
     let omitted = flows.len().saturating_sub(FLOW_CAP);
+    let window = &flows[omitted..];
+    let ids: Vec<u64> = window.iter().map(|flow| flow.id).collect();
+    let rev = session_rev.max(window.iter().map(|flow| flow.rev).max().unwrap_or(0));
     let mut previous = None;
-    let flows = flows
-        .iter()
-        .skip(omitted)
-        .map(|flow| {
-            let item = share_flow(flow, previous);
-            previous = Some(flow.started);
-            item
-        })
-        .collect();
+    let mut out = Vec::new();
+    for flow in window {
+        let prev = previous;
+        previous = Some(flow.started);
+        if since.is_none_or(|s| flow.rev > s) {
+            out.push(share_flow(flow, prev));
+        }
+    }
     let doc = ShareDoc {
         expires: expires
             .duration_since(UNIX_EPOCH)
@@ -146,7 +191,37 @@ pub fn document(flows: &[Flow], expires: SystemTime, filter: &str) -> String {
             .unwrap_or(0),
         filter: filter.to_string(),
         omitted,
-        flows,
+        rev,
+        incremental: since.is_some(),
+        ids,
+        flows: out,
+    };
+    serde_json::to_string(&doc).unwrap_or_else(|_| "{}".into())
+}
+
+pub fn flow_body_document(flow: &Flow) -> String {
+    let req_ct = crate::present::content_type(&flow.request_headers);
+    let res_ct = crate::present::content_type(&flow.response_headers);
+    let (request_body, request_body_pretty) = share_body_pair(
+        &flow.request_body,
+        flow.request_truncated,
+        flow.request_expired,
+        req_ct,
+    );
+    let (response_body, response_body_pretty) = share_body_pair(
+        &flow.response_body,
+        flow.response_truncated,
+        flow.response_expired,
+        res_ct,
+    );
+    let messages = extract_messages(flow, res_ct);
+    let doc = ShareFlowBody {
+        id: flow.id,
+        request_body,
+        request_body_pretty,
+        response_body,
+        response_body_pretty,
+        messages,
     };
     serde_json::to_string(&doc).unwrap_or_else(|_| "{}".into())
 }
@@ -163,30 +238,8 @@ fn format_bytes_short(bytes: u64) -> String {
     }
 }
 
-fn share_flow(flow: &Flow, previous: Option<SystemTime>) -> ShareFlow {
-    let req_ct = crate::present::content_type(&flow.request_headers);
-    let res_ct = crate::present::content_type(&flow.response_headers);
-    let (request_body, request_body_pretty) = share_body_pair(
-        &flow.request_body,
-        flow.request_truncated,
-        flow.request_expired,
-        req_ct,
-    );
-    let (response_body, response_body_pretty) = share_body_pair(
-        &flow.response_body,
-        flow.response_truncated,
-        flow.response_expired,
-        res_ct,
-    );
-    let ttfb_ms = flow
-        .response_at
-        .and_then(|at| at.duration_since(flow.started).ok())
-        .map(|d| d.as_millis());
-    let total_ms = flow
-        .finished_at
-        .and_then(|at| at.duration_since(flow.started).ok())
-        .map(|d| d.as_millis());
-    let messages = if !flow.messages.is_empty() {
+fn extract_messages(flow: &Flow, res_ct: Option<&str>) -> Vec<String> {
+    if !flow.messages.is_empty() {
         flow.messages
             .iter()
             .take(40)
@@ -209,7 +262,43 @@ fn share_flow(flow: &Flow, previous: Option<SystemTime>) -> ShareFlow {
             .collect()
     } else {
         Vec::new()
+    }
+}
+
+fn share_flow(flow: &Flow, previous: Option<SystemTime>) -> ShareFlow {
+    let req_ct = crate::present::content_type(&flow.request_headers);
+    let res_ct = crate::present::content_type(&flow.response_headers);
+    let request_body_spilled = flow.request_spill.is_some() && flow.request_body.is_empty();
+    let response_body_spilled = flow.response_spill.is_some() && flow.response_body.is_empty();
+    let (request_body, request_body_pretty) = if request_body_spilled {
+        (String::new(), String::new())
+    } else {
+        share_body_pair(
+            &flow.request_body,
+            flow.request_truncated,
+            flow.request_expired,
+            req_ct,
+        )
     };
+    let (response_body, response_body_pretty) = if response_body_spilled {
+        (String::new(), String::new())
+    } else {
+        share_body_pair(
+            &flow.response_body,
+            flow.response_truncated,
+            flow.response_expired,
+            res_ct,
+        )
+    };
+    let ttfb_ms = flow
+        .response_at
+        .and_then(|at| at.duration_since(flow.started).ok())
+        .map(|d| d.as_millis());
+    let total_ms = flow
+        .finished_at
+        .and_then(|at| at.duration_since(flow.started).ok())
+        .map(|d| d.as_millis());
+    let messages = extract_messages(flow, res_ct);
 
     ShareFlow {
         id: flow.id,
@@ -239,6 +328,8 @@ fn share_flow(flow: &Flow, previous: Option<SystemTime>) -> ShareFlow {
         query: crate::present::query_pairs(&flow.url),
         request_headers: flow.request_headers.clone(),
         response_headers: flow.response_headers.clone(),
+        request_body_spilled,
+        response_body_spilled,
         request_body,
         request_body_pretty,
         response_body,
@@ -891,10 +982,10 @@ function kvSection(key, title, rows) {{
     + `</div>`;
 }}
 
-function bodySection(key, title, raw, prettyText) {{
-  if (!raw) return "";
+function bodySection(key, title, raw, prettyText, spilled) {{
+  if (!raw && !spilled) return "";
   const folded = state.folded[key] ? " folded" : "";
-  const shown = (state.pretty && prettyText) ? prettyText : raw;
+  const shown = spilled ? I18N.loading : ((state.pretty && prettyText) ? prettyText : raw);
   return `<div class="card${{folded}}" data-fold="${{key}}">`
     + `<div class="card-head">`
     + `<div class="card-title-wrap"><span class="card-arrow">▼</span><span class="card-title">${{esc(title)}}</span></div>`
@@ -906,12 +997,41 @@ function bodySection(key, title, raw, prettyText) {{
     + `</div>`;
 }}
 
+function ensureFlowBody(flow) {{
+  if (!LIVE || !flow || (!flow.request_body_spilled && !flow.response_body_spilled) || flow._loadingBody) return;
+  flow._loadingBody = true;
+  const base = LIVE.replace(/\/flows\.json$/, "");
+  fetch(`${{base}}/flows/${{flow.id}}.json`, {{ cache: "no-store" }})
+    .then(res => res.ok ? res.json() : null)
+    .then(doc => {{
+      flow._loadingBody = false;
+      if (!doc) return;
+      flow.request_body = doc.request_body || "";
+      flow.request_body_pretty = doc.request_body_pretty || "";
+      flow.response_body = doc.response_body || "";
+      flow.response_body_pretty = doc.response_body_pretty || "";
+      if (Array.isArray(doc.messages) && doc.messages.length) {{
+        flow.messages = doc.messages;
+      }}
+      flow.request_body_spilled = false;
+      flow.response_body_spilled = false;
+      flow._bodyLoaded = true;
+      if (state.selectedId === flow.id) {{
+        renderDetail(flow);
+      }}
+    }})
+    .catch(() => {{
+      flow._loadingBody = false;
+    }});
+}}
+
 function renderDetail(flow) {{
   const pane = document.getElementById("right-pane");
   if (!flow) {{
     pane.innerHTML = `<div class="empty-state">${{esc(I18N.emptyDetail)}}</div>`;
     return;
   }}
+  ensureFlowBody(flow);
   const failed = !!flow.error && flow.status == null;
   const statusText = flow.status == null ? (failed ? "ERR" : I18N.inProgress) : String(flow.status);
   const sBadgeCls = statusBadgeClass(flow);
@@ -941,9 +1061,9 @@ function renderDetail(flow) {{
     + `<div class="metrics-line mono">${{esc(mParts.filter(Boolean).join(" · "))}}</div>`
     + `</div>`;
 
-  const resBodyHtml = bodySection("res_body", I18N.resBody, flow.response_body, flow.response_body_pretty);
+  const resBodyHtml = bodySection("res_body", I18N.resBody, flow.response_body, flow.response_body_pretty, flow.response_body_spilled);
   const resHeadersHtml = kvSection("res_headers", I18N.resHeaders, formatHeaders(flow.response_headers, state.pretty));
-  const reqBodyHtml = bodySection("req_body", I18N.reqBody, flow.request_body, flow.request_body_pretty);
+  const reqBodyHtml = bodySection("req_body", I18N.reqBody, flow.request_body, flow.request_body_pretty, flow.request_body_spilled);
   const queryHtml = kvSection("query", I18N.queryParams, flow.query);
   const reqHeadersHtml = kvSection("req_headers", I18N.reqHeaders, formatHeaders(flow.request_headers, state.pretty));
   const msgRows = (flow.messages || []).map((m, i) => ["#" + (i + 1), m]);
@@ -1050,9 +1170,48 @@ renderAll();
 if (LIVE) {{
   const pull = async () => {{
     try {{
-      const res = await fetch(LIVE, {{cache: "no-store"}});
+      const since = (state.data && state.data.rev != null) ? state.data.rev : 0;
+      const url = since > 0 ? `${{LIVE}}?since=${{since}}` : LIVE;
+      const res = await fetch(url, {{cache: "no-store"}});
       if (!res.ok) {{ state.ended = true; renderAll(); return; }}
-      state.data = await res.json();
+      const next = await res.json();
+      if (next.incremental && state.data && Array.isArray(state.data.flows)) {{
+        const curFlows = state.data.flows;
+        const nextIds = Array.isArray(next.ids) ? next.ids : [];
+        const unchanged = (!next.flows || next.flows.length === 0)
+          && nextIds.length === curFlows.length
+          && nextIds.every((id, i) => id === curFlows[i].id)
+          && next.omitted === state.data.omitted;
+        state.data.expires = next.expires;
+        state.data.filter = next.filter;
+        state.data.omitted = next.omitted;
+        state.data.rev = next.rev;
+        state.data.ids = nextIds;
+        if (unchanged && !state.ended) {{
+          return;
+        }}
+        const byId = new Map(curFlows.map(f => [f.id, f]));
+        for (const item of (next.flows || [])) {{
+          const prev = byId.get(item.id);
+          if (prev && prev._bodyLoaded) {{
+            if (item.request_body_spilled) {{
+              item.request_body = prev.request_body;
+              item.request_body_pretty = prev.request_body_pretty;
+              item.request_body_spilled = false;
+            }}
+            if (item.response_body_spilled) {{
+              item.response_body = prev.response_body;
+              item.response_body_pretty = prev.response_body_pretty;
+              item.response_body_spilled = false;
+            }}
+            item._bodyLoaded = !item.request_body_spilled && !item.response_body_spilled;
+          }}
+          byId.set(item.id, item);
+        }}
+        state.data.flows = nextIds.map(id => byId.get(id)).filter(Boolean);
+      }} else {{
+        state.data = next;
+      }}
       state.ended = false;
       renderAll();
     }} catch (_) {{
@@ -1114,7 +1273,15 @@ mod tests {
         );
         assert_eq!(
             parse_share_path(&format!("/s/{id}/flows.json")),
-            Some((id.into(), SharePath::Data))
+            Some((id.into(), SharePath::Data { since: None }))
+        );
+        assert_eq!(
+            parse_share_path(&format!("/s/{id}/flows.json?since=42")),
+            Some((id.into(), SharePath::Data { since: Some(42) }))
+        );
+        assert_eq!(
+            parse_share_path(&format!("/s/{id}/flows/7.json")),
+            Some((id.into(), SharePath::FlowBody(7)))
         );
         assert!(parse_share_path("/s/not-a-uuid").is_none());
         assert!(parse_share_path("/zniff").is_none());
@@ -1154,6 +1321,9 @@ mod tests {
             expires: 0,
             filter: String::new(),
             omitted: 0,
+            rev: 1,
+            incremental: false,
+            ids: vec![1],
             flows: vec![ShareFlow {
                 id: 1,
                 method: "GET".into(),
@@ -1177,6 +1347,8 @@ mod tests {
                 query: Vec::new(),
                 request_headers: vec![("Cookie".into(), "<script>".into())],
                 response_headers: Vec::new(),
+                request_body_spilled: false,
+                response_body_spilled: false,
                 request_body: String::new(),
                 request_body_pretty: String::new(),
                 response_body: body.into(),

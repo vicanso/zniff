@@ -346,6 +346,8 @@ pub struct Flow {
     pub pinned: bool,
     /// Rules that rewrote this flow, joined by spaces. Empty when none did.
     pub rule_hit: String,
+    /// Monotonic revision bumped whenever this flow is created or modified.
+    pub rev: u64,
     accounted: usize,
 }
 
@@ -374,6 +376,7 @@ pub struct Session {
     bytes: usize,
     dropped: u64,
     next_id: u64,
+    next_rev: u64,
 }
 
 impl Session {
@@ -390,11 +393,17 @@ impl Session {
         }
     }
 
+    pub fn rev(&self) -> u64 {
+        self.next_rev
+    }
+
     pub fn open(&mut self, draft: FlowDraft) -> u64 {
         let now = SystemTime::now();
         self.spill.gc(now);
         self.next_id += 1;
+        self.next_rev += 1;
         let id = self.next_id;
+        let rev = self.next_rev;
         let headers_size = headers_size(&draft.request_headers);
         let flow = Flow {
             id,
@@ -426,6 +435,7 @@ impl Session {
             messages_truncated: false,
             pinned: false,
             rule_hit: String::new(),
+            rev,
             accounted: headers_size,
         };
         self.bytes += headers_size;
@@ -443,6 +453,8 @@ impl Session {
         protocol: Option<Protocol>,
     ) {
         let extra = headers_size(&headers);
+        self.next_rev += 1;
+        let rev = self.next_rev;
         let Some(flow) = self.flows.get_mut(&id) else {
             return;
         };
@@ -454,21 +466,27 @@ impl Session {
         if let Some(protocol) = protocol {
             flow.protocol = protocol;
         }
+        flow.rev = rev;
         flow.accounted += extra;
         self.bytes += extra;
         self.evict(id);
     }
 
     pub fn set_error(&mut self, id: u64, error: impl Into<String>) {
+        self.next_rev += 1;
+        let rev = self.next_rev;
         if let Some(flow) = self.flows.get_mut(&id) {
             flow.error = Some(error.into());
             if flow.finished_at.is_none() {
                 flow.finished_at = Some(SystemTime::now());
             }
+            flow.rev = rev;
         }
     }
 
     pub fn add_transfer(&mut self, id: u64, direction: Direction, bytes: u64) {
+        self.next_rev += 1;
+        let rev = self.next_rev;
         let Some(flow) = self.flows.get_mut(&id) else {
             return;
         };
@@ -476,6 +494,7 @@ impl Session {
             Direction::Request => flow.request_bytes = flow.request_bytes.saturating_add(bytes),
             Direction::Response => flow.response_bytes = flow.response_bytes.saturating_add(bytes),
         }
+        flow.rev = rev;
     }
 
     pub fn add_message(
@@ -487,9 +506,12 @@ impl Session {
     ) {
         const COUNT_CAP: usize = 200;
         const BYTE_CAP: usize = 256 * 1024;
+        self.next_rev += 1;
+        let rev = self.next_rev;
         let Some(flow) = self.flows.get_mut(&id) else {
             return;
         };
+        flow.rev = rev;
         if flow.messages_truncated || flow.messages.len() >= COUNT_CAP {
             flow.messages_truncated = true;
             return;
@@ -514,14 +536,19 @@ impl Session {
     }
 
     pub fn retarget(&mut self, id: u64, host: String, path: String, url: String) {
+        self.next_rev += 1;
+        let rev = self.next_rev;
         if let Some(flow) = self.flows.get_mut(&id) {
             flow.host = host;
             flow.path = path;
             flow.url = url;
+            flow.rev = rev;
         }
     }
 
     pub fn replace_request(&mut self, id: u64, headers: Vec<(String, String)>, body: Vec<u8>) {
+        self.next_rev += 1;
+        let rev = self.next_rev;
         let Some(flow) = self.flows.get_mut(&id) else {
             return;
         };
@@ -531,6 +558,7 @@ impl Session {
         flow.request_body = body;
         flow.request_spill = None;
         flow.request_expired = None;
+        flow.rev = rev;
         flow.accounted = flow.accounted.saturating_sub(old) + new_size;
         self.bytes = self.bytes.saturating_sub(old) + new_size;
         self.spill_flow_if_needed(id, SystemTime::now());
@@ -543,6 +571,8 @@ impl Session {
         headers: Vec<(String, String)>,
         body: Vec<u8>,
     ) {
+        self.next_rev += 1;
+        let rev = self.next_rev;
         let Some(flow) = self.flows.get_mut(&id) else {
             return;
         };
@@ -557,6 +587,7 @@ impl Session {
         if flow.response_at.is_none() {
             flow.response_at = Some(SystemTime::now());
         }
+        flow.rev = rev;
         flow.accounted = flow.accounted.saturating_sub(old) + new_size;
         self.bytes = self.bytes.saturating_sub(old) + new_size;
         self.spill_flow_if_needed(id, SystemTime::now());
@@ -578,7 +609,13 @@ impl Session {
             if count >= PIN_CAP {
                 return false;
             }
+            self.next_rev += 1;
+            let rev = self.next_rev;
+            let Some(flow) = self.flows.get_mut(&id) else {
+                return false;
+            };
             flow.pinned = true;
+            flow.rev = rev;
             let req_spill = flow.request_spill.take();
             let res_spill = flow.response_spill.take();
             let mut added = 0usize;
@@ -620,7 +657,9 @@ impl Session {
             }
             true
         } else if let Some(flow) = self.flows.get_mut(&id) {
+            self.next_rev += 1;
             flow.pinned = false;
+            flow.rev = self.next_rev;
             self.spill_flow_if_needed(id, SystemTime::now());
             true
         } else {
@@ -634,10 +673,13 @@ impl Session {
 
     pub fn mark_finished_at(&mut self, id: u64, now: SystemTime) {
         self.spill.gc(now);
-        if let Some(flow) = self.flows.get_mut(&id)
-            && flow.finished_at.is_none()
-        {
-            flow.finished_at = Some(now);
+        self.next_rev += 1;
+        let rev = self.next_rev;
+        if let Some(flow) = self.flows.get_mut(&id) {
+            if flow.finished_at.is_none() {
+                flow.finished_at = Some(now);
+            }
+            flow.rev = rev;
         }
         self.spill_flow_if_needed(id, now);
     }
@@ -691,8 +733,11 @@ impl Session {
     }
 
     pub fn set_started(&mut self, id: u64, started: SystemTime) {
+        self.next_rev += 1;
+        let rev = self.next_rev;
         if let Some(flow) = self.flows.get_mut(&id) {
             flow.started = started;
+            flow.rev = rev;
         }
     }
 
@@ -707,6 +752,8 @@ impl Session {
         request_bytes: Option<u64>,
         response_bytes: Option<u64>,
     ) {
+        self.next_rev += 1;
+        let rev = self.next_rev;
         let Some(flow) = self.flows.get_mut(&id) else {
             return;
         };
@@ -726,6 +773,7 @@ impl Session {
             .unwrap_or(flow.response_body.len() as u64);
         flow.request_bytes = request_bytes.unwrap_or(req_len);
         flow.response_bytes = response_bytes.unwrap_or(res_len);
+        flow.rev = rev;
     }
 
     #[cfg(test)]
@@ -742,7 +790,28 @@ impl Session {
             .collect()
     }
 
+    /// Flows that match `filter`, oldest first, without reading spilled bodies from disk.
+    /// Spilled bodies remain referenced by `request_spill` / `response_spill` so live
+    /// share list polling can load them on demand when a row is clicked.
+    pub fn flows_matching_unhydrated(&self, filter: &str) -> Vec<Flow> {
+        self.matching_with_previous_start(filter)
+            .into_iter()
+            .filter_map(|(id, _)| self.flows.get(&id).cloned())
+            .collect()
+    }
+
+    /// Hydrates a single flow only if it matches `filter`.
+    pub fn hydrated_matching(&self, id: u64, filter: &str) -> Option<Flow> {
+        let flow = self.flows.get(&id)?;
+        let query = FlowQuery::parse(filter);
+        if !query.matches(flow, &self.spill) {
+            return None;
+        }
+        self.hydrated(id)
+    }
+
     pub fn clear(&mut self) {
+        self.next_rev += 1;
         self.order.clear();
         self.flows.clear();
         self.spill.clear();
@@ -751,8 +820,11 @@ impl Session {
     }
 
     pub fn set_rule_hit(&mut self, id: u64, hit: impl Into<String>) {
+        self.next_rev += 1;
+        let rev = self.next_rev;
         if let Some(flow) = self.flows.get_mut(&id) {
             flow.rule_hit = hit.into();
+            flow.rev = rev;
         }
     }
 
@@ -769,15 +841,21 @@ impl Session {
     }
 
     pub fn set_protocol(&mut self, id: u64, protocol: Protocol) {
+        self.next_rev += 1;
+        let rev = self.next_rev;
         if let Some(flow) = self.flows.get_mut(&id) {
             flow.protocol = protocol;
+            flow.rev = rev;
         }
     }
 
     pub fn set_encoding_error(&mut self, id: u64, direction: Direction, error: impl Into<String>) {
+        self.next_rev += 1;
+        let rev = self.next_rev;
         let Some(flow) = self.flows.get_mut(&id) else {
             return;
         };
+        flow.rev = rev;
         let slot = match direction {
             Direction::Request => &mut flow.request_encoding_error,
             Direction::Response => &mut flow.response_encoding_error,
@@ -797,9 +875,12 @@ impl Session {
                 })
                 .unwrap_or(false);
         }
+        self.next_rev += 1;
+        let rev = self.next_rev;
         let Some(flow) = self.flows.get_mut(&id) else {
             return false;
         };
+        flow.rev = rev;
         let (buf, truncated) = match direction {
             Direction::Request => (&mut flow.request_body, &mut flow.request_truncated),
             Direction::Response => (&mut flow.response_body, &mut flow.response_truncated),

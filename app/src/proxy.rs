@@ -173,7 +173,12 @@ impl Hub {
         None
     }
 
+    #[cfg(test)]
     fn share_document(&self, id: &str) -> Option<String> {
+        self.share_document_since(id, None)
+    }
+
+    fn share_document_since(&self, id: &str, since: Option<u64>) -> Option<String> {
         let mut slot = self.share.lock().unwrap_or_else(|err| err.into_inner());
         let share = slot.as_ref()?;
         let now = std::time::SystemTime::now();
@@ -186,8 +191,27 @@ impl Hub {
         let expires = share.expires;
         let filter = share.filter.clone();
         drop(slot);
-        let flows = self.with_session(|session| session.flows_matching(&filter));
-        Some(crate::share::document(&flows, expires, &filter))
+        let (flows, rev) = self
+            .with_session(|session| (session.flows_matching_unhydrated(&filter), session.rev()));
+        Some(crate::share::document_since(
+            &flows, expires, &filter, rev, since,
+        ))
+    }
+
+    fn share_flow_body(&self, id: &str, flow_id: u64) -> Option<String> {
+        let mut slot = self.share.lock().unwrap_or_else(|err| err.into_inner());
+        let share = slot.as_ref()?;
+        let now = std::time::SystemTime::now();
+        if !crate::share::grant_ok(share, id, now) {
+            if share.id == id {
+                *slot = None;
+            }
+            return None;
+        }
+        let filter = share.filter.clone();
+        drop(slot);
+        let flow = self.with_session(|session| session.hydrated_matching(flow_id, &filter))?;
+        Some(crate::share::flow_body_document(&flow))
     }
 
     pub fn set_bypass(&self, text: &str) {
@@ -2114,21 +2138,22 @@ fn local_route_for(method: &str, target: &str, self_target: bool) -> Option<Loca
     if !method.eq_ignore_ascii_case("GET") && !method.eq_ignore_ascii_case("HEAD") {
         return None;
     }
-    let bare = target.split(['?', '#']).next().unwrap_or(target);
-    let (origin_form, path) = if let Some(rest) = bare
+    let no_frag = target.split('#').next().unwrap_or(target);
+    let (origin_form, path_and_query) = if let Some(rest) = no_frag
         .strip_prefix("http://")
-        .or_else(|| bare.strip_prefix("https://"))
+        .or_else(|| no_frag.strip_prefix("https://"))
     {
-        let path = match rest.find('/') {
+        let pq = match rest.find('/') {
             Some(index) => &rest[index..],
             None => "/",
         };
-        (false, path)
-    } else if bare.starts_with('/') {
-        (true, bare)
+        (false, pq)
+    } else if no_frag.starts_with('/') {
+        (true, no_frag)
     } else {
         return None;
     };
+    let path = path_and_query.split('?').next().unwrap_or(path_and_query);
     let direct = origin_form || self_target;
     if path == "/zniff-ca.crt" || path.ends_with("/zniff-ca.crt") {
         return Some(LocalRoute::Cert);
@@ -2141,7 +2166,7 @@ fn local_route_for(method: &str, target: &str, self_target: bool) -> Option<Loca
     }
     // Only a browser hitting this proxy directly (or via proxy targeting this
     // listener port). An absolute-form request for some other host must still be forwarded.
-    if direct && let Some((id, kind)) = crate::share::parse_share_path(path) {
+    if direct && let Some((id, kind)) = crate::share::parse_share_path(path_and_query) {
         return Some(LocalRoute::Share(id, kind));
     }
     None
@@ -2158,19 +2183,39 @@ where
     S: AsyncWrite + Unpin,
 {
     let zh = crate::share::prefers_zh(header_value(&head.headers, "accept-language").as_deref());
-    let Some(json) = hub.share_document(id) else {
-        let body = crate::share::expired_page(zh);
-        return write_untracked(
-            socket,
-            404,
-            "Not Found",
-            "text/html; charset=utf-8",
-            body.as_bytes(),
-        )
-        .await;
-    };
     match kind {
-        crate::share::SharePath::Data => {
+        crate::share::SharePath::Data { since } => {
+            let Some(json) = hub.share_document_since(id, since) else {
+                let body = crate::share::expired_page(zh);
+                return write_untracked(
+                    socket,
+                    404,
+                    "Not Found",
+                    "text/html; charset=utf-8",
+                    body.as_bytes(),
+                )
+                .await;
+            };
+            write_untracked(
+                socket,
+                200,
+                "OK",
+                "application/json; charset=utf-8",
+                json.as_bytes(),
+            )
+            .await
+        }
+        crate::share::SharePath::FlowBody(flow_id) => {
+            let Some(json) = hub.share_flow_body(id, flow_id) else {
+                return write_untracked(
+                    socket,
+                    404,
+                    "Not Found",
+                    "application/json; charset=utf-8",
+                    b"{}",
+                )
+                .await;
+            };
             write_untracked(
                 socket,
                 200,
@@ -2181,6 +2226,17 @@ where
             .await
         }
         crate::share::SharePath::Page => {
+            let Some(json) = hub.share_document_since(id, None) else {
+                let body = crate::share::expired_page(zh);
+                return write_untracked(
+                    socket,
+                    404,
+                    "Not Found",
+                    "text/html; charset=utf-8",
+                    body.as_bytes(),
+                )
+                .await;
+            };
             let live = format!("/s/{id}/flows.json");
             let body = crate::share::page(&json, &live, zh);
             write_untracked(
@@ -5217,6 +5273,104 @@ mod tests {
         assert!(json.contains("http://a.test/secret"), "{json}");
         assert!(!json.contains("http://b.test/other"), "{json}");
         assert!(json.contains("header:cookie"), "{json}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn share_document_supports_incremental_since_and_lazy_spilled_body() {
+        let dir = std::env::temp_dir().join(format!("zniff-share-inc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Hub::new(ca).unwrap();
+        let f1 = hub.open(FlowDraft {
+            protocol: Protocol::Http11,
+            method: "GET".into(),
+            host: "a.test".into(),
+            path: "/big".into(),
+            url: "http://a.test/big".into(),
+            request_headers: Vec::new(),
+        });
+        hub.set_response(
+            f1,
+            200,
+            vec![("Content-Type".into(), "text/plain".into())],
+            None,
+        );
+        let big_payload = "x".repeat(20 * 1024);
+        hub.append_body(f1, Direction::Response, big_payload.as_bytes());
+        hub.mark_finished(f1);
+
+        let f2 = hub.open(FlowDraft {
+            protocol: Protocol::Http11,
+            method: "GET".into(),
+            host: "b.test".into(),
+            path: "/hidden".into(),
+            url: "http://b.test/hidden".into(),
+            request_headers: Vec::new(),
+        });
+        hub.set_response(f2, 200, Vec::new(), None);
+        hub.append_body(f2, Direction::Response, b"secret-b");
+        hub.mark_finished(f2);
+
+        hub.begin_share(Duration::from_secs(60), "host:a.test");
+        let share_id = hub.share_id().expect("share id");
+
+        // Initial snapshot: spilled body (>16KB) is NOT embedded in flows.json
+        let snap_str = hub
+            .share_document_since(&share_id, None)
+            .expect("initial snapshot");
+        let snap: serde_json::Value = serde_json::from_str(&snap_str).unwrap();
+        let rev1 = snap["rev"].as_u64().unwrap();
+        assert!(rev1 > 0);
+        assert_eq!(snap["incremental"], false);
+        assert_eq!(snap["ids"], serde_json::json!([f1]));
+        assert_eq!(snap["flows"].as_array().unwrap().len(), 1);
+        assert_eq!(snap["flows"][0]["response_body_spilled"], true);
+        assert_eq!(snap["flows"][0]["response_body"], "");
+
+        // Polling with since=rev1 when nothing changed returns empty flows
+        let unchanged_str = hub
+            .share_document_since(&share_id, Some(rev1))
+            .expect("unchanged poll");
+        let unchanged: serde_json::Value = serde_json::from_str(&unchanged_str).unwrap();
+        assert_eq!(unchanged["incremental"], true);
+        assert_eq!(unchanged["rev"], rev1);
+        assert_eq!(unchanged["ids"], serde_json::json!([f1]));
+        assert!(unchanged["flows"].as_array().unwrap().is_empty());
+
+        // Clicking flow f1 fetches its spilled body on demand; f2 (filtered out) is rejected
+        let body_str = hub
+            .share_flow_body(&share_id, f1)
+            .expect("lazy body for matching flow");
+        let body_doc: serde_json::Value = serde_json::from_str(&body_str).unwrap();
+        assert_eq!(body_doc["id"], f1);
+        assert!(
+            body_doc["response_body"]
+                .as_str()
+                .unwrap()
+                .starts_with("xxxx")
+        );
+        assert!(hub.share_flow_body(&share_id, f2).is_none());
+
+        // Adding a new matching flow f3: incremental poll since=rev1 returns ONLY f3
+        let f3 = hub.open(FlowDraft {
+            protocol: Protocol::Http11,
+            method: "POST".into(),
+            host: "a.test".into(),
+            path: "/small".into(),
+            url: "http://a.test/small".into(),
+            request_headers: Vec::new(),
+        });
+        let delta_str = hub
+            .share_document_since(&share_id, Some(rev1))
+            .expect("delta poll");
+        let delta: serde_json::Value = serde_json::from_str(&delta_str).unwrap();
+        assert_eq!(delta["incremental"], true);
+        assert!(delta["rev"].as_u64().unwrap() > rev1);
+        assert_eq!(delta["ids"], serde_json::json!([f1, f3]));
+        assert_eq!(delta["flows"].as_array().unwrap().len(), 1);
+        assert_eq!(delta["flows"][0]["id"], f3);
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
