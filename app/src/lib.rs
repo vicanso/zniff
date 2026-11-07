@@ -482,6 +482,10 @@ impl ListColumns {
         self.order.into_iter().find(|&col| self.on(col))
     }
 
+    fn last_visible(self) -> Option<ListColumn> {
+        self.order.into_iter().rev().find(|&col| self.on(col))
+    }
+
     fn visible_count(self) -> usize {
         self.order.into_iter().filter(|&col| self.on(col)).count()
     }
@@ -2138,7 +2142,7 @@ fn profile_dock(
                                 .bg(bg_card())
                                 .shadow_md()
                                 .child(scroll().w_full().max_h(px(210.0)).child(
-                                    view().w_full().gap_0p5().child(each(
+                                    view().w_full().pr_3().gap_0p5().child(each(
                                         saved,
                                         |item| {
                                             format!(
@@ -4946,19 +4950,33 @@ fn flow_cell(
         "id" => id_cell(rows, selected, baseline, columns, index).into_element(),
         "method" => method_cell(rows, selected, baseline, columns, index).into_element(),
         "path" => path_cell(rows, selected, baseline, columns, hover, index).into_element(),
-        "status" => status_text(rows, index).into_element(),
-        "protocol" => protocol_cell(rows, index).into_element(),
-        "gap" => time_cell(rows, hover, index).into_element(),
-        "elapsed" => elapsed_cell(rows, index).into_element(),
+        "status" => status_text(rows, columns, index).into_element(),
+        "protocol" => protocol_cell(rows, columns, index).into_element(),
+        "gap" => time_cell(rows, columns, hover, index).into_element(),
+        "elapsed" => elapsed_cell(rows, columns, index).into_element(),
         "host" => host_cell(rows, columns, hover, index).into_element(),
         "client_ip" => client_ip_cell(rows, columns, hover, index).into_element(),
-        "size" => size_cell(rows, index).into_element(),
+        "size" => size_cell(rows, columns, index).into_element(),
         _ => view().into_element(),
+    }
+}
+
+fn column_pad_right(column: Option<ListColumn>, align_right: bool, columns: ListColumns) -> Points {
+    let base = match column {
+        Some(ListColumn::Method) => 2.0,
+        _ if align_right => 6.0,
+        _ => 4.0,
+    };
+    if column.is_some() && columns.last_visible() == column {
+        px(base + 8.0)
+    } else {
+        px(base)
     }
 }
 
 fn flow_header(cell: &DataTableHeaderCell, columns: Signal<ListColumns>) -> View {
     let key = cell.key.to_string();
+    let column = ListColumn::from_key(&key);
     let align_right = matches!(key.as_str(), "gap" | "elapsed" | "size");
     let pad_left = match key.as_str() {
         "method" => 14.0,
@@ -4970,7 +4988,7 @@ fn flow_header(cell: &DataTableHeaderCell, columns: Signal<ListColumns>) -> View
         .h_full()
         .min_w(px(0.0))
         .pl(px(pad_left))
-        .pr(px(if align_right { 6.0 } else { 4.0 }))
+        .pr(move || column_pad_right(column, align_right, columns.get()))
         .flex_row()
         .items_center()
         .overflow_hidden();
@@ -5010,7 +5028,7 @@ fn method_cell(
         .h_full()
         .min_w(px(0.0))
         .pl(px(2.0))
-        .pr(px(2.0))
+        .pr(move || column_pad_right(Some(ListColumn::Method), false, columns.get()))
         .border_l(px(2.0))
         .border_l_color(move || {
             if columns.get().first_visible() == Some(ListColumn::Method) {
@@ -5088,7 +5106,7 @@ fn id_cell(
         .h_full()
         .min_w(px(0.0))
         .pl(px(4.0))
-        .pr(px(4.0))
+        .pr(move || column_pad_right(Some(ListColumn::Id), false, columns.get()))
         .border_l(px(2.0))
         .border_l_color(move || {
             if columns.get().first_visible() == Some(ListColumn::Id) {
@@ -5114,7 +5132,7 @@ fn id_cell(
         )
 }
 
-fn status_text(rows: Signal<Vec<RowLine>>, index: usize) -> Text {
+fn status_text(rows: Signal<Vec<RowLine>>, columns: Signal<ListColumns>, index: usize) -> Text {
     mono(move || {
         rows.with(|rows| {
             rows.get(index)
@@ -5123,7 +5141,7 @@ fn status_text(rows: Signal<Vec<RowLine>>, index: usize) -> Text {
         })
     })
     .pl(px(4.0))
-    .pr(px(4.0))
+    .pr(move || column_pad_right(Some(ListColumn::Status), false, columns.get()))
     .number_of_lines(1)
     .text_size(px(12.0))
     .font_weight(FontWeight::SEMIBOLD)
@@ -5136,14 +5154,19 @@ fn status_text(rows: Signal<Vec<RowLine>>, index: usize) -> Text {
     })
 }
 
-fn time_cell(rows: Signal<Vec<RowLine>>, hover: CellHover, index: usize) -> impl IntoElement {
+fn time_cell(
+    rows: Signal<Vec<RowLine>>,
+    columns: Signal<ListColumns>,
+    hover: CellHover,
+    index: usize,
+) -> impl IntoElement {
     let clock_rows = rows;
     view()
         .w_full()
         .h_full()
         .min_w(px(0.0))
         .pl(px(4.0))
-        .pr(px(6.0))
+        .pr(move || column_pad_right(Some(ListColumn::Gap), true, columns.get()))
         .flex_row()
         .items_center()
         .justify_end()
@@ -5171,13 +5194,17 @@ fn time_cell(rows: Signal<Vec<RowLine>>, hover: CellHover, index: usize) -> impl
         )
 }
 
-fn elapsed_cell(rows: Signal<Vec<RowLine>>, index: usize) -> impl IntoElement {
+fn elapsed_cell(
+    rows: Signal<Vec<RowLine>>,
+    columns: Signal<ListColumns>,
+    index: usize,
+) -> impl IntoElement {
     view()
         .w_full()
         .h_full()
         .min_w(px(0.0))
         .pl(px(4.0))
-        .pr(px(6.0))
+        .pr(move || column_pad_right(Some(ListColumn::Elapsed), true, columns.get()))
         .flex_row()
         .items_center()
         .justify_end()
@@ -5214,7 +5241,7 @@ fn host_cell(
         .h_full()
         .min_w(px(0.0))
         .pl(px(4.0))
-        .pr(px(4.0))
+        .pr(move || column_pad_right(Some(ListColumn::Host), false, columns.get()))
         .overflow_hidden()
         .flex_row()
         .items_center()
@@ -5256,7 +5283,7 @@ fn client_ip_cell(
         .h_full()
         .min_w(px(0.0))
         .pl(px(4.0))
-        .pr(px(4.0))
+        .pr(move || column_pad_right(Some(ListColumn::ClientIp), false, columns.get()))
         .overflow_hidden()
         .flex_row()
         .items_center()
@@ -5292,7 +5319,7 @@ fn client_ip_cell(
         )
 }
 
-fn protocol_cell(rows: Signal<Vec<RowLine>>, index: usize) -> Text {
+fn protocol_cell(rows: Signal<Vec<RowLine>>, columns: Signal<ListColumns>, index: usize) -> Text {
     mono(move || {
         rows.with(|rows| {
             rows.get(index)
@@ -5301,19 +5328,23 @@ fn protocol_cell(rows: Signal<Vec<RowLine>>, index: usize) -> Text {
         })
     })
     .pl(px(4.0))
-    .pr(px(4.0))
+    .pr(move || column_pad_right(Some(ListColumn::Protocol), false, columns.get()))
     .number_of_lines(1)
     .text_size(px(12.0))
     .text_color(fg_secondary())
 }
 
-fn size_cell(rows: Signal<Vec<RowLine>>, index: usize) -> impl IntoElement {
+fn size_cell(
+    rows: Signal<Vec<RowLine>>,
+    columns: Signal<ListColumns>,
+    index: usize,
+) -> impl IntoElement {
     view()
         .w_full()
         .h_full()
         .min_w(px(0.0))
         .pl(px(4.0))
-        .pr(px(6.0))
+        .pr(move || column_pad_right(Some(ListColumn::Size), true, columns.get()))
         .flex_row()
         .items_center()
         .justify_end()
@@ -5346,7 +5377,7 @@ fn path_cell(
         .h_full()
         .min_w(px(0.0))
         .pl(px(4.0))
-        .pr(px(4.0))
+        .pr(move || column_pad_right(Some(ListColumn::Path), false, columns.get()))
         .border_l(move || {
             if columns.get().first_visible() == Some(ListColumn::Path) {
                 px(2.0)
@@ -5537,7 +5568,9 @@ fn ready_detail(
 ) -> impl IntoElement {
     let no_form = signal(Vec::<HeaderLine>::new());
     view()
-        .p_3p5()
+        .pl_3p5()
+        .pr_5()
+        .py_3p5()
         .gap_3p5()
         .child(summary(
             shown,
@@ -6084,7 +6117,14 @@ fn body_section(
                     .overflow_hidden()
                     .border_t(move || if divided { px(1.0) } else { px(0.0) })
                     .border_t_color(border_subtle())
-                    .child(scroll().size_full().px_3p5().py_2p5().child(doc_body(doc)))
+                    .child(
+                        scroll()
+                            .size_full()
+                            .pl_3p5()
+                            .pr_5()
+                            .py_2p5()
+                            .child(doc_body(doc)),
+                    )
             },
         ))
         .child(when(
@@ -6167,7 +6207,8 @@ fn body_section(
                                     hex_display_rows(&bytes, cols)
                                 }
                             })
-                            .px_3p5()
+                            .pl_3p5()
+                            .pr_5()
                             .py_2()
                             .selectable(true)
                             .on_press_up(dismiss_keyboard)
@@ -8688,10 +8729,10 @@ fn hex_row_bytes(width: f32) -> usize {
     }
 }
 
-/// `ready_detail` padding and the card border, between the pane and the hex area.
-const HEX_AREA_CHROME: f32 = 14.0 * 2.0 + 2.0;
-/// Horizontal padding of the hex text (`px_3p5` on each side).
-const HEX_TEXT_PAD: f32 = 28.0;
+/// `ready_detail` padding (`pl_3p5` + `pr_5`) and the card border, between the pane and the hex area.
+const HEX_AREA_CHROME: f32 = 14.0 + 20.0 + 2.0;
+/// Horizontal padding of the hex text (`pl_3p5` + `pr_5`).
+const HEX_TEXT_PAD: f32 = 14.0 + 20.0;
 
 /// Width the hex area can use inside a detail pane of `pane` points.
 fn hex_area_width(pane: f32) -> f32 {
@@ -10644,6 +10685,27 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
             "gap".into(),
         ]);
         assert_eq!(dragged.first_visible(), Some(super::ListColumn::Path));
+        assert_eq!(dragged.last_visible(), Some(super::ListColumn::Gap));
+        assert_eq!(
+            super::column_pad_right(Some(super::ListColumn::Size), true, default_shown).0,
+            14.0
+        );
+        assert_eq!(
+            super::column_pad_right(Some(super::ListColumn::Size), true, dragged).0,
+            6.0
+        );
+        assert_eq!(
+            super::column_pad_right(Some(super::ListColumn::Gap), true, dragged).0,
+            14.0
+        );
+        assert_eq!(
+            super::column_pad_right(Some(super::ListColumn::ClientIp), false, all_shown).0,
+            12.0
+        );
+        assert_eq!(
+            super::column_pad_right(Some(super::ListColumn::Status), false, all_shown).0,
+            4.0
+        );
         let dragged_cols = super::flow_table_columns(dragged, &std::collections::HashMap::new());
         let dragged_keys: Vec<&str> = dragged_cols.iter().map(|c| c.key.as_ref()).collect();
         assert_eq!(
