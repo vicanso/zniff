@@ -883,6 +883,8 @@ pub fn App() -> impl IntoElement {
     let baseline_tick = baseline;
     let seen_baseline = stored(None::<u64>);
     let seen_pretty = stored(shown_tick.pretty.get());
+    let seen_paused = stored(None::<(u64, BreakSide)>);
+    let compose_tick = compose;
     let share_id = signal(String::new());
     let share_id_tick = share_id;
     let seen_share = stored(String::new());
@@ -915,7 +917,27 @@ pub fn App() -> impl IntoElement {
         listen.set(listen_now.clone());
         ca_installed.set(lock_bool(&controls_tick.ca_installed));
         use_system_proxy.set(lock_bool(&controls_tick.use_system_proxy));
-        paused.set(controls_tick.hub.paused());
+        let paused_now = controls_tick.hub.paused();
+        paused.set(paused_now);
+        if paused_now != seen_paused.get() {
+            let prev_paused = seen_paused.replace(paused_now);
+            if let Some((paused_id, side)) = paused_now {
+                if selected_tick.get().is_none() {
+                    selected_tick.set(Some(paused_id));
+                }
+                if compose_tick.composing.get()
+                    && selected_tick.get() == Some(paused_id)
+                    && compose_tick.response.get() != matches!(side, BreakSide::Response)
+                {
+                    begin_compose(&controls_tick, Some(paused_id), compose_tick);
+                }
+            } else if prev_paused.is_some()
+                && compose_tick.composing.get()
+                && compose_tick.response.get()
+            {
+                reset_compose(compose_tick);
+            }
+        }
         if listen_now != seen_listen.get() {
             seen_listen.replace(listen_now.clone());
             publish_lan(
@@ -8957,31 +8979,12 @@ fn break_bar(
             .text_color(status_warn_fg()),
         )
         .child(detail_button(tr("放行", "Continue"), move || {
-            let edited = compose.composing.get()
-                && paused.get().is_some_and(|(id, side)| {
-                    selected.get() == Some(id)
-                        && compose.response.get() == matches!(side, BreakSide::Response)
-                });
-            let decision = if edited {
-                BreakDecision {
-                    drop: false,
-                    headers: Some(parse_header_text(&compose.headers.get())),
-                    body: Some(compose.body.get().into_bytes()),
-                    status: edited_status(compose),
-                }
-            } else {
-                BreakDecision {
-                    drop: false,
-                    headers: None,
-                    body: None,
-                    status: None,
-                }
-            };
-            if !release.hub.resolve_break(decision) {
-                set_status(&release, StatusMsg::BreakDone);
-            }
+            continue_break(&release, compose, selected, paused);
         }))
         .child(detail_button(tr("丢弃", "Drop"), move || {
+            if compose.composing.get() {
+                reset_compose(compose);
+            }
             let _ = drop_controls.hub.resolve_break(BreakDecision {
                 drop: true,
                 headers: None,
@@ -8991,11 +8994,53 @@ fn break_bar(
         }))
 }
 
+fn continue_break(
+    controls: &Controls,
+    compose: Compose,
+    selected: Signal<Option<u64>>,
+    paused: Signal<Option<(u64, BreakSide)>>,
+) {
+    let current_paused = controls.hub.paused().or_else(|| paused.get());
+    let edited = compose.composing.get()
+        && current_paused.is_some_and(|(id, side)| {
+            (selected.get() == Some(id) || selected.get().is_none())
+                && compose.response.get() == matches!(side, BreakSide::Response)
+        });
+    let decision = if edited {
+        BreakDecision {
+            drop: false,
+            headers: Some(parse_header_text(&compose.headers.get())),
+            body: Some(compose.body.get().into_bytes()),
+            status: edited_status(compose),
+        }
+    } else {
+        BreakDecision {
+            drop: false,
+            headers: None,
+            body: None,
+            status: None,
+        }
+    };
+    if compose.composing.get() {
+        reset_compose(compose);
+    }
+    if !controls.hub.resolve_break(decision) {
+        set_status(controls, StatusMsg::BreakDone);
+    }
+}
+
 fn compose_box(
     compose: Compose,
     controls: Arc<Controls>,
     selected: Signal<Option<u64>>,
 ) -> impl IntoElement {
+    let controls_continue = controls.clone();
+    let controls_touch_status = controls.clone();
+    let controls_touch_method = controls.clone();
+    let controls_touch_url = controls.clone();
+    let controls_touch_headers = controls.clone();
+    let controls_touch_body = controls.clone();
+    let controls_submit_status = controls.clone();
     view()
         .rounded(px(10.0))
         .border_1()
@@ -9050,6 +9095,33 @@ fn compose_box(
                                 ),
                         )
                         .child(when(
+                            move || compose.response.get(),
+                            move || {
+                                let controls = controls_continue.clone();
+                                view()
+                                    .h(px(24.0))
+                                    .px_2p5()
+                                    .rounded(px(6.0))
+                                    .bg(accent_blue())
+                                    .hover(|style| style.bg(accent_blue_hover()))
+                                    .active(|style| style.opacity(0.85))
+                                    .cursor(Cursor::Pointer)
+                                    .flex_row()
+                                    .items_center()
+                                    .on_press(move || {
+                                        let paused_sig = signal(controls.hub.paused());
+                                        continue_break(&controls, compose, selected, paused_sig);
+                                    })
+                                    .child(
+                                        text(tr("放行", "Continue"))
+                                            .number_of_lines(1)
+                                            .text_size(px(11.5))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(white()),
+                                    )
+                            },
+                        ))
+                        .child(when(
                             move || !compose.response.get(),
                             move || {
                                 let controls = controls.clone();
@@ -9064,6 +9136,15 @@ fn compose_box(
                                     .flex_row()
                                     .items_center()
                                     .on_press(move || {
+                                        if controls.hub.paused().is_some_and(|(id, side)| {
+                                            selected.get() == Some(id) && side == BreakSide::Request
+                                        }) {
+                                            let paused_sig = signal(controls.hub.paused());
+                                            continue_break(
+                                                &controls, compose, selected, paused_sig,
+                                            );
+                                            return;
+                                        }
                                         replay_flow(
                                             &controls,
                                             selected.get(),
@@ -9100,6 +9181,8 @@ fn compose_box(
                         .child(when(
                             move || compose.response.get(),
                             move || {
+                                let controls_touch = controls_touch_status.clone();
+                                let controls_submit = controls_submit_status.clone();
                                 view()
                                     .flex_row()
                                     .items_center()
@@ -9110,28 +9193,55 @@ fn compose_box(
                                             .text_size(px(12.0))
                                             .text_color(fg_secondary()),
                                     )
-                                    .child(view().w(px(88.0)).flex_shrink_0().child(compose_input(
-                                        compose.status,
-                                        "200",
-                                        30.0,
-                                        false,
-                                    )))
+                                    .child(
+                                        view().w(px(88.0)).flex_shrink_0().child(
+                                            compose_input_on(
+                                                compose.status,
+                                                "200",
+                                                30.0,
+                                                false,
+                                                move |text| {
+                                                    controls_touch.hub.touch_break();
+                                                    compose.status.set(text.to_string());
+                                                },
+                                            )
+                                            .on_submit(move |text: &str| {
+                                                compose.status.set(text.to_string());
+                                                let paused_sig =
+                                                    signal(controls_submit.hub.paused());
+                                                continue_break(
+                                                    &controls_submit,
+                                                    compose,
+                                                    selected,
+                                                    paused_sig,
+                                                );
+                                            }),
+                                        ),
+                                    )
                             },
                         ))
                         .child(when(
                             move || !compose.response.get(),
                             move || {
+                                let controls_method = controls_touch_method.clone();
+                                let controls_url = controls_touch_url.clone();
                                 view()
                                     .flex_1()
                                     .min_w(px(0.0))
                                     .flex_row()
                                     .gap_1p5()
-                                    .child(view().w(px(88.0)).flex_shrink_0().child(compose_input(
-                                        compose.method,
-                                        "POST",
-                                        30.0,
-                                        false,
-                                    )))
+                                    .child(view().w(px(88.0)).flex_shrink_0().child(
+                                        compose_input_on(
+                                            compose.method,
+                                            "POST",
+                                            30.0,
+                                            false,
+                                            move |text| {
+                                                controls_method.hub.touch_break();
+                                                compose.method.set(text.to_string());
+                                            },
+                                        ),
+                                    ))
                                     .child(view().flex_1().min_w(px(0.0)).child(compose_input_on(
                                         compose.url,
                                         tr(
@@ -9140,7 +9250,10 @@ fn compose_box(
                                         ),
                                         30.0,
                                         false,
-                                        move |text| apply_url_edit(compose, text),
+                                        move |text| {
+                                            controls_url.hub.touch_break();
+                                            apply_url_edit(compose, text);
+                                        },
                                     )))
                             },
                         )),
@@ -9150,12 +9263,14 @@ fn compose_box(
                     tr("一行一个 Name: value", "One Name: value per line"),
                     120.0,
                     "plaintext",
+                    controls_touch_headers,
                 ))
                 .child(compose_editor(
                     compose.body,
                     tr("body", "body"),
                     160.0,
                     "json",
+                    controls_touch_body,
                 )),
         )
 }
@@ -9165,6 +9280,7 @@ fn compose_editor(
     placeholder: impl Fn() -> String + 'static,
     height: f32,
     language: &'static str,
+    controls: Arc<Controls>,
 ) -> impl IntoElement {
     view()
         .w_full()
@@ -9185,20 +9301,12 @@ fn compose_editor(
                 .font_size(Points(12.0))
                 .line_height(Points(18.0))
                 .scroll_beyond_last_line(false)
-                .on_change(move |text: &SharedString| value.set(text.to_string()))
+                .on_change(move |text: &SharedString| {
+                    controls.hub.touch_break();
+                    value.set(text.to_string());
+                })
                 .size_full(),
         )
-}
-
-fn compose_input(
-    value: Signal<String>,
-    placeholder: impl IntoReactive<String> + 'static,
-    height: f32,
-    multiline: bool,
-) -> impl IntoElement {
-    compose_input_on(value, placeholder, height, multiline, move |text| {
-        value.set(text.to_string());
-    })
 }
 
 fn compose_input_on(
@@ -9207,7 +9315,7 @@ fn compose_input_on(
     height: f32,
     multiline: bool,
     on_change: impl Fn(&str) + 'static,
-) -> impl IntoElement {
+) -> Input {
     input()
         .value(value)
         .placeholder(placeholder)
@@ -9248,12 +9356,16 @@ fn looks_like_curl(text: &str) -> bool {
         || text.starts_with("curl\r")
 }
 
+fn parse_status_code(text: &str) -> Option<u16> {
+    let code = text.split_whitespace().next()?.parse::<u16>().ok()?;
+    (100..600).contains(&code).then_some(code)
+}
+
 fn edited_status(compose: Compose) -> Option<u16> {
     if !compose.response.get() {
         return None;
     }
-    let code = compose.status.get().trim().parse::<u16>().ok()?;
-    (100..600).contains(&code).then_some(code)
+    parse_status_code(&compose.status.get())
 }
 
 fn lan_toggle(on: Signal<bool>, controls: Arc<Controls>) -> impl IntoElement {
@@ -9334,6 +9446,7 @@ fn begin_compose(controls: &Controls, id: Option<u64>, compose: Compose) {
         set_status(controls, StatusMsg::NeedSelection);
         return;
     };
+    controls.hub.touch_break();
     let response = controls
         .hub
         .paused()
@@ -11009,5 +11122,14 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
             "",
             "not valid"
         ));
+    }
+
+    #[test]
+    fn parse_status_code_accepts_three_digit_codes_and_reason_phrases() {
+        assert_eq!(super::parse_status_code("201"), Some(201));
+        assert_eq!(super::parse_status_code(" 201 Created "), Some(201));
+        assert_eq!(super::parse_status_code("99"), None);
+        assert_eq!(super::parse_status_code("600"), None);
+        assert_eq!(super::parse_status_code(""), None);
     }
 }

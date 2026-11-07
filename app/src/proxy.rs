@@ -97,6 +97,7 @@ pub struct Upstream {
 struct BreakSlot {
     id: u64,
     side: BreakSide,
+    touched: Instant,
     reply: Option<tokio::sync::oneshot::Sender<BreakDecision>>,
 }
 
@@ -330,25 +331,60 @@ impl Hub {
             .unwrap_or(false)
     }
 
+    pub fn touch_break(&self) {
+        if let Some(slot) = self
+            .break_slot
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .as_mut()
+        {
+            slot.touched = Instant::now();
+        }
+    }
+
     async fn wait_break(&self, id: u64, side: BreakSide) -> BreakDecision {
-        let (tx, rx) = tokio::sync::oneshot::channel();
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
         *self
             .break_slot
             .lock()
             .unwrap_or_else(|err| err.into_inner()) = Some(BreakSlot {
             id,
             side,
+            touched: Instant::now(),
             reply: Some(tx),
         });
         self.touch();
-        let decision = match timeout(Duration::from_secs(60), rx).await {
-            Ok(Ok(decision)) => decision,
-            _ => BreakDecision {
-                drop: false,
-                headers: None,
-                body: None,
-                status: None,
-            },
+        let decision = loop {
+            let remaining = {
+                let slot = self
+                    .break_slot
+                    .lock()
+                    .unwrap_or_else(|err| err.into_inner());
+                match slot.as_ref().filter(|slot| slot.id == id) {
+                    Some(slot) => Duration::from_secs(60).saturating_sub(slot.touched.elapsed()),
+                    None => Duration::ZERO,
+                }
+            };
+            if remaining.is_zero() {
+                break BreakDecision {
+                    drop: false,
+                    headers: None,
+                    body: None,
+                    status: None,
+                };
+            }
+            match timeout(remaining, &mut rx).await {
+                Ok(Ok(decision)) => break decision,
+                Ok(Err(_)) => {
+                    break BreakDecision {
+                        drop: false,
+                        headers: None,
+                        body: None,
+                        status: None,
+                    };
+                }
+                Err(_) => continue,
+            }
         };
         let mut slot = self
             .break_slot
@@ -620,6 +656,17 @@ impl Hub {
         body: Vec<u8>,
     ) {
         self.with_session(|session| session.replace_response(id, status, headers, body));
+        self.touch();
+    }
+
+    fn replace_response_head(&self, id: u64, status: u16, headers: Vec<(String, String)>) {
+        self.with_session(|session| {
+            let body = session
+                .get(id)
+                .map(|flow| flow.response_body.clone())
+                .unwrap_or_default();
+            session.replace_response(id, status, headers, body);
+        });
         self.touch();
     }
 
@@ -1766,6 +1813,7 @@ where
                     hub.set_error(id, "断点丢弃");
                     hub.replace_response(id, 204, Vec::new(), Vec::new());
                     write_bytes(client, 204, "No Content", &[], &[]).await?;
+                    hub.mark_finished(id);
                     return Ok(());
                 }
                 let mut next_headers = decision.headers.unwrap_or(resp_headers);
@@ -1778,7 +1826,11 @@ where
                     status = code;
                 }
                 let reason = reason_phrase(status);
-                hub.replace_response(id, status, next_headers.clone(), next_body.clone());
+                if replaced_body {
+                    hub.replace_response(id, status, next_headers.clone(), next_body.clone());
+                } else {
+                    hub.replace_response_head(id, status, next_headers.clone());
+                }
                 write_bytes(client, status, reason, &next_headers, &next_body).await?;
                 hub.mark_finished(id);
                 return Ok(());
@@ -2800,7 +2852,10 @@ where
 {
     let mut headers: Vec<(String, String)> = headers
         .iter()
-        .filter(|(name, _)| !name.eq_ignore_ascii_case("content-length"))
+        .filter(|(name, _)| {
+            !name.eq_ignore_ascii_case("content-length")
+                && !name.eq_ignore_ascii_case("transfer-encoding")
+        })
         .cloned()
         .collect();
     headers.push(("Content-Length".into(), body.len().to_string()));
@@ -3829,6 +3884,7 @@ async fn hold_hyper_response(
             if decision.drop {
                 hub.set_error(id, "断点丢弃");
                 hub.replace_response(id, 204, Vec::new(), Vec::new());
+                hub.mark_finished(id);
                 return response_from_headers(204, &[], &[]);
             }
             let status = decision.status.unwrap_or(parts.status.as_u16());
@@ -3840,9 +3896,17 @@ async fn hold_hyper_response(
             if replaced_body {
                 headers.retain(|(name, _)| !name.eq_ignore_ascii_case("content-encoding"));
             }
-            headers.retain(|(name, _)| !name.eq_ignore_ascii_case("content-length"));
+            headers.retain(|(name, _)| {
+                !name.eq_ignore_ascii_case("content-length")
+                    && !name.eq_ignore_ascii_case("transfer-encoding")
+            });
             headers.push(("Content-Length".into(), body.len().to_string()));
-            hub.replace_response(id, status, headers.clone(), body.clone());
+            if replaced_body {
+                hub.replace_response(id, status, headers.clone(), body.clone());
+            } else {
+                hub.replace_response_head(id, status, headers.clone());
+            }
+            hub.mark_finished(id);
             response_from_headers(status, &headers, &body)
         }
     }
@@ -5278,6 +5342,120 @@ mod tests {
             .expect("flow");
         assert_eq!(flow.status, Some(201));
         assert_eq!(flow.response_body, b"edited");
+        assert!(flow.finished_at.is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn https_response_break_can_replace_status_and_marks_finished() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let dir =
+            std::env::temp_dir().join(format!("zniff-https-break-res-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let (origin_ca, origin_leaf, leaf_key) = test_origin_cert();
+        let mut hub = Hub::new(ca.clone()).unwrap();
+        hub.add_trust_anchor(origin_ca.der().clone());
+        let hub = Arc::new(hub);
+
+        let mut server_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![origin_leaf.der().clone(), origin_ca.der().clone()],
+                rustls::pki_types::PrivateKeyDer::Pkcs8(
+                    rustls::pki_types::PrivatePkcs8KeyDer::from(leaf_key.serialize_der()),
+                ),
+            )
+            .unwrap();
+        server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
+        let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (sock, _) = origin.accept().await.unwrap();
+            let mut tls = acceptor.accept(sock).await.unwrap();
+            let mut buf = vec![0u8; 1024];
+            let _ = tls.read(&mut buf).await.unwrap();
+            tls.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\norig")
+                .await
+                .unwrap();
+            let _ = tls.shutdown().await;
+        });
+
+        hub.set_rules("break-res 127.0.0.1/hi");
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        let hub_serve = hub.clone();
+        tokio::spawn(async move {
+            let (socket, _) = proxy.accept().await.unwrap();
+            let _ = handle_conn(socket, hub_serve).await;
+        });
+
+        let hub_wait = hub.clone();
+        let waiter = tokio::spawn(async move {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                if hub_wait.paused_id() == Some(1) {
+                    hub_wait.touch_break();
+                    assert_eq!(
+                        hub_wait.paused().map(|(_, side)| side),
+                        Some(BreakSide::Response)
+                    );
+                    hub_wait.resolve_break(BreakDecision {
+                        drop: false,
+                        headers: None,
+                        body: None,
+                        status: Some(201),
+                    });
+                    return;
+                }
+                if std::time::Instant::now() > deadline {
+                    panic!("HTTPS 响应断点没有暂停");
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+
+        let mut tcp = TcpStream::connect(proxy_addr).await.unwrap();
+        let connect = format!("CONNECT {origin_addr} HTTP/1.1\r\nHost: {origin_addr}\r\n\r\n");
+        tcp.write_all(connect.as_bytes()).await.unwrap();
+        read_http_head(&mut tcp).await;
+
+        let mut roots = RootCertStore::empty();
+        roots.add(ca.cert_der()).unwrap();
+        let mut client_config = ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        client_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let mut tls = timeout(
+            Duration::from_secs(5),
+            TlsConnector::from(Arc::new(client_config))
+                .connect(ServerName::IpAddress(origin_addr.ip().into()), tcp),
+        )
+        .await
+        .expect("客户端 TLS 超时")
+        .expect("客户端 TLS");
+
+        let req = format!(
+            "GET /hi HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+            origin_addr.ip()
+        );
+        tls.write_all(req.as_bytes()).await.unwrap();
+        let mut resp = Vec::new();
+        timeout(Duration::from_secs(5), tls.read_to_end(&mut resp))
+            .await
+            .unwrap()
+            .unwrap();
+        waiter.await.unwrap();
+        let text = String::from_utf8_lossy(&resp);
+        assert!(text.contains("201"), "{text}");
+        assert!(text.contains("orig"), "{text}");
+        let flow = hub
+            .with_session(|session| session.get(1).cloned())
+            .expect("flow");
+        assert_eq!(flow.status, Some(201));
+        assert_eq!(flow.response_body, b"orig");
+        assert!(flow.finished_at.is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
