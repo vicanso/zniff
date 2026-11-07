@@ -45,7 +45,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           tag="$GITHUB_REF_NAME"
-          git cliff --latest --strip header > /tmp/notes.md || true
+          git cliff --tag-pattern '^v[0-9]+' --latest --strip header > /tmp/notes.md || true
           if ! grep -q '^- ' /tmp/notes.md; then
             echo "$tag" > /tmp/notes.md
           fi

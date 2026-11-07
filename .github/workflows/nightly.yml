@@ -1,9 +1,12 @@
 name: Nightly
 
-# Rolling nightly pre-release built from main. Runs daily when main has new
-# commits since the last nightly tag, or on demand via workflow_dispatch.
+# Rolling nightly pre-release. Triggered locally via `make nightly` (pushes the
+# `nightly` tag), daily on schedule when `main` has new commits, or manually
+# via workflow_dispatch.
 
 on:
+  push:
+    tags: ["nightly"]
   schedule:
     - cron: "0 18 * * *"
   workflow_dispatch:
@@ -11,7 +14,7 @@ on:
       force:
         description: "Build even if nightly already points at HEAD"
         required: false
-        default: false
+        default: true
         type: boolean
 
 concurrency:
@@ -42,12 +45,15 @@ jobs:
           git fetch --tags --force origin
           head_sha="$(git rev-parse HEAD)"
           nightly_sha="$(git rev-parse -q --verify "refs/tags/${NIGHTLY_TAG}^{commit}" || true)"
-          echo "HEAD=${head_sha} nightly=${nightly_sha:-none}"
-          if [ "${{ github.event_name }}" = "schedule" ] && [ "$head_sha" = "$nightly_sha" ]; then
+          echo "event=${{ github.event_name }} HEAD=${head_sha} nightly=${nightly_sha:-none}"
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "Triggered by nightly tag push; building."
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "schedule" ] && [ "$head_sha" = "$nightly_sha" ]; then
             echo "No new commits since last nightly build; skipping."
             echo "should_build=false" >> "$GITHUB_OUTPUT"
-          elif [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force }}" != "true" ] && [ "$head_sha" = "$nightly_sha" ]; then
-            echo "nightly already points at HEAD (use force=true to rebuild); skipping."
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force }}" = "false" ] && [ "$head_sha" = "$nightly_sha" ]; then
+            echo "nightly already points at HEAD (set force=true to rebuild); skipping."
             echo "should_build=false" >> "$GITHUB_OUTPUT"
           else
             echo "should_build=true" >> "$GITHUB_OUTPUT"
@@ -68,15 +74,17 @@ jobs:
           build_date="$(date -u +%Y-%m-%d)"
           title="Nightly (${build_date} · ${short_sha})"
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -f "$NIGHTLY_TAG" "$head_sha"
-          git push origin "refs/tags/$NIGHTLY_TAG" --force
+          if [ "${{ github.event_name }}" != "push" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -f "$NIGHTLY_TAG" "$head_sha"
+            git push origin "refs/tags/$NIGHTLY_TAG" --force
+          fi
 
           {
-            echo "Automated nightly pre-release built from \`main\` at commit \`${short_sha}\` (${build_date} UTC)."
+            echo "Automated nightly pre-release built at commit \`${short_sha}\` (${build_date} UTC)."
             echo ""
-            git cliff --unreleased --strip header 2>/dev/null || git log -n 15 --pretty=format:'- %s (%h)'
+            git cliff --tag-pattern '^v[0-9]+' --unreleased --strip header 2>/dev/null || git log -n 15 --pretty=format:'- %s (%h)'
             echo ""
           } > /tmp/notes.md
 

@@ -8,7 +8,7 @@ CARGO_FLAGS := --manifest-path $(MANIFEST)
 VERSION := $(shell sed -n 's/^version = "\([^"]*\)"/\1/p' $(MANIFEST) | head -1)
 
 .PHONY: all help build dev debug run fmt lint test check release bundle clean \
-	bloat udeps version version-patch version-minor version-major tag changelog
+	bloat udeps version version-patch version-minor version-major tag nightly changelog
 
 # --- develop ---------------------------------------------------------------
 
@@ -33,6 +33,7 @@ help:
 		'version-patch | version-minor | version-major' \
 		'         bump app/Cargo.toml, then prepend CHANGELOG.md' \
 		'tag      annotate v$(VERSION) (push it yourself)' \
+		'nightly  move and push the nightly tag to trigger a Nightly pre-release' \
 		'changelog  regenerate CHANGELOG.md from conventional commits' \
 		'' \
 		'Extra cargo arguments go in ARGS, for example: make test ARGS=--offline'
@@ -104,21 +105,21 @@ clean:
 # because re-running it would prepend a second section under the same number.
 
 version:
-	@git describe --tags --abbrev=0 >/dev/null 2>&1 || { \
+	@git describe --tags --match 'v[0-9]*' --abbrev=0 >/dev/null 2>&1 || { \
 		echo "no release tag exists — git cliff would treat the ENTIRE history as"; \
 		echo "unreleased and repeat it under v$(VERSION). Tag the previous release"; \
 		echo "first: git tag -a vX.Y.Z <commit>"; exit 1; }
 	@! git rev-parse -q --verify "refs/tags/v$(VERSION)" >/dev/null || { \
 		echo "v$(VERSION) is already tagged — this would add a second $(VERSION)"; \
 		echo "section to CHANGELOG.md. Bump first: make version-patch"; exit 1; }
-	git cliff --unreleased --tag v$(VERSION) --prepend CHANGELOG.md
-	@n=$$(git cliff --unreleased --tag v$(VERSION) 2>&1 >/dev/null \
+	git cliff --tag-pattern '^v[0-9]+' --unreleased --tag v$(VERSION) --prepend CHANGELOG.md
+	@n=$$(git cliff --tag-pattern '^v[0-9]+' --unreleased --tag v$(VERSION) 2>&1 >/dev/null \
 		| grep -o '[0-9]* commit(s) were skipped' | grep -o '^[0-9]*'); \
 	if [ -n "$$n" ]; then \
 		echo ""; \
 		echo "WARNING: $$n commit(s) are missing from the v$(VERSION) section — not"; \
 		echo "conventional-commit syntax. This names them:"; \
-		echo "  git cliff --unreleased -vv 2>&1 | grep 'did not match'"; \
+		echo "  git cliff --tag-pattern '^v[0-9]+' --unreleased -vv 2>&1 | grep 'did not match'"; \
 	fi
 
 # Bump app/Cargo.toml (+ app/Cargo.lock) via cargo-edit, then run `version`
@@ -140,7 +141,21 @@ tag:
 	git tag -a v$(VERSION) -m "version $(VERSION)"
 	@echo "created v$(VERSION) — push it with: git push origin v$(VERSION)"
 
+nightly:
+	@if [ -n "$$(git status --porcelain)" ]; then \
+		echo "working tree is dirty — commit or stash changes before make nightly" >&2; \
+		exit 1; \
+	fi
+	git tag -f nightly HEAD
+	@remote_sha=$$(git ls-remote --tags origin refs/tags/nightly | awk '{print $$1}'); \
+	head_sha=$$(git rev-parse HEAD); \
+	if [ "$$remote_sha" = "$$head_sha" ]; then \
+		git push origin :refs/tags/nightly; \
+	fi
+	git push -f origin refs/tags/nightly
+	@echo "triggered nightly build for $$(git rev-parse --short=7 HEAD)"
+
 # Regenerate CHANGELOG.md from conventional commits (git-cliff).
 # Run it in the version-bump commit, before tagging.
 changelog:
-	git cliff -o CHANGELOG.md
+	git cliff --tag-pattern '^v[0-9]+' -o CHANGELOG.md
