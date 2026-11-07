@@ -2160,7 +2160,8 @@ fn profile_dock(
                                 breaks_on.get(),
                                 show_tunnels.get(),
                             );
-                            export_profiles_file(export_controls.clone(), profiles);
+                            let preferred_name = shown_name().unwrap_or_default();
+                            export_profiles_file(export_controls.clone(), preferred_name, profiles);
                         })
                         .child(
                             text(tr("导出", "Export"))
@@ -8924,7 +8925,43 @@ fn profiles_for_export(
     )
 }
 
-fn export_profiles_file(controls: Arc<Controls>, profiles: Vec<config::SavedProfile>) {
+fn profile_export_filename(
+    preferred_name: &str,
+    profiles: &[config::SavedProfile],
+    secs: u64,
+) -> String {
+    let raw = if !preferred_name.trim().is_empty() {
+        preferred_name.trim()
+    } else {
+        profiles
+            .first()
+            .map(|preset| preset.name.trim())
+            .unwrap_or_default()
+    };
+    let sanitized: String = raw
+        .chars()
+        .map(|ch| {
+            if ch.is_control() || matches!(ch, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+            {
+                '-'
+            } else {
+                ch
+            }
+        })
+        .collect();
+    let sanitized = sanitized.trim_matches(|ch: char| ch.is_whitespace() || ch == '.' || ch == '-');
+    if sanitized.is_empty() {
+        format!("zniff-profiles-{secs}.toml")
+    } else {
+        format!("zniff-{sanitized}.toml")
+    }
+}
+
+fn export_profiles_file(
+    controls: Arc<Controls>,
+    preferred_name: String,
+    profiles: Vec<config::SavedProfile>,
+) {
     let toml_text = match config::export_profiles_toml(&profiles) {
         Ok(text) => text,
         Err(err) => {
@@ -8937,8 +8974,9 @@ fn export_profiles_file(controls: Arc<Controls>, profiles: Vec<config::SavedProf
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
+    let file_name = profile_export_filename(&preferred_name, &profiles, secs);
     let dialog = nsh_core::file_dialog::SaveDialog::new()
-        .file_name(format!("zniff-profiles-{secs}.toml"))
+        .file_name(file_name)
         .filter(nsh_core::file_dialog::FileFilter::new("TOML", ["toml"]));
     spawn(async move {
         match pick_save_path(dialog).await {
@@ -9992,6 +10030,18 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
         );
         assert_eq!(exported.len(), 1);
         assert_eq!(exported[0].name, "Dev");
+        assert_eq!(
+            super::profile_export_filename("Dev", &exported, 123),
+            "zniff-Dev.toml"
+        );
+        assert_eq!(
+            super::profile_export_filename("prod/api:v1", &exported, 123),
+            "zniff-prod-api-v1.toml"
+        );
+        assert_eq!(
+            super::profile_export_filename("", &[], 123),
+            "zniff-profiles-123.toml"
+        );
         let toml_text = crate::config::export_profiles_toml(&exported).unwrap();
         let parsed = super::parse_profiles_from_text_or_path(&toml_text).unwrap();
         assert_eq!(parsed, exported);
