@@ -237,6 +237,8 @@ pub struct Config {
     pub upstream_proxy: String,
     /// On unless the file says otherwise, so an older `config.toml` keeps today's list.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub show_id: bool,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub show_status: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub show_protocol: bool,
@@ -298,6 +300,7 @@ impl Default for Config {
             bypass_hosts: String::new(),
             rules: String::new(),
             upstream_proxy: String::new(),
+            show_id: true,
             show_status: true,
             show_protocol: false,
             show_path: true,
@@ -344,8 +347,13 @@ pub fn column_width_limit(key: &str) -> Option<ColumnWidth> {
             min: 56,
             max: 220,
         },
+        "id" => ColumnWidth {
+            default: 44,
+            min: 36,
+            max: 120,
+        },
         "path" => ColumnWidth {
-            default: 240,
+            default: 196,
             min: 80,
             max: 800,
         },

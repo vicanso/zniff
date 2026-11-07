@@ -736,12 +736,16 @@ where
             unreachable!();
         };
         record_tunnel(&hub, host, port, "不是 TLS，已改为隧道".into());
-        return tunnel_after_hello(&mut client, raw, host, port, &hub).await;
+        return tunnel_after_hello(&mut client, raw, host, port, &hub)
+            .await
+            .map(|_| ());
     };
     let sni_host = hello.sni.clone().unwrap_or_else(|| host.to_string());
     if hub.skips_tls(&sni_host) {
         record_tunnel(&hub, &sni_host, port, "直通名单，未解密".into());
-        return tunnel_after_hello(&mut client, hello.raw, host, port, &hub).await;
+        return tunnel_after_hello(&mut client, hello.raw, host, port, &hub)
+            .await
+            .map(|_| ());
     }
     let offers_h2 = hello.alpn.iter().any(|proto| proto == b"h2");
     if offers_h2 && let Some((mut sender, generation)) = hub.cached_h2(&(sni_host.clone(), port)) {
@@ -765,17 +769,30 @@ where
         }
         Ok(Err(err)) => {
             // The bytes still go through as a tunnel, so the site keeps
-            // working and there is no decrypted request. The row is optional.
+            // working and there is no decrypted request. The row is optional
+            // only when the fallback tunnel actually carries traffic.
             let reason = origin_tls_reason(&err);
             log::debug!("源站 TLS 失败，改隧道 {sni_host}:{port}: {reason} ({err:#})");
-            if hub.show_tunnel_failures.load(Ordering::Relaxed) {
+            let recorded = hub.show_tunnel_failures.load(Ordering::Relaxed);
+            if recorded {
+                record_tunnel(&hub, &sni_host, port, reason.clone());
+            }
+            let result = tunnel_after_hello(&mut client, hello.raw, host, port, &hub).await;
+            if !recorded
+                && !matches!(
+                    result,
+                    Ok((from_client, from_origin)) if from_client > 16 && from_origin > 0
+                )
+            {
                 record_tunnel(&hub, &sni_host, port, reason);
             }
-            tunnel_after_hello(&mut client, hello.raw, host, port, &hub).await
+            result.map(|_| ())
         }
         Err(_) => {
             record_tunnel(&hub, &sni_host, port, "连接源站超时，已改为隧道".into());
-            tunnel_after_hello(&mut client, hello.raw, host, port, &hub).await
+            tunnel_after_hello(&mut client, hello.raw, host, port, &hub)
+                .await
+                .map(|_| ())
         }
     }
 }
@@ -1409,7 +1426,7 @@ async fn tunnel_after_hello<S>(
     host: &str,
     port: u16,
     hub: &Hub,
-) -> Result<()>
+) -> Result<(u64, u64)>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -1418,8 +1435,7 @@ where
         .context("隧道连接源站超时")??;
     origin.set_nodelay(true).ok();
     origin.write_all(&hello).await?;
-    copy_bidirectional(client, &mut origin).await?;
-    Ok(())
+    copy_bidirectional(client, &mut origin).await
 }
 
 async fn plain_http<S>(client: &mut S, head: &Head, hub: Arc<Hub>) -> Result<()>
@@ -2931,13 +2947,12 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Prefixed<S> {
     }
 }
 
-async fn copy_bidirectional<A, B>(a: &mut A, b: &mut B) -> Result<()>
+async fn copy_bidirectional<A, B>(a: &mut A, b: &mut B) -> Result<(u64, u64)>
 where
     A: AsyncRead + AsyncWrite + Unpin,
     B: AsyncRead + AsyncWrite + Unpin,
 {
-    tokio::io::copy_bidirectional(a, b).await?;
-    Ok(())
+    Ok(tokio::io::copy_bidirectional(a, b).await?)
 }
 
 /// Forwards bytes immediately and parses WebSocket frames from the copy.

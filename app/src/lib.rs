@@ -310,6 +310,7 @@ struct RowLine {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ListColumns {
+    id: bool,
     status: bool,
     protocol: bool,
     path: bool,
@@ -323,6 +324,7 @@ struct ListColumns {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ListColumn {
+    Id,
     Path,
     Status,
     Protocol,
@@ -333,7 +335,8 @@ enum ListColumn {
 }
 
 impl ListColumn {
-    const ORDERED: [Self; 7] = [
+    const ORDERED: [Self; 8] = [
+        Self::Id,
         Self::Path,
         Self::Status,
         Self::Protocol,
@@ -345,6 +348,7 @@ impl ListColumn {
 
     fn key(self) -> &'static str {
         match self {
+            Self::Id => "id",
             Self::Path => "path",
             Self::Status => "status",
             Self::Protocol => "protocol",
@@ -357,6 +361,7 @@ impl ListColumn {
 
     fn labels(self) -> (&'static str, &'static str) {
         match self {
+            Self::Id => ("序号", "#"),
             Self::Path => ("路径", "Path"),
             Self::Status => ("状态", "Status"),
             Self::Protocol => ("协议", "Protocol"),
@@ -371,6 +376,7 @@ impl ListColumn {
 impl ListColumns {
     fn from_config(config: &config::Config) -> Self {
         Self {
+            id: config.show_id,
             status: config.show_status,
             protocol: config.show_protocol,
             path: config.show_path,
@@ -385,6 +391,7 @@ impl ListColumns {
 
     fn on(self, column: ListColumn) -> bool {
         match column {
+            ListColumn::Id => self.id,
             ListColumn::Status => self.status,
             ListColumn::Protocol => self.protocol,
             ListColumn::Path => self.path,
@@ -398,6 +405,7 @@ impl ListColumns {
     fn toggle(self, column: ListColumn) -> Self {
         let mut next = self;
         match column {
+            ListColumn::Id => next.id = !next.id,
             ListColumn::Status => next.status = !next.status,
             ListColumn::Protocol => next.protocol = !next.protocol,
             ListColumn::Path => next.path = !next.path,
@@ -426,6 +434,7 @@ impl ListColumns {
     }
 
     fn write(self, config: &mut config::Config) {
+        config.show_id = self.id;
         config.show_status = self.status;
         config.show_protocol = self.protocol;
         config.show_path = self.path;
@@ -439,16 +448,18 @@ impl ListColumns {
 }
 
 /// Columns the table shows, in order. Method is always first and fixed.
-/// Path, when shown, is the next fixed column. The rest scroll under them.
+/// Id and Path, when shown, stay in the fixed left group. The rest scroll under them.
 /// Widths are the last saved drag, not a live value: the table keeps a drag
 /// until this list changes, and a changed width here would fight the drag.
 fn flow_table_columns(shown: ListColumns, widths: &HashMap<String, u32>) -> Vec<DataTableColumn> {
     std::iter::once(("method", true, true))
-        .chain(
-            ListColumn::ORDERED
-                .into_iter()
-                .map(|col| (col.key(), col == ListColumn::Path, shown.on(col))),
-        )
+        .chain(ListColumn::ORDERED.into_iter().map(|col| {
+            (
+                col.key(),
+                matches!(col, ListColumn::Id | ListColumn::Path),
+                shown.on(col),
+            )
+        }))
         .filter(|spec| spec.2)
         .map(|(key, fixed, _)| {
             let limit = config::column_width_limit(key).expect("known column");
@@ -472,6 +483,7 @@ fn flow_table_columns(shown: ListColumns, widths: &HashMap<String, u32>) -> Vec<
 fn flow_column_title(key: &str, full_url: bool) -> String {
     match key {
         "method" => tr("方法", "Method")(),
+        "id" => tr("序号", "#")(),
         "path" => {
             if full_url {
                 "URL".to_string()
@@ -3952,7 +3964,7 @@ fn flow_table(
         .child(dynamic(move || {
             let _ = columns.with(|c| {
                 (
-                    c.path, c.status, c.protocol, c.gap, c.elapsed, c.host, c.size,
+                    c.id, c.path, c.status, c.protocol, c.gap, c.elapsed, c.host, c.size,
                 )
             });
             let blur_header = Rc::clone(&blur_header);
@@ -4470,6 +4482,7 @@ fn flow_cell(
     let index = cell.row as usize;
     match cell.key.as_ref() {
         "method" => method_cell(rows, selected, baseline, index).into_element(),
+        "id" => id_cell(rows, index).into_element(),
         "path" => path_cell(rows, columns, hover, index).into_element(),
         "status" => status_text(rows, index).into_element(),
         "protocol" => protocol_cell(rows, index).into_element(),
@@ -4582,6 +4595,21 @@ fn method_cell(
                     }),
                 ),
         )
+}
+
+fn id_cell(rows: Signal<Vec<RowLine>>, index: usize) -> Text {
+    mono(move || {
+        rows.with(|rows| {
+            rows.get(index)
+                .map(|row| row.id.to_string())
+                .unwrap_or_default()
+        })
+    })
+    .pl(px(4.0))
+    .pr(px(4.0))
+    .number_of_lines(1)
+    .text_size(px(12.0))
+    .text_color(fg_muted())
 }
 
 fn status_text(rows: Signal<Vec<RowLine>>, index: usize) -> Text {
@@ -9718,6 +9746,7 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
     #[test]
     fn flow_columns_pin_method_and_path_and_keep_a_dragged_width() {
         let shown = super::ListColumns {
+            id: false,
             status: true,
             protocol: false,
             path: true,
@@ -9754,10 +9783,17 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
         let default_shown = super::ListColumns::from_config(&crate::config::Config::default());
         let default_cols =
             super::flow_table_columns(default_shown, &std::collections::HashMap::new());
+        let default_keys: Vec<&str> = default_cols.iter().map(|c| c.key.as_ref()).collect();
+        assert_eq!(
+            default_keys,
+            ["method", "id", "path", "status", "gap", "elapsed", "host"]
+        );
+        assert!(default_cols[0].fixed && default_cols[1].fixed && default_cols[2].fixed);
         let default_sum: f32 = default_cols.iter().map(|c| c.width.unwrap().0).sum();
         assert_eq!(default_sum, crate::config::LIST_WIDTH_DEFAULT as f32);
 
         let all_shown = super::ListColumns {
+            id: true,
             path: true,
             status: true,
             protocol: true,
