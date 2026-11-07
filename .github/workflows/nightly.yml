@@ -1,0 +1,304 @@
+name: Nightly
+
+# Rolling nightly pre-release built from main. Runs daily when main has new
+# commits since the last nightly tag, or on demand via workflow_dispatch.
+
+on:
+  schedule:
+    - cron: "0 18 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Build even if nightly already points at HEAD"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: nightly
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: 1.99.1
+  APP_NAME: zniff
+  NIGHTLY_TAG: nightly
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: check whether HEAD is newer than nightly
+        id: check
+        run: |
+          git fetch --tags --force origin
+          head_sha="$(git rev-parse HEAD)"
+          nightly_sha="$(git rev-parse -q --verify "refs/tags/${NIGHTLY_TAG}^{commit}" || true)"
+          echo "HEAD=${head_sha} nightly=${nightly_sha:-none}"
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "$head_sha" = "$nightly_sha" ]; then
+            echo "No new commits since last nightly build; skipping."
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force }}" != "true" ] && [ "$head_sha" = "$nightly_sha" ]; then
+            echo "nightly already points at HEAD (use force=true to rebuild); skipping."
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: install git-cliff
+        if: steps.check.outputs.should_build == 'true'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: git-cliff@2.13.1
+      - name: update nightly tag and pre-release
+        if: steps.check.outputs.should_build == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          head_sha="$(git rev-parse HEAD)"
+          short_sha="$(git rev-parse --short=7 HEAD)"
+          build_date="$(date -u +%Y-%m-%d)"
+          title="Nightly (${build_date} · ${short_sha})"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f "$NIGHTLY_TAG" "$head_sha"
+          git push origin "refs/tags/$NIGHTLY_TAG" --force
+
+          {
+            echo "Automated nightly pre-release built from \`main\` at commit \`${short_sha}\` (${build_date} UTC)."
+            echo ""
+            git cliff --unreleased --strip header 2>/dev/null || git log -n 15 --pretty=format:'- %s (%h)'
+            echo ""
+          } > /tmp/notes.md
+
+          if gh release view "$NIGHTLY_TAG" >/dev/null 2>&1; then
+            gh release edit "$NIGHTLY_TAG" \
+              --title "$title" \
+              --notes-file /tmp/notes.md \
+              --prerelease \
+              --latest=false
+          else
+            gh release create "$NIGHTLY_TAG" \
+              --title "$title" \
+              --notes-file /tmp/notes.md \
+              --prerelease \
+              --latest=false
+          fi
+
+  macos:
+    needs: prepare
+    if: needs.prepare.outputs.should_build == 'true'
+    name: macos-${{ matrix.dmg_suffix }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            dmg_suffix: aarch64
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            dmg_suffix: x86_64
+    steps:
+      - name: preflight notary credentials
+        env:
+          AC_USERNAME: ${{ secrets.AC_USERNAME }}
+          AC_PASSWORD: ${{ secrets.AC_PASSWORD }}
+          AC_TEAM_ID: ${{ secrets.AC_TEAM_ID }}
+        run: |
+          xcrun notarytool history --apple-id "$AC_USERNAME" \
+            --password "$AC_PASSWORD" --team-id "$AC_TEAM_ID" >/dev/null
+          echo "notary credentials OK"
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.target }}
+      - name: rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app
+          key: macos-build-${{ matrix.target }}
+      - name: install tools
+        run: |
+          brew install create-dmg
+      - name: Import Code-Signing Certificates
+        env:
+          p12_certificate: ${{ secrets.MACOS_CERTIFICATE }}
+          p12_password: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+        run: |
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          security create-keychain -p "" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "" "$KEYCHAIN_PATH"
+
+          CERT_PATH="$RUNNER_TEMP/certificate.p12"
+          echo "$p12_certificate" | base64 --decode > "$CERT_PATH"
+          security import "$CERT_PATH" -k "$KEYCHAIN_PATH" -P "$p12_password" -T /usr/bin/codesign
+          rm -f "$CERT_PATH"
+
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+      - name: workspace must be clean before the build
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "workspace is dirty" >&2
+            git status --porcelain >&2
+            exit 1
+          fi
+          echo "clean at $(git rev-parse --short=12 HEAD)"
+      - name: release
+        run: cargo build --manifest-path app/Cargo.toml --release --target ${{ matrix.target }}
+      - name: bundle app
+        run: |
+          set -euo pipefail
+          bin="app/target/${{ matrix.target }}/release/${{ env.APP_NAME }}"
+          mkdir -p bundle-stage
+          scripts/macos-app.sh "$bin" "bundle-stage/${{ env.APP_NAME }}.app"
+      - name: sign app
+        env:
+          CERT_NAME: ${{ secrets.MACOS_CERTIFICATE_NAME }}
+        run: |
+          echo "Signing App with identity: $CERT_NAME"
+          APP="bundle-stage/${{ env.APP_NAME }}.app"
+          for attempt in 1 2 3 4 5; do
+            if codesign --force --deep --verbose --options runtime --timestamp \
+              --sign "$CERT_NAME" \
+              "$APP"; then
+              echo "codesign succeeded on attempt $attempt"
+              break
+            fi
+            if [ "$attempt" -eq 5 ]; then
+              echo "codesign still failing after $attempt attempts" >&2
+              exit 1
+            fi
+            echo "codesign attempt $attempt failed (timestamp server?); retrying in 15s…"
+            sleep 15
+          done
+          if ! codesign -dvv "$APP" 2>&1 | grep -q "^Timestamp="; then
+            echo "no secure timestamp embedded in the signature" >&2
+            exit 1
+          fi
+      - name: create dmg
+        run: |
+          mkdir -p release
+          DMG_NAME="release/${{ env.APP_NAME }}-${{ matrix.dmg_suffix }}.dmg"
+          APP_PATH="bundle-stage/${{ env.APP_NAME }}.app"
+          create-dmg \
+            --volname "${{ env.APP_NAME }} Installer" \
+            --window-pos 200 120 \
+            --window-size 800 400 \
+            --icon-size 100 \
+            --icon "${{ env.APP_NAME }}.app" 200 190 \
+            --hide-extension "${{ env.APP_NAME }}.app" \
+            --app-drop-link 600 185 \
+            "$DMG_NAME" \
+            "$APP_PATH"
+      - name: notarize dmg
+        env:
+          AC_USERNAME: ${{ secrets.AC_USERNAME }}
+          AC_PASSWORD: ${{ secrets.AC_PASSWORD }}
+          AC_TEAM_ID: ${{ secrets.AC_TEAM_ID }}
+        run: |
+          DMG_NAME="release/${{ env.APP_NAME }}-${{ matrix.dmg_suffix }}.dmg"
+          echo "Submitting DMG for notarization..."
+          xcrun notarytool submit "$DMG_NAME" \
+            --apple-id "$AC_USERNAME" \
+            --password "$AC_PASSWORD" \
+            --team-id "$AC_TEAM_ID" \
+            --wait
+      - name: wait for propagation
+        run: sleep 30
+      - name: staple DMG
+        run: |
+          DMG_NAME="release/${{ env.APP_NAME }}-${{ matrix.dmg_suffix }}.dmg"
+          xcrun stapler staple "$DMG_NAME"
+      - name: upload asset (nightly)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "$NIGHTLY_TAG" \
+            "release/${{ env.APP_NAME }}-${{ matrix.dmg_suffix }}.dmg" --clobber
+
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.should_build == 'true'
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bin: zniff.exe
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            bin: zniff
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - name: GTK 4
+        if: matrix.name == 'linux-x86_64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libgtk-4-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.target }}
+      - name: rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app
+          key: release-${{ matrix.target }}
+      - name: release
+        run: cargo build --manifest-path app/Cargo.toml --release --target ${{ matrix.target }}
+      - name: package
+        run: |
+          set -euo pipefail
+          bin="app/target/${{ matrix.target }}/release/${{ matrix.bin }}"
+          stage="${{ env.APP_NAME }}-${{ matrix.name }}"
+          rm -rf "$stage"
+          mkdir -p "$stage"
+          cp "$bin" "$stage/"
+          tar -czf "$stage.tar.gz" "$stage"
+          ls -l "$stage.tar.gz"
+      - name: upload
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "$NIGHTLY_TAG" \
+            "${{ env.APP_NAME }}-${{ matrix.name }}.tar.gz" --clobber
+
+  checksums:
+    needs: [prepare, macos, build]
+    if: needs.prepare.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: SHA256SUMS
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release download "$NIGHTLY_TAG" --pattern '*.dmg' --pattern '*.tar.gz' --dir downloaded
+          (cd downloaded && sha256sum -- * | sort -k2 > ../SHA256SUMS)
+          cat SHA256SUMS
+          gh release upload "$NIGHTLY_TAG" SHA256SUMS --clobber
