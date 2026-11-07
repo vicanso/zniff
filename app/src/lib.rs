@@ -9892,7 +9892,7 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
             id: 1,
             method: "GET".to_string(),
             status: Some(200),
-            time: "+0 ms".to_string(),
+            time: "0 ms".to_string(),
             clock: "12:00:00.000".to_string(),
             elapsed: "10 ms".to_string(),
             elapsed_slow: false,

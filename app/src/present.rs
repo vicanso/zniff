@@ -1052,45 +1052,45 @@ pub fn format_clock(time: SystemTime) -> String {
 }
 
 /// Gap from the previous arrival. The first flow, and a clock that steps
-/// backwards, both read as `+0 ms`.
+/// backwards, both read as `0 ms`.
 pub fn format_gap(previous: Option<SystemTime>, started: SystemTime) -> String {
     let Some(previous) = previous else {
-        return "+0 ms".into();
+        return "0 ms".into();
     };
     match started.duration_since(previous) {
         Ok(duration) => format_delta(duration),
-        Err(_) => "+0 ms".into(),
+        Err(_) => "0 ms".into(),
     }
 }
 
 fn format_delta(duration: Duration) -> String {
     let ms = duration.as_millis();
     if ms < 1_000 {
-        return format!("+{ms} ms");
+        return format!("{ms} ms");
     }
     if ms < 10_000 {
         let whole = ms / 1_000;
         let frac = (ms % 1_000) / 10;
-        return format!("+{whole}.{frac:02} s");
+        return format!("{whole}.{frac:02} s");
     }
     if ms < 60_000 {
         let whole = ms / 1_000;
         let frac = (ms % 1_000) / 100;
-        return format!("+{whole}.{frac} s");
+        return format!("{whole}.{frac} s");
     }
     if ms < 3_600_000 {
-        // Hundredths of a minute. 60_000 ms is `+1.00 m`.
+        // Hundredths of a minute. 60_000 ms is `1.00 m`.
         let hundredths = ms / 600;
         if hundredths < 1_000 {
-            return format!("+{}.{:02} m", hundredths / 100, hundredths % 100);
+            return format!("{}.{:02} m", hundredths / 100, hundredths % 100);
         }
-        return format!("+{} m", hundredths / 100);
+        return format!("{} m", hundredths / 100);
     }
     let tenths = ms / 360_000;
     if tenths < 100 {
-        format!("+{}.{} h", tenths / 10, tenths % 10)
+        format!("{}.{} h", tenths / 10, tenths % 10)
     } else {
-        format!("+{} h", tenths / 10)
+        format!("{} h", tenths / 10)
     }
 }
 
@@ -1449,26 +1449,26 @@ mod tests {
             format_elapsed(start, Some(start + Duration::from_millis(1_240))),
             "1.24 s"
         );
-        assert_eq!(format_gap(None, start), "+0 ms");
+        assert_eq!(format_gap(None, start), "0 ms");
         assert_eq!(
             format_gap(Some(start + Duration::from_secs(2)), start),
-            "+0 ms"
+            "0 ms"
         );
         assert_eq!(
             format_gap(Some(start), start + Duration::from_millis(45)),
-            "+45 ms"
+            "45 ms"
         );
         assert_eq!(
             format_gap(Some(start), start + Duration::from_millis(1_240)),
-            "+1.24 s"
+            "1.24 s"
         );
         assert_eq!(
             format_gap(Some(start), start + Duration::from_millis(10_500)),
-            "+10.5 s"
+            "10.5 s"
         );
         assert_eq!(
             format_gap(Some(start), start + Duration::from_millis(90_000)),
-            "+1.50 m"
+            "1.50 m"
         );
         let clock = format_clock(start + Duration::from_millis(123));
         assert!(clock.ends_with(".123"), "{clock}");
