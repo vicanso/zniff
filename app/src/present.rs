@@ -531,9 +531,9 @@ pub fn sort_headers_pretty(headers: &mut [(String, String)]) {
     });
 }
 
-/// Pretty rows for one `Cookie` or `Set-Cookie` header. Other headers return `None`.
+/// Pretty rows for one `Cookie` header. Other headers (including `Set-Cookie`) return `None`.
 pub fn pretty_cookie_rows(header: &str, value: &str) -> Option<Vec<(String, String)>> {
-    if !header.eq_ignore_ascii_case("cookie") && !header.eq_ignore_ascii_case("set-cookie") {
+    if !header.eq_ignore_ascii_case("cookie") {
         return None;
     }
     let pairs = cookie_pairs(value);
@@ -1355,7 +1355,8 @@ mod tests {
         assert_eq!(rows[1].0, "Cookie · theme");
         assert_eq!(rows[1].1, "dark");
         assert!(pretty_cookie_rows("Accept", "text/plain").is_none());
-        assert!(pretty_cookie_rows("Set-Cookie", "   ").is_none());
+        assert!(pretty_cookie_rows("Set-Cookie", "id=a; Path=/; HttpOnly").is_none());
+        assert!(pretty_cookie_rows("Cookie", "   ").is_none());
     }
 
     #[test]
