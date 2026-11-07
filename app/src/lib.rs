@@ -46,6 +46,11 @@ use crate::session::Direction;
 
 pub use sysproxy::restore_if_dirty;
 
+pub fn initial_window_size() -> (i32, i32) {
+    let cfg = saved_config();
+    (cfg.window_width as i32, cfg.window_height as i32)
+}
+
 struct Controls {
     hub: Arc<Hub>,
     capture: Mutex<Option<Capture>>,
@@ -691,6 +696,8 @@ pub fn App() -> impl IntoElement {
     let filter_tick = filter;
     let filter_pending = stored(filter.get());
     let filter_since = stored(None::<SystemTime>);
+    let win_pending = stored((saved.window_width, saved.window_height));
+    let win_since = stored(None::<SystemTime>);
     let selected_tick = selected;
     let rows_tick = rows;
     let total_tick = flow_total;
@@ -758,6 +765,27 @@ pub fn App() -> impl IntoElement {
         {
             remember_filter(&filter_now);
             filter_since.replace(None);
+        }
+        let win_size = window();
+        if win_size.width.0.is_finite()
+            && win_size.height.0.is_finite()
+            && win_size.width.0 > 0.0
+            && win_size.height.0 > 0.0
+        {
+            let win_now = (
+                config::clamp_window_width(win_size.width.0.round() as u32),
+                config::clamp_window_height(win_size.height.0.round() as u32),
+            );
+            if win_now != win_pending.get() {
+                win_pending.replace(win_now);
+                win_since.replace(Some(SystemTime::now()));
+            } else if win_since
+                .get()
+                .is_some_and(|at| at.elapsed().unwrap_or_default() >= Duration::from_millis(500))
+            {
+                remember_window_size(win_now.0, win_now.1);
+                win_since.replace(None);
+            }
         }
         let spill_expired =
             if spill_gc_at.get().elapsed().unwrap_or_default() >= Duration::from_secs(15) {
@@ -3046,6 +3074,19 @@ fn remember_filter(current: &str) {
         // cannot be written; the next pause tries again.
         let _ = err;
     }
+}
+
+fn remember_window_size(width: u32, height: u32) {
+    let width = config::clamp_window_width(width);
+    let height = config::clamp_window_height(height);
+    let current = saved_config();
+    if current.window_width == width && current.window_height == height {
+        return;
+    }
+    let _ = save_config(|config| {
+        config.window_width = width;
+        config.window_height = height;
+    });
 }
 
 fn filter_chip(

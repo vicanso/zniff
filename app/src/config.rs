@@ -44,8 +44,24 @@ pub const LIST_WIDTH_DEFAULT: u32 = 560;
 pub const LIST_WIDTH_MIN: u32 = 280;
 pub const LIST_WIDTH_MAX: u32 = 1100;
 
+/// Window size when `config.toml` has no `window_width` / `window_height`.
+pub const WINDOW_WIDTH_DEFAULT: u32 = 1200;
+pub const WINDOW_WIDTH_MIN: u32 = 720;
+pub const WINDOW_WIDTH_MAX: u32 = 7680;
+pub const WINDOW_HEIGHT_DEFAULT: u32 = 760;
+pub const WINDOW_HEIGHT_MIN: u32 = 480;
+pub const WINDOW_HEIGHT_MAX: u32 = 4320;
+
 pub fn clamp_list_width(width: u32) -> u32 {
     width.clamp(LIST_WIDTH_MIN, LIST_WIDTH_MAX)
+}
+
+pub fn clamp_window_width(width: u32) -> u32 {
+    width.clamp(WINDOW_WIDTH_MIN, WINDOW_WIDTH_MAX)
+}
+
+pub fn clamp_window_height(height: u32) -> u32 {
+    height.clamp(WINDOW_HEIGHT_MIN, WINDOW_HEIGHT_MAX)
 }
 
 const LEGACY: &[&str] = &[
@@ -264,6 +280,16 @@ pub struct Config {
         skip_serializing_if = "is_default_list_width"
     )]
     pub list_width: u32,
+    #[serde(
+        default = "default_window_width",
+        skip_serializing_if = "is_default_window_width"
+    )]
+    pub window_width: u32,
+    #[serde(
+        default = "default_window_height",
+        skip_serializing_if = "is_default_window_height"
+    )]
+    pub window_height: u32,
     /// Pretty is the body default unless the file says otherwise.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub default_pretty: bool,
@@ -311,6 +337,8 @@ impl Default for Config {
             show_full_url: false,
             ellipsize: ListEllipsize::Middle,
             list_width: default_list_width(),
+            window_width: default_window_width(),
+            window_height: default_window_height(),
             default_pretty: true,
             show_tunnel_failures: false,
             filter: String::new(),
@@ -414,6 +442,14 @@ fn default_list_width() -> u32 {
     LIST_WIDTH_DEFAULT
 }
 
+fn default_window_width() -> u32 {
+    WINDOW_WIDTH_DEFAULT
+}
+
+fn default_window_height() -> u32 {
+    WINDOW_HEIGHT_DEFAULT
+}
+
 fn is_true(value: &bool) -> bool {
     *value
 }
@@ -424,6 +460,14 @@ fn is_false(value: &bool) -> bool {
 
 fn is_default_list_width(value: &u32) -> bool {
     *value == LIST_WIDTH_DEFAULT
+}
+
+fn is_default_window_width(value: &u32) -> bool {
+    *value == WINDOW_WIDTH_DEFAULT
+}
+
+fn is_default_window_height(value: &u32) -> bool {
+    *value == WINDOW_HEIGHT_DEFAULT
 }
 
 fn lock() -> std::sync::MutexGuard<'static, ()> {
@@ -546,6 +590,8 @@ fn normalize_for(mut config: Config, dev: bool) -> Config {
     }
     config.language = language_name(config.language.as_deref().and_then(parse_pref));
     config.list_width = clamp_list_width(config.list_width);
+    config.window_width = clamp_window_width(config.window_width);
+    config.window_height = clamp_window_height(config.window_height);
     clamp_column_widths(&mut config.column_widths);
     clamp_saved_filters(&mut config.saved_filters);
     clamp_saved_rules(&mut config.saved_rules);
@@ -1091,5 +1137,37 @@ mod tests {
 
         assert!(parse_profiles_toml("").is_err());
         assert!(parse_profiles_toml("name = \"empty_only\"\n").is_err());
+    }
+
+    #[test]
+    fn window_size_defaults_cleanly_and_clamps_bounds() {
+        let dir = Scratch::new();
+        let initial = load(dir.path());
+        assert_eq!(initial.window_width, WINDOW_WIDTH_DEFAULT);
+        assert_eq!(initial.window_height, WINDOW_HEIGHT_DEFAULT);
+        let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(!text.contains("window_width"), "{text}");
+        assert!(!text.contains("window_height"), "{text}");
+
+        update(dir.path(), |config| {
+            config.window_width = 1440;
+            config.window_height = 900;
+        })
+        .unwrap();
+        let resized = load(dir.path());
+        assert_eq!(resized.window_width, 1440);
+        assert_eq!(resized.window_height, 900);
+        let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(text.contains("window_width = 1440"), "{text}");
+        assert!(text.contains("window_height = 900"), "{text}");
+
+        update(dir.path(), |config| {
+            config.window_width = 100;
+            config.window_height = 99_999;
+        })
+        .unwrap();
+        let clamped = load(dir.path());
+        assert_eq!(clamped.window_width, WINDOW_WIDTH_MIN);
+        assert_eq!(clamped.window_height, WINDOW_HEIGHT_MAX);
     }
 }

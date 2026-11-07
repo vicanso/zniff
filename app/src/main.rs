@@ -29,7 +29,7 @@ fn main() -> impl std::process::Termination {
             title: "zniff".to_owned(),
             #[cfg(any(target_os = "linux", target_os = "windows"))]
             app_id: "dev.zniff.app".to_owned(),
-            size: (1200, 760),
+            size: zniff::initial_window_size(),
             ..Default::default()
         },
     );
