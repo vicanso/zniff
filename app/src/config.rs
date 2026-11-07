@@ -255,6 +255,8 @@ pub struct Config {
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub show_id: bool,
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub show_method: bool,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub show_status: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub show_protocol: bool,
@@ -267,6 +269,8 @@ pub struct Config {
     pub show_elapsed: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub show_host: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub show_client_ip: bool,
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub show_size: bool,
     /// False shows only `flow.path` in the Path column; true shows `flow.url`.
@@ -327,12 +331,14 @@ impl Default for Config {
             rules: String::new(),
             upstream_proxy: String::new(),
             show_id: true,
+            show_method: true,
             show_status: true,
             show_protocol: false,
             show_path: true,
             show_gap: true,
             show_elapsed: true,
             show_host: false,
+            show_client_ip: false,
             show_size: true,
             show_full_url: false,
             ellipsize: ListEllipsize::Middle,
@@ -409,6 +415,11 @@ pub fn column_width_limit(key: &str) -> Option<ColumnWidth> {
             default: 88,
             min: 64,
             max: 480,
+        },
+        "client_ip" => ColumnWidth {
+            default: 100,
+            min: 64,
+            max: 260,
         },
         "size" => ColumnWidth {
             default: 66,
@@ -892,31 +903,37 @@ mod tests {
         let config = load(dir.path());
         assert!(
             config.show_id
+                && config.show_method
                 && config.show_status
                 && config.show_path
                 && config.show_gap
                 && config.show_elapsed
                 && config.show_size
         );
-        assert!(!config.show_protocol && !config.show_host);
+        assert!(!config.show_protocol && !config.show_host && !config.show_client_ip);
         assert_eq!(config.list_width, LIST_WIDTH_DEFAULT);
         let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
         assert!(!text.contains("show_status"), "{text}");
+        assert!(!text.contains("show_method"), "{text}");
+        assert!(!text.contains("show_client_ip"), "{text}");
         assert!(!text.contains("list_width"), "{text}");
 
         update(dir.path(), |config| {
             config.show_protocol = true;
+            config.show_client_ip = true;
             config.show_size = false;
             config.list_width = 9_999;
         })
         .unwrap();
         let config = load(dir.path());
         assert!(config.show_protocol);
+        assert!(config.show_client_ip);
         assert!(!config.show_size);
         assert!(config.show_status);
         assert_eq!(config.list_width, LIST_WIDTH_MAX);
         let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
         assert!(text.contains("show_protocol = true"), "{text}");
+        assert!(text.contains("show_client_ip = true"), "{text}");
         assert!(text.contains("show_size = false"), "{text}");
         assert!(!text.contains("show_status"), "{text}");
         assert!(!text.contains("show_host"), "{text}");

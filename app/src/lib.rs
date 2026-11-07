@@ -306,6 +306,7 @@ struct RowLine {
     elapsed: String,
     elapsed_slow: bool,
     host: String,
+    client_ip: String,
     path: String,
     url: String,
     protocol: String,
@@ -317,13 +318,15 @@ struct RowLine {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ListColumns {
     id: bool,
-    status: bool,
-    protocol: bool,
+    method: bool,
     path: bool,
+    status: bool,
     gap: bool,
     elapsed: bool,
-    host: bool,
     size: bool,
+    protocol: bool,
+    host: bool,
+    client_ip: bool,
     full_url: bool,
     ellipsize: config::ListEllipsize,
 }
@@ -331,50 +334,58 @@ struct ListColumns {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ListColumn {
     Id,
+    Method,
     Path,
     Status,
-    Protocol,
     Gap,
     Elapsed,
-    Host,
     Size,
+    Protocol,
+    Host,
+    ClientIp,
 }
 
 impl ListColumn {
-    const ORDERED: [Self; 8] = [
+    const ORDERED: [Self; 10] = [
         Self::Id,
+        Self::Method,
         Self::Path,
         Self::Status,
-        Self::Protocol,
         Self::Gap,
         Self::Elapsed,
-        Self::Host,
         Self::Size,
+        Self::Protocol,
+        Self::Host,
+        Self::ClientIp,
     ];
 
     fn key(self) -> &'static str {
         match self {
             Self::Id => "id",
+            Self::Method => "method",
             Self::Path => "path",
             Self::Status => "status",
-            Self::Protocol => "protocol",
             Self::Gap => "gap",
             Self::Elapsed => "elapsed",
-            Self::Host => "host",
             Self::Size => "size",
+            Self::Protocol => "protocol",
+            Self::Host => "host",
+            Self::ClientIp => "client_ip",
         }
     }
 
     fn labels(self) -> (&'static str, &'static str) {
         match self {
             Self::Id => ("序号", "#"),
+            Self::Method => ("方法", "Method"),
             Self::Path => ("路径", "Path"),
             Self::Status => ("状态", "Status"),
-            Self::Protocol => ("协议", "Protocol"),
             Self::Gap => ("间隔", "Gap"),
             Self::Elapsed => ("耗时", "Elapsed"),
-            Self::Host => ("主机", "Host"),
             Self::Size => ("大小", "Size"),
+            Self::Protocol => ("协议", "Protocol"),
+            Self::Host => ("主机", "Host"),
+            Self::ClientIp => ("来源 IP", "Client IP"),
         }
     }
 }
@@ -383,13 +394,15 @@ impl ListColumns {
     fn from_config(config: &config::Config) -> Self {
         Self {
             id: config.show_id,
-            status: config.show_status,
-            protocol: config.show_protocol,
+            method: config.show_method,
             path: config.show_path,
+            status: config.show_status,
             gap: config.show_gap,
             elapsed: config.show_elapsed,
-            host: config.show_host,
             size: config.show_size,
+            protocol: config.show_protocol,
+            host: config.show_host,
+            client_ip: config.show_client_ip,
             full_url: config.show_full_url,
             ellipsize: config.ellipsize,
         }
@@ -398,27 +411,41 @@ impl ListColumns {
     fn on(self, column: ListColumn) -> bool {
         match column {
             ListColumn::Id => self.id,
-            ListColumn::Status => self.status,
-            ListColumn::Protocol => self.protocol,
+            ListColumn::Method => self.method,
             ListColumn::Path => self.path,
+            ListColumn::Status => self.status,
             ListColumn::Gap => self.gap,
             ListColumn::Elapsed => self.elapsed,
-            ListColumn::Host => self.host,
             ListColumn::Size => self.size,
+            ListColumn::Protocol => self.protocol,
+            ListColumn::Host => self.host,
+            ListColumn::ClientIp => self.client_ip,
         }
+    }
+
+    fn visible_count(self) -> usize {
+        ListColumn::ORDERED
+            .into_iter()
+            .filter(|&col| self.on(col))
+            .count()
     }
 
     fn toggle(self, column: ListColumn) -> Self {
         let mut next = self;
         match column {
             ListColumn::Id => next.id = !next.id,
-            ListColumn::Status => next.status = !next.status,
-            ListColumn::Protocol => next.protocol = !next.protocol,
+            ListColumn::Method => next.method = !next.method,
             ListColumn::Path => next.path = !next.path,
+            ListColumn::Status => next.status = !next.status,
             ListColumn::Gap => next.gap = !next.gap,
             ListColumn::Elapsed => next.elapsed = !next.elapsed,
-            ListColumn::Host => next.host = !next.host,
             ListColumn::Size => next.size = !next.size,
+            ListColumn::Protocol => next.protocol = !next.protocol,
+            ListColumn::Host => next.host = !next.host,
+            ListColumn::ClientIp => next.client_ip = !next.client_ip,
+        }
+        if next.visible_count() == 0 {
+            return self;
         }
         next
     }
@@ -441,33 +468,31 @@ impl ListColumns {
 
     fn write(self, config: &mut config::Config) {
         config.show_id = self.id;
-        config.show_status = self.status;
-        config.show_protocol = self.protocol;
+        config.show_method = self.method;
         config.show_path = self.path;
+        config.show_status = self.status;
         config.show_gap = self.gap;
         config.show_elapsed = self.elapsed;
-        config.show_host = self.host;
         config.show_size = self.size;
+        config.show_protocol = self.protocol;
+        config.show_host = self.host;
+        config.show_client_ip = self.client_ip;
         config.show_full_url = self.full_url;
         config.ellipsize = self.ellipsize;
     }
 }
 
-/// Columns the table shows, in order. Id (when shown), Method (always), and
-/// Path (when shown) stay in the fixed left group. The rest scroll under them.
+/// Columns the table shows, in order. Id, Method, and Path (when shown) stay in
+/// the fixed left group. The rest scroll under them.
 /// Widths are the last saved drag, not a live value: the table keeps a drag
 /// until this list changes, and a changed width here would fight the drag.
 fn flow_table_columns(shown: ListColumns, widths: &HashMap<String, u32>) -> Vec<DataTableColumn> {
-    std::iter::once(("id", true, shown.id))
-        .chain(std::iter::once(("method", true, true)))
-        .chain(
-            ListColumn::ORDERED[1..]
-                .iter()
-                .copied()
-                .map(|col| (col.key(), col == ListColumn::Path, shown.on(col))),
-        )
-        .filter(|spec| spec.2)
-        .map(|(key, fixed, _)| {
+    ListColumn::ORDERED
+        .into_iter()
+        .filter(|&col| shown.on(col))
+        .map(|col| {
+            let key = col.key();
+            let fixed = matches!(col, ListColumn::Id | ListColumn::Method | ListColumn::Path);
             let limit = config::column_width_limit(key).expect("known column");
             let width = widths.get(key).copied().unwrap_or(limit.default);
             let mut column = DataTableColumn::default();
@@ -502,6 +527,7 @@ fn flow_column_title(key: &str, full_url: bool) -> String {
         "gap" => tr("间隔", "Gap")(),
         "elapsed" => tr("耗时", "Elapsed")(),
         "host" => tr("主机", "Host")(),
+        "client_ip" => tr("来源 IP", "Client IP")(),
         "size" => tr("大小", "Size")(),
         _ => String::new(),
     }
@@ -4067,7 +4093,16 @@ fn flow_table(
         .child(dynamic(move || {
             let _ = columns.with(|c| {
                 (
-                    c.id, c.path, c.status, c.protocol, c.gap, c.elapsed, c.host, c.size,
+                    c.id,
+                    c.method,
+                    c.path,
+                    c.status,
+                    c.gap,
+                    c.elapsed,
+                    c.size,
+                    c.protocol,
+                    c.host,
+                    c.client_ip,
                 )
             });
             let blur_header = Rc::clone(&blur_header);
@@ -4586,12 +4621,13 @@ fn flow_cell(
     match cell.key.as_ref() {
         "id" => id_cell(rows, selected, baseline, index).into_element(),
         "method" => method_cell(rows, selected, baseline, columns, index).into_element(),
-        "path" => path_cell(rows, columns, hover, index).into_element(),
+        "path" => path_cell(rows, selected, baseline, columns, hover, index).into_element(),
         "status" => status_text(rows, index).into_element(),
         "protocol" => protocol_cell(rows, index).into_element(),
         "gap" => time_cell(rows, hover, index).into_element(),
         "elapsed" => elapsed_cell(rows, index).into_element(),
         "host" => host_cell(rows, columns, hover, index).into_element(),
+        "client_ip" => client_ip_cell(rows, columns, hover, index).into_element(),
         "size" => size_cell(rows, index).into_element(),
         _ => view().into_element(),
     }
@@ -4877,6 +4913,54 @@ fn host_cell(
         )
 }
 
+fn client_ip_cell(
+    rows: Signal<Vec<RowLine>>,
+    columns: Signal<ListColumns>,
+    hover: CellHover,
+    index: usize,
+) -> impl IntoElement {
+    let tip_rows = rows;
+    view()
+        .w_full()
+        .h_full()
+        .min_w(px(0.0))
+        .pl(px(4.0))
+        .pr(px(4.0))
+        .overflow_hidden()
+        .flex_row()
+        .items_center()
+        .on_mouse_move(move |event: &MouseEvent| {
+            let ip = tip_rows.with(|rows| {
+                rows.get(index)
+                    .map(|row| {
+                        if row.client_ip == "—" {
+                            String::new()
+                        } else {
+                            row.client_ip.clone()
+                        }
+                    })
+                    .unwrap_or_default()
+            });
+            show_cell_hover(hover, event, ip);
+        })
+        .on_mouse_leave(move |_: &MouseEvent| hover.text.set(None))
+        .child(
+            mono(move || {
+                rows.with(|rows| {
+                    rows.get(index)
+                        .map(|row| row.client_ip.clone())
+                        .unwrap_or_default()
+                })
+            })
+            .w_full()
+            .min_w(px(0.0))
+            .number_of_lines(1)
+            .text_overflow(move || columns.get().ellipsize_mode())
+            .text_size(px(12.0))
+            .text_color(fg_secondary()),
+        )
+}
+
 fn protocol_cell(rows: Signal<Vec<RowLine>>, index: usize) -> Text {
     mono(move || {
         rows.with(|rows| {
@@ -4919,6 +5003,8 @@ fn size_cell(rows: Signal<Vec<RowLine>>, index: usize) -> impl IntoElement {
 
 fn path_cell(
     rows: Signal<Vec<RowLine>>,
+    selected: Signal<Option<u64>>,
+    baseline: Signal<Option<u64>>,
     columns: Signal<ListColumns>,
     hover: CellHover,
     index: usize,
@@ -4930,6 +5016,15 @@ fn path_cell(
         .min_w(px(0.0))
         .pl(px(4.0))
         .pr(px(4.0))
+        .border_l(move || {
+            let cols = columns.get();
+            if !cols.id && !cols.method {
+                px(2.0)
+            } else {
+                px(0.0)
+            }
+        })
+        .border_l_color(move || row_edge_mark(rows, selected, baseline, index))
         .overflow_hidden()
         .flex_row()
         .items_center()
@@ -7282,6 +7377,11 @@ fn row_lines(hub: &Hub, filter: &str, lang: Lang) -> Vec<RowLine> {
                             std::time::SystemTime::now(),
                         ),
                     host: flow.host.clone(),
+                    client_ip: if flow.client_ip.is_empty() {
+                        "—".to_string()
+                    } else {
+                        flow.client_ip.clone()
+                    },
                     path: list_path(&flow.path, flow.error.as_deref(), failed, lang),
                     url: list_url(&flow.url, &flow.path, flow.error.as_deref(), failed, lang),
                     protocol: flow.protocol.label_in(lang).to_string(),
@@ -10017,20 +10117,23 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
         let mut config = crate::config::Config::default();
         assert!(
             config.show_id
+                && config.show_method
                 && config.show_status
                 && config.show_path
                 && config.show_gap
                 && config.show_elapsed
                 && config.show_size
         );
-        assert!(!config.show_protocol && !config.show_host);
+        assert!(!config.show_protocol && !config.show_host && !config.show_client_ip);
         let columns = super::ListColumns::from_config(&config)
             .toggle(super::ListColumn::Protocol)
+            .toggle(super::ListColumn::ClientIp)
             .toggle(super::ListColumn::Size)
             .with_full_url(true)
             .with_ellipsize(crate::config::ListEllipsize::Tail);
         columns.write(&mut config);
         assert!(config.show_protocol);
+        assert!(config.show_client_ip);
         assert!(!config.show_size);
         assert!(config.show_path);
         assert!(config.show_full_url);
@@ -10046,6 +10149,7 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
             elapsed: "10 ms".to_string(),
             elapsed_slow: false,
             host: "api.example.com".to_string(),
+            client_ip: "127.0.0.1".to_string(),
             path: "/v1/users".to_string(),
             url: "https://api.example.com/v1/users".to_string(),
             protocol: "HTTP/2".to_string(),
@@ -10094,13 +10198,15 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
     fn flow_columns_pin_method_and_path_and_keep_a_dragged_width() {
         let shown = super::ListColumns {
             id: false,
-            status: true,
-            protocol: false,
+            method: true,
             path: true,
+            status: true,
             gap: true,
             elapsed: true,
-            host: false,
             size: false,
+            protocol: false,
+            host: false,
+            client_ip: false,
             full_url: false,
             ellipsize: crate::config::ListEllipsize::Middle,
         };
@@ -10141,23 +10247,36 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
 
         let all_shown = super::ListColumns {
             id: true,
+            method: true,
             path: true,
             status: true,
-            protocol: true,
             gap: true,
             elapsed: true,
-            host: true,
             size: true,
+            protocol: true,
+            host: true,
+            client_ip: true,
             full_url: false,
             ellipsize: crate::config::ListEllipsize::Middle,
         };
         let all_cols = super::flow_table_columns(all_shown, &widths);
         let toggle_keys: Vec<&str> = super::ListColumn::ORDERED.iter().map(|c| c.key()).collect();
-        let table_keys: Vec<&str> = all_cols
-            .iter()
-            .map(|column| column.key.as_ref())
-            .filter(|key| *key != "method")
-            .collect();
+        let table_keys: Vec<&str> = all_cols.iter().map(|column| column.key.as_ref()).collect();
+        assert_eq!(
+            toggle_keys,
+            [
+                "id",
+                "method",
+                "path",
+                "status",
+                "gap",
+                "elapsed",
+                "size",
+                "protocol",
+                "host",
+                "client_ip"
+            ]
+        );
         assert_eq!(toggle_keys, table_keys);
     }
 

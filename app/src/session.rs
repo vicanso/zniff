@@ -315,6 +315,7 @@ pub struct Flow {
     pub host: String,
     pub path: String,
     pub url: String,
+    pub client_ip: String,
     pub status: Option<u16>,
     pub error: Option<String>,
     pub request_headers: Vec<(String, String)>,
@@ -412,6 +413,7 @@ impl Session {
             host: draft.host,
             path: draft.path,
             url: draft.url,
+            client_ip: String::new(),
             status: None,
             error: None,
             request_headers: draft.request_headers,
@@ -443,6 +445,15 @@ impl Session {
         self.flows.insert(id, flow);
         self.evict(id);
         id
+    }
+
+    pub fn set_client_ip(&mut self, id: u64, client_ip: impl Into<String>) {
+        self.next_rev += 1;
+        let rev = self.next_rev;
+        if let Some(flow) = self.flows.get_mut(&id) {
+            flow.client_ip = client_ip.into();
+            flow.rev = rev;
+        }
     }
 
     pub fn set_response(
@@ -1139,6 +1150,7 @@ fn path_prefix_matches(path: &str, prefix: &str) -> bool {
 struct FlowQuery {
     texts: Vec<Vec<String>>,
     hosts: Vec<String>,
+    client_ips: Vec<String>,
     path_prefixes: Vec<String>,
     excludes: Vec<String>,
     methods: Vec<String>,
@@ -1156,6 +1168,7 @@ impl FlowQuery {
         let mut query = Self {
             texts: Vec::new(),
             hosts: Vec::new(),
+            client_ips: Vec::new(),
             path_prefixes: Vec::new(),
             excludes: Vec::new(),
             methods: Vec::new(),
@@ -1191,6 +1204,13 @@ impl FlowQuery {
                 .or_else(|| lower.strip_prefix("domain:"))
             {
                 query.hosts.extend(split_or_terms(rest));
+                continue;
+            }
+            if let Some(rest) = lower
+                .strip_prefix("ip:")
+                .or_else(|| lower.strip_prefix("client:"))
+            {
+                query.client_ips.extend(split_or_terms(rest));
                 continue;
             }
             if let Some(rest) = lower.strip_prefix("path:") {
@@ -1315,11 +1335,20 @@ impl FlowQuery {
         }
         let host = flow.host.to_ascii_lowercase();
         let path = flow.path.to_ascii_lowercase();
+        let client_ip = flow.client_ip.to_ascii_lowercase();
         if !self.hosts.is_empty()
             && !self
                 .hosts
                 .iter()
                 .any(|pattern| host_matches(&host, pattern))
+        {
+            return false;
+        }
+        if !self.client_ips.is_empty()
+            && !self
+                .client_ips
+                .iter()
+                .any(|ip| !client_ip.is_empty() && client_ip.contains(ip))
         {
             return false;
         }
@@ -1339,9 +1368,11 @@ impl FlowQuery {
             return false;
         }
         if !self.texts.iter().all(|group| {
-            group
-                .iter()
-                .any(|text| host_matches(&host, text) || path.contains(text))
+            group.iter().any(|text| {
+                host_matches(&host, text)
+                    || path.contains(text)
+                    || (!client_ip.is_empty() && client_ip.contains(text))
+            })
         }) {
             return false;
         }

@@ -45,6 +45,14 @@ const IO_TIMEOUT: Duration = Duration::from_secs(20);
 /// Drop a cached origin HTTP/2 connection before a typical server idle timeout.
 const H2_IDLE: Duration = Duration::from_secs(45);
 
+tokio::task_local! {
+    static CLIENT_IP: String;
+}
+
+fn current_client_ip() -> String {
+    CLIENT_IP.try_with(|ip| ip.clone()).unwrap_or_default()
+}
+
 type H2Sender = hyper::client::conn::http2::SendRequest<RecordingBody<Incoming>>;
 
 struct PooledH2 {
@@ -465,7 +473,14 @@ impl Hub {
     }
 
     fn open(&self, draft: FlowDraft) -> u64 {
-        let id = self.with_session(|session| session.open(draft));
+        let client_ip = current_client_ip();
+        let id = self.with_session(|session| {
+            let id = session.open(draft);
+            if !client_ip.is_empty() {
+                session.set_client_ip(id, client_ip);
+            }
+            id
+        });
         self.touch();
         id
     }
@@ -704,7 +719,17 @@ pub async fn listen() -> Result<TcpListener> {
     Ok(TcpListener::bind("127.0.0.1:0").await?)
 }
 
-async fn handle_conn(mut socket: TcpStream, hub: Arc<Hub>) -> Result<()> {
+async fn handle_conn(socket: TcpStream, hub: Arc<Hub>) -> Result<()> {
+    let client_ip = socket
+        .peer_addr()
+        .map(|addr| addr.ip().to_canonical().to_string())
+        .unwrap_or_default();
+    CLIENT_IP
+        .scope(client_ip, handle_conn_inner(socket, hub))
+        .await
+}
+
+async fn handle_conn_inner(mut socket: TcpStream, hub: Arc<Hub>) -> Result<()> {
     socket.set_nodelay(true).ok();
     let local_addr = socket.local_addr().ok();
     let (head_bytes, rest) = read_header_block(&mut socket).await?;
@@ -1033,11 +1058,13 @@ where
     });
     let shared = H1Client { tx };
     let host_for_service = host.clone();
+    let client_ip = current_client_ip();
     let service = hyper::service::service_fn(move |req| {
         let mut sender = shared.clone();
         let hub = hub.clone();
         let host = host_for_service.clone();
-        async move {
+        let client_ip = client_ip.clone();
+        CLIENT_IP.scope(client_ip, async move {
             forward_request(
                 &mut sender,
                 req,
@@ -1049,7 +1076,7 @@ where
             )
             .await
             .map_err(|err| io::Error::other(err.to_string()))
-        }
+        })
     });
     hyper::server::conn::http1::Builder::new()
         .preserve_header_case(true)
@@ -1185,15 +1212,17 @@ where
         host: host.clone(),
         port,
     };
+    let client_ip = current_client_ip();
     let service = hyper::service::service_fn(move |req| {
         let mut lane = shared.clone();
         let hub = lane.hub.clone();
         let host = lane.host.clone();
-        async move {
+        let client_ip = client_ip.clone();
+        CLIENT_IP.scope(client_ip, async move {
             forward_request(&mut lane, req, hub, &host, port, "https", Protocol::Http2)
                 .await
                 .map_err(|err| io::Error::other(err.to_string()))
-        }
+        })
     });
     hyper::server::conn::http2::Builder::new(executor)
         .serve_connection(TokioIo::new(client), service)
@@ -2468,6 +2497,9 @@ async fn replay_once(
         ),
         request_headers: headers.clone(),
     });
+    if !source.client_ip.is_empty() {
+        hub.with_session(|session| session.set_client_ip(id, source.client_ip.clone()));
+    }
     hub.replace_request(id, headers.clone(), body.clone());
     let sent = if scheme == "https" {
         replay_tls(&hub, id, &method, &host, port, &path, &headers, &body).await
