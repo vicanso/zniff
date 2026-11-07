@@ -1101,9 +1101,9 @@ fn saved_filter_menu(profiles: ProfileSignals, controls: Arc<Controls>) -> impl 
     let active_rules_count = move || crate::rules::parse_rules(&rules_text.get()).len();
     popover()
         .placement(Placement::Bottom)
-        .align(Align::End)
+        .align(Align::Start)
         .offset(px(6.0))
-        .margin(px(8.0))
+        .margin(px(10.0))
         .trigger(
             view()
                 .h(px(CONTROL_H))
@@ -2826,9 +2826,9 @@ fn clamp_list_px_for_window(width: f32, window_w: f32) -> f32 {
 
 fn adaptive_filter_panel_width(window_w: f32) -> f32 {
     if window_w.is_finite() && window_w > 0.0 {
-        (window_w - 48.0).round().clamp(680.0, 1080.0)
+        (window_w - 420.0).round().clamp(640.0, 860.0)
     } else {
-        780.0
+        740.0
     }
 }
 
@@ -9768,10 +9768,10 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
         assert_eq!(super::clamp_list_px_for_window(900.0, 1000.0), 660.0);
         assert_eq!(super::clamp_list_px_for_window(900.0, 0.0), 900.0);
         assert_eq!(super::clamp_list_px_for_window(900.0, 500.0), 280.0);
-        assert_eq!(super::adaptive_filter_panel_width(0.0), 780.0);
-        assert_eq!(super::adaptive_filter_panel_width(600.0), 680.0);
-        assert_eq!(super::adaptive_filter_panel_width(900.0), 852.0);
-        assert_eq!(super::adaptive_filter_panel_width(1400.0), 1080.0);
+        assert_eq!(super::adaptive_filter_panel_width(0.0), 740.0);
+        assert_eq!(super::adaptive_filter_panel_width(900.0), 640.0);
+        assert_eq!(super::adaptive_filter_panel_width(1200.0), 780.0);
+        assert_eq!(super::adaptive_filter_panel_width(1400.0), 860.0);
         assert_eq!(super::adaptive_rules_editor_height(0.0), 105.0);
         assert_eq!(super::adaptive_rules_editor_height(520.0), 105.0);
         assert_eq!(super::adaptive_rules_editor_height(700.0), 240.0);
