@@ -249,9 +249,9 @@ pub struct Config {
     /// On unless the file says otherwise. Time from the request to the full response.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub show_elapsed: bool,
-    #[serde(default = "default_true", skip_serializing_if = "is_true")]
-    pub show_host: bool,
     #[serde(default, skip_serializing_if = "is_false")]
+    pub show_host: bool,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub show_size: bool,
     /// False shows only `flow.path` in the Path column; true shows `flow.url`.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -306,8 +306,8 @@ impl Default for Config {
             show_path: true,
             show_gap: true,
             show_elapsed: true,
-            show_host: true,
-            show_size: false,
+            show_host: false,
+            show_size: true,
             show_full_url: false,
             ellipsize: ListEllipsize::Middle,
             list_width: default_list_width(),
@@ -353,7 +353,7 @@ pub fn column_width_limit(key: &str) -> Option<ColumnWidth> {
             max: 120,
         },
         "path" => ColumnWidth {
-            default: 196,
+            default: 220,
             min: 80,
             max: 800,
         },
@@ -843,13 +843,14 @@ mod tests {
         fs::write(dir.path().join("config.toml"), "listen_port = 8877\n").unwrap();
         let config = load(dir.path());
         assert!(
-            config.show_status
+            config.show_id
+                && config.show_status
                 && config.show_path
                 && config.show_gap
                 && config.show_elapsed
-                && config.show_host
+                && config.show_size
         );
-        assert!(!config.show_protocol && !config.show_size);
+        assert!(!config.show_protocol && !config.show_host);
         assert_eq!(config.list_width, LIST_WIDTH_DEFAULT);
         let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
         assert!(!text.contains("show_status"), "{text}");
@@ -857,20 +858,20 @@ mod tests {
 
         update(dir.path(), |config| {
             config.show_protocol = true;
-            config.show_host = false;
+            config.show_size = false;
             config.list_width = 9_999;
         })
         .unwrap();
         let config = load(dir.path());
         assert!(config.show_protocol);
-        assert!(!config.show_host);
+        assert!(!config.show_size);
         assert!(config.show_status);
         assert_eq!(config.list_width, LIST_WIDTH_MAX);
         let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
         assert!(text.contains("show_protocol = true"), "{text}");
-        assert!(text.contains("show_host = false"), "{text}");
+        assert!(text.contains("show_size = false"), "{text}");
         assert!(!text.contains("show_status"), "{text}");
-        assert!(!text.contains("show_size"), "{text}");
+        assert!(!text.contains("show_host"), "{text}");
         assert!(
             text.contains(&format!("list_width = {LIST_WIDTH_MAX}")),
             "{text}"

@@ -447,19 +447,19 @@ impl ListColumns {
     }
 }
 
-/// Columns the table shows, in order. Method is always first and fixed.
-/// Id and Path, when shown, stay in the fixed left group. The rest scroll under them.
+/// Columns the table shows, in order. Id (when shown), Method (always), and
+/// Path (when shown) stay in the fixed left group. The rest scroll under them.
 /// Widths are the last saved drag, not a live value: the table keeps a drag
 /// until this list changes, and a changed width here would fight the drag.
 fn flow_table_columns(shown: ListColumns, widths: &HashMap<String, u32>) -> Vec<DataTableColumn> {
-    std::iter::once(("method", true, true))
-        .chain(ListColumn::ORDERED.into_iter().map(|col| {
-            (
-                col.key(),
-                matches!(col, ListColumn::Id | ListColumn::Path),
-                shown.on(col),
-            )
-        }))
+    std::iter::once(("id", true, shown.id))
+        .chain(std::iter::once(("method", true, true)))
+        .chain(
+            ListColumn::ORDERED[1..]
+                .iter()
+                .copied()
+                .map(|col| (col.key(), col == ListColumn::Path, shown.on(col))),
+        )
         .filter(|spec| spec.2)
         .map(|(key, fixed, _)| {
             let limit = config::column_width_limit(key).expect("known column");
@@ -4481,8 +4481,8 @@ fn flow_cell(
 ) -> AnyElement {
     let index = cell.row as usize;
     match cell.key.as_ref() {
-        "method" => method_cell(rows, selected, baseline, index).into_element(),
-        "id" => id_cell(rows, index).into_element(),
+        "id" => id_cell(rows, selected, baseline, index).into_element(),
+        "method" => method_cell(rows, selected, baseline, columns, index).into_element(),
         "path" => path_cell(rows, columns, hover, index).into_element(),
         "status" => status_text(rows, index).into_element(),
         "protocol" => protocol_cell(rows, index).into_element(),
@@ -4496,12 +4496,16 @@ fn flow_cell(
 
 fn flow_header(cell: &DataTableHeaderCell, columns: Signal<ListColumns>) -> View {
     let key = cell.key.to_string();
-    let lead = key == "method";
+    let pad_left = match key.as_str() {
+        "method" => 14.0,
+        "id" => 6.0,
+        _ => 4.0,
+    };
     view()
         .w_full()
         .h_full()
         .min_w(px(0.0))
-        .pl(px(if lead { 14.0 } else { 4.0 }))
+        .pl(px(pad_left))
         .pr(px(4.0))
         .flex_row()
         .items_center()
@@ -4517,14 +4521,27 @@ fn flow_header(cell: &DataTableHeaderCell, columns: Signal<ListColumns>) -> View
         )
 }
 
-fn method_cell(
+fn row_edge_mark(
     rows: Signal<Vec<RowLine>>,
     selected: Signal<Option<u64>>,
     baseline: Signal<Option<u64>>,
     index: usize,
+) -> AdaptiveColor {
+    let id = rows.with(|rows| rows.get(index).map(|row| row.id));
+    match id {
+        Some(id) if selected.get() == Some(id) => accent_blue(),
+        Some(id) if baseline.get() == Some(id) => baseline_mark(),
+        _ => AdaptiveColor::TRANSPARENT,
+    }
+}
+
+fn method_cell(
+    rows: Signal<Vec<RowLine>>,
+    selected: Signal<Option<u64>>,
+    baseline: Signal<Option<u64>>,
+    columns: Signal<ListColumns>,
+    index: usize,
 ) -> impl IntoElement {
-    let marked = selected;
-    let base = baseline;
     view()
         .w_full()
         .h_full()
@@ -4533,11 +4550,10 @@ fn method_cell(
         .pr(px(2.0))
         .border_l(px(2.0))
         .border_l_color(move || {
-            let id = rows.with(|rows| rows.get(index).map(|row| row.id));
-            match id {
-                Some(id) if marked.get() == Some(id) => accent_blue(),
-                Some(id) if base.get() == Some(id) => baseline_mark(),
-                _ => AdaptiveColor::TRANSPARENT,
+            if columns.get().id {
+                AdaptiveColor::TRANSPARENT
+            } else {
+                row_edge_mark(rows, selected, baseline, index)
             }
         })
         .flex_row()
@@ -4597,19 +4613,35 @@ fn method_cell(
         )
 }
 
-fn id_cell(rows: Signal<Vec<RowLine>>, index: usize) -> Text {
-    mono(move || {
-        rows.with(|rows| {
-            rows.get(index)
-                .map(|row| row.id.to_string())
-                .unwrap_or_default()
-        })
-    })
-    .pl(px(4.0))
-    .pr(px(4.0))
-    .number_of_lines(1)
-    .text_size(px(12.0))
-    .text_color(fg_muted())
+fn id_cell(
+    rows: Signal<Vec<RowLine>>,
+    selected: Signal<Option<u64>>,
+    baseline: Signal<Option<u64>>,
+    index: usize,
+) -> impl IntoElement {
+    view()
+        .w_full()
+        .h_full()
+        .min_w(px(0.0))
+        .pl(px(4.0))
+        .pr(px(4.0))
+        .border_l(px(2.0))
+        .border_l_color(move || row_edge_mark(rows, selected, baseline, index))
+        .flex_row()
+        .items_center()
+        .overflow_hidden()
+        .child(
+            mono(move || {
+                rows.with(|rows| {
+                    rows.get(index)
+                        .map(|row| row.id.to_string())
+                        .unwrap_or_default()
+                })
+            })
+            .number_of_lines(1)
+            .text_size(px(12.0))
+            .text_color(fg_muted()),
+        )
 }
 
 fn status_text(rows: Signal<Vec<RowLine>>, index: usize) -> Text {
@@ -9671,21 +9703,22 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
     fn list_columns_round_trip_and_the_pane_clamps() {
         let mut config = crate::config::Config::default();
         assert!(
-            config.show_status
+            config.show_id
+                && config.show_status
                 && config.show_path
                 && config.show_gap
                 && config.show_elapsed
-                && config.show_host
+                && config.show_size
         );
-        assert!(!config.show_protocol && !config.show_size);
+        assert!(!config.show_protocol && !config.show_host);
         let columns = super::ListColumns::from_config(&config)
             .toggle(super::ListColumn::Protocol)
-            .toggle(super::ListColumn::Host)
+            .toggle(super::ListColumn::Size)
             .with_full_url(true)
             .with_ellipsize(crate::config::ListEllipsize::Tail);
         columns.write(&mut config);
         assert!(config.show_protocol);
-        assert!(!config.show_host);
+        assert!(!config.show_size);
         assert!(config.show_path);
         assert!(config.show_full_url);
         assert_eq!(config.ellipsize, crate::config::ListEllipsize::Tail);
@@ -9786,7 +9819,7 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
         let default_keys: Vec<&str> = default_cols.iter().map(|c| c.key.as_ref()).collect();
         assert_eq!(
             default_keys,
-            ["method", "id", "path", "status", "gap", "elapsed", "host"]
+            ["id", "method", "path", "status", "gap", "elapsed", "size"]
         );
         assert!(default_cols[0].fixed && default_cols[1].fixed && default_cols[2].fixed);
         let default_sum: f32 = default_cols.iter().map(|c| c.width.unwrap().0).sum();
@@ -9806,9 +9839,10 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
         };
         let all_cols = super::flow_table_columns(all_shown, &widths);
         let toggle_keys: Vec<&str> = super::ListColumn::ORDERED.iter().map(|c| c.key()).collect();
-        let table_keys: Vec<&str> = all_cols[1..]
+        let table_keys: Vec<&str> = all_cols
             .iter()
             .map(|column| column.key.as_ref())
+            .filter(|key| *key != "method")
             .collect();
         assert_eq!(toggle_keys, table_keys);
     }
