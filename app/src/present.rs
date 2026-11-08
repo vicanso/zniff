@@ -820,51 +820,131 @@ pub fn flow_snapshot(flow: &Flow, lang: Lang) -> String {
     out
 }
 
-/// Builds a Mermaid `sequenceDiagram` from the given flows, interleaving
-/// request start and response finish timestamps along the real timeline so
-/// concurrent/overlapping requests and lifeline activations (`+`/`-`) are visible.
-pub fn mermaid_sequence_diagram(
+#[derive(Clone, Debug, PartialEq)]
+pub struct SequenceStep {
+    pub step_no: usize,
+    pub flow_id: u64,
+    pub method: String,
+    pub host_idx: usize,
+    pub is_request: bool,
+    pub is_error: bool,
+    pub label: String,
+    pub note: String,
+    pub active_hosts: Vec<bool>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct WaterfallBar {
+    pub flow_id: u64,
+    pub method: String,
+    pub status: Option<u16>,
+    pub failed: bool,
+    pub slow: bool,
+    pub host: String,
+    pub target: String,
+    pub start_ms: f64,
+    pub end_ms: f64,
+    pub duration_label: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SequenceDiagramData {
+    pub hosts: Vec<String>,
+    pub steps: Vec<SequenceStep>,
+    pub bars: Vec<WaterfallBar>,
+    pub mermaid: String,
+}
+
+/// Builds both the structured visual sequence/waterfall diagram data and the
+/// Mermaid `sequenceDiagram` text from the given flows along the real timeline.
+pub fn build_sequence_diagram_data(
     flows: &[&Flow],
     include_response: bool,
     include_query: bool,
-) -> String {
+) -> SequenceDiagramData {
     let mut lines = vec![
         "sequenceDiagram".to_string(),
         "    autonumber".to_string(),
         "    participant C as Client".to_string(),
     ];
     if flows.is_empty() {
-        return lines.join("\n");
+        return SequenceDiagramData {
+            hosts: Vec::new(),
+            steps: Vec::new(),
+            bars: Vec::new(),
+            mermaid: lines.join("\n"),
+        };
     }
     let mut sorted: Vec<&Flow> = flows.to_vec();
     sorted.sort_by_key(|flow| (flow.started, flow.id));
     let base_start = sorted[0].started;
     let show_offset = sorted.len() > 1;
+    let now = SystemTime::now();
 
     let mut participants: Vec<(String, String)> = Vec::new();
+    let mut flow_host_indices: Vec<usize> = Vec::with_capacity(sorted.len());
     let mut flow_aliases: Vec<String> = Vec::with_capacity(sorted.len());
+    let mut flow_raw_targets: Vec<String> = Vec::with_capacity(sorted.len());
     let mut flow_targets: Vec<String> = Vec::with_capacity(sorted.len());
     let mut end_times: Vec<SystemTime> = Vec::with_capacity(sorted.len());
+    let mut bars: Vec<WaterfallBar> = Vec::with_capacity(sorted.len());
 
     for flow in &sorted {
         let host = resolve_flow_host(flow);
-        let alias = if let Some((_, existing)) = participants.iter().find(|(h, _)| h == &host) {
-            existing.clone()
+        let (host_idx, alias) = if let Some((idx, (_, existing))) = participants
+            .iter()
+            .enumerate()
+            .find(|(_, (h, _))| h == &host)
+        {
+            (idx, existing.clone())
         } else {
-            let alias = format!("H{}", participants.len() + 1);
+            let idx = participants.len();
+            let alias = format!("H{}", idx + 1);
             let label = format_mermaid_participant(&host);
             lines.push(format!("    participant {alias} as {label}"));
-            participants.push((host, alias.clone()));
-            alias
+            participants.push((host.clone(), alias.clone()));
+            (idx, alias)
         };
+        flow_host_indices.push(host_idx);
         flow_aliases.push(alias);
         let target_raw = resolve_flow_target(flow, include_query);
+        flow_raw_targets.push(target_raw.clone());
         flow_targets.push(sanitize_mermaid_text(&target_raw));
         let end_time = flow
             .finished_at
             .map(|fin| fin.max(flow.started))
             .unwrap_or(flow.started);
         end_times.push(end_time);
+
+        let start_ms = flow
+            .started
+            .duration_since(base_start)
+            .unwrap_or_default()
+            .as_secs_f64()
+            * 1000.0;
+        let dur_ms = end_time
+            .duration_since(flow.started)
+            .unwrap_or_default()
+            .as_secs_f64()
+            * 1000.0;
+        let end_ms = start_ms + dur_ms.max(1.0);
+        let method_raw = if flow.method.trim().is_empty() {
+            "GET".to_string()
+        } else {
+            flow.method.trim().to_string()
+        };
+        bars.push(WaterfallBar {
+            flow_id: flow.id,
+            method: method_raw,
+            status: flow.status,
+            failed: flow.status.is_none() && flow.error.is_some(),
+            slow: flow.finished_at.is_some() && is_slow(flow.started, flow.finished_at, now),
+            host,
+            target: target_raw,
+            start_ms,
+            end_ms,
+            duration_label: format_elapsed(flow.started, flow.finished_at),
+        });
     }
 
     // Detect if a flow overlaps in time with another flow targeting the same host
@@ -873,7 +953,8 @@ pub fn mermaid_sequence_diagram(
     if include_response {
         for i in 0..sorted.len() {
             for j in (i + 1)..sorted.len() {
-                if flow_aliases[i] == flow_aliases[j] && sorted[j].started < end_times[i] {
+                if flow_host_indices[i] == flow_host_indices[j] && sorted[j].started < end_times[i]
+                {
                     same_host_overlap[i] = true;
                     same_host_overlap[j] = true;
                 }
@@ -897,22 +978,34 @@ pub fn mermaid_sequence_diagram(
     }
     events.sort_by_key(|(time, kind, idx)| (*time, *kind, *idx));
 
+    let host_count = participants.len();
+    let mut active_depths = vec![0usize; host_count];
+    let mut steps: Vec<SequenceStep> = Vec::with_capacity(events.len());
     let act = if include_response { "+" } else { "" };
+
     for (_, kind, idx) in events {
         let flow = sorted[idx];
+        let host_idx = flow_host_indices[idx];
         let alias = &flow_aliases[idx];
         let target = &flow_targets[idx];
+        let raw_target = &flow_raw_targets[idx];
+        let step_no = steps.len() + 1;
+        let method_raw = if flow.method.trim().is_empty() {
+            "GET"
+        } else {
+            flow.method.trim()
+        };
+
         match kind {
             EventKind::Request => {
+                if include_response {
+                    active_depths[host_idx] += 1;
+                }
+                let active_hosts: Vec<bool> = active_depths.iter().map(|&d| d > 0).collect();
                 let comment = sanitize_mermaid_text(&flow.comment);
                 if !comment.is_empty() {
                     lines.push(format!("    Note over C,{alias}: {comment}"));
                 }
-                let method_raw = if flow.method.trim().is_empty() {
-                    "GET"
-                } else {
-                    flow.method.trim()
-                };
                 let method = sanitize_mermaid_text(method_raw);
                 let offset_suffix = if show_offset {
                     let delta = flow.started.duration_since(base_start).unwrap_or_default();
@@ -930,14 +1023,32 @@ pub fn mermaid_sequence_diagram(
                         "    C->>{act}{alias}: {method} {target}{offset_suffix}"
                     ));
                 }
+                steps.push(SequenceStep {
+                    step_no,
+                    flow_id: flow.id,
+                    method: method_raw.to_string(),
+                    host_idx,
+                    is_request: true,
+                    is_error: failed_without_res,
+                    label: format!("{method_raw} {raw_target}{offset_suffix}"),
+                    note: flow.comment.trim().to_string(),
+                    active_hosts,
+                });
             }
             EventKind::Response => {
+                let active_hosts: Vec<bool> = active_depths.iter().map(|&d| d > 0).collect();
+                active_depths[host_idx] = active_depths[host_idx].saturating_sub(1);
                 let path_hint = if same_host_overlap[idx] {
                     format!(" {target}")
                 } else {
                     String::new()
                 };
-                match flow.status {
+                let raw_path_hint = if same_host_overlap[idx] {
+                    format!(" {raw_target}")
+                } else {
+                    String::new()
+                };
+                let (label, is_error) = match flow.status {
                     Some(code) => {
                         let status_text = match http::StatusCode::from_u16(code)
                             .ok()
@@ -959,23 +1070,56 @@ pub fn mermaid_sequence_diagram(
                             (None, None) => String::new(),
                         };
                         lines.push(format!("    {alias}-->>-C: {status_text}{path_hint}{meta}"));
+                        (format!("{status_text}{raw_path_hint}{meta}"), code >= 400)
                     }
                     None if flow.error.is_some() => {
                         let reason = sanitize_mermaid_text(flow.error.as_deref().unwrap_or(""));
                         if reason.is_empty() {
                             lines.push(format!("    {alias}--x-C: ERR{path_hint}"));
+                            (format!("ERR{raw_path_hint}"), true)
                         } else {
                             lines.push(format!("    {alias}--x-C: ERR{path_hint} ({reason})"));
+                            (format!("ERR{raw_path_hint} ({reason})"), true)
                         }
                     }
                     None => {
                         lines.push(format!("    {alias}-->>-C: ...{path_hint}"));
+                        (format!("...{raw_path_hint}"), false)
                     }
-                }
+                };
+                steps.push(SequenceStep {
+                    step_no,
+                    flow_id: flow.id,
+                    method: method_raw.to_string(),
+                    host_idx,
+                    is_request: false,
+                    is_error,
+                    label,
+                    note: String::new(),
+                    active_hosts,
+                });
             }
         }
     }
-    lines.join("\n")
+
+    SequenceDiagramData {
+        hosts: participants.into_iter().map(|(h, _)| h).collect(),
+        steps,
+        bars,
+        mermaid: lines.join("\n"),
+    }
+}
+
+/// Builds a Mermaid `sequenceDiagram` from the given flows, interleaving
+/// request start and response finish timestamps along the real timeline so
+/// concurrent/overlapping requests and lifeline activations (`+`/`-`) are visible.
+#[cfg(test)]
+pub fn mermaid_sequence_diagram(
+    flows: &[&Flow],
+    include_response: bool,
+    include_query: bool,
+) -> String {
+    build_sequence_diagram_data(flows, include_response, include_query).mermaid
 }
 
 /// Wraps a Mermaid diagram string in a fenced Markdown code block.
@@ -2845,7 +2989,20 @@ Content-Type: image/png\r\n\r\n\
         fast.comment.clear();
         fast.started = start + Duration::from_millis(2);
         fast.finished_at = Some(start + Duration::from_millis(50));
-        let concurrent = mermaid_sequence_diagram(&[&slow, &fast], true, false);
+        let concurrent_data = build_sequence_diagram_data(&[&slow, &fast], true, false);
+        assert_eq!(concurrent_data.hosts, vec!["api.example.com".to_string()]);
+        assert_eq!(concurrent_data.steps.len(), 4);
+        assert!(concurrent_data.steps[0].is_request);
+        assert!(concurrent_data.steps[1].is_request);
+        assert!(!concurrent_data.steps[2].is_request);
+        assert!(!concurrent_data.steps[3].is_request);
+        assert_eq!(concurrent_data.steps[1].active_hosts, vec![true]);
+        assert_eq!(concurrent_data.bars.len(), 2);
+        assert_eq!(concurrent_data.bars[0].start_ms, 0.0);
+        assert_eq!(concurrent_data.bars[0].end_ms, 500.0);
+        assert_eq!(concurrent_data.bars[1].start_ms, 2.0);
+        assert_eq!(concurrent_data.bars[1].end_ms, 50.0);
+        let concurrent = concurrent_data.mermaid;
         let idx_req_slow = concurrent
             .find("C->>+H1: GET /api/v1/slow [+0 ms]")
             .unwrap();

@@ -115,6 +115,9 @@ struct SeqBuilder {
     include_response: Signal<bool>,
     include_query: Signal<bool>,
     output: Signal<String>,
+    diagram: Signal<present::SequenceDiagramData>,
+    view_mode: Signal<u8>,
+    hover_bar: Signal<Option<usize>>,
 }
 
 /// The app's UI set (`nsh.json` `"rust"`).
@@ -906,6 +909,9 @@ pub fn App() -> impl IntoElement {
         include_response: signal(true),
         include_query: signal(false),
         output: signal(String::new()),
+        diagram: signal(present::SequenceDiagramData::default()),
+        view_mode: signal(0),
+        hover_bar: signal(None),
     };
     effect(move || {
         let has_selected = selected.get().is_some();
@@ -11007,15 +11013,15 @@ fn begin_sequence_diagram(
     selected.set(None);
     shown_phase.set(Phase::Empty);
     seq_builder.items.set(candidates);
-    let diagram = build_mermaid_from_state(controls, seq_builder);
-    seq_builder.output.set(diagram);
+    seq_builder.hover_bar.set(None);
+    refresh_seq_diagram(controls, seq_builder);
     seq_builder.open.set(true);
 }
 
-fn build_mermaid_from_state(controls: &Controls, seq_builder: SeqBuilder) -> String {
+fn refresh_seq_diagram(controls: &Controls, seq_builder: SeqBuilder) -> String {
     let include_res = seq_builder.include_response.get();
     let include_query = seq_builder.include_query.get();
-    controls.hub.with_session(|session| {
+    let data = controls.hub.with_session(|session| {
         seq_builder.items.update(|items| {
             for item in items.iter_mut() {
                 if let Some(f) = session.get(item.id) {
@@ -11041,8 +11047,12 @@ fn build_mermaid_from_state(controls: &Controls, seq_builder: SeqBuilder) -> Str
             .iter()
             .filter_map(|id| session.get(*id))
             .collect();
-        present::mermaid_sequence_diagram(&flows, include_res, include_query)
-    })
+        present::build_sequence_diagram_data(&flows, include_res, include_query)
+    });
+    let mermaid = data.mermaid.clone();
+    seq_builder.diagram.set(data);
+    seq_builder.output.set(mermaid.clone());
+    mermaid
 }
 
 fn seq_candidate_target(item: &SeqCandidate, include_query: bool) -> String {
@@ -11172,6 +11182,684 @@ fn seq_option_toggle(
         )
 }
 
+fn seq_mode_tab(
+    mode: Signal<u8>,
+    target: u8,
+    zh: &'static str,
+    en: &'static str,
+) -> impl IntoElement {
+    view()
+        .h(px(22.0))
+        .px_2p5()
+        .rounded(px(5.0))
+        .bg(move || {
+            if mode.get() == target {
+                bg_card()
+            } else {
+                bg_control()
+            }
+        })
+        .border_1()
+        .border_color(move || {
+            if mode.get() == target {
+                border_control()
+            } else {
+                bg_control()
+            }
+        })
+        .cursor(Cursor::Pointer)
+        .flex_row()
+        .items_center()
+        .on_press(move || mode.set(target))
+        .child(
+            text(tr(zh, en))
+                .number_of_lines(1)
+                .text_size(px(11.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(move || {
+                    if mode.get() == target {
+                        fg_primary()
+                    } else {
+                        fg_muted()
+                    }
+                }),
+        )
+}
+
+fn seq_swimlane_view(seq_builder: SeqBuilder) -> impl IntoElement {
+    const LANE_W: f32 = 168.0;
+    const STEP_H: f32 = 42.0;
+    const HEADER_H: f32 = 42.0;
+
+    view()
+        .w_full()
+        .h(move || {
+            let steps = seq_builder.diagram.with(|d| d.steps.len());
+            if steps == 0 {
+                px(160.0)
+            } else {
+                let visible = steps.clamp(3, 11) as f32;
+                px(HEADER_H + visible * STEP_H + 8.0)
+            }
+        })
+        .rounded(px(7.0))
+        .border_1()
+        .border_color(border_control())
+        .bg(bg_code())
+        .overflow_hidden()
+        .child(when(
+            move || seq_builder.diagram.with(|d| d.steps.is_empty()),
+            || {
+                view()
+                    .size_full()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        text(tr("请勾选至少一条流量", "Select at least one flow"))
+                            .text_size(px(12.0))
+                            .text_color(fg_muted()),
+                    )
+            },
+        ))
+        .child(when(
+            move || seq_builder.diagram.with(|d| !d.steps.is_empty()),
+            move || {
+                scroll().horizontal().size_full().child(
+                    view()
+                        .h_full()
+                        .w(move || {
+                            let lanes =
+                                (1 + seq_builder.diagram.with(|d| d.hosts.len())).max(2) as f32;
+                            px((lanes * LANE_W).max(420.0))
+                        })
+                        .child(
+                            view()
+                                .h(px(HEADER_H))
+                                .flex_shrink_0()
+                                .flex_row()
+                                .items_center()
+                                .border_b_1()
+                                .border_b_color(border_subtle())
+                                .bg(bg_card())
+                                .child(
+                                    view()
+                                        .w(px(LANE_W))
+                                        .flex_shrink_0()
+                                        .px_2()
+                                        .items_center()
+                                        .justify_center()
+                                        .child(
+                                            view()
+                                                .h(px(26.0))
+                                                .px_3()
+                                                .rounded(px(6.0))
+                                                .border_1()
+                                                .border_color(accent_blue_border())
+                                                .bg(accent_blue_soft())
+                                                .flex_row()
+                                                .items_center()
+                                                .child(
+                                                    mono("Client")
+                                                        .text_size(px(11.5))
+                                                        .font_weight(FontWeight::BOLD)
+                                                        .text_color(accent_blue_text()),
+                                                ),
+                                        ),
+                                )
+                                .child(each(
+                                    move || {
+                                        seq_builder.diagram.with(|d| {
+                                            d.hosts
+                                                .iter()
+                                                .cloned()
+                                                .enumerate()
+                                                .collect::<Vec<(usize, String)>>()
+                                        })
+                                    },
+                                    |(idx, _)| *idx,
+                                    move |pair, _| {
+                                        view()
+                                            .w(px(LANE_W))
+                                            .flex_shrink_0()
+                                            .px_1p5()
+                                            .items_center()
+                                            .justify_center()
+                                            .child(
+                                                view()
+                                                    .h(px(26.0))
+                                                    .max_w(px(LANE_W - 12.0))
+                                                    .px_2()
+                                                    .rounded(px(6.0))
+                                                    .border_1()
+                                                    .border_color(border_control())
+                                                    .bg(bg_control())
+                                                    .flex_row()
+                                                    .items_center()
+                                                    .gap_1()
+                                                    .child(
+                                                        mono(move || {
+                                                            format!("H{}", pair.with(|(i, _)| i + 1))
+                                                        })
+                                                        .flex_shrink_0()
+                                                        .text_size(px(10.0))
+                                                        .font_weight(FontWeight::BOLD)
+                                                        .text_color(accent_blue_text()),
+                                                    )
+                                                    .child(
+                                                        mono(move || {
+                                                            pair.with(|(_, host)| host.clone())
+                                                        })
+                                                        .min_w(px(0.0))
+                                                        .number_of_lines(1)
+                                                        .text_overflow(EllipsizeMode::Middle)
+                                                        .text_size(px(11.0))
+                                                        .font_weight(FontWeight::SEMIBOLD)
+                                                        .text_color(fg_primary()),
+                                                    ),
+                                            )
+                                    },
+                                )),
+                        )
+                        .child(scroll().flex_1().w_full().child(each(
+                            move || seq_builder.diagram.with(|d| d.steps.clone()),
+                            |step| (step.step_no, step.flow_id, step.is_request),
+                            move |step, _| {
+                                view()
+                                    .w(move || {
+                                        let lanes = (1
+                                            + seq_builder.diagram.with(|d| d.hosts.len()))
+                                        .max(2)
+                                            as f32;
+                                        px((lanes * LANE_W).max(420.0))
+                                    })
+                                    .h(px(STEP_H))
+                                    .relative()
+                                    .child(
+                                        canvas(move || {
+                                            let hosts_len =
+                                                seq_builder.diagram.with(|d| d.hosts.len());
+                                            let (host_idx, is_req, is_err, active_hosts) =
+                                                step.with(|s| {
+                                                    (
+                                                        s.host_idx,
+                                                        s.is_request,
+                                                        s.is_error,
+                                                        s.active_hosts.clone(),
+                                                    )
+                                                });
+                                            let mut p = Painter::new();
+                                            for k in 0..=hosts_len {
+                                                let x = k as f32 * LANE_W + LANE_W * 0.5;
+                                                p = p
+                                                    .line_width(1.0)
+                                                    .stroke_color(color(border_control()))
+                                                    .stroke_svg(&format!(
+                                                        "M{x:.1} 0 L{x:.1} {STEP_H:.1}"
+                                                    ));
+                                                let active = k == 0
+                                                    || active_hosts
+                                                        .get(k - 1)
+                                                        .copied()
+                                                        .unwrap_or(false);
+                                                if active {
+                                                    p = p
+                                                        .line_width(3.6)
+                                                        .stroke_color(color(accent_blue()))
+                                                        .stroke_svg(&format!(
+                                                            "M{x:.1} 0 L{x:.1} {STEP_H:.1}"
+                                                        ));
+                                                }
+                                            }
+                                            let x_client = LANE_W * 0.5;
+                                            let x_host =
+                                                (host_idx + 1) as f32 * LANE_W + LANE_W * 0.5;
+                                            let (x_from, x_to) = if is_req {
+                                                (x_client + 3.0, x_host - 3.0)
+                                            } else {
+                                                (x_host - 3.0, x_client + 3.0)
+                                            };
+                                            let y_arrow = 29.0_f32;
+                                            let stroke = color(if is_err {
+                                                status_err_fg()
+                                            } else if is_req {
+                                                accent_blue()
+                                            } else {
+                                                status_ok_fg()
+                                            });
+                                            if is_req {
+                                                p = p
+                                                    .line_width(1.6)
+                                                    .stroke_color(stroke)
+                                                    .stroke_svg(&format!(
+                                                        "M{x_from:.1} {y_arrow:.1} L{x_to:.1} {y_arrow:.1}"
+                                                    ));
+                                            } else {
+                                                let dir =
+                                                    if x_to >= x_from { 1.0_f32 } else { -1.0_f32 };
+                                                let span = (x_to - x_from).abs();
+                                                let mut cur = 0.0_f32;
+                                                let mut segs = String::new();
+                                                while cur < span {
+                                                    let next = (cur + 6.0).min(span);
+                                                    let a = x_from + dir * cur;
+                                                    let b = x_from + dir * next;
+                                                    use std::fmt::Write;
+                                                    let _ = write!(
+                                                        segs,
+                                                        "M{a:.1} {y_arrow:.1} L{b:.1} {y_arrow:.1} "
+                                                    );
+                                                    cur += 10.0;
+                                                }
+                                                if !segs.is_empty() {
+                                                    p = p
+                                                        .line_width(1.5)
+                                                        .stroke_color(stroke)
+                                                        .stroke_svg(&segs);
+                                                }
+                                            }
+                                            let dir =
+                                                if x_to >= x_from { 1.0_f32 } else { -1.0_f32 };
+                                            let ax = x_to - dir * 6.0;
+                                            let ay1 = y_arrow - 3.4;
+                                            let ay2 = y_arrow + 3.4;
+                                            p.line_width(1.6).stroke_color(stroke).stroke_svg(
+                                                &format!(
+                                                    "M{ax:.1} {ay1:.1} L{x_to:.1} {y_arrow:.1} L{ax:.1} {ay2:.1}"
+                                                ),
+                                            )
+                                        })
+                                        .size_full(),
+                                    )
+                                    .child(
+                                        view()
+                                            .absolute()
+                                            .left(px(LANE_W * 0.5 + 8.0))
+                                            .top(px(5.0))
+                                            .max_w(move || {
+                                                let host_idx = step.with(|s| s.host_idx);
+                                                let span =
+                                                    (host_idx + 1) as f32 * LANE_W - 16.0;
+                                                px(span.max(136.0))
+                                            })
+                                            .flex_row()
+                                            .items_center()
+                                            .gap_1()
+                                            .child(
+                                                view()
+                                                    .px_1p5()
+                                                    .py(px(0.5))
+                                                    .rounded(px(3.5))
+                                                    .flex_shrink_0()
+                                                    .bg(bg_control())
+                                                    .child(
+                                                        mono(move || {
+                                                            step.with(|s| s.step_no.to_string())
+                                                        })
+                                                        .text_size(px(10.0))
+                                                        .font_weight(FontWeight::BOLD)
+                                                        .text_color(fg_secondary()),
+                                                    ),
+                                            )
+                                            .child(
+                                                view()
+                                                    .px_1p5()
+                                                    .py(px(0.5))
+                                                    .rounded(px(3.5))
+                                                    .min_w(px(0.0))
+                                                    .bg(bg_card())
+                                                    .child(
+                                                        mono(move || {
+                                                            step.with(|s| s.label.clone())
+                                                        })
+                                                        .number_of_lines(1)
+                                                        .text_overflow(EllipsizeMode::Middle)
+                                                        .text_size(px(11.0))
+                                                        .font_weight(FontWeight::MEDIUM)
+                                                        .text_color(move || {
+                                                            step.with(|s| {
+                                                                if s.is_error {
+                                                                    status_err_fg()
+                                                                } else if s.is_request {
+                                                                    fg_primary()
+                                                                } else {
+                                                                    status_ok_fg()
+                                                                }
+                                                            })
+                                                        }),
+                                                    ),
+                                            )
+                                            .child(when(
+                                                move || step.with(|s| !s.note.is_empty()),
+                                                move || {
+                                                    view()
+                                                        .px_1p5()
+                                                        .py(px(0.5))
+                                                        .rounded(px(3.5))
+                                                        .max_w(px(140.0))
+                                                        .flex_shrink_0()
+                                                        .bg(accent_blue_soft())
+                                                        .child(
+                                                            text(move || {
+                                                                format!(
+                                                                    "# {}",
+                                                                    step.with(|s| s.note.clone())
+                                                                )
+                                                            })
+                                                            .number_of_lines(1)
+                                                            .text_overflow(EllipsizeMode::Tail)
+                                                            .text_size(px(10.0))
+                                                            .font_weight(FontWeight::MEDIUM)
+                                                            .text_color(accent_blue_text()),
+                                                        )
+                                                },
+                                            )),
+                                    )
+                            },
+                        ))),
+                )
+            },
+        ))
+}
+
+fn seq_waterfall_view(seq_builder: SeqBuilder) -> impl IntoElement {
+    const WF_ROW_H: f32 = 28.0;
+    const WF_HEADER_H: f32 = 28.0;
+
+    view()
+        .w_full()
+        .h(move || {
+            let len = seq_builder.diagram.with(|d| d.bars.len());
+            if len == 0 {
+                px(160.0)
+            } else {
+                let visible = len.clamp(3, 10) as f32;
+                px(WF_HEADER_H + visible * WF_ROW_H + 2.0)
+            }
+        })
+        .rounded(px(7.0))
+        .border_1()
+        .border_color(border_control())
+        .bg(bg_code())
+        .overflow_hidden()
+        .child(when(
+            move || seq_builder.diagram.with(|d| d.bars.is_empty()),
+            || {
+                view()
+                    .size_full()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        text(tr("请勾选至少一条流量", "Select at least one flow"))
+                            .text_size(px(12.0))
+                            .text_color(fg_muted()),
+                    )
+            },
+        ))
+        .child(when(
+            move || seq_builder.diagram.with(|d| !d.bars.is_empty()),
+            move || {
+                view()
+                    .size_full()
+                    .child(
+                        view()
+                            .h(px(WF_HEADER_H))
+                            .px_3()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .border_b_1()
+                            .border_b_color(border_subtle())
+                            .bg(bg_card())
+                            .child(
+                                text(tr(
+                                    "请求时间轴瀑布图（横向跨度体现并发重叠与耗时）",
+                                    "Timeline waterfall (horizontal spans show concurrency & latency)",
+                                ))
+                                .number_of_lines(1)
+                                .text_size(px(11.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(fg_secondary()),
+                            )
+                            .child(
+                                mono(move || {
+                                    let hovered = seq_builder.hover_bar.get();
+                                    seq_builder.diagram.with(|d| {
+                                        if let Some(idx) = hovered
+                                            && let Some(bar) = d.bars.get(idx)
+                                        {
+                                            return format!(
+                                                "#{} {} {} · [+{:.0}ms .. +{:.0}ms] ({})",
+                                                bar.flow_id,
+                                                bar.method,
+                                                bar.target,
+                                                bar.start_ms,
+                                                bar.end_ms,
+                                                bar.duration_label
+                                            );
+                                        }
+                                        let max_ms = d
+                                            .bars
+                                            .iter()
+                                            .map(|b| b.end_ms)
+                                            .fold(0.0_f64, f64::max);
+                                        format!("0 ms .. {max_ms:.0} ms")
+                                    })
+                                })
+                                .number_of_lines(1)
+                                .text_size(px(11.0))
+                                .text_color(accent_blue_text()),
+                            ),
+                    )
+                    .child(
+                        scroll().flex_1().w_full().child(
+                            view()
+                                .w_full()
+                                .h(move || {
+                                    let len =
+                                        seq_builder.diagram.with(|d| d.bars.len()).max(1) as f32;
+                                    px(len * WF_ROW_H)
+                                })
+                                .flex_row()
+                                .child(
+                                    view()
+                                        .w(px(230.0))
+                                        .flex_shrink_0()
+                                        .border_r_1()
+                                        .border_r_color(border_subtle())
+                                        .bg(bg_card())
+                                        .child(each(
+                                            move || seq_builder.diagram.with(|d| d.bars.clone()),
+                                            |b| b.flow_id,
+                                            move |bar_item, index| {
+                                                view()
+                                                    .h(px(WF_ROW_H))
+                                                    .px_2p5()
+                                                    .gap_1p5()
+                                                    .flex_row()
+                                                    .items_center()
+                                                    .border_t(move || {
+                                                        if index.get() > 0 {
+                                                            px(1.0)
+                                                        } else {
+                                                            px(0.0)
+                                                        }
+                                                    })
+                                                    .border_t_color(border_subtle())
+                                                    .child(
+                                                        mono(move || {
+                                                            format!(
+                                                                "#{}",
+                                                                bar_item.with(|b| b.flow_id)
+                                                            )
+                                                        })
+                                                        .flex_shrink_0()
+                                                        .text_size(px(10.5))
+                                                        .text_color(fg_muted()),
+                                                    )
+                                                    .child(
+                                                        view()
+                                                            .px(px(4.5))
+                                                            .py(px(1.0))
+                                                            .rounded(px(3.5))
+                                                            .flex_shrink_0()
+                                                            .bg(move || {
+                                                                bar_item
+                                                                    .with(|b| method_bg(&b.method))
+                                                            })
+                                                            .child(
+                                                                mono(move || {
+                                                                    bar_item.with(|b| {
+                                                                        b.method.clone()
+                                                                    })
+                                                                })
+                                                                .text_size(px(9.5))
+                                                                .font_weight(FontWeight::BOLD)
+                                                                .text_color(move || {
+                                                                    bar_item.with(|b| {
+                                                                        method_fg(&b.method)
+                                                                    })
+                                                                }),
+                                                            ),
+                                                    )
+                                                    .child(
+                                                        mono(move || {
+                                                            bar_item.with(|b| b.target.clone())
+                                                        })
+                                                        .flex_1()
+                                                        .min_w(px(0.0))
+                                                        .number_of_lines(1)
+                                                        .text_overflow(EllipsizeMode::Middle)
+                                                        .text_size(px(11.0))
+                                                        .text_color(fg_primary()),
+                                                    )
+                                                    .child(
+                                                        mono(move || {
+                                                            bar_item.with(|b| {
+                                                                b.duration_label.clone()
+                                                            })
+                                                        })
+                                                        .flex_shrink_0()
+                                                        .text_size(px(10.5))
+                                                        .text_color(move || {
+                                                            bar_item.with(|b| {
+                                                                http_status_fg(b.status, b.failed)
+                                                            })
+                                                        }),
+                                                    )
+                                            },
+                                        )),
+                                )
+                                .child(
+                                    view()
+                                        .flex_1()
+                                        .h_full()
+                                        .px_2p5()
+                                        .child(
+                                            nsh_base::plot::plot()
+                                                .size_full()
+                                                .data(move || {
+                                                    seq_builder.diagram.with(|d| {
+                                                        let starts: Vec<f64> = d
+                                                            .bars
+                                                            .iter()
+                                                            .map(|b| b.start_ms)
+                                                            .collect();
+                                                        let ends: Vec<f64> = d
+                                                            .bars
+                                                            .iter()
+                                                            .map(|b| b.end_ms)
+                                                            .collect();
+                                                        nsh_core::element::Rows::from_columns(
+                                                            d.bars.len(),
+                                                            [
+                                                                ("start_ms".into(), starts),
+                                                                ("end_ms".into(), ends),
+                                                            ],
+                                                        )
+                                                    })
+                                                })
+                                                .y_scale({
+                                                    let mut band =
+                                                        nsh_base::plot::BandScale::default();
+                                                    band.padding_inner = Percentage(0.34);
+                                                    band.padding_outer = Percentage(0.17);
+                                                    nsh_base::plot::Scale::Band(band)
+                                                })
+                                                .x_scale(move || {
+                                                    let max_ms = seq_builder.diagram.with(|d| {
+                                                        d.bars
+                                                            .iter()
+                                                            .map(|b| b.end_ms)
+                                                            .fold(1.0_f64, f64::max)
+                                                    });
+                                                    nsh_base::plot::Scale::Linear {
+                                                        domain: Some([0.0, max_ms]),
+                                                        reverse: false,
+                                                    }
+                                                })
+                                                .on_hover_change(move |idx: &Option<u32>| {
+                                                    seq_builder
+                                                        .hover_bar
+                                                        .set(idx.map(|i| i as usize));
+                                                })
+                                                .child(
+                                                    nsh_base::plot::grid()
+                                                        .text_color(border_control()),
+                                                )
+                                                .child(
+                                                    nsh_base::plot::bar()
+                                                        .base(nsh_base::plot::BarBase::Row(
+                                                            nsh_core::element::RowAccessor::key(
+                                                                "start_ms",
+                                                            ),
+                                                        ))
+                                                        .value(nsh_core::element::RowAccessor::key(
+                                                            "end_ms",
+                                                        ))
+                                                        .corner_radii(
+                                                            nsh_base::plot::BarCornerRadii::all(px(
+                                                                3.5,
+                                                            )),
+                                                        )
+                                                        .inactive_opacity(Percentage(0.55))
+                                                        .text_color(accent_blue()),
+                                                ),
+                                        ),
+                                ),
+                        ),
+                    )
+            },
+        ))
+}
+
+fn seq_mermaid_source_view(seq_builder: SeqBuilder) -> impl IntoElement {
+    view()
+        .w_full()
+        .h(move || {
+            let lines = body_line_count(&seq_builder.output.get()).clamp(6, 16);
+            px(lines as f32 * BODY_LINE_H + BODY_CHROME)
+        })
+        .rounded(px(7.0))
+        .border_1()
+        .border_color(border_control())
+        .bg(bg_code())
+        .overflow_hidden()
+        .child(
+            editor()
+                .value(move || SharedString::from(seq_builder.output.get()))
+                .read_only(true)
+                .language("plaintext")
+                .line_numbers(true)
+                .folding(false)
+                .soft_wrap(true)
+                .font_size(Points(12.0))
+                .line_height(Points(18.0))
+                .scroll_beyond_last_line(false)
+                .size_full(),
+        )
+}
+
 fn sequence_diagram_panel(seq_builder: SeqBuilder, controls: Arc<Controls>) -> impl IntoElement {
     let select_all_controls = controls.clone();
     let clear_controls = controls.clone();
@@ -11265,10 +11953,7 @@ fn sequence_diagram_panel(seq_builder: SeqBuilder, controls: Arc<Controls>) -> i
                                             item.checked = true;
                                         }
                                     });
-                                    seq_builder.output.set(build_mermaid_from_state(
-                                        &select_all_controls,
-                                        seq_builder,
-                                    ));
+                                    refresh_seq_diagram(&select_all_controls, seq_builder);
                                 }))
                                 .child(detail_button(tr("全不选", "Clear"), move || {
                                     seq_builder.items.update(|items| {
@@ -11276,10 +11961,7 @@ fn sequence_diagram_panel(seq_builder: SeqBuilder, controls: Arc<Controls>) -> i
                                             item.checked = false;
                                         }
                                     });
-                                    seq_builder.output.set(build_mermaid_from_state(
-                                        &clear_controls,
-                                        seq_builder,
-                                    ));
+                                    refresh_seq_diagram(&clear_controls, seq_builder);
                                 }))
                                 .child(detail_button(tr("反选", "Invert"), move || {
                                     seq_builder.items.update(|items| {
@@ -11287,10 +11969,7 @@ fn sequence_diagram_panel(seq_builder: SeqBuilder, controls: Arc<Controls>) -> i
                                             item.checked = !item.checked;
                                         }
                                     });
-                                    seq_builder.output.set(build_mermaid_from_state(
-                                        &invert_controls,
-                                        seq_builder,
-                                    ));
+                                    refresh_seq_diagram(&invert_controls, seq_builder);
                                 })),
                         )
                         .child(
@@ -11303,10 +11982,7 @@ fn sequence_diagram_panel(seq_builder: SeqBuilder, controls: Arc<Controls>) -> i
                                     "含响应",
                                     "Responses",
                                     move || {
-                                        seq_builder.output.set(build_mermaid_from_state(
-                                            &res_controls,
-                                            seq_builder,
-                                        ));
+                                        refresh_seq_diagram(&res_controls, seq_builder);
                                     },
                                 ))
                                 .child(seq_option_toggle(
@@ -11314,10 +11990,7 @@ fn sequence_diagram_panel(seq_builder: SeqBuilder, controls: Arc<Controls>) -> i
                                     "含查询参数",
                                     "Query string",
                                     move || {
-                                        seq_builder.output.set(build_mermaid_from_state(
-                                            &query_controls,
-                                            seq_builder,
-                                        ));
+                                        refresh_seq_diagram(&query_controls, seq_builder);
                                     },
                                 )),
                         ),
@@ -11369,10 +12042,7 @@ fn sequence_diagram_panel(seq_builder: SeqBuilder, controls: Arc<Controls>) -> i
                                                 target.checked = !target.checked;
                                             }
                                         });
-                                        seq_builder.output.set(build_mermaid_from_state(
-                                            &row_controls,
-                                            seq_builder,
-                                        ));
+                                        refresh_seq_diagram(&row_controls, seq_builder);
                                     })
                                     .child(
                                         view()
@@ -11544,11 +12214,8 @@ fn sequence_diagram_panel(seq_builder: SeqBuilder, controls: Arc<Controls>) -> i
                                             if count == 0 {
                                                 return;
                                             }
-                                            let diagram = build_mermaid_from_state(
-                                                &gen_controls,
-                                                seq_builder,
-                                            );
-                                            seq_builder.output.set(diagram.clone());
+                                            let diagram =
+                                                refresh_seq_diagram(&gen_controls, seq_builder);
                                             set_clipboard(diagram);
                                             set_status(
                                                 &gen_controls,
@@ -11579,11 +12246,10 @@ fn sequence_diagram_panel(seq_builder: SeqBuilder, controls: Arc<Controls>) -> i
                                         if count == 0 {
                                             return;
                                         }
-                                        let diagram = build_mermaid_from_state(
+                                        let diagram = refresh_seq_diagram(
                                             &copy_mermaid_controls,
                                             seq_builder,
                                         );
-                                        seq_builder.output.set(diagram.clone());
                                         set_clipboard(diagram);
                                         set_status(
                                             &copy_mermaid_controls,
@@ -11601,11 +12267,8 @@ fn sequence_diagram_panel(seq_builder: SeqBuilder, controls: Arc<Controls>) -> i
                                         if count == 0 {
                                             return;
                                         }
-                                        let diagram = build_mermaid_from_state(
-                                            &copy_md_controls,
-                                            seq_builder,
-                                        );
-                                        seq_builder.output.set(diagram.clone());
+                                        let diagram =
+                                            refresh_seq_diagram(&copy_md_controls, seq_builder);
                                         set_clipboard(present::mermaid_markdown_block(&diagram));
                                         set_status(
                                             &copy_md_controls,
@@ -11615,40 +12278,37 @@ fn sequence_diagram_panel(seq_builder: SeqBuilder, controls: Arc<Controls>) -> i
                                 )),
                         )
                         .child(
-                            text(tr(
-                                "Mermaid sequenceDiagram 语法",
-                                "Mermaid sequenceDiagram syntax",
-                            ))
-                            .text_size(px(11.0))
-                            .text_color(fg_muted()),
+                            view()
+                                .p(px(2.0))
+                                .rounded(px(6.5))
+                                .border_1()
+                                .border_color(border_subtle())
+                                .bg(bg_control())
+                                .flex_row()
+                                .items_center()
+                                .gap(px(2.0))
+                                .child(seq_mode_tab(seq_builder.view_mode, 0, "时序图", "Diagram"))
+                                .child(seq_mode_tab(
+                                    seq_builder.view_mode,
+                                    1,
+                                    "瀑布图",
+                                    "Waterfall",
+                                ))
+                                .child(seq_mode_tab(seq_builder.view_mode, 2, "源码", "Mermaid")),
                         ),
                 )
-                .child(
-                    view()
-                        .w_full()
-                        .h(move || {
-                            let lines = body_line_count(&seq_builder.output.get()).clamp(6, 16);
-                            px(lines as f32 * BODY_LINE_H + BODY_CHROME)
-                        })
-                        .rounded(px(7.0))
-                        .border_1()
-                        .border_color(border_control())
-                        .bg(bg_code())
-                        .overflow_hidden()
-                        .child(
-                            editor()
-                                .value(move || SharedString::from(seq_builder.output.get()))
-                                .read_only(true)
-                                .language("plaintext")
-                                .line_numbers(true)
-                                .folding(false)
-                                .soft_wrap(true)
-                                .font_size(Points(12.0))
-                                .line_height(Points(18.0))
-                                .scroll_beyond_last_line(false)
-                                .size_full(),
-                        ),
-                ),
+                .child(when(
+                    move || seq_builder.view_mode.get() == 0,
+                    move || seq_swimlane_view(seq_builder),
+                ))
+                .child(when(
+                    move || seq_builder.view_mode.get() == 1,
+                    move || seq_waterfall_view(seq_builder),
+                ))
+                .child(when(
+                    move || seq_builder.view_mode.get() == 2,
+                    move || seq_mermaid_source_view(seq_builder),
+                )),
         )
 }
 
@@ -11760,9 +12420,11 @@ fn clear_unpinned_captured(
         if remaining_empty {
             seq_builder.open.set(false);
             seq_builder.output.set(String::new());
+            seq_builder
+                .diagram
+                .set(present::SequenceDiagramData::default());
         } else {
-            let diagram = build_mermaid_from_state(controls, seq_builder);
-            seq_builder.output.set(diagram);
+            refresh_seq_diagram(controls, seq_builder);
         }
     }
 }
