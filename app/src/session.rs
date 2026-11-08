@@ -1176,9 +1176,14 @@ fn body_groups_match(flow: &Flow, spill: &SpillStore, groups: &[Vec<String>]) ->
     let response = String::from_utf8_lossy(res_bytes).to_ascii_lowercase();
 
     groups.iter().all(|group| {
-        group
-            .iter()
-            .any(|keyword| request.contains(keyword) || response.contains(keyword))
+        group.iter().any(|keyword| {
+            request.contains(keyword)
+                || response.contains(keyword)
+                || flow.messages.iter().any(|msg| {
+                    msg.text.to_ascii_lowercase().contains(keyword)
+                        || msg.kind.to_ascii_lowercase().contains(keyword)
+                })
+        })
     })
 }
 
@@ -1307,6 +1312,19 @@ fn path_prefix_matches(path: &str, prefix: &str) -> bool {
     }
 }
 
+fn comment_has_repeat_id(comment_lower: &str, id_str: &str) -> bool {
+    let tag = format!("repeat:{id_str}");
+    let mut rest = comment_lower;
+    while let Some(pos) = rest.find(&tag) {
+        let after = &rest[pos + tag.len()..];
+        if after.is_empty() || !after.as_bytes()[0].is_ascii_digit() {
+            return true;
+        }
+        rest = after;
+    }
+    false
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FlowQuery {
     texts: Vec<Vec<String>>,
@@ -1320,6 +1338,7 @@ struct FlowQuery {
     bodies: Vec<Vec<String>>,
     headers: Vec<Vec<String>>,
     comments: Vec<Vec<String>>,
+    repeats: Vec<Vec<String>>,
     pinned_only: bool,
     slow_only: bool,
 }
@@ -1339,6 +1358,7 @@ impl FlowQuery {
             bodies: Vec::new(),
             headers: Vec::new(),
             comments: Vec::new(),
+            repeats: Vec::new(),
             pinned_only: false,
             slow_only: false,
         };
@@ -1384,6 +1404,15 @@ impl FlowQuery {
             {
                 let group = split_or_terms(rest);
                 query.comments.push(group);
+                continue;
+            }
+            if let Some(rest) = lower.strip_prefix("repeat:") {
+                let group: Vec<String> = split_or_terms(rest)
+                    .into_iter()
+                    .map(|term| term.trim_start_matches('#').to_string())
+                    .filter(|term| !term.is_empty())
+                    .collect();
+                query.repeats.push(group);
                 continue;
             }
             if let Some(rest) = lower.strip_prefix("path:") {
@@ -1516,6 +1545,19 @@ impl FlowQuery {
                     !comment.is_empty()
                 } else {
                     !comment.is_empty() && group.iter().any(|kw| comment.contains(kw))
+                }
+            })
+        {
+            return false;
+        }
+        if !self.repeats.is_empty()
+            && !self.repeats.iter().all(|group| {
+                if group.is_empty() {
+                    comment.contains("repeat:")
+                } else {
+                    group.iter().any(|target| {
+                        flow.id.to_string() == *target || comment_has_repeat_id(&comment, target)
+                    })
                 }
             })
         {
@@ -2040,5 +2082,21 @@ mod tests {
             filtered.max_elapsed,
             Some((f1, 120, "api.test/users".to_string()))
         );
+    }
+
+    #[test]
+    fn filter_matches_ws_messages_and_repeat_tags() {
+        let mut session = Session::default();
+        let f1 = session.open(draft("ws.test"));
+        session.add_message(f1, Direction::Response, "文本", "order_created:9981");
+        let f2 = session.open(draft("api.test"));
+        session.set_comment(f2, "repeat:1 (1/3)");
+        let f3 = session.open(draft("api.test"));
+        session.set_comment(f3, "repeat:10 (1/2)");
+
+        assert_eq!(session.ids_matching("body:order_created"), vec![f1]);
+        assert_eq!(session.ids_matching("repeat:"), vec![f2, f3]);
+        assert_eq!(session.ids_matching("repeat:1"), vec![f1, f2]);
+        assert_eq!(session.ids_matching("repeat:#10"), vec![f3]);
     }
 }

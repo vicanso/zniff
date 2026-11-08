@@ -814,8 +814,12 @@ struct Shown {
     repeating: Signal<bool>,
     repeat_count: Signal<String>,
     repeat_interval: Signal<String>,
+    repeat_concurrency: Signal<String>,
     req_search: Signal<String>,
     res_search: Signal<String>,
+    msg_search: Signal<String>,
+    msg_dir: Signal<u8>,
+    msg_kind: Signal<u8>,
 }
 
 #[derive(Clone, Copy)]
@@ -886,8 +890,12 @@ pub fn App() -> impl IntoElement {
         repeating: signal(false),
         repeat_count: signal(present::REPEAT_COUNT_DEFAULT.to_string()),
         repeat_interval: signal(present::REPEAT_INTERVAL_DEFAULT_MS.to_string()),
+        repeat_concurrency: signal(present::REPEAT_CONCURRENCY_DEFAULT.to_string()),
         req_search: signal(String::new()),
         res_search: signal(String::new()),
+        msg_search: signal(String::new()),
+        msg_dir: signal(0),
+        msg_kind: signal(0),
     };
     let port_text = signal(String::new());
     let listen_all = signal(false);
@@ -1106,6 +1114,9 @@ pub fn App() -> impl IntoElement {
             if selected_now != seen_selected.get() {
                 shown_tick.editing_comment.set(false);
                 shown_tick.repeating.set(false);
+                shown_tick.msg_search.set(String::new());
+                shown_tick.msg_dir.set(0);
+                shown_tick.msg_kind.set(0);
             }
             seen_gen.replace(generation);
             seen_filter.replace(filter_now.clone());
@@ -4143,7 +4154,7 @@ fn replace_row(
     response: Signal<bool>,
     kind: Signal<u8>,
 ) -> impl IntoElement {
-    let kinds = [0_u8, 1, 2, 3, 4, 5, 6, 7, 8];
+    let kinds = [0_u8, 1, 2, 3, 4, 5, 6, 7, 8, 9];
     let ready_to_add = move || {
         let combined = crate::rules::combine_rule_pattern(&host_pattern.get(), &path_pattern.get());
         crate::rules::append_quick_rule(
@@ -4269,7 +4280,12 @@ fn replace_row(
                         .items_center()
                         .gap_1()
                         .child(when(
-                            move || kind.get() < 4 || kind.get() == 6 || kind.get() == 7,
+                            move || {
+                                kind.get() < 4
+                                    || kind.get() == 6
+                                    || kind.get() == 7
+                                    || kind.get() == 9
+                            },
                             move || {
                                 let placeholder = move || {
                                     let lang = ui_lang(ui_langs());
@@ -4297,6 +4313,12 @@ fn replace_row(
                                                 .to_string()
                                         }
                                         7 => t(lang, "参数名: env", "Query param: env").to_string(),
+                                        9 => t(
+                                            lang,
+                                            "下行速率或预设: 3g / 256kbps",
+                                            "Down rate or preset: 3g / 256kbps",
+                                        )
+                                        .to_string(),
                                         _ => t(lang, "查找原文 (from)", "Find text (from)")
                                             .to_string(),
                                     }
@@ -4328,10 +4350,8 @@ fn replace_row(
                                     .cursor(Cursor::Pointer)
                                     .on_press(move || {
                                         spawn_detached(async move {
-                                            if let Ok(Some(paths)) = pick_paths(
-                                                nsh_core::file_dialog::OpenDialog::files(),
-                                            )
-                                            .await
+                                            if let Ok(Some(paths)) =
+                                                pick_paths(open_dialog_with_default_dir()).await
                                                 && let Some(path) = paths.first()
                                             {
                                                 from.set(path.display().to_string());
@@ -4352,6 +4372,7 @@ fn replace_row(
                                     || kind.get() == 2
                                     || kind.get() == 6
                                     || kind.get() == 7
+                                    || kind.get() == 9
                             },
                             move || {
                                 let placeholder = move || {
@@ -4371,6 +4392,12 @@ fn replace_row(
                                             t(lang, "参数值 (留空删除)", "Value (empty to delete)")
                                                 .to_string()
                                         }
+                                        9 => t(
+                                            lang,
+                                            "上行速率 (可选): 64kbps",
+                                            "Up rate (optional): 64kbps",
+                                        )
+                                        .to_string(),
                                         _ => {
                                             t(lang, "替换成 (to)", "Replace with (to)").to_string()
                                         }
@@ -5357,7 +5384,7 @@ fn closing(open: Signal<bool>, run: impl Fn() + 'static) -> impl Fn() + 'static 
 
 fn quick_kind(kind: u8) -> crate::rules::QuickRule {
     use crate::rules::QuickRule;
-    match kind % 9 {
+    match kind % 10 {
         0 => QuickRule::Replace,
         1 => QuickRule::Remote,
         2 => QuickRule::Local,
@@ -5366,7 +5393,8 @@ fn quick_kind(kind: u8) -> crate::rules::QuickRule {
         5 => QuickRule::BreakRes,
         6 => QuickRule::Header,
         7 => QuickRule::Query,
-        _ => QuickRule::Cors,
+        8 => QuickRule::Cors,
+        _ => QuickRule::Throttle,
     }
 }
 
@@ -5426,7 +5454,7 @@ fn map_local_from_flow(controls: Arc<Controls>, id: Option<u64>, rules_text: Sig
     let ext = present::content_type(&flow.response_headers)
         .and_then(present::image_extension)
         .unwrap_or_else(|| body_extension(&flow.response_headers, &flow.response_body));
-    let dialog = nsh_core::file_dialog::SaveDialog::new()
+    let dialog = save_dialog_with_default_dir()
         .file_name(format!("{}.{}", flow.id, ext))
         .filter(nsh_core::file_dialog::FileFilter::new(
             ext.to_ascii_uppercase(),
@@ -5436,14 +5464,7 @@ fn map_local_from_flow(controls: Arc<Controls>, id: Option<u64>, rules_text: Sig
     spawn_detached(async move {
         match pick_save_path(dialog).await {
             Ok(Some(save_path)) => {
-                if let Some(parent) = save_path.parent()
-                    && !parent.as_os_str().is_empty()
-                    && let Err(err) = std::fs::create_dir_all(parent)
-                {
-                    set_status(&controls, StatusMsg::SaveFailed(err.to_string()));
-                    return;
-                }
-                if let Err(err) = std::fs::write(&save_path, &body) {
+                if let Err(err) = write_export_file(&save_path, &body) {
                     set_status(&controls, StatusMsg::SaveFailed(err.to_string()));
                     return;
                 }
@@ -6562,7 +6583,7 @@ fn ready_detail(
         ))
         .child(when(
             move || !shown.messages.with(Vec::is_empty),
-            move || header_section("消息", "Messages", shown.messages, folded, FOLD_MESSAGES),
+            move || messages_section(shown, folded),
         ))
 }
 
@@ -6792,6 +6813,7 @@ fn repeat_inline_bar(
 ) -> impl IntoElement {
     let submit_count_controls = controls.clone();
     let submit_interval_controls = controls.clone();
+    let submit_concurrency_controls = controls.clone();
     let run_controls = controls;
     view()
         .flex_row()
@@ -6824,6 +6846,24 @@ fn repeat_inline_bar(
         .child(repeat_preset_chip(shown.repeat_count, "5", "5×"))
         .child(repeat_preset_chip(shown.repeat_count, "10", "10×"))
         .child(repeat_preset_chip(shown.repeat_count, "20", "20×"))
+        .child(
+            text(tr("并发", "Concurrency"))
+                .pl_1()
+                .number_of_lines(1)
+                .text_size(px(11.5))
+                .text_color(fg_secondary()),
+        )
+        .child(
+            view().w(px(48.0)).flex_shrink_0().child(
+                compose_input_on(shown.repeat_concurrency, "1", 26.0, false, move |text| {
+                    shown.repeat_concurrency.set(text.to_string())
+                })
+                .on_submit(move |text: &str| {
+                    shown.repeat_concurrency.set(text.to_string());
+                    repeat_flow_batch(&submit_concurrency_controls, selected.get(), shown);
+                }),
+            ),
+        )
         .child(
             text(tr("间隔 ms", "Interval (ms)"))
                 .pl_1()
@@ -6991,6 +7031,290 @@ fn header_section(
                 .otherwise(move || {
                     each(
                         lines,
+                        |line| line.key,
+                        |line, index| {
+                            view()
+                                .flex_row()
+                                .gap_3()
+                                .px_3p5()
+                                .py_2()
+                                .bg(move || {
+                                    if index.get() % 2 == 1 {
+                                        bg_code()
+                                    } else {
+                                        bg_card()
+                                    }
+                                })
+                                .border_t(move || if index.get() > 0 { px(1.0) } else { px(0.0) })
+                                .border_t_color(border_subtle())
+                                .on_press_up(dismiss_keyboard)
+                                .child(
+                                    mono(move || line.with(|line| line.name.clone()))
+                                        .w(px(176.0))
+                                        .flex_shrink_0()
+                                        .selectable(true)
+                                        .number_of_lines(1)
+                                        .text_overflow(EllipsizeMode::Tail)
+                                        .text_size(px(12.0))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(fg_muted()),
+                                )
+                                .child(
+                                    mono(move || line.with(|line| line.value.clone()))
+                                        .flex_1()
+                                        .selectable(true)
+                                        .text_size(px(12.0))
+                                        .text_color(fg_primary()),
+                                )
+                        },
+                    )
+                })
+            },
+        ))
+}
+
+fn filter_message_lines(lines: &[HeaderLine], query: &str, dir: u8, kind: u8) -> Vec<HeaderLine> {
+    if query.trim().is_empty() && dir == 0 && kind == 0 {
+        return lines.to_vec();
+    }
+    lines
+        .iter()
+        .filter(|line| present::message_matches_filter(&line.name, &line.value, query, dir, kind))
+        .cloned()
+        .collect()
+}
+
+fn msg_filter_chip(
+    state: Signal<u8>,
+    val: u8,
+    zh: &'static str,
+    en: &'static str,
+) -> impl IntoElement {
+    let active = move || state.get() == val;
+    view()
+        .h(px(22.0))
+        .px_2()
+        .flex_row()
+        .items_center()
+        .bg(move || if active() { accent_blue() } else { bg_card() })
+        .hover(|style| {
+            style.bg(move || {
+                if active() {
+                    accent_blue_hover()
+                } else {
+                    bg_control_hover()
+                }
+            })
+        })
+        .cursor(Cursor::Pointer)
+        .on_press(move || state.set(val))
+        .child(
+            text(tr(zh, en))
+                .number_of_lines(1)
+                .text_size(px(11.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(move || {
+                    if active() {
+                        AdaptiveColor::rgb(0xffffff, 0xffffff)
+                    } else {
+                        fg_secondary()
+                    }
+                }),
+        )
+}
+
+fn msg_search_box(
+    search: Signal<String>,
+    lines: Signal<Vec<HeaderLine>>,
+    dir: Signal<u8>,
+    kind: Signal<u8>,
+) -> impl IntoElement {
+    view()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .child(
+            input()
+                .value(search)
+                .placeholder(tr("搜索…", "Search…"))
+                .placeholder_color(move || color(fg_muted()))
+                .w(px(120.0))
+                .h(px(22.0))
+                .px_2()
+                .rounded(px(6.0))
+                .bg(bg_code())
+                .border_1()
+                .border_color(move || {
+                    if search.get().trim().is_empty() {
+                        border_control()
+                    } else {
+                        accent_blue_border()
+                    }
+                })
+                .focus(|style| style.border_color(accent_blue()))
+                .text_size(px(11.5))
+                .text_color(fg_primary())
+                .on_change(move |text: &str| search.set(text.to_string())),
+        )
+        .child(when(
+            move || !search.get().trim().is_empty(),
+            move || {
+                view()
+                    .h(px(22.0))
+                    .px_1p5()
+                    .rounded(px(6.0))
+                    .bg(accent_blue_soft())
+                    .border_1()
+                    .border_color(accent_blue_border())
+                    .flex_row()
+                    .items_center()
+                    .cursor(Cursor::Pointer)
+                    .tooltip(label_tip("点击清空搜索", "Click to clear search"))
+                    .on_press(move || search.set(String::new()))
+                    .child(
+                        mono(move || {
+                            let matched = filter_message_lines(
+                                &lines.get(),
+                                &search.get(),
+                                dir.get(),
+                                kind.get(),
+                            )
+                            .len();
+                            format!("{matched} ×")
+                        })
+                        .text_size(px(10.5))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(accent_blue_text()),
+                    )
+            },
+        ))
+}
+
+fn messages_section(shown: Shown, folded: Signal<u8>) -> impl IntoElement {
+    let lines = shown.messages;
+    let search = shown.msg_search;
+    let dir = shown.msg_dir;
+    let kind = shown.msg_kind;
+    let has_ws_dirs = move || {
+        lines.with(|items| {
+            items
+                .iter()
+                .any(|line| line.name.starts_with('↑') || line.name.starts_with('↓'))
+        })
+    };
+    view()
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(border_strong())
+        .bg(bg_card())
+        .overflow_hidden()
+        .child(
+            view()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .px_3p5()
+                .py_2()
+                .border_b(move || {
+                    if card_folded(folded, FOLD_MESSAGES) {
+                        px(0.0)
+                    } else {
+                        px(1.0)
+                    }
+                })
+                .border_b_color(border_subtle())
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_1p5()
+                        .cursor(Cursor::Pointer)
+                        .on_press(move || toggle_card(folded, FOLD_MESSAGES))
+                        .child(fold_mark(folded, FOLD_MESSAGES))
+                        .child(section_title(tr("消息", "Messages")))
+                        .child(
+                            view()
+                                .px_1p5()
+                                .py(px(1.0))
+                                .rounded(px(4.0))
+                                .bg(bg_control())
+                                .child(
+                                    mono(move || {
+                                        let total = lines.with(Vec::len);
+                                        if search.get().trim().is_empty()
+                                            && dir.get() == 0
+                                            && kind.get() == 0
+                                        {
+                                            format!("{total}")
+                                        } else {
+                                            let matched = filter_message_lines(
+                                                &lines.get(),
+                                                &search.get(),
+                                                dir.get(),
+                                                kind.get(),
+                                            )
+                                            .len();
+                                            format!("{matched}/{total}")
+                                        }
+                                    })
+                                    .text_size(px(10.5))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(fg_muted()),
+                                ),
+                        ),
+                )
+                .child(when(
+                    move || !card_folded(folded, FOLD_MESSAGES),
+                    move || {
+                        view()
+                            .flex_row()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_1p5()
+                            .child(when(has_ws_dirs, move || {
+                                view()
+                                    .flex_row()
+                                    .h(px(22.0))
+                                    .rounded(px(6.0))
+                                    .border_1()
+                                    .border_color(border_control())
+                                    .overflow_hidden()
+                                    .child(msg_filter_chip(dir, 0, "全部", "All"))
+                                    .child(msg_filter_chip(dir, 1, "↑ 客户端", "↑ Client"))
+                                    .child(msg_filter_chip(dir, 2, "↓ 源站", "↓ Origin"))
+                            }))
+                            .child(when(has_ws_dirs, move || {
+                                view()
+                                    .flex_row()
+                                    .h(px(22.0))
+                                    .rounded(px(6.0))
+                                    .border_1()
+                                    .border_color(border_control())
+                                    .overflow_hidden()
+                                    .child(msg_filter_chip(kind, 0, "全部", "All"))
+                                    .child(msg_filter_chip(kind, 1, "文本", "Text"))
+                                    .child(msg_filter_chip(kind, 2, "二进制", "Binary"))
+                                    .child(msg_filter_chip(kind, 3, "控制", "Control"))
+                            }))
+                            .child(msg_search_box(search, lines, dir, kind))
+                    },
+                )),
+        )
+        .child(when(
+            move || !card_folded(folded, FOLD_MESSAGES),
+            move || {
+                let filtered = move || {
+                    filter_message_lines(&lines.get(), &search.get(), dir.get(), kind.get())
+                };
+                when(
+                    move || filtered().is_empty(),
+                    || view().px_3p5().py_2p5().child(muted_line(tr("无", "None"))),
+                )
+                .otherwise(move || {
+                    each(
+                        filtered,
                         |line| line.key,
                         |line, index| {
                             view()
@@ -10280,6 +10604,73 @@ fn spawn_detached<T: 'static>(future: impl std::future::Future<Output = T> + 'st
     });
 }
 
+fn default_save_dir() -> Option<std::path::PathBuf> {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok();
+    let config_home = std::env::var("XDG_CONFIG_HOME")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            home.as_deref()
+                .map(|h| std::path::PathBuf::from(h).join(".config"))
+        });
+    let user_dirs =
+        config_home.and_then(|dir| std::fs::read_to_string(dir.join("user-dirs.dirs")).ok());
+    let cwd = std::env::current_dir().ok();
+    default_save_dir_from(home.as_deref(), user_dirs.as_deref(), cwd.as_deref())
+}
+
+fn default_save_dir_from(
+    home: Option<&str>,
+    user_dirs_text: Option<&str>,
+    cwd: Option<&std::path::Path>,
+) -> Option<std::path::PathBuf> {
+    if let Some(home) = home {
+        if let Some(text) = user_dirs_text
+            && let Some(xdg) = xdg_download_dir(home, text)
+            && xdg.is_dir()
+        {
+            return Some(xdg);
+        }
+        let downloads = std::path::PathBuf::from(home).join("Downloads");
+        if downloads.is_dir() {
+            return Some(downloads);
+        }
+        let home_dir = std::path::PathBuf::from(home);
+        if home_dir.is_dir() {
+            return Some(home_dir);
+        }
+    }
+    cwd.filter(|dir| dir.is_dir())
+        .map(std::path::Path::to_path_buf)
+}
+
+fn save_dialog_with_default_dir() -> nsh_core::file_dialog::SaveDialog {
+    let dialog = nsh_core::file_dialog::SaveDialog::new();
+    match default_save_dir() {
+        Some(dir) => dialog.directory(dir),
+        None => dialog,
+    }
+}
+
+fn open_dialog_with_default_dir() -> nsh_core::file_dialog::OpenDialog {
+    let dialog = nsh_core::file_dialog::OpenDialog::files();
+    match default_save_dir() {
+        Some(dir) => dialog.directory(dir),
+        None => dialog,
+    }
+}
+
+fn write_export_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, bytes)
+}
+
 fn export_response(controls: Arc<Controls>, id: Option<u64>) {
     let Some(flow) = selected_flow(&controls, id) else {
         return;
@@ -10287,11 +10678,11 @@ fn export_response(controls: Arc<Controls>, id: Option<u64>) {
     if flow.response_body.is_empty() {
         set_status(&controls, StatusMsg::EmptyResponse);
         return;
-    }
+    };
     let ext = present::content_type(&flow.response_headers)
         .and_then(present::image_extension)
         .unwrap_or_else(|| body_extension(&flow.response_headers, &flow.response_body));
-    let dialog = nsh_core::file_dialog::SaveDialog::new()
+    let dialog = save_dialog_with_default_dir()
         .file_name(format!("{}.{}", flow.id, ext))
         .filter(nsh_core::file_dialog::FileFilter::new(
             ext.to_ascii_uppercase(),
@@ -10301,14 +10692,7 @@ fn export_response(controls: Arc<Controls>, id: Option<u64>) {
     spawn_detached(async move {
         match pick_save_path(dialog).await {
             Ok(Some(path)) => {
-                if let Some(parent) = path.parent()
-                    && !parent.as_os_str().is_empty()
-                    && let Err(err) = std::fs::create_dir_all(parent)
-                {
-                    set_status(&controls, StatusMsg::SaveFailed(err.to_string()));
-                    return;
-                }
-                if let Err(err) = std::fs::write(&path, &body) {
+                if let Err(err) = write_export_file(&path, &body) {
                     set_status(&controls, StatusMsg::SaveFailed(err.to_string()));
                     return;
                 }
@@ -10322,7 +10706,6 @@ fn export_response(controls: Arc<Controls>, id: Option<u64>) {
     });
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 /// `XDG_DOWNLOAD_DIR="$HOME/Downloads"` from `user-dirs.dirs`.
 fn xdg_download_dir(home: &str, text: &str) -> Option<std::path::PathBuf> {
     for line in text.lines() {
@@ -10937,7 +11320,7 @@ fn lan_toggle(on: Signal<bool>, controls: Arc<Controls>) -> impl IntoElement {
 
 fn prompt_import_har(controls: Arc<Controls>) {
     spawn_detached(async move {
-        let dialog = nsh_core::file_dialog::OpenDialog::files()
+        let dialog = open_dialog_with_default_dir()
             .multiple(true)
             .filter(nsh_core::file_dialog::FileFilter::new("HAR", ["har"]));
         match pick_paths(dialog).await {
@@ -13385,14 +13768,17 @@ fn repeat_flow_batch(controls: &Arc<Controls>, id: Option<u64>, shown: Shown) {
     };
     let count = present::parse_repeat_count(&shown.repeat_count.get());
     let interval_ms = present::parse_repeat_interval_ms(&shown.repeat_interval.get());
+    let concurrency = present::parse_repeat_concurrency(&shown.repeat_concurrency.get());
     shown.repeat_count.set(count.to_string());
     shown.repeat_interval.set(interval_ms.to_string());
+    shown.repeat_concurrency.set(concurrency.to_string());
     shown.repeating.set(false);
     let hub = controls.hub.clone();
     let controls = Arc::clone(controls);
     hub.replay_batch_later(
         id,
         count,
+        concurrency,
         interval_ms,
         ReplayOverride::default(),
         move |result| match result {
@@ -13434,20 +13820,13 @@ fn export_har_file(controls: Arc<Controls>, filter: &str) {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
-    let dialog = nsh_core::file_dialog::SaveDialog::new()
+    let dialog = save_dialog_with_default_dir()
         .file_name(format!("zniff-{secs}.har"))
         .filter(nsh_core::file_dialog::FileFilter::new("HAR", ["har"]));
     spawn_detached(async move {
         match pick_save_path(dialog).await {
             Ok(Some(path)) => {
-                if let Some(parent) = path.parent()
-                    && !parent.as_os_str().is_empty()
-                    && let Err(err) = std::fs::create_dir_all(parent)
-                {
-                    set_status(&controls, StatusMsg::ExportFailed(err.to_string()));
-                    return;
-                }
-                if let Err(err) = std::fs::write(&path, &bytes) {
+                if let Err(err) = write_export_file(&path, &bytes) {
                     set_status(&controls, StatusMsg::ExportFailed(err.to_string()));
                     return;
                 }
@@ -13471,7 +13850,7 @@ fn export_html_file(controls: Arc<Controls>, filter: &str, zh: bool) {
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
-    let dialog = nsh_core::file_dialog::SaveDialog::new()
+    let dialog = save_dialog_with_default_dir()
         .file_name(format!("zniff-{secs}.html"))
         .filter(nsh_core::file_dialog::FileFilter::new(
             "HTML",
@@ -13480,14 +13859,7 @@ fn export_html_file(controls: Arc<Controls>, filter: &str, zh: bool) {
     spawn_detached(async move {
         match pick_save_path(dialog).await {
             Ok(Some(path)) => {
-                if let Some(parent) = path.parent()
-                    && !parent.as_os_str().is_empty()
-                    && let Err(err) = std::fs::create_dir_all(parent)
-                {
-                    set_status(&controls, StatusMsg::ExportFailed(err.to_string()));
-                    return;
-                }
-                if let Err(err) = std::fs::write(&path, &html) {
+                if let Err(err) = write_export_file(&path, html.as_bytes()) {
                     set_status(&controls, StatusMsg::ExportFailed(err.to_string()));
                     return;
                 }
@@ -15149,5 +15521,43 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
             super::seq_candidate_target(&candidate, true),
             "api.example.com/v1/orders?limit=10"
         );
+    }
+
+    #[test]
+    fn default_save_dir_prefers_xdg_downloads_then_home_and_cwd() {
+        let base = std::env::temp_dir().join(format!("zniff-save-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let home = base.join("home");
+        let custom_dl = home.join("MyDownloads");
+        let std_dl = home.join("Downloads");
+        let cwd = base.join("cwd");
+        std::fs::create_dir_all(&custom_dl).unwrap();
+        std::fs::create_dir_all(&std_dl).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let home_str = home.to_string_lossy();
+        let user_dirs = "XDG_DOWNLOAD_DIR=\"$HOME/MyDownloads\"\n";
+        assert_eq!(
+            super::default_save_dir_from(Some(&home_str), Some(user_dirs), Some(&cwd)),
+            Some(custom_dl)
+        );
+        assert_eq!(
+            super::default_save_dir_from(Some(&home_str), None, Some(&cwd)),
+            Some(std_dl.clone())
+        );
+        std::fs::remove_dir_all(&std_dl).unwrap();
+        assert_eq!(
+            super::default_save_dir_from(Some(&home_str), None, Some(&cwd)),
+            Some(home.clone())
+        );
+        assert_eq!(
+            super::default_save_dir_from(None, None, Some(&cwd)),
+            Some(cwd.clone())
+        );
+
+        let exported = base.join("nested").join("export.har");
+        super::write_export_file(&exported, b"{\"log\":{}}").unwrap();
+        assert_eq!(std::fs::read(&exported).unwrap(), b"{\"log\":{}}");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

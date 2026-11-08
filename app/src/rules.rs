@@ -82,6 +82,13 @@ pub enum Rule {
         from: String,
         to: String,
     },
+    /// Bandwidth limit in bytes per second for download (`down_bps`) and/or upload (`up_bps`).
+    Throttle {
+        host: String,
+        path_prefix: String,
+        down_bps: Option<u64>,
+        up_bps: Option<u64>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,6 +114,8 @@ pub enum Action {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Effect {
     pub delay: Duration,
+    pub throttle_down_bps: Option<u64>,
+    pub throttle_up_bps: Option<u64>,
     pub request_headers: Vec<HeaderOp>,
     pub response_headers: Vec<HeaderOp>,
     pub query_ops: Vec<QueryOp>,
@@ -121,6 +130,8 @@ impl Default for Effect {
     fn default() -> Self {
         Self {
             delay: Duration::ZERO,
+            throttle_down_bps: None,
+            throttle_up_bps: None,
             request_headers: Vec::new(),
             response_headers: Vec::new(),
             query_ops: Vec::new(),
@@ -166,6 +177,9 @@ impl Rule {
             }
             | Self::Replace {
                 host, path_prefix, ..
+            }
+            | Self::Throttle {
+                host, path_prefix, ..
             } => (host, path_prefix),
         }
     }
@@ -198,6 +212,7 @@ pub fn hit_summary(rules: &[Rule], host: &str, path: &str) -> String {
             Rule::Break { .. } => ("break", true),
             Rule::BreakResponse { .. } => ("break-res", true),
             Rule::Delay { .. } => ("delay", false),
+            Rule::Throttle { .. } => ("throttle", false),
             Rule::Header { .. } => ("header", false),
             Rule::Query { .. } => ("query", false),
             Rule::Cors { .. } => ("cors", false),
@@ -251,6 +266,18 @@ pub fn effect(rules: &[Rule], host: &str, path: &str) -> Effect {
         match rule {
             Rule::Delay { delay, .. } => {
                 effect.delay = cap_delay(effect.delay.saturating_add(*delay));
+            }
+            Rule::Throttle {
+                down_bps, up_bps, ..
+            } => {
+                if let Some(down) = down_bps {
+                    effect.throttle_down_bps =
+                        Some(effect.throttle_down_bps.map_or(*down, |cur| cur.min(*down)));
+                }
+                if let Some(up) = up_bps {
+                    effect.throttle_up_bps =
+                        Some(effect.throttle_up_bps.map_or(*up, |cur| cur.min(*up)));
+                }
             }
             Rule::Header {
                 response,
@@ -555,6 +582,16 @@ fn parse_line(line: &str) -> Option<Rule> {
                 delay: parse_delay(&tokens[0])?,
             })
         }
+        "throttle" => {
+            let tokens = rule_tokens(rest)?;
+            let (down_bps, up_bps) = parse_throttle_tokens(&tokens)?;
+            Some(Rule::Throttle {
+                host,
+                path_prefix,
+                down_bps,
+                up_bps,
+            })
+        }
         "header" => {
             let (side, rest) = next_rule_token(rest)?;
             let (op, rest) = next_rule_token(rest)?;
@@ -795,6 +832,7 @@ pub enum QuickRule {
     Remote,
     Local,
     Delay,
+    Throttle,
     Break,
     BreakRes,
     Header,
@@ -809,6 +847,7 @@ impl QuickRule {
             Self::Remote => ("转发", "Forward"),
             Self::Local => ("文件", "File"),
             Self::Delay => ("延迟", "Delay"),
+            Self::Throttle => ("限速", "Throttle"),
             Self::Break => ("断点", "Break"),
             Self::BreakRes => ("响应断点", "Break res"),
             Self::Header => ("改头", "Header"),
@@ -940,6 +979,20 @@ pub fn append_quick_rule(
             }
             format!("delay {pattern} {from}")
         }
+        QuickRule::Throttle => {
+            let spec = if to.is_empty() {
+                from.to_string()
+            } else if from.is_empty() {
+                format!("up={to}")
+            } else if from.contains('=') || to.contains('=') {
+                format!("{from} {to}")
+            } else {
+                format!("down={from} up={to}")
+            };
+            let tokens = rule_tokens(&spec)?;
+            let _ = parse_throttle_tokens(&tokens)?;
+            format!("throttle {pattern} {}", tokens.join(" "))
+        }
         QuickRule::Break => format!("break {pattern}"),
         QuickRule::BreakRes => format!("break-res {pattern}"),
         QuickRule::Header => {
@@ -1035,6 +1088,115 @@ fn parse_delay(text: &str) -> Option<Duration> {
     }
     let ms = num.parse::<u64>().ok()?.saturating_mul(unit);
     Some(Duration::from_millis(ms.min(DELAY_CAP.as_millis() as u64)))
+}
+
+pub const THROTTLE_MIN_BPS: u64 = 512;
+pub const THROTTLE_MAX_BPS: u64 = 100 * 1024 * 1024;
+
+/// Parses `throttle` rule tokens into `(down_bps, up_bps)` in bytes per second.
+/// Supports presets (`2g` / `slow-3g`, `3g`, `4g` / `slow-4g`), directional
+/// `down=<rate>` / `up=<rate>`, or a single bare `<rate>` token (applied to both
+/// download and upload).
+pub fn parse_throttle_tokens(tokens: &[String]) -> Option<(Option<u64>, Option<u64>)> {
+    if tokens.is_empty() {
+        return None;
+    }
+    if tokens.len() == 1 {
+        let single = tokens[0].trim();
+        let lower = single.to_ascii_lowercase();
+        match lower.as_str() {
+            "2g" | "slow-3g" | "slow3g" => return Some((Some(50_000), Some(20_000))),
+            "3g" | "regular-3g" | "fast-3g" => return Some((Some(96_000), Some(32_000))),
+            "4g" | "slow-4g" | "slow4g" => return Some((Some(512_000), Some(128_000))),
+            _ => {}
+        }
+        if !lower.contains('=') {
+            let bps = parse_bandwidth_bps(single)?;
+            return Some((Some(bps), Some(bps)));
+        }
+    }
+    let mut down_bps = None;
+    let mut up_bps = None;
+    for token in tokens {
+        let lower = token.trim().to_ascii_lowercase();
+        if let Some(rest) = lower
+            .strip_prefix("down=")
+            .or_else(|| lower.strip_prefix("dl="))
+        {
+            if down_bps.is_some() {
+                return None;
+            }
+            down_bps = Some(parse_bandwidth_bps(rest)?);
+        } else {
+            let rest = lower
+                .strip_prefix("up=")
+                .or_else(|| lower.strip_prefix("ul="))?;
+            if up_bps.is_some() {
+                return None;
+            }
+            up_bps = Some(parse_bandwidth_bps(rest)?);
+        }
+    }
+    if down_bps.is_none() && up_bps.is_none() {
+        return None;
+    }
+    Some((down_bps, up_bps))
+}
+
+/// Parses a bandwidth rate token into bytes per second (`B/s`), clamped to
+/// `[THROTTLE_MIN_BPS, THROTTLE_MAX_BPS]`.
+///
+/// Supported units (case-insensitive):
+/// - `mb/s`, `mbyte/s`: `n * 1024 * 1024` B/s
+/// - `mbps`, `mbit/s`, `mb`: `n * 125_000` B/s (megabits/s)
+/// - `kb/s`, `kbyte/s`: `n * 1024` B/s
+/// - `kbps`, `kbit/s`, `kb`, or bare integer: `n * 125` B/s (kilobits/s; `8 kbps = 1000 B/s`)
+/// - `b/s`, `bps`: `n` B/s
+pub fn parse_bandwidth_bps(text: &str) -> Option<u64> {
+    let lower = text.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return None;
+    }
+    let (num_str, multiplier, divisor) = if let Some(n) = lower
+        .strip_suffix("mb/s")
+        .or_else(|| lower.strip_suffix("mbyte/s"))
+    {
+        (n, 1024 * 1024, 1)
+    } else if let Some(n) = lower
+        .strip_suffix("mbps")
+        .or_else(|| lower.strip_suffix("mbit/s"))
+        .or_else(|| lower.strip_suffix("mb"))
+    {
+        (n, 1_000_000, 8)
+    } else if let Some(n) = lower
+        .strip_suffix("kb/s")
+        .or_else(|| lower.strip_suffix("kbyte/s"))
+    {
+        (n, 1024, 1)
+    } else if let Some(n) = lower
+        .strip_suffix("kbps")
+        .or_else(|| lower.strip_suffix("kbit/s"))
+        .or_else(|| lower.strip_suffix("kb"))
+    {
+        (n, 1000, 8)
+    } else if let Some(n) = lower
+        .strip_suffix("b/s")
+        .or_else(|| lower.strip_suffix("bps"))
+    {
+        (n, 1, 1)
+    } else {
+        (lower.as_str(), 1000, 8)
+    };
+    let num_str = num_str.trim();
+    if num_str.is_empty() || !num_str.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let val = num_str.parse::<u64>().ok()?;
+    if val == 0 {
+        return None;
+    }
+    let bps = val.saturating_mul(multiplier) / divisor;
+    Some(bps.clamp(THROTTLE_MIN_BPS, THROTTLE_MAX_BPS))
 }
 
 /// Builds a single-token rule pattern from a domain input (which may already
@@ -1448,5 +1610,50 @@ replace example.com/api res \"old text\" -> \"new text\"
         let q_del =
             append_quick_rule("", QuickRule::Query, "example.com/api", false, "token", "").unwrap();
         assert_eq!(q_del, "query example.com/api del token\n");
+    }
+
+    #[test]
+    fn throttle_rules_parse_presets_and_directional_rates() {
+        let rules = parse_rules(
+            "\
+throttle example.com/api down=256kbps up=64kbps
+throttle example.com/slow 3g
+throttle example.com/fast 64kb/s
+",
+        );
+        assert_eq!(rules.len(), 3);
+        let eff_api = effect(&rules, "example.com", "/api/v1");
+        assert_eq!(eff_api.throttle_down_bps, Some(32_000));
+        assert_eq!(eff_api.throttle_up_bps, Some(8_000));
+        assert_eq!(hit_summary(&rules, "example.com", "/api/v1"), "throttle");
+
+        let eff_3g = effect(&rules, "example.com", "/slow/item");
+        assert_eq!(eff_3g.throttle_down_bps, Some(96_000));
+        assert_eq!(eff_3g.throttle_up_bps, Some(32_000));
+
+        let eff_kb = effect(&rules, "example.com", "/fast");
+        assert_eq!(eff_kb.throttle_down_bps, Some(64 * 1024));
+        assert_eq!(eff_kb.throttle_up_bps, Some(64 * 1024));
+
+        assert_eq!(
+            append_quick_rule(
+                "",
+                QuickRule::Throttle,
+                "example.com/api",
+                false,
+                "256kbps",
+                "64kbps"
+            )
+            .as_deref(),
+            Some("throttle example.com/api down=256kbps up=64kbps\n")
+        );
+        assert_eq!(
+            append_quick_rule("", QuickRule::Throttle, "example.com", false, "3g", "").as_deref(),
+            Some("throttle example.com 3g\n")
+        );
+        assert!(
+            append_quick_rule("", QuickRule::Throttle, "example.com", false, "invalid", "")
+                .is_none()
+        );
     }
 }

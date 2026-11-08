@@ -379,6 +379,9 @@ pub fn is_slow(started: SystemTime, finished: Option<SystemTime>, now: SystemTim
 pub const REPEAT_COUNT_MIN: u32 = 1;
 pub const REPEAT_COUNT_MAX: u32 = 100;
 pub const REPEAT_COUNT_DEFAULT: u32 = 5;
+pub const REPEAT_CONCURRENCY_MIN: u32 = 1;
+pub const REPEAT_CONCURRENCY_MAX: u32 = 20;
+pub const REPEAT_CONCURRENCY_DEFAULT: u32 = 1;
 pub const REPEAT_INTERVAL_MAX_MS: u64 = 60_000;
 pub const REPEAT_INTERVAL_DEFAULT_MS: u64 = 200;
 
@@ -389,11 +392,58 @@ pub fn parse_repeat_count(text: &str) -> u32 {
         .clamp(REPEAT_COUNT_MIN, REPEAT_COUNT_MAX)
 }
 
+pub fn parse_repeat_concurrency(text: &str) -> u32 {
+    text.trim()
+        .parse::<u32>()
+        .unwrap_or(REPEAT_CONCURRENCY_DEFAULT)
+        .clamp(REPEAT_CONCURRENCY_MIN, REPEAT_CONCURRENCY_MAX)
+}
+
 pub fn parse_repeat_interval_ms(text: &str) -> u64 {
     text.trim()
         .parse::<u64>()
         .unwrap_or(REPEAT_INTERVAL_DEFAULT_MS)
         .min(REPEAT_INTERVAL_MAX_MS)
+}
+
+/// Checks whether a WebSocket or SSE message row (`(name, value)`) matches the
+/// details message filter (`query`, `dir`: `0 = All`, `1 = Client ↑`, `2 = Origin ↓`,
+/// `kind`: `0 = All`, `1 = Text`, `2 = Binary`, `3 = Control (ping/pong/close)`).
+pub fn message_matches_filter(name: &str, value: &str, query: &str, dir: u8, kind: u8) -> bool {
+    if name == "…" {
+        return true;
+    }
+    let name_lower = name.to_lowercase();
+    let is_client = name_lower.starts_with("客户端 ") || name_lower.starts_with("client ");
+    let is_origin = name_lower.starts_with("源站 ") || name_lower.starts_with("origin ");
+    let is_ws = is_client || is_origin;
+    match dir {
+        1 if is_ws && !is_client => return false,
+        2 if is_ws && !is_origin => return false,
+        _ => {}
+    }
+    if is_ws && kind != 0 {
+        let is_text = name_lower.ends_with(" 文本") || name_lower.ends_with(" text");
+        let is_binary = name_lower.ends_with(" 二进制") || name_lower.ends_with(" binary");
+        let is_ctrl = name_lower.ends_with(" ping")
+            || name_lower.ends_with(" pong")
+            || name_lower.ends_with(" 关闭")
+            || name_lower.ends_with(" close");
+        match kind {
+            1 if !is_text => return false,
+            2 if !is_binary => return false,
+            3 if !is_ctrl => return false,
+            _ => {}
+        }
+    }
+    let needle = query.trim().to_lowercase();
+    if !needle.is_empty() {
+        let value_lower = value.to_lowercase();
+        if !name_lower.contains(&needle) && !value_lower.contains(&needle) {
+            return false;
+        }
+    }
+    true
 }
 
 pub fn bytes(bytes: usize) -> String {
@@ -3477,10 +3527,36 @@ mod tests {
         assert_eq!(parse_repeat_count("0"), 1);
         assert_eq!(parse_repeat_count("12"), 12);
         assert_eq!(parse_repeat_count("999"), 100);
+        assert_eq!(parse_repeat_concurrency(""), 1);
+        assert_eq!(parse_repeat_concurrency("0"), 1);
+        assert_eq!(parse_repeat_concurrency("4"), 4);
+        assert_eq!(parse_repeat_concurrency("99"), 20);
         assert_eq!(parse_repeat_interval_ms(""), 200);
         assert_eq!(parse_repeat_interval_ms("0"), 0);
         assert_eq!(parse_repeat_interval_ms("500"), 500);
         assert_eq!(parse_repeat_interval_ms("120000"), 60_000);
+        assert!(message_matches_filter(
+            "客户端 文本",
+            "{\"op\":\"sub\"}",
+            "sub",
+            1,
+            1
+        ));
+        assert!(!message_matches_filter(
+            "客户端 文本",
+            "{\"op\":\"sub\"}",
+            "sub",
+            2,
+            1
+        ));
+        assert!(!message_matches_filter(
+            "客户端 文本",
+            "{\"op\":\"sub\"}",
+            "sub",
+            1,
+            2
+        ));
+        assert!(message_matches_filter("源站 ping", "", "", 2, 3));
         assert_eq!(bytes(512), "512 B");
         assert_eq!(bytes(2048), "2.0 KB");
         let parsed = parse_curl(

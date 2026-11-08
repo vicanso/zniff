@@ -880,12 +880,14 @@ impl Hub {
         });
     }
 
-    /// Replays one stored request `count` times sequentially with `interval_ms`
-    /// between iterations on a fresh runtime. Map and break rules are not applied.
+    /// Replays one stored request `count` times (with up to `concurrency` parallel
+    /// workers) and `interval_ms` between launches on a fresh runtime. Map and break
+    /// rules are not applied.
     pub fn replay_batch_later<F>(
         self: &Arc<Self>,
         id: u64,
         count: u32,
+        concurrency: u32,
         interval_ms: u64,
         edit: ReplayOverride,
         on_done: F,
@@ -908,7 +910,14 @@ impl Hub {
                     .enable_all()
                     .build()
                     .context("重放运行时")?;
-                runtime.block_on(replay_batch(hub, flow, count, interval_ms, edit))
+                runtime.block_on(replay_batch(
+                    hub,
+                    flow,
+                    count,
+                    concurrency,
+                    interval_ms,
+                    edit,
+                ))
             })();
             on_done(result);
         });
@@ -1940,6 +1949,8 @@ where
     }
     let response_ops = plan.response_headers.clone();
     let cors = plan.cors;
+    let throttle_up_bps = plan.throttle_up_bps;
+    let throttle_down_bps = plan.throttle_down_bps;
     let break_response = matches!(plan.action, Some(Action::BreakResponse));
     if cors && method.eq_ignore_ascii_case("OPTIONS") && plan.action.is_none() {
         let _ = drain_request(client, &headers, &hub, id).await;
@@ -1960,6 +1971,7 @@ where
                 *status,
                 &response_ops,
                 cors,
+                throttle_down_bps,
             )
             .await;
         }
@@ -1995,7 +2007,17 @@ where
                     let _ = drain_request(client, &headers, &hub, id).await;
                     let body = body_override.unwrap_or_default();
                     return exchange_tls(
-                        client, &hub, id, &method, &host, port, &path, &headers, &body,
+                        client,
+                        &hub,
+                        id,
+                        &method,
+                        &host,
+                        port,
+                        &path,
+                        &headers,
+                        &body,
+                        throttle_up_bps,
+                        throttle_down_bps,
                     )
                     .await;
                 }
@@ -2098,7 +2120,7 @@ where
     }
     let encoding = header_value(&headers, "content-encoding");
     if let Some(body) = &body_override {
-        origin.write_all(body).await?;
+        write_all_throttled(&mut origin, body, throttle_up_bps).await?;
         hub.replace_request(id, headers.clone(), body.clone());
         if !request_taken {
             let _ = discard_request(client, &head.headers).await;
@@ -2112,6 +2134,7 @@ where
             id,
             Direction::Request,
             encoding,
+            throttle_up_bps,
         )
         .await?;
     }
@@ -2161,13 +2184,21 @@ where
                     && !name.eq_ignore_ascii_case("transfer-encoding")
             });
             hub.replace_response(id, status, resp_headers.clone(), next.clone());
-            write_bytes(client, status, &reason, &resp_headers, &next).await?;
+            write_bytes(
+                client,
+                status,
+                &reason,
+                &resp_headers,
+                &next,
+                throttle_down_bps,
+            )
+            .await?;
             hub.mark_finished(id);
             return Ok(());
         }
         let head = render_response_head(status, &reason, &resp_headers);
         client.write_all(head.as_bytes()).await?;
-        client.write_all(&raw).await?;
+        write_all_throttled(client, &raw, throttle_down_bps).await?;
         note_decoded(&hub, id, Direction::Response, &raw, encoding.as_deref());
         hub.mark_finished(id);
         return Ok(());
@@ -2181,7 +2212,7 @@ where
                 if decision.drop {
                     hub.set_error(id, "断点丢弃");
                     hub.replace_response(id, 204, Vec::new(), Vec::new());
-                    write_bytes(client, 204, "No Content", &[], &[]).await?;
+                    write_bytes(client, 204, "No Content", &[], &[], None).await?;
                     hub.mark_finished(id);
                     return Ok(());
                 }
@@ -2200,7 +2231,15 @@ where
                 } else {
                     hub.replace_response_head(id, status, next_headers.clone());
                 }
-                write_bytes(client, status, reason, &next_headers, &next_body).await?;
+                write_bytes(
+                    client,
+                    status,
+                    reason,
+                    &next_headers,
+                    &next_body,
+                    throttle_down_bps,
+                )
+                .await?;
                 hub.mark_finished(id);
                 return Ok(());
             }
@@ -2237,6 +2276,7 @@ where
         id,
         Direction::Response,
         encoding,
+        throttle_down_bps,
     )
     .await?;
     hub.mark_finished(id);
@@ -2317,6 +2357,7 @@ where
         id,
         Direction::Request,
         encoding,
+        None,
     )
     .await?;
     Ok(())
@@ -2364,6 +2405,7 @@ where
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn write_mapped_file<S>(
     client: &mut S,
     hub: &Hub,
@@ -2372,6 +2414,7 @@ async fn write_mapped_file<S>(
     status: u16,
     response_ops: &[rules::HeaderOp],
     cors: bool,
+    throttle_bps: Option<u64>,
 ) -> Result<()>
 where
     S: AsyncWrite + Unpin,
@@ -2404,7 +2447,7 @@ where
                 rules::ensure_cors(&mut headers);
             }
             rules::apply_header_ops(&mut headers, response_ops);
-            write_static(
+            write_static_throttled(
                 client,
                 hub,
                 id,
@@ -2412,6 +2455,7 @@ where
                 reason_phrase(status),
                 &headers,
                 &body,
+                throttle_bps,
             )
             .await
         }
@@ -2444,6 +2488,23 @@ async fn write_static<S>(
 where
     S: AsyncWrite + Unpin,
 {
+    write_static_throttled(client, hub, id, status, reason, headers, body, None).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn write_static_throttled<S>(
+    client: &mut S,
+    hub: &Hub,
+    id: u64,
+    status: u16,
+    reason: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+    throttle_bps: Option<u64>,
+) -> Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
     let mut head = format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n",
         body.len()
@@ -2459,7 +2520,7 @@ where
     }
     head.push_str("\r\n");
     client.write_all(head.as_bytes()).await?;
-    client.write_all(body).await?;
+    write_all_throttled(client, body, throttle_bps).await?;
     let mut recorded = headers.to_vec();
     if !recorded
         .iter()
@@ -2484,6 +2545,8 @@ async fn exchange_tls<S>(
     path: &str,
     headers: &[(String, String)],
     body: &[u8],
+    throttle_up_bps: Option<u64>,
+    throttle_down_bps: Option<u64>,
 ) -> Result<()>
 where
     S: AsyncWrite + Unpin,
@@ -2516,7 +2579,7 @@ where
         body.len()
     ));
     origin.write_all(outbound.as_bytes()).await?;
-    origin.write_all(body).await?;
+    write_all_throttled(&mut origin, body, throttle_up_bps).await?;
     let (resp_bytes, resp_rest) = read_header_block(&mut origin).await?;
     client.write_all(&resp_bytes).await?;
     let resp = parse_head(&resp_bytes)?;
@@ -2540,6 +2603,7 @@ where
         id,
         Direction::Response,
         header_value(&resp.headers, "content-encoding"),
+        throttle_down_bps,
     )
     .await?;
     hub.mark_finished(id);
@@ -2893,6 +2957,7 @@ pub async fn replay_batch(
     hub: Arc<Hub>,
     source: crate::session::Flow,
     count: u32,
+    concurrency: u32,
     interval_ms: u64,
     edit: ReplayOverride,
 ) -> Result<Vec<u64>> {
@@ -2900,17 +2965,74 @@ pub async fn replay_batch(
         crate::present::REPEAT_COUNT_MIN,
         crate::present::REPEAT_COUNT_MAX,
     );
+    let workers = concurrency
+        .clamp(
+            crate::present::REPEAT_CONCURRENCY_MIN,
+            crate::present::REPEAT_CONCURRENCY_MAX,
+        )
+        .min(total);
     let delay_ms = interval_ms.min(crate::present::REPEAT_INTERVAL_MAX_MS);
-    let mut ids = Vec::with_capacity(total as usize);
+    let source_id = source.id;
+    let base_comment = source.comment.clone();
+    if workers <= 1 {
+        let mut ids = Vec::with_capacity(total as usize);
+        for idx in 0..total {
+            if idx > 0 && delay_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+            let (replayed_id, _sent) =
+                replay_once_attempt(Arc::clone(&hub), Some(source.clone()), edit.clone()).await?;
+            hub.set_comment(
+                replayed_id,
+                repeat_tag_comment(source_id, &base_comment, idx + 1, total),
+            );
+            ids.push(replayed_id);
+        }
+        return Ok(ids);
+    }
+
+    let sem = Arc::new(tokio::sync::Semaphore::new(workers as usize));
+    let mut join_set = tokio::task::JoinSet::new();
     for idx in 0..total {
         if idx > 0 && delay_ms > 0 {
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
         }
-        let (replayed_id, _sent) =
-            replay_once_attempt(Arc::clone(&hub), Some(source.clone()), edit.clone()).await?;
-        ids.push(replayed_id);
+        let permit = Arc::clone(&sem)
+            .acquire_owned()
+            .await
+            .context("并发信号量")?;
+        let hub_task = Arc::clone(&hub);
+        let source_task = source.clone();
+        let edit_task = edit.clone();
+        let base_comment_task = base_comment.clone();
+        join_set.spawn(async move {
+            let _permit = permit;
+            let (replayed_id, _sent) =
+                replay_once_attempt(Arc::clone(&hub_task), Some(source_task), edit_task).await?;
+            hub_task.set_comment(
+                replayed_id,
+                repeat_tag_comment(source_id, &base_comment_task, idx + 1, total),
+            );
+            Ok::<(u32, u64), anyhow::Error>((idx, replayed_id))
+        });
     }
-    Ok(ids)
+    let mut pairs = Vec::with_capacity(total as usize);
+    while let Some(res) = join_set.join_next().await {
+        let pair = res.context("批量重放任务")??;
+        pairs.push(pair);
+    }
+    pairs.sort_by_key(|(idx, _)| *idx);
+    Ok(pairs.into_iter().map(|(_, id)| id).collect())
+}
+
+fn repeat_tag_comment(source_id: u64, base_comment: &str, index: u32, total: u32) -> String {
+    let tag = format!("repeat:{source_id} ({index}/{total})");
+    let trimmed = base_comment.trim();
+    if trimmed.is_empty() {
+        tag
+    } else {
+        format!("{trimmed} · {tag}")
+    }
 }
 
 async fn replay_once(
@@ -3125,6 +3247,7 @@ where
         id,
         Direction::Response,
         header_value(&resp.headers, "content-encoding"),
+        None,
     )
     .await?;
     hub.mark_finished(id);
@@ -3144,6 +3267,38 @@ fn file_type(path: &std::path::Path) -> &'static str {
     }
 }
 
+const THROTTLE_CHUNK_BYTES: usize = 4096;
+
+fn throttle_sleep_duration(bytes: usize, bps: Option<u64>) -> Duration {
+    let Some(bps) = bps.filter(|&rate| rate > 0) else {
+        return Duration::ZERO;
+    };
+    if bytes == 0 {
+        return Duration::ZERO;
+    }
+    let nanos = (bytes as u128).saturating_mul(1_000_000_000) / (bps as u128);
+    Duration::from_nanos(nanos.min(30_000_000_000) as u64)
+}
+
+async fn write_all_throttled<W>(to: &mut W, data: &[u8], bps: Option<u64>) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let Some(bps) = bps.filter(|&rate| rate > 0) else {
+        to.write_all(data).await?;
+        return Ok(());
+    };
+    for chunk in data.chunks(THROTTLE_CHUNK_BYTES) {
+        to.write_all(chunk).await?;
+        let pause = throttle_sleep_duration(chunk.len(), Some(bps));
+        if !pause.is_zero() {
+            tokio::time::sleep(pause).await;
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn copy_message_body<R, W>(
     from: &mut R,
     to: &mut W,
@@ -3152,6 +3307,7 @@ async fn copy_message_body<R, W>(
     id: u64,
     direction: Direction,
     encoding: Option<String>,
+    throttle_bps: Option<u64>,
 ) -> Result<bool>
 where
     R: AsyncRead + Unpin,
@@ -3161,16 +3317,21 @@ where
     if let Some(error) = decoder.error() {
         hub.set_encoding_error(id, direction, error.to_string());
     }
+    let chunk_cap = if throttle_bps.is_some() {
+        THROTTLE_CHUNK_BYTES
+    } else {
+        16 * 1024
+    };
     let reusable = if let Some(length) = content_length(headers) {
         let mut left = length;
-        let mut buf = vec![0u8; 16 * 1024];
+        let mut buf = vec![0u8; chunk_cap];
         while left > 0 {
             let want = left.min(buf.len());
             let n = from.read(&mut buf[..want]).await?;
             if n == 0 {
                 break;
             }
-            to.write_all(&buf[..n]).await?;
+            write_all_throttled(to, &buf[..n], throttle_bps).await?;
             hub.add_transfer(id, direction, n as u64);
             let decoded = decoder.push(&buf[..n]);
             hub.append_body(id, direction, &decoded);
@@ -3178,16 +3339,16 @@ where
         }
         left == 0
     } else if is_chunked(headers) {
-        copy_chunked(from, to, hub, id, direction, &mut decoder).await?;
+        copy_chunked(from, to, hub, id, direction, &mut decoder, throttle_bps).await?;
         true
     } else if direction == Direction::Response {
-        let mut buf = vec![0u8; 16 * 1024];
+        let mut buf = vec![0u8; chunk_cap];
         loop {
             let n = from.read(&mut buf).await?;
             if n == 0 {
                 break;
             }
-            to.write_all(&buf[..n]).await?;
+            write_all_throttled(to, &buf[..n], throttle_bps).await?;
             hub.add_transfer(id, direction, n as u64);
             let decoded = decoder.push(&buf[..n]);
             hub.append_body(id, direction, &decoded);
@@ -3211,11 +3372,17 @@ async fn copy_chunked<R, W>(
     id: u64,
     direction: Direction,
     decoder: &mut Decoder,
+    throttle_bps: Option<u64>,
 ) -> Result<()>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
+    let chunk_cap = if throttle_bps.is_some() {
+        THROTTLE_CHUNK_BYTES
+    } else {
+        16 * 1024
+    };
     loop {
         let size_line = read_line(from).await?;
         to.write_all(&size_line).await?;
@@ -3228,14 +3395,14 @@ where
             break;
         }
         let mut left = size;
-        let mut buf = vec![0u8; 16 * 1024];
+        let mut buf = vec![0u8; chunk_cap];
         while left > 0 {
             let want = left.min(buf.len());
             let n = from.read(&mut buf[..want]).await?;
             if n == 0 {
                 anyhow::bail!("分块 body 提前结束");
             }
-            to.write_all(&buf[..n]).await?;
+            write_all_throttled(to, &buf[..n], throttle_bps).await?;
             hub.add_transfer(id, direction, n as u64);
             let decoded = decoder.push(&buf[..n]);
             hub.append_body(id, direction, &decoded);
@@ -3285,6 +3452,7 @@ async fn write_bytes<S>(
     reason: &str,
     headers: &[(String, String)],
     body: &[u8],
+    throttle_bps: Option<u64>,
 ) -> Result<()>
 where
     S: AsyncWrite + Unpin,
@@ -3300,7 +3468,7 @@ where
     headers.push(("Content-Length".into(), body.len().to_string()));
     let head = render_response_head(status, reason, &headers);
     client.write_all(head.as_bytes()).await?;
-    client.write_all(body).await?;
+    write_all_throttled(client, body, throttle_bps).await?;
     Ok(())
 }
 
@@ -3662,6 +3830,9 @@ struct RecordingBody<B> {
     inner: Option<B>,
     once: Option<Bytes>,
     record: Option<Record>,
+    throttle_bps: Option<u64>,
+    sleep: Option<Pin<Box<tokio::time::Sleep>>>,
+    pending_frame: Option<Frame<Bytes>>,
 }
 
 struct Record {
@@ -3688,6 +3859,9 @@ impl<B> RecordingBody<B> {
                 decoder,
                 finished: false,
             }),
+            throttle_bps: None,
+            sleep: None,
+            pending_frame: None,
         }
     }
 
@@ -3696,6 +3870,9 @@ impl<B> RecordingBody<B> {
             inner: Some(inner),
             once: None,
             record: None,
+            throttle_bps: None,
+            sleep: None,
+            pending_frame: None,
         }
     }
 
@@ -3705,7 +3882,15 @@ impl<B> RecordingBody<B> {
             inner: None,
             once: if bytes.is_empty() { None } else { Some(bytes) },
             record: None,
+            throttle_bps: None,
+            sleep: None,
+            pending_frame: None,
         }
+    }
+
+    fn with_throttle(mut self, bps: Option<u64>) -> Self {
+        self.throttle_bps = bps.filter(|&rate| rate > 0);
+        self
     }
 
     /// Yields `prefix` first, then `inner`. Only `inner` is recorded; the caller
@@ -3783,41 +3968,81 @@ where
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        use std::future::Future as _;
         let this = self.get_mut();
-        if let Some(bytes) = this.once.take() {
-            return Poll::Ready(Some(Ok(Frame::data(bytes))));
-        }
-        let Some(inner) = this.inner.as_mut() else {
-            this.finish_record();
-            return Poll::Ready(None);
-        };
-        match Pin::new(inner).poll_frame(cx) {
-            Poll::Ready(Some(Ok(frame))) => {
-                if let Some(data) = frame.data_ref() {
-                    let bytes = data.clone();
-                    this.record_bytes(&bytes);
+        loop {
+            if let Some(sleep) = this.sleep.as_mut() {
+                if sleep.as_mut().poll(cx).is_pending() {
+                    return Poll::Pending;
                 }
-                // hyper stops polling once `is_end_stream` is true, so the
-                // trailing `None` never arrives for the last DATA frame.
-                if this
-                    .inner
-                    .as_ref()
-                    .is_some_and(|inner| inner.is_end_stream())
+                this.sleep = None;
+            }
+            if let Some(frame) = this.pending_frame.take() {
+                if this.once.is_none()
+                    && this
+                        .inner
+                        .as_ref()
+                        .is_none_or(|inner| inner.is_end_stream())
                 {
                     this.finish_record();
                 }
-                Poll::Ready(Some(Ok(frame)))
+                return Poll::Ready(Some(Ok(frame)));
             }
-            Poll::Ready(None) => {
+            if let Some(mut bytes) = this.once.take() {
+                let chunk = if this.throttle_bps.is_some() && bytes.len() > THROTTLE_CHUNK_BYTES {
+                    let head = bytes.split_to(THROTTLE_CHUNK_BYTES);
+                    this.once = Some(bytes);
+                    head
+                } else {
+                    bytes
+                };
+                let pause = throttle_sleep_duration(chunk.len(), this.throttle_bps);
+                if !pause.is_zero() {
+                    this.pending_frame = Some(Frame::data(chunk));
+                    this.sleep = Some(Box::pin(tokio::time::sleep(pause)));
+                    continue;
+                }
+                return Poll::Ready(Some(Ok(Frame::data(chunk))));
+            }
+            let Some(inner) = this.inner.as_mut() else {
                 this.finish_record();
-                Poll::Ready(None)
+                return Poll::Ready(None);
+            };
+            match Pin::new(inner).poll_frame(cx) {
+                Poll::Ready(Some(Ok(frame))) => {
+                    let mut pause = Duration::ZERO;
+                    if let Some(data) = frame.data_ref() {
+                        let bytes = data.clone();
+                        this.record_bytes(&bytes);
+                        pause = throttle_sleep_duration(bytes.len(), this.throttle_bps);
+                    }
+                    if !pause.is_zero() {
+                        this.pending_frame = Some(frame);
+                        this.sleep = Some(Box::pin(tokio::time::sleep(pause)));
+                        continue;
+                    }
+                    // hyper stops polling once `is_end_stream` is true, so the
+                    // trailing `None` never arrives for the last DATA frame.
+                    if this
+                        .inner
+                        .as_ref()
+                        .is_some_and(|inner| inner.is_end_stream())
+                    {
+                        this.finish_record();
+                    }
+                    return Poll::Ready(Some(Ok(frame)));
+                }
+                Poll::Ready(None) => {
+                    this.finish_record();
+                    return Poll::Ready(None);
+                }
+                other => return other,
             }
-            other => other,
         }
     }
 
     fn is_end_stream(&self) -> bool {
-        if self.once.is_some() {
+        if self.once.is_some() || self.pending_frame.is_some() || self.sleep.is_some() {
             return false;
         }
         self.inner
@@ -3827,7 +4052,10 @@ where
     }
 
     fn size_hint(&self) -> http_body::SizeHint {
-        if let Some(bytes) = &self.once {
+        if let Some(bytes) = &self.once
+            && self.pending_frame.is_none()
+            && self.inner.is_none()
+        {
             let mut hint = http_body::SizeHint::new();
             hint.set_exact(bytes.len() as u64);
             return hint;
@@ -4009,6 +4237,8 @@ async fn forward_request(
     let mut response_ops = Vec::new();
     let mut response_replaces = Vec::new();
     let mut cors = false;
+    let mut throttle_up_bps = None;
+    let mut throttle_down_bps = None;
     if !websocket {
         hub.note_rules(id, &host, &path);
         let plan = hub.plan(&host, &path);
@@ -4018,6 +4248,8 @@ async fn forward_request(
         response_ops = plan.response_headers.clone();
         response_replaces = plan.response_replaces.clone();
         cors = plan.cors;
+        throttle_up_bps = plan.throttle_up_bps;
+        throttle_down_bps = plan.throttle_down_bps;
         if !plan.request_headers.is_empty() {
             let mut pairs = header_pairs(&parts.headers);
             rules::apply_header_ops(&mut pairs, &plan.request_headers);
@@ -4048,7 +4280,8 @@ async fn forward_request(
                     *status,
                     &response_ops,
                     cors,
-                );
+                )
+                .map(|res| res.map(|b| b.with_throttle(throttle_down_bps)));
             }
             Some(Action::BreakRequest) => {
                 let decision = hub.wait_break(id, BreakSide::Request).await;
@@ -4096,7 +4329,8 @@ async fn forward_request(
                             &parts.headers,
                             raw,
                         )
-                        .await;
+                        .await
+                        .map(|res| res.map(|b| b.with_throttle(throttle_down_bps)));
                     }
                 }
             }
@@ -4159,7 +4393,7 @@ async fn forward_request(
             drain_incoming(left).await?;
         }
         hub.replace_request(id, header_pairs(&parts.headers), bytes.clone());
-        RecordingBody::from_bytes(Bytes::from(bytes))
+        RecordingBody::from_bytes(Bytes::from(bytes)).with_throttle(throttle_up_bps)
     } else if websocket {
         RecordingBody::passthrough(incoming.take().expect("request body"))
     } else {
@@ -4173,6 +4407,7 @@ async fn forward_request(
             Direction::Request,
             encoding.as_deref(),
         )
+        .with_throttle(throttle_up_bps)
     };
     parts.version = match protocol {
         Protocol::Http2 => Version::HTTP_2,
@@ -4248,7 +4483,8 @@ async fn forward_request(
                     parts.status,
                     header_pairs(&parts.headers),
                     next,
-                );
+                )
+                .map(|res| res.map(|b| b.with_throttle(throttle_down_bps)));
             }
             hub.set_response(
                 id,
@@ -4264,11 +4500,16 @@ async fn forward_request(
                 resp_encoding.as_deref(),
             );
             hub.mark_finished(id);
-            return Ok(Response::from_parts(parts, RecordingBody::from_bytes(raw)));
+            return Ok(Response::from_parts(
+                parts,
+                RecordingBody::from_bytes(raw).with_throttle(throttle_down_bps),
+            ));
         }
     }
     if break_response && !websocket {
-        return hold_hyper_response(hub, id, parts, body, resp_encoding).await;
+        return hold_hyper_response(hub, id, parts, body, resp_encoding)
+            .await
+            .map(|res| res.map(|b| b.with_throttle(throttle_down_bps)));
     }
     hub.set_response(
         id,
@@ -4280,6 +4521,7 @@ async fn forward_request(
         RecordingBody::passthrough(body)
     } else {
         RecordingBody::new(body, hub, id, Direction::Response, resp_encoding.as_deref())
+            .with_throttle(throttle_down_bps)
     };
     Ok(Response::from_parts(parts, body))
 }
@@ -7441,6 +7683,7 @@ mod tests {
             hub.clone(),
             source_flow.clone(),
             3,
+            1,
             5,
             ReplayOverride::default(),
         )
@@ -7456,7 +7699,14 @@ mod tests {
                 String::from_utf8_lossy(&flow.response_body),
                 format!("hit-{}", idx + 1)
             );
+            assert!(
+                flow.comment
+                    .contains(&format!("repeat:{source_id} ({}/3)", idx + 1))
+            );
         }
+        let repeat_filtered =
+            hub.with_session(|session| session.flows_matching(&format!("repeat:{source_id}")));
+        assert_eq!(repeat_filtered.len(), 4);
 
         // A transient origin failure on an intermediate iteration records ERR on that flow
         // and continues replaying the remaining iterations.
@@ -7479,13 +7729,20 @@ mod tests {
                 socket.write_all(res.as_bytes()).await.unwrap();
             }
         });
-        let mut flaky_source = source_flow;
+        let mut flaky_source = source_flow.clone();
         flaky_source.host = flaky_addr.to_string();
         flaky_source.url = format!("http://{flaky_addr}/repeat-target");
         flaky_source.request_headers = vec![("Host".into(), flaky_addr.to_string())];
-        let flaky_ids = replay_batch(hub.clone(), flaky_source, 3, 0, ReplayOverride::default())
-            .await
-            .unwrap();
+        let flaky_ids = replay_batch(
+            hub.clone(),
+            flaky_source,
+            3,
+            1,
+            0,
+            ReplayOverride::default(),
+        )
+        .await
+        .unwrap();
         assert_eq!(flaky_ids.len(), 3);
         let first = hub
             .with_session(|session| session.get(flaky_ids[0]).cloned())
@@ -7501,6 +7758,45 @@ mod tests {
         assert!(second.error.is_some());
         assert_eq!(third.status, Some(200));
         assert_eq!(String::from_utf8_lossy(&third.response_body), "flaky-3");
+
+        // Concurrent batch replay launches multiple in-flight requests and tags each flow.
+        let conc_origin = listen().await.unwrap();
+        let conc_addr = conc_origin.local_addr().unwrap();
+        tokio::spawn(async move {
+            for _ in 0..4 {
+                let (mut socket, _) = conc_origin.accept().await.unwrap();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let _ = socket.read(&mut buf).await.unwrap();
+                    let body = "conc-ok";
+                    let res = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    socket.write_all(res.as_bytes()).await.unwrap();
+                });
+            }
+        });
+        let mut conc_source = source_flow;
+        conc_source.host = conc_addr.to_string();
+        conc_source.url = format!("http://{conc_addr}/repeat-conc");
+        conc_source.request_headers = vec![("Host".into(), conc_addr.to_string())];
+        conc_source.comment = "load-test".into();
+        let conc_ids = replay_batch(hub.clone(), conc_source, 4, 3, 0, ReplayOverride::default())
+            .await
+            .unwrap();
+        assert_eq!(conc_ids.len(), 4);
+        for (idx, id) in conc_ids.iter().enumerate() {
+            let flow = hub
+                .with_session(|session| session.get(*id).cloned())
+                .unwrap();
+            assert_eq!(flow.status, Some(200));
+            assert_eq!(
+                flow.comment,
+                format!("load-test · repeat:{source_id} ({}/4)", idx + 1)
+            );
+        }
+        assert_eq!(throttle_sleep_duration(4096, Some(4096)).as_millis(), 1000);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
