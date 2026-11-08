@@ -17,7 +17,7 @@ P0 到 P3 里点名的能力已经接上。下面是仍然接受的缺口，不�
 - macOS `security add-trusted-cert` 可能要用户点确认。`security find-certificate` 只说明证书在登录钥匙串里，不保证 SSL 信任策略已经生效。
 - 带密码的系统代理：`networksetup` 读不回密码，停止后可能恢复不完整。
 - 证书状态检测与移除：macOS 用 `security find-certificate` 与 `security delete-certificate`，Windows 用 `certutil -user -verifystore / -delstore Root`，Linux 用 NSS `certutil -d sql:$HOME/.pki/nssdb -L / -D`（仅针对 Chromium 系使用的 `~/.pki/nssdb`，不改系统级 `/etc/ssl/certs`）。移除时同时清理旧名 `Snoop CA`。
-- 窗口位置和大小不记。nsh 0.4 的 `AppOptions` 仍只有初始 `size`，没有坐标。公开的窗口接口是 `set_title_bar`、`title_bar`、`close_window`。`window()` 只返回表面尺寸。`set_frame` 和 `desktop_command` 仍是 `pub(crate)`。`nsh-platform-macos` 重导出了 `objc2_app_kit`，应用拿不到 nsh 正在用的那扇 `NSWindow`；用 `NSApplication` 的窗口列表去猜，会和 nsh 自己的标题栏、全屏状态抢外框。多显示器 UUID、重叠面积，以及 Windows、Linux 的同一套恢复因此先不做。启动尺寸仍是 `app/src/main.rs` 里的 `(1200, 760)`。
+- 窗口位置不记，窗口大小记住。nsh 0.4 的 `AppOptions` 提供初始 `size`，没有窗口坐标接口；`window()` 返回表面尺寸，改变后停半秒写入 `config.toml` 的 `window_width` / `window_height`（默认 `1200×760`），下次启动由 `app/src/main.rs` 传入 `AppOptions::size` 恢复。
 
 ## 代理行为
 
@@ -45,7 +45,7 @@ P0 到 P3 里点名的能力已经接上。下面是仍然接受的缺口，不�
 - 清空会话。顶栏有「清空」按钮，「更多」的第一项也是「清空」，右侧是会话条数；「导出」是第二项。工具栏「更多」左边用同一数字。没有过滤词时只显示总数，有过滤词时显示「筛选数 / 总数」。清的是整个会话。清列表、字节和丢弃计数，不清下一条 id。切换选中行或点「清空」会收起「编辑重发」并清掉编辑框。
 - 复制 URL、cURL、请求 body、响应 body。cURL 跳过 `Host` 和 `Content-Length`。非 UTF-8 复制十六进制。二进制请求 body 不写进 cURL。
 - 记住监听端口。摘要里有开始时间、TTFB、总耗时、请求和响应线字节。时区用启动时的 `date +%z`，否则 UTC。HAR 导入按 `timings.wait`、`time` 和 `bodySize` 回填 `response_at`、`finished_at`、`request_bytes`、`response_bytes`。`bodySize` 缺失或为负时用已还原的 body 长度。
-- JSON、表单、XML、HTML 默认美化，可切「原文」。`config.toml` 的 `default_pretty` 缺省为开；「更多」里「默认美化」关掉后下次启动用原文，并马上按新模式重画当前选中的详情。卡片上的「美化 / 原文」仍只改当前窗口。复制和另存仍用记录原文。查询参数单独成表。美化时 `x-www-form-urlencoded` 的请求 body 也按键值行画，值下面带 JWT、时间戳和 Base64 提示；原文仍是整段。另存写到下载目录的 `zniff` 文件夹（Linux 读 `~/.config/user-dirs.dirs` 的 `XDG_DOWNLOAD_DIR`，否则 `~/Downloads`），状态栏给出完整路径。HAR 仍导出到数据目录的 `exports/`。
+- JSON、表单、XML、HTML 默认美化，可切「原文」。HTML 与 Markdown 响应/请求还可在卡片标题栏一键切换「渲染预览」（基于 `TextView`）与源码视图。`config.toml` 的 `default_pretty` 缺省为开；「更多」里「默认美化」关掉后下次启动用原文，并马上按新模式重画当前选中的详情。卡片上的「美化 / 原文」仍只改当前窗口。复制和另存仍用记录原文。查询参数单独成表。美化时 `x-www-form-urlencoded` 的请求 body 也按键值行画，值下面带 JWT、时间戳和 Base64 提示；原文仍是整段。另存响应、导出 HAR 与导出 HTML 均通过系统原生保存对话框选择路径（通过 `Owner::detached()` 启动异步文件选择任务，避免菜单关闭销毁 `Owner` 取消任务），状态栏给出完整路径并复制到剪贴板。
 - 过滤是 AND 词，同一个词内支持 `|` 或 `,` 表示 OR：`host:` / `domain:`（支持 `*.` 通配符与多域名 OR）、`path:`（支持多 Path 前缀 OR）、方法精确、状态精确或 `1xx`–`5xx`、`失败`、`type:` / `ct:`、`body:`、`header:`、`pin:`、`slow:`、`mute:` 或 `-词`，其余匹配主机或路径。`body:` 搜请求和响应 body，`header:` 搜头名和头值。`pin:` 只留星标。`slow:` 只留从开始到结束不少于 1 秒的流量；还没结束的用现在的时间，和列表警告色是同一条规则。`mute:` 和 `-词` 排除主机或路径里带这个词的行。顶栏「过滤」双栏面板左侧有域名 OR、Path 前缀 OR、排除域名/路径 OR 三个结构化输入框（与完整过滤表达式双向同步），以及 JSON、报错、星标、慢请求四个快捷筛选开关。点一下追加整词 `type:json`、`失败`、`pin:`、`slow:`，再点去掉。已经写了 `ct:json` 或 `fail` 时，对应开关也算打开，再点会把这些别名一起去掉。列表右键或详情「更多」里的「只看」会把当前主机并入 `host:` OR 列表，「屏蔽」会把当前主机并入 `mute:` OR 列表。复制、另存、星标、基准、重放、编辑重发和美化也在这个菜单里。
 - 「编辑重发」可改方法、URL、头和 body。URL 框以 `curl` 开头时，按 `-X`、`-H`、`--url`、`-d` / `--data*`、`-A`、`-e`、`-b` 填进这些框；带 body 又没写方法时当成 `POST`。发送时按新 body 重算 `Content-Length`。URL 改了就丢掉旧的 `Host`。停在响应断点上再点「编辑重发」，改的是状态码、响应头和响应 body，由断点条的「放行」送出。状态码只接受 100–599。
 - 复制还有 `fetch`、Python `requests`，以及响应 JSON 对象或数组的浅层 TypeScript `interface`。「更多」里「复制代理环境」复制 `http_proxy`、`https_proxy`、`SSL_CERT_FILE`、`NODE_EXTRA_CA_CERTS`、`REQUESTS_CA_BUNDLE`、`CURL_CA_BUNDLE`、`GIT_SSL_CAINFO`，证书路径指向数据目录的 `ca.crt`，端口用当前记住的监听端口。请求头和查询值里能认出的 JWT、10 位或 13 位时间戳、可打印 Base64 会附在原值下面。两条流量可以用「基准」做行级对比。设为基准的那一行，方法列最前有一条红竖线，和选中时的蓝线同一位置；这一行如果正在被选中，仍显示蓝线。对比卡片顶部用同一红色标「基准」、用绿色标「当前」：红的是基准，绿的是当前选中。再点这条的「基准」会取消，菜单写成「取消基准」，红线和对比卡片一起去掉。换一条再点「基准」会改成新的。超过 1 秒的时间列用警告色。星标在方法徽章前有蓝点，藏起主机列也看得到。
@@ -91,22 +91,76 @@ P0 到 P3 里点名的能力已经接上。下面是仍然接受的缺口，不�
 3. **过滤与规则配置窗口随应用窗口自适应调整**（已完成）：
    - 实现：结合 `window()` 实时尺寸动态计算——过滤弹出层宽度 `clamp(window_w - 48, 680, 1080)`（未提供时回退 `780`），规则编辑器高度 `clamp(window_h - 460, 105, 360)`（未提供时回退 `105`），左栏宽度上限受 `window_w - 340` 动态约束以始终保留右栏详情空间。
 4. **规则配置（`SavedProfile`）导出与导入**（已完成）：
-   - 实现：顶栏「过滤」弹出层底栏已提供「导出」与「导入」按钮——支持将 `SavedProfile` 序列化为可读的 `.toml` 写出到数据目录 `exports/` 并复制到剪贴板；支持从剪贴板或拖拽 `.toml` 配置文件到窗口导入（同名忽略大小写覆盖，保持 16 条上限）。
+   - 实现：顶栏「过滤」弹出层底栏已提供「导出」与「导入」按钮——点击「导出」直接将 `SavedProfile` 序列化为 `.toml` 文本复制到系统剪贴板；点击「导入」展开大号多行文本输入框供粘贴 `.toml` 配置内容导入，同时支持把 `.toml` 配置文件拖到窗口上导入（同名忽略大小写覆盖，保持 16 条上限）。
 5. **列表 Path 列支持切换「仅展示 Path」或「完整 URL」**（已完成）：
    - 实现：在列设置菜单底部增加 `仅路径 / 完整 URL`（`Path only / Full URL`）切换并记入 `config.toml` 的 `show_full_url`（默认仅路径）；切为完整 URL 时列标题切换为 `URL` 并直接显示 `flow.url`（隧道与失败原因显示逻辑不变），悬停提示同步跟随。
 6. **列表 URL/路径与主机省略位置支持三种模式（开头 / 中间 / 结尾）**（已完成）：
    - 实现：利用 `nsh_core::prelude::EllipsizeMode` 的 `Head`（开头 `...`）、`Middle`（中间 `...`）、`Tail`（结尾 `...`），在列设置菜单底部提供省略位置切换并记入 `config.toml` 的 `ellipsize`（`head` / `middle` / `tail`），默认保持 `middle`。
+7. **列表新增「来源 IP」列、列顺序自定义与点击表头排序**（已完成）：
+   - 实现：支持开关「来源 IP」（`show_client_ip`，默认关）；支持拖拽表头或在列菜单内点击上移/下移调整列顺序（固定区与滚动区各自内部调序，记入 `column_order`）；支持点击表头按该列升序 `↑` / 降序 `↓` / 恢复默认顺序三态切换排序。
 
 ### 二、既有文档中尚未接上或受限的事项汇总
 
-除上述待实现增强外，现有代码与文档中保留的未完成项及平台限制汇总如下：
+除上述已完成增强外，现有代码与文档中保留的未完成项及平台限制汇总如下：
 
-1. **Windows / Linux 证书状态检测与卸载**（已完成）：`app/src/ca.rs` 已接上 Windows `certutil -user -verifystore / -delstore Root` 与 Linux NSS `certutil -d sql:$HOME/.pki/nssdb -L / -D`（Linux 仅管理用户级 `~/.pki/nssdb`，不写入需要 root 权限的系统级 CA 目录）。
-2. **窗口位置与尺寸记忆恢复未接入**：受限于 `nsh 0.4` 的 `AppOptions` 仅提供初始 `size`、未暴露窗口坐标及跨平台 `set_frame` 接口，暂不持久化窗口位置与大小，每次启动尺寸固定为 `(1200, 760)`。
-3. **已有规则行无独立表单回填编辑**：过滤面板右栏底部的 8 项分段标签用于快速追加新规则行，修改已有规则仍直接在上方带行号与语法校验的纯文本编辑器中编辑。
-4. **规则语法的空格限制**：规则文本按空白字符分词，因此 `map-local` 的本地文件路径不能包含空格，`replace` 的匹配原文不能包含空格（替换目标文本可以包含空格）。
-5. **无系统原生文件选择框**：HAR/HTML 导出固定写入数据目录 `exports/`，另存响应固定写入下载目录 `zniff/`，HAR 导入默认读取数据目录 `import.har` 或通过拖拽文件到窗口触发。
-6. **各平台系统代理能力边界**：
+1. **窗口坐标位置未记忆**：窗口宽高已自动记忆恢复，但受限于 `nsh 0.4` 未暴露读取/设置窗口屏幕坐标（`x, y`）的公开接口，暂不记录窗口位置。
+2. **已有规则行无独立表单回填编辑**：过滤面板右栏底部的 9 项分段标签用于快速追加新规则行，修改已有规则仍直接在上方带行号与语法校验的纯文本编辑器中编辑。
+3. **各平台系统代理能力边界**：
    - Linux 非 GNOME 环境无统一系统代理设置接口，开启「系统代理」后仅启动监听并在状态栏提示手动指向 `127.0.0.1:端口`。
    - Windows 仅修改当前用户的 WinINET 注册表项，不修改 WinHTTP。
    - macOS 带密码认证的系统代理无法通过 `networksetup` 读回密码，停止抓包后密码项无法自动还原；`security find-certificate` 仅能确认证书存在于登录钥匙串，无法直接判定 SSL 信任策略是否已被用户勾选生效。
+
+---
+
+## 与 Proxyman / Charles / Reqable / Whistle 的对比分析与值得增强的功能
+
+在保持 `zniff` **单进程轻量、内存可控（环形分片落盘）、纯文本规则易分享、双栏紧凑交互**核心定位的前提下，横向对比 Proxyman、Charles、Reqable、Whistle 等主流抓包调试工具，梳理出以下**高性价比、契合现有架构、值得后续迭代增强的功能清单**：
+
+### P1：高频痛点、投入小、收益显著（✅ 已完成）
+
+1. **从抓包流量一键创建规则（Map Local / 快速预填规则）** — ✅ 已完成
+   - **实现**：在列表右键和详情「更多」菜单中支持「本地映射」（`Map local`）与「填入断点」（`Add break`）。选中流量有响应正文时弹出保存对话框，将响应正文另存为本地文件并自动追加 `map-local <host><path> <file> [status=<code>]` 规则；响应正文为空时直接追加 `map-local <host><path> status=<code>` 规则并立即生效。
+
+2. **独立新建请求（Scratchpad / 无选中流量时直接构造请求或粘贴 cURL）** — ✅ 已完成
+   - **实现**：在顶栏「更多」菜单及右栏未选中流量的空态页面提供「构造请求」（`New request`）入口，无需先选中已有流量即可直接构造 `GET`/`POST` 等请求或粘贴 `curl` 命令解析填充并发送，发出的请求自动记入抓包会话列表。
+
+3. **URL 查询参数改写规则（`query` 规则动词）** — ✅ 已完成
+   - **实现**：新增修饰类规则 `query <主机[/路径]> set <名> <值>`（或 `<名>=<值>`）与 `query <主机[/路径]> del <名>`，以及快速添加规则栏中的「改参」（`Query`）标签，在代理转发前自动解析并重构 URL query，正确处理 URL 编码与分隔符。
+
+4. **`map-local` 内联状态码空响应与带引号路径/文本支持** — ✅ 已完成
+   - **实现**：支持 `map-local <主机[/路径]> status=503 [delay=...]`（省略文件路径直接返回指定状态码与空正文）；规则解析器全面支持双引号 `"..."` 包裹含空格的本地文件路径、`replace` 匹配原文与替换目标、`header` 值与 `query` 参数值，并在快速添加规则时自动为含空格词补齐双引号。
+
+5. **`multipart/form-data` 请求体结构化预览** — ✅ 已完成
+   - **实现**：在「美化」模式下按 `boundary` 解析 `multipart/form-data` 各分片，在请求 body 卡片中以结构化键值表格展示每个分片的 `name`、文件元数据（`filename`、`Content-Type`、字节大小）及文本内容预览；切回「原文」模式仍查看原始报文或十六进制。
+
+---
+
+### P2：深度调试体验增强（✅ 已完成）
+
+6. **详情 Body 内关键字搜索与高亮定位** — ✅ 已完成
+   - **实现**：在请求/响应 Body 卡片标题栏右侧提供内联搜索框与命中计数角标（点击角标一键清空），实时按关键词（忽略大小写）筛选匹配行并标注 `[L0001]` 四位行号，对表单/Multipart 视图同步按字段名或值实时过滤。
+
+7. **本地客户端进程名识别（Process / App Attribution）** — ✅ 已完成
+   - **实现**：当客户端地址为本机回环（`127.0.0.1` / `::1`）时，在后台线程池（`spawn_blocking`）异步解析客户端源端口所属的本地进程名（Linux `/proc/net/tcp*` + `/proc/<pid>/fd`、macOS `lsof`、Windows `netstat`/`tasklist`）并带 15 秒端口缓存，在「来源 IP」列展示为 `127.0.0.1 (curl)` 等格式（绝不阻塞代理转发），同时过滤语法支持 `app:<进程名>` / `proc:<进程名>`。
+
+8. **断点并发队列（Breakpoint Queue）** — ✅ 已完成
+   - **实现**：将断点槽位升级为最多 8 条的有界 FIFO 队列（`BREAK_QUEUE_CAP = 8`，超出时自动放行队首最旧断点以防死锁），队内等待的断点在轮到队首前自动保持 60 秒超时计时器新鲜；顶部断点栏在排队数 `> 1` 时显示 `(1 / N)` 进度并提供「全部放行」（`Continue all`）按钮。
+
+9. **流量备注（Comment / Note）与「仅清空未星标流量」** — ✅ 已完成
+   - **实现**：支持通过列表右键或详情「更多」菜单点击「备注」（`Note`）为流量添加备注（摘要卡片显示可点击编辑的 `# 备注` 徽章，路径列追加 `· #备注` 展示，过滤框支持 `note:<关键词>` / `comment:<关键词>` 或裸词检索，HAR 1.2 导入导出完整读写标准 `entry.comment` 字段）；顶栏「更多」菜单新增「清空未星标」（`Clear unstarred`），一键清理普通流量并保留星标流量。
+
+10. **GraphQL 与 Protobuf / MessagePack 零配置可读预览** — ✅ 已完成
+    - **实现**：美化模式下自动识别包含 `query` 字段的 GraphQL JSON 请求，将 `operationName`、缩进排版后的多行 GraphQL 查询语句与 `variables` JSON 分块展示；美化模式下对 Protobuf（`application/x-protobuf`、`application/protobuf`、`application/grpc*` 含 gRPC 5 字节帧头）提供无 Schema 的 Wire Tag 解码视图（展示 `field #N (varint/fixed64/fixed32/string/bytes/message)` 及嵌套消息），对 MessagePack（`application/msgpack`、`application/x-msgpack`）自动解码为格式化 JSON 预览，切换「原文」仍可查看 16/32 字节十六进制视图。
+
+---
+
+### P3：进阶压测与诊断辅助（按需演进）
+
+11. **重复重放 / 批量重放（Repeat Advanced）**
+    - 对标 Charles「Repeat Advanced」与 Proxyman「Repeat N times」，支持对选中流量指定重放次数（如连续重放 10 次）与间隔毫秒数，方便复现偶发 Bug、验证接口幂等性或限流策略。
+
+12. **当前列表聚合统计（Filtered Summary）**
+    - 在状态栏或详情空态下提供当前筛选集合的轻量聚合统计（总请求数、成功率/4xx/5xx 分布、总传输体积、平均耗时与最慢请求），方便验证页面首屏加载体积与接口整体耗时。
+
+13. **客户端代理环境与证书信任一键诊断**
+    - 扩展「复制代理环境」覆盖更多运行时（如 `CARGO_HTTP_CAINFO`、`DENO_CERT`、`JAVA_TOOL_OPTIONS`），并在 macOS 下结合 `security verify-cert` 精确检测根证书是否已开启 SSL 信任策略（区分「已导入钥匙串但未勾选始终信任」与「已完全信任」）。

@@ -311,6 +311,7 @@ struct RowLine {
     client_ip: String,
     path: String,
     url: String,
+    comment: String,
     protocol: String,
     size: String,
     size_bytes: u64,
@@ -783,6 +784,10 @@ struct Shown {
     diff_old: Signal<String>,
     diff_new: Signal<String>,
     pinned: Signal<bool>,
+    comment: Signal<String>,
+    editing_comment: Signal<bool>,
+    req_search: Signal<String>,
+    res_search: Signal<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -847,10 +852,15 @@ pub fn App() -> impl IntoElement {
         diff_old: signal(String::new()),
         diff_new: signal(String::new()),
         pinned: signal(false),
+        comment: signal(String::new()),
+        editing_comment: signal(false),
+        req_search: signal(String::new()),
+        res_search: signal(String::new()),
     };
     let port_text = signal(String::new());
     let listen_all = signal(false);
     let paused = signal(None::<(u64, BreakSide)>);
+    let paused_count = signal(0_usize);
     let baseline = signal(None::<u64>);
     let compose = Compose {
         composing: signal(false),
@@ -951,7 +961,9 @@ pub fn App() -> impl IntoElement {
         ca_installed.set(lock_bool(&controls_tick.ca_installed));
         use_system_proxy.set(lock_bool(&controls_tick.use_system_proxy));
         let paused_now = controls_tick.hub.paused();
+        let paused_len = controls_tick.hub.paused_queue_len();
         paused.set(paused_now);
+        paused_count.set(paused_len);
         if paused_now != seen_paused.get() {
             let prev_paused = seen_paused.replace(paused_now);
             if let Some((paused_id, side)) = paused_now {
@@ -1041,6 +1053,9 @@ pub fn App() -> impl IntoElement {
             || full_url_now != seen_full_url.get()
             || spill_expired
         {
+            if selected_now != seen_selected.get() {
+                shown_tick.editing_comment.set(false);
+            }
             seen_gen.replace(generation);
             seen_filter.replace(filter_now.clone());
             seen_selected.replace(selected_now);
@@ -1079,6 +1094,7 @@ pub fn App() -> impl IntoElement {
     let controls_remove = controls.clone();
     let controls_proxy = controls.clone();
     let controls_clear = controls.clone();
+    let controls_clear_unpinned = controls.clone();
     let controls_clear_key = controls_clear.clone();
     let controls_replay_key = controls.clone();
     let controls_export = controls.clone();
@@ -1086,6 +1102,9 @@ pub fn App() -> impl IntoElement {
     let selected_clear = selected;
     let baseline_clear = baseline;
     let compose_clear = compose;
+    let selected_clear_unpinned = selected;
+    let baseline_clear_unpinned = baseline;
+    let compose_clear_unpinned = compose;
     let controls_detail = controls.clone();
     let controls_break = controls.clone();
     let controls_list = controls.clone();
@@ -1158,6 +1177,14 @@ pub fn App() -> impl IntoElement {
                     compose_clear,
                 );
             },
+            move || {
+                clear_unpinned_captured(
+                    &controls_clear_unpinned,
+                    selected_clear_unpinned,
+                    baseline_clear_unpinned,
+                    compose_clear_unpinned,
+                );
+            },
             move || export_har_file(controls_export.clone(), &filter.get()),
             move || copy_proxy_env(&controls_env),
             move || toggle_capture(controls_start.clone()),
@@ -1168,10 +1195,20 @@ pub fn App() -> impl IntoElement {
             shown.pretty,
             share_id,
             profile_signals,
+            compose,
+            selected,
         ))
         .child(when(
             move || paused.get().is_some(),
-            move || break_bar(paused, compose, selected, controls_break.clone()),
+            move || {
+                break_bar(
+                    paused,
+                    paused_count,
+                    compose,
+                    selected,
+                    controls_break.clone(),
+                )
+            },
         ))
         .child(
             view()
@@ -1198,6 +1235,7 @@ pub fn App() -> impl IntoElement {
                     selected,
                     compose,
                     filter,
+                    rules_text,
                     baseline,
                     folded,
                     pane_px,
@@ -1209,6 +1247,7 @@ pub fn App() -> impl IntoElement {
         ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn toolbar(
     status: Signal<StatusMsg>,
     running: Signal<bool>,
@@ -1218,6 +1257,7 @@ fn toolbar(
     remove: impl Fn() + 'static,
     toggle_proxy: impl Fn() + 'static,
     clear: impl Fn() + 'static,
+    clear_unpinned: impl Fn() + 'static,
     export_har: impl Fn() + 'static,
     copy_env: impl Fn() + 'static,
     toggle: impl Fn() + 'static,
@@ -1228,9 +1268,12 @@ fn toolbar(
     pretty: Signal<bool>,
     share_id: Signal<String>,
     profiles: ProfileSignals,
+    compose: Compose,
+    selected: Signal<Option<u64>>,
 ) -> impl IntoElement {
     let install = Rc::new(install);
     let clear = Rc::new(clear);
+    let clear_unpinned = Rc::new(clear_unpinned);
     let remove = Rc::new(remove);
     let filter_controls = import_controls.clone();
     view()
@@ -1329,12 +1372,18 @@ fn toolbar(
                 let clear = Rc::clone(&clear);
                 move || clear()
             },
+            {
+                let clear_unpinned = Rc::clone(&clear_unpinned);
+                move || clear_unpinned()
+            },
             import_controls,
             rows,
             flow_total,
             filter,
             pretty,
             share_id,
+            compose,
+            selected,
         ))
         .child(primary_button(
             {
@@ -2034,8 +2083,13 @@ fn profile_dock(
     let blank_controls = controls.clone();
     let export_controls = controls.clone();
     let import_controls = controls.clone();
+    let import_panel_controls = controls.clone();
     let save_controls = controls;
     let dropdown_open = signal(false);
+    let import_open = signal(false);
+    let import_text = signal(String::new());
+    let import_focus = element_ref();
+    let import_focus_job = stored(None::<Spawned<()>>);
     let matched_name = move || {
         saved.with(|items| {
             matched_saved_profile(
@@ -2078,8 +2132,183 @@ fn profile_dock(
         .w_full()
         .px_3()
         .py_2p5()
+        .gap_2()
         .border_t_1()
         .border_t_color(border_subtle())
+        .child(when(
+            move || import_open.get(),
+            move || {
+                let confirm_controls = import_panel_controls.clone();
+                let ready = move || !import_text.get().trim().is_empty();
+                view()
+                    .w_full()
+                    .p_2p5()
+                    .gap_2()
+                    .rounded(px(8.0))
+                    .border_1()
+                    .border_color(border_subtle())
+                    .bg(bg_canvas())
+                    .child(
+                        view()
+                            .w_full()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                text(tr(
+                                    "粘贴 TOML 配置导入（支持 [[profiles]] 或单套配置）",
+                                    "Paste TOML setup to import (supports [[profiles]] or single setup)",
+                                ))
+                                .text_size(px(11.5))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(fg_muted()),
+                            )
+                            .child(
+                                view()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .child(when(
+                                        move || !import_text.get().is_empty(),
+                                        move || {
+                                            view()
+                                                .h(px(24.0))
+                                                .px_2()
+                                                .rounded(px(6.0))
+                                                .border_1()
+                                                .border_color(border_control())
+                                                .bg(bg_control())
+                                                .hover(|style| style.bg(bg_control_hover()))
+                                                .flex_row()
+                                                .items_center()
+                                                .cursor(Cursor::Pointer)
+                                                .on_press(move || import_text.set(String::new()))
+                                                .child(
+                                                    text(tr("清空", "Clear"))
+                                                        .text_size(px(11.0))
+                                                        .text_color(fg_secondary()),
+                                                )
+                                        },
+                                    ))
+                                    .child(
+                                        view()
+                                            .h(px(24.0))
+                                            .px_2p5()
+                                            .rounded(px(6.0))
+                                            .border_1()
+                                            .border_color(border_control())
+                                            .bg(bg_control())
+                                            .hover(|style| style.bg(bg_control_hover()))
+                                            .flex_row()
+                                            .items_center()
+                                            .cursor(Cursor::Pointer)
+                                            .on_press(move || {
+                                                import_text.set(String::new());
+                                                import_open.set(false);
+                                            })
+                                            .child(
+                                                text(tr("取消", "Cancel"))
+                                                    .text_size(px(11.0))
+                                                    .text_color(fg_secondary()),
+                                            ),
+                                    )
+                                    .child(
+                                        view()
+                                            .h(px(24.0))
+                                            .px_2p5()
+                                            .rounded(px(6.0))
+                                            .border_1()
+                                            .border_color(move || {
+                                                if ready() {
+                                                    accent_blue()
+                                                } else {
+                                                    border_control()
+                                                }
+                                            })
+                                            .bg(move || {
+                                                if ready() {
+                                                    accent_blue()
+                                                } else {
+                                                    bg_control()
+                                                }
+                                            })
+                                            .hover(|style| {
+                                                style.bg(move || {
+                                                    if ready() {
+                                                        accent_blue_hover()
+                                                    } else {
+                                                        bg_control()
+                                                    }
+                                                })
+                                            })
+                                            .flex_row()
+                                            .items_center()
+                                            .cursor(Cursor::Pointer)
+                                            .disabled(move || !ready())
+                                            .disabled_style(|style| style.cursor(Cursor::Default))
+                                            .on_press(move || {
+                                                if !ready() {
+                                                    return;
+                                                }
+                                                if import_profiles_text(
+                                                    &confirm_controls,
+                                                    &import_text.get(),
+                                                    ProfileSignals {
+                                                        saved,
+                                                        name: rule_name,
+                                                        filter,
+                                                        bypass: bypass_text,
+                                                        rules: rules_text,
+                                                        upstream: upstream_text,
+                                                        rules_on,
+                                                        breaks_on,
+                                                        show_tunnels,
+                                                        list_width: signal(
+                                                            config::LIST_WIDTH_DEFAULT as f32,
+                                                        ),
+                                                    },
+                                                ) {
+                                                    clear_rule_draft(
+                                                        draft_host,
+                                                        draft_path,
+                                                        draft_from,
+                                                        draft_to,
+                                                        draft_response,
+                                                        draft_kind,
+                                                    );
+                                                    import_text.set(String::new());
+                                                    import_open.set(false);
+                                                }
+                                            })
+                                            .child(
+                                                text(tr("确认导入", "Confirm Import"))
+                                                    .text_size(px(11.0))
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .text_color(move || {
+                                                        if ready() {
+                                                            AdaptiveColor::rgb(0xffffff, 0xffffff)
+                                                        } else {
+                                                            fg_muted()
+                                                        }
+                                                    }),
+                                            ),
+                                    ),
+                            ),
+                    )
+                    .child(focused_input(
+                        import_text,
+                        tr(
+                            "在此粘贴导出的 [[profiles]] TOML 内容...",
+                            "Paste exported [[profiles]] TOML content here...",
+                        ),
+                        140.0,
+                        true,
+                        move |text| import_text.set(text.to_string()),
+                        Some(import_focus),
+                    ))
+            },
+        ))
         .child(
             view()
                 .w_full()
@@ -2422,8 +2651,8 @@ fn profile_dock(
                         .justify_center()
                         .cursor(Cursor::Pointer)
                         .tooltip(label_tip(
-                            "导出配置为 TOML 文件并复制到剪贴板",
-                            "Export setups to a TOML file and copy",
+                            "导出配置 TOML 到剪贴板",
+                            "Copy setups as TOML to clipboard",
                         ))
                         .on_press(move || {
                             dropdown_open.set(false);
@@ -2447,8 +2676,7 @@ fn profile_dock(
                                 breaks_on.get(),
                                 show_tunnels.get(),
                             );
-                            let preferred_name = shown_name().unwrap_or_default();
-                            export_profiles_file(export_controls.clone(), preferred_name, profiles);
+                            export_profiles_clipboard(&export_controls, &profiles);
                         })
                         .child(
                             text(tr("导出", "Export"))
@@ -2464,67 +2692,89 @@ fn profile_dock(
                         .flex_shrink_0()
                         .rounded(px(7.0))
                         .border_1()
-                        .border_color(border_control())
-                        .bg(bg_control())
-                        .hover(|style| style.bg(bg_control_hover()))
+                        .border_color(move || {
+                            if import_open.get() {
+                                accent_blue_border()
+                            } else {
+                                border_control()
+                            }
+                        })
+                        .bg(move || {
+                            if import_open.get() {
+                                accent_blue_soft()
+                            } else {
+                                bg_control()
+                            }
+                        })
+                        .hover(|style| {
+                            style.bg(move || {
+                                if import_open.get() {
+                                    accent_blue_soft()
+                                } else {
+                                    bg_control_hover()
+                                }
+                            })
+                        })
                         .flex_row()
                         .items_center()
                         .justify_center()
                         .cursor(Cursor::Pointer)
                         .tooltip(label_tip(
-                            "选择 TOML 配置文件导入（或拖拽 .toml 到窗口）",
-                            "Pick a TOML setup file to import (or drop .toml)",
+                            "粘贴 TOML 配置文本导入（或拖拽 .toml 到窗口）",
+                            "Paste TOML setup text to import (or drop .toml)",
                         ))
                         .on_press(move || {
                             dropdown_open.set(false);
-                            let import_controls = import_controls.clone();
-                            spawn(async move {
-                                let dialog = nsh_core::file_dialog::OpenDialog::files().filter(
-                                    nsh_core::file_dialog::FileFilter::new("TOML", ["toml"]),
+                            if !import_open.get() {
+                                import_open.set(true);
+                                let import_focus = import_focus;
+                                import_focus_job.replace(Some(set_timeout(
+                                    Duration::from_millis(0),
+                                    move || {
+                                        import_focus.focus();
+                                    },
+                                )));
+                            } else if import_text.get().trim().is_empty() {
+                                import_open.set(false);
+                            } else if import_profiles_text(
+                                &import_controls,
+                                &import_text.get(),
+                                ProfileSignals {
+                                    saved,
+                                    name: rule_name,
+                                    filter,
+                                    bypass: bypass_text,
+                                    rules: rules_text,
+                                    upstream: upstream_text,
+                                    rules_on,
+                                    breaks_on,
+                                    show_tunnels,
+                                    list_width: signal(config::LIST_WIDTH_DEFAULT as f32),
+                                },
+                            ) {
+                                clear_rule_draft(
+                                    draft_host,
+                                    draft_path,
+                                    draft_from,
+                                    draft_to,
+                                    draft_response,
+                                    draft_kind,
                                 );
-                                match pick_paths(dialog).await {
-                                    Ok(Some(paths)) => {
-                                        if let Some(path) = paths.first() {
-                                            clear_rule_draft(
-                                                draft_host,
-                                                draft_path,
-                                                draft_from,
-                                                draft_to,
-                                                draft_response,
-                                                draft_kind,
-                                            );
-                                            import_profiles_file(
-                                                &import_controls,
-                                                &path.to_string_lossy(),
-                                                ProfileSignals {
-                                                    saved,
-                                                    name: rule_name,
-                                                    filter,
-                                                    bypass: bypass_text,
-                                                    rules: rules_text,
-                                                    upstream: upstream_text,
-                                                    rules_on,
-                                                    breaks_on,
-                                                    show_tunnels,
-                                                    list_width: signal(
-                                                        config::LIST_WIDTH_DEFAULT as f32,
-                                                    ),
-                                                },
-                                            );
-                                        }
-                                    }
-                                    Ok(None) => {}
-                                    Err(err) => {
-                                        set_status(&import_controls, StatusMsg::ImportFailed(err));
-                                    }
-                                }
-                            });
+                                import_text.set(String::new());
+                                import_open.set(false);
+                            }
                         })
                         .child(
                             text(tr("导入", "Import"))
                                 .text_size(px(11.5))
                                 .font_weight(FontWeight::MEDIUM)
-                                .text_color(fg_secondary()),
+                                .text_color(move || {
+                                    if import_open.get() {
+                                        accent_blue_text()
+                                    } else {
+                                        fg_secondary()
+                                    }
+                                }),
                         ),
                 )
                 .child(
@@ -3618,6 +3868,7 @@ fn focused_input(
         .text_color(fg_primary())
         .multiline(multiline)
         .on_change(on_change);
+    let field = if multiline { field.py_2() } else { field };
     match focus {
         Some(focus) => field.element_ref(&focus),
         None => field,
@@ -3801,7 +4052,7 @@ fn replace_row(
     response: Signal<bool>,
     kind: Signal<u8>,
 ) -> impl IntoElement {
-    let kinds = [0_u8, 1, 2, 3, 4, 5, 6, 7];
+    let kinds = [0_u8, 1, 2, 3, 4, 5, 6, 7, 8];
     let ready_to_add = move || {
         let combined = crate::rules::combine_rule_pattern(&host_pattern.get(), &path_pattern.get());
         crate::rules::append_quick_rule(
@@ -3927,7 +4178,7 @@ fn replace_row(
                         .items_center()
                         .gap_1()
                         .child(when(
-                            move || kind.get() < 4 || kind.get() == 6,
+                            move || kind.get() < 4 || kind.get() == 6 || kind.get() == 7,
                             move || {
                                 let placeholder = move || {
                                     let lang = ui_lang(ui_langs());
@@ -3940,8 +4191,8 @@ fn replace_row(
                                         .to_string(),
                                         2 => t(
                                             lang,
-                                            "本地文件路径: ./mock.json",
-                                            "Local file path: ./mock.json",
+                                            "本地文件路径 (或留空仅填状态码)",
+                                            "Local file (or leave empty for status)",
                                         )
                                         .to_string(),
                                         3 => t(
@@ -3954,6 +4205,7 @@ fn replace_row(
                                             t(lang, "Header 名称: X-Debug", "Header name: X-Debug")
                                                 .to_string()
                                         }
+                                        7 => t(lang, "参数名: env", "Query param: env").to_string(),
                                         _ => t(lang, "查找原文 (from)", "Find text (from)")
                                             .to_string(),
                                     }
@@ -3984,7 +4236,7 @@ fn replace_row(
                                     .hover(|style| style.bg(bg_control_hover()))
                                     .cursor(Cursor::Pointer)
                                     .on_press(move || {
-                                        spawn(async move {
+                                        spawn_detached(async move {
                                             if let Ok(Some(paths)) = pick_paths(
                                                 nsh_core::file_dialog::OpenDialog::files(),
                                             )
@@ -4004,15 +4256,33 @@ fn replace_row(
                             },
                         ))
                         .child(when(
-                            move || kind.get() == 0 || kind.get() == 6,
+                            move || {
+                                kind.get() == 0
+                                    || kind.get() == 2
+                                    || kind.get() == 6
+                                    || kind.get() == 7
+                            },
                             move || {
                                 let placeholder = move || {
                                     let lang = ui_lang(ui_langs());
-                                    if kind.get() == 6 {
-                                        t(lang, "Header 值 (留空删除)", "Value (empty to delete)")
-                                            .to_string()
-                                    } else {
-                                        t(lang, "替换成 (to)", "Replace with (to)").to_string()
+                                    match kind.get() {
+                                        2 => {
+                                            t(lang, "状态码: 200 (可选)", "Status: 200 (optional)")
+                                                .to_string()
+                                        }
+                                        6 => t(
+                                            lang,
+                                            "Header 值 (留空删除)",
+                                            "Value (empty to delete)",
+                                        )
+                                        .to_string(),
+                                        7 => {
+                                            t(lang, "参数值 (留空删除)", "Value (empty to delete)")
+                                                .to_string()
+                                        }
+                                        _ => {
+                                            t(lang, "替换成 (to)", "Replace with (to)").to_string()
+                                        }
                                     }
                                 };
                                 view().flex_1().min_w(px(0.0)).child(side_input(
@@ -4029,7 +4299,7 @@ fn replace_row(
                                 .h(px(28.0))
                                 .px_3()
                                 .flex_grow(move || {
-                                    if matches!(kind.get(), 4 | 5 | 7) {
+                                    if matches!(kind.get(), 4 | 5 | 8) {
                                         1.0_f32
                                     } else {
                                         0.0_f32
@@ -4871,6 +5141,7 @@ fn row_context_menu(
     let pin_mark = controls.clone();
     let pin_label = controls.clone();
     let base_controls = controls.clone();
+    let map_local_controls = controls.clone();
     let replay_controls = controls;
     view()
         .w(px(196.0))
@@ -4951,6 +5222,12 @@ fn row_context_menu(
                 })
             },
         ))
+        .child(action_item(
+            tr("备注", "Note"),
+            closing(menu_open, move || {
+                shown.editing_comment.set(true);
+            }),
+        ))
         .child(menu_rule())
         .child(action_item(
             tr("重放", "Replay"),
@@ -4964,6 +5241,12 @@ fn row_context_menu(
                 fill_break_rule(&break_controls, picked.get(), rules_text);
             }),
         ))
+        .child(action_item(
+            tr("本地映射", "Map local"),
+            closing(menu_open, move || {
+                map_local_from_flow(map_local_controls.clone(), picked.get(), rules_text);
+            }),
+        ))
 }
 
 fn closing(open: Signal<bool>, run: impl Fn() + 'static) -> impl Fn() + 'static {
@@ -4975,7 +5258,7 @@ fn closing(open: Signal<bool>, run: impl Fn() + 'static) -> impl Fn() + 'static 
 
 fn quick_kind(kind: u8) -> crate::rules::QuickRule {
     use crate::rules::QuickRule;
-    match kind % 8 {
+    match kind % 9 {
         0 => QuickRule::Replace,
         1 => QuickRule::Remote,
         2 => QuickRule::Local,
@@ -4983,6 +5266,7 @@ fn quick_kind(kind: u8) -> crate::rules::QuickRule {
         4 => QuickRule::Break,
         5 => QuickRule::BreakRes,
         6 => QuickRule::Header,
+        7 => QuickRule::Query,
         _ => QuickRule::Cors,
     }
 }
@@ -5006,6 +5290,93 @@ fn fill_break_rule(controls: &Controls, id: Option<u64>, rules_text: Signal<Stri
             },
         );
     }
+}
+
+fn map_local_from_flow(controls: Arc<Controls>, id: Option<u64>, rules_text: Signal<String>) {
+    let Some(flow) = selected_flow(&controls, id) else {
+        return;
+    };
+    let host = flow.host.clone();
+    let path = flow.path.clone();
+    let status = flow.status;
+    if flow.response_body.is_empty() {
+        let Some(next) = crate::rules::append_map_local_line(
+            &rules_text.get(),
+            &host,
+            &path,
+            None,
+            Some(status.unwrap_or(200)),
+        ) else {
+            return;
+        };
+        rules_text.set(next.clone());
+        controls.hub.set_rules(&next);
+        if let Err(err) = save_config(|config| config.rules = next) {
+            set_status(
+                &controls,
+                StatusMsg::PrefUnsaved {
+                    name: PrefName::Rules,
+                    err: err.to_string(),
+                },
+            );
+            return;
+        }
+        set_status(&controls, StatusMsg::MappedLocal(format!("{host}{path}")));
+        return;
+    }
+    let ext = present::content_type(&flow.response_headers)
+        .and_then(present::image_extension)
+        .unwrap_or_else(|| body_extension(&flow.response_headers, &flow.response_body));
+    let dialog = nsh_core::file_dialog::SaveDialog::new()
+        .file_name(format!("{}.{}", flow.id, ext))
+        .filter(nsh_core::file_dialog::FileFilter::new(
+            ext.to_ascii_uppercase(),
+            [ext],
+        ));
+    let body = flow.response_body;
+    spawn_detached(async move {
+        match pick_save_path(dialog).await {
+            Ok(Some(save_path)) => {
+                if let Some(parent) = save_path.parent()
+                    && !parent.as_os_str().is_empty()
+                    && let Err(err) = std::fs::create_dir_all(parent)
+                {
+                    set_status(&controls, StatusMsg::SaveFailed(err.to_string()));
+                    return;
+                }
+                if let Err(err) = std::fs::write(&save_path, &body) {
+                    set_status(&controls, StatusMsg::SaveFailed(err.to_string()));
+                    return;
+                }
+                let file_text = save_path.display().to_string();
+                let Some(next) = crate::rules::append_map_local_line(
+                    &rules_text.get(),
+                    &host,
+                    &path,
+                    Some(&file_text),
+                    status,
+                ) else {
+                    return;
+                };
+                rules_text.set(next.clone());
+                controls.hub.set_rules(&next);
+                if let Err(err) = save_config(|config| config.rules = next) {
+                    set_status(
+                        &controls,
+                        StatusMsg::PrefUnsaved {
+                            name: PrefName::Rules,
+                            err: err.to_string(),
+                        },
+                    );
+                    return;
+                }
+                set_clipboard(file_text.clone());
+                set_status(&controls, StatusMsg::MappedLocal(file_text));
+            }
+            Ok(None) => set_status(&controls, StatusMsg::SaveCancelled),
+            Err(err) => set_status(&controls, StatusMsg::SaveFailed(err)),
+        }
+    });
 }
 
 fn flow_pinned(controls: &Controls, id: Option<u64>) -> bool {
@@ -5500,7 +5871,7 @@ fn path_cell(
                 let full_url = columns.get().full_url;
                 rows.with(|rows| {
                     rows.get(index)
-                        .map(|row| row_target_text(row, full_url).to_string())
+                        .map(|row| row_target_display(row, full_url))
                         .unwrap_or_default()
                 })
             })
@@ -5521,7 +5892,7 @@ fn path_cell(
             let full_url = columns.get().full_url;
             let path = tip_rows.with(|rows| {
                 rows.get(index)
-                    .map(|row| row_target_text(row, full_url).to_string())
+                    .map(|row| row_target_display(row, full_url))
                     .unwrap_or_default()
             });
             show_cell_hover(hover, event, path);
@@ -5534,6 +5905,15 @@ fn row_target_text(row: &RowLine, full_url: bool) -> &str {
         &row.url
     } else {
         &row.path
+    }
+}
+
+fn row_target_display(row: &RowLine, full_url: bool) -> String {
+    let base = row_target_text(row, full_url);
+    if row.comment.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base} · #{}", row.comment)
     }
 }
 
@@ -5580,10 +5960,12 @@ fn detail_pane(
     selected: Signal<Option<u64>>,
     compose: Compose,
     filter: Signal<String>,
+    rules_text: Signal<String>,
     baseline: Signal<Option<u64>>,
     folded: Signal<u8>,
     pane_px: Rc<Cell<f32>>,
 ) -> impl IntoElement {
+    let ready_controls = controls.clone();
     scroll()
         .flex_1()
         .min_w(px(0.0))
@@ -5601,74 +5983,117 @@ fn detail_pane(
                 move || {
                     ready_detail(
                         shown,
-                        controls.clone(),
+                        ready_controls.clone(),
                         selected,
                         compose,
                         filter,
+                        rules_text,
                         baseline,
                         folded,
                     )
                 },
             )
             .otherwise(move || {
-                view()
-                    .flex_1()
-                    .items_center()
-                    .justify_center()
-                    .gap_1p5()
-                    .px_6()
-                    .child(glyph_px(28.0, || Glyph::List, || color(fg_muted())))
-                    .child(
-                        text({
-                            let langs = ui_langs();
-                            move || -> SharedString {
-                                let lang = ui_lang(langs);
-                                match shown.phase.get() {
-                                    Phase::Gone => {
-                                        t(lang, "这条记录已经不在了", "That flow is gone").into()
+                let compose_controls = controls.clone();
+                when(
+                    move || compose.composing.get(),
+                    move || {
+                        view()
+                            .pl_3p5()
+                            .pr_5()
+                            .py_3p5()
+                            .gap_3p5()
+                            .child(compose_box(compose, compose_controls.clone(), selected))
+                    },
+                )
+                .otherwise(move || {
+                    view()
+                        .flex_1()
+                        .items_center()
+                        .justify_center()
+                        .gap_1p5()
+                        .px_6()
+                        .child(glyph_px(28.0, || Glyph::List, || color(fg_muted())))
+                        .child(
+                            text({
+                                let langs = ui_langs();
+                                move || -> SharedString {
+                                    let lang = ui_lang(langs);
+                                    match shown.phase.get() {
+                                        Phase::Gone => {
+                                            t(lang, "这条记录已经不在了", "That flow is gone")
+                                                .into()
+                                        }
+                                        _ => t(lang, "还没有选择", "Nothing selected").into(),
                                     }
-                                    _ => t(lang, "还没有选择", "Nothing selected").into(),
                                 }
-                            }
-                        })
-                        .text_size(px(13.5))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(fg_secondary()),
-                    )
-                    .child(
-                        text({
-                            let langs = ui_langs();
-                            move || -> SharedString {
-                                let lang = ui_lang(langs);
-                                match shown.phase.get() {
-                                    Phase::Gone => t(
-                                        lang,
-                                        "它因为内存上限被丢掉了。",
-                                        "It was dropped because the session hit its memory cap.",
-                                    )
-                                    .into(),
-                                    _ => t(
-                                        lang,
-                                        "从左边选一条流量，查看请求头、响应头和 body。",
-                                        "Pick a flow on the left to see headers and the body.",
-                                    )
-                                    .into(),
+                            })
+                            .text_size(px(13.5))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(fg_secondary()),
+                        )
+                        .child(
+                            text({
+                                let langs = ui_langs();
+                                move || -> SharedString {
+                                    let lang = ui_lang(langs);
+                                    match shown.phase.get() {
+                                        Phase::Gone => t(
+                                            lang,
+                                            "它因为内存上限被丢掉了。",
+                                            "It was dropped because the session hit its memory cap.",
+                                        )
+                                        .into(),
+                                        _ => t(
+                                            lang,
+                                            "从左边选一条流量，查看请求头、响应头和 body。",
+                                            "Pick a flow on the left to see headers and the body.",
+                                        )
+                                        .into(),
+                                    }
                                 }
-                            }
-                        })
-                        .text_size(px(12.0))
-                        .text_color(fg_muted()),
-                    )
+                            })
+                            .text_size(px(12.0))
+                            .text_color(fg_muted()),
+                        )
+                        .child(
+                            view()
+                                .mt_1p5()
+                                .h(px(28.0))
+                                .px_3()
+                                .rounded(px(6.0))
+                                .border_1()
+                                .border_color(border_control())
+                                .bg(bg_control())
+                                .hover(|style| style.bg(bg_control_hover()))
+                                .active(|style| style.opacity(0.8))
+                                .cursor(Cursor::Pointer)
+                                .flex_row()
+                                .items_center()
+                                .gap_1p5()
+                                .on_press(move || begin_new_request(compose, selected))
+                                .child(glyph_px(13.0, || Glyph::Prompt, || color(fg_secondary())))
+                                .child(
+                                    text(tr("构造请求", "New request"))
+                                        .number_of_lines(1)
+                                        .text_size(px(12.0))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(fg_primary()),
+                                ),
+                        )
+                })
             }),
         )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn ready_detail(
     shown: Shown,
     controls: Arc<Controls>,
     selected: Signal<Option<u64>>,
     compose: Compose,
     filter: Signal<String>,
+    rules_text: Signal<String>,
     baseline: Signal<Option<u64>>,
     folded: Signal<u8>,
 ) -> impl IntoElement {
@@ -5684,6 +6109,7 @@ fn ready_detail(
             selected,
             compose,
             filter,
+            rules_text,
             baseline,
         ))
         .child(when(move || compose.composing.get(), {
@@ -5708,6 +6134,7 @@ fn ready_detail(
                         shown.response_language,
                         shown.response_doc,
                         no_form,
+                        shown.res_search,
                         true,
                         shown,
                         controls.clone(),
@@ -5742,6 +6169,7 @@ fn ready_detail(
                     shown.request_language,
                     shown.request_doc,
                     shown.request_form,
+                    shown.req_search,
                     false,
                     shown,
                     controls.clone(),
@@ -5779,6 +6207,7 @@ fn summary(
     selected: Signal<Option<u64>>,
     compose: Compose,
     filter: Signal<String>,
+    rules_text: Signal<String>,
     baseline: Signal<Option<u64>>,
 ) -> impl IntoElement {
     view()
@@ -5865,9 +6294,36 @@ fn summary(
                             )
                     },
                 ))
+                .child(when(
+                    move || !shown.comment.get().is_empty() && !shown.editing_comment.get(),
+                    move || {
+                        view()
+                            .px_2()
+                            .py_0p5()
+                            .rounded(px(5.0))
+                            .border_1()
+                            .border_color(accent_blue_border())
+                            .bg(accent_blue_soft())
+                            .cursor(Cursor::Pointer)
+                            .on_press(move || shown.editing_comment.set(true))
+                            .child(
+                                text(move || format!("# {}", shown.comment.get()))
+                                    .number_of_lines(1)
+                                    .text_size(px(11.5))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(accent_blue_text()),
+                            )
+                    },
+                ))
                 .child(view().flex_1())
                 .child(detail_actions(
-                    shown, controls, selected, compose, filter, baseline,
+                    shown,
+                    controls.clone(),
+                    selected,
+                    compose,
+                    filter,
+                    rules_text,
+                    baseline,
                 )),
         )
         .child(
@@ -5886,6 +6342,43 @@ fn summary(
                         .text_color(fg_primary()),
                 ),
         )
+        .child(when(move || shown.editing_comment.get(), {
+            let controls = controls.clone();
+            move || {
+                let save_controls = controls.clone();
+                let submit_controls = controls.clone();
+                let clear_controls = controls.clone();
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_1p5()
+                    .child(
+                        view().flex_1().min_w(px(0.0)).child(
+                            compose_input_on(
+                                shown.comment,
+                                tr(
+                                    "添加流量备注（可用 note: 搜索）…",
+                                    "Add flow note (searchable via note:)…",
+                                ),
+                                26.0,
+                                false,
+                                move |text| shown.comment.set(text.to_string()),
+                            )
+                            .on_submit(move |text: &str| {
+                                shown.comment.set(text.to_string());
+                                save_flow_comment(&submit_controls, selected.get(), shown);
+                            }),
+                        ),
+                    )
+                    .child(detail_button(tr("保存", "Save"), move || {
+                        save_flow_comment(&save_controls, selected.get(), shown);
+                    }))
+                    .child(detail_button(tr("清除", "Clear"), move || {
+                        shown.comment.set(String::new());
+                        save_flow_comment(&clear_controls, selected.get(), shown);
+                    }))
+            }
+        }))
         .child(
             mono(move || shown.metrics.get())
                 .selectable(true)
@@ -6137,6 +6630,7 @@ fn body_section(
     code: Signal<String>,
     doc: Signal<Option<nsh_base::text_view::Document>>,
     form: Signal<Vec<HeaderLine>>,
+    search: Signal<String>,
     embed_image: bool,
     shown: Shown,
     controls: Arc<Controls>,
@@ -6147,6 +6641,11 @@ fn body_section(
 ) -> impl IntoElement {
     let image_on = move || embed_image && shown.pretty.get() && !shown.preview.get().is_empty();
     let doc_on = move || shown.doc_preview.get() && doc.with(Option::is_some);
+    let can_search = move || {
+        !card_folded(folded, bit)
+            && !doc_on()
+            && (!form.with(Vec::is_empty) || !body.get().is_empty())
+    };
     view()
         .rounded(px(10.0))
         .border_1()
@@ -6186,6 +6685,9 @@ fn body_section(
                         .flex_row()
                         .items_center()
                         .gap_1p5()
+                        .child(when(can_search, move || {
+                            body_search_box(search, body, hex, form, shown.pane_width)
+                        }))
                         .child(when(
                             move || doc.with(Option::is_some),
                             move || doc_preview_chip(shown),
@@ -6277,6 +6779,7 @@ fn body_section(
                 let divided = image_on() || !note.get().is_empty();
                 let height_body = body;
                 let height_hex = hex;
+                let height_search = search;
                 view()
                     .w_full()
                     .min_w(move || px(hex_area_width(shown.pane_width.get())))
@@ -6290,14 +6793,13 @@ fn body_section(
                     })
                     .bg(bg_code())
                     .h(move || {
-                        let lines = if height_hex.with(Vec::is_empty) {
-                            body_line_count(&height_body.get())
-                        } else {
-                            let count = height_hex.with(Vec::len);
-                            let cols = hex_cols_for_pane(shown.pane_width.get()).max(1);
-                            count.div_ceil(cols).max(1)
-                        };
-                        px(body_box_height(lines))
+                        let text = filtered_plain_body(
+                            &height_body.get(),
+                            &height_hex.with(|bytes| bytes.clone()),
+                            shown.pane_width.get(),
+                            &height_search.get(),
+                        );
+                        px(body_box_height(body_line_count(&text)))
                     })
                     .overflow_hidden()
                     .border_t(move || if divided { px(1.0) } else { px(0.0) })
@@ -6306,12 +6808,12 @@ fn body_section(
                         scroll().size_full().child(
                             mono(move || {
                                 let bytes = hex.with(|bytes| bytes.clone());
-                                if bytes.is_empty() {
-                                    body.get()
-                                } else {
-                                    let cols = hex_cols_for_pane(shown.pane_width.get());
-                                    hex_display_rows(&bytes, cols)
-                                }
+                                filtered_plain_body(
+                                    &body.get(),
+                                    &bytes,
+                                    shown.pane_width.get(),
+                                    &search.get(),
+                                )
                             })
                             .pl_3p5()
                             .pr_5()
@@ -6337,14 +6839,14 @@ fn body_section(
                 view()
                     .border_t(move || if divided { px(1.0) } else { px(0.0) })
                     .border_t_color(border_subtle())
-                    .child(code_body(body, code))
+                    .child(code_body(body, code, search))
             },
         ))
         .child(when(
             move || !card_folded(folded, bit) && !doc_on() && !form.with(Vec::is_empty),
             move || {
                 each(
-                    form,
+                    move || filtered_form_lines(&form.get(), &search.get()),
                     |line| line.key,
                     |line, index| {
                         view()
@@ -6386,6 +6888,122 @@ fn body_section(
         ))
 }
 
+fn filtered_plain_body(body: &str, hex: &[u8], pane_width: f32, query: &str) -> String {
+    let source = if hex.is_empty() {
+        body.to_string()
+    } else {
+        let cols = hex_cols_for_pane(pane_width);
+        hex_display_rows(hex, cols)
+    };
+    if query.trim().is_empty() {
+        source
+    } else {
+        present::filter_body_lines(&source, query).1
+    }
+}
+
+fn filtered_form_lines(lines: &[HeaderLine], query: &str) -> Vec<HeaderLine> {
+    let q = query.trim().to_ascii_lowercase();
+    if q.is_empty() {
+        return lines.to_vec();
+    }
+    lines
+        .iter()
+        .filter(|line| {
+            line.name.to_ascii_lowercase().contains(&q)
+                || line.value.to_ascii_lowercase().contains(&q)
+        })
+        .cloned()
+        .collect()
+}
+
+fn body_search_hit_count(
+    body: Signal<String>,
+    hex: Signal<Vec<u8>>,
+    form: Signal<Vec<HeaderLine>>,
+    pane_width: Signal<f32>,
+    query: &str,
+) -> usize {
+    let q = query.trim();
+    if q.is_empty() {
+        return 0;
+    }
+    if !form.with(Vec::is_empty) {
+        return filtered_form_lines(&form.get(), q).len();
+    }
+    let bytes = hex.with(|bytes| bytes.clone());
+    let source = if bytes.is_empty() {
+        body.get()
+    } else {
+        hex_display_rows(&bytes, hex_cols_for_pane(pane_width.get()))
+    };
+    present::filter_body_lines(&source, q).0
+}
+
+fn body_search_box(
+    search: Signal<String>,
+    body: Signal<String>,
+    hex: Signal<Vec<u8>>,
+    form: Signal<Vec<HeaderLine>>,
+    pane_width: Signal<f32>,
+) -> impl IntoElement {
+    view()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .child(
+            input()
+                .value(search)
+                .placeholder(tr("搜索…", "Search…"))
+                .placeholder_color(move || color(fg_muted()))
+                .w(px(120.0))
+                .h(px(22.0))
+                .px_2()
+                .rounded(px(6.0))
+                .bg(bg_code())
+                .border_1()
+                .border_color(move || {
+                    if search.get().trim().is_empty() {
+                        border_control()
+                    } else {
+                        accent_blue_border()
+                    }
+                })
+                .focus(|style| style.border_color(accent_blue()))
+                .text_size(px(11.5))
+                .text_color(fg_primary())
+                .on_change(move |text: &str| search.set(text.to_string())),
+        )
+        .child(when(
+            move || !search.get().trim().is_empty(),
+            move || {
+                view()
+                    .h(px(22.0))
+                    .px_1p5()
+                    .rounded(px(6.0))
+                    .bg(accent_blue_soft())
+                    .border_1()
+                    .border_color(accent_blue_border())
+                    .flex_row()
+                    .items_center()
+                    .cursor(Cursor::Pointer)
+                    .tooltip(label_tip("点击清空搜索", "Click to clear search"))
+                    .on_press(move || search.set(String::new()))
+                    .child(
+                        mono(move || {
+                            format!(
+                                "{} ×",
+                                body_search_hit_count(body, hex, form, pane_width, &search.get())
+                            )
+                        })
+                        .text_size(px(10.5))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(accent_blue_text()),
+                    )
+            },
+        ))
+}
+
 const BODY_LINE_H: f32 = 18.0;
 const BODY_LINES: usize = 10;
 const BODY_CHROME: f32 = 16.0;
@@ -6405,16 +7023,35 @@ fn editor_box_height(text: &str) -> f32 {
     body_box_height(body_line_count(text))
 }
 
-fn code_body(body: Signal<String>, code: Signal<String>) -> impl IntoElement {
+fn code_body(
+    body: Signal<String>,
+    code: Signal<String>,
+    search: Signal<String>,
+) -> impl IntoElement {
+    let shown_text = move || {
+        let raw = body.get();
+        let q = search.get();
+        if q.trim().is_empty() {
+            raw
+        } else {
+            present::filter_body_lines(&raw, &q).1
+        }
+    };
     view()
         .w_full()
-        .h(move || px(editor_box_height(&body.get())))
+        .h(move || px(editor_box_height(&shown_text())))
         .bg(bg_code())
         .child(
             editor()
-                .value(move || SharedString::from(body.get()))
+                .value(move || SharedString::from(shown_text()))
                 .read_only(true)
-                .language(move || SharedString::from(code.get()))
+                .language(move || {
+                    if search.get().trim().is_empty() {
+                        SharedString::from(code.get())
+                    } else {
+                        SharedString::from("plaintext")
+                    }
+                })
                 .line_numbers(true)
                 .folding(true)
                 .soft_wrap(true)
@@ -6571,6 +7208,7 @@ fn detail_actions(
     selected: Signal<Option<u64>>,
     compose: Compose,
     filter: Signal<String>,
+    rules_text: Signal<String>,
     baseline: Signal<Option<u64>>,
 ) -> impl IntoElement {
     let copy_url = controls.clone();
@@ -6588,6 +7226,8 @@ fn detail_actions(
     let replay_controls = controls.clone();
     let edit_controls = controls.clone();
     let send_controls = controls.clone();
+    let break_controls = controls.clone();
+    let map_local_controls = controls.clone();
     let pretty_controls = controls;
     let pinned = shown.pinned;
     let pretty = shown.pretty;
@@ -6692,6 +7332,9 @@ fn detail_actions(
                         }
                     },
                 ))
+                .child(action_item(tr("备注", "Note"), move || {
+                    shown.editing_comment.set(true);
+                }))
                 .child(marked_action(
                     move || pretty.get(),
                     {
@@ -6724,6 +7367,12 @@ fn detail_actions(
                 }))
                 .child(action_item(tr("编辑重发", "Edit"), move || {
                     begin_compose(&edit_controls, selected.get(), compose);
+                }))
+                .child(action_item(tr("填入断点", "Add break"), move || {
+                    fill_break_rule(&break_controls, selected.get(), rules_text);
+                }))
+                .child(action_item(tr("本地映射", "Map local"), move || {
+                    map_local_from_flow(map_local_controls.clone(), selected.get(), rules_text);
                 }))
                 .child(when(
                     move || compose.composing.get() && !compose.response.get(),
@@ -7227,6 +7876,7 @@ fn control_text(label: impl IntoReactive<SharedString>) -> Text {
         .font_weight(FontWeight::MEDIUM)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn toolbar_menu(
     installed: Signal<bool>,
     proxy_on: Signal<bool>,
@@ -7236,12 +7886,15 @@ fn toolbar_menu(
     export_har: impl Fn() + 'static,
     copy_env: impl Fn() + 'static,
     clear: impl Fn() + 'static,
+    clear_unpinned: impl Fn() + 'static,
     import_controls: Arc<Controls>,
     rows: Signal<Vec<RowLine>>,
     flow_total: Signal<usize>,
     filter: Signal<String>,
     pretty: Signal<bool>,
     share_id: Signal<String>,
+    compose: Compose,
+    selected: Signal<Option<u64>>,
 ) -> impl IntoElement {
     menu()
         .placement(Placement::Bottom)
@@ -7258,12 +7911,15 @@ fn toolbar_menu(
             export_har,
             copy_env,
             clear,
+            clear_unpinned,
             import_controls,
             rows,
             flow_total,
             filter,
             pretty,
             share_id,
+            compose,
+            selected,
         ))
 }
 
@@ -7383,6 +8039,7 @@ fn more_trigger(installed: Signal<bool>, proxy_on: Signal<bool>) -> impl IntoEle
         ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn more_menu(
     installed: Signal<bool>,
     proxy_on: Signal<bool>,
@@ -7392,12 +8049,15 @@ fn more_menu(
     export_har: impl Fn() + 'static,
     copy_env: impl Fn() + 'static,
     clear: impl Fn() + 'static,
+    clear_unpinned: impl Fn() + 'static,
     import_controls: Arc<Controls>,
     rows: Signal<Vec<RowLine>>,
     flow_total: Signal<usize>,
     filter: Signal<String>,
     pretty: Signal<bool>,
     share_id: Signal<String>,
+    compose: Compose,
+    selected: Signal<Option<u64>>,
 ) -> impl IntoElement {
     let export_har = Rc::new(export_har);
     let export_all = Rc::clone(&export_har);
@@ -7416,6 +8076,11 @@ fn more_menu(
             tr("清空", "Clear"),
             move || SharedString::from(flow_count_now(rows, flow_total, filter)),
             clear,
+        ))
+        .child(menu_action(
+            Glyph::Trash,
+            tr("清空未星标", "Clear unstarred"),
+            clear_unpinned,
         ))
         .child(
             when(
@@ -7492,6 +8157,11 @@ fn more_menu(
             let controls = import_controls.clone();
             move || prompt_import_har(controls.clone())
         }))
+        .child(menu_action(
+            Glyph::Prompt,
+            tr("构造请求", "New request"),
+            move || begin_new_request(compose, selected),
+        ))
         .child(menu_action(
             Glyph::Prompt,
             tr("复制代理环境", "Copy proxy env"),
@@ -7877,6 +8547,7 @@ fn row_lines(
                     },
                     path: list_path(&flow.path, flow.error.as_deref(), failed, lang),
                     url: list_url(&flow.url, &flow.path, flow.error.as_deref(), failed, lang),
+                    comment: flow.comment.clone(),
                     protocol: flow.protocol.label_in(lang).to_string(),
                     size: format_bytes(flow.response_bytes as usize),
                     size_bytes: flow.response_bytes,
@@ -7961,6 +8632,7 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baselin
         shown.request_form.set(Vec::new());
         shown.rules.set(String::new());
         shown.pinned.set(false);
+        shown.comment.set(String::new());
         return;
     };
     let snapshot = hub.with_session(|session| session.hydrated(id));
@@ -7982,6 +8654,7 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baselin
         shown.request_form.set(Vec::new());
         shown.rules.set(String::new());
         shown.pinned.set(false);
+        shown.comment.set(String::new());
         return;
     };
     let (diff_old, diff_new) = match baseline {
@@ -8071,11 +8744,15 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baselin
         .response_headers
         .set(header_lines(&flow.response_headers, pretty));
     let form = if pretty {
-        std::str::from_utf8(&flow.request_body)
-            .ok()
-            .filter(|text| present::is_form(request_type, text))
-            .map(|text| {
-                present::form_pairs(text)
+        present::multipart_pairs(request_type, &flow.request_body)
+            .or_else(|| {
+                std::str::from_utf8(&flow.request_body)
+                    .ok()
+                    .filter(|text| present::is_form(request_type, text))
+                    .map(present::form_pairs)
+            })
+            .map(|pairs| {
+                pairs
                     .into_iter()
                     .enumerate()
                     .map(|(index, (name, value))| HeaderLine {
@@ -8144,6 +8821,9 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baselin
     shown.diff_old.set(diff_old);
     shown.diff_new.set(diff_new);
     shown.pinned.set(flow.pinned);
+    if !shown.editing_comment.get() {
+        shown.comment.set(flow.comment);
+    }
     shown.phase.set(Phase::Ready);
 }
 
@@ -8249,10 +8929,16 @@ fn display_body(
     lang: Lang,
 ) -> BodyText {
     let mut presented = body_text(body, truncated, expired, encoding_error, lang);
-    if pretty && std::str::from_utf8(body).is_ok() {
-        presented.hex.clear();
-    }
     if pretty {
+        if let Some(decoded) = present::pretty_binary_body(content_type, body) {
+            presented.hex.clear();
+            presented.note = present::without_hex_cap_note(&presented.note);
+            presented.text = decoded;
+            return presented;
+        }
+        if std::str::from_utf8(body).is_ok() {
+            presented.hex.clear();
+        }
         apply_pretty(&mut presented, body, content_type, lang);
     }
     presented
@@ -8946,6 +9632,12 @@ fn hex_dump(body: &[u8]) -> String {
     out
 }
 
+fn spawn_detached<T: 'static>(future: impl std::future::Future<Output = T> + 'static) {
+    Owner::detached().run(|| {
+        spawn(future);
+    });
+}
+
 fn export_response(controls: Arc<Controls>, id: Option<u64>) {
     let Some(flow) = selected_flow(&controls, id) else {
         return;
@@ -8957,14 +9649,14 @@ fn export_response(controls: Arc<Controls>, id: Option<u64>) {
     let ext = present::content_type(&flow.response_headers)
         .and_then(present::image_extension)
         .unwrap_or_else(|| body_extension(&flow.response_headers, &flow.response_body));
-    let dialog = save_dialog_with_default_dir()
+    let dialog = nsh_core::file_dialog::SaveDialog::new()
         .file_name(format!("{}.{}", flow.id, ext))
         .filter(nsh_core::file_dialog::FileFilter::new(
             ext.to_ascii_uppercase(),
             [ext],
         ));
     let body = flow.response_body;
-    spawn(async move {
+    spawn_detached(async move {
         match pick_save_path(dialog).await {
             Ok(Some(path)) => {
                 if let Some(parent) = path.parent()
@@ -8988,71 +9680,7 @@ fn export_response(controls: Arc<Controls>, id: Option<u64>) {
     });
 }
 
-fn save_dialog_with_default_dir() -> nsh_core::file_dialog::SaveDialog {
-    let dialog = nsh_core::file_dialog::SaveDialog::new();
-    match default_save_dir() {
-        Some(dir) => dialog.directory(dir),
-        None => dialog,
-    }
-}
-
-fn default_save_dir() -> Option<std::path::PathBuf> {
-    let home = std::env::var("HOME")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| {
-            std::env::var("USERPROFILE")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-        });
-    let xdg_config = std::env::var("XDG_CONFIG_HOME")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            home.as_deref()
-                .map(|home| std::path::Path::new(home).join(".config"))
-        });
-    let user_dirs =
-        xdg_config.and_then(|dir| std::fs::read_to_string(dir.join("user-dirs.dirs")).ok());
-    default_save_dir_from(
-        home.as_deref(),
-        user_dirs.as_deref(),
-        std::env::current_dir().ok().as_deref(),
-        |path| path.is_dir(),
-    )
-}
-
-fn default_save_dir_from(
-    home: Option<&str>,
-    user_dirs_text: Option<&str>,
-    cwd: Option<&std::path::Path>,
-    mut is_dir: impl FnMut(&std::path::Path) -> bool,
-) -> Option<std::path::PathBuf> {
-    if let (Some(home), Some(text)) = (home, user_dirs_text)
-        && let Some(dir) = xdg_download_dir(home, text)
-        && is_dir(&dir)
-    {
-        return Some(dir);
-    }
-    if let Some(home) = home {
-        let downloads = std::path::Path::new(home).join("Downloads");
-        if is_dir(&downloads) {
-            return Some(downloads);
-        }
-        let home_path = std::path::PathBuf::from(home);
-        if is_dir(&home_path) {
-            return Some(home_path);
-        }
-    }
-    if let Some(cwd) = cwd
-        && is_dir(cwd)
-    {
-        return Some(cwd.to_path_buf());
-    }
-    None
-}
-
+#[cfg_attr(not(test), allow(dead_code))]
 /// `XDG_DOWNLOAD_DIR="$HOME/Downloads"` from `user-dirs.dirs`.
 fn xdg_download_dir(home: &str, text: &str) -> Option<std::path::PathBuf> {
     for line in text.lines() {
@@ -9155,11 +9783,13 @@ fn lock_string(slot: &Mutex<String>) -> String {
 
 fn break_bar(
     paused: Signal<Option<(u64, BreakSide)>>,
+    paused_count: Signal<usize>,
     compose: Compose,
     selected: Signal<Option<u64>>,
     controls: Arc<Controls>,
 ) -> impl IntoElement {
     let release = controls.clone();
+    let release_all = controls.clone();
     let drop_controls = controls;
     view()
         .h(px(40.0))
@@ -9174,15 +9804,21 @@ fn break_bar(
             text({
                 let langs = ui_langs();
                 move || -> SharedString {
+                    let count = paused_count.get();
+                    let queue_suffix = if count > 1 {
+                        format!(" (1 / {count})")
+                    } else {
+                        String::new()
+                    };
                     match paused.get() {
                         Some((id, BreakSide::Response)) => format!(
-                            "{} #{id} {}",
+                            "{} #{id} {}{queue_suffix}",
                             t(ui_lang(langs), "流量", "Flow"),
                             t(ui_lang(langs), "停在响应断点", "is paused on the response")
                         )
                         .into(),
                         Some((id, BreakSide::Request)) => format!(
-                            "{} #{id} {}",
+                            "{} #{id} {}{queue_suffix}",
                             t(ui_lang(langs), "流量", "Flow"),
                             t(ui_lang(langs), "停在请求断点", "is paused on the request")
                         )
@@ -9200,6 +9836,18 @@ fn break_bar(
         .child(detail_button(tr("放行", "Continue"), move || {
             continue_break(&release, compose, selected, paused);
         }))
+        .child(when(
+            move || paused_count.get() > 1,
+            move || {
+                let controls = release_all.clone();
+                detail_button(tr("全部放行", "Continue all"), move || {
+                    if compose.composing.get() {
+                        reset_compose(compose);
+                    }
+                    controls.hub.resolve_all_breaks();
+                })
+            },
+        ))
         .child(detail_button(tr("丢弃", "Drop"), move || {
             if compose.composing.get() {
                 reset_compose(compose);
@@ -9281,6 +9929,8 @@ fn compose_box(
                     move || -> SharedString {
                         if compose.response.get() {
                             t(ui_lang(langs), "编辑响应", "Edit response").into()
+                        } else if selected.get().is_none() {
+                            t(ui_lang(langs), "构造请求", "New request").into()
                         } else {
                             t(ui_lang(langs), "编辑重发", "Edit and resend").into()
                         }
@@ -9644,7 +10294,7 @@ fn lan_toggle(on: Signal<bool>, controls: Arc<Controls>) -> impl IntoElement {
 }
 
 fn prompt_import_har(controls: Arc<Controls>) {
-    spawn(async move {
+    spawn_detached(async move {
         let dialog = nsh_core::file_dialog::OpenDialog::files()
             .multiple(true)
             .filter(nsh_core::file_dialog::FileFilter::new("HAR", ["har"]));
@@ -9660,7 +10310,28 @@ fn prompt_import_har(controls: Arc<Controls>) {
     });
 }
 
+fn begin_new_request(compose: Compose, selected: Signal<Option<u64>>) {
+    selected.set(None);
+    compose.response.set(false);
+    compose.method.set("GET".to_string());
+    compose.url.set(String::new());
+    compose.headers.set(String::new());
+    compose.body.set(String::new());
+    compose.status.set(String::new());
+    compose.composing.set(true);
+}
+
 fn begin_compose(controls: &Controls, id: Option<u64>, compose: Compose) {
+    if id.is_none() {
+        compose.response.set(false);
+        compose.method.set("GET".to_string());
+        compose.url.set(String::new());
+        compose.headers.set(String::new());
+        compose.body.set(String::new());
+        compose.status.set(String::new());
+        compose.composing.set(true);
+        return;
+    }
     let Some(flow) = selected_flow(controls, id) else {
         set_status(controls, StatusMsg::NeedSelection);
         return;
@@ -9721,6 +10392,41 @@ fn clear_captured(
     reset_compose(compose);
 }
 
+fn clear_unpinned_captured(
+    controls: &Controls,
+    selected: Signal<Option<u64>>,
+    baseline: Signal<Option<u64>>,
+    compose: Compose,
+) {
+    controls.hub.clear_unpinned();
+    if let Some(id) = selected.get()
+        && controls
+            .hub
+            .with_session(|session| session.get(id).is_none())
+    {
+        selected.set(None);
+        reset_compose(compose);
+    }
+    if let Some(id) = baseline.get()
+        && controls
+            .hub
+            .with_session(|session| session.get(id).is_none())
+    {
+        baseline.set(None);
+    }
+}
+
+fn save_flow_comment(controls: &Controls, id: Option<u64>, shown: Shown) {
+    let Some(id) = id else {
+        shown.editing_comment.set(false);
+        return;
+    };
+    let clean = shown.comment.get().trim().to_string();
+    shown.comment.set(clean.clone());
+    shown.editing_comment.set(false);
+    let _ = controls.hub.set_comment(id, &clean);
+}
+
 /// Next id in the filtered list. `delta` is `-1` for up and `1` for down.
 /// An empty list stays unselected. With nothing selected, down takes the
 /// first row and up the last. Either end clamps. An id that is not in the
@@ -9765,11 +10471,19 @@ fn step_selected(
 }
 
 fn replay_flow(controls: &Arc<Controls>, id: Option<u64>, edit: ReplayOverride) {
+    let hub = controls.hub.clone();
     let Some(id) = id else {
-        set_status(controls, StatusMsg::NeedSelection);
+        if edit.url.as_deref().is_some_and(|u| !u.trim().is_empty()) {
+            let controls = Arc::clone(controls);
+            hub.send_composed_later(edit, move |result| match result {
+                Ok(new_id) => set_status(&controls, StatusMsg::Replayed(new_id)),
+                Err(err) => set_status(&controls, StatusMsg::ReplayFailed(format!("{err:#}"))),
+            });
+        } else {
+            set_status(controls, StatusMsg::NeedSelection);
+        }
         return;
     };
-    let hub = controls.hub.clone();
     let controls = Arc::clone(controls);
     hub.replay_later(id, edit, move |result| match result {
         Ok(new_id) => set_status(&controls, StatusMsg::Replayed(new_id)),
@@ -9803,10 +10517,10 @@ fn export_har_file(controls: Arc<Controls>, filter: &str) {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
-    let dialog = save_dialog_with_default_dir()
+    let dialog = nsh_core::file_dialog::SaveDialog::new()
         .file_name(format!("zniff-{secs}.har"))
         .filter(nsh_core::file_dialog::FileFilter::new("HAR", ["har"]));
-    spawn(async move {
+    spawn_detached(async move {
         match pick_save_path(dialog).await {
             Ok(Some(path)) => {
                 if let Some(parent) = path.parent()
@@ -9840,13 +10554,13 @@ fn export_html_file(controls: Arc<Controls>, filter: &str, zh: bool) {
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
-    let dialog = save_dialog_with_default_dir()
+    let dialog = nsh_core::file_dialog::SaveDialog::new()
         .file_name(format!("zniff-{secs}.html"))
         .filter(nsh_core::file_dialog::FileFilter::new(
             "HTML",
             ["html", "htm"],
         ));
-    spawn(async move {
+    spawn_detached(async move {
         match pick_save_path(dialog).await {
             Ok(Some(path)) => {
                 if let Some(parent) = path.parent()
@@ -9938,6 +10652,7 @@ fn profiles_for_export(
     )
 }
 
+#[cfg(test)]
 fn profile_export_filename(
     preferred_name: &str,
     profiles: &[config::SavedProfile],
@@ -9970,63 +10685,25 @@ fn profile_export_filename(
     }
 }
 
-fn export_profiles_file(
-    controls: Arc<Controls>,
-    preferred_name: String,
-    profiles: Vec<config::SavedProfile>,
-) {
-    let toml_text = match config::export_profiles_toml(&profiles) {
-        Ok(text) => text,
+fn export_profiles_clipboard(controls: &Controls, profiles: &[config::SavedProfile]) {
+    match config::export_profiles_toml(profiles) {
+        Ok(toml_text) => {
+            let count = profiles.len();
+            set_clipboard(toml_text);
+            set_status(controls, StatusMsg::ProfilesExported { count });
+        }
         Err(err) => {
-            set_status(&controls, StatusMsg::ExportFailed(err));
-            return;
+            set_status(controls, StatusMsg::ExportFailed(err));
         }
-    };
-    let count = profiles.len();
-    let secs = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0);
-    let file_name = profile_export_filename(&preferred_name, &profiles, secs);
-    let dialog = save_dialog_with_default_dir()
-        .file_name(file_name)
-        .filter(nsh_core::file_dialog::FileFilter::new("TOML", ["toml"]));
-    spawn(async move {
-        match pick_save_path(dialog).await {
-            Ok(Some(path)) => {
-                if let Some(parent) = path.parent()
-                    && !parent.as_os_str().is_empty()
-                    && let Err(err) = std::fs::create_dir_all(parent)
-                {
-                    set_status(&controls, StatusMsg::ExportFailed(err.to_string()));
-                    return;
-                }
-                if let Err(err) = std::fs::write(&path, &toml_text) {
-                    set_status(&controls, StatusMsg::ExportFailed(err.to_string()));
-                    return;
-                }
-                set_clipboard(toml_text);
-                set_status(
-                    &controls,
-                    StatusMsg::ProfilesExported {
-                        count,
-                        path: path.display().to_string(),
-                    },
-                );
-            }
-            Ok(None) => set_status(&controls, StatusMsg::ExportCancelled),
-            Err(err) => set_status(&controls, StatusMsg::ExportFailed(err)),
-        }
-    });
+    }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 fn parse_profiles_from_text_or_path(
     input: &str,
 ) -> std::result::Result<Vec<config::SavedProfile>, String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
-        return Err("empty clipboard".to_string());
+        return Err("empty TOML".to_string());
     }
     let candidate_str = dropped_toml_path(trimmed).unwrap_or_else(|| trimmed.to_string());
     let candidate = std::path::Path::new(&candidate_str);
@@ -10039,6 +10716,19 @@ fn parse_profiles_from_text_or_path(
         return config::parse_profiles_toml(&content);
     }
     config::parse_profiles_toml(trimmed)
+}
+
+fn import_profiles_text(controls: &Controls, raw_text: &str, profiles: ProfileSignals) -> bool {
+    match parse_profiles_from_text_or_path(raw_text) {
+        Ok(incoming) => {
+            apply_imported_profiles(controls, incoming, profiles);
+            true
+        }
+        Err(err) => {
+            set_status(controls, StatusMsg::ImportFailed(err));
+            false
+        }
+    }
 }
 
 fn import_profiles_file(controls: &Controls, path_text: &str, profiles: ProfileSignals) {
@@ -10056,6 +10746,14 @@ fn import_profiles_file(controls: &Controls, path_text: &str, profiles: ProfileS
             return;
         }
     };
+    apply_imported_profiles(controls, incoming, profiles);
+}
+
+fn apply_imported_profiles(
+    controls: &Controls,
+    incoming: Vec<config::SavedProfile>,
+    profiles: ProfileSignals,
+) {
     let count = incoming.len();
     let merged = config::merge_imported_profiles(&profiles.saved.get(), &incoming, SAVED_RULE_CAP);
     profiles.saved.set(merged.clone());
@@ -10857,6 +11555,7 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
             client_ip: "127.0.0.1".to_string(),
             path: "/v1/users".to_string(),
             url: "https://api.example.com/v1/users".to_string(),
+            comment: String::new(),
             protocol: "HTTP/2".to_string(),
             size: "128 B".to_string(),
             size_bytes: 128,
@@ -11335,14 +12034,18 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
             super::draft_rules("break a.test/api", "a.test", "", "keep", "", false, 0),
             "break a.test/api\nreplace a.test req keep -> \n"
         );
+        assert_eq!(
+            super::draft_rules("break a.test/api", "a.test", "", "with space", "", false, 0),
+            "break a.test/api\nreplace a.test req \"with space\" -> \n"
+        );
         assert!(!ready(
             "test",
             "host:a.test",
             "break a.test/api",
             true,
             false,
-            "",
-            "not valid"
+            "a.test",
+            ""
         ));
     }
 
@@ -11356,47 +12059,27 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
     }
 
     #[test]
-    fn default_save_dir_prefers_xdg_downloads_then_home_and_cwd() {
-        let xdg = super::default_save_dir_from(
-            Some("/home/alice"),
-            Some("XDG_DOWNLOAD_DIR=\"$HOME/MyDownloads\"\n"),
-            Some(std::path::Path::new("/work")),
-            |p| p == std::path::Path::new("/home/alice/MyDownloads"),
-        );
-        assert_eq!(
-            xdg.as_deref(),
-            Some(std::path::Path::new("/home/alice/MyDownloads"))
-        );
+    fn detached_owner_survives_child_owner_disposal() {
+        use nsh_core::element::{Runtime, create_root};
+        use nsh_core::prelude::{Owner, cleanup};
+        use std::cell::Cell;
+        use std::rc::Rc;
 
-        let downloads = super::default_save_dir_from(
-            Some("/home/alice"),
-            Some("XDG_DOWNLOAD_DIR=\"$HOME/Missing\"\n"),
-            Some(std::path::Path::new("/work")),
-            |p| p == std::path::Path::new("/home/alice/Downloads"),
-        );
-        assert_eq!(
-            downloads.as_deref(),
-            Some(std::path::Path::new("/home/alice/Downloads"))
-        );
-
-        let home_fallback = super::default_save_dir_from(
-            Some("/home/alice"),
-            None,
-            Some(std::path::Path::new("/work")),
-            |p| p == std::path::Path::new("/home/alice"),
-        );
-        assert_eq!(
-            home_fallback.as_deref(),
-            Some(std::path::Path::new("/home/alice"))
-        );
-
-        let cwd_fallback = super::default_save_dir_from(
-            Some("/home/alice"),
-            None,
-            Some(std::path::Path::new("/work")),
-            |p| p == std::path::Path::new("/work"),
-        );
-        assert_eq!(cwd_fallback.as_deref(), Some(std::path::Path::new("/work")));
+        let runtime = Runtime::default();
+        let _entered = runtime.enter();
+        let scoped_cancelled = Rc::new(Cell::new(false));
+        let detached_cancelled = Rc::new(Cell::new(false));
+        let scoped_flag = Rc::clone(&scoped_cancelled);
+        let detached_flag = Rc::clone(&detached_cancelled);
+        let (menu_owner, ()) = create_root(move || {
+            cleanup(move || scoped_flag.set(true));
+            Owner::detached().run(|| {
+                cleanup(move || detached_flag.set(true));
+            });
+        });
+        menu_owner.dispose();
+        assert!(scoped_cancelled.get());
+        assert!(!detached_cancelled.get());
     }
 
     #[test]
@@ -11450,6 +12133,7 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
             client_ip: "127.0.0.1".to_string(),
             path: path.to_string(),
             url: format!("https://{host}{path}"),
+            comment: String::new(),
             protocol: "HTTP/1.1".to_string(),
             size: "0 B".to_string(),
             size_bytes,

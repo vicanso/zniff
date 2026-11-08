@@ -33,7 +33,7 @@ pub enum Rule {
     MapLocal {
         host: String,
         path_prefix: String,
-        file: PathBuf,
+        file: Option<PathBuf>,
         status: Option<u16>,
         delay: Duration,
     },
@@ -63,6 +63,13 @@ pub enum Rule {
         name: String,
         value: String,
     },
+    Query {
+        host: String,
+        path_prefix: String,
+        remove: bool,
+        name: String,
+        value: String,
+    },
     Cors {
         host: String,
         path_prefix: String,
@@ -84,8 +91,14 @@ pub enum HeaderOp {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueryOp {
+    Set { name: String, value: String },
+    Remove { name: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
-    MapLocal { file: PathBuf, status: u16 },
+    MapLocal { file: Option<PathBuf>, status: u16 },
     MapRemote { url: String },
     BreakRequest,
     BreakResponse,
@@ -96,6 +109,7 @@ pub struct Effect {
     pub delay: Duration,
     pub request_headers: Vec<HeaderOp>,
     pub response_headers: Vec<HeaderOp>,
+    pub query_ops: Vec<QueryOp>,
     pub cors: bool,
     pub action: Option<Action>,
     /// `(from, to)` applied in order to a UTF-8 body that fits in one flow.
@@ -109,6 +123,7 @@ impl Default for Effect {
             delay: Duration::ZERO,
             request_headers: Vec::new(),
             response_headers: Vec::new(),
+            query_ops: Vec::new(),
             cors: false,
             action: None,
             request_replaces: Vec::new(),
@@ -143,6 +158,9 @@ impl Rule {
             | Self::Header {
                 host, path_prefix, ..
             }
+            | Self::Query {
+                host, path_prefix, ..
+            }
             | Self::Cors {
                 host, path_prefix, ..
             }
@@ -156,7 +174,7 @@ impl Rule {
 pub fn parse_rules(text: &str) -> Vec<Rule> {
     text.lines()
         .filter_map(|line| {
-            let line = line.split('#').next().unwrap_or(line).trim();
+            let line = strip_rule_comment(line).trim();
             if line.is_empty() {
                 return None;
             }
@@ -181,6 +199,7 @@ pub fn hit_summary(rules: &[Rule], host: &str, path: &str) -> String {
             Rule::BreakResponse { .. } => ("break-res", true),
             Rule::Delay { .. } => ("delay", false),
             Rule::Header { .. } => ("header", false),
+            Rule::Query { .. } => ("query", false),
             Rule::Cors { .. } => ("cors", false),
             Rule::Replace { .. } => ("replace", false),
         };
@@ -253,6 +272,22 @@ pub fn effect(rules: &[Rule], host: &str, path: &str) -> Effect {
                 } else {
                     effect.request_headers.push(op);
                 }
+            }
+            Rule::Query {
+                remove,
+                name,
+                value,
+                ..
+            } => {
+                let op = if *remove {
+                    QueryOp::Remove { name: name.clone() }
+                } else {
+                    QueryOp::Set {
+                        name: name.clone(),
+                        value: value.clone(),
+                    }
+                };
+                effect.query_ops.push(op);
             }
             Rule::Cors { .. } => effect.cors = true,
             Rule::Replace {
@@ -334,38 +369,160 @@ fn cap_delay(delay: Duration) -> Duration {
     if delay > DELAY_CAP { DELAY_CAP } else { delay }
 }
 
-fn parse_line(line: &str) -> Option<Rule> {
-    let mut parts = line.split_whitespace();
-    let kind = parts.next()?;
-    let pattern = parts.next()?;
-    let (host, path_prefix) = split_pattern(pattern);
-    match kind {
-        "map-local" => {
-            let file = parts.next()?;
-            let mut status = None;
-            let mut delay = Duration::ZERO;
-            for token in parts {
-                if let Some(code) = token.strip_prefix("status=") {
-                    let code: u16 = code.parse().ok()?;
-                    if !(100..600).contains(&code) {
+/// Strips a trailing `# ...` comment when `#` is outside `"..."` quotes.
+fn strip_rule_comment(line: &str) -> &str {
+    let mut in_quotes = false;
+    let mut escaped = false;
+    for (idx, ch) in line.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if in_quotes {
+            if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_quotes = false;
+            }
+            continue;
+        }
+        if ch == '"' {
+            in_quotes = true;
+        } else if ch == '#' {
+            return &line[..idx];
+        }
+    }
+    line
+}
+
+/// Quotes a rule token with `"..."` when it contains whitespace, quotes, or backslashes.
+pub fn quote_rule_token(text: &str) -> String {
+    if text.is_empty()
+        || text.chars().any(char::is_whitespace)
+        || text.contains('"')
+        || text.contains('\\')
+    {
+        let mut out = String::with_capacity(text.len() + 2);
+        out.push('"');
+        for ch in text.chars() {
+            match ch {
+                '\\' => out.push_str("\\\\"),
+                '"' => out.push_str("\\\""),
+                _ => out.push(ch),
+            }
+        }
+        out.push('"');
+        out
+    } else {
+        text.to_string()
+    }
+}
+
+/// Unquotes an optional `"..."` wrapper, or returns the trimmed text when unquoted.
+/// Returns `None` if the text starts with `"` but has an unclosed quote or trailing characters.
+fn unquote_optional(text: &str) -> Option<String> {
+    let text = text.trim();
+    if !text.starts_with('"') {
+        return Some(text.to_string());
+    }
+    let (token, rest) = next_rule_token(text)?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    Some(token)
+}
+
+fn next_rule_token(input: &str) -> Option<(String, &str)> {
+    let trimmed = input.trim_start();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(after_open) = trimmed.strip_prefix('"') {
+        let mut out = String::new();
+        let mut chars = after_open.char_indices();
+        while let Some((idx, ch)) = chars.next() {
+            match ch {
+                '"' => {
+                    let rest = &after_open[idx + 1..];
+                    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
                         return None;
                     }
-                    status = Some(code);
-                } else {
-                    let text = token.strip_prefix("delay=")?;
-                    delay = parse_delay(text)?;
+                    return Some((out, rest));
                 }
+                '\\' => {
+                    let (_, esc) = chars.next()?;
+                    match esc {
+                        'n' => out.push('\n'),
+                        'r' => out.push('\r'),
+                        't' => out.push('\t'),
+                        other => out.push(other),
+                    }
+                }
+                other => out.push(other),
+            }
+        }
+        None
+    } else {
+        let end = trimmed.find(char::is_whitespace).unwrap_or(trimmed.len());
+        Some((trimmed[..end].to_string(), &trimmed[end..]))
+    }
+}
+
+fn rule_tokens(line: &str) -> Option<Vec<String>> {
+    let mut tokens = Vec::new();
+    let mut rest = line.trim();
+    while !rest.is_empty() {
+        let (token, next) = next_rule_token(rest)?;
+        tokens.push(token);
+        rest = next.trim_start();
+    }
+    Some(tokens)
+}
+
+fn parse_status_opt(text: &str) -> Option<u16> {
+    let raw = text.trim().strip_prefix("status=").unwrap_or(text.trim());
+    let code: u16 = raw.parse().ok()?;
+    (100..600).contains(&code).then_some(code)
+}
+
+fn parse_line(line: &str) -> Option<Rule> {
+    let (kind, rest) = next_rule_token(line)?;
+    let (pattern, rest) = next_rule_token(rest)?;
+    let (host, path_prefix) = split_pattern(&pattern);
+    match kind.as_str() {
+        "map-local" => {
+            let tokens = rule_tokens(rest)?;
+            let mut file: Option<PathBuf> = None;
+            let mut status = None;
+            let mut delay = Duration::ZERO;
+            for token in tokens {
+                if let Some(code_str) = token.strip_prefix("status=") {
+                    status = Some(parse_status_opt(code_str)?);
+                } else if let Some(delay_str) = token.strip_prefix("delay=") {
+                    delay = parse_delay(delay_str)?;
+                } else if file.is_none() && !token.is_empty() {
+                    file = Some(PathBuf::from(token));
+                } else {
+                    return None;
+                }
+            }
+            if file.is_none() && status.is_none() {
+                return None;
             }
             Some(Rule::MapLocal {
                 host,
                 path_prefix,
-                file: PathBuf::from(file),
+                file,
                 status,
                 delay,
             })
         }
         "map-remote" => {
-            let url = parts.next()?.to_string();
+            let tokens = rule_tokens(rest)?;
+            if tokens.len() != 1 {
+                return None;
+            }
+            let url = tokens.into_iter().next()?;
             if !(url.starts_with("http://") || url.starts_with("https://")) {
                 return None;
             }
@@ -375,34 +532,51 @@ fn parse_line(line: &str) -> Option<Rule> {
                 url,
             })
         }
-        "break" => Some(Rule::Break { host, path_prefix }),
-        "break-res" | "break-response" => Some(Rule::BreakResponse { host, path_prefix }),
+        "break" => {
+            if !rest.trim().is_empty() {
+                return None;
+            }
+            Some(Rule::Break { host, path_prefix })
+        }
+        "break-res" | "break-response" => {
+            if !rest.trim().is_empty() {
+                return None;
+            }
+            Some(Rule::BreakResponse { host, path_prefix })
+        }
         "delay" => {
-            let text = parts.next()?;
+            let tokens = rule_tokens(rest)?;
+            if tokens.len() != 1 {
+                return None;
+            }
             Some(Rule::Delay {
                 host,
                 path_prefix,
-                delay: parse_delay(text)?,
+                delay: parse_delay(&tokens[0])?,
             })
         }
         "header" => {
-            let side = parts.next()?;
-            let op = parts.next()?;
-            let name = parts.next()?.to_string();
+            let (side, rest) = next_rule_token(rest)?;
+            let (op, rest) = next_rule_token(rest)?;
+            let (name, rest) = next_rule_token(rest)?;
+            let name = name.trim_end_matches(':').to_string();
             if name.is_empty() {
                 return None;
             }
-            let response = match side {
+            let response = match side.as_str() {
                 "res" | "response" => true,
                 "req" | "request" => false,
                 _ => return None,
             };
-            let remove = match op {
+            let remove = match op.as_str() {
                 "del" | "delete" | "rm" => true,
                 "set" | "add" => false,
                 _ => return None,
             };
-            let value = parts.collect::<Vec<_>>().join(" ");
+            let value = unquote_optional(rest)?;
+            if remove && !value.is_empty() {
+                return None;
+            }
             Some(Rule::Header {
                 host,
                 path_prefix,
@@ -412,22 +586,62 @@ fn parse_line(line: &str) -> Option<Rule> {
                 value,
             })
         }
-        "cors" => Some(Rule::Cors { host, path_prefix }),
+        "query" => {
+            let (op, rest) = next_rule_token(rest)?;
+            let remove = match op.as_str() {
+                "del" | "delete" | "rm" => true,
+                "set" | "add" => false,
+                _ => return None,
+            };
+            let (first, rest) = next_rule_token(rest)?;
+            let (name, value) = if remove {
+                if !rest.trim().is_empty() || first.is_empty() {
+                    return None;
+                }
+                (first, String::new())
+            } else if let Some((k, v)) = first.split_once('=') {
+                if k.is_empty() || !rest.trim().is_empty() {
+                    return None;
+                }
+                (k.to_string(), v.to_string())
+            } else {
+                let value = unquote_optional(rest)?;
+                (first, value)
+            };
+            if name.is_empty() {
+                return None;
+            }
+            Some(Rule::Query {
+                host,
+                path_prefix,
+                remove,
+                name,
+                value,
+            })
+        }
+        "cors" => {
+            if !rest.trim().is_empty() {
+                return None;
+            }
+            Some(Rule::Cors { host, path_prefix })
+        }
         "replace" => {
-            let side = parts.next()?;
-            let rest = parts.collect::<Vec<_>>().join(" ");
+            let (side, rest) = next_rule_token(rest)?;
+            let rest = rest.trim();
             // `from ->` with nothing after the arrow deletes that text.
-            // Whitespace around the arrow is not part of either side.
-            let (from, to) = if let Some((from, to)) = rest.split_once(" -> ") {
+            // Whitespace around the arrow is not part of either side unless quoted.
+            let (raw_from, raw_to) = if let Some((from, to)) = rest.split_once(" -> ") {
                 (from, to)
             } else {
                 let from = rest.strip_suffix(" ->")?;
                 (from, "")
             };
+            let from = unquote_optional(raw_from)?;
+            let to = unquote_optional(raw_to)?;
             if from.is_empty() {
                 return None;
             }
-            let response = match side {
+            let response = match side.as_str() {
                 "res" | "response" => true,
                 "req" | "request" => false,
                 _ => return None,
@@ -436,12 +650,117 @@ fn parse_line(line: &str) -> Option<Rule> {
                 host,
                 path_prefix,
                 response,
-                from: from.to_string(),
-                to: to.to_string(),
+                from,
+                to,
             })
         }
         _ => None,
     }
+}
+
+/// Applies `query` rules to a request target (`/path` or `/path?a=1&b=2`).
+/// Returns `None` when `ops` is empty, `path` does not start with `/`, or nothing changes.
+pub fn apply_query_ops(path: &str, ops: &[QueryOp]) -> Option<String> {
+    if ops.is_empty() || !path.starts_with('/') {
+        return None;
+    }
+    let (base_path, query_str) = match path.split_once('?') {
+        Some((base, q)) => (base, q),
+        None => (path, ""),
+    };
+    let mut pairs: Vec<(String, Option<String>)> = query_str
+        .split('&')
+        .filter(|seg| !seg.is_empty())
+        .map(|seg| match seg.split_once('=') {
+            Some((k, v)) => (k.to_string(), Some(v.to_string())),
+            None => (seg.to_string(), None),
+        })
+        .collect();
+
+    for op in ops {
+        match op {
+            QueryOp::Remove { name } => {
+                pairs.retain(|(k, _)| k != name && decode_query_component(k) != *name);
+            }
+            QueryOp::Set { name, value } => {
+                let encoded_name = encode_query_component(name);
+                let encoded_val = encode_query_component(value);
+                let mut replaced = false;
+                let mut next_pairs = Vec::with_capacity(pairs.len() + 1);
+                for (k, v) in pairs {
+                    if k == *name || decode_query_component(&k) == *name {
+                        if !replaced {
+                            next_pairs.push((encoded_name.clone(), Some(encoded_val.clone())));
+                            replaced = true;
+                        }
+                    } else {
+                        next_pairs.push((k, v));
+                    }
+                }
+                if !replaced {
+                    next_pairs.push((encoded_name, Some(encoded_val)));
+                }
+                pairs = next_pairs;
+            }
+        }
+    }
+
+    let next = if pairs.is_empty() {
+        base_path.to_string()
+    } else {
+        let joined = pairs
+            .into_iter()
+            .map(|(k, v)| match v {
+                Some(v) => format!("{k}={v}"),
+                None => k,
+            })
+            .collect::<Vec<_>>()
+            .join("&");
+        format!("{base_path}?{joined}")
+    };
+    (next != path).then_some(next)
+}
+
+fn decode_query_component(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut idx = 0;
+    while idx < bytes.len() {
+        if bytes[idx] == b'+' {
+            out.push(b' ');
+            idx += 1;
+        } else if bytes[idx] == b'%'
+            && idx + 2 < bytes.len()
+            && let Ok(val) = u8::from_str_radix(&input[idx + 1..idx + 3], 16)
+        {
+            out.push(val);
+            idx += 3;
+        } else {
+            out.push(bytes[idx]);
+            idx += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn encode_query_component(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for byte in input.bytes() {
+        match byte {
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'-'
+            | b'_'
+            | b'.'
+            | b'~'
+            | b':'
+            | b'/'
+            | b'%' => out.push(byte as char),
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
 }
 
 /// Replaces each pair in order. `None` when the text is not UTF-8, `from` is
@@ -479,6 +798,7 @@ pub enum QuickRule {
     Break,
     BreakRes,
     Header,
+    Query,
     Cors,
 }
 
@@ -492,6 +812,7 @@ impl QuickRule {
             Self::Break => ("断点", "Break"),
             Self::BreakRes => ("响应断点", "Break res"),
             Self::Header => ("改头", "Header"),
+            Self::Query => ("改参", "Query"),
             Self::Cors => ("跨域", "CORS"),
         }
     }
@@ -501,7 +822,7 @@ impl QuickRule {
 pub fn invalid_rule_lines(text: &str) -> Vec<usize> {
     let mut bad = Vec::new();
     for (index, line) in text.lines().enumerate() {
-        let stripped = line.split('#').next().unwrap_or(line).trim();
+        let stripped = strip_rule_comment(line).trim();
         if stripped.is_empty() {
             continue;
         }
@@ -532,6 +853,36 @@ pub fn append_break_line(rules: &str, host: &str, path: &str) -> Option<String> 
     push_line(rules, &format!("break {pattern}"))
 }
 
+/// Appends (or updates an existing `map-local <pattern>` line) for a captured flow.
+pub fn append_map_local_line(
+    rules: &str,
+    host: &str,
+    path: &str,
+    file: Option<&str>,
+    status: Option<u16>,
+) -> Option<String> {
+    let pattern = request_pattern(host, path)?;
+    let file = file.map(str::trim).filter(|s| !s.is_empty());
+    let status = status.filter(|code| (100..600).contains(code));
+    if file.is_none() && status.is_none() {
+        return None;
+    }
+    let mut line = format!("map-local {pattern}");
+    if let Some(file) = file {
+        if file.contains('\n') || file.contains('\r') {
+            return None;
+        }
+        line.push(' ');
+        line.push_str(&quote_rule_token(file));
+    }
+    if let Some(code) = status
+        && (file.is_none() || code != 200)
+    {
+        line.push_str(&format!(" status={code}"));
+    }
+    push_line(rules, &line)
+}
+
 pub fn append_quick_rule(
     rules: &str,
     kind: QuickRule,
@@ -551,19 +902,40 @@ pub fn append_quick_rule(
             return append_replace_line(rules, pattern, response, from, to);
         }
         QuickRule::Remote => {
-            if !(from.starts_with("http://") || from.starts_with("https://")) {
+            if !(from.starts_with("http://") || from.starts_with("https://"))
+                || from.contains(char::is_whitespace)
+            {
                 return None;
             }
             format!("map-remote {pattern} {from}")
         }
         QuickRule::Local => {
-            if from.is_empty() || from.contains(char::is_whitespace) {
+            if from.contains('\n') || to.contains('\n') {
                 return None;
             }
-            format!("map-local {pattern} {from}")
+            let status_from_to = if to.is_empty() {
+                None
+            } else {
+                Some(parse_status_opt(to)?)
+            };
+            if from.is_empty() {
+                let code = status_from_to?;
+                format!("map-local {pattern} status={code}")
+            } else if status_from_to.is_none()
+                && let Some(code) = from.strip_prefix("status=").and_then(parse_status_opt)
+            {
+                format!("map-local {pattern} status={code}")
+            } else {
+                let quoted = quote_rule_token(from);
+                match status_from_to {
+                    Some(code) => format!("map-local {pattern} {quoted} status={code}"),
+                    None => format!("map-local {pattern} {quoted}"),
+                }
+            }
         }
         QuickRule::Delay => {
-            if from.is_empty() || from.contains(char::is_whitespace) {
+            if from.is_empty() || from.contains(char::is_whitespace) || parse_delay(from).is_none()
+            {
                 return None;
             }
             format!("delay {pattern} {from}")
@@ -571,7 +943,8 @@ pub fn append_quick_rule(
         QuickRule::Break => format!("break {pattern}"),
         QuickRule::BreakRes => format!("break-res {pattern}"),
         QuickRule::Header => {
-            if from.is_empty() || from.contains(char::is_whitespace) {
+            let from = from.trim_end_matches(':').trim();
+            if from.is_empty() || from.contains(char::is_whitespace) || to.contains('\n') {
                 return None;
             }
             let side = if response { "res" } else { "req" };
@@ -579,6 +952,21 @@ pub fn append_quick_rule(
                 format!("header {pattern} {side} del {from}")
             } else {
                 format!("header {pattern} {side} set {from} {to}")
+            }
+        }
+        QuickRule::Query => {
+            if from.is_empty()
+                || from.contains(char::is_whitespace)
+                || from.contains('=')
+                || to.contains('\n')
+            {
+                return None;
+            }
+            if to.is_empty() {
+                format!("query {pattern} del {from}")
+            } else {
+                let quoted_to = quote_rule_token(to);
+                format!("query {pattern} set {from} {quoted_to}")
             }
         }
         QuickRule::Cors => format!("cors {pattern}"),
@@ -599,7 +987,7 @@ fn push_line(rules: &str, line: &str) -> Option<String> {
     Some(next)
 }
 
-/// One line for the rules box. `from` cannot contain spaces or `->`.
+/// One line for the rules box. `from` is quoted when it contains spaces; `->` is rejected.
 pub fn append_replace_line(
     rules: &str,
     pattern: &str,
@@ -613,15 +1001,16 @@ pub fn append_replace_line(
     if pattern.is_empty()
         || from.is_empty()
         || pattern.contains(char::is_whitespace)
-        || from.contains(char::is_whitespace)
         || from.contains("->")
         || pattern.contains('\n')
+        || from.contains('\n')
         || to.contains('\n')
     {
         return None;
     }
     let side = if response { "res" } else { "req" };
-    let line = format!("replace {pattern} {side} {from} -> {to}");
+    let quoted_from = quote_rule_token(from);
+    let line = format!("replace {pattern} {side} {quoted_from} -> {to}");
     let mut next = rules.to_string();
     if !next.is_empty() && !next.ends_with('\n') {
         next.push('\n');
@@ -799,7 +1188,7 @@ break example.com/api
         assert_eq!(
             applied.action,
             Some(Action::MapLocal {
-                file: PathBuf::from("./a.json"),
+                file: Some(PathBuf::from("./a.json")),
                 status: 429,
             })
         );
@@ -985,5 +1374,79 @@ break example.com/api
             ),
             vec![2, 4]
         );
+    }
+
+    #[test]
+    fn query_rules_and_quoted_map_local_work() {
+        let rules = parse_rules(
+            "\
+query example.com/api set env staging
+query example.com/api set msg \"hello world\"
+query example.com/api del debug
+map-local example.com/api/mock \"/Users/tree/My Mocks/data.json\" status=201
+map-local example.com/api/empty status=503 delay=200ms
+replace example.com/api res \"old text\" -> \"new text\"
+",
+        );
+        assert_eq!(rules.len(), 6);
+        let eff = effect(&rules, "example.com", "/api/items?debug=1&page=2&env=prod");
+        assert_eq!(
+            apply_query_ops("/api/items?debug=1&page=2&env=prod", &eff.query_ops).as_deref(),
+            Some("/api/items?page=2&env=staging&msg=hello%20world")
+        );
+        assert_eq!(
+            hit_summary(&rules, "example.com", "/api/mock"),
+            "query map-local replace"
+        );
+        let mock_eff = effect(&rules, "example.com", "/api/mock");
+        assert_eq!(
+            mock_eff.action,
+            Some(Action::MapLocal {
+                file: Some(PathBuf::from("/Users/tree/My Mocks/data.json")),
+                status: 201,
+            })
+        );
+        let empty_eff = effect(&rules, "example.com", "/api/empty");
+        assert_eq!(
+            empty_eff.action,
+            Some(Action::MapLocal {
+                file: None,
+                status: 503,
+            })
+        );
+        assert_eq!(empty_eff.delay, Duration::from_millis(200));
+        assert_eq!(
+            empty_eff.response_replaces,
+            vec![("old text".into(), "new text".into())]
+        );
+
+        let mapped = append_map_local_line(
+            "",
+            "example.com",
+            "/v1/user?id=1",
+            Some("/tmp/my mock/user.json"),
+            Some(200),
+        )
+        .unwrap();
+        assert_eq!(
+            mapped,
+            "map-local example.com/v1/user \"/tmp/my mock/user.json\"\n"
+        );
+        let mapped_status =
+            append_map_local_line("", "example.com", "/v1/err", None, Some(503)).unwrap();
+        assert_eq!(mapped_status, "map-local example.com/v1/err status=503\n");
+        let q_set = append_quick_rule(
+            "",
+            QuickRule::Query,
+            "example.com/api",
+            false,
+            "env",
+            "staging",
+        )
+        .unwrap();
+        assert_eq!(q_set, "query example.com/api set env staging\n");
+        let q_del =
+            append_quick_rule("", QuickRule::Query, "example.com/api", false, "token", "").unwrap();
+        assert_eq!(q_del, "query example.com/api del token\n");
     }
 }

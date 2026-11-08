@@ -44,13 +44,173 @@ use crate::ws::{self, FrameFeed};
 const IO_TIMEOUT: Duration = Duration::from_secs(20);
 /// Drop a cached origin HTTP/2 connection before a typical server idle timeout.
 const H2_IDLE: Duration = Duration::from_secs(45);
+/// Maximum number of concurrent flows waiting in the breakpoint FIFO queue.
+pub const BREAK_QUEUE_CAP: usize = 8;
 
 tokio::task_local! {
-    static CLIENT_IP: String;
+    static CLIENT_CTX: Arc<ClientConnCtx>;
 }
 
-fn current_client_ip() -> String {
-    CLIENT_IP.try_with(|ip| ip.clone()).unwrap_or_default()
+struct ClientConnCtx {
+    label: Mutex<String>,
+    opened_ids: Mutex<Vec<u64>>,
+}
+
+fn current_client_ctx() -> Option<Arc<ClientConnCtx>> {
+    CLIENT_CTX.try_with(Arc::clone).ok()
+}
+
+fn local_app_cache() -> &'static Mutex<HashMap<u16, (String, Instant)>> {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<Mutex<HashMap<u16, (String, Instant)>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cached_local_app(port: u16) -> Option<String> {
+    let mut guard = local_app_cache()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    if let Some((app, at)) = guard.get(&port)
+        && at.elapsed() < Duration::from_secs(15)
+    {
+        return (!app.is_empty()).then(|| app.clone());
+    }
+    if guard.len() > 256 {
+        guard.retain(|_, (_, at)| at.elapsed() < Duration::from_secs(15));
+    }
+    None
+}
+
+fn store_cached_local_app(port: u16, app: String) {
+    let mut guard = local_app_cache()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    guard.insert(port, (app, Instant::now()));
+}
+
+/// Identifies the local process name owning `peer_port` on loopback connections.
+pub fn resolve_local_process_name(peer_port: u16) -> Option<String> {
+    if peer_port == 0 {
+        return None;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(name) = resolve_local_process_linux(peer_port) {
+            return Some(name);
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let out = std::process::Command::new("lsof")
+            .args(["-nP", "-iTCP", "-sTCP:ESTABLISHED", "-Fpcn"])
+            .output()
+            .ok()?;
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let needle = format!(":{peer_port}->");
+        let mut current_cmd = String::new();
+        for line in stdout.lines() {
+            if let Some(cmd) = line.strip_prefix('c') {
+                current_cmd = cmd.trim().to_string();
+            } else if let Some(net) = line.strip_prefix('n')
+                && net.contains(&needle)
+                && !current_cmd.is_empty()
+            {
+                return Some(clean_process_name(&current_cmd));
+            }
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let out = std::process::Command::new("netstat")
+            .args(["-ano", "-p", "TCP"])
+            .output()
+            .ok()?;
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let needle = format!(":{peer_port} ");
+        for line in stdout.lines() {
+            if line.contains(&needle)
+                && let Some(pid_str) = line.split_whitespace().last()
+                && let Ok(pid) = pid_str.parse::<u32>()
+                && pid > 0
+            {
+                let tlist = std::process::Command::new("tasklist")
+                    .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+                    .output()
+                    .ok()?;
+                let t_out = String::from_utf8_lossy(&tlist.stdout);
+                if let Some(first_col) = t_out.lines().next().and_then(|l| l.split(',').next()) {
+                    let name = first_col.trim().trim_matches('"');
+                    if !name.is_empty() {
+                        return Some(clean_process_name(name));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn resolve_local_process_linux(peer_port: u16) -> Option<String> {
+    let port_hex = format!(":{peer_port:04X}");
+    let mut target_inode = None;
+    for path in ["/proc/net/tcp", "/proc/net/tcp6"] {
+        let Ok(content) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        for line in content.lines().skip(1) {
+            let mut cols = line.split_whitespace();
+            let _sl = cols.next();
+            let Some(local_addr) = cols.next() else {
+                continue;
+            };
+            if local_addr.ends_with(&port_hex) {
+                let Some(inode) = cols.nth(7) else {
+                    continue;
+                };
+                if inode != "0" {
+                    target_inode = Some(inode.to_string());
+                    break;
+                }
+            }
+        }
+        if target_inode.is_some() {
+            break;
+        }
+    }
+    let inode = target_inode?;
+    let socket_tag = format!("socket:[{inode}]");
+    let entries = std::fs::read_dir("/proc").ok()?;
+    for entry in entries.flatten() {
+        let fname = entry.file_name();
+        let Some(pid_str) = fname.to_str() else {
+            continue;
+        };
+        if !pid_str.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let fd_dir = entry.path().join("fd");
+        let Ok(fds) = std::fs::read_dir(fd_dir) else {
+            continue;
+        };
+        for fd in fds.flatten() {
+            if let Ok(link) = std::fs::read_link(fd.path())
+                && link.to_string_lossy() == socket_tag
+            {
+                let comm = std::fs::read_to_string(entry.path().join("comm")).ok()?;
+                let name = clean_process_name(comm.trim());
+                if !name.is_empty() {
+                    return Some(name);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn clean_process_name(raw: &str) -> String {
+    let trimmed = raw.trim().trim_end_matches(".exe");
+    trimmed.replace("\\x20", " ")
 }
 
 type H2Sender = hyper::client::conn::http2::SendRequest<RecordingBody<Incoming>>;
@@ -83,7 +243,7 @@ pub struct Hub {
     /// Test-only. The next send on a live browser connection dials again.
     #[cfg(test)]
     refresh_h2: AtomicBool,
-    break_slot: Mutex<Option<BreakSlot>>,
+    break_queue: Mutex<std::collections::VecDeque<BreakSlot>>,
     /// One live HTML share. A new call replaces the id.
     share: Mutex<Option<crate::share::LiveShare>>,
 }
@@ -146,7 +306,7 @@ impl Hub {
             h2_generation: AtomicU64::new(1),
             #[cfg(test)]
             refresh_h2: AtomicBool::new(false),
-            break_slot: Mutex::new(None),
+            break_queue: Mutex::new(std::collections::VecDeque::new()),
             share: Mutex::new(None),
         })
     }
@@ -298,11 +458,18 @@ impl Hub {
     }
 
     pub fn paused(&self) -> Option<(u64, BreakSide)> {
-        self.break_slot
+        self.break_queue
             .lock()
             .unwrap_or_else(|err| err.into_inner())
-            .as_ref()
+            .front()
             .map(|slot| (slot.id, slot.side))
+    }
+
+    pub fn paused_queue_len(&self) -> usize {
+        self.break_queue
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .len()
     }
 
     #[cfg(test)]
@@ -318,25 +485,65 @@ impl Hub {
         ok
     }
 
+    pub fn set_comment(&self, id: u64, comment: impl Into<String>) -> bool {
+        let ok = self.with_session(|session| session.set_comment(id, comment));
+        if ok {
+            self.touch();
+        }
+        ok
+    }
+
     pub fn resolve_break(&self, decision: BreakDecision) -> bool {
-        let mut slot = self
-            .break_slot
+        let mut queue = self
+            .break_queue
             .lock()
             .unwrap_or_else(|err| err.into_inner());
-        let Some(slot) = slot.take() else {
+        let Some(slot) = queue.pop_front() else {
             return false;
         };
-        slot.reply
+        if let Some(next) = queue.front_mut() {
+            next.touched = Instant::now();
+        }
+        drop(queue);
+        let ok = slot
+            .reply
             .map(|reply| reply.send(decision).is_ok())
-            .unwrap_or(false)
+            .unwrap_or(false);
+        self.touch();
+        ok
+    }
+
+    /// Releases every paused flow in the breakpoint FIFO queue without dropping them.
+    pub fn resolve_all_breaks(&self) -> usize {
+        let slots: Vec<BreakSlot> = self
+            .break_queue
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .drain(..)
+            .collect();
+        let count = slots.len();
+        for slot in slots {
+            if let Some(reply) = slot.reply {
+                let _ = reply.send(BreakDecision {
+                    drop: false,
+                    headers: None,
+                    body: None,
+                    status: None,
+                });
+            }
+        }
+        if count > 0 {
+            self.touch();
+        }
+        count
     }
 
     pub fn touch_break(&self) {
         if let Some(slot) = self
-            .break_slot
+            .break_queue
             .lock()
             .unwrap_or_else(|err| err.into_inner())
-            .as_mut()
+            .front_mut()
         {
             slot.touched = Instant::now();
         }
@@ -344,24 +551,40 @@ impl Hub {
 
     async fn wait_break(&self, id: u64, side: BreakSide) -> BreakDecision {
         let (tx, mut rx) = tokio::sync::oneshot::channel();
-        *self
-            .break_slot
-            .lock()
-            .unwrap_or_else(|err| err.into_inner()) = Some(BreakSlot {
-            id,
-            side,
-            touched: Instant::now(),
-            reply: Some(tx),
-        });
+        {
+            let mut queue = self
+                .break_queue
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            if queue.len() >= BREAK_QUEUE_CAP {
+                // Evict oldest paused flow so its oneshot sender drops and auto-continues.
+                let _ = queue.pop_front();
+                if let Some(next) = queue.front_mut() {
+                    next.touched = Instant::now();
+                }
+            }
+            queue.push_back(BreakSlot {
+                id,
+                side,
+                touched: Instant::now(),
+                reply: Some(tx),
+            });
+        }
         self.touch();
         let decision = loop {
             let remaining = {
-                let slot = self
-                    .break_slot
+                let mut queue = self
+                    .break_queue
                     .lock()
                     .unwrap_or_else(|err| err.into_inner());
-                match slot.as_ref().filter(|slot| slot.id == id) {
-                    Some(slot) => Duration::from_secs(60).saturating_sub(slot.touched.elapsed()),
+                match queue.iter_mut().enumerate().find(|(_, slot)| slot.id == id) {
+                    Some((0, slot)) => {
+                        Duration::from_secs(60).saturating_sub(slot.touched.elapsed())
+                    }
+                    Some((_, slot)) => {
+                        slot.touched = Instant::now();
+                        Duration::from_millis(200)
+                    }
                     None => Duration::ZERO,
                 }
             };
@@ -386,14 +609,17 @@ impl Hub {
                 Err(_) => continue,
             }
         };
-        let mut slot = self
-            .break_slot
-            .lock()
-            .unwrap_or_else(|err| err.into_inner());
-        if slot.as_ref().map(|slot| slot.id) == Some(id) {
-            *slot = None;
+        {
+            let mut queue = self
+                .break_queue
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            let was_front = queue.front().map(|slot| slot.id) == Some(id);
+            queue.retain(|slot| slot.id != id);
+            if was_front && let Some(next) = queue.front_mut() {
+                next.touched = Instant::now();
+            }
         }
-        drop(slot);
         self.touch();
         decision
     }
@@ -509,7 +735,11 @@ impl Hub {
     }
 
     fn open(&self, draft: FlowDraft) -> u64 {
-        let client_ip = current_client_ip();
+        let ctx = current_client_ctx();
+        let client_ip = ctx
+            .as_ref()
+            .map(|c| c.label.lock().unwrap_or_else(|e| e.into_inner()).clone())
+            .unwrap_or_default();
         let id = self.with_session(|session| {
             let id = session.open(draft);
             if !client_ip.is_empty() {
@@ -517,6 +747,12 @@ impl Hub {
             }
             id
         });
+        if let Some(c) = ctx {
+            c.opened_ids
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(id);
+        }
         self.touch();
         id
     }
@@ -563,6 +799,14 @@ impl Hub {
         self.touch();
     }
 
+    pub fn clear_unpinned(&self) -> usize {
+        let removed = self.with_session(|session| session.clear_unpinned());
+        if removed > 0 {
+            self.touch();
+        }
+        removed
+    }
+
     /// Exports the flows the list is showing. An empty filter exports the session.
     pub fn export_har_matching(&self, filter: &str) -> serde_json::Value {
         let flows = self.with_session(|session| session.flows_matching(filter));
@@ -599,6 +843,9 @@ impl Hub {
                     item.request_bytes,
                     item.response_bytes,
                 );
+                if let Some(comment) = item.comment {
+                    session.set_comment(id, comment);
+                }
             });
         }
         count
@@ -627,7 +874,26 @@ impl Hub {
                     .enable_all()
                     .build()
                     .context("重放运行时")?;
-                runtime.block_on(replay_once(hub, flow, edit))
+                runtime.block_on(replay_once(hub, Some(flow), edit))
+            })();
+            on_done(result);
+        });
+    }
+
+    /// Sends a standalone composed request on a fresh runtime without a source
+    /// flow. Map and break rules are not applied.
+    pub fn send_composed_later<F>(self: &Arc<Self>, edit: ReplayOverride, on_done: F)
+    where
+        F: FnOnce(Result<u64>) + Send + 'static,
+    {
+        let hub = Arc::clone(self);
+        std::thread::spawn(move || {
+            let result = (|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .context("重放运行时")?;
+                runtime.block_on(replay_once(hub, None, edit))
             })();
             on_done(result);
         });
@@ -767,13 +1033,56 @@ pub async fn listen() -> Result<TcpListener> {
 }
 
 async fn handle_conn(socket: TcpStream, hub: Arc<Hub>) -> Result<()> {
-    let client_ip = socket
-        .peer_addr()
+    let peer = socket.peer_addr().ok();
+    let base_ip = peer
         .map(|addr| addr.ip().to_canonical().to_string())
         .unwrap_or_default();
-    CLIENT_IP
-        .scope(client_ip, handle_conn_inner(socket, hub))
-        .await
+    let mut initial_label = base_ip.clone();
+    let mut lookup_port = None;
+    if let Some(addr) = peer
+        && addr.ip().is_loopback()
+    {
+        if let Some(app) = cached_local_app(addr.port()) {
+            initial_label = format!("{base_ip} ({app})");
+        } else {
+            lookup_port = Some(addr.port());
+        }
+    }
+    let ctx = Arc::new(ClientConnCtx {
+        label: Mutex::new(initial_label),
+        opened_ids: Mutex::new(Vec::new()),
+    });
+    #[cfg(not(test))]
+    if let Some(port) = lookup_port {
+        let ctx_bg = Arc::clone(&ctx);
+        let hub_bg = Arc::clone(&hub);
+        let ip_bg = base_ip;
+        tokio::task::spawn_blocking(move || {
+            if let Some(app) = resolve_local_process_name(port) {
+                store_cached_local_app(port, app.clone());
+                let full = format!("{ip_bg} ({app})");
+                *ctx_bg.label.lock().unwrap_or_else(|e| e.into_inner()) = full.clone();
+                let ids = ctx_bg
+                    .opened_ids
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                if !ids.is_empty() {
+                    hub_bg.with_session(|session| {
+                        for id in ids {
+                            session.set_client_ip(id, full.clone());
+                        }
+                    });
+                    hub_bg.touch();
+                }
+            } else {
+                store_cached_local_app(port, String::new());
+            }
+        });
+    }
+    #[cfg(test)]
+    let _ = lookup_port;
+    CLIENT_CTX.scope(ctx, handle_conn_inner(socket, hub)).await
 }
 
 async fn handle_conn_inner(mut socket: TcpStream, hub: Arc<Hub>) -> Result<()> {
@@ -1105,14 +1414,14 @@ where
     });
     let shared = H1Client { tx };
     let host_for_service = host.clone();
-    let client_ip = current_client_ip();
+    let client_ctx = current_client_ctx();
     let service = hyper::service::service_fn(move |req| {
         let mut sender = shared.clone();
         let hub = hub.clone();
         let host = host_for_service.clone();
-        let client_ip = client_ip.clone();
-        CLIENT_IP.scope(client_ip, async move {
-            forward_request(
+        let client_ctx = client_ctx.clone();
+        async move {
+            let fut = forward_request(
                 &mut sender,
                 req,
                 hub,
@@ -1120,10 +1429,14 @@ where
                 port,
                 "https",
                 Protocol::Http11,
-            )
-            .await
-            .map_err(|err| io::Error::other(err.to_string()))
-        })
+            );
+            let res = if let Some(ctx) = client_ctx {
+                CLIENT_CTX.scope(ctx, fut).await
+            } else {
+                fut.await
+            };
+            res.map_err(|err| io::Error::other(err.to_string()))
+        }
     });
     hyper::server::conn::http1::Builder::new()
         .preserve_header_case(true)
@@ -1259,17 +1572,21 @@ where
         host: host.clone(),
         port,
     };
-    let client_ip = current_client_ip();
+    let client_ctx = current_client_ctx();
     let service = hyper::service::service_fn(move |req| {
         let mut lane = shared.clone();
         let hub = lane.hub.clone();
         let host = lane.host.clone();
-        let client_ip = client_ip.clone();
-        CLIENT_IP.scope(client_ip, async move {
-            forward_request(&mut lane, req, hub, &host, port, "https", Protocol::Http2)
-                .await
-                .map_err(|err| io::Error::other(err.to_string()))
-        })
+        let client_ctx = client_ctx.clone();
+        async move {
+            let fut = forward_request(&mut lane, req, hub, &host, port, "https", Protocol::Http2);
+            let res = if let Some(ctx) = client_ctx {
+                CLIENT_CTX.scope(ctx, fut).await
+            } else {
+                fut.await
+            };
+            res.map_err(|err| io::Error::other(err.to_string()))
+        }
     });
     hyper::server::conn::http2::Builder::new(executor)
         .serve_connection(TokioIo::new(client), service)
@@ -1601,7 +1918,16 @@ where
     match &plan.action {
         Some(Action::MapLocal { file, status }) => {
             let _ = drain_request(client, &headers, &hub, id).await;
-            return write_mapped_file(client, &hub, id, file, *status, &response_ops, cors).await;
+            return write_mapped_file(
+                client,
+                &hub,
+                id,
+                file.as_deref(),
+                *status,
+                &response_ops,
+                cors,
+            )
+            .await;
         }
         Some(Action::BreakRequest) => {
             let decision = hub.wait_break(id, BreakSide::Request).await;
@@ -1642,6 +1968,15 @@ where
             }
         }
         Some(Action::BreakResponse) | None => {}
+    }
+    if let Some(next) = rules::apply_query_ops(&path, &plan.query_ops) {
+        path = next;
+        hub.retarget(
+            id,
+            host.clone(),
+            path.clone(),
+            format!("http://{}{path}", display_authority(&host, port, "http")),
+        );
     }
     if let Some(next) = rules::replace_target(&path, &plan.request_replaces) {
         path = next;
@@ -1999,7 +2334,7 @@ async fn write_mapped_file<S>(
     client: &mut S,
     hub: &Hub,
     id: u64,
-    file: &std::path::Path,
+    file: Option<&std::path::Path>,
     status: u16,
     response_ops: &[rules::HeaderOp],
     cors: bool,
@@ -2007,6 +2342,23 @@ async fn write_mapped_file<S>(
 where
     S: AsyncWrite + Unpin,
 {
+    let Some(file) = file else {
+        let mut headers = vec![("Content-Length".to_string(), "0".to_string())];
+        if cors {
+            rules::ensure_cors(&mut headers);
+        }
+        rules::apply_header_ops(&mut headers, response_ops);
+        return write_static(
+            client,
+            hub,
+            id,
+            status,
+            reason_phrase(status),
+            &headers,
+            &[],
+        )
+        .await;
+    };
     match std::fs::read(file) {
         Ok(body) => {
             let kind = file_type(file);
@@ -2505,13 +2857,16 @@ where
 
 async fn replay_once(
     hub: Arc<Hub>,
-    source: crate::session::Flow,
+    source: Option<crate::session::Flow>,
     edit: ReplayOverride,
 ) -> Result<u64> {
     let custom_method = edit.method.unwrap_or_default();
     let custom_method = custom_method.trim();
     let method = if custom_method.is_empty() {
-        source.method.clone()
+        source
+            .as_ref()
+            .map(|flow| flow.method.clone())
+            .unwrap_or_else(|| "GET".to_string())
     } else {
         custom_method.to_string()
     };
@@ -2520,24 +2875,36 @@ async fn replay_once(
     let url_overridden = !custom_url.is_empty();
     let url_for_parse: &str = if url_overridden {
         &custom_url
+    } else if let Some(flow) = source.as_ref() {
+        &flow.url
     } else {
-        &source.url
+        ""
     };
     let Some((scheme, host, port, path)) = parse_http_url(url_for_parse) else {
         anyhow::bail!(
             "{}",
-            if url_overridden {
+            if url_overridden || source.is_none() {
                 "编辑后的 URL 不能重放"
             } else {
                 "这条记录没有可重放的 URL"
             }
         );
     };
-    let mut headers = edit.headers.unwrap_or(source.request_headers);
-    if url_overridden {
+    let mut headers = edit.headers.unwrap_or_else(|| {
+        source
+            .as_ref()
+            .map(|flow| flow.request_headers.clone())
+            .unwrap_or_default()
+    });
+    if url_overridden || source.is_none() {
         headers.retain(|(name, _)| !name.eq_ignore_ascii_case("host"));
     }
-    let body = edit.body.unwrap_or(source.request_body);
+    let body = edit.body.unwrap_or_else(|| {
+        source
+            .as_ref()
+            .map(|flow| flow.request_body.clone())
+            .unwrap_or_default()
+    });
     let id = hub.open(FlowDraft {
         protocol: Protocol::Http11,
         method: method.clone(),
@@ -2549,8 +2916,10 @@ async fn replay_once(
         ),
         request_headers: headers.clone(),
     });
-    if !source.client_ip.is_empty() {
-        hub.with_session(|session| session.set_client_ip(id, source.client_ip.clone()));
+    if let Some(flow) = source.as_ref()
+        && !flow.client_ip.is_empty()
+    {
+        hub.with_session(|session| session.set_client_ip(id, flow.client_ip.clone()));
     }
     hub.replace_request(id, headers.clone(), body.clone());
     let sent = if scheme == "https" {
@@ -3602,7 +3971,14 @@ async fn forward_request(
                     encoding.as_deref(),
                 )
                 .await?;
-                return mapped_file_response(&hub, id, file, *status, &response_ops, cors);
+                return mapped_file_response(
+                    &hub,
+                    id,
+                    file.as_deref(),
+                    *status,
+                    &response_ops,
+                    cors,
+                );
             }
             Some(Action::BreakRequest) => {
                 let decision = hub.wait_break(id, BreakSide::Request).await;
@@ -3656,6 +4032,16 @@ async fn forward_request(
             }
             Some(Action::BreakResponse) => break_response = true,
             None => {}
+        }
+        if let Some(next) = rules::apply_query_ops(&path, &plan.query_ops) {
+            path = next;
+            let authority = display_authority(&host, port, &scheme);
+            hub.retarget(
+                id,
+                host.clone(),
+                path.clone(),
+                format!("{scheme}://{authority}{path}"),
+            );
         }
         if let Some(next) = rules::replace_target(&path, &plan.request_replaces) {
             path = next;
@@ -4021,11 +4407,20 @@ fn note_decoded(hub: &Hub, id: u64, direction: Direction, raw: &[u8], encoding: 
 fn mapped_file_response(
     hub: &Arc<Hub>,
     id: u64,
-    file: &std::path::Path,
+    file: Option<&std::path::Path>,
     status: u16,
     response_ops: &[rules::HeaderOp],
     cors: bool,
 ) -> Result<Response<RecordingBody<Incoming>>> {
+    let Some(file) = file else {
+        let code = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
+        let mut headers = vec![("Content-Length".into(), "0".into())];
+        if cors {
+            rules::ensure_cors(&mut headers);
+        }
+        rules::apply_header_ops(&mut headers, response_ops);
+        return synthetic_headers(hub, id, code, headers, Vec::new());
+    };
     match std::fs::read(file) {
         Ok(body) => {
             let code = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
@@ -6783,6 +7178,154 @@ mod tests {
             flow.finished_at.is_none(),
             "the request side copy must not mark the flow finished"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn status_only_map_local_query_rewrite_and_composed_request_work() {
+        let dir = std::env::temp_dir().join(format!("zniff-p1-proxy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+        hub.set_rules(
+            "map-local 127.0.0.1/status-only status=204\n\
+             query 127.0.0.1/items set env staging\n\
+             query 127.0.0.1/items del drop\n",
+        );
+
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        let hub_serve = hub.clone();
+        tokio::spawn(async move {
+            let (socket, _) = proxy.accept().await.unwrap();
+            let _ = handle_conn(socket, hub_serve).await;
+        });
+
+        // 1. Status-only map-local returns 204 with empty body without dialing origin.
+        let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+        client
+            .write_all(b"GET http://127.0.0.1:9/status-only HTTP/1.1\r\nHost: 127.0.0.1:9\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut raw = Vec::new();
+        client.read_to_end(&mut raw).await.unwrap();
+        let head = String::from_utf8_lossy(&raw);
+        assert!(head.starts_with("HTTP/1.1 204 "), "{head}");
+
+        // 2. Standalone composed request + query rule rewrite against a real local origin.
+        let origin = listen().await.unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = origin.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let n = socket.read(&mut buf).await.unwrap();
+            let req_text = String::from_utf8_lossy(&buf[..n]);
+            assert!(
+                req_text.starts_with("GET /items?keep=1&env=staging HTTP/1.1\r\n"),
+                "{req_text}"
+            );
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .await
+                .unwrap();
+        });
+
+        let origin2 = listen().await.unwrap();
+        let origin2_addr = origin2.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = origin2.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let _ = socket.read(&mut buf).await.unwrap();
+            socket
+                .write_all(
+                    b"HTTP/1.1 201 Created\r\nContent-Length: 4\r\nConnection: close\r\n\r\ndone",
+                )
+                .await
+                .unwrap();
+        });
+
+        let composed_id = replay_once(
+            hub.clone(),
+            None,
+            ReplayOverride {
+                method: Some("POST".into()),
+                url: Some(format!("http://{origin2_addr}/scratch")),
+                headers: Some(vec![("X-From".into(), "scratchpad".into())]),
+                body: Some(b"hello".to_vec()),
+            },
+        )
+        .await
+        .unwrap();
+        let composed_flow = hub
+            .with_session(|session| session.get(composed_id).cloned())
+            .unwrap();
+        assert_eq!(composed_flow.status, Some(201));
+        assert_eq!(composed_flow.response_body, b"done");
+
+        let proxy3 = listen().await.unwrap();
+        let proxy3_addr = proxy3.local_addr().unwrap();
+        let hub_serve3 = hub.clone();
+        tokio::spawn(async move {
+            let (socket, _) = proxy3.accept().await.unwrap();
+            let _ = handle_conn(socket, hub_serve3).await;
+        });
+        let mut client2 = TcpStream::connect(proxy3_addr).await.unwrap();
+        let req = format!(
+            "GET http://{origin_addr}/items?keep=1&drop=2 HTTP/1.1\r\nHost: {origin_addr}\r\nConnection: close\r\n\r\n"
+        );
+        client2.write_all(req.as_bytes()).await.unwrap();
+        let mut raw2 = Vec::new();
+        client2.read_to_end(&mut raw2).await.unwrap();
+        assert!(String::from_utf8_lossy(&raw2).ends_with("ok"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn breakpoint_fifo_queue_and_local_app_cache_work() {
+        let dir = std::env::temp_dir().join(format!("zniff-break-q-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+
+        let h1 = hub.clone();
+        let w1 = tokio::spawn(async move { h1.wait_break(10, BreakSide::Request).await });
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        let h2 = hub.clone();
+        let w2 = tokio::spawn(async move { h2.wait_break(20, BreakSide::Response).await });
+        let h3 = hub.clone();
+        let w3 = tokio::spawn(async move { h3.wait_break(30, BreakSide::Request).await });
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while hub.paused_queue_len() < 3 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(hub.paused_queue_len(), 3);
+        assert_eq!(hub.paused(), Some((10, BreakSide::Request)));
+
+        assert!(hub.resolve_break(BreakDecision {
+            drop: true,
+            headers: None,
+            body: None,
+            status: None,
+        }));
+        let d1 = w1.await.unwrap();
+        assert!(d1.drop);
+
+        assert_eq!(hub.paused_queue_len(), 2);
+        assert_eq!(hub.paused(), Some((20, BreakSide::Response)));
+
+        assert_eq!(hub.resolve_all_breaks(), 2);
+        assert_eq!(hub.paused_queue_len(), 0);
+        let d2 = w2.await.unwrap();
+        let d3 = w3.await.unwrap();
+        assert!(!d2.drop);
+        assert!(!d3.drop);
+
+        store_cached_local_app(65431, "curl".into());
+        assert_eq!(cached_local_app(65431).as_deref(), Some("curl"));
+        assert_eq!(resolve_local_process_name(0), None);
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

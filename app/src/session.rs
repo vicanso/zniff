@@ -347,6 +347,8 @@ pub struct Flow {
     pub pinned: bool,
     /// Rules that rewrote this flow, joined by spaces. Empty when none did.
     pub rule_hit: String,
+    /// User-supplied note/comment attached to this flow.
+    pub comment: String,
     /// Monotonic revision bumped whenever this flow is created or modified.
     pub rev: u64,
     accounted: usize,
@@ -437,6 +439,7 @@ impl Session {
             messages_truncated: false,
             pinned: false,
             rule_hit: String::new(),
+            comment: String::new(),
             rev,
             accounted: headers_size,
         };
@@ -830,6 +833,32 @@ impl Session {
         self.dropped = 0;
     }
 
+    /// Removes all unpinned flows while keeping pinned flows intact.
+    /// Returns the number of flows removed.
+    pub fn clear_unpinned(&mut self) -> usize {
+        let before = self.flows.len();
+        self.flows.retain(|_, flow| flow.pinned);
+        let removed = before.saturating_sub(self.flows.len());
+        self.order.retain(|id| self.flows.contains_key(id));
+        if self.flows.is_empty() {
+            self.spill.clear();
+        }
+        self.bytes = self.flows.values().map(|flow| flow.accounted).sum();
+        self.dropped = 0;
+        self.next_rev += 1;
+        removed
+    }
+
+    pub fn set_comment(&mut self, id: u64, comment: impl Into<String>) -> bool {
+        let Some(flow) = self.flows.get_mut(&id) else {
+            return false;
+        };
+        self.next_rev += 1;
+        flow.comment = comment.into().trim().to_string();
+        flow.rev = self.next_rev;
+        true
+    }
+
     pub fn set_rule_hit(&mut self, id: u64, hit: impl Into<String>) {
         self.next_rev += 1;
         let rev = self.next_rev;
@@ -1158,6 +1187,7 @@ struct FlowQuery {
     content_types: Vec<String>,
     bodies: Vec<Vec<String>>,
     headers: Vec<Vec<String>>,
+    comments: Vec<Vec<String>>,
     pinned_only: bool,
     slow_only: bool,
 }
@@ -1176,6 +1206,7 @@ impl FlowQuery {
             content_types: Vec::new(),
             bodies: Vec::new(),
             headers: Vec::new(),
+            comments: Vec::new(),
             pinned_only: false,
             slow_only: false,
         };
@@ -1209,8 +1240,18 @@ impl FlowQuery {
             if let Some(rest) = lower
                 .strip_prefix("ip:")
                 .or_else(|| lower.strip_prefix("client:"))
+                .or_else(|| lower.strip_prefix("app:"))
+                .or_else(|| lower.strip_prefix("proc:"))
             {
                 query.client_ips.extend(split_or_terms(rest));
+                continue;
+            }
+            if let Some(rest) = lower
+                .strip_prefix("note:")
+                .or_else(|| lower.strip_prefix("comment:"))
+            {
+                let group = split_or_terms(rest);
+                query.comments.push(group);
                 continue;
             }
             if let Some(rest) = lower.strip_prefix("path:") {
@@ -1336,6 +1377,18 @@ impl FlowQuery {
         let host = flow.host.to_ascii_lowercase();
         let path = flow.path.to_ascii_lowercase();
         let client_ip = flow.client_ip.to_ascii_lowercase();
+        let comment = flow.comment.to_ascii_lowercase();
+        if !self.comments.is_empty()
+            && !self.comments.iter().all(|group| {
+                if group.is_empty() {
+                    !comment.is_empty()
+                } else {
+                    !comment.is_empty() && group.iter().any(|kw| comment.contains(kw))
+                }
+            })
+        {
+            return false;
+        }
         if !self.hosts.is_empty()
             && !self
                 .hosts
@@ -1372,6 +1425,7 @@ impl FlowQuery {
                 host_matches(&host, text)
                     || path.contains(text)
                     || (!client_ip.is_empty() && client_ip.contains(text))
+                    || (!comment.is_empty() && comment.contains(text))
             })
         }) {
             return false;
@@ -1744,5 +1798,27 @@ mod tests {
         assert!(!stale_orphan.exists());
         assert!(own_dir.exists());
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn comment_app_filter_and_clear_unpinned_work() {
+        let mut session = Session::default();
+        let a = session.open(draft("api.test"));
+        let b = session.open(draft("cdn.test"));
+        session.set_client_ip(a, "127.0.0.1 (curl)");
+        session.set_client_ip(b, "127.0.0.1 (Safari)");
+        session.set_comment(a, "login regression ticket-42");
+        session.set_pinned(a, true);
+
+        assert_eq!(session.ids_matching("app:curl"), vec![a]);
+        assert_eq!(session.ids_matching("proc:safari"), vec![b]);
+        assert_eq!(session.ids_matching("note:"), vec![a]);
+        assert_eq!(session.ids_matching("note:ticket-42"), vec![a]);
+        assert_eq!(session.ids_matching("comment:regression"), vec![a]);
+        assert_eq!(session.ids_matching("ticket-42"), vec![a]);
+
+        assert_eq!(session.clear_unpinned(), 1);
+        assert_eq!(session.len(), 1);
+        assert_eq!(session.ids_matching(""), vec![a]);
     }
 }

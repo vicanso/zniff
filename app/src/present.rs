@@ -59,11 +59,23 @@ pub fn query_pairs(url: &str) -> Vec<(String, String)> {
 
 pub fn pretty_body(content_type: Option<&str>, body: &str) -> String {
     let kind = content_type.unwrap_or("").to_ascii_lowercase();
+    if (kind.contains("json") || kind.contains("graphql") || looks_like_json(body))
+        && let Some(gql) = pretty_graphql_json(body)
+    {
+        return gql;
+    }
     if (kind.contains("json") || looks_like_json(body))
         && let Ok(value) = serde_json::from_str::<serde_json::Value>(body)
         && let Ok(pretty) = serde_json::to_string_pretty(&value)
     {
         return pretty;
+    }
+    if let Some(pairs) = multipart_pairs(content_type, body.as_bytes()) {
+        return pairs
+            .into_iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect::<Vec<_>>()
+            .join("\n");
     }
     if kind.contains("x-www-form-urlencoded")
         || (!kind.contains('/') && body.contains('=') && body.contains('&'))
@@ -74,6 +86,39 @@ pub fn pretty_body(content_type: Option<&str>, body: &str) -> String {
         return pretty_markup(body);
     }
     body.to_string()
+}
+
+/// Decodes binary Protobuf (including gRPC length-prefixed frames) or MessagePack
+/// payloads into a human-readable string when `pretty` mode is active.
+pub fn pretty_binary_body(content_type: Option<&str>, body: &[u8]) -> Option<String> {
+    if is_msgpack(content_type) {
+        return decode_msgpack_to_json(body);
+    }
+    if is_protobuf(content_type) {
+        return decode_protobuf_wire(content_type, body);
+    }
+    None
+}
+
+/// Case-insensitive keyword search inside a body text. Returns `(match_count, filtered_text)`
+/// where each matching line is prefixed with `[L<n>] ` so its original line number stays visible.
+pub fn filter_body_lines(text: &str, query: &str) -> (usize, String) {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() || text.is_empty() {
+        return (0, text.to_string());
+    }
+    let mut hits = 0usize;
+    let mut matched_lines = Vec::new();
+    for (idx, line) in text.lines().enumerate() {
+        let lower = line.to_lowercase();
+        let line_hits = lower.matches(&needle).count();
+        if line_hits > 0 {
+            hits += line_hits;
+            let line_no = idx + 1;
+            matched_lines.push(format!("[L{line_no}] {line}"));
+        }
+    }
+    (hits, matched_lines.join("\n"))
 }
 
 pub fn content_type(headers: &[(String, String)]) -> Option<&str> {
@@ -118,7 +163,7 @@ pub fn image_body(
 
 /// The hex-window note belongs on the raw dump. A decoded preview drops it
 /// and keeps every other note, such as a failed decompression.
-fn without_hex_cap_note(note: &str) -> String {
+pub fn without_hex_cap_note(note: &str) -> String {
     note.lines()
         .filter(|line| !is_hex_cap_note(line))
         .collect::<Vec<_>>()
@@ -649,6 +694,15 @@ pub fn editor_language(content_type: Option<&str>, text: &str) -> Option<&'stati
         return None;
     }
     let kind = content_type.unwrap_or("").to_ascii_lowercase();
+    if is_msgpack(content_type) && looks_like_json(text) {
+        return Some("json");
+    }
+    if is_protobuf(content_type) && text.contains('\n') {
+        return Some("plaintext");
+    }
+    if kind.contains("json") && !looks_like_json(text) && text.contains('\n') {
+        return Some("plaintext");
+    }
     if kind.contains("json")
         || ((kind.is_empty() || kind.contains("text/plain")) && looks_like_json(text))
     {
@@ -1194,6 +1248,144 @@ pub fn form_pairs(body: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Parses a `multipart/form-data` body into `(field_name, summary_or_value)` pairs
+/// when the `Content-Type` header supplies a valid `boundary` parameter.
+pub fn multipart_pairs(content_type: Option<&str>, body: &[u8]) -> Option<Vec<(String, String)>> {
+    let ct = content_type?;
+    if !ct.to_ascii_lowercase().contains("multipart/form-data") {
+        return None;
+    }
+    let boundary = extract_multipart_boundary(ct)?;
+    if boundary.is_empty() || body.is_empty() {
+        return None;
+    }
+    let marker = format!("--{boundary}");
+    let marker_bytes = marker.as_bytes();
+    let mut parts = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(pos) = find_subslice(&body[cursor..], marker_bytes) {
+        let start = cursor + pos + marker_bytes.len();
+        if body[start..].starts_with(b"--") {
+            break;
+        }
+        let after_line = if body[start..].starts_with(b"\r\n") {
+            start + 2
+        } else if body[start..].starts_with(b"\n") {
+            start + 1
+        } else {
+            cursor = start;
+            continue;
+        };
+        let Some(next_rel) = find_subslice(&body[after_line..], marker_bytes) else {
+            break;
+        };
+        let mut part_end = after_line + next_rel;
+        if part_end >= after_line + 2 && &body[part_end - 2..part_end] == b"\r\n" {
+            part_end -= 2;
+        } else if part_end > after_line && body[part_end - 1] == b'\n' {
+            part_end -= 1;
+        }
+        let part = &body[after_line..part_end];
+        if let Some(pair) = parse_multipart_part(part) {
+            parts.push(pair);
+        }
+        cursor = after_line + next_rel;
+    }
+    if parts.is_empty() { None } else { Some(parts) }
+}
+
+fn extract_multipart_boundary(content_type: &str) -> Option<String> {
+    for segment in content_type.split(';').skip(1) {
+        let segment = segment.trim();
+        let Some((key, value)) = segment.split_once('=') else {
+            continue;
+        };
+        if key.trim().eq_ignore_ascii_case("boundary") {
+            let value = value.trim().trim_matches('"').trim_matches('\'');
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn parse_multipart_part(part: &[u8]) -> Option<(String, String)> {
+    let (head_bytes, payload) = if let Some(pos) = find_subslice(part, b"\r\n\r\n") {
+        (&part[..pos], &part[pos + 4..])
+    } else {
+        let pos = find_subslice(part, b"\n\n")?;
+        (&part[..pos], &part[pos + 2..])
+    };
+    let head_str = std::str::from_utf8(head_bytes).ok()?;
+    let mut name = String::new();
+    let mut filename: Option<String> = None;
+    let mut part_ct: Option<String> = None;
+    for line in head_str.lines() {
+        let line = line.trim();
+        let Some((h_name, h_val)) = line.split_once(':') else {
+            continue;
+        };
+        let h_name = h_name.trim();
+        let h_val = h_val.trim();
+        if h_name.eq_ignore_ascii_case("content-disposition") {
+            for param in h_val.split(';').skip(1) {
+                let Some((k, v)) = param.trim().split_once('=') else {
+                    continue;
+                };
+                let k = k.trim();
+                let v = v.trim().trim_matches('"');
+                if k.eq_ignore_ascii_case("name") {
+                    name = v.to_string();
+                } else if k.eq_ignore_ascii_case("filename") {
+                    filename = Some(v.to_string());
+                }
+            }
+        } else if h_name.eq_ignore_ascii_case("content-type") && !h_val.is_empty() {
+            part_ct = Some(h_val.to_string());
+        }
+    }
+    if name.is_empty() {
+        name = filename.clone().unwrap_or_else(|| "part".to_string());
+    }
+    let value = match (filename, std::str::from_utf8(payload)) {
+        (Some(fname), Ok(text)) if payload.len() <= 256 && !text.contains('\0') => {
+            let ct_note = part_ct.as_deref().unwrap_or("text/plain");
+            if text.is_empty() {
+                format!("[{fname} · {ct_note} · 0 B]")
+            } else {
+                format!(
+                    "[{fname} · {ct_note} · {}] {text}",
+                    format_count(payload.len() as u64)
+                )
+            }
+        }
+        (Some(fname), _) => {
+            let ct_note = part_ct.as_deref().unwrap_or("application/octet-stream");
+            format!(
+                "[{fname} · {ct_note} · {}]",
+                format_count(payload.len() as u64)
+            )
+        }
+        (None, Ok(text)) => text.to_string(),
+        (None, Err(_)) => format!(
+            "[{} · {}]",
+            part_ct.as_deref().unwrap_or("binary"),
+            format_count(payload.len() as u64)
+        ),
+    };
+    Some((name, value))
+}
+
 fn pretty_form(body: &str) -> String {
     form_pairs(body)
         .into_iter()
@@ -1264,6 +1456,580 @@ fn percent_decode(text: &str) -> String {
     }
     String::from_utf8(out)
         .unwrap_or_else(|err| String::from_utf8_lossy(err.as_bytes()).into_owned())
+}
+
+/// Formats a GraphQL-over-JSON request payload (`{"query": "...", "variables": {...}}`)
+/// into a readable multi-line GraphQL block followed by pretty-printed variables.
+pub fn pretty_graphql_json(body: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(body.trim()).ok()?;
+    let map = value.as_object()?;
+    let query = map.get("query")?.as_str()?.trim();
+    if !looks_like_graphql_query(query) {
+        return None;
+    }
+    let only_gql_keys = map.keys().all(|k| {
+        matches!(
+            k.as_str(),
+            "query" | "operationName" | "variables" | "extensions"
+        )
+    });
+    if !only_gql_keys {
+        return None;
+    }
+    let mut out = String::new();
+    if let Some(op) = map
+        .get("operationName")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        out.push_str("# operationName: ");
+        out.push_str(op);
+        out.push('\n');
+    }
+    out.push_str(&format_graphql_query(query));
+    if let Some(vars) = map.get("variables")
+        && !vars.is_null()
+        && vars.as_object().is_none_or(|o| !o.is_empty())
+        && let Ok(pretty_vars) = serde_json::to_string_pretty(vars)
+    {
+        out.push_str("\n\n# variables\n");
+        out.push_str(&pretty_vars);
+    }
+    if let Some(ext) = map.get("extensions")
+        && !ext.is_null()
+        && ext.as_object().is_none_or(|o| !o.is_empty())
+        && let Ok(pretty_ext) = serde_json::to_string_pretty(ext)
+    {
+        out.push_str("\n\n# extensions\n");
+        out.push_str(&pretty_ext);
+    }
+    Some(out)
+}
+
+fn looks_like_graphql_query(query: &str) -> bool {
+    let trimmed = query.trim_start();
+    if !trimmed.contains('{') || !trimmed.contains('}') {
+        return false;
+    }
+    trimmed.starts_with('{')
+        || trimmed.starts_with('#')
+        || ["query", "mutation", "subscription", "fragment"]
+            .iter()
+            .any(|kw| {
+                trimmed.strip_prefix(kw).is_some_and(|rest| {
+                    rest.starts_with(|c: char| c.is_whitespace() || c == '{' || c == '(')
+                })
+            })
+}
+
+fn format_graphql_query(query: &str) -> String {
+    let mut out = String::new();
+    let mut depth: usize = 0;
+    let mut paren_depth: usize = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut in_comment = false;
+    let mut at_line_start = true;
+    let mut pending_space = false;
+
+    let push_indent = |buf: &mut String, d: usize| {
+        for _ in 0..d {
+            buf.push_str("  ");
+        }
+    };
+
+    for ch in query.chars() {
+        if in_comment {
+            if ch == '\n' {
+                in_comment = false;
+                out.push('\n');
+                at_line_start = true;
+                pending_space = false;
+            } else if ch != '\r' {
+                out.push(ch);
+            }
+            continue;
+        }
+        if in_string {
+            if at_line_start {
+                push_indent(&mut out, depth);
+                at_line_start = false;
+            } else if pending_space {
+                out.push(' ');
+                pending_space = false;
+            }
+            out.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => {
+                if at_line_start {
+                    push_indent(&mut out, depth);
+                    at_line_start = false;
+                } else if pending_space {
+                    out.push(' ');
+                    pending_space = false;
+                }
+                in_string = true;
+                out.push('"');
+            }
+            '#' => {
+                if at_line_start {
+                    push_indent(&mut out, depth);
+                    at_line_start = false;
+                } else if pending_space {
+                    out.push(' ');
+                    pending_space = false;
+                }
+                in_comment = true;
+                out.push('#');
+            }
+            '(' => {
+                if at_line_start {
+                    push_indent(&mut out, depth);
+                    at_line_start = false;
+                }
+                pending_space = false;
+                paren_depth += 1;
+                out.push('(');
+            }
+            ')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                pending_space = false;
+                out.push(')');
+            }
+            '{' if paren_depth == 0 => {
+                if at_line_start {
+                    push_indent(&mut out, depth);
+                } else if !out.ends_with(' ') && !out.ends_with('\n') {
+                    out.push(' ');
+                }
+                out.push_str("{\n");
+                depth += 1;
+                at_line_start = true;
+                pending_space = false;
+            }
+            '}' if paren_depth == 0 => {
+                depth = depth.saturating_sub(1);
+                if !at_line_start {
+                    out.push('\n');
+                }
+                push_indent(&mut out, depth);
+                out.push_str("}\n");
+                at_line_start = true;
+                pending_space = false;
+            }
+            '\n' | ',' if paren_depth == 0 => {
+                if !at_line_start {
+                    out.push('\n');
+                    at_line_start = true;
+                }
+                pending_space = false;
+            }
+            ',' => {
+                out.push_str(", ");
+                pending_space = false;
+            }
+            c if c.is_whitespace() => {
+                if !at_line_start {
+                    pending_space = true;
+                }
+            }
+            c => {
+                if at_line_start {
+                    push_indent(&mut out, depth);
+                    at_line_start = false;
+                } else if pending_space {
+                    out.push(' ');
+                    pending_space = false;
+                }
+                out.push(c);
+            }
+        }
+    }
+    out.trim().to_string()
+}
+
+pub fn is_protobuf(content_type: Option<&str>) -> bool {
+    let Some(ct) = content_type else {
+        return false;
+    };
+    let lower = ct.to_ascii_lowercase();
+    lower.contains("protobuf")
+        || lower.contains("application/grpc")
+        || lower.contains("x-google-protobuf")
+}
+
+/// Decodes a binary Protobuf or gRPC wire payload without requiring a `.proto` schema.
+pub fn decode_protobuf_wire(content_type: Option<&str>, body: &[u8]) -> Option<String> {
+    if !is_protobuf(content_type) || body.is_empty() {
+        return None;
+    }
+    let lower = content_type.unwrap_or("").to_ascii_lowercase();
+    let is_grpc = lower.contains("grpc");
+    if is_grpc && body.len() >= 5 && (body[0] == 0 || body[0] == 1) {
+        let mut cursor = 0usize;
+        let mut frames = Vec::new();
+        let mut valid_frames = true;
+        while cursor + 5 <= body.len() {
+            let compressed = body[cursor];
+            if compressed > 1 {
+                valid_frames = false;
+                break;
+            }
+            let frame_len =
+                u32::from_be_bytes(body[cursor + 1..cursor + 5].try_into().ok()?) as usize;
+            if cursor + 5 + frame_len > body.len() {
+                valid_frames = false;
+                break;
+            }
+            let payload = &body[cursor + 5..cursor + 5 + frame_len];
+            frames.push((compressed == 1, payload));
+            cursor += 5 + frame_len;
+        }
+        if valid_frames && cursor == body.len() && !frames.is_empty() {
+            let mut out = String::new();
+            for (idx, (compressed, payload)) in frames.into_iter().enumerate() {
+                if idx > 0 {
+                    out.push_str("\n\n");
+                }
+                if compressed {
+                    out.push_str(&format!(
+                        "# gRPC frame #{} (compressed, {} B)",
+                        idx + 1,
+                        payload.len()
+                    ));
+                } else if payload.is_empty() {
+                    out.push_str(&format!("# gRPC frame #{} (0 B)", idx + 1));
+                } else {
+                    let mut decoded = String::new();
+                    if decode_proto_fields(payload, 0, &mut decoded) {
+                        if idx > 0 {
+                            out.push_str(&format!("# gRPC frame #{}\n", idx + 1));
+                        }
+                        out.push_str(decoded.trim_end());
+                    } else {
+                        return None;
+                    }
+                }
+            }
+            return (!out.is_empty()).then_some(out);
+        }
+    }
+    let mut out = String::new();
+    if decode_proto_fields(body, 0, &mut out) && !out.is_empty() {
+        Some(out.trim_end().to_string())
+    } else {
+        None
+    }
+}
+
+fn decode_proto_fields(bytes: &[u8], depth: usize, out: &mut String) -> bool {
+    if depth > 6 || bytes.is_empty() {
+        return false;
+    }
+    let mut cursor = 0usize;
+    let mut count = 0usize;
+    while cursor < bytes.len() {
+        let Some((tag, next)) = read_varint(bytes, cursor) else {
+            return false;
+        };
+        cursor = next;
+        let field_num = tag >> 3;
+        let wire_type = (tag & 0x07) as u8;
+        if field_num == 0 || field_num > 536_870_911 {
+            return false;
+        }
+        let indent = "  ".repeat(depth);
+        match wire_type {
+            0 => {
+                let Some((val, next)) = read_varint(bytes, cursor) else {
+                    return false;
+                };
+                cursor = next;
+                out.push_str(&format!("{indent}field #{field_num} (varint): {val}\n"));
+            }
+            1 => {
+                if cursor + 8 > bytes.len() {
+                    return false;
+                }
+                let raw: [u8; 8] = bytes[cursor..cursor + 8].try_into().unwrap();
+                cursor += 8;
+                let u_val = u64::from_le_bytes(raw);
+                out.push_str(&format!("{indent}field #{field_num} (fixed64): {u_val}\n"));
+            }
+            2 => {
+                let Some((len_u64, next)) = read_varint(bytes, cursor) else {
+                    return false;
+                };
+                let len = len_u64 as usize;
+                cursor = next;
+                if cursor + len > bytes.len() {
+                    return false;
+                }
+                let sub = &bytes[cursor..cursor + len];
+                cursor += len;
+                if let Ok(s) = std::str::from_utf8(sub)
+                    && !s.is_empty()
+                    && s.chars()
+                        .all(|c| !c.is_control() || matches!(c, '\n' | '\r' | '\t'))
+                {
+                    out.push_str(&format!("{indent}field #{field_num} (string): {s:?}\n"));
+                } else if !sub.is_empty() && depth < 5 {
+                    let mut nested = String::new();
+                    if decode_proto_fields(sub, depth + 1, &mut nested) && !nested.is_empty() {
+                        out.push_str(&format!(
+                            "{indent}field #{field_num} (message): {{\n{nested}{indent}}}\n"
+                        ));
+                    } else {
+                        out.push_str(&format!(
+                            "{indent}field #{field_num} (bytes, {len} B): {}\n",
+                            hex_preview(sub, 24)
+                        ));
+                    }
+                } else {
+                    out.push_str(&format!(
+                        "{indent}field #{field_num} (bytes, {len} B): {}\n",
+                        hex_preview(sub, 24)
+                    ));
+                }
+            }
+            5 => {
+                if cursor + 4 > bytes.len() {
+                    return false;
+                }
+                let raw: [u8; 4] = bytes[cursor..cursor + 4].try_into().unwrap();
+                cursor += 4;
+                let u_val = u32::from_le_bytes(raw);
+                out.push_str(&format!("{indent}field #{field_num} (fixed32): {u_val}\n"));
+            }
+            _ => return false,
+        }
+        count += 1;
+        if out.len() > 256 * 1024 {
+            break;
+        }
+    }
+    count > 0 && cursor == bytes.len()
+}
+
+fn read_varint(bytes: &[u8], mut cursor: usize) -> Option<(u64, usize)> {
+    let mut result = 0u64;
+    let mut shift = 0u32;
+    while cursor < bytes.len() {
+        let b = bytes[cursor];
+        cursor += 1;
+        result |= ((b & 0x7f) as u64) << shift;
+        if b & 0x80 == 0 {
+            return Some((result, cursor));
+        }
+        shift += 7;
+        if shift >= 64 {
+            return None;
+        }
+    }
+    None
+}
+
+fn hex_preview(bytes: &[u8], limit: usize) -> String {
+    if bytes.is_empty() {
+        return "\"\"".into();
+    }
+    let shown = bytes.len().min(limit);
+    let mut hex = bytes[..shown]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if bytes.len() > shown {
+        hex.push_str(" …");
+    }
+    hex
+}
+
+pub fn is_msgpack(content_type: Option<&str>) -> bool {
+    content_type.is_some_and(|ct| ct.to_ascii_lowercase().contains("msgpack"))
+}
+
+/// Decodes a binary MessagePack payload into pretty-printed JSON.
+pub fn decode_msgpack_to_json(body: &[u8]) -> Option<String> {
+    if body.is_empty() {
+        return None;
+    }
+    let mut pos = 0usize;
+    let val = read_msgpack_value(body, &mut pos, 0)?;
+    if pos != body.len() {
+        return None;
+    }
+    serde_json::to_string_pretty(&val).ok()
+}
+
+fn read_msgpack_value(bytes: &[u8], pos: &mut usize, depth: usize) -> Option<serde_json::Value> {
+    if depth > 16 || *pos >= bytes.len() {
+        return None;
+    }
+    let marker = bytes[*pos];
+    *pos += 1;
+    let take = |pos: &mut usize, n: usize| -> Option<&[u8]> {
+        if *pos + n > bytes.len() {
+            None
+        } else {
+            let slice = &bytes[*pos..*pos + n];
+            *pos += n;
+            Some(slice)
+        }
+    };
+    match marker {
+        0x00..=0x7f => Some(serde_json::Value::from(marker)),
+        0x80..=0x8f => read_msgpack_map(bytes, pos, (marker & 0x0f) as usize, depth + 1),
+        0x90..=0x9f => read_msgpack_array(bytes, pos, (marker & 0x0f) as usize, depth + 1),
+        0xa0..=0xbf => {
+            let s = take(pos, (marker & 0x1f) as usize)?;
+            Some(serde_json::Value::String(
+                String::from_utf8_lossy(s).into_owned(),
+            ))
+        }
+        0xc0 => Some(serde_json::Value::Null),
+        0xc2 => Some(serde_json::Value::Bool(false)),
+        0xc3 => Some(serde_json::Value::Bool(true)),
+        0xc4 => {
+            let n = take(pos, 1)?[0] as usize;
+            let b = take(pos, n)?;
+            Some(serde_json::Value::String(format!(
+                "<bin {n} B: {}>",
+                hex_preview(b, 16)
+            )))
+        }
+        0xc5 => {
+            let n = u16::from_be_bytes(take(pos, 2)?.try_into().ok()?) as usize;
+            let b = take(pos, n)?;
+            Some(serde_json::Value::String(format!(
+                "<bin {n} B: {}>",
+                hex_preview(b, 16)
+            )))
+        }
+        0xc6 => {
+            let n = u32::from_be_bytes(take(pos, 4)?.try_into().ok()?) as usize;
+            let b = take(pos, n)?;
+            Some(serde_json::Value::String(format!(
+                "<bin {n} B: {}>",
+                hex_preview(b, 16)
+            )))
+        }
+        0xca => {
+            let f = f32::from_be_bytes(take(pos, 4)?.try_into().ok()?) as f64;
+            serde_json::Number::from_f64(f).map(serde_json::Value::Number)
+        }
+        0xcb => {
+            let f = f64::from_be_bytes(take(pos, 8)?.try_into().ok()?);
+            serde_json::Number::from_f64(f).map(serde_json::Value::Number)
+        }
+        0xcc => Some(serde_json::Value::from(take(pos, 1)?[0])),
+        0xcd => Some(serde_json::Value::from(u16::from_be_bytes(
+            take(pos, 2)?.try_into().ok()?,
+        ))),
+        0xce => Some(serde_json::Value::from(u32::from_be_bytes(
+            take(pos, 4)?.try_into().ok()?,
+        ))),
+        0xcf => Some(serde_json::Value::from(u64::from_be_bytes(
+            take(pos, 8)?.try_into().ok()?,
+        ))),
+        0xd0 => Some(serde_json::Value::from(take(pos, 1)?[0] as i8)),
+        0xd1 => Some(serde_json::Value::from(i16::from_be_bytes(
+            take(pos, 2)?.try_into().ok()?,
+        ))),
+        0xd2 => Some(serde_json::Value::from(i32::from_be_bytes(
+            take(pos, 4)?.try_into().ok()?,
+        ))),
+        0xd3 => Some(serde_json::Value::from(i64::from_be_bytes(
+            take(pos, 8)?.try_into().ok()?,
+        ))),
+        0xd9 => {
+            let n = take(pos, 1)?[0] as usize;
+            let s = take(pos, n)?;
+            Some(serde_json::Value::String(
+                String::from_utf8_lossy(s).into_owned(),
+            ))
+        }
+        0xda => {
+            let n = u16::from_be_bytes(take(pos, 2)?.try_into().ok()?) as usize;
+            let s = take(pos, n)?;
+            Some(serde_json::Value::String(
+                String::from_utf8_lossy(s).into_owned(),
+            ))
+        }
+        0xdb => {
+            let n = u32::from_be_bytes(take(pos, 4)?.try_into().ok()?) as usize;
+            let s = take(pos, n)?;
+            Some(serde_json::Value::String(
+                String::from_utf8_lossy(s).into_owned(),
+            ))
+        }
+        0xdc => {
+            let n = u16::from_be_bytes(take(pos, 2)?.try_into().ok()?) as usize;
+            read_msgpack_array(bytes, pos, n, depth + 1)
+        }
+        0xdd => {
+            let n = u32::from_be_bytes(take(pos, 4)?.try_into().ok()?) as usize;
+            read_msgpack_array(bytes, pos, n, depth + 1)
+        }
+        0xde => {
+            let n = u16::from_be_bytes(take(pos, 2)?.try_into().ok()?) as usize;
+            read_msgpack_map(bytes, pos, n, depth + 1)
+        }
+        0xdf => {
+            let n = u32::from_be_bytes(take(pos, 4)?.try_into().ok()?) as usize;
+            read_msgpack_map(bytes, pos, n, depth + 1)
+        }
+        0xe0..=0xff => Some(serde_json::Value::from(marker as i8)),
+        _ => None,
+    }
+}
+
+fn read_msgpack_array(
+    bytes: &[u8],
+    pos: &mut usize,
+    len: usize,
+    depth: usize,
+) -> Option<serde_json::Value> {
+    if len > 10_000 {
+        return None;
+    }
+    let mut items = Vec::with_capacity(len.min(256));
+    for _ in 0..len {
+        items.push(read_msgpack_value(bytes, pos, depth)?);
+    }
+    Some(serde_json::Value::Array(items))
+}
+
+fn read_msgpack_map(
+    bytes: &[u8],
+    pos: &mut usize,
+    len: usize,
+    depth: usize,
+) -> Option<serde_json::Value> {
+    if len > 10_000 {
+        return None;
+    }
+    let mut map = serde_json::Map::with_capacity(len.min(256));
+    for _ in 0..len {
+        let key_val = read_msgpack_value(bytes, pos, depth)?;
+        let key = match key_val {
+            serde_json::Value::String(s) => s,
+            other => other.to_string(),
+        };
+        let val = read_msgpack_value(bytes, pos, depth)?;
+        map.insert(key, val);
+    }
+    Some(serde_json::Value::Object(map))
 }
 
 #[cfg(test)]
@@ -1615,5 +2381,61 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn multipart_form_data_extracts_text_and_file_parts() {
+        let ct = Some("multipart/form-data; boundary=----ZniffBoundary7MA4YWxkTrZu0gW");
+        let raw = b"------ZniffBoundary7MA4YWxkTrZu0gW\r\n\
+Content-Disposition: form-data; name=\"scene\"\r\n\r\n\
+avatar\r\n\
+------ZniffBoundary7MA4YWxkTrZu0gW\r\n\
+Content-Disposition: form-data; name=\"file\"; filename=\"logo.png\"\r\n\
+Content-Type: image/png\r\n\r\n\
+\x89PNG\r\n\x1a\n\r\n\
+------ZniffBoundary7MA4YWxkTrZu0gW--\r\n";
+        let pairs = multipart_pairs(ct, raw).expect("multipart pairs");
+        assert_eq!(pairs.len(), 2);
+        assert_eq!(pairs[0], ("scene".to_string(), "avatar".to_string()));
+        assert_eq!(pairs[1].0, "file");
+        assert!(pairs[1].1.contains("logo.png"));
+        assert!(pairs[1].1.contains("image/png"));
+    }
+
+    #[test]
+    fn graphql_protobuf_msgpack_and_body_search_work() {
+        let gql_json = r#"{"operationName":"GetUser","query":"query GetUser($id: ID!) { user(id: $id) { id name profile { avatar } } }","variables":{"id":"42"}}"#;
+        let pretty = pretty_body(Some("application/json"), gql_json);
+        assert!(pretty.contains("# operationName: GetUser"));
+        assert!(pretty.contains("query GetUser($id: ID!) {"));
+        assert!(pretty.contains("  user(id: $id) {"));
+        assert!(pretty.contains("    id"));
+        assert!(pretty.contains("# variables\n{\n  \"id\": \"42\"\n}"));
+
+        // Protobuf wire: field #1 varint 150 (0x08 0x96 0x01), field #2 string "zniff" (0x12 0x05 b"zniff")
+        let proto = b"\x08\x96\x01\x12\x05zniff";
+        let decoded_proto =
+            pretty_binary_body(Some("application/x-protobuf"), proto).expect("protobuf decode");
+        assert!(decoded_proto.contains("field #1 (varint): 150"));
+        assert!(decoded_proto.contains("field #2 (string): \"zniff\""));
+
+        // gRPC frame: 0x00 (uncompressed) + 0x0000000a (10 bytes) + proto
+        let mut grpc = vec![0x00, 0x00, 0x00, 0x00, proto.len() as u8];
+        grpc.extend_from_slice(proto);
+        let decoded_grpc =
+            pretty_binary_body(Some("application/grpc+proto"), &grpc).expect("grpc decode");
+        assert!(decoded_grpc.contains("field #1 (varint): 150"));
+        assert!(decoded_grpc.contains("field #2 (string): \"zniff\""));
+
+        // MessagePack: {"ok": true, "n": 7} -> 0x82 (map 2), 0xa2 "ok", 0xc3 (true), 0xa1 "n", 0x07
+        let msgpack = b"\x82\xa2ok\xc3\xa1n\x07";
+        let decoded_mp =
+            pretty_binary_body(Some("application/msgpack"), msgpack).expect("msgpack decode");
+        assert!(decoded_mp.contains("\"ok\": true"));
+        assert!(decoded_mp.contains("\"n\": 7"));
+
+        let (hits, filtered) = filter_body_lines("alpha\nBeta match\ngamma MATCH two", "match");
+        assert_eq!(hits, 2);
+        assert_eq!(filtered, "[L2] Beta match\n[L3] gamma MATCH two");
     }
 }

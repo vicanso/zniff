@@ -20,37 +20,43 @@ English | [简体中文](./README-zh.md)
 - **Rich Filter Syntax**: Space-separated `AND` terms with `|` or `,` for `OR` within a term:
   - `host:api.example.com|*.cdn.com` (or `domain:`)
   - `path:/v1|/auth`
-  - `ip:127.0.0.1|192.168.1.10` (or `client:`)
+  - `ip:127.0.0.1|192.168.1.10` (or `client:`), `app:curl|node` (or `proc:`, matches local client process name on loopback connections)
   - Exact HTTP method (`GET`, `POST`, `PUT`, `DELETE`, `CONNECT`, …)
   - Status code (`200`, `404`), status class (`1xx`–`5xx`), or failed flows (`失败` / `fail` / `error` / `err`)
   - `type:json` (or `ct:html`, `ct:image`, …)
   - `body:keyword` (searches request and response bodies)
   - `header:authorization` (searches header names and values)
+  - `note:keyword` (or `comment:`, matches flow notes; bare `note:` matches any annotated flow)
   - `pin:` (starred flows), `slow:` (elapsed ≥ 1s)
   - `mute:ads.example.com` or `-keyword` (exclude matching host or path)
 
 ### 3. Traffic Rules, Breakpoints & Saved Setups
+> Full guide with syntax details and practical examples: **[Rules & Configuration Guide](./docs/rules.md)** ([中文指南](./docs/rules-zh.md))
+
 - **Terminal Rules** (first match wins):
-  - `map-local <pattern> <file> [status=200]` — Serve a local file without dialing the origin.
+  - `map-local <pattern> [<file>] [status=200]` — Serve a local file (or status-only empty response) without dialing the origin. Right-click any captured flow and choose **Map local** to save its response and create a rule in one step.
   - `map-remote <pattern> <https://target-host/path>` — Rewrite the destination origin/URL.
   - `break <pattern>` — Pause the request before forwarding to inspect or edit method, URL, headers, and body.
   - `break-res <pattern>` — Pause the response before returning to the client to edit status code, headers, and body.
 - **Modifier Rules** (stackable):
-  - `replace <pattern> req|res <from> -> <to>` — Rewrite request target/body or UTF-8 response body.
+  - `replace <pattern> req|res <from> -> <to>` — Rewrite request target/body or UTF-8 response body (supports `"..."` quoted strings with spaces).
   - `delay <pattern> <ms|s>` — Inject latency up to 30 seconds.
-  - `header <pattern> req|res set|del <Name>[=Value]` — Set or remove request/response headers.
+  - `header <pattern> req|res set|del <Name> [<Value>]` — Set or remove request/response headers.
+  - `query <pattern> set|del <Name> [<Value>]` — Set or remove URL query parameters automatically.
   - `cors <pattern>` — Inject permissive CORS headers and auto-answer `OPTIONS` preflight with `204`.
-- **Saved Setups (`SavedProfile`)**: Save, switch, export (`.toml`), and import complete setups combining filter expressions, bypass hosts, rules, upstream proxy, and toggle states.
+- **Saved Setups (`SavedProfile`)**: Save, switch, export to clipboard (`.toml`), and import complete setups (via the multiline TOML textarea or by dropping `.toml` files) combining filter expressions, bypass hosts, rules, upstream proxy, and toggle states.
 
 ### 4. Deep Inspection, Diff & Replay
 - **Smart Body Viewer**:
-  - Syntax-highlighted read-only editor for JSON, HTML, XML, and multi-line text.
+  - Syntax-highlighted read-only editor for JSON, HTML, XML, and multi-line text, with an inline **Search** box and hit-count filter in both request and response body headers.
+  - Zero-config **GraphQL** query/variables formatting, schema-less **Protobuf / gRPC** wire decoding, and **MessagePack** to JSON decoding in **Pretty** mode.
   - Rendered **Preview** (`text_view`) for HTML and Markdown bodies alongside **Pretty** and **Raw** modes.
   - Inline image preview (`png`, `jpeg`, `webp`, `gif`) with pixel dimensions and byte size.
   - Responsive 16-byte / 32-byte hex viewer for binary payloads.
-  - Automatic inline annotations for **JWT** payloads, Unix **timestamps**, and printable **Base64** strings in headers, query parameters, and form fields.
+  - Automatic inline annotations for **JWT** payloads, Unix **timestamps**, and printable **Base64** strings in headers, query parameters, and form fields (`application/x-www-form-urlencoded` and `multipart/form-data`).
+- **Flow Notes & Clear Unstarred**: Add searchable notes (`# note`) to any flow (persisted in HAR 1.2 `comment`), and clear unstarred noise while keeping starred flows intact.
 - **Line-by-Line Diff**: Mark any flow as a **Baseline** (red indicator) and select another flow (green indicator) to compare URL, request headers/body, and response headers/body side by side.
-- **Replay & Compose**: One-click **Replay** (`Cmd/Ctrl+R`) or **Edit** to modify method, URL, headers, and body before resending. Paste a `curl ...` command into the URL field to populate all fields automatically.
+- **Replay & Standalone Compose**: One-click **Replay** (`Cmd/Ctrl+R`), **Edit** an existing flow, or click **New request** (in the empty detail pane or **More** menu) to compose a request from scratch or paste a `curl ...` command into the URL field to populate all fields automatically.
 - **Code & Snippet Export**: Copy as URL, `cURL`, JavaScript `fetch`, Python `requests`, or shallow TypeScript `interface` definitions.
 
 ### 5. Mobile Capture, HAR & Live Sharing

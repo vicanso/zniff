@@ -25,6 +25,7 @@ pub struct Imported {
     /// `None` when HAR `bodySize` is missing or negative.
     pub request_bytes: Option<u64>,
     pub response_bytes: Option<u64>,
+    pub comment: Option<String>,
 }
 
 pub fn export_har(flows: &[Flow]) -> Value {
@@ -57,7 +58,7 @@ fn entry(flow: &Flow) -> Value {
         .and_then(|at| at.duration_since(flow.started).ok())
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or(wait);
-    json!({
+    let mut obj = json!({
         "startedDateTime": iso_utc(flow.started),
         "time": total,
         "request": message(
@@ -87,7 +88,11 @@ fn entry(flow: &Flow) -> Value {
             "wait": wait,
             "receive": total.saturating_sub(wait),
         },
-    })
+    });
+    if !flow.comment.is_empty() {
+        obj["comment"] = json!(flow.comment);
+    }
+    obj
 }
 
 fn message(
@@ -200,6 +205,12 @@ fn import_entry(entry: &Value) -> Option<Imported> {
         finished_at: total.map(|ms| started + Duration::from_millis(ms)),
         request_bytes: non_negative_ms(request.get("bodySize")),
         response_bytes: response.and_then(|response| non_negative_ms(response.get("bodySize"))),
+        comment: entry
+            .get("comment")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
     })
 }
 
@@ -495,6 +506,7 @@ mod tests {
         let mut flow = session.get(id).unwrap().clone();
         flow.response_at = Some(flow.started + Duration::from_millis(15));
         flow.finished_at = Some(flow.started + Duration::from_millis(40));
+        flow.comment = "my-flow-note".into();
         let mut har = export_har(&[flow]);
         har["log"]["entries"][0]["request"]["bodySize"] = json!(18);
         har["log"]["entries"][0]["response"]["bodySize"] = json!(4);
@@ -520,5 +532,6 @@ mod tests {
         assert_eq!(imported[0].request_bytes, Some(18));
         assert_eq!(imported[0].response_bytes, Some(4));
         assert_eq!(imported[0].request_body, b"hi");
+        assert_eq!(imported[0].comment.as_deref(), Some("my-flow-note"));
     }
 }

@@ -127,11 +127,11 @@ pub enum StatusMsg {
     BaselineCleared,
     ProfilesExported {
         count: usize,
-        path: String,
     },
     ProfilesImported {
         count: usize,
     },
+    MappedLocal(String),
 }
 
 fn port_in_use(err: &str) -> bool {
@@ -368,13 +368,17 @@ impl StatusMsg {
             Self::BaselineCleared => {
                 t(lang, "已取消对比基准", "Cleared the comparison baseline").into()
             }
-            Self::ProfilesExported { count, path } => match lang {
-                Lang::Zh => format!("已导出 {count} 套配置并复制到剪贴板 · {path}"),
-                Lang::En => format!("Exported {count} setups and copied to clipboard · {path}"),
+            Self::ProfilesExported { count } => match lang {
+                Lang::Zh => format!("已导出 {count} 套配置到剪贴板"),
+                Lang::En => format!("Exported {count} setups to clipboard"),
             },
             Self::ProfilesImported { count } => match lang {
                 Lang::Zh => format!("已导入 {count} 套配置"),
                 Lang::En => format!("Imported {count} setups"),
+            },
+            Self::MappedLocal(target) => match lang {
+                Lang::Zh => format!("已添加本地映射规则 · {target}"),
+                Lang::En => format!("Added map-local rule · {target}"),
             },
         }
     }
@@ -705,12 +709,9 @@ mod tests {
         );
         assert_eq!(ws_kind(Lang::En, "文本"), "text");
         assert!(
-            StatusMsg::ProfilesExported {
-                count: 2,
-                path: "/tmp/p.toml".into()
-            }
-            .text(Lang::Zh)
-            .contains("已导出 2 套配置")
+            StatusMsg::ProfilesExported { count: 2 }
+                .text(Lang::Zh)
+                .contains("已导出 2 套配置到剪贴板")
         );
         assert_eq!(
             StatusMsg::ProfilesImported { count: 3 }.text(Lang::En),
