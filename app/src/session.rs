@@ -306,6 +306,41 @@ pub enum Direction {
     Response,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ConnInfo {
+    pub dns_ms: Option<u64>,
+    pub tcp_ms: Option<u64>,
+    pub tls_ms: Option<u64>,
+    pub reused: bool,
+    pub server_addr: String,
+    pub tls_version: String,
+    /// True when DNS/TCP/TLS happened before `flow.started` (e.g. initial request on `mitm_connect` or HAR import).
+    pub dialed_before_start: bool,
+}
+
+impl ConnInfo {
+    pub fn as_reused(&self) -> Self {
+        Self {
+            dns_ms: None,
+            tcp_ms: None,
+            tls_ms: None,
+            reused: true,
+            server_addr: self.server_addr.clone(),
+            tls_version: self.tls_version.clone(),
+            dialed_before_start: false,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.dns_ms.is_none()
+            && self.tcp_ms.is_none()
+            && self.tls_ms.is_none()
+            && !self.reused
+            && self.server_addr.is_empty()
+            && self.tls_version.is_empty()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Flow {
     #[allow(dead_code)]
@@ -316,6 +351,7 @@ pub struct Flow {
     pub path: String,
     pub url: String,
     pub client_ip: String,
+    pub conn_info: ConnInfo,
     pub status: Option<u16>,
     pub error: Option<String>,
     pub request_headers: Vec<(String, String)>,
@@ -538,6 +574,7 @@ impl Session {
             path: draft.path,
             url: draft.url,
             client_ip: String::new(),
+            conn_info: ConnInfo::default(),
             status: None,
             error: None,
             request_headers: draft.request_headers,
@@ -577,6 +614,15 @@ impl Session {
         let rev = self.next_rev;
         if let Some(flow) = self.flows.get_mut(&id) {
             flow.client_ip = client_ip.into();
+            flow.rev = rev;
+        }
+    }
+
+    pub fn set_conn_info(&mut self, id: u64, conn_info: ConnInfo) {
+        self.next_rev += 1;
+        let rev = self.next_rev;
+        if let Some(flow) = self.flows.get_mut(&id) {
+            flow.conn_info = conn_info;
             flow.rev = rev;
         }
     }

@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
-use crate::session::{Flow, Protocol};
+use crate::session::{ConnInfo, Flow, Protocol};
 
 #[derive(Debug, Clone)]
 pub struct Imported {
@@ -26,6 +26,7 @@ pub struct Imported {
     pub request_bytes: Option<u64>,
     pub response_bytes: Option<u64>,
     pub comment: Option<String>,
+    pub conn_info: ConnInfo,
 }
 
 #[cfg(test)]
@@ -99,14 +100,33 @@ fn entry(flow: &Flow) -> Value {
         "cache": {},
         "timings": {
             "blocked": -1,
-            "dns": -1,
-            "connect": -1,
-            "ssl": -1,
+            "dns": flow.conn_info.dns_ms.map(|v| v as i64).unwrap_or(-1),
+            "connect": flow.conn_info.tcp_ms.map(|v| v as i64).unwrap_or(-1),
+            "ssl": flow.conn_info.tls_ms.map(|v| v as i64).unwrap_or(-1),
             "send": 0,
             "wait": wait,
             "receive": total.saturating_sub(wait),
         },
     });
+    if !flow.conn_info.server_addr.is_empty() {
+        let ip_only = flow
+            .conn_info
+            .server_addr
+            .parse::<std::net::SocketAddr>()
+            .map(|a| a.ip().to_string())
+            .unwrap_or_else(|_| flow.conn_info.server_addr.clone());
+        obj["serverIPAddress"] = json!(ip_only);
+        obj["_serverAddress"] = json!(flow.conn_info.server_addr);
+    }
+    if !flow.conn_info.tls_version.is_empty() {
+        obj["_tlsVersion"] = json!(flow.conn_info.tls_version);
+    }
+    if flow.conn_info.reused {
+        obj["_reusedConnection"] = json!(true);
+    }
+    if flow.conn_info.dialed_before_start {
+        obj["_dialedBeforeStart"] = json!(true);
+    }
     if !flow.comment.is_empty() {
         obj["comment"] = json!(flow.comment);
     }
@@ -185,12 +205,35 @@ fn import_entry(entry: &Value) -> Option<Imported> {
         .and_then(|value| value.as_str())
         .and_then(parse_iso)
         .unwrap_or_else(SystemTime::now);
-    let wait = non_negative_ms(entry.get("timings").and_then(|timings| timings.get("wait")));
-    let receive = non_negative_ms(
-        entry
-            .get("timings")
-            .and_then(|timings| timings.get("receive")),
-    );
+    let timings = entry.get("timings");
+    let wait = non_negative_ms(timings.and_then(|timings| timings.get("wait")));
+    let receive = non_negative_ms(timings.and_then(|timings| timings.get("receive")));
+    let dns_ms = non_negative_ms(timings.and_then(|t| t.get("dns")));
+    let tcp_ms = non_negative_ms(timings.and_then(|t| t.get("connect")));
+    let tls_ms = non_negative_ms(timings.and_then(|t| t.get("ssl")));
+    let server_addr = entry
+        .get("_serverAddress")
+        .or_else(|| entry.get("serverIPAddress"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default()
+        .to_string();
+    let tls_version = entry
+        .get("_tlsVersion")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default()
+        .to_string();
+    let reused = entry
+        .get("_reusedConnection")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let dialed_before_start = entry
+        .get("_dialedBeforeStart")
+        .and_then(Value::as_bool)
+        .unwrap_or(entry.get("_serverAddress").is_none());
     let total = non_negative_ms(entry.get("time")).or_else(|| match (wait, receive) {
         (Some(wait), Some(receive)) => Some(wait.saturating_add(receive)),
         (Some(wait), None) => Some(wait),
@@ -229,6 +272,15 @@ fn import_entry(entry: &Value) -> Option<Imported> {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string),
+        conn_info: ConnInfo {
+            dns_ms,
+            tcp_ms,
+            tls_ms,
+            reused,
+            server_addr,
+            tls_version,
+            dialed_before_start,
+        },
     })
 }
 
@@ -551,5 +603,42 @@ mod tests {
         assert_eq!(imported[0].response_bytes, Some(4));
         assert_eq!(imported[0].request_body, b"hi");
         assert_eq!(imported[0].comment.as_deref(), Some("my-flow-note"));
+    }
+
+    #[test]
+    fn round_trip_preserves_conn_info_and_phase_timings() {
+        let mut session = Session::default();
+        let id = session.open(FlowDraft {
+            protocol: Protocol::Http2,
+            method: "GET".into(),
+            host: "api.example.com".into(),
+            path: "/items".into(),
+            url: "https://api.example.com/items".into(),
+            request_headers: Vec::new(),
+        });
+        session.set_conn_info(
+            id,
+            ConnInfo {
+                dns_ms: Some(12),
+                tcp_ms: Some(25),
+                tls_ms: Some(48),
+                reused: false,
+                server_addr: "93.184.216.34:443".into(),
+                tls_version: "TLS 1.3".into(),
+                dialed_before_start: true,
+            },
+        );
+        let flow = session.get(id).unwrap().clone();
+        let har = export_har(&[flow.clone()]);
+        assert_eq!(har["log"]["entries"][0]["timings"]["dns"], json!(12));
+        assert_eq!(har["log"]["entries"][0]["timings"]["connect"], json!(25));
+        assert_eq!(har["log"]["entries"][0]["timings"]["ssl"], json!(48));
+        assert_eq!(
+            har["log"]["entries"][0]["serverIPAddress"],
+            json!("93.184.216.34")
+        );
+        let imported = import_har(&har);
+        assert_eq!(imported.len(), 1);
+        assert_eq!(imported[0].conn_info, flow.conn_info);
     }
 }

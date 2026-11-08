@@ -863,6 +863,7 @@ struct Shown {
     request_note: Signal<String>,
     response_note: Signal<String>,
     metrics: Signal<String>,
+    timing_bar: Signal<present::TimingBreakdown>,
     query: Signal<Vec<HeaderLine>>,
     preview: Signal<String>,
     preview_w: Signal<f32>,
@@ -939,6 +940,7 @@ pub fn App() -> impl IntoElement {
         request_note: signal(String::new()),
         response_note: signal(String::new()),
         metrics: signal(String::new()),
+        timing_bar: signal(present::TimingBreakdown::default()),
         query: signal(Vec::new()),
         preview: signal(String::new()),
         preview_w: signal(0.0),
@@ -7018,6 +7020,10 @@ fn summary(
                 .text_color(fg_muted()),
         )
         .child(when(
+            move || shown.timing_bar.with(present::TimingBreakdown::has_content),
+            move || summary_timing_bar(shown.timing_bar),
+        ))
+        .child(when(
             move || !shown.error.get().is_empty(),
             move || {
                 view()
@@ -7040,6 +7046,241 @@ fn summary(
                     )
             },
         ))
+}
+
+fn phase_color_dns() -> AdaptiveColor {
+    AdaptiveColor::rgb(0x0284c7, 0x38bdf8)
+}
+
+fn phase_color_tcp() -> AdaptiveColor {
+    AdaptiveColor::rgb(0xd97706, 0xfbbf24)
+}
+
+fn phase_color_tls() -> AdaptiveColor {
+    AdaptiveColor::rgb(0x7c3aed, 0xa78bfa)
+}
+
+fn phase_color_wait() -> AdaptiveColor {
+    AdaptiveColor::rgb(0x059669, 0x34d399)
+}
+
+fn phase_color_download() -> AdaptiveColor {
+    AdaptiveColor::rgb(0x2563eb, 0x60a5fa)
+}
+
+fn summary_timing_bar(timing: Signal<present::TimingBreakdown>) -> impl IntoElement {
+    view()
+        .px_2p5()
+        .py_2()
+        .gap_1p5()
+        .rounded(px(7.0))
+        .bg(bg_code())
+        .border_1()
+        .border_color(border_subtle())
+        .child(
+            view()
+                .w_full()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(
+                    view()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_1p5()
+                        .child(when(
+                            move || timing.with(|tb| tb.reused),
+                            || {
+                                view()
+                                    .px_1p5()
+                                    .py(px(1.5))
+                                    .rounded(px(4.0))
+                                    .bg(status_ok_bg())
+                                    .child(
+                                        text(tr("复用连接", "Reused"))
+                                            .text_size(px(10.5))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(status_ok_fg()),
+                                    )
+                            },
+                        ))
+                        .child(when(
+                            move || {
+                                timing.with(|tb| {
+                                    !tb.reused
+                                        && (tb.dns_ms.is_some()
+                                            || tb.tcp_ms.is_some()
+                                            || tb.tls_ms.is_some())
+                                })
+                            },
+                            || {
+                                view()
+                                    .px_1p5()
+                                    .py(px(1.5))
+                                    .rounded(px(4.0))
+                                    .bg(accent_blue_soft())
+                                    .child(
+                                        text(tr("新建连接", "New conn"))
+                                            .text_size(px(10.5))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(accent_blue_text()),
+                                    )
+                            },
+                        ))
+                        .child(when(
+                            move || timing.with(|tb| !tb.tls_version.is_empty()),
+                            move || {
+                                view()
+                                    .px_1p5()
+                                    .py(px(1.5))
+                                    .rounded(px(4.0))
+                                    .bg(bg_control())
+                                    .child(
+                                        mono(move || timing.with(|tb| tb.tls_version.clone()))
+                                            .text_size(px(10.5))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(fg_secondary()),
+                                    )
+                            },
+                        ))
+                        .child(when(
+                            move || timing.with(|tb| !tb.server_addr.is_empty()),
+                            move || {
+                                view()
+                                    .px_1p5()
+                                    .py(px(1.5))
+                                    .rounded(px(4.0))
+                                    .bg(bg_control())
+                                    .child(
+                                        mono({
+                                            let langs = ui_langs();
+                                            move || {
+                                                let addr = timing.with(|tb| tb.server_addr.clone());
+                                                format!(
+                                                    "{} {addr}",
+                                                    t(ui_lang(langs), "远端", "Peer")
+                                                )
+                                            }
+                                        })
+                                        .selectable(true)
+                                        .text_size(px(10.5))
+                                        .text_color(fg_muted()),
+                                    )
+                            },
+                        )),
+                )
+                .child(
+                    view()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2p5()
+                        .child(timing_phase_chip(
+                            "DNS",
+                            "DNS",
+                            phase_color_dns(),
+                            move || timing.with(|tb| tb.dns_ms),
+                        ))
+                        .child(timing_phase_chip(
+                            "TCP",
+                            "TCP",
+                            phase_color_tcp(),
+                            move || timing.with(|tb| tb.tcp_ms),
+                        ))
+                        .child(timing_phase_chip(
+                            "TLS",
+                            "TLS",
+                            phase_color_tls(),
+                            move || timing.with(|tb| tb.tls_ms),
+                        ))
+                        .child(timing_phase_chip(
+                            "等待",
+                            "Wait",
+                            phase_color_wait(),
+                            move || timing.with(|tb| tb.wait_ms),
+                        ))
+                        .child(timing_phase_chip(
+                            "下载",
+                            "Download",
+                            phase_color_download(),
+                            move || timing.with(|tb| tb.download_ms),
+                        )),
+                ),
+        )
+        .child(when(
+            move || timing.with(present::TimingBreakdown::has_phases),
+            move || {
+                view()
+                    .w_full()
+                    .h(px(5.0))
+                    .rounded(px(2.5))
+                    .bg(bg_control())
+                    .overflow_hidden()
+                    .flex_row()
+                    .gap(px(1.0))
+                    .child(timing_phase_segment(phase_color_dns(), move || {
+                        timing.with(|tb| tb.dns_ms)
+                    }))
+                    .child(timing_phase_segment(phase_color_tcp(), move || {
+                        timing.with(|tb| tb.tcp_ms)
+                    }))
+                    .child(timing_phase_segment(phase_color_tls(), move || {
+                        timing.with(|tb| tb.tls_ms)
+                    }))
+                    .child(timing_phase_segment(phase_color_wait(), move || {
+                        timing.with(|tb| tb.wait_ms)
+                    }))
+                    .child(timing_phase_segment(phase_color_download(), move || {
+                        timing.with(|tb| tb.download_ms)
+                    }))
+            },
+        ))
+}
+
+fn timing_phase_chip(
+    zh: &'static str,
+    en: &'static str,
+    color: AdaptiveColor,
+    get_ms: impl Fn() -> Option<u64> + Copy + 'static,
+) -> impl IntoElement {
+    when(
+        move || get_ms().is_some(),
+        move || {
+            let langs = ui_langs();
+            view()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .child(view().w(px(6.5)).h(px(6.5)).rounded(px(3.5)).bg(color))
+                .child(
+                    mono(move || {
+                        let ms = get_ms().unwrap_or(0);
+                        format!("{} {ms} ms", t(ui_lang(langs), zh, en))
+                    })
+                    .text_size(px(10.5))
+                    .text_color(fg_secondary()),
+                )
+        },
+    )
+}
+
+fn timing_phase_segment(
+    color: AdaptiveColor,
+    get_ms: impl Fn() -> Option<u64> + Copy + 'static,
+) -> impl IntoElement {
+    when(
+        move || get_ms().is_some(),
+        move || {
+            view()
+                .h_full()
+                .min_w(px(3.0))
+                .flex_grow(move || (get_ms().unwrap_or(0).max(1)) as f32)
+                .bg(color)
+        },
+    )
 }
 
 fn repeat_inline_bar(
@@ -10144,6 +10385,7 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baselin
         shown.rules.set(String::new());
         shown.pinned.set(false);
         shown.comment.set(String::new());
+        shown.timing_bar.set(present::TimingBreakdown::default());
         return;
     };
     let snapshot = hub.with_session(|session| session.hydrated(id));
@@ -10168,6 +10410,7 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baselin
         shown.rules.set(String::new());
         shown.pinned.set(false);
         shown.comment.set(String::new());
+        shown.timing_bar.set(present::TimingBreakdown::default());
         return;
     };
     let (diff_old, diff_new) = match baseline {
@@ -10233,6 +10476,7 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baselin
         flow.response_bytes,
         lang,
     ));
+    shown.timing_bar.set(present::flow_timing_breakdown(&flow));
     shown.query.set(
         present::query_pairs(&flow.url)
             .into_iter()

@@ -175,12 +175,11 @@ P0 到 P3 里点名的能力已经接上。下面是仍然接受的缺口，不�
 
 ### P4：高性价比、立竿见影的差异化增强（待办规划）
 
-15. **单条请求连接阶段耗时明细（Timing Breakdown & Connection Metadata）**
-    - **现状与痛点**：目前列表和摘要展示了 `Gap`、`TTFB` 和 `Total Elapsed`，但当请求慢时，无法一眼区分是慢在 **DNS 解析**、**TCP 三次握手**、**TLS 握手**、**TTFB（服务端处理等待）** 还是 **Content Download（响应体传输）**，也无法直观看到该请求是否复用了连接。
-    - **架构方案（高优先级）**：
-      - 在 `proxy.rs` 的 `dial` 与 `connect_origin` 中精细打点：`dns_ms`、`tcp_ms`、`tls_ms`，结合已有的 `response_at` 与 `finished_at` 计算出 `wait_ms`（TTFB）与 `download_ms`（Content Download）。
-      - 在 `session::Flow` 中附加轻量连接元数据：`reused_connection: bool`（命中 H1 连接池或 H2 发送端缓存时为 `true`，此时 DNS/TCP/TLS 为 `0 ms`）、`server_addr: Option<SocketAddr>`（远端真实 IP 与端口）、`tls_version: Option<&'static str>`（`TLSv1.2` / `TLSv1.3`）及协商出的 `alpn`。
-      - 在右栏详情面板新增可折叠的「**耗时与连接 / Timing & Connection**」卡片（或集成在摘要卡片下方的可视化分段条），直观展示各阶段耗时占比与连接复用信息，并在导出 HAR 1.2 时完整填充标准 `timings.{dns, connect, ssl, wait, receive}` 与 `serverIPAddress`。
+15. **单条请求连接阶段耗时明细（Timing Breakdown & Connection Metadata）** — ✅ 已完成
+    - **实现**：
+      - 在 `proxy.rs` 的 `dial_timed` 与 `connect_origin` 中精细采集 `dns_ms`、`tcp_ms`、`tls_ms`，结合 `response_at` 与 `finished_at` 计算 `wait_ms`（TTFB 服务端处理等待）与 `download_ms`（响应体传输耗时）。
+      - 在 `session::Flow` 中附加 `ConnInfo` 连接元数据：支持记录连接复用状态 `reused`（命中 HTTP/1.1 空闲池或 HTTP/2 多路复用后续流时标记为复用）、远端真实地址 `server_addr` 与协商出的 TLS 版本 `tls_version`（`TLS 1.3` / `TLS 1.2`）。
+      - 在右栏详情摘要卡片下方渲染可视化连接标签（`新建连接` / `复用连接`、TLS 版本、远端 `IP:Port`）与多色比例耗时分段条（`DNS`、`TCP`、`TLS`、`等待`、`下载`），并在 HAR 1.2 导入导出中完整读写标准 `timings.{dns, connect, ssl, wait, receive}` 与 `serverIPAddress`。
 
 16. **内置 MCP Server 与 Rust / Go 代码生成（AI 联调降维打击）**
     - **现状与痛点**：开发者在使用 Claude Code、Antigravity、Cursor 等 AI 编程工具排查接口报错（如 `400`/`500` 或字段不匹配）时，往往需要手动去抓包工具复制 URL、请求头、Payload 和响应体再粘贴给 AI；同时代码导出目前支持 `cURL`、`fetch`、`Python requests` 和 `TypeScript interface`，缺少 Rust 与 Go 生态的一键导出。

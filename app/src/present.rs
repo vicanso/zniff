@@ -3359,6 +3359,76 @@ fn read_msgpack_map(
     Some(serde_json::Value::Object(map))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TimingBreakdown {
+    pub dns_ms: Option<u64>,
+    pub tcp_ms: Option<u64>,
+    pub tls_ms: Option<u64>,
+    pub wait_ms: Option<u64>,
+    pub download_ms: Option<u64>,
+    pub total_ms: u64,
+    pub reused: bool,
+    pub server_addr: String,
+    pub tls_version: String,
+}
+
+impl TimingBreakdown {
+    pub fn has_content(&self) -> bool {
+        self.dns_ms.is_some()
+            || self.tcp_ms.is_some()
+            || self.tls_ms.is_some()
+            || self.wait_ms.is_some()
+            || self.download_ms.is_some()
+            || self.reused
+            || !self.server_addr.is_empty()
+            || !self.tls_version.is_empty()
+    }
+
+    pub fn has_phases(&self) -> bool {
+        self.dns_ms.is_some()
+            || self.tcp_ms.is_some()
+            || self.tls_ms.is_some()
+            || self.wait_ms.is_some()
+            || self.download_ms.is_some()
+    }
+}
+
+pub fn flow_timing_breakdown(flow: &Flow) -> TimingBreakdown {
+    let conn = &flow.conn_info;
+    let handshake_ms = conn
+        .dns_ms
+        .unwrap_or(0)
+        .saturating_add(conn.tcp_ms.unwrap_or(0))
+        .saturating_add(conn.tls_ms.unwrap_or(0));
+    let raw_wait = flow
+        .response_at
+        .and_then(|at| at.duration_since(flow.started).ok())
+        .map(|d| d.as_millis() as u64);
+    let wait_ms = if conn.dialed_before_start {
+        raw_wait
+    } else {
+        raw_wait.map(|w| w.saturating_sub(handshake_ms))
+    };
+    let download_ms = match (flow.response_at, flow.finished_at) {
+        (Some(r), Some(f)) => f.duration_since(r).ok().map(|d| d.as_millis() as u64),
+        _ => None,
+    };
+    let total_ms = handshake_ms
+        .saturating_add(wait_ms.unwrap_or(0))
+        .saturating_add(download_ms.unwrap_or(0));
+    TimingBreakdown {
+        dns_ms: conn.dns_ms,
+        tcp_ms: conn.tcp_ms,
+        tls_ms: conn.tls_ms,
+        wait_ms,
+        download_ms,
+        total_ms,
+        reused: conn.reused,
+        server_addr: conn.server_addr.clone(),
+        tls_version: conn.tls_version.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3387,6 +3457,32 @@ mod tests {
         assert!(command.starts_with("curl -X 'POST' 'https://example.com/v1?q=a%20b&n=1'"));
         assert!(!command.contains("Host:"));
         assert!(command.contains("--data-binary '{\"a\":1}'"));
+    }
+
+    #[test]
+    fn flow_timing_breakdown_computes_phases_and_reused_state() {
+        let mut f = flow();
+        f.conn_info = crate::session::ConnInfo {
+            dns_ms: Some(10),
+            tcp_ms: Some(20),
+            tls_ms: Some(30),
+            reused: false,
+            server_addr: "93.184.216.34:443".into(),
+            tls_version: "TLS 1.3".into(),
+            dialed_before_start: false,
+        };
+        f.response_at = Some(f.started + std::time::Duration::from_millis(100));
+        f.finished_at = Some(f.started + std::time::Duration::from_millis(125));
+        let tb = flow_timing_breakdown(&f);
+        assert_eq!(tb.dns_ms, Some(10));
+        assert_eq!(tb.tcp_ms, Some(20));
+        assert_eq!(tb.tls_ms, Some(30));
+        assert_eq!(tb.wait_ms, Some(40));
+        assert_eq!(tb.download_ms, Some(25));
+        assert_eq!(tb.total_ms, 125);
+        assert!(!tb.reused);
+        assert_eq!(tb.server_addr, "93.184.216.34:443");
+        assert_eq!(tb.tls_version, "TLS 1.3");
     }
 
     #[test]

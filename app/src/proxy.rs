@@ -219,6 +219,8 @@ struct PooledH2 {
     sender: H2Sender,
     used: Instant,
     generation: u64,
+    conn_info: crate::session::ConnInfo,
+    first_used: Arc<AtomicBool>,
 }
 
 pub struct Hub {
@@ -735,7 +737,10 @@ impl Hub {
         decision
     }
 
-    fn cached_h2(&self, key: &(String, u16)) -> Option<(H2Sender, u64)> {
+    fn cached_h2(
+        &self,
+        key: &(String, u16),
+    ) -> Option<(H2Sender, u64, crate::session::ConnInfo, Arc<AtomicBool>)> {
         let mut pool = self.h2_pool.lock().unwrap_or_else(|err| err.into_inner());
         let expired = pool
             .get(key)
@@ -746,14 +751,25 @@ impl Hub {
         }
         let entry = pool.get_mut(key)?;
         entry.used = Instant::now();
-        Some((entry.sender.clone(), entry.generation))
+        Some((
+            entry.sender.clone(),
+            entry.generation,
+            entry.conn_info.clone(),
+            Arc::clone(&entry.first_used),
+        ))
     }
 
     /// Returns the generation stored with this sender. Replacing a key does
     /// not wipe the other origins. A full pool drops every entry only when
     /// the key is new.
-    fn store_h2(&self, key: (String, u16), sender: H2Sender) -> u64 {
+    fn store_h2(
+        &self,
+        key: (String, u16),
+        sender: H2Sender,
+        conn_info: crate::session::ConnInfo,
+    ) -> (u64, Arc<AtomicBool>) {
         let generation = self.h2_generation.fetch_add(1, Ordering::Relaxed);
+        let first_used = Arc::new(AtomicBool::new(false));
         let mut pool = self.h2_pool.lock().unwrap_or_else(|err| err.into_inner());
         let replacing = pool.contains_key(&key);
         if !replacing && pool.len() >= 16 {
@@ -765,9 +781,11 @@ impl Hub {
                 sender,
                 used: Instant::now(),
                 generation,
+                conn_info,
+                first_used: Arc::clone(&first_used),
             },
         );
-        generation
+        (generation, first_used)
     }
 
     /// Removes the entry only when it is still this generation, so an old
@@ -879,6 +897,11 @@ impl Hub {
         self.touch();
     }
 
+    fn set_conn_info(&self, id: u64, conn_info: crate::session::ConnInfo) {
+        self.with_session(|session| session.set_conn_info(id, conn_info));
+        self.touch();
+    }
+
     fn set_error(&self, id: u64, error: impl Into<String>) {
         self.with_session(|session| session.set_error(id, error));
         self.touch();
@@ -960,6 +983,9 @@ impl Hub {
                 );
                 if let Some(comment) = item.comment {
                     session.set_comment(id, comment);
+                }
+                if !item.conn_info.is_empty() {
+                    session.set_conn_info(id, item.conn_info);
                 }
             });
         }
@@ -1326,11 +1352,14 @@ where
             .map(|_| ());
     }
     let offers_h2 = hello.alpn.iter().any(|proto| proto == b"h2");
-    if offers_h2 && let Some((mut sender, generation)) = hub.cached_h2(&(sni_host.clone(), port)) {
+    if offers_h2
+        && let Some((mut sender, generation, conn_info, first_used)) =
+            hub.cached_h2(&(sni_host.clone(), port))
+    {
         let ready = timeout(Duration::from_secs(2), sender.ready()).await;
         if matches!(ready, Ok(Ok(()))) {
             return intercept_h2_pooled(
-                client, hello.raw, sender, generation, &sni_host, port, hub,
+                client, hello.raw, sender, generation, conn_info, first_used, &sni_host, port, hub,
             )
             .await;
         }
@@ -1342,8 +1371,12 @@ where
         hello.alpn.clone()
     };
     match timeout(IO_TIMEOUT, connect_origin(&sni_host, port, &alpn, &hub)).await {
-        Ok(Ok((origin, selected))) => {
-            intercept(client, hello.raw, origin, &sni_host, port, selected, hub).await
+        Ok(Ok((origin, selected, mut conn_info))) => {
+            conn_info.dialed_before_start = true;
+            intercept(
+                client, hello.raw, origin, &sni_host, port, selected, conn_info, hub,
+            )
+            .await
         }
         Ok(Err(err)) => {
             // The bytes still go through as a tunnel, so the site keeps
@@ -1381,24 +1414,36 @@ async fn connect_origin(
     port: u16,
     alpn: &[Vec<u8>],
     hub: &Hub,
-) -> Result<(tokio_rustls::client::TlsStream<TcpStream>, Vec<u8>)> {
-    let tcp = timeout(IO_TIMEOUT, dial(host, port, hub, true))
+) -> Result<(
+    tokio_rustls::client::TlsStream<TcpStream>,
+    Vec<u8>,
+    crate::session::ConnInfo,
+)> {
+    let (tcp, mut info) = timeout(IO_TIMEOUT, dial_timed(host, port, hub, true))
         .await
         .context("连接源站超时")??;
     tcp.set_nodelay(true).ok();
     let config = hub.client_config_for_host(host, alpn)?;
     let connector = TlsConnector::from(Arc::new(config));
     let name = server_name(host)?;
+    let tls_start = Instant::now();
     let tls = connector.connect(name, tcp).await.context("源站 TLS")?;
-    let selected = tls
-        .get_ref()
-        .1
+    info.tls_ms = Some(tls_start.elapsed().as_millis() as u64);
+    let conn = tls.get_ref().1;
+    info.tls_version = match conn.protocol_version() {
+        Some(rustls::ProtocolVersion::TLSv1_3) => "TLS 1.3".to_string(),
+        Some(rustls::ProtocolVersion::TLSv1_2) => "TLS 1.2".to_string(),
+        Some(other) => format!("{other:?}"),
+        None => String::new(),
+    };
+    let selected = conn
         .alpn_protocol()
         .map(|proto| proto.to_vec())
         .unwrap_or_else(|| b"http/1.1".to_vec());
-    Ok((tls, selected))
+    Ok((tls, selected, info))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn intercept<S>(
     client: S,
     client_hello: Vec<u8>,
@@ -1406,6 +1451,7 @@ async fn intercept<S>(
     host: &str,
     port: u16,
     selected: Vec<u8>,
+    conn_info: crate::session::ConnInfo,
     hub: Arc<Hub>,
 ) -> Result<()>
 where
@@ -1434,9 +1480,9 @@ where
     };
     let host = host.to_string();
     if selected == b"h2" {
-        serve_h2(client_tls, origin, host, port, hub).await
+        serve_h2(client_tls, origin, host, port, conn_info, hub).await
     } else {
-        serve_h1(client_tls, origin, host, port, hub).await
+        serve_h1(client_tls, origin, host, port, conn_info, hub).await
     }
 }
 
@@ -1541,7 +1587,14 @@ fn host_ends_with(host: &str, suffix: &str) -> bool {
         && host[host.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
 }
 
-async fn serve_h1<C, O>(client: C, origin: O, host: String, port: u16, hub: Arc<Hub>) -> Result<()>
+async fn serve_h1<C, O>(
+    client: C,
+    origin: O,
+    host: String,
+    port: u16,
+    conn_info: crate::session::ConnInfo,
+    hub: Arc<Hub>,
+) -> Result<()>
 where
     C: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     O: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -1561,10 +1614,21 @@ where
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<H1Job>();
     tokio::spawn(async move {
         let mut sender = sender;
+        let mut first = true;
         while let Some(job) = rx.recv().await {
+            let info = if first {
+                first = false;
+                conn_info.clone()
+            } else {
+                conn_info.as_reused()
+            };
             let result = async {
                 sender.ready().await.context("上游 HTTP/1.1 未就绪")?;
-                sender.send_request(job.req).await.context("上游 HTTP/1.1")
+                let resp = sender
+                    .send_request(job.req)
+                    .await
+                    .context("上游 HTTP/1.1")?;
+                Ok((resp, info))
             }
             .await;
             let _ = job.reply.send(result);
@@ -1610,8 +1674,9 @@ async fn handshake_h2<O>(
     origin: O,
     host: &str,
     port: u16,
+    conn_info: crate::session::ConnInfo,
     hub: &Arc<Hub>,
-) -> Result<(H2Sender, u64)>
+) -> Result<(H2Sender, u64, crate::session::ConnInfo, Arc<AtomicBool>)>
 where
     O: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -1619,7 +1684,8 @@ where
         .handshake::<_, RecordingBody<Incoming>>(TokioIo::new(origin))
         .await
         .context("上游 HTTP/2")?;
-    let generation = hub.store_h2((host.to_string(), port), sender.clone());
+    let (generation, first_used) =
+        hub.store_h2((host.to_string(), port), sender.clone(), conn_info.clone());
     let hub = hub.clone();
     let key = (host.to_string(), port);
     tokio::spawn(async move {
@@ -1628,13 +1694,17 @@ where
         }
         hub.drop_h2_generation(&key, generation);
     });
-    Ok((sender, generation))
+    Ok((sender, generation, conn_info, first_used))
 }
 
 /// Dials the origin offering only `h2`. A server that picks another protocol
 /// is an error: this path does not fall back to HTTP/1.1.
-async fn dial_h2(host: &str, port: u16, hub: &Arc<Hub>) -> Result<(H2Sender, u64)> {
-    let (origin, selected) = timeout(
+async fn dial_h2(
+    host: &str,
+    port: u16,
+    hub: &Arc<Hub>,
+) -> Result<(H2Sender, u64, crate::session::ConnInfo, Arc<AtomicBool>)> {
+    let (origin, selected, conn_info) = timeout(
         IO_TIMEOUT,
         connect_origin(host, port, &[b"h2".to_vec()], hub),
     )
@@ -1643,19 +1713,29 @@ async fn dial_h2(host: &str, port: u16, hub: &Arc<Hub>) -> Result<(H2Sender, u64
     if selected != b"h2" {
         anyhow::bail!("源站没有选择 HTTP/2");
     }
-    handshake_h2(origin, host, port, hub).await
+    handshake_h2(origin, host, port, conn_info, hub).await
 }
 
-async fn serve_h2<C, O>(client: C, origin: O, host: String, port: u16, hub: Arc<Hub>) -> Result<()>
+async fn serve_h2<C, O>(
+    client: C,
+    origin: O,
+    host: String,
+    port: u16,
+    conn_info: crate::session::ConnInfo,
+    hub: Arc<Hub>,
+) -> Result<()>
 where
     C: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     O: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let (sender, generation) = handshake_h2(origin, &host, port, &hub).await?;
+    let (sender, generation, conn_info, first_used) =
+        handshake_h2(origin, &host, port, conn_info, &hub).await?;
     serve_h2_sender(
         client,
         sender,
         generation,
+        conn_info,
+        first_used,
         host,
         port,
         hub,
@@ -1664,11 +1744,14 @@ where
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn intercept_h2_pooled<S>(
     client: S,
     client_hello: Vec<u8>,
     sender: H2Sender,
     generation: u64,
+    conn_info: crate::session::ConnInfo,
+    first_used: Arc<AtomicBool>,
     host: &str,
     port: u16,
     hub: Arc<Hub>,
@@ -1701,6 +1784,8 @@ where
         client_tls,
         sender,
         generation,
+        conn_info,
+        first_used,
         host.to_string(),
         port,
         hub,
@@ -1709,10 +1794,13 @@ where
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn serve_h2_sender<C>(
     client: C,
     sender: H2Sender,
     generation: u64,
+    conn_info: crate::session::ConnInfo,
+    first_used: Arc<AtomicBool>,
     host: String,
     port: u16,
     hub: Arc<Hub>,
@@ -1727,6 +1815,8 @@ where
             last_ok: Instant::now(),
             broken: false,
             generation,
+            conn_info,
+            first_used,
         })),
         hub: hub.clone(),
         host: host.clone(),
@@ -2267,9 +2357,22 @@ where
         }
     }
     let pool_key = pool_key(&host, port, &hub);
-    let mut origin = match hub.take_idle(pool_key.clone()).await {
-        Some(stream) => stream,
-        None => timeout(IO_TIMEOUT, dial(&host, port, &hub, false))
+    let (mut origin, mut conn_info) = match hub.take_idle(pool_key.clone()).await {
+        Some(stream) => {
+            let server_addr = stream
+                .peer_addr()
+                .map(|a| a.to_string())
+                .unwrap_or_default();
+            (
+                stream,
+                crate::session::ConnInfo {
+                    reused: true,
+                    server_addr,
+                    ..Default::default()
+                },
+            )
+        }
+        None => timeout(IO_TIMEOUT, dial_timed(&host, port, &hub, false))
             .await
             .context("连接源站超时")
             .inspect_err(|err| {
@@ -2320,12 +2423,15 @@ where
     }
     outbound.push_str("\r\n");
     if origin.write_all(outbound.as_bytes()).await.is_err() {
-        origin = timeout(IO_TIMEOUT, dial(&host, port, &hub, false))
+        let (next_origin, next_info) = timeout(IO_TIMEOUT, dial_timed(&host, port, &hub, false))
             .await
             .context("连接源站超时")??;
+        origin = next_origin;
+        conn_info = next_info;
         origin.set_nodelay(true).ok();
         origin.write_all(outbound.as_bytes()).await?;
     }
+    hub.set_conn_info(id, conn_info);
     let encoding = header_value(&headers, "content-encoding");
     if let Some(body) = &body_override {
         write_all_throttled(&mut origin, body, throttle_up_bps).await?;
@@ -2525,11 +2631,25 @@ fn pool_key(host: &str, port: u16, hub: &Hub) -> (String, u16) {
 }
 
 async fn dial(host: &str, port: u16, hub: &Hub, tunnel: bool) -> Result<TcpStream> {
+    Ok(dial_timed(host, port, hub, tunnel).await?.0)
+}
+
+async fn dial_timed(
+    host: &str,
+    port: u16,
+    hub: &Hub,
+    tunnel: bool,
+) -> Result<(TcpStream, crate::session::ConnInfo)> {
+    let mut info = crate::session::ConnInfo::default();
     if let Some(upstream) = hub.upstream() {
+        let tcp_start = Instant::now();
         let mut stream = TcpStream::connect((upstream.host.as_str(), upstream.port))
             .await
             .context("连接上游代理")?;
         stream.set_nodelay(true).ok();
+        if let Ok(peer) = stream.peer_addr() {
+            info.server_addr = peer.to_string();
+        }
         if tunnel {
             let req = format!("CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n");
             stream.write_all(req.as_bytes()).await?;
@@ -2546,11 +2666,32 @@ async fn dial(host: &str, port: u16, hub: &Hub, tunnel: bool) -> Result<TcpStrea
                 anyhow::bail!("上游 CONNECT 响应带了多余字节");
             }
         }
-        return Ok(stream);
+        info.tcp_ms = Some(tcp_start.elapsed().as_millis() as u64);
+        return Ok((stream, info));
     }
-    let stream = TcpStream::connect((host, port)).await?;
+    let clean_host = host.trim().trim_matches(|ch| ch == '[' || ch == ']');
+    let stream = if let Ok(ip) = clean_host.parse::<std::net::IpAddr>() {
+        let tcp_start = Instant::now();
+        let s = TcpStream::connect((ip, port)).await?;
+        info.tcp_ms = Some(tcp_start.elapsed().as_millis() as u64);
+        s
+    } else {
+        let dns_start = Instant::now();
+        let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port)).await?.collect();
+        info.dns_ms = Some(dns_start.elapsed().as_millis() as u64);
+        if addrs.is_empty() {
+            anyhow::bail!("主机名没有解析到地址");
+        }
+        let tcp_start = Instant::now();
+        let s = TcpStream::connect(&addrs[..]).await?;
+        info.tcp_ms = Some(tcp_start.elapsed().as_millis() as u64);
+        s
+    };
+    if let Ok(peer) = stream.peer_addr() {
+        info.server_addr = peer.to_string();
+    }
     stream.set_nodelay(true).ok();
-    Ok(stream)
+    Ok((stream, info))
 }
 
 fn parse_upstream(text: &str) -> Option<Upstream> {
@@ -2775,7 +2916,9 @@ async fn exchange_tls<S>(
 where
     S: AsyncWrite + Unpin,
 {
-    let (mut origin, _) = connect_origin(host, port, &[b"http/1.1".to_vec()], hub).await?;
+    let (mut origin, _, conn_info) =
+        connect_origin(host, port, &[b"http/1.1".to_vec()], hub).await?;
+    hub.set_conn_info(id, conn_info);
     let mut outbound = format!("{method} {path} HTTP/1.1\r\n");
     let mut has_host = false;
     for (name, value) in headers {
@@ -3358,9 +3501,10 @@ async fn replay_http(
     headers: &[(String, String)],
     body: &[u8],
 ) -> Result<()> {
-    let mut origin = timeout(IO_TIMEOUT, dial(host, port, hub, false))
+    let (mut origin, conn_info) = timeout(IO_TIMEOUT, dial_timed(host, port, hub, false))
         .await
         .context("连接源站超时")??;
+    hub.set_conn_info(id, conn_info);
     let target = if hub.upstream().is_some() {
         format!("http://{}{path}", display_authority(host, port, "http"))
     } else {
@@ -3392,7 +3536,8 @@ async fn replay_tls(
     headers: &[(String, String)],
     body: &[u8],
 ) -> Result<()> {
-    let (origin, _) = connect_origin(host, port, &[b"http/1.1".to_vec()], hub).await?;
+    let (origin, _, conn_info) = connect_origin(host, port, &[b"http/1.1".to_vec()], hub).await?;
+    hub.set_conn_info(id, conn_info);
     write_replay(
         hub, id, origin, method, host, port, "https", path, headers, body,
     )
@@ -4310,7 +4455,7 @@ where
 
 struct H1Job {
     req: Request<RecordingBody<Incoming>>,
-    reply: tokio::sync::oneshot::Sender<Result<Response<Incoming>>>,
+    reply: tokio::sync::oneshot::Sender<Result<(Response<Incoming>, crate::session::ConnInfo)>>,
 }
 
 #[derive(Clone)]
@@ -4322,14 +4467,15 @@ trait HttpSender: Send {
     fn send(
         &mut self,
         req: Request<RecordingBody<Incoming>>,
-    ) -> impl std::future::Future<Output = Result<Response<Incoming>>> + Send;
+    ) -> impl std::future::Future<Output = Result<(Response<Incoming>, crate::session::ConnInfo)>> + Send;
 }
 
 impl HttpSender for H1Client {
     fn send(
         &mut self,
         req: Request<RecordingBody<Incoming>>,
-    ) -> impl std::future::Future<Output = Result<Response<Incoming>>> + Send {
+    ) -> impl std::future::Future<Output = Result<(Response<Incoming>, crate::session::ConnInfo)>> + Send
+    {
         let (reply, rx) = tokio::sync::oneshot::channel();
         let queued = self.tx.send(H1Job { req, reply });
         async move {
@@ -4344,6 +4490,8 @@ struct LaneInner {
     last_ok: Instant,
     broken: bool,
     generation: u64,
+    conn_info: crate::session::ConnInfo,
+    first_used: Arc<AtomicBool>,
 }
 
 /// One browser HTTP/2 connection. The lane can drop a dead origin sender
@@ -4360,7 +4508,8 @@ impl HttpSender for H2Lane {
     fn send(
         &mut self,
         req: Request<RecordingBody<Incoming>>,
-    ) -> impl std::future::Future<Output = Result<Response<Incoming>>> + Send {
+    ) -> impl std::future::Future<Output = Result<(Response<Incoming>, crate::session::ConnInfo)>> + Send
+    {
         let lane = self.lane.clone();
         let hub = self.hub.clone();
         let host = self.host.clone();
@@ -4372,7 +4521,7 @@ impl HttpSender for H2Lane {
                     break;
                 };
                 let key = (host.clone(), port);
-                let (mut sender, generation) = {
+                let (mut sender, generation, conn_info, first_used) = {
                     let mut guard = lane.lock().await;
                     let stale = guard.broken
                         || guard.sender.is_closed()
@@ -4383,9 +4532,11 @@ impl HttpSender for H2Lane {
                         let old = guard.generation;
                         hub.drop_h2_generation(&key, old);
                         match dial_h2(&host, port, &hub).await {
-                            Ok((next, generation)) => {
+                            Ok((next, generation, conn_info, first_used)) => {
                                 guard.sender = next;
                                 guard.generation = generation;
+                                guard.conn_info = conn_info;
+                                guard.first_used = first_used;
                                 guard.broken = false;
                                 guard.last_ok = Instant::now();
                             }
@@ -4395,7 +4546,12 @@ impl HttpSender for H2Lane {
                             }
                         }
                     }
-                    (guard.sender.clone(), guard.generation)
+                    (
+                        guard.sender.clone(),
+                        guard.generation,
+                        guard.conn_info.clone(),
+                        Arc::clone(&guard.first_used),
+                    )
                 };
                 // `try_send_request` gives the request back only when it never
                 // left. Retrying after the body was written would repeat a POST.
@@ -4403,6 +4559,11 @@ impl HttpSender for H2Lane {
                 // stream's replacement stays in the pool.
                 match sender.try_send_request(req).await {
                     Ok(response) => {
+                        let info = if !first_used.swap(true, Ordering::AcqRel) {
+                            conn_info
+                        } else {
+                            conn_info.as_reused()
+                        };
                         let mut guard = lane.lock().await;
                         if guard.generation == generation {
                             guard.last_ok = Instant::now();
@@ -4410,7 +4571,7 @@ impl HttpSender for H2Lane {
                         }
                         drop(guard);
                         hub.touch_h2(&key, generation);
-                        return Ok(response);
+                        return Ok((response, info));
                     }
                     Err(mut err) => {
                         let mut guard = lane.lock().await;
@@ -4777,7 +4938,10 @@ async fn forward_request(
     }
     let outbound = Request::from_parts(parts, outbound_body);
     let mut response = match sender.send(outbound).await {
-        Ok(response) => response,
+        Ok((response, conn_info)) => {
+            hub.set_conn_info(id, conn_info);
+            response
+        }
         Err(err) => {
             // The HTTP/2 lane already dropped its own generation. A blanket
             // drop here would remove the replacement it just opened.
@@ -5216,13 +5380,15 @@ async fn fetch_remote(
     body: Bytes,
 ) -> Result<Response<RecordingBody<Incoming>>> {
     if scheme == "https" {
-        let (tls, _) = connect_origin(host, port, &[b"http/1.1".to_vec()], hub).await?;
+        let (tls, _, conn_info) = connect_origin(host, port, &[b"http/1.1".to_vec()], hub).await?;
+        hub.set_conn_info(id, conn_info);
         fetch_on(
             tls, hub, id, method, scheme, host, port, path, headers, body,
         )
         .await
     } else {
-        let tcp = dial(host, port, hub, false).await?;
+        let (tcp, conn_info) = dial_timed(host, port, hub, false).await?;
+        hub.set_conn_info(id, conn_info);
         fetch_on(
             tcp, hub, id, method, scheme, host, port, path, headers, body,
         )
@@ -8340,6 +8506,49 @@ mod tests {
                 .error
                 .as_deref()
                 .is_some_and(|e| e.contains("拒绝越界路径"))
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn https_h2_records_conn_info_and_marks_subsequent_streams_reused() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let dir = std::env::temp_dir().join(format!("zniff-h2-conninfo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let (origin_ca, origin_leaf, leaf_key) = test_origin_cert();
+        let mut hub = Hub::new(ca.clone()).unwrap();
+        hub.add_trust_anchor(origin_ca.der().clone());
+        let hub = Arc::new(hub);
+
+        let server = origin_tls_config(&origin_ca, &origin_leaf, &leaf_key, vec![b"h2".to_vec()]);
+        let (origin_addr, _accepts) = spawn_h2_origin(server).await;
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        serve_proxy(proxy, hub.clone());
+
+        let mut sender = h2_client(&ca, proxy_addr, origin_addr).await;
+        let (status1, _) = h2_send(&mut sender, "/first").await;
+        assert_eq!(status1, StatusCode::OK);
+        let (status2, _) = h2_send(&mut sender, "/second").await;
+        assert_eq!(status2, StatusCode::OK);
+
+        let flows = hub.with_session(|session| session.flows());
+        assert_eq!(flows.len(), 2);
+        assert!(!flows[0].conn_info.reused);
+        assert!(flows[0].conn_info.tcp_ms.is_some());
+        assert!(flows[0].conn_info.tls_ms.is_some());
+        assert_eq!(flows[0].conn_info.server_addr, origin_addr.to_string());
+        assert!(flows[0].conn_info.tls_version.starts_with("TLS 1."));
+
+        assert!(flows[1].conn_info.reused);
+        assert!(flows[1].conn_info.tcp_ms.is_none());
+        assert!(flows[1].conn_info.tls_ms.is_none());
+        assert_eq!(flows[1].conn_info.server_addr, origin_addr.to_string());
+        assert_eq!(
+            flows[1].conn_info.tls_version,
+            flows[0].conn_info.tls_version
         );
 
         let _ = std::fs::remove_dir_all(&dir);
