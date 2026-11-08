@@ -11043,11 +11043,12 @@ fn refresh_seq_diagram(controls: &Controls, seq_builder: SeqBuilder) -> String {
                 .collect()
         });
         checked_ids.sort_unstable();
-        let flows: Vec<&crate::session::Flow> = checked_ids
+        let hydrated_flows: Vec<crate::session::Flow> = checked_ids
             .iter()
-            .filter_map(|id| session.get(*id))
+            .filter_map(|id| session.hydrated(*id))
             .collect();
-        present::build_sequence_diagram_data(&flows, include_res, include_query)
+        let flow_refs: Vec<&crate::session::Flow> = hydrated_flows.iter().collect();
+        present::build_sequence_diagram_data(&flow_refs, include_res, include_query)
     });
     let mermaid = data.mermaid.clone();
     seq_builder.diagram.set(data);
@@ -11226,10 +11227,66 @@ fn seq_mode_tab(
         )
 }
 
+fn swimlane_pill_width(host: &str) -> f32 {
+    ((host.chars().count() + 4) as f32 * 7.2 + 28.0).clamp(136.0, 280.0)
+}
+
+fn swimlane_layout(diagram: &present::SequenceDiagramData, viewport_w: f32) -> (Vec<f32>, f32) {
+    let hosts_len = diagram.hosts.len();
+    let x0 = 58.0_f32;
+    if hosts_len == 0 {
+        let w = viewport_w.max(520.0);
+        return (vec![x0, (w - 80.0).max(280.0)], w);
+    }
+    let mut xs = Vec::with_capacity(hosts_len + 1);
+    xs.push(x0);
+
+    let mut prev_half = 46.0_f32;
+    for (i, host) in diagram.hosts.iter().enumerate() {
+        let pill_w = swimlane_pill_width(host);
+        let half = pill_w * 0.5;
+        let min_gap = (prev_half + half + 32.0).max(180.0);
+
+        let max_step_span = diagram
+            .steps
+            .iter()
+            .filter(|s| s.host_idx == i)
+            .map(|s| {
+                let label_w = s.label.chars().count() as f32 * 7.0;
+                let note_w = if s.note.is_empty() {
+                    0.0
+                } else {
+                    (s.note.chars().count().min(24) as f32 * 6.8 + 22.0).min(150.0)
+                };
+                (42.0 + label_w + note_w + 32.0).clamp(240.0, 760.0)
+            })
+            .fold(240.0_f32, f32::max);
+
+        let prev_x = *xs.last().unwrap_or(&x0);
+        let next_x = (prev_x + min_gap).max(x0 + max_step_span);
+        xs.push(next_x);
+        prev_half = half;
+    }
+
+    let right_pad = (prev_half + 28.0).max(96.0);
+    let content_w = xs.last().copied().unwrap_or(x0) + right_pad;
+    let total_w = content_w.max(viewport_w.max(520.0));
+
+    if total_w > content_w && hosts_len > 0 {
+        let extra = (total_w - content_w).min(240.0 * hosts_len as f32);
+        let per_lane = extra / hosts_len as f32;
+        for (idx, x) in xs.iter_mut().enumerate().skip(1) {
+            *x += per_lane * idx as f32;
+        }
+    }
+
+    (xs, total_w)
+}
+
 fn seq_swimlane_view(seq_builder: SeqBuilder) -> impl IntoElement {
-    const LANE_W: f32 = 168.0;
     const STEP_H: f32 = 42.0;
     const HEADER_H: f32 = 42.0;
+    let viewport_w = signal(0.0_f32);
 
     view()
         .w_full()
@@ -11247,6 +11304,12 @@ fn seq_swimlane_view(seq_builder: SeqBuilder) -> impl IntoElement {
         .border_color(border_control())
         .bg(bg_code())
         .overflow_hidden()
+        .on_layout(move |bounds: &Bounds<Points>| {
+            let w = bounds.size.width.0;
+            if (w - viewport_w.get_untracked()).abs() > 1.0 {
+                viewport_w.set(w);
+            }
+        })
         .child(when(
             move || seq_builder.diagram.with(|d| d.steps.is_empty()),
             || {
@@ -11268,42 +11331,45 @@ fn seq_swimlane_view(seq_builder: SeqBuilder) -> impl IntoElement {
                     view()
                         .h_full()
                         .w(move || {
-                            let lanes =
-                                (1 + seq_builder.diagram.with(|d| d.hosts.len())).max(2) as f32;
-                            px((lanes * LANE_W).max(420.0))
+                            let (_, total_w) = seq_builder
+                                .diagram
+                                .with(|d| swimlane_layout(d, viewport_w.get()));
+                            px(total_w)
                         })
                         .child(
                             view()
+                                .w_full()
                                 .h(px(HEADER_H))
                                 .flex_shrink_0()
-                                .flex_row()
-                                .items_center()
+                                .relative()
                                 .border_b_1()
                                 .border_b_color(border_subtle())
                                 .bg(bg_card())
                                 .child(
                                     view()
-                                        .w(px(LANE_W))
-                                        .flex_shrink_0()
-                                        .px_2()
+                                        .absolute()
+                                        .left(move || {
+                                            let (xs, _) = seq_builder
+                                                .diagram
+                                                .with(|d| swimlane_layout(d, viewport_w.get()));
+                                            let x0 = xs.first().copied().unwrap_or(58.0);
+                                            px((x0 - 38.0).max(8.0))
+                                        })
+                                        .top(px(8.0))
+                                        .w(px(76.0))
+                                        .h(px(26.0))
+                                        .rounded(px(6.0))
+                                        .border_1()
+                                        .border_color(accent_blue_border())
+                                        .bg(accent_blue_soft())
+                                        .flex_row()
                                         .items_center()
                                         .justify_center()
                                         .child(
-                                            view()
-                                                .h(px(26.0))
-                                                .px_3()
-                                                .rounded(px(6.0))
-                                                .border_1()
-                                                .border_color(accent_blue_border())
-                                                .bg(accent_blue_soft())
-                                                .flex_row()
-                                                .items_center()
-                                                .child(
-                                                    mono("Client")
-                                                        .text_size(px(11.5))
-                                                        .font_weight(FontWeight::BOLD)
-                                                        .text_color(accent_blue_text()),
-                                                ),
+                                            mono("Client")
+                                                .text_size(px(11.5))
+                                                .font_weight(FontWeight::BOLD)
+                                                .text_color(accent_blue_text()),
                                         ),
                                 )
                                 .child(each(
@@ -11319,43 +11385,49 @@ fn seq_swimlane_view(seq_builder: SeqBuilder) -> impl IntoElement {
                                     |(idx, _)| *idx,
                                     move |pair, _| {
                                         view()
-                                            .w(px(LANE_W))
-                                            .flex_shrink_0()
-                                            .px_1p5()
+                                            .absolute()
+                                            .left(move || {
+                                                let (idx, host) = pair.with(|p| p.clone());
+                                                let (xs, _) = seq_builder
+                                                    .diagram
+                                                    .with(|d| swimlane_layout(d, viewport_w.get()));
+                                                let x =
+                                                    xs.get(idx + 1).copied().unwrap_or(300.0);
+                                                let pill_w = swimlane_pill_width(&host);
+                                                px((x - pill_w * 0.5).max(8.0))
+                                            })
+                                            .top(px(8.0))
+                                            .w(move || {
+                                                pair.with(|(_, host)| px(swimlane_pill_width(host)))
+                                            })
+                                            .h(px(26.0))
+                                            .px_2p5()
+                                            .rounded(px(6.0))
+                                            .border_1()
+                                            .border_color(border_control())
+                                            .bg(bg_control())
+                                            .flex_row()
                                             .items_center()
                                             .justify_center()
+                                            .gap_1()
+                                            .overflow_hidden()
                                             .child(
-                                                view()
-                                                    .h(px(26.0))
-                                                    .max_w(px(LANE_W - 12.0))
-                                                    .px_2()
-                                                    .rounded(px(6.0))
-                                                    .border_1()
-                                                    .border_color(border_control())
-                                                    .bg(bg_control())
-                                                    .flex_row()
-                                                    .items_center()
-                                                    .gap_1()
-                                                    .child(
-                                                        mono(move || {
-                                                            format!("H{}", pair.with(|(i, _)| i + 1))
-                                                        })
-                                                        .flex_shrink_0()
-                                                        .text_size(px(10.0))
-                                                        .font_weight(FontWeight::BOLD)
-                                                        .text_color(accent_blue_text()),
-                                                    )
-                                                    .child(
-                                                        mono(move || {
-                                                            pair.with(|(_, host)| host.clone())
-                                                        })
-                                                        .min_w(px(0.0))
-                                                        .number_of_lines(1)
-                                                        .text_overflow(EllipsizeMode::Middle)
-                                                        .text_size(px(11.0))
-                                                        .font_weight(FontWeight::SEMIBOLD)
-                                                        .text_color(fg_primary()),
-                                                    ),
+                                                mono(move || {
+                                                    format!("H{}", pair.with(|(i, _)| i + 1))
+                                                })
+                                                .flex_shrink_0()
+                                                .text_size(px(10.0))
+                                                .font_weight(FontWeight::BOLD)
+                                                .text_color(accent_blue_text()),
+                                            )
+                                            .child(
+                                                mono(move || pair.with(|(_, host)| host.clone()))
+                                                    .min_w(px(0.0))
+                                                    .number_of_lines(1)
+                                                    .text_overflow(EllipsizeMode::Middle)
+                                                    .text_size(px(11.0))
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(fg_primary()),
                                             )
                                     },
                                 )),
@@ -11366,18 +11438,18 @@ fn seq_swimlane_view(seq_builder: SeqBuilder) -> impl IntoElement {
                             move |step, _| {
                                 view()
                                     .w(move || {
-                                        let lanes = (1
-                                            + seq_builder.diagram.with(|d| d.hosts.len()))
-                                        .max(2)
-                                            as f32;
-                                        px((lanes * LANE_W).max(420.0))
+                                        let (_, total_w) = seq_builder
+                                            .diagram
+                                            .with(|d| swimlane_layout(d, viewport_w.get()));
+                                        px(total_w)
                                     })
                                     .h(px(STEP_H))
                                     .relative()
                                     .child(
                                         canvas(move || {
-                                            let hosts_len =
-                                                seq_builder.diagram.with(|d| d.hosts.len());
+                                            let (xs, _) = seq_builder
+                                                .diagram
+                                                .with(|d| swimlane_layout(d, viewport_w.get()));
                                             let (host_idx, is_req, is_err, active_hosts) =
                                                 step.with(|s| {
                                                     (
@@ -11388,8 +11460,7 @@ fn seq_swimlane_view(seq_builder: SeqBuilder) -> impl IntoElement {
                                                     )
                                                 });
                                             let mut p = Painter::new();
-                                            for k in 0..=hosts_len {
-                                                let x = k as f32 * LANE_W + LANE_W * 0.5;
+                                            for (k, &x) in xs.iter().enumerate() {
                                                 p = p
                                                     .line_width(1.0)
                                                     .stroke_color(color(border_control()))
@@ -11410,9 +11481,11 @@ fn seq_swimlane_view(seq_builder: SeqBuilder) -> impl IntoElement {
                                                         ));
                                                 }
                                             }
-                                            let x_client = LANE_W * 0.5;
-                                            let x_host =
-                                                (host_idx + 1) as f32 * LANE_W + LANE_W * 0.5;
+                                            let x_client = xs.first().copied().unwrap_or(58.0);
+                                            let x_host = xs
+                                                .get(host_idx + 1)
+                                                .copied()
+                                                .unwrap_or(x_client + 280.0);
                                             let (x_from, x_to) = if is_req {
                                                 (x_client + 3.0, x_host - 3.0)
                                             } else {
@@ -11473,17 +11546,30 @@ fn seq_swimlane_view(seq_builder: SeqBuilder) -> impl IntoElement {
                                     .child(
                                         view()
                                             .absolute()
-                                            .left(px(LANE_W * 0.5 + 8.0))
+                                            .left(move || {
+                                                let (xs, _) = seq_builder
+                                                    .diagram
+                                                    .with(|d| swimlane_layout(d, viewport_w.get()));
+                                                let x0 = xs.first().copied().unwrap_or(58.0);
+                                                px(x0 + 8.0)
+                                            })
                                             .top(px(5.0))
                                             .max_w(move || {
                                                 let host_idx = step.with(|s| s.host_idx);
-                                                let span =
-                                                    (host_idx + 1) as f32 * LANE_W - 16.0;
-                                                px(span.max(136.0))
+                                                let (xs, _) = seq_builder
+                                                    .diagram
+                                                    .with(|d| swimlane_layout(d, viewport_w.get()));
+                                                let x0 = xs.first().copied().unwrap_or(58.0);
+                                                let x_host = xs
+                                                    .get(host_idx + 1)
+                                                    .copied()
+                                                    .unwrap_or(x0 + 280.0);
+                                                px((x_host - x0 - 16.0).max(160.0))
                                             })
                                             .flex_row()
                                             .items_center()
                                             .gap_1()
+                                            .overflow_hidden()
                                             .child(
                                                 view()
                                                     .px_1p5()
@@ -11506,10 +11592,36 @@ fn seq_swimlane_view(seq_builder: SeqBuilder) -> impl IntoElement {
                                                     .py(px(0.5))
                                                     .rounded(px(3.5))
                                                     .min_w(px(0.0))
+                                                    .overflow_hidden()
                                                     .bg(bg_card())
                                                     .child(
                                                         mono(move || {
                                                             step.with(|s| s.label.clone())
+                                                        })
+                                                        .max_w(move || {
+                                                            let (host_idx, has_note) = step
+                                                                .with(|s| {
+                                                                    (s.host_idx, !s.note.is_empty())
+                                                                });
+                                                            let (xs, _) =
+                                                                seq_builder.diagram.with(|d| {
+                                                                    swimlane_layout(
+                                                                        d,
+                                                                        viewport_w.get(),
+                                                                    )
+                                                                });
+                                                            let x0 =
+                                                                xs.first().copied().unwrap_or(58.0);
+                                                            let x_host = xs
+                                                                .get(host_idx + 1)
+                                                                .copied()
+                                                                .unwrap_or(x0 + 280.0);
+                                                            let reserve = if has_note {
+                                                                180.0
+                                                            } else {
+                                                                56.0
+                                                            };
+                                                            px((x_host - x0 - reserve).max(120.0))
                                                         })
                                                         .number_of_lines(1)
                                                         .text_overflow(EllipsizeMode::Middle)
@@ -11561,9 +11673,534 @@ fn seq_swimlane_view(seq_builder: SeqBuilder) -> impl IntoElement {
         ))
 }
 
+fn dep_kind_prefix(kind: present::DepKind, lang: Lang) -> &'static str {
+    match (kind, lang) {
+        (present::DepKind::Cookie, Lang::Zh) => "🍪 Cookie 依赖",
+        (present::DepKind::Cookie, Lang::En) => "🍪 Cookie",
+        (present::DepKind::Token, Lang::Zh) => "🔑 令牌依赖",
+        (present::DepKind::Token, Lang::En) => "🔑 Token",
+        (present::DepKind::Redirect, Lang::Zh) => "↪ 重定向依赖",
+        (present::DepKind::Redirect, Lang::En) => "↪ Redirect",
+        (present::DepKind::QueryParam, Lang::Zh) => "🔗 参数依赖",
+        (present::DepKind::QueryParam, Lang::En) => "🔗 Query",
+        (present::DepKind::BodyOrPath, Lang::Zh) => "🔗 字段依赖",
+        (present::DepKind::BodyOrPath, Lang::En) => "🔗 Data",
+        (present::DepKind::Sequential, Lang::Zh) => "⏱ 时序后继",
+        (present::DepKind::Sequential, Lang::En) => "⏱ After",
+    }
+}
+
+fn seq_dependency_view(seq_builder: SeqBuilder) -> impl IntoElement {
+    let langs = ui_langs();
+    view()
+        .w_full()
+        .h(move || {
+            let bars = seq_builder.diagram.with(|d| d.bars.len());
+            if bars == 0 {
+                px(160.0)
+            } else {
+                let est = (44.0 + bars as f32 * 64.0).clamp(220.0, 500.0);
+                px(est)
+            }
+        })
+        .rounded(px(7.0))
+        .border_1()
+        .border_color(border_control())
+        .bg(bg_code())
+        .overflow_hidden()
+        .child(when(
+            move || seq_builder.diagram.with(|d| d.stages.is_empty()),
+            || {
+                view()
+                    .size_full()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        text(tr("请勾选至少一条流量", "Select at least one flow"))
+                            .text_size(px(12.0))
+                            .text_color(fg_muted()),
+                    )
+            },
+        ))
+        .child(when(
+            move || seq_builder.diagram.with(|d| !d.stages.is_empty()),
+            move || {
+                view()
+                    .size_full()
+                    .child(
+                        view()
+                            .h(px(30.0))
+                            .px_3()
+                            .flex_shrink_0()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .border_b_1()
+                            .border_b_color(border_subtle())
+                            .bg(bg_card())
+                            .child(
+                                text(move || {
+                                    let lang = ui_lang(langs);
+                                    seq_builder.diagram.with(|d| {
+                                        let stage_cnt = d.stages.len();
+                                        let conc_cnt = d
+                                            .stages
+                                            .iter()
+                                            .filter(|s| s.bar_indices.len() > 1)
+                                            .count();
+                                        let hard_cnt = d.hard_dep_count;
+                                        match lang {
+                                            Lang::Zh => format!(
+                                                "共 {stage_cnt} 个阶段 · {conc_cnt} 组并发 · 识别出 {hard_cnt} 处参数/Cookie 依赖"
+                                            ),
+                                            Lang::En => format!(
+                                                "{stage_cnt} stages · {conc_cnt} concurrent groups · {hard_cnt} data dependencies"
+                                            ),
+                                        }
+                                    })
+                                })
+                                .number_of_lines(1)
+                                .text_size(px(11.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(fg_secondary()),
+                            )
+                            .child(
+                                view()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        view()
+                                            .px_1p5()
+                                            .py(px(1.0))
+                                            .rounded(px(4.0))
+                                            .bg(accent_blue_soft())
+                                            .child(
+                                                text(tr("🔗 参数/Cookie 传递", "🔗 Data flow"))
+                                                    .text_size(px(10.0))
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .text_color(accent_blue_text()),
+                                            ),
+                                    )
+                                    .child(
+                                        view()
+                                            .px_1p5()
+                                            .py(px(1.0))
+                                            .rounded(px(4.0))
+                                            .bg(status_warn_bg())
+                                            .child(
+                                                text(tr("★ 关键路径", "★ Critical path"))
+                                                    .text_size(px(10.0))
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .text_color(status_warn_fg()),
+                                            ),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        scroll().flex_1().w_full().child(
+                            view()
+                                .w_full()
+                                .p_3()
+                                .child(each(
+                                    move || seq_builder.diagram.with(|d| d.stages.clone()),
+                                    |stage| stage.stage_no,
+                                    move |stage, _| {
+                                        view()
+                                            .w_full()
+                                            .child(when(
+                                                move || stage.with(|s| s.stage_no > 1),
+                                                move || {
+                                                    view()
+                                                        .w_full()
+                                                        .h(px(28.0))
+                                                        .flex_row()
+                                                        .items_center()
+                                                        .justify_center()
+                                                        .gap_2()
+                                                        .child(
+                                                            mono("↓")
+                                                                .text_size(px(13.0))
+                                                                .font_weight(FontWeight::BOLD)
+                                                                .text_color(accent_blue_text()),
+                                                        )
+                                                        .child(
+                                                            view()
+                                                                .px_2()
+                                                                .py(px(1.5))
+                                                                .rounded(px(4.0))
+                                                                .border_1()
+                                                                .border_color(border_subtle())
+                                                                .bg(bg_card())
+                                                                .child(
+                                                                    text(move || {
+                                                                        let lang = ui_lang(langs);
+                                                                        let indices = stage.with(|s| s.bar_indices.clone());
+                                                                        let st_no = stage.with(|s| s.stage_no);
+                                                                        let has_hard = seq_builder.diagram.with(|d| {
+                                                                            indices.iter().any(|&idx| {
+                                                                                d.bars
+                                                                                    .get(idx)
+                                                                                    .is_some_and(|b| b.deps.iter().any(|dep| dep.kind.is_hard()))
+                                                                            })
+                                                                        });
+                                                                        match (has_hard, lang) {
+                                                                            (true, Lang::Zh) => format!("携带前序阶段返回参数进入阶段 {st_no}"),
+                                                                            (true, Lang::En) => format!("Passes response data into Stage {st_no}"),
+                                                                            (false, Lang::Zh) => format!("等待阶段 {} 响应完成后触发", st_no - 1),
+                                                                            (false, Lang::En) => format!("Triggered after Stage {} completed", st_no - 1),
+                                                                        }
+                                                                    })
+                                                                    .text_size(px(10.5))
+                                                                    .text_color(fg_muted()),
+                                                                ),
+                                                        )
+                                                },
+                                            ))
+                                            .child(
+                                                view()
+                                                    .w_full()
+                                                    .rounded(px(7.0))
+                                                    .border_1()
+                                                    .border_color(border_control())
+                                                    .bg(bg_card())
+                                                    .overflow_hidden()
+                                                    .child(
+                                                        view()
+                                                            .h(px(26.0))
+                                                            .px_3()
+                                                            .flex_row()
+                                                            .items_center()
+                                                            .justify_between()
+                                                            .gap_2()
+                                                            .bg(bg_control())
+                                                            .border_b_1()
+                                                            .border_b_color(border_subtle())
+                                                            .child(
+                                                                view()
+                                                                    .flex_row()
+                                                                    .items_center()
+                                                                    .gap_2()
+                                                                    .child(
+                                                                        text(move || {
+                                                                            let no = stage.with(|s| s.stage_no);
+                                                                            match ui_lang(langs) {
+                                                                                Lang::Zh => format!("阶段 {no}"),
+                                                                                Lang::En => format!("Stage {no}"),
+                                                                            }
+                                                                        })
+                                                                        .text_size(px(11.0))
+                                                                        .font_weight(FontWeight::BOLD)
+                                                                        .text_color(fg_primary()),
+                                                                    )
+                                                                    .child(
+                                                                        view()
+                                                                            .px_1p5()
+                                                                            .py(px(0.5))
+                                                                            .rounded(px(4.0))
+                                                                            .bg(move || {
+                                                                                if stage.with(|s| s.bar_indices.len() > 1) {
+                                                                                    accent_blue_soft()
+                                                                                } else {
+                                                                                    bg_card()
+                                                                                }
+                                                                            })
+                                                                            .child(
+                                                                                text(move || {
+                                                                                    let count = stage.with(|s| s.bar_indices.len());
+                                                                                    match (count > 1, ui_lang(langs)) {
+                                                                                        (true, Lang::Zh) => format!("⚡ 并发 ×{count}"),
+                                                                                        (true, Lang::En) => format!("⚡ Concurrent ×{count}"),
+                                                                                        (false, Lang::Zh) => "串行单步".to_string(),
+                                                                                        (false, Lang::En) => "Sequential".to_string(),
+                                                                                    }
+                                                                                })
+                                                                                .text_size(px(10.0))
+                                                                                .font_weight(FontWeight::SEMIBOLD)
+                                                                                .text_color(move || {
+                                                                                    if stage.with(|s| s.bar_indices.len() > 1) {
+                                                                                        accent_blue_text()
+                                                                                    } else {
+                                                                                        fg_muted()
+                                                                                    }
+                                                                                }),
+                                                                            ),
+                                                                    ),
+                                                            )
+                                                            .child(
+                                                                mono(move || {
+                                                                    stage.with(|s| {
+                                                                        format!(
+                                                                            "[{}] · {}",
+                                                                            s.offset_label, s.span_label
+                                                                        )
+                                                                    })
+                                                                })
+                                                                .text_size(px(10.5))
+                                                                .text_color(fg_muted()),
+                                                            ),
+                                                    )
+                                                    .child(each(
+                                                        move || {
+                                                            let indices = stage.with(|s| s.bar_indices.clone());
+                                                            seq_builder.diagram.with(|d| {
+                                                                indices
+                                                                    .into_iter()
+                                                                    .filter_map(|idx| d.bars.get(idx).cloned())
+                                                                    .collect::<Vec<_>>()
+                                                            })
+                                                        },
+                                                        |bar| bar.flow_id,
+                                                        move |bar, row_idx| {
+                                                            view()
+                                                                .w_full()
+                                                                .px_3()
+                                                                .py_2()
+                                                                .gap_1p5()
+                                                                .border_t(move || {
+                                                                    if row_idx.get() > 0 {
+                                                                        px(1.0)
+                                                                    } else {
+                                                                        px(0.0)
+                                                                    }
+                                                                })
+                                                                .border_t_color(border_subtle())
+                                                                .child(
+                                                                    view()
+                                                                        .w_full()
+                                                                        .flex_row()
+                                                                        .items_center()
+                                                                        .gap_2()
+                                                                        .child(
+                                                                            view()
+                                                                                .w(px(3.0))
+                                                                                .h(px(16.0))
+                                                                                .rounded(px(99.0))
+                                                                                .flex_shrink_0()
+                                                                                .bg(move || {
+                                                                                    bar.with(|b| {
+                                                                                        if b.failed || b.status.is_some_and(|c| c >= 400) {
+                                                                                            status_err_fg()
+                                                                                        } else if b.status.is_some_and(|c| (300..400).contains(&c)) {
+                                                                                            status_warn_fg()
+                                                                                        } else if b.status.is_some() {
+                                                                                            status_ok_fg()
+                                                                                        } else {
+                                                                                            accent_blue()
+                                                                                        }
+                                                                                    })
+                                                                                }),
+                                                                        )
+                                                                        .child(
+                                                                            mono(move || {
+                                                                                format!(
+                                                                                    "#{}",
+                                                                                    bar.with(|b| b.flow_id)
+                                                                                )
+                                                                            })
+                                                                            .flex_shrink_0()
+                                                                            .text_size(px(11.5))
+                                                                            .text_color(fg_muted()),
+                                                                        )
+                                                                        .child(
+                                                                            view()
+                                                                                .px(px(5.0))
+                                                                                .py_0p5()
+                                                                                .rounded(px(4.0))
+                                                                                .flex_shrink_0()
+                                                                                .bg(move || {
+                                                                                    bar.with(|b| method_bg(&b.method))
+                                                                                })
+                                                                                .child(
+                                                                                    mono(move || {
+                                                                                        bar.with(|b| b.method.clone())
+                                                                                    })
+                                                                                    .text_size(px(10.5))
+                                                                                    .font_weight(FontWeight::BOLD)
+                                                                                    .text_color(move || {
+                                                                                        bar.with(|b| method_fg(&b.method))
+                                                                                    }),
+                                                                                ),
+                                                                        )
+                                                                        .child(
+                                                                            mono(move || {
+                                                                                bar.with(|b| {
+                                                                                    if b.host.is_empty() {
+                                                                                        b.target.clone()
+                                                                                    } else if b.target.starts_with('/') {
+                                                                                        format!("{}{}", b.host, b.target)
+                                                                                    } else {
+                                                                                        format!("{}/{}", b.host, b.target)
+                                                                                    }
+                                                                                })
+                                                                            })
+                                                                            .flex_1()
+                                                                            .min_w(px(0.0))
+                                                                            .number_of_lines(1)
+                                                                            .text_overflow(EllipsizeMode::Middle)
+                                                                            .text_size(px(12.0))
+                                                                            .font_weight(FontWeight::MEDIUM)
+                                                                            .text_color(fg_primary()),
+                                                                        )
+                                                                        .child(when(
+                                                                            move || bar.with(|b| b.on_critical_path),
+                                                                            || {
+                                                                                view()
+                                                                                    .px_1p5()
+                                                                                    .py(px(0.5))
+                                                                                    .rounded(px(3.5))
+                                                                                    .flex_shrink_0()
+                                                                                    .bg(status_warn_bg())
+                                                                                    .child(
+                                                                                        text(tr("★ 关键路径", "★ Critical"))
+                                                                                            .text_size(px(10.0))
+                                                                                            .font_weight(FontWeight::SEMIBOLD)
+                                                                                            .text_color(status_warn_fg()),
+                                                                                    )
+                                                                            },
+                                                                        ))
+                                                                        .child(
+                                                                            mono(move || {
+                                                                                bar.with(|b| list_status(b.status, b.failed))
+                                                                            })
+                                                                            .flex_shrink_0()
+                                                                            .text_size(px(11.5))
+                                                                            .font_weight(FontWeight::SEMIBOLD)
+                                                                            .text_color(move || {
+                                                                                bar.with(|b| http_status_fg(b.status, b.failed))
+                                                                            }),
+                                                                        )
+                                                                        .child(
+                                                                            mono(move || {
+                                                                                bar.with(|b| {
+                                                                                    if b.size_label.is_empty() {
+                                                                                        format!(
+                                                                                            "[{}] · {}",
+                                                                                            b.offset_label, b.duration_label
+                                                                                        )
+                                                                                    } else {
+                                                                                        format!(
+                                                                                            "[{}] · {} · {}",
+                                                                                            b.offset_label, b.duration_label, b.size_label
+                                                                                        )
+                                                                                    }
+                                                                                })
+                                                                            })
+                                                                            .flex_shrink_0()
+                                                                            .text_size(px(11.0))
+                                                                            .text_color(fg_muted()),
+                                                                        ),
+                                                                )
+                                                                .child(when(
+                                                                    move || {
+                                                                        bar.with(|b| {
+                                                                            !b.deps.is_empty()
+                                                                                || !b.comment.is_empty()
+                                                                        })
+                                                                    },
+                                                                    move || {
+                                                                        view()
+                                                                            .w_full()
+                                                                            .pl_3()
+                                                                            .flex_row()
+                                                                            .flex_wrap()
+                                                                            .items_center()
+                                                                            .gap_1p5()
+                                                                            .child(each(
+                                                                                move || {
+                                                                                    bar.with(|b| {
+                                                                                        b.deps
+                                                                                            .iter()
+                                                                                            .cloned()
+                                                                                            .enumerate()
+                                                                                            .collect::<Vec<_>>()
+                                                                                    })
+                                                                                },
+                                                                                |(idx, _)| *idx,
+                                                                                move |pair, _| {
+                                                                                    view()
+                                                                                        .px_2()
+                                                                                        .py(px(1.5))
+                                                                                        .rounded(px(4.0))
+                                                                                        .border_1()
+                                                                                        .border_color(move || {
+                                                                                            if pair.with(|(_, d)| d.kind.is_hard()) {
+                                                                                                accent_blue_border()
+                                                                                            } else {
+                                                                                                border_subtle()
+                                                                                            }
+                                                                                        })
+                                                                                        .bg(move || {
+                                                                                            if pair.with(|(_, d)| d.kind.is_hard()) {
+                                                                                                accent_blue_soft()
+                                                                                            } else {
+                                                                                                bg_control()
+                                                                                            }
+                                                                                        })
+                                                                                        .child(
+                                                                                            mono(move || {
+                                                                                                let lang = ui_lang(langs);
+                                                                                                pair.with(|(_, d)| {
+                                                                                                    let prefix = dep_kind_prefix(d.kind, lang);
+                                                                                                    format!(
+                                                                                                        "{prefix} #{} · {}",
+                                                                                                        d.from_flow_id, d.label
+                                                                                                    )
+                                                                                                })
+                                                                                            })
+                                                                                            .text_size(px(10.5))
+                                                                                            .font_weight(FontWeight::MEDIUM)
+                                                                                            .text_color(move || {
+                                                                                                if pair.with(|(_, d)| d.kind.is_hard()) {
+                                                                                                    accent_blue_text()
+                                                                                                } else {
+                                                                                                    fg_secondary()
+                                                                                                }
+                                                                                            }),
+                                                                                        )
+                                                                                },
+                                                                            ))
+                                                                            .child(when(
+                                                                                move || {
+                                                                                    bar.with(|b| !b.comment.is_empty())
+                                                                                },
+                                                                                move || {
+                                                                                    view()
+                                                                                        .px_2()
+                                                                                        .py(px(1.5))
+                                                                                        .rounded(px(4.0))
+                                                                                        .bg(accent_blue_soft())
+                                                                                        .child(
+                                                                                            text(move || {
+                                                                                                format!(
+                                                                                                    "# {}",
+                                                                                                    bar.with(|b| b.comment.clone())
+                                                                                                )
+                                                                                            })
+                                                                                            .text_size(px(10.5))
+                                                                                            .text_color(accent_blue_text()),
+                                                                                        )
+                                                                                },
+                                                                            ))
+                                                                    },
+                                                                ))
+                                                        },
+                                                    )),
+                                            )
+                                    },
+                                )),
+                        ),
+                    )
+            },
+        ))
+}
+
 fn seq_waterfall_view(seq_builder: SeqBuilder) -> impl IntoElement {
-    const WF_ROW_H: f32 = 28.0;
+    const WF_ROW_H: f32 = 30.0;
     const WF_HEADER_H: f32 = 28.0;
+    const WF_RULER_H: f32 = 22.0;
+    let track_w = signal(0.0_f32);
 
     view()
         .w_full()
@@ -11572,8 +12209,8 @@ fn seq_waterfall_view(seq_builder: SeqBuilder) -> impl IntoElement {
             if len == 0 {
                 px(160.0)
             } else {
-                let visible = len.clamp(3, 10) as f32;
-                px(WF_HEADER_H + visible * WF_ROW_H + 2.0)
+                let visible = len.clamp(3, 11) as f32;
+                px(WF_HEADER_H + WF_RULER_H + visible * WF_ROW_H + 2.0)
             }
         })
         .rounded(px(7.0))
@@ -11604,6 +12241,7 @@ fn seq_waterfall_view(seq_builder: SeqBuilder) -> impl IntoElement {
                         view()
                             .h(px(WF_HEADER_H))
                             .px_3()
+                            .flex_shrink_0()
                             .flex_row()
                             .items_center()
                             .justify_between()
@@ -11613,8 +12251,8 @@ fn seq_waterfall_view(seq_builder: SeqBuilder) -> impl IntoElement {
                             .bg(bg_card())
                             .child(
                                 text(tr(
-                                    "请求时间轴瀑布图（横向跨度体现并发重叠与耗时）",
-                                    "Timeline waterfall (horizontal spans show concurrency & latency)",
+                                    "关键路径瀑布图（折线连接上下游依赖，垂直重叠代表同时并发）",
+                                    "Critical-path waterfall (connectors show dependencies; vertical overlap shows concurrency)",
                                 ))
                                 .number_of_lines(1)
                                 .text_size(px(11.0))
@@ -11628,8 +12266,18 @@ fn seq_waterfall_view(seq_builder: SeqBuilder) -> impl IntoElement {
                                         if let Some(idx) = hovered
                                             && let Some(bar) = d.bars.get(idx)
                                         {
+                                            let dep_note = bar
+                                                .deps
+                                                .first()
+                                                .map(|dep| {
+                                                    format!(
+                                                        " · 依赖 #{} ({})",
+                                                        dep.from_flow_id, dep.label
+                                                    )
+                                                })
+                                                .unwrap_or_default();
                                             return format!(
-                                                "#{} {} {} · [+{:.0}ms .. +{:.0}ms] ({})",
+                                                "#{} {} {} · [+{:.0}ms .. +{:.0}ms] ({}){dep_note}",
                                                 bar.flow_id,
                                                 bar.method,
                                                 bar.target,
@@ -11652,182 +12300,397 @@ fn seq_waterfall_view(seq_builder: SeqBuilder) -> impl IntoElement {
                             ),
                     )
                     .child(
-                        scroll().flex_1().w_full().child(
-                            view()
-                                .w_full()
-                                .h(move || {
-                                    let len =
-                                        seq_builder.diagram.with(|d| d.bars.len()).max(1) as f32;
-                                    px(len * WF_ROW_H)
-                                })
-                                .flex_row()
-                                .child(
-                                    view()
-                                        .w(px(230.0))
-                                        .flex_shrink_0()
-                                        .border_r_1()
-                                        .border_r_color(border_subtle())
-                                        .bg(bg_card())
-                                        .child(each(
-                                            move || seq_builder.diagram.with(|d| d.bars.clone()),
-                                            |b| b.flow_id,
-                                            move |bar_item, index| {
+                        view()
+                            .h(px(WF_RULER_H))
+                            .w_full()
+                            .flex_shrink_0()
+                            .flex_row()
+                            .items_center()
+                            .border_b_1()
+                            .border_b_color(border_subtle())
+                            .bg(bg_control())
+                            .child(
+                                view()
+                                    .w(px(280.0))
+                                    .h_full()
+                                    .flex_shrink_0()
+                                    .px_2p5()
+                                    .flex_row()
+                                    .items_center()
+                                    .border_r_1()
+                                    .border_r_color(border_subtle())
+                                    .child(
+                                        text(tr("阶段 / 接口", "Stage / Endpoint"))
+                                            .text_size(px(10.5))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(fg_muted()),
+                                    ),
+                            )
+                            .child(
+                                view()
+                                    .flex_1()
+                                    .h_full()
+                                    .px_3()
+                                    .flex_row()
+                                    .items_center()
+                                    .justify_between()
+                                    .on_layout(move |bounds: &Bounds<Points>| {
+                                        let w = bounds.size.width.0;
+                                        if (w - track_w.get_untracked()).abs() > 1.0 {
+                                            track_w.set(w);
+                                        }
+                                    })
+                                    .children([0.0_f64, 0.25, 0.5, 0.75, 1.0].into_iter().map(
+                                        move |ratio| {
+                                            mono(move || {
+                                                let max_ms = seq_builder.diagram.with(|d| {
+                                                    d.bars
+                                                        .iter()
+                                                        .map(|b| b.end_ms)
+                                                        .fold(1.0_f64, f64::max)
+                                                });
+                                                let ms = max_ms * ratio;
+                                                if ms >= 1000.0 {
+                                                    format!("+{:.2}s", ms / 1000.0)
+                                                } else {
+                                                    format!("+{ms:.0}ms")
+                                                }
+                                            })
+                                            .text_size(px(10.0))
+                                            .text_color(fg_muted())
+                                        },
+                                    )),
+                            ),
+                    )
+                    .child(
+                        scroll().flex_1().w_full().child(each(
+                            move || seq_builder.diagram.with(|d| d.bars.clone()),
+                            |b| b.flow_id,
+                            move |bar_item, index| {
+                                view()
+                                    .w_full()
+                                    .h(px(WF_ROW_H))
+                                    .flex_row()
+                                    .items_center()
+                                    .bg(move || {
+                                        if seq_builder.hover_bar.get() == Some(index.get()) {
+                                            bg_control_hover()
+                                        } else if index.get() % 2 == 1 {
+                                            bg_code()
+                                        } else {
+                                            bg_card()
+                                        }
+                                    })
+                                    .border_t(
+                                        move || {
+                                            if index.get() > 0 { px(1.0) } else { px(0.0) }
+                                        },
+                                    )
+                                    .border_t_color(border_subtle())
+                                    .on_mouse_move(move |_: &MouseEvent| {
+                                        seq_builder.hover_bar.set(Some(index.get()));
+                                    })
+                                    .on_mouse_leave(move |_: &MouseEvent| {
+                                        if seq_builder.hover_bar.get() == Some(index.get()) {
+                                            seq_builder.hover_bar.set(None);
+                                        }
+                                    })
+                                    .child(
+                                        view()
+                                            .w(px(280.0))
+                                            .h_full()
+                                            .px_2p5()
+                                            .gap_1p5()
+                                            .flex_shrink_0()
+                                            .flex_row()
+                                            .items_center()
+                                            .border_r_1()
+                                            .border_r_color(border_subtle())
+                                            .child(
                                                 view()
-                                                    .h(px(WF_ROW_H))
-                                                    .px_2p5()
-                                                    .gap_1p5()
-                                                    .flex_row()
-                                                    .items_center()
-                                                    .border_t(move || {
-                                                        if index.get() > 0 {
-                                                            px(1.0)
-                                                        } else {
-                                                            px(0.0)
-                                                        }
-                                                    })
-                                                    .border_t_color(border_subtle())
+                                                    .px_1()
+                                                    .py(px(0.5))
+                                                    .rounded(px(3.0))
+                                                    .flex_shrink_0()
+                                                    .bg(bg_control())
                                                     .child(
                                                         mono(move || {
                                                             format!(
-                                                                "#{}",
-                                                                bar_item.with(|b| b.flow_id)
+                                                                "S{}",
+                                                                bar_item.with(|b| b.stage)
                                                             )
                                                         })
-                                                        .flex_shrink_0()
-                                                        .text_size(px(10.5))
-                                                        .text_color(fg_muted()),
-                                                    )
-                                                    .child(
-                                                        view()
-                                                            .px(px(4.5))
-                                                            .py(px(1.0))
-                                                            .rounded(px(3.5))
-                                                            .flex_shrink_0()
-                                                            .bg(move || {
-                                                                bar_item
-                                                                    .with(|b| method_bg(&b.method))
-                                                            })
-                                                            .child(
-                                                                mono(move || {
-                                                                    bar_item.with(|b| {
-                                                                        b.method.clone()
-                                                                    })
-                                                                })
-                                                                .text_size(px(9.5))
-                                                                .font_weight(FontWeight::BOLD)
-                                                                .text_color(move || {
-                                                                    bar_item.with(|b| {
-                                                                        method_fg(&b.method)
-                                                                    })
-                                                                }),
-                                                            ),
-                                                    )
-                                                    .child(
-                                                        mono(move || {
-                                                            bar_item.with(|b| b.target.clone())
-                                                        })
-                                                        .flex_1()
-                                                        .min_w(px(0.0))
-                                                        .number_of_lines(1)
-                                                        .text_overflow(EllipsizeMode::Middle)
-                                                        .text_size(px(11.0))
-                                                        .text_color(fg_primary()),
-                                                    )
-                                                    .child(
-                                                        mono(move || {
-                                                            bar_item.with(|b| {
-                                                                b.duration_label.clone()
-                                                            })
-                                                        })
-                                                        .flex_shrink_0()
-                                                        .text_size(px(10.5))
-                                                        .text_color(move || {
-                                                            bar_item.with(|b| {
-                                                                http_status_fg(b.status, b.failed)
-                                                            })
-                                                        }),
-                                                    )
-                                            },
-                                        )),
-                                )
-                                .child(
-                                    view()
-                                        .flex_1()
-                                        .h_full()
-                                        .px_2p5()
-                                        .child(
-                                            nsh_base::plot::plot()
-                                                .size_full()
-                                                .data(move || {
-                                                    seq_builder.diagram.with(|d| {
-                                                        let starts: Vec<f64> = d
-                                                            .bars
-                                                            .iter()
-                                                            .map(|b| b.start_ms)
-                                                            .collect();
-                                                        let ends: Vec<f64> = d
-                                                            .bars
-                                                            .iter()
-                                                            .map(|b| b.end_ms)
-                                                            .collect();
-                                                        nsh_core::element::Rows::from_columns(
-                                                            d.bars.len(),
-                                                            [
-                                                                ("start_ms".into(), starts),
-                                                                ("end_ms".into(), ends),
-                                                            ],
-                                                        )
+                                                        .text_size(px(9.5))
+                                                        .font_weight(FontWeight::BOLD)
+                                                        .text_color(accent_blue_text()),
+                                                    ),
+                                            )
+                                            .child(
+                                                mono(move || {
+                                                    format!("#{}", bar_item.with(|b| b.flow_id))
+                                                })
+                                                .flex_shrink_0()
+                                                .text_size(px(10.5))
+                                                .text_color(fg_muted()),
+                                            )
+                                            .child(
+                                                view()
+                                                    .px(px(4.5))
+                                                    .py(px(1.0))
+                                                    .rounded(px(3.5))
+                                                    .flex_shrink_0()
+                                                    .bg(move || {
+                                                        bar_item.with(|b| method_bg(&b.method))
                                                     })
+                                                    .child(
+                                                        mono(move || {
+                                                            bar_item.with(|b| b.method.clone())
+                                                        })
+                                                        .text_size(px(9.5))
+                                                        .font_weight(FontWeight::BOLD)
+                                                        .text_color(move || {
+                                                            bar_item.with(|b| method_fg(&b.method))
+                                                        }),
+                                                    ),
+                                            )
+                                            .child(
+                                                mono(move || bar_item.with(|b| b.target.clone()))
+                                                    .flex_1()
+                                                    .min_w(px(0.0))
+                                                    .number_of_lines(1)
+                                                    .text_overflow(EllipsizeMode::Middle)
+                                                    .text_size(px(11.0))
+                                                    .text_color(fg_primary()),
+                                            )
+                                            .child(
+                                                mono(move || {
+                                                    bar_item
+                                                        .with(|b| list_status(b.status, b.failed))
                                                 })
-                                                .y_scale({
-                                                    let mut band =
-                                                        nsh_base::plot::BandScale::default();
-                                                    band.padding_inner = Percentage(0.34);
-                                                    band.padding_outer = Percentage(0.17);
-                                                    nsh_base::plot::Scale::Band(band)
-                                                })
-                                                .x_scale(move || {
-                                                    let max_ms = seq_builder.diagram.with(|d| {
-                                                        d.bars
-                                                            .iter()
-                                                            .map(|b| b.end_ms)
-                                                            .fold(1.0_f64, f64::max)
-                                                    });
-                                                    nsh_base::plot::Scale::Linear {
-                                                        domain: Some([0.0, max_ms]),
-                                                        reverse: false,
+                                                .flex_shrink_0()
+                                                .text_size(px(10.5))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(move || {
+                                                    bar_item.with(|b| {
+                                                        http_status_fg(b.status, b.failed)
+                                                    })
+                                                }),
+                                            ),
+                                    )
+                                    .child(
+                                        view()
+                                            .flex_1()
+                                            .h_full()
+                                            .relative()
+                                            .child(
+                                                canvas(move || {
+                                                    let row_i = index.get();
+                                                    let w = (track_w.get() - 24.0).max(200.0);
+                                                    let pad_x = 12.0_f32;
+                                                    let bars = seq_builder
+                                                        .diagram
+                                                        .with(|d| d.bars.clone());
+                                                    let max_ms = bars
+                                                        .iter()
+                                                        .map(|b| b.end_ms)
+                                                        .fold(1.0_f64, f64::max)
+                                                        as f32;
+                                                    let y_mid = WF_ROW_H * 0.5;
+                                                    let mut p = Painter::new();
+
+                                                    // 1. Vertical time grid lines for this row
+                                                    for ratio in [0.0_f32, 0.25, 0.5, 0.75, 1.0] {
+                                                        let gx = pad_x + ratio * w;
+                                                        p = p
+                                                            .line_width(1.0)
+                                                            .stroke_color(color(border_subtle()))
+                                                            .stroke_svg(&format!(
+                                                                "M{gx:.1} 0 L{gx:.1} {WF_ROW_H:.1}"
+                                                            ));
                                                     }
+
+                                                    // 2. Cross-row dependency connector segments passing through `row_i`
+                                                    for (target_idx, target_bar) in
+                                                        bars.iter().enumerate()
+                                                    {
+                                                        for dep in &target_bar.deps {
+                                                            let from_idx = dep.from_index;
+                                                            if from_idx >= target_idx
+                                                                || row_i < from_idx
+                                                                || row_i > target_idx
+                                                            {
+                                                                continue;
+                                                            }
+                                                            let Some(parent) = bars.get(from_idx)
+                                                            else {
+                                                                continue;
+                                                            };
+                                                            let x_parent_end = pad_x
+                                                                + (parent.end_ms as f32 / max_ms)
+                                                                    * w;
+                                                            let x_target_start = pad_x
+                                                                + (target_bar.start_ms as f32
+                                                                    / max_ms)
+                                                                    * w;
+                                                            let elbow_x = x_parent_end
+                                                                .min(x_target_start - 2.0)
+                                                                .max(pad_x);
+                                                            let conn_color = if dep.kind.is_hard() {
+                                                                color(accent_blue())
+                                                            } else {
+                                                                color(status_warn_fg())
+                                                            };
+                                                            let lw = if dep.kind.is_hard() {
+                                                                1.5
+                                                            } else {
+                                                                1.1
+                                                            };
+                                                            if row_i == from_idx {
+                                                                p = p
+                                                                    .line_width(lw)
+                                                                    .stroke_color(conn_color)
+                                                                    .stroke_svg(&format!(
+                                                                        "M{x_parent_end:.1} {y_mid:.1} L{elbow_x:.1} {y_mid:.1} L{elbow_x:.1} {WF_ROW_H:.1}"
+                                                                    ));
+                                                            } else if row_i < target_idx {
+                                                                p = p
+                                                                    .line_width(lw)
+                                                                    .stroke_color(conn_color)
+                                                                    .stroke_svg(&format!(
+                                                                        "M{elbow_x:.1} 0 L{elbow_x:.1} {WF_ROW_H:.1}"
+                                                                    ));
+                                                            } else {
+                                                                p = p
+                                                                    .line_width(lw)
+                                                                    .stroke_color(conn_color)
+                                                                    .stroke_svg(&format!(
+                                                                        "M{elbow_x:.1} 0 L{elbow_x:.1} {y_mid:.1} L{x_target_start:.1} {y_mid:.1}"
+                                                                    ));
+                                                                let ax = (x_target_start - 4.2)
+                                                                    .max(pad_x);
+                                                                let ay1 = y_mid - 2.6;
+                                                                let ay2 = y_mid + 2.6;
+                                                                p = p
+                                                                    .line_width(1.4)
+                                                                    .stroke_color(conn_color)
+                                                                    .stroke_svg(&format!(
+                                                                        "M{ax:.1} {ay1:.1} L{x_target_start:.1} {y_mid:.1} L{ax:.1} {ay2:.1}"
+                                                                    ));
+                                                            }
+                                                        }
+                                                    }
+
+                                                    // 3. Horizontal Span Bar for `row_i`
+                                                    if let Some(bar) = bars.get(row_i) {
+                                                        let x1 = pad_x
+                                                            + (bar.start_ms as f32 / max_ms) * w;
+                                                        let x2 = pad_x
+                                                            + (bar.end_ms as f32 / max_ms) * w;
+                                                        let bw = (x2 - x1).max(5.0);
+                                                        let y_top = 7.0_f32;
+                                                        let bh = WF_ROW_H - 14.0;
+                                                        let fill = color(
+                                                            if bar.failed
+                                                                || bar
+                                                                    .status
+                                                                    .is_some_and(|c| c >= 400)
+                                                            {
+                                                                status_err_fg()
+                                                            } else if bar.status.is_some_and(|c| {
+                                                                (300..400).contains(&c)
+                                                            }) {
+                                                                status_warn_fg()
+                                                            } else if bar.status.is_some() {
+                                                                status_ok_fg()
+                                                            } else {
+                                                                accent_blue()
+                                                            },
+                                                        );
+                                                        let rect_svg = format!(
+                                                            "M{x1:.1} {y_top:.1} H{:.1} V{:.1} H{x1:.1} Z",
+                                                            x1 + bw,
+                                                            y_top + bh
+                                                        );
+                                                        p = p.fill_color(fill).fill_svg(&rect_svg);
+                                                        if bar.on_critical_path {
+                                                            p = p
+                                                                .line_width(1.5)
+                                                                .stroke_color(color(
+                                                                    status_warn_fg(),
+                                                                ))
+                                                                .stroke_svg(&rect_svg);
+                                                        }
+                                                    }
+                                                    p
                                                 })
-                                                .on_hover_change(move |idx: &Option<u32>| {
-                                                    seq_builder
-                                                        .hover_bar
-                                                        .set(idx.map(|i| i as usize));
-                                                })
-                                                .child(
-                                                    nsh_base::plot::grid()
-                                                        .text_color(border_control()),
-                                                )
-                                                .child(
-                                                    nsh_base::plot::bar()
-                                                        .base(nsh_base::plot::BarBase::Row(
-                                                            nsh_core::element::RowAccessor::key(
-                                                                "start_ms",
-                                                            ),
-                                                        ))
-                                                        .value(nsh_core::element::RowAccessor::key(
-                                                            "end_ms",
-                                                        ))
-                                                        .corner_radii(
-                                                            nsh_base::plot::BarCornerRadii::all(px(
-                                                                3.5,
-                                                            )),
-                                                        )
-                                                        .inactive_opacity(Percentage(0.55))
-                                                        .text_color(accent_blue()),
-                                                ),
-                                        ),
-                                ),
-                        ),
+                                                .size_full(),
+                                            )
+                                            .child(
+                                                view()
+                                                    .absolute()
+                                                    .left(move || {
+                                                        let w = (track_w.get() - 24.0).max(200.0);
+                                                        let max_ms =
+                                                            seq_builder.diagram.with(|d| {
+                                                                d.bars
+                                                                    .iter()
+                                                                    .map(|b| b.end_ms)
+                                                                    .fold(1.0_f64, f64::max)
+                                                            })
+                                                                as f32;
+                                                        let (start_ms, end_ms) = bar_item.with(
+                                                            |b| {
+                                                                (
+                                                                    b.start_ms as f32,
+                                                                    b.end_ms as f32,
+                                                                )
+                                                            },
+                                                        );
+                                                        let x1 = 12.0 + (start_ms / max_ms) * w;
+                                                        let x2 = 12.0 + (end_ms / max_ms) * w;
+                                                        let after = x1.max(x2) + 6.0;
+                                                        if after + 120.0 < w + 12.0 {
+                                                            px(after)
+                                                        } else {
+                                                            px((x1 + 4.0)
+                                                                .min(w - 96.0)
+                                                                .max(14.0))
+                                                        }
+                                                    })
+                                                    .top(px(5.0))
+                                                    .px_1p5()
+                                                    .py(px(0.5))
+                                                    .rounded(px(3.0))
+                                                    .bg(bg_card())
+                                                    .child(
+                                                        mono(move || {
+                                                            bar_item.with(|b| {
+                                                                if let Some(dep) = b.deps.first() {
+                                                                    if dep.kind.is_hard() {
+                                                                        format!(
+                                                                            "{} · 🔗#{}",
+                                                                            b.duration_label,
+                                                                            dep.from_flow_id
+                                                                        )
+                                                                    } else {
+                                                                        format!(
+                                                                            "{} · ⏱#{}",
+                                                                            b.duration_label,
+                                                                            dep.from_flow_id
+                                                                        )
+                                                                    }
+                                                                } else {
+                                                                    b.duration_label.clone()
+                                                                }
+                                                            })
+                                                        })
+                                                        .text_size(px(10.0))
+                                                        .text_color(fg_secondary()),
+                                                    ),
+                                            ),
+                                    )
+                            },
+                        )),
                     )
             },
         ))
@@ -12287,26 +13150,36 @@ fn sequence_diagram_panel(seq_builder: SeqBuilder, controls: Arc<Controls>) -> i
                                 .flex_row()
                                 .items_center()
                                 .gap(px(2.0))
-                                .child(seq_mode_tab(seq_builder.view_mode, 0, "时序图", "Diagram"))
                                 .child(seq_mode_tab(
                                     seq_builder.view_mode,
-                                    1,
+                                    0,
                                     "瀑布图",
                                     "Waterfall",
                                 ))
-                                .child(seq_mode_tab(seq_builder.view_mode, 2, "源码", "Mermaid")),
+                                .child(seq_mode_tab(seq_builder.view_mode, 1, "时序图", "Sequence"))
+                                .child(seq_mode_tab(
+                                    seq_builder.view_mode,
+                                    2,
+                                    "依赖图",
+                                    "Dependency",
+                                ))
+                                .child(seq_mode_tab(seq_builder.view_mode, 3, "源码", "Mermaid")),
                         ),
                 )
                 .child(when(
                     move || seq_builder.view_mode.get() == 0,
-                    move || seq_swimlane_view(seq_builder),
-                ))
-                .child(when(
-                    move || seq_builder.view_mode.get() == 1,
                     move || seq_waterfall_view(seq_builder),
                 ))
                 .child(when(
+                    move || seq_builder.view_mode.get() == 1,
+                    move || seq_swimlane_view(seq_builder),
+                ))
+                .child(when(
                     move || seq_builder.view_mode.get() == 2,
+                    move || seq_dependency_view(seq_builder),
+                ))
+                .child(when(
+                    move || seq_builder.view_mode.get() == 3,
                     move || seq_mermaid_source_view(seq_builder),
                 )),
         )

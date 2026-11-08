@@ -820,6 +820,40 @@ pub fn flow_snapshot(flow: &Flow, lang: Lang) -> String {
     out
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DepKind {
+    Redirect,
+    Cookie,
+    Token,
+    QueryParam,
+    BodyOrPath,
+    Sequential,
+}
+
+impl DepKind {
+    pub fn is_hard(self) -> bool {
+        !matches!(self, Self::Sequential)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct FlowDependency {
+    pub from_flow_id: u64,
+    pub from_index: usize,
+    pub kind: DepKind,
+    pub label: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DependencyStage {
+    pub stage_no: usize,
+    pub start_ms: f64,
+    pub end_ms: f64,
+    pub offset_label: String,
+    pub span_label: String,
+    pub bar_indices: Vec<usize>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct SequenceStep {
     pub step_no: usize,
@@ -842,9 +876,15 @@ pub struct WaterfallBar {
     pub slow: bool,
     pub host: String,
     pub target: String,
+    pub comment: String,
     pub start_ms: f64,
     pub end_ms: f64,
+    pub offset_label: String,
     pub duration_label: String,
+    pub size_label: String,
+    pub stage: usize,
+    pub deps: Vec<FlowDependency>,
+    pub on_critical_path: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -852,7 +892,10 @@ pub struct SequenceDiagramData {
     pub hosts: Vec<String>,
     pub steps: Vec<SequenceStep>,
     pub bars: Vec<WaterfallBar>,
+    pub stages: Vec<DependencyStage>,
+    pub hard_dep_count: usize,
     pub mermaid: String,
+    pub flowchart_mermaid: String,
 }
 
 /// Builds both the structured visual sequence/waterfall diagram data and the
@@ -872,7 +915,10 @@ pub fn build_sequence_diagram_data(
             hosts: Vec::new(),
             steps: Vec::new(),
             bars: Vec::new(),
+            stages: Vec::new(),
+            hard_dep_count: 0,
             mermaid: lines.join("\n"),
+            flowchart_mermaid: "flowchart TD".to_string(),
         };
     }
     let mut sorted: Vec<&Flow> = flows.to_vec();
@@ -916,12 +962,8 @@ pub fn build_sequence_diagram_data(
             .unwrap_or(flow.started);
         end_times.push(end_time);
 
-        let start_ms = flow
-            .started
-            .duration_since(base_start)
-            .unwrap_or_default()
-            .as_secs_f64()
-            * 1000.0;
+        let delta = flow.started.duration_since(base_start).unwrap_or_default();
+        let start_ms = delta.as_secs_f64() * 1000.0;
         let dur_ms = end_time
             .duration_since(flow.started)
             .unwrap_or_default()
@@ -933,6 +975,12 @@ pub fn build_sequence_diagram_data(
         } else {
             flow.method.trim().to_string()
         };
+        let res_bytes = flow.res_bytes();
+        let size_label = if res_bytes > 0 {
+            format_count(res_bytes as u64)
+        } else {
+            String::new()
+        };
         bars.push(WaterfallBar {
             flow_id: flow.id,
             method: method_raw,
@@ -941,11 +989,20 @@ pub fn build_sequence_diagram_data(
             slow: flow.finished_at.is_some() && is_slow(flow.started, flow.finished_at, now),
             host,
             target: target_raw,
+            comment: flow.comment.trim().to_string(),
             start_ms,
             end_ms,
+            offset_label: format!("+{}", format_delta(delta)),
             duration_label: format_elapsed(flow.started, flow.finished_at),
+            size_label,
+            stage: 1,
+            deps: Vec::new(),
+            on_critical_path: false,
         });
     }
+
+    let (stages, hard_dep_count, flowchart_mermaid) =
+        analyze_flow_dependencies_and_stages(&sorted, &mut bars);
 
     // Detect if a flow overlaps in time with another flow targeting the same host
     // so response arrows on shared lifelines can include the path to disambiguate.
@@ -1106,8 +1163,672 @@ pub fn build_sequence_diagram_data(
         hosts: participants.into_iter().map(|(h, _)| h).collect(),
         steps,
         bars,
+        stages,
+        hard_dep_count,
         mermaid: lines.join("\n"),
+        flowchart_mermaid,
     }
+}
+
+#[derive(Clone)]
+struct ProducedToken {
+    path: String,
+    key: String,
+    value: String,
+}
+
+#[derive(Clone, Default)]
+struct ProducedArtifacts {
+    redirect_location: Option<String>,
+    cookies: Vec<(String, String)>,
+    tokens: Vec<ProducedToken>,
+}
+
+fn is_id_or_token_key(key: &str) -> bool {
+    let k = key.trim().to_ascii_lowercase();
+    if k.is_empty() {
+        return false;
+    }
+    matches!(
+        k.as_str(),
+        "id" | "uid"
+            | "uuid"
+            | "guid"
+            | "token"
+            | "access_token"
+            | "refresh_token"
+            | "id_token"
+            | "auth_token"
+            | "ticket"
+            | "code"
+            | "key"
+            | "secret"
+            | "nonce"
+            | "cursor"
+            | "next_cursor"
+            | "page_token"
+            | "session"
+            | "session_id"
+            | "sid"
+            | "sn"
+            | "seq"
+            | "order_no"
+            | "trace_id"
+            | "request_id"
+    ) || k.ends_with("_id")
+        || k.ends_with("id") && k.len() >= 3
+        || k.ends_with("_token")
+        || k.ends_with("token")
+        || k.ends_with("_code")
+        || k.ends_with("_key")
+        || k.ends_with("_no")
+        || k.ends_with("_sn")
+}
+
+fn is_trivial_scalar(val: &str) -> bool {
+    let lower = val.trim().to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "" | "true"
+            | "false"
+            | "null"
+            | "none"
+            | "nil"
+            | "ok"
+            | "success"
+            | "error"
+            | "fail"
+            | "failed"
+            | "pending"
+            | "get"
+            | "post"
+            | "put"
+            | "delete"
+            | "patch"
+            | "head"
+            | "options"
+            | "utf-8"
+            | "gzip"
+            | "br"
+            | "deflate"
+            | "keep-alive"
+            | "close"
+            | "zh"
+            | "en"
+            | "zh-cn"
+            | "en-us"
+            | "0"
+            | "1"
+            | "-1"
+            | "200"
+            | "201"
+            | "204"
+            | "301"
+            | "302"
+            | "304"
+            | "400"
+            | "401"
+            | "403"
+            | "404"
+            | "500"
+    )
+}
+
+fn keys_compatible(src_key: &str, dst_key: &str) -> bool {
+    let a = src_key.trim().to_ascii_lowercase();
+    let b = dst_key.trim().to_ascii_lowercase();
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    if a == b || a.ends_with(&b) || b.ends_with(&a) {
+        return true;
+    }
+    is_id_or_token_key(&a) && is_id_or_token_key(&b)
+}
+
+fn collect_json_scalars(
+    val: &serde_json::Value,
+    prefix: &str,
+    last_key: &str,
+    depth: usize,
+    out: &mut Vec<ProducedToken>,
+) {
+    if depth > 4 || out.len() >= 64 {
+        return;
+    }
+    match val {
+        serde_json::Value::Object(map) => {
+            for (k, v) in map {
+                let next_prefix = if prefix.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{prefix}.{k}")
+                };
+                collect_json_scalars(v, &next_prefix, k, depth + 1, out);
+                if out.len() >= 64 {
+                    break;
+                }
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for (idx, v) in arr.iter().take(6).enumerate() {
+                let next_prefix = format!("{prefix}[{idx}]");
+                collect_json_scalars(v, &next_prefix, last_key, depth + 1, out);
+                if out.len() >= 64 {
+                    break;
+                }
+            }
+        }
+        serde_json::Value::String(s) => {
+            let trimmed = s.trim();
+            if trimmed.len() >= 3
+                && trimmed.len() <= 180
+                && !trimmed.contains(char::is_whitespace)
+                && !trimmed.starts_with("http://")
+                && !trimmed.starts_with("https://")
+                && !trimmed.starts_with('/')
+                && !is_trivial_scalar(trimmed)
+                && (trimmed.len() >= 6 || is_id_or_token_key(last_key))
+                && !out.iter().any(|t| t.value == trimmed)
+            {
+                out.push(ProducedToken {
+                    path: if prefix.is_empty() {
+                        "body".to_string()
+                    } else {
+                        prefix.to_string()
+                    },
+                    key: last_key.to_string(),
+                    value: trimmed.to_string(),
+                });
+            }
+        }
+        serde_json::Value::Number(n) => {
+            let s = n.to_string();
+            if s.len() >= 2
+                && s.len() <= 32
+                && !s.contains('.')
+                && !is_trivial_scalar(&s)
+                && is_id_or_token_key(last_key)
+                && !out.iter().any(|t| t.value == s)
+            {
+                out.push(ProducedToken {
+                    path: if prefix.is_empty() {
+                        "body".to_string()
+                    } else {
+                        prefix.to_string()
+                    },
+                    key: last_key.to_string(),
+                    value: s,
+                });
+            }
+        }
+        _ => {}
+    }
+}
+
+fn extract_produced_artifacts(flow: &Flow) -> ProducedArtifacts {
+    let mut out = ProducedArtifacts::default();
+    if matches!(flow.status, Some(301 | 302 | 303 | 307 | 308)) {
+        for (name, val) in &flow.response_headers {
+            if name.eq_ignore_ascii_case("location") && !val.trim().is_empty() {
+                out.redirect_location = Some(val.trim().to_string());
+                break;
+            }
+        }
+    }
+    for (name, val) in &flow.response_headers {
+        if name.eq_ignore_ascii_case("set-cookie") {
+            let pair = val.split(';').next().unwrap_or("").trim();
+            if let Some((ck_name, ck_val)) = pair.split_once('=') {
+                let ck_name = ck_name.trim();
+                let ck_val = ck_val.trim();
+                if !ck_name.is_empty() && ck_val.len() >= 3 && !is_trivial_scalar(ck_val) {
+                    out.cookies.push((ck_name.to_string(), ck_val.to_string()));
+                }
+            }
+        } else if matches!(
+            name.to_ascii_lowercase().as_str(),
+            "x-auth-token"
+                | "x-csrf-token"
+                | "x-xsrf-token"
+                | "etag"
+                | "x-request-id"
+                | "x-trace-id"
+                | "authorization"
+        ) {
+            let trimmed = val.trim().trim_matches('"');
+            if trimmed.len() >= 4 && !is_trivial_scalar(trimmed) {
+                out.tokens.push(ProducedToken {
+                    path: format!("Header:{name}"),
+                    key: name.clone(),
+                    value: trimmed.to_string(),
+                });
+            }
+        }
+    }
+    let res_bytes = &flow.response_body;
+    if !res_bytes.is_empty()
+        && res_bytes.len() <= 256 * 1024
+        && let Ok(text) = std::str::from_utf8(res_bytes)
+        && looks_like_json(text)
+        && let Ok(json) = serde_json::from_str::<serde_json::Value>(text)
+    {
+        collect_json_scalars(&json, "", "", 0, &mut out.tokens);
+    }
+    out
+}
+
+fn is_ignored_req_header(name: &str) -> bool {
+    let lower = name.trim().to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "host"
+            | "user-agent"
+            | "accept"
+            | "accept-encoding"
+            | "accept-language"
+            | "connection"
+            | "proxy-connection"
+            | "content-length"
+            | "content-type"
+            | "origin"
+            | "referer"
+            | "cookie"
+            | "cache-control"
+            | "pragma"
+            | "upgrade-insecure-requests"
+            | "dnt"
+            | "priority"
+            | "te"
+    ) || lower.starts_with("sec-")
+}
+
+fn analyze_flow_dependencies_and_stages(
+    sorted: &[&Flow],
+    bars: &mut [WaterfallBar],
+) -> (Vec<DependencyStage>, usize, String) {
+    let n = sorted.len();
+    let produced: Vec<ProducedArtifacts> = sorted
+        .iter()
+        .map(|f| extract_produced_artifacts(f))
+        .collect();
+
+    let mut hard_dep_count = 0usize;
+
+    for j in 1..n {
+        let flow_j = sorted[j];
+        let mut deps: Vec<FlowDependency> = Vec::new();
+
+        // 1. Check Redirect Location from earlier 3xx responses
+        for i in (0..j).rev() {
+            if let Some(loc) = &produced[i].redirect_location
+                && (flow_j.url == *loc
+                    || flow_j.path == *loc
+                    || (!flow_j.path.is_empty()
+                        && flow_j.path != "/"
+                        && loc.ends_with(&flow_j.path)))
+            {
+                deps.push(FlowDependency {
+                    from_flow_id: sorted[i].id,
+                    from_index: i,
+                    kind: DepKind::Redirect,
+                    label: "Location 重定向".to_string(),
+                });
+                break;
+            }
+        }
+
+        // 2. Check Cookie dependencies (`Set-Cookie` -> `Cookie`)
+        for (h_name, h_val) in &flow_j.request_headers {
+            if !h_name.eq_ignore_ascii_case("cookie") {
+                continue;
+            }
+            for part in h_val.split(';') {
+                let Some((ck_name, ck_val)) = part.trim().split_once('=') else {
+                    continue;
+                };
+                let ck_name = ck_name.trim();
+                let ck_val = ck_val.trim();
+                if ck_name.is_empty() || ck_val.is_empty() {
+                    continue;
+                }
+                for i in (0..j).rev() {
+                    if produced[i]
+                        .cookies
+                        .iter()
+                        .any(|(k, v)| k.eq_ignore_ascii_case(ck_name) && v == ck_val)
+                    {
+                        let label = format!("Set-Cookie: {ck_name}");
+                        if !deps.iter().any(|d| d.from_index == i && d.label == label) {
+                            deps.push(FlowDependency {
+                                from_flow_id: sorted[i].id,
+                                from_index: i,
+                                kind: DepKind::Cookie,
+                                label,
+                            });
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        // 3. Check Request Headers (`Authorization`, `X-*`, `If-None-Match`, etc.)
+        for (h_name, h_val) in &flow_j.request_headers {
+            if is_ignored_req_header(h_name) {
+                continue;
+            }
+            let h_trimmed = h_val.trim();
+            if h_trimmed.len() < 4 {
+                continue;
+            }
+            let bearer_stripped = h_trimmed
+                .strip_prefix("Bearer ")
+                .or_else(|| h_trimmed.strip_prefix("bearer "))
+                .map(str::trim)
+                .unwrap_or(h_trimmed);
+            for i in (0..j).rev() {
+                if let Some(tok) = produced[i].tokens.iter().find(|t| {
+                    t.value.len() >= 6 && (t.value == h_trimmed || t.value == bearer_stripped)
+                }) {
+                    let label = format!("{} → Header:{h_name}", tok.path);
+                    if !deps.iter().any(|d| d.label == label) {
+                        deps.push(FlowDependency {
+                            from_flow_id: sorted[i].id,
+                            from_index: i,
+                            kind: DepKind::Token,
+                            label,
+                        });
+                    }
+                    break;
+                }
+            }
+        }
+
+        // 4. Check Query Parameters (`?key=val`)
+        let raw_target = resolve_flow_target(flow_j, true);
+        if let Some((_, q_str)) = raw_target.split_once('?') {
+            let q_clean = q_str.split('#').next().unwrap_or(q_str);
+            for (q_key, q_val) in form_pairs(q_clean) {
+                let q_val = q_val.trim();
+                if q_val.len() < 2 || is_trivial_scalar(q_val) {
+                    continue;
+                }
+                for i in (0..j).rev() {
+                    if let Some(tok) = produced[i].tokens.iter().find(|t| {
+                        t.value == q_val && (q_val.len() >= 6 || keys_compatible(&t.key, &q_key))
+                    }) {
+                        let label = format!("{} → ?{q_key}", tok.path);
+                        if !deps.iter().any(|d| d.label == label) {
+                            deps.push(FlowDependency {
+                                from_flow_id: sorted[i].id,
+                                from_index: i,
+                                kind: DepKind::QueryParam,
+                                label,
+                            });
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        // 5. Check URL path segments & Request Body (JSON / Form)
+        let path_only = raw_target.split(['?', '#']).next().unwrap_or(&raw_target);
+        for seg in path_only.split('/').filter(|s| s.len() >= 4) {
+            if is_trivial_scalar(seg) {
+                continue;
+            }
+            for i in (0..j).rev() {
+                if let Some(tok) = produced[i]
+                    .tokens
+                    .iter()
+                    .find(|t| t.value == seg && (seg.len() >= 8 || is_id_or_token_key(&t.key)))
+                {
+                    let label = format!("{} → path:/{seg}", tok.path);
+                    if !deps.iter().any(|d| d.label == label) {
+                        deps.push(FlowDependency {
+                            from_flow_id: sorted[i].id,
+                            from_index: i,
+                            kind: DepKind::BodyOrPath,
+                            label,
+                        });
+                    }
+                    break;
+                }
+            }
+        }
+
+        let req_bytes = &flow_j.request_body;
+        if !req_bytes.is_empty()
+            && req_bytes.len() <= 128 * 1024
+            && let Ok(req_text) = std::str::from_utf8(req_bytes)
+        {
+            if looks_like_json(req_text)
+                && let Ok(req_json) = serde_json::from_str::<serde_json::Value>(req_text)
+            {
+                let mut req_scalars = Vec::new();
+                collect_json_scalars(&req_json, "", "", 0, &mut req_scalars);
+                for req_tok in req_scalars {
+                    for i in (0..j).rev() {
+                        if let Some(tok) = produced[i].tokens.iter().find(|t| {
+                            t.value == req_tok.value
+                                && (req_tok.value.len() >= 6
+                                    || keys_compatible(&t.key, &req_tok.key))
+                        }) {
+                            let label = format!("{} → body.{}", tok.path, req_tok.path);
+                            if !deps.iter().any(|d| d.label == label) {
+                                deps.push(FlowDependency {
+                                    from_flow_id: sorted[i].id,
+                                    from_index: i,
+                                    kind: DepKind::BodyOrPath,
+                                    label,
+                                });
+                            }
+                            break;
+                        }
+                    }
+                }
+            } else if is_form(None, req_text) {
+                for (f_key, f_val) in form_pairs(req_text) {
+                    let f_val = f_val.trim();
+                    if f_val.len() < 2 || is_trivial_scalar(f_val) {
+                        continue;
+                    }
+                    for i in (0..j).rev() {
+                        if let Some(tok) = produced[i].tokens.iter().find(|t| {
+                            t.value == f_val
+                                && (f_val.len() >= 6 || keys_compatible(&t.key, &f_key))
+                        }) {
+                            let label = format!("{} → form.{f_key}", tok.path);
+                            if !deps.iter().any(|d| d.label == label) {
+                                deps.push(FlowDependency {
+                                    from_flow_id: sorted[i].id,
+                                    from_index: i,
+                                    kind: DepKind::BodyOrPath,
+                                    label,
+                                });
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        deps.truncate(4);
+        hard_dep_count += deps.len();
+        bars[j].deps = deps;
+    }
+
+    // Group flows into timeline Stages (concurrent bursts vs sequential steps)
+    let mut stage_of = vec![0usize; n];
+    let mut cur_stage = 0usize;
+    let mut stage_start_ms = bars[0].start_ms;
+
+    for j in 1..n {
+        let min_from_hard = bars[j]
+            .deps
+            .iter()
+            .map(|d| stage_of[d.from_index] + 1)
+            .max()
+            .unwrap_or(0);
+
+        let waited_for_current_stage = (0..j).any(|i| {
+            stage_of[i] == cur_stage
+                && sorted[i].finished_at.is_some()
+                && bars[j].start_ms >= bars[i].end_ms - 1.0
+                && bars[j].start_ms - stage_start_ms > 20.0
+        });
+
+        let next_stage = if min_from_hard > cur_stage {
+            min_from_hard
+        } else if waited_for_current_stage {
+            cur_stage + 1
+        } else {
+            cur_stage
+        };
+
+        if next_stage != cur_stage {
+            cur_stage = next_stage;
+            stage_start_ms = bars[j].start_ms;
+        }
+        stage_of[j] = cur_stage;
+    }
+
+    // Normalize stage numbers to contiguous 1..=K and attach sequential timing predecessors
+    // for flows in stage > 1 that have no hard data dependencies.
+    let mut unique_stages: Vec<usize> = stage_of.clone();
+    unique_stages.sort_unstable();
+    unique_stages.dedup();
+
+    let mut stages: Vec<DependencyStage> = Vec::with_capacity(unique_stages.len());
+    for (norm_idx, &raw_stage) in unique_stages.iter().enumerate() {
+        let stage_no = norm_idx + 1;
+        let mut bar_indices = Vec::new();
+        let mut s_min = f64::INFINITY;
+        let mut s_max = 0.0_f64;
+        for (j, &st) in stage_of.iter().enumerate() {
+            if st == raw_stage {
+                bars[j].stage = stage_no;
+                bar_indices.push(j);
+                s_min = s_min.min(bars[j].start_ms);
+                s_max = s_max.max(bars[j].end_ms);
+            }
+        }
+        let s_min = if s_min.is_finite() { s_min } else { 0.0 };
+        let span_ms = (s_max - s_min).max(0.0);
+        stages.push(DependencyStage {
+            stage_no,
+            start_ms: s_min,
+            end_ms: s_max,
+            offset_label: format!("+{}", format_delta(Duration::from_secs_f64(s_min / 1000.0))),
+            span_label: format_duration(Duration::from_secs_f64(span_ms / 1000.0)),
+            bar_indices,
+        });
+    }
+
+    for j in 1..n {
+        if bars[j].deps.is_empty() && bars[j].stage > 1 {
+            let prev_stage = bars[j].stage - 1;
+            let pred = (0..j)
+                .filter(|&i| {
+                    bars[i].stage == prev_stage && bars[i].end_ms <= bars[j].start_ms + 2.0
+                })
+                .max_by(|&a, &b| bars[a].end_ms.total_cmp(&bars[b].end_ms))
+                .or_else(|| {
+                    (0..j)
+                        .filter(|&i| bars[i].stage == prev_stage)
+                        .max_by(|&a, &b| bars[a].end_ms.total_cmp(&bars[b].end_ms))
+                });
+            if let Some(i) = pred {
+                let wait_ms = (bars[j].start_ms - bars[i].end_ms).max(0.0);
+                bars[j].deps.push(FlowDependency {
+                    from_flow_id: bars[i].flow_id,
+                    from_index: i,
+                    kind: DepKind::Sequential,
+                    label: format!("+{wait_ms:.0} ms"),
+                });
+            }
+        }
+    }
+
+    // Compute Critical Path across the DAG
+    let mut best_score = vec![0.0_f64; n];
+    let mut best_parent = vec![None::<usize>; n];
+    for j in 0..n {
+        let own_dur = (bars[j].end_ms - bars[j].start_ms).max(1.0);
+        let mut parent = None;
+        let mut max_prev = 0.0_f64;
+        for dep in &bars[j].deps {
+            let candidate = best_score[dep.from_index];
+            if parent.is_none() || candidate > max_prev {
+                max_prev = candidate;
+                parent = Some(dep.from_index);
+            }
+        }
+        best_score[j] = max_prev + own_dur;
+        best_parent[j] = parent;
+    }
+    if let Some((last_idx, _)) = bars.iter().enumerate().max_by(|(ia, a), (ib, b)| {
+        a.end_ms
+            .total_cmp(&b.end_ms)
+            .then_with(|| best_score[*ia].total_cmp(&best_score[*ib]))
+    }) {
+        let mut cur = Some(last_idx);
+        while let Some(idx) = cur {
+            bars[idx].on_critical_path = true;
+            cur = best_parent[idx];
+        }
+    }
+
+    // Build Mermaid `flowchart TD`
+    let mut fc = vec!["flowchart TD".to_string()];
+    for stage in &stages {
+        let title = if stage.bar_indices.len() > 1 {
+            format!(
+                "Stage {} ({}, 并发 x{})",
+                stage.stage_no,
+                stage.offset_label,
+                stage.bar_indices.len()
+            )
+        } else {
+            format!("Stage {} ({})", stage.stage_no, stage.offset_label)
+        };
+        fc.push(format!("    subgraph S{}[\"{}\"]", stage.stage_no, title));
+        for &idx in &stage.bar_indices {
+            let b = &bars[idx];
+            let st = match b.status {
+                Some(code) => code.to_string(),
+                None if b.failed => "ERR".to_string(),
+                None => "...".to_string(),
+            };
+            let clean_target = sanitize_mermaid_text(&b.target).replace('"', "'");
+            fc.push(format!(
+                "        F{}[\"#{} {} {} ({} · {})\"]",
+                b.flow_id, b.flow_id, b.method, clean_target, st, b.duration_label
+            ));
+        }
+        fc.push("    end".to_string());
+    }
+    for b in bars.iter() {
+        for dep in &b.deps {
+            let clean_label = sanitize_mermaid_text(&dep.label).replace('"', "'");
+            if dep.kind.is_hard() {
+                fc.push(format!(
+                    "    F{} -->|\"{}\"| F{}",
+                    dep.from_flow_id, clean_label, b.flow_id
+                ));
+            } else {
+                fc.push(format!(
+                    "    F{} -.->|\"{}\"| F{}",
+                    dep.from_flow_id, clean_label, b.flow_id
+                ));
+            }
+        }
+    }
+
+    (stages, hard_dep_count, fc.join("\n"))
 }
 
 /// Builds a Mermaid `sequenceDiagram` from the given flows, interleaving
@@ -3056,5 +3777,92 @@ Content-Type: image/png\r\n\r\n\
         assert_eq!(resolve_flow_host(&f5), "search.example.com");
         assert_eq!(resolve_flow_target(&f5, false), "/");
         assert_eq!(resolve_flow_target(&f5, true), "/?q=rust");
+
+        // Automatic data dependency & stage DAG analysis (Cookie + Token + QueryParam + Stages)
+        let dep_login_id = session.open(FlowDraft {
+            protocol: Protocol::Http2,
+            method: "POST".into(),
+            host: "auth.example.com".into(),
+            path: "/v1/login".into(),
+            url: "https://auth.example.com/v1/login".into(),
+            request_headers: vec![],
+        });
+        session.set_response(
+            dep_login_id,
+            200,
+            vec![
+                (
+                    "Set-Cookie".into(),
+                    "sid=sess_987654321; Path=/; HttpOnly".into(),
+                ),
+                ("Content-Type".into(), "application/json".into()),
+            ],
+            None,
+        );
+        session.append_body(
+            dep_login_id,
+            crate::session::Direction::Response,
+            br#"{"access_token":"tok_abcdef123456","order_id":"ord_55667788"}"#,
+        );
+        let mut dep_login = session.get(dep_login_id).unwrap().clone();
+        dep_login.started = start;
+        dep_login.finished_at = Some(start + Duration::from_millis(40));
+
+        let dep_profile_id = session.open(FlowDraft {
+            protocol: Protocol::Http2,
+            method: "GET".into(),
+            host: "api.example.com".into(),
+            path: "/v1/profile".into(),
+            url: "https://api.example.com/v1/profile".into(),
+            request_headers: vec![
+                ("Cookie".into(), "sid=sess_987654321".into()),
+                ("Authorization".into(), "Bearer tok_abcdef123456".into()),
+            ],
+        });
+        session.set_response(dep_profile_id, 200, vec![], None);
+        let mut dep_profile = session.get(dep_profile_id).unwrap().clone();
+        dep_profile.started = start + Duration::from_millis(50);
+        dep_profile.finished_at = Some(start + Duration::from_millis(90));
+
+        let dep_order_id = session.open(FlowDraft {
+            protocol: Protocol::Http2,
+            method: "GET".into(),
+            host: "api.example.com".into(),
+            path: "/v1/orders?id=ord_55667788".into(),
+            url: "https://api.example.com/v1/orders?id=ord_55667788".into(),
+            request_headers: vec![("Authorization".into(), "Bearer tok_abcdef123456".into())],
+        });
+        session.set_response(dep_order_id, 200, vec![], None);
+        let mut dep_order = session.get(dep_order_id).unwrap().clone();
+        dep_order.started = start + Duration::from_millis(52);
+        dep_order.finished_at = Some(start + Duration::from_millis(160));
+
+        let dag = build_sequence_diagram_data(&[&dep_login, &dep_profile, &dep_order], true, true);
+        assert_eq!(dag.stages.len(), 2);
+        assert_eq!(dag.stages[0].bar_indices, vec![0]);
+        assert_eq!(dag.stages[1].bar_indices, vec![1, 2]);
+        assert!(
+            dag.bars[1]
+                .deps
+                .iter()
+                .any(|d| d.from_index == 0 && d.kind == DepKind::Cookie)
+        );
+        assert!(
+            dag.bars[1]
+                .deps
+                .iter()
+                .any(|d| d.from_index == 0 && d.kind == DepKind::Token)
+        );
+        assert!(
+            dag.bars[2]
+                .deps
+                .iter()
+                .any(|d| d.from_index == 0 && d.kind == DepKind::QueryParam)
+        );
+        // Critical path: login (#0, ends 40ms) -> order (#2, ends 160ms)
+        assert!(dag.bars[0].on_critical_path);
+        assert!(!dag.bars[1].on_critical_path);
+        assert!(dag.bars[2].on_critical_path);
+        assert!(dag.flowchart_mermaid.starts_with("flowchart TD\n"));
     }
 }
