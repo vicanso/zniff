@@ -110,7 +110,7 @@ pub enum Delivery {
     Replaced,
     /// The image was handed to the OS for the classic drag — no bundle
     /// to replace, or the in-place copy could not proceed.
-    #[cfg(target_os = "macos")]
+    #[allow(dead_code)]
     OpenedForDrag,
 }
 

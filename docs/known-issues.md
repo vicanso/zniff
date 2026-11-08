@@ -66,8 +66,7 @@ P0 到 P3 里点名的能力已经接上。下面是仍然接受的缺口，不�
 
 上面第 1 到第 4 组里，环境变量、响应断点、状态码和延迟、头改写、CORS、行级对比、只看 / 屏蔽 / 星标、慢请求在时间列着色、JWT 与编码提示、`fetch` / Python / TypeScript、粘贴 cURL，都已经接上。下面这些不做：
 
-- **TCP 建连和 TLS 握手分段计时**。连接池命中时没有新的握手。摘要里已经有 TTFB 和总耗时。慢请求用时间列上超过 1 秒的警告色代替分段计时。
-- **丢包和带宽限制**。`delay`（最长 30 秒）和 `status=` 覆盖 Loading、超时和错误边界。按字节限速或随机丢包是另一套转发，不放进现在的规则。
+- **网卡级随机丢包模拟**。应用层带宽限流已通过 `throttle` 规则支持（支持 `2g`/`3g`/`4g` 预设及 `down=`/`up=` 速率限制），但不做 TUN/TAP 网卡层的随机丢包与乱序重传模拟。
 - **JSON 树对比**。对比是 URL、请求头、请求 body、响应头、响应 body 的行级差异，每边最多 200 行。不做可折叠的 JSON 树。
 - **超过 1 MB 的响应改写**。响应断点的缓冲上限就是单条 body 上限。更大的响应只转发，不在界面里改。
 - **完整 cURL 语法**。不解析换行续行、`-G`、`--json`、`--form` 和多段 body。认不出的旗标忽略。
@@ -163,4 +162,57 @@ P0 到 P3 里点名的能力已经接上。下面是仍然接受的缺口，不�
     - **实现**：新增 `session::FilteredStats` 实时汇总当前筛选集合的总请求数、总传输字节（及上行/下行拆分）、平均耗时、状态码分布（`2xx` / `3xx` / `4xx` / `5xx` / `ERR` / `进行中` 语义色角标）与最慢请求；在右栏未选中流量的空态顶部展示「当前列表统计」卡片（点击最慢请求直接跳转选中该条流量），顶栏「清空」按钮旁提供「统计」（`Summary`）按钮（或点击会话条数角标、按 `Esc` 键）一键返回统计视图。
 
 13. **客户端代理环境与证书信任一键诊断** — ✅ 已完成
-    - **实现**：「复制代理环境」（`present::proxy_env_export`）扩展覆盖 `http_proxy` / `https_proxy` / `all_proxy`（含大小写）、`SSL_CERT_FILE`、`NODE_EXTRA_CA_CERTS`、`REQUESTS_CA_BUNDLE`、`CURL_CA_BUNDLE`、`GIT_SSL_CAINFO`、`CARGO_HTTP_CAINFO`、`DENO_CERT` 与 `JAVA_TOOL_OPTIONS`；新增 `ca::CaStatus`（`Trusted` / `InstalledUntrusted` / `NotInstalled`），macOS 下结合 `security find-certificate` 与 `security verify-cert -c <ca.crt> -L` 精确区分「证书：已信任」「证书：未开启信任」（警告色提示并同时提供「信任证书」与「移除证书」）和「证书：未安装」。
+    - **实现**：「复制代理环境」（`present::proxy_env_export`）扩展覆盖 `http_proxy` / `https_proxy` / `all_proxy`（含大小写）、`SSL_CERT_FILE`、`NODE_EXTRA_CA_CERTS`、`REQUESTS_CA_BUNDLE`、`CURL_CA_BUNDLE`、`GIT_SSL_CAINFO`、`CARGO_HTTP_CAINFO`、`DENO_CERT` 与 `JAVA_TOOL_OPTIONS`；新增 `ca::CaStatus`（`Trusted` / `InstalledUntrusted` / `NotInstalled`），macOS 下结合 `security find-certificate` 区分「证书：已信任」「证书：未开启信任」（警告色提示并同时提供「信任证书」与「移除证书」）和「证书：未安装」。
+
+14. **弱网带宽限流（`throttle`）、域名真实证书挂载（`cert`）、并发批量重放与自动检测升级** — ✅ 已完成
+    - **实现**：
+      - **带宽限流（`throttle`）**：支持 `throttle <主机[/路径]> <预设|速率>`（预设 `2g`/`slow-3g`、`3g`、`4g`/`slow-4g`，或 `down=50kbps up=20kbps`），在代理流转发层按 4 KB 分片对请求上传与响应下发进行流式速率限制。
+      - **真实域名证书挂载（`cert`）**：支持 `cert <主机> <cert.crt/.pem> [key.key]` 规则及数据目录 `certs/` 自动匹配（含泛域名 `_wildcard.<domain>`），使用真实证书链与私钥完成 MITM 握手。
+      - **并发批量重放与消息筛选**：批量重放支持并发数（`1..=20`）与 `repeat:<id>` 追踪标记；WebSocket/SSE 消息卡片支持方向（`↑`/`↓`）、帧类型与关键词过滤。
+      - **自动升级与原地重启（`updater`）**：后台定时检测 GitHub Releases（支持 Gitee 镜像回退），流式下载并校验 `SHA256SUMS`，原地替换 `.app` / 可执行文件并自动释放抓包端口后重启恢复。
+
+---
+
+### P4：高性价比、立竿见影的差异化增强（待办规划）
+
+15. **单条请求连接阶段耗时明细（Timing Breakdown & Connection Metadata）**
+    - **现状与痛点**：目前列表和摘要展示了 `Gap`、`TTFB` 和 `Total Elapsed`，但当请求慢时，无法一眼区分是慢在 **DNS 解析**、**TCP 三次握手**、**TLS 握手**、**TTFB（服务端处理等待）** 还是 **Content Download（响应体传输）**，也无法直观看到该请求是否复用了连接。
+    - **架构方案（高优先级）**：
+      - 在 `proxy.rs` 的 `dial` 与 `connect_origin` 中精细打点：`dns_ms`、`tcp_ms`、`tls_ms`，结合已有的 `response_at` 与 `finished_at` 计算出 `wait_ms`（TTFB）与 `download_ms`（Content Download）。
+      - 在 `session::Flow` 中附加轻量连接元数据：`reused_connection: bool`（命中 H1 连接池或 H2 发送端缓存时为 `true`，此时 DNS/TCP/TLS 为 `0 ms`）、`server_addr: Option<SocketAddr>`（远端真实 IP 与端口）、`tls_version: Option<&'static str>`（`TLSv1.2` / `TLSv1.3`）及协商出的 `alpn`。
+      - 在右栏详情面板新增可折叠的「**耗时与连接 / Timing & Connection**」卡片（或集成在摘要卡片下方的可视化分段条），直观展示各阶段耗时占比与连接复用信息，并在导出 HAR 1.2 时完整填充标准 `timings.{dns, connect, ssl, wait, receive}` 与 `serverIPAddress`。
+
+16. **内置 MCP Server 与 Rust / Go 代码生成（AI 联调降维打击）**
+    - **现状与痛点**：开发者在使用 Claude Code、Antigravity、Cursor 等 AI 编程工具排查接口报错（如 `400`/`500` 或字段不匹配）时，往往需要手动去抓包工具复制 URL、请求头、Payload 和响应体再粘贴给 AI；同时代码导出目前支持 `cURL`、`fetch`、`Python requests` 和 `TypeScript interface`，缺少 Rust 与 Go 生态的一键导出。
+    - **架构方案（高优先级）**：
+      - **Code Export 扩展（`present.rs`）**：在详情「更多」菜单中新增复制 **Rust (`reqwest`)** 请求代码、**Go (`net/http`)** 请求代码，以及从响应 JSON 一键推导 **Rust `#[derive(Debug, Clone, Serialize, Deserialize)] struct`**。纯内存生成、零外部依赖。
+      - **内置只读/可控 MCP 接口**：复用 `zniff` 已有的本地代理监听端口（仅限 `127.0.0.1` 回环访问的本地管理路由，如 `/mcp` SSE/Streamable HTTP，或命令行 `zniff --mcp` 模式），暴露 `list_flows`（支持直接传入 `zniff` 过滤表达式，如 `status:5xx host:api.example.com`）、`get_flow_detail`（读取头、完整正文与耗时明细）、`replay_flow` 等 MCP Tool，让 AI 助手一句话自动读取刚报错的真实抓包流量并定位代码问题。
+
+17. **快捷语义规则：`no-cache`（禁用缓存）与 `block`（阻断连接）**
+    - **现状与痛点**：虽然通过多条 `header <pattern> req del If-Modified-Since` / `If-None-Match` 可以手工拼出禁用缓存，通过 `map-local <pattern> status=403` 可以模拟报错，但高频调试时不如语义化单条指令直观，且缺少直接掐断 TCP 连接（模拟网络 Drop/Reset）的快捷规则。
+    - **架构方案（中短期）**：
+      - `no-cache <主机[/路径]>`：叠加类规则，转发请求时自动剥离 `If-Modified-Since`、`If-None-Match`，并向请求与响应注入 `Cache-Control: no-cache, no-store, must-revalidate`（避免 `304 Not Modified` 干扰抓包查看正文）。
+      - `block <主机[/路径]> [drop|status=<code,默认403>]`：终点类规则，支持直接关闭底层连接（模拟连接被重置/掐断）或立即返回指定拦截状态码，不拨号源站。
+
+18. **macOS iOS Simulator 一键注入证书 & Linux 系统级证书指引**
+    - **现状与痛点**：
+      - macOS 移动端开发者使用 Xcode iOS 模拟器联调时，需要把 `zniff CA` 拖进模拟器再手动进「设置 -> 通用 -> 关于本机 -> 证书信任设置」开启信任，步骤繁琐。
+      - Linux 下目前自动安装了 `~/.pki/nssdb`（覆盖 Chromium/Chrome），但 `curl`、`wget` 或系统级 OpenSSL 客户端走的是发行版系统级 Trust Store（如 Arch 的 `trust anchor --store` 或 Debian/Ubuntu 的 `update-ca-certificates`）。
+    - **架构方案（中短期）**：
+      - **iOS 模拟器证书一键安装（macOS）**：在「更多」菜单证书区域，检测到本机有运行中的 iOS Simulator（`xcrun simctl list devices booted`）时，提供「安装证书到 iOS 模拟器」（`Install on iOS Simulators`），直接调用 `xcrun simctl keychain booted add-root-cert <ca.crt>` 一键写入并信任。
+      - **Linux 系统级证书辅助**：在 Linux 平台提供一键复制系统级安装命令（自动识别 `/etc/arch-release` 生成 `sudo trust anchor --store .../ca.crt` 或 `/etc/debian_version` 生成 `sudo cp .../ca.crt /usr/local/share/ca-certificates/zniff-ca.crt && sudo update-ca-certificates`）。
+
+19. **可选折叠的 Domain / App 快速导航抽屉（Sidebar Tree / Filter Facets）**
+    - **现状与痛点**：`zniff` 的单行过滤表达式（`host:`、`app:`、`path:`）对键盘流极高效，但从 Charles / Proxyman 迁移的用户习惯按「应用进程（Apps）」或「域名（Domains）」点选聚合列表来快速聚焦某个客户端或服务。
+    - **架构方案（中期）**：
+      - 在不破坏默认两栏紧凑布局的前提下，支持在左栏列表顶部或左侧展开一个轻量可折叠的「**应用 / 域名（Apps / Domains）**」快速分面导航（基于当前会话中已捕获流量的 `client_app` 与 `host` 实时聚合计数），点击某一项即自动切换/追加 `app:xxx` 或 `host:xxx` 过滤词，右键支持一键「只看」「屏蔽（`mute:`）」或「加入直通名单」。
+
+---
+
+### P5：高阶扩展方向（按需演进）
+
+20. **动态脚本改写（Scripting / Dynamic Rules）**
+    - **场景**：针对 20% 静态 DSL 无法覆盖的动态计算场景——例如修改请求 Body 后需用 `HMAC-SHA256` 动态重算请求头中的 `X-Signature` / `X-Timestamp`，或对自定义 AES/RSA 加密的请求/响应报文进行透明加解密展示。
+    - **架构评估**：为避免给主进程引入重量级运行时，可评估两种演进路径：
+      1. **轻量嵌入式引擎**：按需引入极轻量的 `rquickjs` 或 `mlua`，支持 `script <主机[/路径]> <path.js/.lua>`，在受控沙箱与超时限制内暴露 `onRequest(ctx)` / `onResponse(ctx)` 钩子及内置 `crypto`（HMAC/SHA256/AES/Base64）工具函数；
+      2. **外部 Filter 进程 / 本地 Webhook 钩子**：无需内嵌语言虚拟机，允许将匹配流量通过 stdin/stdout 或本地 Unix Socket 交给用户自己的脚本处理。

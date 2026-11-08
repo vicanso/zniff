@@ -10632,7 +10632,6 @@ fn start_upgrade(controls: Arc<Controls>, version: String) {
                 set_status(&controls, StatusMsg::UpdateRestarting(version));
                 relaunch_and_exit(&controls);
             }
-            #[cfg(target_os = "macos")]
             Ok(updater::Delivery::OpenedForDrag) => {
                 with_update_state(&controls, |st| {
                     st.phase = UpdatePhase::OpenedInstaller {
