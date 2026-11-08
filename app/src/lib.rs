@@ -17,6 +17,7 @@ mod rules;
 mod session;
 mod share;
 mod sysproxy;
+mod updater;
 mod ws;
 
 use std::cell::Cell;
@@ -67,6 +68,64 @@ struct Controls {
     ops: Mutex<()>,
     /// Next 「开始」binds `0.0.0.0` when this is on.
     listen_all: Mutex<bool>,
+    update_state: Mutex<UpdateState>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+enum UpdatePhase {
+    #[default]
+    Idle,
+    Checking,
+    Downloading {
+        version: String,
+        received: u64,
+        total: u64,
+    },
+    Installing {
+        version: String,
+    },
+    ReadyToRestart {
+        version: String,
+    },
+    OpenedInstaller {
+        version: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+struct UpdateState {
+    phase: UpdatePhase,
+    nudge: Option<String>,
+    ignored: Option<String>,
+}
+
+impl UpdateState {
+    fn from_disk() -> Self {
+        Self {
+            phase: UpdatePhase::Idle,
+            nudge: updater::nudge(),
+            ignored: updater::ignored(),
+        }
+    }
+
+    fn is_busy(&self) -> bool {
+        matches!(
+            self.phase,
+            UpdatePhase::Checking
+                | UpdatePhase::Downloading { .. }
+                | UpdatePhase::Installing { .. }
+        )
+    }
+
+    fn has_toolbar_pill(&self) -> bool {
+        match &self.phase {
+            UpdatePhase::Downloading { .. }
+            | UpdatePhase::Installing { .. }
+            | UpdatePhase::ReadyToRestart { .. }
+            | UpdatePhase::OpenedInstaller { .. } => true,
+            UpdatePhase::Idle | UpdatePhase::Checking => self.nudge.is_some(),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -951,11 +1010,16 @@ pub fn App() -> impl IntoElement {
     let lan_addrs = signal(Vec::<LanAddr>::new());
     let qr_path = signal(String::new());
     let controls = open_controls();
+    let update_state = signal(lock_update_state(&controls));
     status.set(lock_status(&controls));
     ca_status.set(lock_ca_status(&controls));
     use_system_proxy.set(lock_bool(&controls.use_system_proxy));
     port_text.set(lock_port(&controls.listen_port).to_string());
     listen_all.set(lock_bool(&controls.listen_all));
+    std::thread::spawn(updater::sweep_installer_mounts);
+    if updater::auto_check_due(SystemTime::now()) {
+        auto_check_update(controls.clone());
+    }
     if saved_config().capturing {
         let controls_boot = controls.clone();
         std::thread::spawn(move || start_capture(&controls_boot));
@@ -989,6 +1053,9 @@ pub fn App() -> impl IntoElement {
     let share_id = signal(String::new());
     let share_id_tick = share_id;
     let seen_share = stored(String::new());
+    let update_tick = update_state;
+    let seen_update = stored(update_state.get());
+    let update_probe_at = stored(SystemTime::now());
     let spill_gc_at = stored(SystemTime::now());
     // The hex text's own box is only as wide as the current line, so measuring
     // it always says 16 bytes fit. The pane viewport is the width the card
@@ -1006,6 +1073,17 @@ pub fn App() -> impl IntoElement {
         if share_now != seen_share.get() {
             seen_share.replace(share_now.clone());
             share_id_tick.set(share_now);
+        }
+        let update_now = lock_update_state(&controls_tick);
+        if update_now != seen_update.get() {
+            seen_update.replace(update_now.clone());
+            update_tick.set(update_now);
+        }
+        if update_probe_at.get().elapsed().unwrap_or_default() >= Duration::from_secs(3600) {
+            update_probe_at.replace(SystemTime::now());
+            if updater::auto_check_due(SystemTime::now()) {
+                auto_check_update(controls_tick.clone());
+            }
         }
         status.set(lock_status(&controls_tick));
         running.set(
@@ -1283,6 +1361,7 @@ pub fn App() -> impl IntoElement {
             compose,
             seq_builder,
             selected,
+            update_state,
         ))
         .child(when(
             move || paused.get().is_some(),
@@ -1361,12 +1440,14 @@ fn toolbar(
     compose: Compose,
     seq_builder: SeqBuilder,
     selected: Signal<Option<u64>>,
+    update_state: Signal<UpdateState>,
 ) -> impl IntoElement {
     let install = Rc::new(install);
     let clear = Rc::new(clear);
     let clear_unpinned = Rc::new(clear_unpinned);
     let remove = Rc::new(remove);
     let filter_controls = import_controls.clone();
+    let update_controls = import_controls.clone();
     view()
         .flex_row()
         .items_center()
@@ -1445,6 +1526,7 @@ fn toolbar(
                     }),
                 ),
         )
+        .child(toolbar_update_pill(update_state, update_controls))
         .child(flow_count_badge(rows, flow_total, filter, move || {
             reset_compose(compose);
             seq_builder.open.set(false);
@@ -1486,6 +1568,7 @@ fn toolbar(
             compose,
             seq_builder,
             selected,
+            update_state,
         ))
         .child(primary_button(
             {
@@ -4154,7 +4237,7 @@ fn replace_row(
     response: Signal<bool>,
     kind: Signal<u8>,
 ) -> impl IntoElement {
-    let kinds = [0_u8, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+    let kinds = [0_u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
     let ready_to_add = move || {
         let combined = crate::rules::combine_rule_pattern(&host_pattern.get(), &path_pattern.get());
         crate::rules::append_quick_rule(
@@ -4285,6 +4368,7 @@ fn replace_row(
                                     || kind.get() == 6
                                     || kind.get() == 7
                                     || kind.get() == 9
+                                    || kind.get() == 10
                             },
                             move || {
                                 let placeholder = move || {
@@ -4319,6 +4403,12 @@ fn replace_row(
                                             "Down rate or preset: 3g / 256kbps",
                                         )
                                         .to_string(),
+                                        10 => t(
+                                            lang,
+                                            "证书链文件 (.crt / .pem)",
+                                            "Certificate chain (.crt / .pem)",
+                                        )
+                                        .to_string(),
                                         _ => t(lang, "查找原文 (from)", "Find text (from)")
                                             .to_string(),
                                     }
@@ -4333,7 +4423,7 @@ fn replace_row(
                             },
                         ))
                         .child(when(
-                            move || kind.get() == 2,
+                            move || kind.get() == 2 || kind.get() == 10,
                             move || {
                                 view()
                                     .h(px(28.0))
@@ -4359,10 +4449,16 @@ fn replace_row(
                                         });
                                     })
                                     .child(
-                                        text(tr("选择文件", "Browse"))
-                                            .text_size(px(11.0))
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(fg_secondary()),
+                                        text(move || {
+                                            if kind.get() == 10 {
+                                                tr("选择证书", "Cert…")()
+                                            } else {
+                                                tr("选择文件", "Browse")()
+                                            }
+                                        })
+                                        .text_size(px(11.0))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(fg_secondary()),
                                     )
                             },
                         ))
@@ -4373,6 +4469,7 @@ fn replace_row(
                                     || kind.get() == 6
                                     || kind.get() == 7
                                     || kind.get() == 9
+                                    || kind.get() == 10
                             },
                             move || {
                                 let placeholder = move || {
@@ -4398,6 +4495,12 @@ fn replace_row(
                                             "Up rate (optional): 64kbps",
                                         )
                                         .to_string(),
+                                        10 => t(
+                                            lang,
+                                            "私钥文件 (.key，合并 PEM 可留空)",
+                                            "Private key (.key, optional if combined)",
+                                        )
+                                        .to_string(),
                                         _ => {
                                             t(lang, "替换成 (to)", "Replace with (to)").to_string()
                                         }
@@ -4410,6 +4513,40 @@ fn replace_row(
                                     false,
                                     move |text| to.set(text.to_string()),
                                 ))
+                            },
+                        ))
+                        .child(when(
+                            move || kind.get() == 10,
+                            move || {
+                                view()
+                                    .h(px(28.0))
+                                    .px_2p5()
+                                    .flex_shrink_0()
+                                    .flex_row()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(6.0))
+                                    .border_1()
+                                    .border_color(border_control())
+                                    .bg(bg_control())
+                                    .hover(|style| style.bg(bg_control_hover()))
+                                    .cursor(Cursor::Pointer)
+                                    .on_press(move || {
+                                        spawn_detached(async move {
+                                            if let Ok(Some(paths)) =
+                                                pick_paths(open_dialog_with_default_dir()).await
+                                                && let Some(path) = paths.first()
+                                            {
+                                                to.set(path.display().to_string());
+                                            }
+                                        });
+                                    })
+                                    .child(
+                                        text(tr("选择私钥", "Key…"))
+                                            .text_size(px(11.0))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(fg_secondary()),
+                                    )
                             },
                         ))
                         .child(
@@ -5384,7 +5521,7 @@ fn closing(open: Signal<bool>, run: impl Fn() + 'static) -> impl Fn() + 'static 
 
 fn quick_kind(kind: u8) -> crate::rules::QuickRule {
     use crate::rules::QuickRule;
-    match kind % 10 {
+    match kind % 11 {
         0 => QuickRule::Replace,
         1 => QuickRule::Remote,
         2 => QuickRule::Local,
@@ -5394,7 +5531,8 @@ fn quick_kind(kind: u8) -> crate::rules::QuickRule {
         6 => QuickRule::Header,
         7 => QuickRule::Query,
         8 => QuickRule::Cors,
-        _ => QuickRule::Throttle,
+        9 => QuickRule::Throttle,
+        _ => QuickRule::Cert,
     }
 }
 
@@ -8727,13 +8865,14 @@ fn toolbar_menu(
     compose: Compose,
     seq_builder: SeqBuilder,
     selected: Signal<Option<u64>>,
+    update_state: Signal<UpdateState>,
 ) -> impl IntoElement {
     menu()
         .placement(Placement::Bottom)
         .align(Align::End)
         .offset(px(6.0))
         .margin(px(8.0))
-        .trigger(more_trigger(ca_status, proxy_on))
+        .trigger(more_trigger(ca_status, proxy_on, update_state))
         .child(more_menu(
             ca_status,
             proxy_on,
@@ -8754,6 +8893,7 @@ fn toolbar_menu(
             compose,
             seq_builder,
             selected,
+            update_state,
         ))
 }
 
@@ -8809,9 +8949,14 @@ fn flow_count_badge(
         )
 }
 
-fn more_trigger(ca_status: Signal<ca::CaStatus>, proxy_on: Signal<bool>) -> impl IntoElement {
+fn more_trigger(
+    ca_status: Signal<ca::CaStatus>,
+    proxy_on: Signal<bool>,
+    update_state: Signal<UpdateState>,
+) -> impl IntoElement {
     let dot_status = ca_status;
     let dot_proxy = proxy_on;
+    let dot_update = update_state;
     let label_proxy = proxy_on;
     view()
         .h(px(CONTROL_H))
@@ -8848,7 +8993,11 @@ fn more_trigger(ca_status: Signal<ca::CaStatus>, proxy_on: Signal<bool>) -> impl
         .cursor(Cursor::Pointer)
         .active(|style| style.opacity(0.75))
         .child(when(
-            move || dot_proxy.get() || dot_status.get() != ca::CaStatus::Trusted,
+            move || {
+                dot_proxy.get()
+                    || dot_status.get() != ca::CaStatus::Trusted
+                    || dot_update.get().nudge.is_some()
+            },
             move || {
                 view().w(px(6.0)).h(px(6.0)).rounded(px(99.0)).bg(move || {
                     if dot_status.get() != ca::CaStatus::Trusted {
@@ -8899,6 +9048,7 @@ fn more_menu(
     compose: Compose,
     seq_builder: SeqBuilder,
     selected: Signal<Option<u64>>,
+    update_state: Signal<UpdateState>,
 ) -> impl IntoElement {
     let export_har = Rc::new(export_har);
     let export_all = Rc::clone(&export_har);
@@ -9077,23 +9227,290 @@ fn more_menu(
         .child(marked_action(
             move || pretty.get(),
             tr("默认美化", "Pretty by default"),
-            move || {
-                let next = !pretty.get();
-                pretty.set(next);
-                if let Err(err) = save_config(|config| config.default_pretty = next) {
-                    set_status(
-                        &import_controls,
-                        StatusMsg::PrefUnsaved {
-                            name: PrefName::Pretty,
-                            err: err.to_string(),
-                        },
-                    );
+            {
+                let controls = import_controls.clone();
+                move || {
+                    let next = !pretty.get();
+                    pretty.set(next);
+                    if let Err(err) = save_config(|config| config.default_pretty = next) {
+                        set_status(
+                            &controls,
+                            StatusMsg::PrefUnsaved {
+                                name: PrefName::Pretty,
+                                err: err.to_string(),
+                            },
+                        );
+                    }
                 }
             },
         ))
         .child(lang_choice(None, "跟随系统", "Follow system"))
         .child(lang_choice(Some(Lang::Zh), "中文", "中文"))
         .child(lang_choice(Some(Lang::En), "English", "English"))
+        .child(menu_rule())
+        .child(update_menu_section(update_state, import_controls))
+}
+
+fn toolbar_update_pill(
+    update_state: Signal<UpdateState>,
+    controls: Arc<Controls>,
+) -> impl IntoElement {
+    when(
+        move || update_state.get().has_toolbar_pill(),
+        move || {
+            let controls_press = controls.clone();
+            let langs = ui_langs();
+            view()
+                .h(px(CONTROL_H))
+                .px_2p5()
+                .gap_1p5()
+                .flex_shrink_0()
+                .flex_row()
+                .items_center()
+                .rounded(px(CONTROL_RADIUS))
+                .border_1()
+                .border_color(accent_blue_border())
+                .bg(accent_blue_soft())
+                .hover(|style| {
+                    style.bg(move || {
+                        if update_state.get().is_busy() {
+                            accent_blue_soft()
+                        } else {
+                            bg_control_hover()
+                        }
+                    })
+                })
+                .cursor(Cursor::Pointer)
+                .active(|style| style.opacity(0.8))
+                .on_press(move || {
+                    let st = update_state.get();
+                    match st.phase {
+                        UpdatePhase::ReadyToRestart { .. } => {
+                            relaunch_and_exit(&controls_press);
+                        }
+                        UpdatePhase::OpenedInstaller { .. } => {
+                            quit_for_manual_install(&controls_press);
+                        }
+                        UpdatePhase::Idle => {
+                            if let Some(version) = st.nudge {
+                                start_upgrade(controls_press.clone(), version);
+                            }
+                        }
+                        UpdatePhase::Checking
+                        | UpdatePhase::Downloading { .. }
+                        | UpdatePhase::Installing { .. } => {}
+                    }
+                })
+                .child(glyph(|| Glyph::Download, || color(accent_blue_text())))
+                .child(
+                    control_text(move || {
+                        let lang = ui_lang(langs);
+                        let st = update_state.get();
+                        let label = match &st.phase {
+                            UpdatePhase::Downloading {
+                                version,
+                                received,
+                                total,
+                            } => {
+                                if *total > 0 {
+                                    let pct = ((*received as f64 / *total as f64) * 100.0)
+                                        .round()
+                                        .clamp(0.0, 100.0)
+                                        as u32;
+                                    format!("{} {version} · {pct}%", t(lang, "下载", "Downloading"))
+                                } else {
+                                    format!(
+                                        "{} {version} · {}",
+                                        t(lang, "下载", "Downloading"),
+                                        format_bytes(*received as usize)
+                                    )
+                                }
+                            }
+                            UpdatePhase::Installing { version } => {
+                                format!("{} {version}…", t(lang, "安装", "Installing"))
+                            }
+                            UpdatePhase::ReadyToRestart { version } => {
+                                format!("{} {version}", t(lang, "重启完成", "Restart for"))
+                            }
+                            UpdatePhase::OpenedInstaller { .. } => {
+                                t(lang, "退出完成安装", "Quit to install").to_string()
+                            }
+                            UpdatePhase::Idle | UpdatePhase::Checking => {
+                                let ver = st.nudge.as_deref().unwrap_or_default();
+                                format!("{} {ver}", t(lang, "升级", "Upgrade"))
+                            }
+                        };
+                        SharedString::from(label)
+                    })
+                    .text_color(accent_blue_text()),
+                )
+        },
+    )
+}
+
+fn update_menu_section(
+    update_state: Signal<UpdateState>,
+    controls: Arc<Controls>,
+) -> impl IntoElement {
+    let controls_upgrade = controls.clone();
+    let controls_skip = controls.clone();
+    let controls_restart = controls.clone();
+    let controls_quit = controls.clone();
+    let controls_unskip = controls.clone();
+    let controls_check = controls;
+    view()
+        .gap_0p5()
+        .child(when(
+            move || {
+                let st = update_state.get();
+                matches!(st.phase, UpdatePhase::Idle) && st.nudge.is_some()
+            },
+            move || {
+                let controls_up = controls_upgrade.clone();
+                let controls_sk = controls_skip.clone();
+                let langs = ui_langs();
+                view()
+                    .gap_0p5()
+                    .child(menu_action_meta(
+                        Glyph::Download,
+                        move || {
+                            let ver = update_state.get().nudge.unwrap_or_default();
+                            SharedString::from(format!(
+                                "{} {ver}",
+                                t(ui_lang(langs), "升级到", "Upgrade to")
+                            ))
+                        },
+                        move || {
+                            let ver = update_state.get().nudge.unwrap_or_default();
+                            SharedString::from(format!("v{} → {ver}", updater::version()))
+                        },
+                        move || {
+                            if let Some(ver) = update_state.get().nudge {
+                                start_upgrade(controls_up.clone(), ver);
+                            }
+                        },
+                    ))
+                    .child(menu_action_meta(
+                        Glyph::Stop,
+                        tr("跳过此版本", "Skip this version"),
+                        move || SharedString::from(update_state.get().nudge.unwrap_or_default()),
+                        move || {
+                            if let Some(ver) = update_state.get().nudge {
+                                skip_update(&controls_sk, &ver);
+                            }
+                        },
+                    ))
+            },
+        ))
+        .child(when(
+            move || matches!(update_state.get().phase, UpdatePhase::Downloading { .. }),
+            move || {
+                menu_action_enabled(
+                    Glyph::Download,
+                    tr("正在下载更新…", "Downloading update…"),
+                    move || match update_state.get().phase {
+                        UpdatePhase::Downloading {
+                            received, total, ..
+                        } => {
+                            if total > 0 {
+                                SharedString::from(format!(
+                                    "{} / {}",
+                                    format_bytes(received as usize),
+                                    format_bytes(total as usize)
+                                ))
+                            } else {
+                                SharedString::from(format_bytes(received as usize))
+                            }
+                        }
+                        _ => SharedString::default(),
+                    },
+                    || false,
+                    || {},
+                )
+            },
+        ))
+        .child(when(
+            move || matches!(update_state.get().phase, UpdatePhase::Installing { .. }),
+            move || {
+                menu_action_enabled(
+                    Glyph::Download,
+                    tr("正在安装更新…", "Installing update…"),
+                    move || match update_state.get().phase {
+                        UpdatePhase::Installing { version } => SharedString::from(version),
+                        _ => SharedString::default(),
+                    },
+                    || false,
+                    || {},
+                )
+            },
+        ))
+        .child(when(
+            move || matches!(update_state.get().phase, UpdatePhase::ReadyToRestart { .. }),
+            move || {
+                let controls = controls_restart.clone();
+                menu_action_meta(
+                    Glyph::Play,
+                    tr("立即重启完成更新", "Restart to finish update"),
+                    move || match update_state.get().phase {
+                        UpdatePhase::ReadyToRestart { version } => SharedString::from(version),
+                        _ => SharedString::default(),
+                    },
+                    move || relaunch_and_exit(&controls),
+                )
+            },
+        ))
+        .child(when(
+            move || {
+                matches!(
+                    update_state.get().phase,
+                    UpdatePhase::OpenedInstaller { .. }
+                )
+            },
+            move || {
+                let controls = controls_quit.clone();
+                menu_action_meta(
+                    Glyph::Stop,
+                    tr("退出以完成安装", "Quit to finish install"),
+                    move || match update_state.get().phase {
+                        UpdatePhase::OpenedInstaller { version } => SharedString::from(version),
+                        _ => SharedString::default(),
+                    },
+                    move || quit_for_manual_install(&controls),
+                )
+            },
+        ))
+        .child(when(
+            move || {
+                let st = update_state.get();
+                matches!(st.phase, UpdatePhase::Idle) && st.nudge.is_none() && st.ignored.is_some()
+            },
+            move || {
+                let controls = controls_unskip.clone();
+                menu_action_meta(
+                    Glyph::Download,
+                    tr("恢复版本提醒", "Unskip update"),
+                    move || SharedString::from(update_state.get().ignored.unwrap_or_default()),
+                    move || unskip_update(&controls),
+                )
+            },
+        ))
+        .child(menu_action_enabled(
+            Glyph::Download,
+            tr("检查更新", "Check for updates"),
+            {
+                let langs = ui_langs();
+                move || {
+                    let st = update_state.get();
+                    if matches!(st.phase, UpdatePhase::Checking) {
+                        SharedString::from(t(ui_lang(langs), "检查中…", "Checking…"))
+                    } else {
+                        SharedString::from(format!("v{}", updater::version()))
+                    }
+                }
+            },
+            move || !update_state.get().is_busy(),
+            move || check_update_manual(controls_check.clone()),
+        ))
 }
 
 fn menu_action(
@@ -10021,6 +10438,7 @@ fn open_controls() -> Arc<Controls> {
                 proxy_applied: Mutex::new(false),
                 ops: Mutex::new(()),
                 listen_all: Mutex::new(load_listen_all()),
+                update_state: Mutex::new(UpdateState::from_disk()),
             })
         }
         Err(err) => {
@@ -10043,9 +10461,224 @@ fn open_controls() -> Arc<Controls> {
                 proxy_applied: Mutex::new(false),
                 ops: Mutex::new(()),
                 listen_all: Mutex::new(load_listen_all()),
+                update_state: Mutex::new(UpdateState::from_disk()),
             })
         }
     }
+}
+
+fn lock_update_state(controls: &Controls) -> UpdateState {
+    controls
+        .update_state
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .clone()
+}
+
+fn with_update_state(controls: &Controls, f: impl FnOnce(&mut UpdateState)) {
+    let mut guard = controls
+        .update_state
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    f(&mut guard);
+}
+
+fn auto_check_update(controls: Arc<Controls>) {
+    if lock_update_state(&controls).is_busy() {
+        return;
+    }
+    std::thread::spawn(move || {
+        let outcome = updater::check();
+        updater::record_outcome(SystemTime::now(), &outcome);
+        with_update_state(&controls, |st| {
+            st.nudge = updater::nudge();
+            st.ignored = updater::ignored();
+        });
+    });
+}
+
+fn check_update_manual(controls: Arc<Controls>) {
+    {
+        let mut st = controls
+            .update_state
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if st.is_busy() {
+            return;
+        }
+        st.phase = UpdatePhase::Checking;
+    }
+    set_status(&controls, StatusMsg::UpdateChecking);
+    std::thread::spawn(move || {
+        let outcome = updater::check_with_skipped();
+        updater::record_outcome(SystemTime::now(), &outcome);
+        match &outcome {
+            updater::UpdateCheck::UpToDate => {
+                set_status(
+                    &controls,
+                    StatusMsg::UpdateUpToDate(updater::version().to_string()),
+                );
+            }
+            updater::UpdateCheck::Newer { version, .. } => {
+                updater::unignore();
+                set_status(&controls, StatusMsg::UpdateAvailable(version.clone()));
+            }
+            updater::UpdateCheck::Failed(err) => {
+                set_status(&controls, StatusMsg::UpdateCheckFailed(err.clone()));
+            }
+        }
+        with_update_state(&controls, |st| {
+            st.phase = UpdatePhase::Idle;
+            st.nudge = updater::nudge();
+            st.ignored = updater::ignored();
+        });
+    });
+}
+
+fn skip_update(controls: &Controls, version: &str) {
+    updater::ignore(version);
+    with_update_state(controls, |st| {
+        st.nudge = updater::nudge();
+        st.ignored = updater::ignored();
+    });
+}
+
+fn unskip_update(controls: &Controls) {
+    updater::unignore();
+    with_update_state(controls, |st| {
+        st.nudge = updater::nudge();
+        st.ignored = updater::ignored();
+    });
+}
+
+fn start_upgrade(controls: Arc<Controls>, version: String) {
+    {
+        let mut st = controls
+            .update_state
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if st.is_busy() {
+            return;
+        }
+        st.phase = UpdatePhase::Downloading {
+            version: version.clone(),
+            received: 0,
+            total: 0,
+        };
+    }
+    set_status(
+        &controls,
+        StatusMsg::UpdateDownloading {
+            version: version.clone(),
+            progress: "0 B".into(),
+        },
+    );
+    std::thread::spawn(move || {
+        let controls_progress = controls.clone();
+        let ver_progress = version.clone();
+        let mut last_step = u64::MAX;
+        let downloaded = updater::download(&version, move |received, total| {
+            let step = received / (256 * 1024);
+            if step != last_step || (total > 0 && received == total) {
+                last_step = step;
+                with_update_state(&controls_progress, |st| {
+                    st.phase = UpdatePhase::Downloading {
+                        version: ver_progress.clone(),
+                        received,
+                        total,
+                    };
+                });
+                let progress = if total > 0 {
+                    format!(
+                        "{} / {}",
+                        format_bytes(received as usize),
+                        format_bytes(total as usize)
+                    )
+                } else {
+                    format_bytes(received as usize)
+                };
+                set_status(
+                    &controls_progress,
+                    StatusMsg::UpdateDownloading {
+                        version: ver_progress.clone(),
+                        progress,
+                    },
+                );
+            }
+        });
+        let path = match downloaded {
+            Ok(path) => path,
+            Err(err) => {
+                with_update_state(&controls, |st| {
+                    st.phase = UpdatePhase::Idle;
+                });
+                set_status(&controls, StatusMsg::UpdateFailed { version, err });
+                return;
+            }
+        };
+        with_update_state(&controls, |st| {
+            st.phase = UpdatePhase::Installing {
+                version: version.clone(),
+            };
+        });
+        set_status(&controls, StatusMsg::UpdateInstalling(version.clone()));
+        match updater::install(&path) {
+            Ok(updater::Delivery::Replaced) => {
+                with_update_state(&controls, |st| {
+                    st.phase = UpdatePhase::ReadyToRestart {
+                        version: version.clone(),
+                    };
+                });
+                set_status(&controls, StatusMsg::UpdateRestarting(version));
+                relaunch_and_exit(&controls);
+            }
+            #[cfg(target_os = "macos")]
+            Ok(updater::Delivery::OpenedForDrag) => {
+                with_update_state(&controls, |st| {
+                    st.phase = UpdatePhase::OpenedInstaller {
+                        version: version.clone(),
+                    };
+                });
+                set_status(&controls, StatusMsg::UpdateOpenedInstaller(version));
+            }
+            Err(err) => {
+                with_update_state(&controls, |st| {
+                    st.phase = UpdatePhase::Idle;
+                });
+                set_status(&controls, StatusMsg::UpdateFailed { version, err });
+            }
+        }
+    });
+}
+
+fn shutdown_capture_for_exit(controls: &Controls) {
+    let _ops = lock_ops(controls);
+    if let Some(capture) = controls
+        .capture
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .take()
+    {
+        capture.stop();
+    }
+    controls.hub.end_share();
+    if lock_bool(&controls.proxy_applied) {
+        set_bool(&controls.proxy_applied, false);
+        let _ = sysproxy::disable();
+    } else {
+        let _ = sysproxy::restore_if_dirty();
+    }
+}
+
+fn relaunch_and_exit(controls: &Controls) {
+    shutdown_capture_for_exit(controls);
+    updater::relaunch();
+    std::process::exit(0);
+}
+
+fn quit_for_manual_install(controls: &Controls) {
+    shutdown_capture_for_exit(controls);
+    std::process::exit(0);
 }
 
 fn install_ca(controls: Arc<Controls>) {

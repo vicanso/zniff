@@ -438,6 +438,23 @@ impl Hub {
         }
     }
 
+    fn server_config_for_host(&self, host: &str, alpn: &[u8]) -> Result<rustls::ServerConfig> {
+        let rule_cert = if self.apply_rules.load(Ordering::Relaxed) {
+            let rules = self
+                .rules
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .clone();
+            rules::custom_cert(&rules, host)
+        } else {
+            None
+        };
+        let custom_ref = rule_cert
+            .as_ref()
+            .map(|(cert, key)| (cert.as_path(), key.as_deref()));
+        self.ca.server_config_with_custom(host, alpn, custom_ref)
+    }
+
     fn note_rules(&self, id: u64, host: &str, path: &str) {
         if !self.apply_rules.load(Ordering::Relaxed) {
             return;
@@ -1298,7 +1315,9 @@ async fn intercept<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let config = hub.ca.server_config(host, &selected).context("叶子证书")?;
+    let config = hub
+        .server_config_for_host(host, &selected)
+        .context("叶子证书")?;
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
     let rewound = Prefixed {
         prefix: client_hello,
@@ -1561,7 +1580,9 @@ async fn intercept_h2_pooled<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let config = hub.ca.server_config(host, b"h2").context("叶子证书")?;
+    let config = hub
+        .server_config_for_host(host, b"h2")
+        .context("叶子证书")?;
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
     let rewound = Prefixed {
         prefix: client_hello,

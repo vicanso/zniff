@@ -89,6 +89,14 @@ pub enum Rule {
         down_bps: Option<u64>,
         up_bps: Option<u64>,
     },
+    /// Custom TLS certificate chain and private key for MITM handshakes on `host`.
+    /// When `key_path` is `None`, `cert_path` is a combined PEM containing both
+    /// certificate(s) and the private key.
+    Cert {
+        host: String,
+        cert_path: PathBuf,
+        key_path: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -181,8 +189,21 @@ impl Rule {
             | Self::Throttle {
                 host, path_prefix, ..
             } => (host, path_prefix),
+            Self::Cert { host, .. } => (host, "/"),
         }
     }
+}
+
+/// First matching `cert` rule for `host`, returning `(cert_path, key_path)`.
+pub fn custom_cert(rules: &[Rule], host: &str) -> Option<(PathBuf, Option<PathBuf>)> {
+    rules.iter().find_map(|rule| match rule {
+        Rule::Cert {
+            host: rule_host,
+            cert_path,
+            key_path,
+        } if host_matches(rule_host, host) => Some((cert_path.clone(), key_path.clone())),
+        _ => None,
+    })
 }
 
 pub fn parse_rules(text: &str) -> Vec<Rule> {
@@ -213,6 +234,7 @@ pub fn hit_summary(rules: &[Rule], host: &str, path: &str) -> String {
             Rule::BreakResponse { .. } => ("break-res", true),
             Rule::Delay { .. } => ("delay", false),
             Rule::Throttle { .. } => ("throttle", false),
+            Rule::Cert { .. } => ("cert", false),
             Rule::Header { .. } => ("header", false),
             Rule::Query { .. } => ("query", false),
             Rule::Cors { .. } => ("cors", false),
@@ -592,6 +614,19 @@ fn parse_line(line: &str) -> Option<Rule> {
                 up_bps,
             })
         }
+        "cert" => {
+            let tokens = rule_tokens(rest)?;
+            if tokens.is_empty() || tokens.len() > 2 || tokens[0].is_empty() {
+                return None;
+            }
+            let cert_path = PathBuf::from(&tokens[0]);
+            let key_path = tokens.get(1).filter(|s| !s.is_empty()).map(PathBuf::from);
+            Some(Rule::Cert {
+                host,
+                cert_path,
+                key_path,
+            })
+        }
         "header" => {
             let (side, rest) = next_rule_token(rest)?;
             let (op, rest) = next_rule_token(rest)?;
@@ -838,6 +873,7 @@ pub enum QuickRule {
     Header,
     Query,
     Cors,
+    Cert,
 }
 
 impl QuickRule {
@@ -853,6 +889,7 @@ impl QuickRule {
             Self::Header => ("改头", "Header"),
             Self::Query => ("改参", "Query"),
             Self::Cors => ("跨域", "CORS"),
+            Self::Cert => ("证书", "Cert"),
         }
     }
 }
@@ -1023,6 +1060,19 @@ pub fn append_quick_rule(
             }
         }
         QuickRule::Cors => format!("cors {pattern}"),
+        QuickRule::Cert => {
+            if from.is_empty() || from.contains('\n') || to.contains('\n') {
+                return None;
+            }
+            let (host_only, _) = split_pattern(pattern);
+            let quoted_cert = quote_rule_token(from);
+            if to.is_empty() {
+                format!("cert {host_only} {quoted_cert}")
+            } else {
+                let quoted_key = quote_rule_token(to);
+                format!("cert {host_only} {quoted_cert} {quoted_key}")
+            }
+        }
     };
     push_line(rules, &line)
 }
@@ -1654,6 +1704,57 @@ throttle example.com/fast 64kb/s
         assert!(
             append_quick_rule("", QuickRule::Throttle, "example.com", false, "invalid", "")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn cert_rules_parse_and_match_hosts() {
+        let rules = parse_rules(
+            "\
+cert *.example.com \"/tmp/my certs/fullchain.pem\" \"/tmp/my certs/privkey.key\"
+cert single.test /tmp/bundle.pem
+",
+        );
+        assert_eq!(rules.len(), 2);
+        assert_eq!(
+            custom_cert(&rules, "api.example.com"),
+            Some((
+                PathBuf::from("/tmp/my certs/fullchain.pem"),
+                Some(PathBuf::from("/tmp/my certs/privkey.key"))
+            ))
+        );
+        assert_eq!(
+            custom_cert(&rules, "single.test"),
+            Some((PathBuf::from("/tmp/bundle.pem"), None))
+        );
+        assert_eq!(custom_cert(&rules, "other.test"), None);
+        assert_eq!(hit_summary(&rules, "api.example.com", "/v1/orders"), "cert");
+
+        assert_eq!(
+            append_quick_rule(
+                "",
+                QuickRule::Cert,
+                "*.example.com/v1",
+                false,
+                "/tmp/my certs/fullchain.pem",
+                "/tmp/my certs/privkey.key",
+            )
+            .as_deref(),
+            Some(
+                "cert *.example.com \"/tmp/my certs/fullchain.pem\" \"/tmp/my certs/privkey.key\"\n"
+            )
+        );
+        assert_eq!(
+            append_quick_rule(
+                "",
+                QuickRule::Cert,
+                "single.test",
+                false,
+                "/tmp/bundle.pem",
+                "",
+            )
+            .as_deref(),
+            Some("cert single.test /tmp/bundle.pem\n")
         );
     }
 }

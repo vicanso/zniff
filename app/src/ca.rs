@@ -15,7 +15,9 @@ use rcgen::{
     Issuer, KeyPair, KeyUsagePurpose, SanType,
 };
 use rustls::ServerConfig;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use rustls::pki_types::{
+    CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer, PrivatePkcs8KeyDer, PrivateSec1KeyDer,
+};
 
 const CA_NAME: &str = "zniff CA";
 /// The previous product name. Still removed so an already-trusted root does not linger.
@@ -121,7 +123,36 @@ impl Ca {
         self.ca_der.clone()
     }
 
+    #[cfg(test)]
     pub fn server_config(&self, host: &str, alpn: &[u8]) -> Result<ServerConfig> {
+        self.server_config_with_custom(host, alpn, None)
+    }
+
+    pub fn server_config_with_custom(
+        &self,
+        host: &str,
+        alpn: &[u8],
+        custom: Option<(&Path, Option<&Path>)>,
+    ) -> Result<ServerConfig> {
+        let dir_found;
+        let effective_custom = match custom {
+            Some(pair) => Some(pair),
+            None => {
+                dir_found = self.dir_custom_cert(host);
+                dir_found
+                    .as_ref()
+                    .map(|(cert, key)| (cert.as_path(), key.as_deref()))
+            }
+        };
+        if let Some((cert_path, key_path)) = effective_custom {
+            let (certs, key) = load_custom_cert_pair(cert_path, key_path)?;
+            let mut config = ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(certs, key)
+                .with_context(|| format!("组装自定义证书 {}", cert_path.display()))?;
+            config.alpn_protocols = vec![alpn.to_vec()];
+            return Ok(config);
+        }
         let leaf = self.leaf(host)?;
         let mut config = ServerConfig::builder()
             .with_no_client_auth()
@@ -132,6 +163,42 @@ impl Ca {
             .context("组装叶子证书")?;
         config.alpn_protocols = vec![alpn.to_vec()];
         Ok(config)
+    }
+
+    /// Looks up a custom certificate in `<data_dir>/certs/` for `host`
+    /// (exact `<host>.crt`/`.pem` + `.key`, or wildcard `_wildcard.<parent>` / `*.<parent>`).
+    fn dir_custom_cert(&self, host: &str) -> Option<(PathBuf, Option<PathBuf>)> {
+        let certs_dir = self.dir.join("certs");
+        if !certs_dir.is_dir() {
+            return None;
+        }
+        let lower = host.trim().to_ascii_lowercase();
+        if lower.is_empty() {
+            return None;
+        }
+        let mut stems = vec![lower.clone()];
+        if let Some((_, parent)) = lower.split_once('.')
+            && !parent.is_empty()
+        {
+            stems.push(format!("_wildcard.{parent}"));
+            stems.push(format!("*.{parent}"));
+        }
+        for stem in stems {
+            let key_candidate = certs_dir.join(format!("{stem}.key"));
+            let has_key = key_candidate.is_file();
+            for ext in ["crt", "pem"] {
+                let cert_candidate = certs_dir.join(format!("{stem}.{ext}"));
+                if cert_candidate.is_file() {
+                    if has_key {
+                        return Some((cert_candidate, Some(key_candidate)));
+                    }
+                    if ext == "pem" {
+                        return Some((cert_candidate, None));
+                    }
+                }
+            }
+        }
+        None
     }
 
     fn leaf(&self, host: &str) -> Result<Leaf> {
@@ -186,13 +253,86 @@ fn san_for(host: &str) -> Result<SanType> {
 }
 
 fn ca_der_from_pem(pem: &str) -> Result<CertificateDer<'static>> {
-    let der = pem
-        .lines()
-        .filter(|line| !line.starts_with('-') && !line.trim().is_empty())
-        .collect::<String>();
-    use base64_decode::decode;
-    let bytes = decode(&der).context("解析 CA PEM")?;
-    Ok(CertificateDer::from(bytes))
+    let mut certs = certs_from_pem(pem)?;
+    if certs.is_empty() {
+        anyhow::bail!("PEM 中未找到 CERTIFICATE 块");
+    }
+    Ok(certs.swap_remove(0))
+}
+
+fn load_custom_cert_pair(
+    cert_path: &Path,
+    key_path: Option<&Path>,
+) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
+    let cert_pem = fs::read_to_string(cert_path)
+        .with_context(|| format!("读取证书文件 {}", cert_path.display()))?;
+    let certs =
+        certs_from_pem(&cert_pem).with_context(|| format!("解析证书链 {}", cert_path.display()))?;
+    if certs.is_empty() {
+        anyhow::bail!("证书文件 {} 中未找到 CERTIFICATE", cert_path.display());
+    }
+    let key = match key_path {
+        Some(kp) => {
+            let key_pem =
+                fs::read_to_string(kp).with_context(|| format!("读取私钥文件 {}", kp.display()))?;
+            key_from_pem(&key_pem).with_context(|| format!("解析私钥 {}", kp.display()))?
+        }
+        None => key_from_pem(&cert_pem)
+            .with_context(|| format!("解析合并 PEM 私钥 {}", cert_path.display()))?,
+    };
+    Ok((certs, key))
+}
+
+fn certs_from_pem(pem: &str) -> Result<Vec<CertificateDer<'static>>> {
+    let mut certs = Vec::new();
+    let mut current = String::new();
+    let mut inside = false;
+    for line in pem.lines() {
+        let trimmed = line.trim();
+        if trimmed == "-----BEGIN CERTIFICATE-----" {
+            inside = true;
+            current.clear();
+        } else if trimmed == "-----END CERTIFICATE-----" {
+            if inside {
+                let bytes = base64_decode::decode(&current).context("解析证书 PEM Base64")?;
+                certs.push(CertificateDer::from(bytes));
+                inside = false;
+                current.clear();
+            }
+        } else if inside && !trimmed.starts_with('-') && !trimmed.is_empty() {
+            current.push_str(trimmed);
+        }
+    }
+    Ok(certs)
+}
+
+fn key_from_pem(pem: &str) -> Result<PrivateKeyDer<'static>> {
+    let mut current = String::new();
+    let mut kind: Option<&str> = None;
+    for line in pem.lines() {
+        let trimmed = line.trim();
+        if kind.is_none() {
+            kind = match trimmed {
+                "-----BEGIN PRIVATE KEY-----" => Some("PKCS8"),
+                "-----BEGIN RSA PRIVATE KEY-----" => Some("PKCS1"),
+                "-----BEGIN EC PRIVATE KEY-----" => Some("SEC1"),
+                _ => None,
+            };
+            if kind.is_some() {
+                current.clear();
+            }
+        } else if trimmed.starts_with("-----END ") && trimmed.ends_with("PRIVATE KEY-----") {
+            let bytes = base64_decode::decode(&current).context("解析私钥 PEM Base64")?;
+            return Ok(match kind.unwrap_or("PKCS8") {
+                "PKCS1" => PrivateKeyDer::Pkcs1(PrivatePkcs1KeyDer::from(bytes)),
+                "SEC1" => PrivateKeyDer::Sec1(PrivateSec1KeyDer::from(bytes)),
+                _ => PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(bytes)),
+            });
+        } else if !trimmed.starts_with('-') && !trimmed.is_empty() {
+            current.push_str(trimmed);
+        }
+    }
+    anyhow::bail!("PEM 中未找到私钥块（PRIVATE KEY / RSA PRIVATE KEY / EC PRIVATE KEY）")
 }
 
 /// Tiny base64 decoder so the CA module does not take another dependency.
@@ -539,6 +679,36 @@ mod tests {
         let ca = Ca::open(&dir).unwrap();
         let config = ca.server_config("example.com", b"http/1.1").unwrap();
         assert_eq!(config.alpn_protocols, vec![b"http/1.1".to_vec()]);
+
+        // Verify custom certificate loading via explicit paths and via `<data_dir>/certs/`
+        let custom_key = KeyPair::generate().unwrap();
+        let mut custom_params = CertificateParams::default();
+        custom_params.subject_alt_names = vec![san_for("pin.example.com").unwrap()];
+        let custom_cert = custom_params.self_signed(&custom_key).unwrap();
+        let cert_file = dir.join("pin.crt");
+        let key_file = dir.join("pin.key");
+        fs::write(&cert_file, custom_cert.pem()).unwrap();
+        fs::write(&key_file, custom_key.serialize_pem()).unwrap();
+        let custom_cfg = ca
+            .server_config_with_custom(
+                "pin.example.com",
+                b"h2",
+                Some((&cert_file, Some(&key_file))),
+            )
+            .unwrap();
+        assert_eq!(custom_cfg.alpn_protocols, vec![b"h2".to_vec()]);
+
+        let certs_dir = dir.join("certs");
+        fs::create_dir_all(&certs_dir).unwrap();
+        let bundle_file = certs_dir.join("_wildcard.example.com.pem");
+        fs::write(
+            &bundle_file,
+            format!("{}\n{}", custom_cert.pem(), custom_key.serialize_pem()),
+        )
+        .unwrap();
+        assert!(ca.dir_custom_cert("sub.example.com").is_some());
+        let dir_cfg = ca.server_config("sub.example.com", b"http/1.1").unwrap();
+        assert_eq!(dir_cfg.alpn_protocols, vec![b"http/1.1".to_vec()]);
         let _ = fs::remove_dir_all(&dir);
     }
 

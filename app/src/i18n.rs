@@ -141,6 +141,21 @@ pub enum StatusMsg {
     },
     CopiedMermaid,
     CopiedMermaidMarkdown,
+    UpdateChecking,
+    UpdateUpToDate(String),
+    UpdateAvailable(String),
+    UpdateCheckFailed(String),
+    UpdateDownloading {
+        version: String,
+        progress: String,
+    },
+    UpdateInstalling(String),
+    UpdateRestarting(String),
+    UpdateOpenedInstaller(String),
+    UpdateFailed {
+        version: String,
+        err: String,
+    },
 }
 
 fn port_in_use(err: &str) -> bool {
@@ -410,6 +425,41 @@ impl StatusMsg {
                 "Copied Markdown sequence diagram",
             )
             .into(),
+            Self::UpdateChecking => t(lang, "正在检查更新…", "Checking for updates…").into(),
+            Self::UpdateUpToDate(ver) => match lang {
+                Lang::Zh => format!("当前已是最新版本 v{ver}"),
+                Lang::En => format!("Already up to date (v{ver})"),
+            },
+            Self::UpdateAvailable(ver) => match lang {
+                Lang::Zh => format!("发现新版本 {ver}，可在顶栏或更多菜单中点击升级"),
+                Lang::En => {
+                    format!("New version {ver} available; click Upgrade in toolbar or More")
+                }
+            },
+            Self::UpdateCheckFailed(err) => match lang {
+                Lang::Zh => format!("检查更新失败: {err}"),
+                Lang::En => format!("Update check failed: {err}"),
+            },
+            Self::UpdateDownloading { version, progress } => match lang {
+                Lang::Zh => format!("正在下载 {version} ({progress})…"),
+                Lang::En => format!("Downloading {version} ({progress})…"),
+            },
+            Self::UpdateInstalling(ver) => match lang {
+                Lang::Zh => format!("正在安装 {ver}…"),
+                Lang::En => format!("Installing {ver}…"),
+            },
+            Self::UpdateRestarting(ver) => match lang {
+                Lang::Zh => format!("已安装 {ver}，正在重启应用…"),
+                Lang::En => format!("Installed {ver}, restarting…"),
+            },
+            Self::UpdateOpenedInstaller(ver) => match lang {
+                Lang::Zh => format!("已打开 {ver} 安装镜像，拖入 Applications 后重启"),
+                Lang::En => format!("Opened {ver} installer; drag to Applications and restart"),
+            },
+            Self::UpdateFailed { version, err } => match lang {
+                Lang::Zh => format!("升级 {version} 失败: {err}"),
+                Lang::En => format!("Failed to update to {version}: {err}"),
+            },
         }
     }
 }
