@@ -549,6 +549,123 @@ pub fn typescript_interface(json: &str) -> Option<String> {
     Some(types.blocks.join("\n"))
 }
 
+pub fn rust_reqwest(flow: &Flow) -> String {
+    let headers = copy_headers(&flow.request_headers);
+    let method = flow.method.to_ascii_uppercase();
+    let method_expr = match method.as_str() {
+        "GET" => "reqwest::Method::GET".to_string(),
+        "POST" => "reqwest::Method::POST".to_string(),
+        "PUT" => "reqwest::Method::PUT".to_string(),
+        "DELETE" => "reqwest::Method::DELETE".to_string(),
+        "PATCH" => "reqwest::Method::PATCH".to_string(),
+        "HEAD" => "reqwest::Method::HEAD".to_string(),
+        "OPTIONS" => "reqwest::Method::OPTIONS".to_string(),
+        _ => format!(
+            "reqwest::Method::from_bytes({}.as_bytes())?",
+            js_string(&flow.method)
+        ),
+    };
+    let mut lines = vec![
+        "let client = reqwest::Client::new();".into(),
+        format!(
+            "let response = client\n    .request({method_expr}, {})",
+            js_string(&flow.url)
+        ),
+    ];
+    for (name, value) in &headers {
+        lines.push(format!(
+            "    .header({}, {})",
+            js_string(name),
+            js_string(value)
+        ));
+    }
+    if let Ok(text) = std::str::from_utf8(&flow.request_body)
+        && !text.is_empty()
+    {
+        lines.push(format!("    .body({})", js_string(text)));
+    }
+    lines.push("    .send()\n    .await?;".into());
+    lines.join("\n")
+}
+
+pub fn go_http(flow: &Flow) -> String {
+    let headers = copy_headers(&flow.request_headers);
+    let body_text = std::str::from_utf8(&flow.request_body)
+        .ok()
+        .filter(|t| !t.is_empty());
+    let mut lines = vec![
+        "package main".into(),
+        "".into(),
+        "import (".into(),
+        "\t\"net/http\"".into(),
+    ];
+    if body_text.is_some() {
+        lines.push("\t\"strings\"".into());
+    }
+    lines.extend([
+        ")".into(),
+        "".into(),
+        "func doRequest() (*http.Response, error) {".into(),
+    ]);
+    let body_arg = match body_text {
+        Some(text) => format!("strings.NewReader({})", js_string(text)),
+        None => "nil".to_string(),
+    };
+    lines.push(format!(
+        "\treq, err := http.NewRequest({}, {}, {body_arg})",
+        js_string(&flow.method),
+        js_string(&flow.url)
+    ));
+    lines.push("\tif err != nil {\n\t\treturn nil, err\n\t}".into());
+    for (name, value) in &headers {
+        lines.push(format!(
+            "\treq.Header.Set({}, {})",
+            js_string(name),
+            js_string(value)
+        ));
+    }
+    lines.push("\treturn http.DefaultClient.Do(req)".into());
+    lines.push("}".into());
+    lines.join("\n")
+}
+
+/// Generates Rust `#[derive(Debug, Clone, Serialize, Deserialize)]` structs
+/// from a JSON object or array. Nested objects become sibling structs.
+pub fn rust_serde_struct(json: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(json.trim()).ok()?;
+    if !value.is_object() && !value.is_array() {
+        return None;
+    }
+    let mut gen_state = RustStructGen::default();
+    if value.is_array() {
+        let root = gen_state.emit("Item", &value);
+        gen_state
+            .blocks
+            .push(format!("pub type Response = {root};"));
+    } else {
+        gen_state.emit("Response", &value);
+    }
+    Some(format!(
+        "use serde::{{Deserialize, Serialize}};\n\n{}",
+        gen_state.blocks.join("\n\n")
+    ))
+}
+
+/// Formats binary bytes as 16-bytes-per-line hex without line numbers.
+pub fn hex_dump_raw(bytes: &[u8]) -> String {
+    bytes
+        .chunks(16)
+        .map(|chunk| {
+            chunk
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CurlRequest {
     pub method: String,
@@ -2125,6 +2242,124 @@ fn ts_key(key: &str) -> String {
     } else {
         js_string(key)
     }
+}
+
+#[derive(Default)]
+struct RustStructGen {
+    blocks: Vec<String>,
+    used: Vec<String>,
+}
+
+impl RustStructGen {
+    fn emit(&mut self, name: &str, value: &serde_json::Value) -> String {
+        match value {
+            serde_json::Value::Object(map) => {
+                let struct_name = self.fresh(name);
+                let mut fields = String::new();
+                let mut seen_fields: Vec<String> = Vec::new();
+                for (key, child) in map {
+                    let child_name = pascal(key);
+                    let ty = self.emit(&child_name, child);
+                    let (mut ident, mut needs_rename) = rust_field_ident(key);
+                    let base_ident = ident.trim_start_matches("r#").to_string();
+                    let mut suffix = 2;
+                    while seen_fields.contains(&ident) {
+                        ident = format!("{base_ident}_{suffix}");
+                        needs_rename = true;
+                        suffix += 1;
+                    }
+                    seen_fields.push(ident.clone());
+                    if needs_rename {
+                        fields.push_str(&format!("    #[serde(rename = {})]\n", js_string(key)));
+                    }
+                    fields.push_str(&format!("    pub {ident}: {ty},\n"));
+                }
+                self.blocks.push(format!(
+                    "#[derive(Debug, Clone, Serialize, Deserialize)]\npub struct {struct_name} {{\n{fields}}}"
+                ));
+                struct_name
+            }
+            serde_json::Value::Array(items) => {
+                let inner = items
+                    .first()
+                    .map(|item| self.emit(name, item))
+                    .unwrap_or_else(|| "serde_json::Value".into());
+                format!("Vec<{inner}>")
+            }
+            serde_json::Value::String(_) => "String".into(),
+            serde_json::Value::Number(num) => {
+                if num.is_i64() {
+                    "i64".into()
+                } else if num.is_u64() {
+                    "u64".into()
+                } else {
+                    "f64".into()
+                }
+            }
+            serde_json::Value::Bool(_) => "bool".into(),
+            serde_json::Value::Null => "Option<serde_json::Value>".into(),
+        }
+    }
+
+    fn fresh(&mut self, name: &str) -> String {
+        let base = if name.is_empty() { "Value" } else { name };
+        let mut candidate = base.to_string();
+        let mut n = 2;
+        while self.used.iter().any(|used| used == &candidate) {
+            candidate = format!("{base}{n}");
+            n += 1;
+        }
+        self.used.push(candidate.clone());
+        candidate
+    }
+}
+
+fn rust_field_ident(key: &str) -> (String, bool) {
+    let mut snake = String::new();
+    let mut prev_lower_or_digit = false;
+    for ch in key.chars() {
+        if ch.is_ascii_alphanumeric() {
+            if ch.is_ascii_uppercase() {
+                if prev_lower_or_digit && !snake.ends_with('_') {
+                    snake.push('_');
+                }
+                snake.push(ch.to_ascii_lowercase());
+                prev_lower_or_digit = false;
+            } else {
+                snake.push(ch);
+                prev_lower_or_digit = true;
+            }
+        } else {
+            if !snake.is_empty() && !snake.ends_with('_') {
+                snake.push('_');
+            }
+            prev_lower_or_digit = false;
+        }
+    }
+    let clean = snake.trim_matches('_').to_string();
+    let mut ident = if clean.is_empty() {
+        "field".to_string()
+    } else if clean.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
+        format!("f_{clean}")
+    } else {
+        clean
+    };
+    const RUST_KEYWORDS: &[&str] = &[
+        "as", "async", "await", "box", "break", "const", "continue", "crate", "dyn", "else",
+        "enum", "extern", "false", "fn", "for", "gen", "if", "impl", "in", "let", "loop", "macro",
+        "match", "mod", "move", "mut", "priv", "pub", "ref", "return", "self", "Self", "static",
+        "struct", "super", "trait", "true", "type", "unsafe", "use", "where", "while", "yield",
+    ];
+    let raw_needed = RUST_KEYWORDS.contains(&ident.as_str());
+    let rename_needed = ident != key;
+    if raw_needed {
+        if matches!(ident.as_str(), "self" | "Self" | "super" | "crate") {
+            ident.push('_');
+            return (ident, true);
+        }
+        ident = format!("r#{ident}");
+    }
+    (ident, rename_needed)
 }
 
 fn shell_tokens(input: &str) -> Vec<String> {
@@ -4178,5 +4413,54 @@ Content-Type: image/png\r\n\r\n\
 
         let get_query = "/graphql?query=query%20ViewerProfile%20%7B%20me%20%7B%20id%20%7D%20%7D";
         assert_eq!(graphql_operations(get_query, b""), vec!["ViewerProfile"]);
+    }
+
+    #[test]
+    fn rust_and_go_snippets_and_serde_struct() {
+        let mut session = crate::session::Session::default();
+        let id = session.open(crate::session::FlowDraft {
+            protocol: crate::session::Protocol::Http2,
+            method: "POST".into(),
+            host: "api.example.com".into(),
+            path: "/v1/items".into(),
+            url: "https://api.example.com/v1/items".into(),
+            request_headers: vec![
+                ("Host".into(), "api.example.com".into()),
+                ("Content-Type".into(), "application/json".into()),
+                ("X-Trace".into(), "t1".into()),
+            ],
+        });
+        session.append_body(id, crate::session::Direction::Request, br#"{"name":"box"}"#);
+        let flow = session.get(id).unwrap().clone();
+
+        let rust_code = rust_reqwest(&flow);
+        assert!(rust_code.contains("reqwest::Method::POST"));
+        assert!(rust_code.contains("\"https://api.example.com/v1/items\""));
+        assert!(rust_code.contains(".header(\"Content-Type\", \"application/json\")"));
+        assert!(!rust_code.contains("\"Host\""));
+        assert!(rust_code.contains(".body(\"{\\\"name\\\":\\\"box\\\"}\")"));
+
+        let go_code = go_http(&flow);
+        assert!(go_code.contains("\"net/http\""));
+        assert!(go_code.contains("\"strings\""));
+        assert!(go_code.contains("http.NewRequest(\"POST\", \"https://api.example.com/v1/items\""));
+        assert!(go_code.contains("req.Header.Set(\"X-Trace\", \"t1\")"));
+
+        let rust_struct = rust_serde_struct(
+            r#"{"userId": 42, "type": "admin", "1st-tag": true, "profile": {"display_name": "Ada"}}"#,
+        )
+        .unwrap();
+        assert!(rust_struct.contains("use serde::{Deserialize, Serialize};"));
+        assert!(rust_struct.contains("pub struct Profile {"));
+        assert!(rust_struct.contains("pub display_name: String,"));
+        assert!(rust_struct.contains("pub struct Response {"));
+        assert!(rust_struct.contains("#[serde(rename = \"userId\")]"));
+        assert!(rust_struct.contains("pub user_id: i64,"));
+        assert!(rust_struct.contains("pub r#type: String,"));
+        assert!(rust_struct.contains("#[serde(rename = \"1st-tag\")]"));
+        assert!(rust_struct.contains("pub f_1st_tag: bool,"));
+        assert!(rust_serde_struct("123").is_none());
+
+        assert_eq!(hex_dump_raw(&[0x00, 0xab, 0xff]), "00 ab ff");
     }
 }

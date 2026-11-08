@@ -181,11 +181,10 @@ P0 到 P3 里点名的能力已经接上。下面是仍然接受的缺口，不�
       - 在 `session::Flow` 中附加 `ConnInfo` 连接元数据：支持记录连接复用状态 `reused`（命中 HTTP/1.1 空闲池或 HTTP/2 多路复用后续流时标记为复用）、远端真实地址 `server_addr` 与协商出的 TLS 版本 `tls_version`（`TLS 1.3` / `TLS 1.2`）。
       - 在右栏详情摘要卡片下方渲染可视化连接标签（`新建连接` / `复用连接`、TLS 版本、远端 `IP:Port`）与多色比例耗时分段条（`DNS`、`TCP`、`TLS`、`等待`、`下载`），并在 HAR 1.2 导入导出中完整读写标准 `timings.{dns, connect, ssl, wait, receive}` 与 `serverIPAddress`。
 
-16. **内置 MCP Server 与 Rust / Go 代码生成（AI 联调降维打击）**
-    - **现状与痛点**：开发者在使用 Claude Code、Antigravity、Cursor 等 AI 编程工具排查接口报错（如 `400`/`500` 或字段不匹配）时，往往需要手动去抓包工具复制 URL、请求头、Payload 和响应体再粘贴给 AI；同时代码导出目前支持 `cURL`、`fetch`、`Python requests` 和 `TypeScript interface`，缺少 Rust 与 Go 生态的一键导出。
-    - **架构方案（高优先级）**：
-      - **Code Export 扩展（`present.rs`）**：在详情「更多」菜单中新增复制 **Rust (`reqwest`)** 请求代码、**Go (`net/http`)** 请求代码，以及从响应 JSON 一键推导 **Rust `#[derive(Debug, Clone, Serialize, Deserialize)] struct`**。纯内存生成、零外部依赖。
-      - **内置只读/可控 MCP 接口**：复用 `zniff` 已有的本地代理监听端口（仅限 `127.0.0.1` 回环访问的本地管理路由，如 `/mcp` SSE/Streamable HTTP，或命令行 `zniff --mcp` 模式），暴露 `list_flows`（支持直接传入 `zniff` 过滤表达式，如 `status:5xx host:api.example.com`）、`get_flow_detail`（读取头、完整正文与耗时明细）、`replay_flow` 等 MCP Tool，让 AI 助手一句话自动读取刚报错的真实抓包流量并定位代码问题。
+16. **内置 MCP Server 与 Rust / Go 代码生成（AI 联调降维打击）** — ✅ 已完成
+    - **实现**：
+      - **Code Export 扩展（`present.rs`）**：在详情「更多」菜单中新增复制 **Rust (`reqwest`)** 请求代码（`present::rust_reqwest`）、**Go (`net/http`)** 请求代码（`present::go_http`），以及从响应 JSON 一键推导 **Rust `#[derive(Debug, Clone, Serialize, Deserialize)] struct`**（`present::rust_serde_struct`，自动将字段名转为 `snake_case`、处理 Rust 保留字 `r#` 与数字开头标识符并补充 `#[serde(rename = "...")]`）。
+      - **内置本地 MCP 接口（`mcp.rs` + `proxy.rs`）**：在代理监听端口新增仅限本机回环（`peer.ip().is_loopback()`）访问的 `POST /mcp` JSON-RPC 2.0 路由（不记入抓包会话列表），并支持命令行 `zniff --mcp [--port <port>]` stdio 桥接模式；暴露 `list_flows`（直接复用 `zniff` 过滤表达式）、`get_flow_detail`（含头、完整正文、连接耗时明细与 WebSocket 消息）、`replay_flow`（支持重放已有流量或构造新请求并返回新流量详情）、`get_rules` 与 `set_rules`（实时读取与校验/更新规则及直通名单）共 5 个 MCP Tool。顶栏「更多」菜单新增「复制 MCP 配置」（`Copy MCP config`）一键复制 Claude Code / Cursor / Antigravity 可直接粘贴的 `mcpServers.zniff` 配置 JSON。
 
 17. **快捷语义规则：`no-cache`（禁用缓存）与 `block`（阻断连接）**
     - **现状与痛点**：虽然通过多条 `header <pattern> req del If-Modified-Since` / `If-None-Match` 可以手工拼出禁用缓存，通过 `map-local <pattern> status=403` 可以模拟报错，但高频调试时不如语义化单条指令直观，且缺少直接掐断 TCP 连接（模拟网络 Drop/Reset）的快捷规则。

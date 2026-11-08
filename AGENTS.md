@@ -13,7 +13,7 @@
 - `app/src/ca.rs`：根 CA 和叶子证书。
 - `app/src/sysproxy.rs`：系统代理的记住、改写和恢复。
 - `app/src/client_hello.rs`、`app/src/decompress.rs`：ClientHello 和 `Content-Encoding`。
-- `app/src/bypass.rs`、`app/src/rules.rs`、`app/src/har.rs`、`app/src/share.rs`、`app/src/present.rs`、`app/src/ws.rs`、`app/src/updater.rs`：直通名单、Map/断点、HAR、HTML 快照与实时分享、展示格式、WebSocket 帧、自动检查更新与原地安装重启。
+- `app/src/bypass.rs`、`app/src/rules.rs`、`app/src/har.rs`、`app/src/share.rs`、`app/src/present.rs`、`app/src/mcp.rs`、`app/src/ws.rs`、`app/src/updater.rs`：直通名单、Map/断点、HAR、HTML 快照与实时分享、展示格式、内置 MCP 接口（`POST /mcp` 与 `zniff --mcp`）、WebSocket 帧、自动检查更新与原地安装重启。
 - `app/src/i18n.rs`、`app/src/icon.rs`：界面语言和单色描边图标。
 - `app/src/config.rs`：用户配置，正式版读写数据目录里的 `config.toml`，开发模式（`debug_assertions` 或 `ZNIFF_DEV=1`）读写 `config.dev.toml`（默认端口 `8878`）与 `proxy-snapshot.dev.toml`，根证书 `ca.crt`/`ca.key` 共用。
 - `docs/known-issues.md`：已经接受的缺口。新的缺口补在这里，不要为了绕开它停掉当前开发。

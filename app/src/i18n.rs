@@ -122,9 +122,13 @@ pub enum StatusMsg {
         path: String,
     },
     CopiedEnv,
+    CopiedMcpConfig(u16),
     CopiedFetch,
     CopiedPython,
+    CopiedRustReqwest,
+    CopiedGoHttp,
     CopiedInterface,
+    CopiedRustStruct,
     InterfaceUnavailable,
     PinLimit,
     BaselineSet,
@@ -374,16 +378,25 @@ impl StatusMsg {
                 t(lang, "条", "flows")
             ),
             Self::CopiedEnv => t(lang, "已复制代理环境变量", "Copied the proxy environment").into(),
+            Self::CopiedMcpConfig(port) => match lang {
+                Lang::Zh => format!("已复制 MCP 配置 · http://127.0.0.1:{port}/mcp"),
+                Lang::En => format!("Copied MCP config · http://127.0.0.1:{port}/mcp"),
+            },
             Self::CopiedFetch => t(lang, "已复制 fetch", "Copied fetch").into(),
             Self::CopiedPython => {
                 t(lang, "已复制 Python requests", "Copied Python requests").into()
             }
+            Self::CopiedRustReqwest => t(lang, "已复制 Rust reqwest", "Copied Rust reqwest").into(),
+            Self::CopiedGoHttp => t(lang, "已复制 Go net/http", "Copied Go net/http").into(),
             Self::CopiedInterface => t(
                 lang,
                 "已复制 TypeScript interface",
                 "Copied the TypeScript interface",
             )
             .into(),
+            Self::CopiedRustStruct => {
+                t(lang, "已复制 Rust 结构体", "Copied the Rust struct").into()
+            }
             Self::InterfaceUnavailable => t(
                 lang,
                 "响应不是 JSON 对象或数组",

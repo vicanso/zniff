@@ -229,7 +229,9 @@ pub struct Hub {
     pub ca: Arc<Ca>,
     roots: RootCertStore,
     bypass: Mutex<BypassRules>,
+    bypass_text: Mutex<String>,
     rules: Mutex<Vec<Rule>>,
+    rules_text: Mutex<String>,
     /// Session-only. Off skips every rule without rewriting the text.
     apply_rules: AtomicBool,
     /// Session-only. Off drops `break` and `break-res` and keeps the other rules.
@@ -298,7 +300,9 @@ impl Hub {
             ca,
             roots,
             bypass: Mutex::new(BypassRules::default()),
+            bypass_text: Mutex::new(String::new()),
             rules: Mutex::new(Vec::new()),
+            rules_text: Mutex::new(String::new()),
             apply_rules: AtomicBool::new(true),
             apply_breaks: AtomicBool::new(true),
             show_tunnel_failures: AtomicBool::new(false),
@@ -399,19 +403,49 @@ impl Hub {
     }
 
     pub fn set_bypass(&self, text: &str) {
+        *self
+            .bypass_text
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = text.to_string();
         *self.bypass.lock().unwrap_or_else(|err| err.into_inner()) = BypassRules::parse(text);
     }
 
+    pub fn bypass_text(&self) -> String {
+        self.bypass_text
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+    }
+
     pub fn set_rules(&self, text: &str) {
+        *self
+            .rules_text
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = text.to_string();
         *self.rules.lock().unwrap_or_else(|err| err.into_inner()) = rules::parse_rules(text);
+    }
+
+    pub fn rules_text(&self) -> String {
+        self.rules_text
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
     }
 
     pub fn set_rules_enabled(&self, enabled: bool) {
         self.apply_rules.store(enabled, Ordering::Relaxed);
     }
 
+    pub fn rules_enabled(&self) -> bool {
+        self.apply_rules.load(Ordering::Relaxed)
+    }
+
     pub fn set_breaks_enabled(&self, enabled: bool) {
         self.apply_breaks.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn breaks_enabled(&self) -> bool {
+        self.apply_breaks.load(Ordering::Relaxed)
     }
 
     pub fn set_show_tunnel_failures(&self, show: bool) {
@@ -1283,6 +1317,9 @@ async fn handle_conn_inner(mut socket: TcpStream, hub: Arc<Hub>) -> Result<()> {
         Some(LocalRoute::Install) => return serve_install_page(&mut socket, &hub, &head).await,
         Some(LocalRoute::Share(id, kind)) => {
             return serve_share(&mut socket, &hub, &head, &id, kind).await;
+        }
+        Some(LocalRoute::Mcp) => {
+            return serve_mcp(&mut socket, rest, hub, &method, &head).await;
         }
         Some(LocalRoute::Favicon) => {
             return write_untracked(&mut socket, 204, "No Content", "image/x-icon", b"").await;
@@ -2998,6 +3035,7 @@ enum LocalRoute {
     Install,
     Share(String, crate::share::SharePath),
     Favicon,
+    Mcp,
 }
 
 fn targets_self(local_addr: Option<SocketAddr>, head: &Head, method: &str, target: &str) -> bool {
@@ -3033,9 +3071,6 @@ fn local_route(method: &str, target: &str) -> Option<LocalRoute> {
 }
 
 fn local_route_for(method: &str, target: &str, self_target: bool) -> Option<LocalRoute> {
-    if !method.eq_ignore_ascii_case("GET") && !method.eq_ignore_ascii_case("HEAD") {
-        return None;
-    }
     let no_frag = target.split('#').next().unwrap_or(target);
     let (origin_form, path_and_query) = if let Some(rest) = no_frag
         .strip_prefix("http://")
@@ -3053,6 +3088,12 @@ fn local_route_for(method: &str, target: &str, self_target: bool) -> Option<Loca
     };
     let path = path_and_query.split('?').next().unwrap_or(path_and_query);
     let direct = origin_form || self_target;
+    if direct && (path == "/mcp" || path == "/mcp/") {
+        return Some(LocalRoute::Mcp);
+    }
+    if !method.eq_ignore_ascii_case("GET") && !method.eq_ignore_ascii_case("HEAD") {
+        return None;
+    }
     if path == "/zniff-ca.crt" || path.ends_with("/zniff-ca.crt") {
         return Some(LocalRoute::Cert);
     }
@@ -3068,6 +3109,69 @@ fn local_route_for(method: &str, target: &str, self_target: bool) -> Option<Loca
         return Some(LocalRoute::Share(id, kind));
     }
     None
+}
+
+async fn serve_mcp(
+    socket: &mut TcpStream,
+    rest: Vec<u8>,
+    hub: Arc<Hub>,
+    method: &str,
+    head: &Head,
+) -> Result<()> {
+    let is_loopback = socket.peer_addr().is_ok_and(|peer| peer.ip().is_loopback());
+    if !is_loopback {
+        return write_untracked(
+            socket,
+            403,
+            "Forbidden",
+            "text/plain; charset=utf-8",
+            b"MCP endpoint is restricted to loopback (127.0.0.1 / ::1).",
+        )
+        .await;
+    }
+    if method.eq_ignore_ascii_case("OPTIONS") {
+        return write_untracked(socket, 204, "No Content", "text/plain", b"").await;
+    }
+    if !method.eq_ignore_ascii_case("POST") {
+        return write_untracked(
+            socket,
+            405,
+            "Method Not Allowed",
+            "text/plain; charset=utf-8",
+            b"Use POST /mcp with JSON-RPC 2.0 payload.",
+        )
+        .await;
+    }
+    let mut reader = Prefixed {
+        prefix: rest,
+        pos: 0,
+        inner: socket,
+    };
+    let body = match timeout(
+        IO_TIMEOUT,
+        read_capped_body(&mut reader, &head.headers, crate::session::BODY_CAP),
+    )
+    .await
+    {
+        Ok(Ok(Some(bytes))) => bytes,
+        _ => {
+            return write_untracked(
+                reader.inner,
+                400,
+                "Bad Request",
+                "application/json; charset=utf-8",
+                br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Failed to read request body"}}"#,
+            )
+            .await;
+        }
+    };
+    let socket = reader.inner;
+    match crate::mcp::handle_http_jsonrpc(hub, &body).await {
+        Some(reply) => {
+            write_untracked(socket, 200, "OK", "application/json; charset=utf-8", &reply).await
+        }
+        None => write_untracked(socket, 202, "Accepted", "text/plain", b"").await,
+    }
 }
 
 async fn serve_share<S>(
@@ -3402,7 +3506,7 @@ fn repeat_tag_comment(source_id: u64, base_comment: &str, index: u32, total: u32
     }
 }
 
-async fn replay_once(
+pub(crate) async fn replay_once(
     hub: Arc<Hub>,
     source: Option<crate::session::Flow>,
     edit: ReplayOverride,
@@ -8550,6 +8654,40 @@ mod tests {
             flows[1].conn_info.tls_version,
             flows[0].conn_info.tls_version
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn local_mcp_endpoint_serves_jsonrpc_without_recording_flow() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let dir = std::env::temp_dir().join(format!("zniff-mcp-http-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        serve_proxy(proxy, hub.clone());
+
+        let payload = br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+        let req = format!(
+            "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            proxy_addr.port(),
+            payload.len()
+        );
+        let mut sock = TcpStream::connect(proxy_addr).await.unwrap();
+        sock.write_all(req.as_bytes()).await.unwrap();
+        sock.write_all(payload).await.unwrap();
+        let mut raw = Vec::new();
+        sock.read_to_end(&mut raw).await.unwrap();
+        let text = String::from_utf8_lossy(&raw);
+        assert!(text.starts_with("HTTP/1.1 200 OK\r\n"));
+        let (_, body) = text.split_once("\r\n\r\n").unwrap();
+        let json: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(json["id"], 1);
+        assert!(json["result"]["tools"].is_array());
+        // MCP calls must not pollute the captured flow session
+        assert_eq!(hub.with_session(|session| session.len()), 0);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

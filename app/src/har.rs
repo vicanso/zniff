@@ -629,7 +629,7 @@ mod tests {
             },
         );
         let flow = session.get(id).unwrap().clone();
-        let har = export_har(&[flow.clone()]);
+        let har = export_har(std::slice::from_ref(&flow));
         assert_eq!(har["log"]["entries"][0]["timings"]["dns"], json!(12));
         assert_eq!(har["log"]["entries"][0]["timings"]["connect"], json!(25));
         assert_eq!(har["log"]["entries"][0]["timings"]["ssl"], json!(48));

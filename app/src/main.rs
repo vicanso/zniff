@@ -11,6 +11,9 @@ use nsh_platform_windows as platform;
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn main() -> impl std::process::Termination {
+    if let Some(code) = zniff::maybe_run_cli_mode() {
+        std::process::exit(code);
+    }
     env_logger::init();
     let _ = rustls::crypto::ring::default_provider().install_default();
     if let Err(err) = zniff::restore_if_dirty() {

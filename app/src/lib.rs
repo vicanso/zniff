@@ -11,6 +11,7 @@ mod decompress;
 mod har;
 mod i18n;
 mod icon;
+mod mcp;
 mod present;
 mod proxy;
 mod rules;
@@ -50,6 +51,35 @@ pub use sysproxy::restore_if_dirty;
 pub fn initial_window_size() -> (i32, i32) {
     let cfg = saved_config();
     (cfg.window_width as i32, cfg.window_height as i32)
+}
+
+/// Checks if `--mcp` was passed on the command line. When present, runs the
+/// stdio MCP JSON-RPC 2.0 bridge forwarding to the local `zniff` proxy and
+/// returns its exit code so `main()` can exit without opening a window.
+pub fn maybe_run_cli_mode() -> Option<i32> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if !args.iter().any(|arg| arg == "--mcp") {
+        return None;
+    }
+    let mut port = saved_config().listen_port;
+    let mut idx = 0usize;
+    while idx < args.len() {
+        let arg = args[idx].as_str();
+        if let Some(rest) = arg.strip_prefix("--port=") {
+            if let Some(parsed) = present::parse_port(rest) {
+                port = parsed;
+            }
+        } else if arg == "--port" || arg == "-p" {
+            if let Some(next) = args.get(idx + 1)
+                && let Some(parsed) = present::parse_port(next)
+            {
+                port = parsed;
+            }
+            idx += 1;
+        }
+        idx += 1;
+    }
+    Some(mcp::run_stdio_bridge(port))
 }
 
 struct Controls {
@@ -8517,7 +8547,10 @@ fn detail_actions(
     let copy_curl = controls.clone();
     let copy_fetch = controls.clone();
     let copy_python = controls.clone();
+    let copy_rust = controls.clone();
+    let copy_go = controls.clone();
     let copy_types = controls.clone();
+    let copy_rust_struct = controls.clone();
     let copy_request = controls.clone();
     let copy_response = controls.clone();
     let save = controls.clone();
@@ -8563,9 +8596,21 @@ fn detail_actions(
                 .child(action_item("Python", move || {
                     copy_snippet(&copy_python, selected.get(), Snippet::Python);
                 }))
+                .child(action_item("Rust (reqwest)", move || {
+                    copy_snippet(&copy_rust, selected.get(), Snippet::RustReqwest);
+                }))
+                .child(action_item("Go (net/http)", move || {
+                    copy_snippet(&copy_go, selected.get(), Snippet::GoHttp);
+                }))
                 .child(action_item(tr("类型", "Types"), move || {
                     copy_snippet(&copy_types, selected.get(), Snippet::Types);
                 }))
+                .child(action_item(
+                    tr("Rust 结构体", "Rust struct"),
+                    move || {
+                        copy_snippet(&copy_rust_struct, selected.get(), Snippet::RustStruct);
+                    },
+                ))
                 .child(action_item(tr("复制请求", "Copy request"), move || {
                     copy_part(&copy_request, selected.get(), CopyPart::Request);
                 }))
@@ -9562,6 +9607,14 @@ fn more_menu(
             Glyph::Prompt,
             tr("复制代理环境", "Copy proxy env"),
             copy_env,
+        ))
+        .child(menu_action(
+            Glyph::Prompt,
+            tr("复制 MCP 配置", "Copy MCP config"),
+            {
+                let controls = import_controls.clone();
+                move || copy_mcp_config(&controls)
+            },
         ))
         .child(menu_rule())
         .child(proxy_menu_item(proxy_on, toggle_proxy))
@@ -11400,7 +11453,10 @@ fn set_port(slot: &Mutex<u16>, port: u16) {
 enum Snippet {
     Fetch,
     Python,
+    RustReqwest,
+    GoHttp,
     Types,
+    RustStruct,
 }
 
 fn copy_proxy_env(controls: &Controls) {
@@ -11408,6 +11464,12 @@ fn copy_proxy_env(controls: &Controls) {
     let cert = controls.hub.ca.cert_path();
     set_clipboard(present::proxy_env_export(port, &cert.display().to_string()));
     set_status(controls, StatusMsg::CopiedEnv);
+}
+
+fn copy_mcp_config(controls: &Controls) {
+    let port = lock_port(&controls.listen_port);
+    set_clipboard(mcp::mcp_config_json(port));
+    set_status(controls, StatusMsg::CopiedMcpConfig(port));
 }
 
 fn copy_snippet(controls: &Controls, id: Option<u64>, kind: Snippet) {
@@ -11423,6 +11485,14 @@ fn copy_snippet(controls: &Controls, id: Option<u64>, kind: Snippet) {
             set_clipboard(present::python_requests(&flow));
             set_status(controls, StatusMsg::CopiedPython);
         }
+        Snippet::RustReqwest => {
+            set_clipboard(present::rust_reqwest(&flow));
+            set_status(controls, StatusMsg::CopiedRustReqwest);
+        }
+        Snippet::GoHttp => {
+            set_clipboard(present::go_http(&flow));
+            set_status(controls, StatusMsg::CopiedGoHttp);
+        }
         Snippet::Types => match std::str::from_utf8(&flow.response_body)
             .ok()
             .and_then(present::typescript_interface)
@@ -11430,6 +11500,16 @@ fn copy_snippet(controls: &Controls, id: Option<u64>, kind: Snippet) {
             Some(text) => {
                 set_clipboard(text);
                 set_status(controls, StatusMsg::CopiedInterface);
+            }
+            None => set_status(controls, StatusMsg::InterfaceUnavailable),
+        },
+        Snippet::RustStruct => match std::str::from_utf8(&flow.response_body)
+            .ok()
+            .and_then(present::rust_serde_struct)
+        {
+            Some(text) => {
+                set_clipboard(text);
+                set_status(controls, StatusMsg::CopiedRustStruct);
             }
             None => set_status(controls, StatusMsg::InterfaceUnavailable),
         },
