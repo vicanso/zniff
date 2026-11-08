@@ -82,6 +82,15 @@ pub enum Rule {
         from: String,
         to: String,
     },
+    /// Set or remove a JSON property/element by JSON Pointer (`/a/b/0`) or dot/bracket path (`a.b[0]`).
+    Json {
+        host: String,
+        path_prefix: String,
+        response: bool,
+        remove: bool,
+        json_path: String,
+        value: serde_json::Value,
+    },
     /// Bandwidth limit in bytes per second for download (`down_bps`) and/or upload (`up_bps`).
     Throttle {
         host: String,
@@ -112,6 +121,17 @@ pub enum QueryOp {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JsonOp {
+    Set {
+        path: String,
+        value: serde_json::Value,
+    },
+    Remove {
+        path: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     MapLocal { file: Option<PathBuf>, status: u16 },
     MapRemote { url: String },
@@ -132,6 +152,9 @@ pub struct Effect {
     /// `(from, to)` applied in order to a UTF-8 body that fits in one flow.
     pub request_replaces: Vec<(String, String)>,
     pub response_replaces: Vec<(String, String)>,
+    /// Structured JSON path set/remove operations applied to JSON request/response bodies.
+    pub request_json_ops: Vec<JsonOp>,
+    pub response_json_ops: Vec<JsonOp>,
 }
 
 impl Default for Effect {
@@ -147,6 +170,8 @@ impl Default for Effect {
             action: None,
             request_replaces: Vec::new(),
             response_replaces: Vec::new(),
+            request_json_ops: Vec::new(),
+            response_json_ops: Vec::new(),
         }
     }
 }
@@ -184,6 +209,9 @@ impl Rule {
                 host, path_prefix, ..
             }
             | Self::Replace {
+                host, path_prefix, ..
+            }
+            | Self::Json {
                 host, path_prefix, ..
             }
             | Self::Throttle {
@@ -239,6 +267,7 @@ pub fn hit_summary(rules: &[Rule], host: &str, path: &str) -> String {
             Rule::Query { .. } => ("query", false),
             Rule::Cors { .. } => ("cors", false),
             Rule::Replace { .. } => ("replace", false),
+            Rule::Json { .. } => ("json", false),
         };
         if terminal {
             if took_terminal {
@@ -347,6 +376,29 @@ pub fn effect(rules: &[Rule], host: &str, path: &str) -> Effect {
                     effect.response_replaces.push(pair);
                 } else {
                     effect.request_replaces.push(pair);
+                }
+            }
+            Rule::Json {
+                response,
+                remove,
+                json_path,
+                value,
+                ..
+            } => {
+                let op = if *remove {
+                    JsonOp::Remove {
+                        path: json_path.clone(),
+                    }
+                } else {
+                    JsonOp::Set {
+                        path: json_path.clone(),
+                        value: value.clone(),
+                    }
+                };
+                if *response {
+                    effect.response_json_ops.push(op);
+                } else {
+                    effect.request_json_ops.push(op);
                 }
             }
             Rule::MapLocal {
@@ -726,6 +778,48 @@ fn parse_line(line: &str) -> Option<Rule> {
                 to,
             })
         }
+        "json" => {
+            let (side, rest) = next_rule_token(rest)?;
+            let response = match side.as_str() {
+                "res" | "response" => true,
+                "req" | "request" => false,
+                _ => return None,
+            };
+            let (op, rest) = next_rule_token(rest)?;
+            let remove = match op.as_str() {
+                "del" | "delete" | "rm" => true,
+                "set" | "add" => false,
+                _ => return None,
+            };
+            let (json_path, rest) = next_rule_token(rest)?;
+            let json_path = json_path.trim().to_string();
+            if json_path.is_empty() || parse_json_path(&json_path).is_empty() {
+                return None;
+            }
+            if remove {
+                if !rest.trim().is_empty() {
+                    return None;
+                }
+                Some(Rule::Json {
+                    host,
+                    path_prefix,
+                    response,
+                    remove: true,
+                    json_path,
+                    value: serde_json::Value::Null,
+                })
+            } else {
+                let value = parse_json_rule_value(rest)?;
+                Some(Rule::Json {
+                    host,
+                    path_prefix,
+                    response,
+                    remove: false,
+                    json_path,
+                    value,
+                })
+            }
+        }
         _ => None,
     }
 }
@@ -861,9 +955,191 @@ pub fn replace_target(path: &str, pairs: &[(String, String)]) -> Option<String> 
     next.starts_with('/').then_some(next)
 }
 
+fn parse_json_rule_value(raw: &str) -> Option<serde_json::Value> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        return Some(val);
+    }
+    let unquoted = unquote_optional(trimmed)?;
+    Some(serde_json::Value::String(unquoted))
+}
+
+/// Parses either RFC 6901 JSON Pointer (`/a/b/0`) or dot/bracket notation (`$.a.b[0]` / `a.b.0`).
+fn parse_json_path(path: &str) -> Vec<String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    if let Some(rest) = trimmed.strip_prefix('/') {
+        return rest
+            .split('/')
+            .map(|seg| seg.replace("~1", "/").replace("~0", "~"))
+            .collect();
+    }
+    let body = trimmed
+        .strip_prefix("$.")
+        .or_else(|| trimmed.strip_prefix('$'))
+        .unwrap_or(trimmed);
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut chars = body.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '.' => {
+                if !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+            }
+            '[' => {
+                if !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+                let mut bracket = String::new();
+                for bch in chars.by_ref() {
+                    if bch == ']' {
+                        break;
+                    }
+                    bracket.push(bch);
+                }
+                let btrimmed = bracket.trim().trim_matches('"').trim_matches('\'');
+                if !btrimmed.is_empty() {
+                    out.push(btrimmed.to_string());
+                }
+            }
+            _ => cur.push(ch),
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// Applies JSON-aware `set`/`del` operations in order.
+/// - Returns `Ok(Some(bytes))` when valid JSON was modified.
+/// - Returns `Ok(None)` when `ops` is empty or the operations did not change the JSON document.
+/// - Returns `Err(reason)` when `ops` is non-empty and `body` is not valid UTF-8 JSON.
+pub fn apply_json_ops(body: &[u8], ops: &[JsonOp]) -> Result<Option<Vec<u8>>, &'static str> {
+    if ops.is_empty() {
+        return Ok(None);
+    }
+    let text = std::str::from_utf8(body).map_err(|_| "non-UTF-8 body")?;
+    let mut root: serde_json::Value =
+        serde_json::from_str(text.trim()).map_err(|_| "non-JSON body")?;
+    let original = root.clone();
+    for op in ops {
+        match op {
+            JsonOp::Set { path, value } => {
+                let segs = parse_json_path(path);
+                if !segs.is_empty() {
+                    json_set_at(&mut root, &segs, value.clone());
+                }
+            }
+            JsonOp::Remove { path } => {
+                let segs = parse_json_path(path);
+                if !segs.is_empty() {
+                    json_remove_at(&mut root, &segs);
+                }
+            }
+        }
+    }
+    if root == original {
+        return Ok(None);
+    }
+    serde_json::to_vec(&root)
+        .map(Some)
+        .map_err(|_| "JSON serialization failed")
+}
+
+fn json_set_at(node: &mut serde_json::Value, segs: &[String], val: serde_json::Value) {
+    let Some((first, rest)) = segs.split_first() else {
+        return;
+    };
+    if rest.is_empty() {
+        match node {
+            serde_json::Value::Object(map) => {
+                map.insert(first.clone(), val);
+            }
+            serde_json::Value::Array(arr) => {
+                if first == "-" {
+                    arr.push(val);
+                } else if let Ok(idx) = first.parse::<usize>() {
+                    if idx < arr.len() {
+                        arr[idx] = val;
+                    } else if idx == arr.len() {
+                        arr.push(val);
+                    }
+                }
+            }
+            _ => {}
+        }
+        return;
+    }
+    match node {
+        serde_json::Value::Object(map) => {
+            let entry = map
+                .entry(first.clone())
+                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+            if entry.is_null() {
+                *entry = serde_json::Value::Object(serde_json::Map::new());
+            }
+            json_set_at(entry, rest, val);
+        }
+        serde_json::Value::Array(arr) => {
+            if let Ok(idx) = first.parse::<usize>()
+                && let Some(child) = arr.get_mut(idx)
+            {
+                json_set_at(child, rest, val);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn json_remove_at(node: &mut serde_json::Value, segs: &[String]) {
+    let Some((first, rest)) = segs.split_first() else {
+        return;
+    };
+    if rest.is_empty() {
+        match node {
+            serde_json::Value::Object(map) => {
+                map.remove(first);
+            }
+            serde_json::Value::Array(arr) => {
+                if let Ok(idx) = first.parse::<usize>()
+                    && idx < arr.len()
+                {
+                    arr.remove(idx);
+                }
+            }
+            _ => {}
+        }
+        return;
+    }
+    match node {
+        serde_json::Value::Object(map) => {
+            if let Some(child) = map.get_mut(first) {
+                json_remove_at(child, rest);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            if let Ok(idx) = first.parse::<usize>()
+                && let Some(child) = arr.get_mut(idx)
+            {
+                json_remove_at(child, rest);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum QuickRule {
     Replace,
+    Json,
     Remote,
     Local,
     Delay,
@@ -880,6 +1156,7 @@ impl QuickRule {
     pub fn label(self) -> (&'static str, &'static str) {
         match self {
             Self::Replace => ("替换", "Replace"),
+            Self::Json => ("JSON", "JSON"),
             Self::Remote => ("转发", "Forward"),
             Self::Local => ("文件", "File"),
             Self::Delay => ("延迟", "Delay"),
@@ -976,6 +1253,21 @@ pub fn append_quick_rule(
     let line = match kind {
         QuickRule::Replace => {
             return append_replace_line(rules, pattern, response, from, to);
+        }
+        QuickRule::Json => {
+            if from.is_empty()
+                || from.contains(char::is_whitespace)
+                || parse_json_path(from).is_empty()
+                || to.contains('\n')
+            {
+                return None;
+            }
+            let side = if response { "res" } else { "req" };
+            if to.is_empty() {
+                format!("json {pattern} {side} del {from}")
+            } else {
+                format!("json {pattern} {side} set {from} {to}")
+            }
         }
         QuickRule::Remote => {
             if !(from.starts_with("http://") || from.starts_with("https://"))
@@ -1755,6 +2047,76 @@ cert single.test /tmp/bundle.pem
             )
             .as_deref(),
             Some("cert single.test /tmp/bundle.pem\n")
+        );
+    }
+
+    #[test]
+    fn json_rules_set_and_remove_by_pointer_or_dot_path() {
+        let rules = parse_rules(
+            "\
+json example.com/api res set /data/enabled true
+json example.com/api res set items[0].price 19.5
+json example.com/api res set $.meta.tier \"pro\"
+json example.com/api res del /data/secret
+json example.com/api req set user.roles [\"admin\",\"ops\"]
+",
+        );
+        assert_eq!(rules.len(), 5);
+        assert_eq!(hit_summary(&rules, "example.com", "/api/v1"), "json");
+        let eff = effect(&rules, "example.com", "/api/v1");
+        assert_eq!(eff.response_json_ops.len(), 4);
+        assert_eq!(eff.request_json_ops.len(), 1);
+
+        let res_body =
+            br#"{"data":{"enabled":false,"secret":"tok"},"items":[{"price":10},{"price":20}]}"#;
+        let rewritten = apply_json_ops(res_body, &eff.response_json_ops)
+            .unwrap()
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&rewritten).unwrap();
+        assert_eq!(val["data"]["enabled"], serde_json::json!(true));
+        assert!(val["data"].get("secret").is_none());
+        assert_eq!(val["items"][0]["price"], serde_json::json!(19.5));
+        assert_eq!(val["meta"]["tier"], serde_json::json!("pro"));
+
+        let req_body = br#"{}"#;
+        let req_rewritten = apply_json_ops(req_body, &eff.request_json_ops)
+            .unwrap()
+            .unwrap();
+        let req_val: serde_json::Value = serde_json::from_slice(&req_rewritten).unwrap();
+        assert_eq!(
+            req_val["user"]["roles"],
+            serde_json::json!(["admin", "ops"])
+        );
+
+        // Non-JSON body returns Err with a clear reason
+        assert_eq!(
+            apply_json_ops(b"<html>not json</html>", &eff.response_json_ops),
+            Err("non-JSON body")
+        );
+
+        assert_eq!(
+            append_quick_rule(
+                "",
+                QuickRule::Json,
+                "example.com/api",
+                true,
+                "/data/enabled",
+                "true",
+            )
+            .as_deref(),
+            Some("json example.com/api res set /data/enabled true\n")
+        );
+        assert_eq!(
+            append_quick_rule(
+                "",
+                QuickRule::Json,
+                "example.com/api",
+                true,
+                "/data/secret",
+                "",
+            )
+            .as_deref(),
+            Some("json example.com/api res del /data/secret\n")
         );
     }
 }

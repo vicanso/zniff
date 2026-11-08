@@ -4248,7 +4248,7 @@ fn replace_row(
     response: Signal<bool>,
     kind: Signal<u8>,
 ) -> impl IntoElement {
-    let kinds = [0_u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    let kinds = [0_u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
     let ready_to_add = move || {
         let combined = crate::rules::combine_rule_pattern(&host_pattern.get(), &path_pattern.get());
         crate::rules::append_quick_rule(
@@ -4352,7 +4352,7 @@ fn replace_row(
                             move |text| path_pattern.set(text.to_string()),
                         )))
                         .child(when(
-                            move || kind.get() == 0 || kind.get() == 6,
+                            move || kind.get() == 0 || kind.get() == 6 || kind.get() == 11,
                             move || {
                                 view()
                                     .h(px(28.0))
@@ -4380,6 +4380,7 @@ fn replace_row(
                                     || kind.get() == 7
                                     || kind.get() == 9
                                     || kind.get() == 10
+                                    || kind.get() == 11
                             },
                             move || {
                                 let placeholder = move || {
@@ -4418,6 +4419,12 @@ fn replace_row(
                                             lang,
                                             "证书链文件 (.crt / .pem)",
                                             "Certificate chain (.crt / .pem)",
+                                        )
+                                        .to_string(),
+                                        11 => t(
+                                            lang,
+                                            "JSON 路径: /data/enabled 或 items[0].price",
+                                            "JSON path: /data/enabled or items[0].price",
                                         )
                                         .to_string(),
                                         _ => t(lang, "查找原文 (from)", "Find text (from)")
@@ -4481,6 +4488,7 @@ fn replace_row(
                                     || kind.get() == 7
                                     || kind.get() == 9
                                     || kind.get() == 10
+                                    || kind.get() == 11
                             },
                             move || {
                                 let placeholder = move || {
@@ -4510,6 +4518,12 @@ fn replace_row(
                                             lang,
                                             "私钥文件 (.key，合并 PEM 可留空)",
                                             "Private key (.key, optional if combined)",
+                                        )
+                                        .to_string(),
+                                        11 => t(
+                                            lang,
+                                            "JSON 值: true / 42 / \"text\" (留空删除)",
+                                            "JSON value: true / 42 / \"text\" (empty to delete)",
                                         )
                                         .to_string(),
                                         _ => {
@@ -5532,7 +5546,7 @@ fn closing(open: Signal<bool>, run: impl Fn() + 'static) -> impl Fn() + 'static 
 
 fn quick_kind(kind: u8) -> crate::rules::QuickRule {
     use crate::rules::QuickRule;
-    match kind % 11 {
+    match kind % 12 {
         0 => QuickRule::Replace,
         1 => QuickRule::Remote,
         2 => QuickRule::Local,
@@ -5543,7 +5557,8 @@ fn quick_kind(kind: u8) -> crate::rules::QuickRule {
         7 => QuickRule::Query,
         8 => QuickRule::Cors,
         9 => QuickRule::Throttle,
-        _ => QuickRule::Cert,
+        10 => QuickRule::Cert,
+        _ => QuickRule::Json,
     }
 }
 

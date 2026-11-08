@@ -523,6 +523,26 @@ impl Hub {
         ok
     }
 
+    pub fn append_comment(&self, id: u64, note: &str) {
+        let changed = self.with_session(|session| {
+            let Some(flow) = session.get(id) else {
+                return false;
+            };
+            if flow.comment.contains(note) {
+                return false;
+            }
+            let next = if flow.comment.is_empty() {
+                note.to_string()
+            } else {
+                format!("{} {note}", flow.comment)
+            };
+            session.set_comment(id, next)
+        });
+        if changed {
+            self.touch();
+        }
+    }
+
     pub fn resolve_break(&self, decision: BreakDecision) -> bool {
         let mut queue = self
             .break_queue
@@ -2082,18 +2102,34 @@ where
         );
     }
     if body_override.is_none()
-        && !plan.request_replaces.is_empty()
-        && let Some(len) = content_length(&head.headers)
-        && len <= crate::session::BODY_CAP
+        && (!plan.request_replaces.is_empty() || !plan.request_json_ops.is_empty())
     {
-        let raw = read_exact(client, len).await?;
-        request_taken = true;
-        let encoding = header_value(&head.headers, "content-encoding");
-        if let Some(next) = replaced_body(&raw, encoding.as_deref(), &plan.request_replaces) {
-            strip_request_encoding = true;
-            body_override = Some(next);
-        } else {
-            body_override = Some(raw);
+        if let Some(len) = content_length(&head.headers)
+            && len <= crate::session::BODY_CAP
+        {
+            if len > 0 {
+                let raw = read_exact(client, len).await?;
+                request_taken = true;
+                let encoding = header_value(&head.headers, "content-encoding");
+                if let Some(next) = rewrite_body(
+                    &hub,
+                    id,
+                    &raw,
+                    encoding.as_deref(),
+                    &plan.request_replaces,
+                    &plan.request_json_ops,
+                ) {
+                    strip_request_encoding = true;
+                    body_override = Some(next);
+                } else {
+                    body_override = Some(raw);
+                }
+            }
+        } else if !plan.request_json_ops.is_empty() {
+            hub.append_comment(
+                id,
+                "[json rule skipped: unsupported or unbuffered request body]",
+            );
         }
     }
     let pool_key = pool_key(&host, port, &hub);
@@ -2210,36 +2246,50 @@ where
     };
     if !websocket
         && !break_response
-        && !plan.response_replaces.is_empty()
-        && let Some(len) = content_length(&resp_headers)
-        && len <= crate::session::BODY_CAP
+        && (!plan.response_replaces.is_empty() || !plan.response_json_ops.is_empty())
     {
-        let raw = read_exact(&mut origin, len).await?;
-        let encoding = header_value(&resp_headers, "content-encoding");
-        if let Some(next) = replaced_body(&raw, encoding.as_deref(), &plan.response_replaces) {
-            resp_headers.retain(|(name, _)| {
-                !name.eq_ignore_ascii_case("content-encoding")
-                    && !name.eq_ignore_ascii_case("transfer-encoding")
-            });
-            hub.replace_response(id, status, resp_headers.clone(), next.clone());
-            write_bytes(
-                client,
-                status,
-                &reason,
-                &resp_headers,
-                &next,
-                throttle_down_bps,
-            )
-            .await?;
+        if let Some(len) = content_length(&resp_headers)
+            && len <= crate::session::BODY_CAP
+        {
+            let raw = read_exact(&mut origin, len).await?;
+            let encoding = header_value(&resp_headers, "content-encoding");
+            if let Some(next) = rewrite_body(
+                &hub,
+                id,
+                &raw,
+                encoding.as_deref(),
+                &plan.response_replaces,
+                &plan.response_json_ops,
+            ) {
+                resp_headers.retain(|(name, _)| {
+                    !name.eq_ignore_ascii_case("content-encoding")
+                        && !name.eq_ignore_ascii_case("transfer-encoding")
+                });
+                hub.replace_response(id, status, resp_headers.clone(), next.clone());
+                write_bytes(
+                    client,
+                    status,
+                    &reason,
+                    &resp_headers,
+                    &next,
+                    throttle_down_bps,
+                )
+                .await?;
+                hub.mark_finished(id);
+                return Ok(());
+            }
+            let head = render_response_head(status, &reason, &resp_headers);
+            client.write_all(head.as_bytes()).await?;
+            write_all_throttled(client, &raw, throttle_down_bps).await?;
+            note_decoded(&hub, id, Direction::Response, &raw, encoding.as_deref());
             hub.mark_finished(id);
             return Ok(());
+        } else if !plan.response_json_ops.is_empty() {
+            hub.append_comment(
+                id,
+                "[json rule skipped: unsupported or unbuffered response body]",
+            );
         }
-        let head = render_response_head(status, &reason, &resp_headers);
-        client.write_all(head.as_bytes()).await?;
-        write_all_throttled(client, &raw, throttle_down_bps).await?;
-        note_decoded(&hub, id, Direction::Response, &raw, encoding.as_deref());
-        hub.mark_finished(id);
-        return Ok(());
     }
     if break_response {
         match read_capped_body(&mut origin, &resp_headers, crate::session::BODY_CAP).await {
@@ -4274,6 +4324,7 @@ async fn forward_request(
     let mut break_response = false;
     let mut response_ops = Vec::new();
     let mut response_replaces = Vec::new();
+    let mut response_json_ops = Vec::new();
     let mut cors = false;
     let mut throttle_up_bps = None;
     let mut throttle_down_bps = None;
@@ -4285,6 +4336,7 @@ async fn forward_request(
         }
         response_ops = plan.response_headers.clone();
         response_replaces = plan.response_replaces.clone();
+        response_json_ops = plan.response_json_ops.clone();
         cors = plan.cors;
         throttle_up_bps = plan.throttle_up_bps;
         throttle_down_bps = plan.throttle_down_bps;
@@ -4395,7 +4447,9 @@ async fn forward_request(
                 format!("{scheme}://{authority}{path}"),
             );
         }
-        if body_override.is_none() && !plan.request_replaces.is_empty() {
+        if body_override.is_none()
+            && (!plan.request_replaces.is_empty() || !plan.request_json_ops.is_empty())
+        {
             let known = parts
                 .headers
                 .get(http::header::CONTENT_LENGTH)
@@ -4409,13 +4463,24 @@ async fn forward_request(
                     encoding.as_deref(),
                 )
                 .await?;
-                if let Some(next) = replaced_body(&raw, encoding.as_deref(), &plan.request_replaces)
-                {
+                if let Some(next) = rewrite_body(
+                    &hub,
+                    id,
+                    &raw,
+                    encoding.as_deref(),
+                    &plan.request_replaces,
+                    &plan.request_json_ops,
+                ) {
                     strip_request_encoding = true;
                     body_override = Some(next);
                 } else {
                     body_override = Some(raw.to_vec());
                 }
+            } else if !plan.request_json_ops.is_empty() {
+                hub.append_comment(
+                    id,
+                    "[json rule skipped: unsupported or unbuffered request body]",
+                );
             }
         }
     }
@@ -4497,7 +4562,10 @@ async fn forward_request(
         }
         replace_header_map(&mut parts.headers, &pairs);
     }
-    if !websocket && !break_response && !response_replaces.is_empty() {
+    if !websocket
+        && !break_response
+        && (!response_replaces.is_empty() || !response_json_ops.is_empty())
+    {
         let known = parts
             .headers
             .get(http::header::CONTENT_LENGTH)
@@ -4509,7 +4577,14 @@ async fn forward_request(
                 .await
                 .map_err(|err| anyhow!("读取响应体: {err}"))?;
             let raw = collected.to_bytes();
-            if let Some(next) = replaced_body(&raw, resp_encoding.as_deref(), &response_replaces) {
+            if let Some(next) = rewrite_body(
+                &hub,
+                id,
+                &raw,
+                resp_encoding.as_deref(),
+                &response_replaces,
+                &response_json_ops,
+            ) {
                 parts.headers.remove(http::header::CONTENT_ENCODING);
                 parts.headers.remove(http::header::CONTENT_LENGTH);
                 if let Ok(value) = http::HeaderValue::from_str(&next.len().to_string()) {
@@ -4542,6 +4617,11 @@ async fn forward_request(
                 parts,
                 RecordingBody::from_bytes(raw).with_throttle(throttle_down_bps),
             ));
+        } else if !response_json_ops.is_empty() {
+            hub.append_comment(
+                id,
+                "[json rule skipped: unsupported or unbuffered response body]",
+            );
         }
     }
     if break_response && !websocket {
@@ -4722,21 +4802,47 @@ async fn drain_incoming(body: Incoming) -> Result<()> {
 
 /// Decodes `Content-Encoding`, then applies text replacements. `None` keeps
 /// the wire bytes: binary, a failed decode, or a body the pairs do not change.
-fn replaced_body(
+fn rewrite_body(
+    hub: &Hub,
+    id: u64,
     raw: &[u8],
     encoding: Option<&str>,
     pairs: &[(String, String)],
+    json_ops: &[rules::JsonOp],
 ) -> Option<Vec<u8>> {
-    if pairs.is_empty() || raw.len() > crate::session::BODY_CAP {
+    if (pairs.is_empty() && json_ops.is_empty()) || raw.len() > crate::session::BODY_CAP {
+        if !json_ops.is_empty() && raw.len() > crate::session::BODY_CAP {
+            hub.append_comment(id, "[json rule skipped: body exceeds 1 MB]");
+        }
         return None;
     }
     let mut decoder = Decoder::from_header(encoding);
     let mut decoded = decoder.push(raw);
     decoded.extend(decoder.finish());
     if decoder.error().is_some() {
+        if !json_ops.is_empty() {
+            hub.append_comment(id, "[json rule skipped: content-encoding decode failed]");
+        }
         return None;
     }
-    rules::apply_replaces(&decoded, pairs)
+    let mut changed = false;
+    if let Some(next) = rules::apply_replaces(&decoded, pairs) {
+        decoded = next;
+        changed = true;
+    }
+    if !json_ops.is_empty() {
+        match rules::apply_json_ops(&decoded, json_ops) {
+            Ok(Some(next)) => {
+                decoded = next;
+                changed = true;
+            }
+            Ok(None) => {}
+            Err(reason) => {
+                hub.append_comment(id, &format!("[json rule skipped: {reason}]"));
+            }
+        }
+    }
+    changed.then_some(decoded)
 }
 
 fn note_decoded(hub: &Hub, id: u64, direction: Direction, raw: &[u8], encoding: Option<&str>) {
