@@ -4316,7 +4316,12 @@ fn replace_row(
                                 })
                             })
                             .cursor(Cursor::Pointer)
-                            .on_press(move || kind.set(idx))
+                            .on_press(move || {
+                                kind.set(idx);
+                                if idx == 2 || idx == 10 {
+                                    response.set(false);
+                                }
+                            })
                             .child(
                                 text(tr(zh, en))
                                     .number_of_lines(1)
@@ -4352,7 +4357,7 @@ fn replace_row(
                             move |text| path_pattern.set(text.to_string()),
                         )))
                         .child(when(
-                            move || matches!(kind.get(), 0 | 6 | 10 | 11),
+                            move || matches!(kind.get(), 0 | 2 | 6 | 10 | 11),
                             move || {
                                 view()
                                     .h(px(28.0))
@@ -4378,7 +4383,21 @@ fn replace_row(
                                         },
                                     ))
                                     .child(when(
-                                        move || kind.get() != 10,
+                                        move || kind.get() == 2,
+                                        move || {
+                                            view()
+                                                .flex_row()
+                                                .items_center()
+                                                .child(quick_side_chip(
+                                                    response, false, "本地", "Local",
+                                                ))
+                                                .child(quick_side_chip(
+                                                    response, true, "回源", "Fallback",
+                                                ))
+                                        },
+                                    ))
+                                    .child(when(
+                                        move || kind.get() != 10 && kind.get() != 2,
                                         move || {
                                             view()
                                                 .flex_row()
@@ -4413,8 +4432,8 @@ fn replace_row(
                                         .to_string(),
                                         2 => t(
                                             lang,
-                                            "本地文件路径 (或留空仅填状态码)",
-                                            "Local file (or leave empty for status)",
+                                            "本地文件或目录路径 (或留空仅填状态码)",
+                                            "Local file or directory (or empty for status)",
                                         )
                                         .to_string(),
                                         3 => t(

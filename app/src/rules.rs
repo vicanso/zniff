@@ -37,6 +37,7 @@ pub enum Rule {
         status: Option<u16>,
         delay: Duration,
         op: Option<String>,
+        fallback: bool,
     },
     MapRemote {
         host: String,
@@ -143,8 +144,15 @@ pub enum JsonOp {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
-    MapLocal { file: Option<PathBuf>, status: u16 },
-    MapRemote { url: String },
+    MapLocal {
+        path_prefix: String,
+        file: Option<PathBuf>,
+        status: u16,
+        fallback: bool,
+    },
+    MapRemote {
+        url: String,
+    },
     BreakRequest,
     BreakResponse,
 }
@@ -468,15 +476,19 @@ pub fn effect_with_ops(rules: &[Rule], host: &str, path: &str, ops: &[String]) -
                 }
             }
             Rule::MapLocal {
+                path_prefix,
                 file,
                 status,
                 delay,
+                fallback,
                 ..
             } if effect.action.is_none() => {
                 effect.delay = cap_delay(effect.delay.saturating_add(*delay));
                 effect.action = Some(Action::MapLocal {
+                    path_prefix: path_prefix.clone(),
                     file: file.clone(),
                     status: status.unwrap_or(200),
+                    fallback: *fallback,
                 });
             }
             Rule::MapRemote { url, .. } if effect.action.is_none() => {
@@ -676,6 +688,7 @@ fn parse_line(line: &str) -> Option<Rule> {
             let mut status = None;
             let mut delay = Duration::ZERO;
             let mut op = None;
+            let mut fallback = false;
             for token in tokens {
                 if let Some(code_str) = token.strip_prefix("status=") {
                     status = Some(parse_status_opt(code_str)?);
@@ -689,13 +702,22 @@ fn parse_line(line: &str) -> Option<Rule> {
                         return None;
                     }
                     op = Some(parse_op_opt(op_str)?);
+                } else if token.eq_ignore_ascii_case("fallback")
+                    || token.eq_ignore_ascii_case("fallback=true")
+                    || token.eq_ignore_ascii_case("fallback=1")
+                {
+                    fallback = true;
+                } else if token.eq_ignore_ascii_case("fallback=false")
+                    || token.eq_ignore_ascii_case("fallback=0")
+                {
+                    fallback = false;
                 } else if file.is_none() && !token.is_empty() {
                     file = Some(PathBuf::from(token));
                 } else {
                     return None;
                 }
             }
-            if file.is_none() && status.is_none() {
+            if (file.is_none() && status.is_none()) || (fallback && file.is_none()) {
                 return None;
             }
             Some(Rule::MapLocal {
@@ -705,6 +727,7 @@ fn parse_line(line: &str) -> Option<Rule> {
                 status,
                 delay,
                 op,
+                fallback,
             })
         }
         "map-remote" => {
@@ -1442,9 +1465,10 @@ pub fn append_quick_rule(
                 format!("map-local {pattern} status={code}")
             } else {
                 let quoted = quote_rule_token(from);
+                let fb = if response { " fallback" } else { "" };
                 match status_from_to {
-                    Some(code) => format!("map-local {pattern} {quoted} status={code}"),
-                    None => format!("map-local {pattern} {quoted}"),
+                    Some(code) => format!("map-local {pattern} {quoted} status={code}{fb}"),
+                    None => format!("map-local {pattern} {quoted}{fb}"),
                 }
             }
         }
@@ -1865,6 +1889,169 @@ fn wildcard_matches(pattern: &str, text: &str) -> bool {
     true
 }
 
+#[derive(Debug)]
+pub enum MapLocalError {
+    NotFound(std::io::Error),
+    Io(std::io::Error),
+    Traversal,
+}
+
+impl MapLocalError {
+    pub fn message(&self) -> String {
+        match self {
+            Self::NotFound(err) | Self::Io(err) => format!("map-local 读不到文件: {err}"),
+            Self::Traversal => "map-local 拒绝越界路径: 请求路径超出映射目录".to_string(),
+        }
+    }
+}
+
+/// Resolves a `map-local` file or directory target against the matched `path_prefix`
+/// and incoming `req_path` (which may include a `?query` string).
+///
+/// - When `file` is `None`, returns `Ok(None)` (status-only response with empty body).
+/// - When `file` is a regular file, returns `Ok(Some(file))`.
+/// - When `file` is a directory, strips the matched `path_prefix` and `?query`,
+///   percent-decodes relative segments, defaults `/` or a subdirectory to `index.html`,
+///   and verifies via `canonicalize` that the resolved path stays inside the directory root.
+pub fn resolve_map_local_target(
+    file: Option<&std::path::Path>,
+    path_prefix: &str,
+    req_path: &str,
+) -> Result<Option<PathBuf>, MapLocalError> {
+    let Some(base) = file else {
+        return Ok(None);
+    };
+    let meta = match std::fs::metadata(base) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            if std::fs::symlink_metadata(base).is_ok() {
+                return Err(MapLocalError::Io(err));
+            }
+            return Err(MapLocalError::NotFound(err));
+        }
+        Err(err) => return Err(MapLocalError::Io(err)),
+    };
+    if !meta.is_dir() {
+        return Ok(Some(base.to_path_buf()));
+    }
+    let canonical_root = std::fs::canonicalize(base).map_err(MapLocalError::Io)?;
+    let clean_path = req_path.split(['?', '#']).next().unwrap_or(req_path);
+    let suffix = matched_route_suffix(path_prefix, clean_path);
+    if suffix.contains('\\') || suffix.contains('\0') {
+        return Err(MapLocalError::Traversal);
+    }
+    let mut cur = canonical_root.clone();
+    for raw_seg in suffix.split('/') {
+        if raw_seg.is_empty() || raw_seg == "." {
+            continue;
+        }
+        if raw_seg == ".." {
+            return Err(MapLocalError::Traversal);
+        }
+        let seg = percent_decode_segment(raw_seg).ok_or(MapLocalError::Traversal)?;
+        if seg.is_empty() || seg == "." {
+            continue;
+        }
+        if seg == ".." || seg.contains('/') || seg.contains('\\') || seg.contains('\0') {
+            return Err(MapLocalError::Traversal);
+        }
+        let mut comps = std::path::Path::new(&seg).components();
+        if !matches!(comps.next(), Some(std::path::Component::Normal(_))) || comps.next().is_some()
+        {
+            return Err(MapLocalError::Traversal);
+        }
+        let next = cur.join(&seg);
+        if std::fs::symlink_metadata(&next).is_ok() {
+            let canon = std::fs::canonicalize(&next).map_err(|_| MapLocalError::Traversal)?;
+            if !canon.starts_with(&canonical_root) {
+                return Err(MapLocalError::Traversal);
+            }
+        }
+        cur = next;
+    }
+    if cur == canonical_root || suffix.ends_with('/') || cur.is_dir() {
+        cur = cur.join("index.html");
+    }
+    let meta = match std::fs::symlink_metadata(&cur) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(MapLocalError::NotFound(err));
+        }
+        Err(err) => return Err(MapLocalError::Io(err)),
+    };
+    let canon_file = std::fs::canonicalize(&cur).map_err(|err| {
+        if meta.file_type().is_symlink() {
+            MapLocalError::Traversal
+        } else {
+            MapLocalError::Io(err)
+        }
+    })?;
+    if !canon_file.starts_with(&canonical_root) {
+        return Err(MapLocalError::Traversal);
+    }
+    if !canon_file.is_file() {
+        return Err(MapLocalError::NotFound(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "resolved path is not a regular file",
+        )));
+    }
+    Ok(Some(canon_file))
+}
+
+fn matched_route_suffix<'a>(prefix: &str, clean_path: &'a str) -> &'a str {
+    let mut best_len: Option<usize> = None;
+    for part in prefix
+        .split(['|', ','])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let p = if part.starts_with('/') {
+            part.to_string()
+        } else {
+            format!("/{part}")
+        };
+        if p == "/" {
+            best_len = Some(best_len.unwrap_or(0));
+            continue;
+        }
+        let trimmed = p.trim_end_matches('/');
+        if clean_path == trimmed || clean_path.starts_with(&format!("{trimmed}/")) {
+            let len = trimmed.len();
+            if best_len.is_none_or(|cur| len > cur) {
+                best_len = Some(len);
+            }
+        } else if clean_path.starts_with(&p) {
+            let len = p.len();
+            if best_len.is_none_or(|cur| len > cur) {
+                best_len = Some(len);
+            }
+        }
+    }
+    let cut = best_len.unwrap_or(0).min(clean_path.len());
+    &clean_path[cut..]
+}
+
+fn percent_decode_segment(input: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut idx = 0;
+    while idx < bytes.len() {
+        if bytes[idx] == b'%' {
+            if idx + 2 >= bytes.len() {
+                return None;
+            }
+            let hi = (bytes[idx + 1] as char).to_digit(16)? as u8;
+            let lo = (bytes[idx + 2] as char).to_digit(16)? as u8;
+            out.push((hi << 4) | lo);
+            idx += 3;
+        } else {
+            out.push(bytes[idx]);
+            idx += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1901,8 +2088,10 @@ break example.com/api
         assert_eq!(
             applied.action,
             Some(Action::MapLocal {
+                path_prefix: "/api".to_string(),
                 file: Some(PathBuf::from("./a.json")),
                 status: 429,
+                fallback: false,
             })
         );
         assert_eq!(applied.request_headers.len(), 1);
@@ -2115,16 +2304,20 @@ replace example.com/api res \"old text\" -> \"new text\"
         assert_eq!(
             mock_eff.action,
             Some(Action::MapLocal {
+                path_prefix: "/api/mock".to_string(),
                 file: Some(PathBuf::from("/Users/tree/My Mocks/data.json")),
                 status: 201,
+                fallback: false,
             })
         );
         let empty_eff = effect(&rules, "example.com", "/api/empty");
         assert_eq!(
             empty_eff.action,
             Some(Action::MapLocal {
+                path_prefix: "/api/empty".to_string(),
                 file: None,
                 status: 503,
+                fallback: false,
             })
         );
         assert_eq!(empty_eff.delay, Duration::from_millis(200));
@@ -2354,8 +2547,10 @@ break-res example.com/graphql op=anonymous
         assert_eq!(
             cart_eff.action,
             Some(Action::MapLocal {
+                path_prefix: "/graphql".to_string(),
                 file: Some(PathBuf::from("./cart.json")),
                 status: 200,
+                fallback: false,
             })
         );
         assert_eq!(
@@ -2430,5 +2625,103 @@ break-res example.com/graphql op=anonymous
             appended,
             "client-cert mtls.example.com /tmp/client.pem /tmp/client.key\n"
         );
+    }
+
+    #[test]
+    fn map_local_directory_resolves_files_index_and_blocks_traversal() {
+        let dir = std::env::temp_dir().join(format!("zniff-mapdir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let dist = dir.join("dist");
+        std::fs::create_dir_all(dist.join("js")).unwrap();
+        std::fs::write(dist.join("index.html"), b"<h1>root</h1>").unwrap();
+        std::fs::write(dist.join("js/app.js"), b"console.log(1)").unwrap();
+        std::fs::write(dist.join("js/hello world.js"), b"console.log(2)").unwrap();
+        let outside = dir.join("secret.txt");
+        std::fs::write(&outside, b"top-secret").unwrap();
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&outside, dist.join("evil.txt")).unwrap();
+            std::os::unix::fs::symlink(&dir, dist.join("evil_dir")).unwrap();
+        }
+
+        let rules = parse_rules(&format!(
+            "map-local example.com/assets \"{}\" fallback\n",
+            dist.display()
+        ));
+        assert_eq!(rules.len(), 1);
+        let eff = effect(&rules, "example.com", "/assets/js/app.js");
+        assert_eq!(
+            eff.action,
+            Some(Action::MapLocal {
+                path_prefix: "/assets".to_string(),
+                file: Some(dist.clone()),
+                status: 200,
+                fallback: true,
+            })
+        );
+
+        let root_index = resolve_map_local_target(Some(&dist), "/assets", "/assets?v=1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(std::fs::read(&root_index).unwrap(), b"<h1>root</h1>");
+
+        let js_file = resolve_map_local_target(Some(&dist), "/assets", "/assets/js/app.js?ts=9")
+            .unwrap()
+            .unwrap();
+        assert_eq!(std::fs::read(&js_file).unwrap(), b"console.log(1)");
+
+        let encoded =
+            resolve_map_local_target(Some(&dist), "/assets", "/assets/js/hello%20world.js")
+                .unwrap()
+                .unwrap();
+        assert_eq!(std::fs::read(&encoded).unwrap(), b"console.log(2)");
+
+        // Missing file inside directory returns NotFound
+        assert!(matches!(
+            resolve_map_local_target(Some(&dist), "/assets", "/assets/js/missing.js"),
+            Err(MapLocalError::NotFound(_))
+        ));
+
+        // Directory traversal (raw or percent-encoded) is blocked with Traversal
+        for bad in [
+            "/assets/../secret.txt",
+            "/assets/%2e%2e/secret.txt",
+            "/assets/js/..%2f..%2fsecret.txt",
+            "/assets/\\..\\secret.txt",
+        ] {
+            assert!(
+                matches!(
+                    resolve_map_local_target(Some(&dist), "/assets", bad),
+                    Err(MapLocalError::Traversal)
+                ),
+                "expected Traversal for {bad}"
+            );
+        }
+
+        #[cfg(unix)]
+        {
+            assert!(matches!(
+                resolve_map_local_target(Some(&dist), "/assets", "/assets/evil.txt"),
+                Err(MapLocalError::Traversal)
+            ));
+            assert!(matches!(
+                resolve_map_local_target(Some(&dist), "/assets", "/assets/evil_dir/secret.txt"),
+                Err(MapLocalError::Traversal)
+            ));
+        }
+
+        let quick_fb = append_quick_rule(
+            "",
+            QuickRule::Local,
+            "example.com/assets",
+            true,
+            "./dist",
+            "",
+        )
+        .unwrap();
+        assert_eq!(quick_fb, "map-local example.com/assets ./dist fallback\n");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

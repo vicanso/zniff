@@ -2106,22 +2106,50 @@ where
         return Ok(());
     }
     match &plan.action {
-        Some(Action::MapLocal { file, status }) => {
-            if !request_taken {
-                let _ = drain_request(client, &headers, &hub, id).await;
+        Some(Action::MapLocal {
+            path_prefix,
+            file,
+            status,
+            fallback,
+        }) => match rules::resolve_map_local_target(file.as_deref(), path_prefix, &path) {
+            Ok(resolved) => {
+                if !request_taken {
+                    let _ = drain_request(client, &headers, &hub, id).await;
+                }
+                return write_mapped_file(
+                    client,
+                    &hub,
+                    id,
+                    resolved.as_deref(),
+                    *status,
+                    &response_ops,
+                    cors,
+                    throttle_down_bps,
+                )
+                .await;
             }
-            return write_mapped_file(
-                client,
-                &hub,
-                id,
-                file.as_deref(),
-                *status,
-                &response_ops,
-                cors,
-                throttle_down_bps,
-            )
-            .await;
-        }
+            Err(rules::MapLocalError::NotFound(_)) if *fallback => {
+                hub.append_comment(id, "map-local(fallback)");
+            }
+            Err(err) => {
+                if !request_taken {
+                    let _ = drain_request(client, &headers, &hub, id).await;
+                }
+                let body = err.message();
+                hub.set_error(id, body.clone());
+                write_static(
+                    client,
+                    &hub,
+                    id,
+                    502,
+                    "Bad Gateway",
+                    &[("Content-Type".into(), "text/plain".into())],
+                    body.as_bytes(),
+                )
+                .await?;
+                return Ok(());
+            }
+        },
         Some(Action::BreakRequest) => {
             let decision = hub.wait_break(id, BreakSide::Request).await;
             if decision.drop {
@@ -3451,14 +3479,31 @@ where
 }
 
 fn file_type(path: &std::path::Path) -> &'static str {
-    match path.extension().and_then(|ext| ext.to_str()).unwrap_or("") {
-        "json" => "application/json",
+    let ext = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "json" | "map" => "application/json",
+        "js" | "mjs" | "cjs" => "application/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
         "html" | "htm" => "text/html",
+        "xml" => "application/xml",
+        "wasm" => "application/wasm",
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
         "webp" => "image/webp",
+        "gif" => "image/gif",
+        "ico" => "image/x-icon",
+        "avif" => "image/avif",
         "svg" => "image/svg+xml",
-        "txt" | "log" => "text/plain",
+        "woff2" => "font/woff2",
+        "woff" => "font/woff",
+        "ttf" => "font/ttf",
+        "otf" => "font/otf",
+        "pdf" => "application/pdf",
+        "txt" | "log" | "csv" => "text/plain",
         _ => "application/octet-stream",
     }
 }
@@ -4502,20 +4547,45 @@ async fn forward_request(
             return synthetic_headers(&hub, id, StatusCode::NO_CONTENT, resp_headers, Vec::new());
         }
         match &plan.action {
-            Some(Action::MapLocal { file, status }) => {
-                if let Some(left) = incoming.take() {
-                    record_request_bytes(&hub, id, left, encoding.as_deref()).await?;
+            Some(Action::MapLocal {
+                path_prefix,
+                file,
+                status,
+                fallback,
+            }) => match rules::resolve_map_local_target(file.as_deref(), path_prefix, &path) {
+                Ok(resolved) => {
+                    if let Some(left) = incoming.take() {
+                        record_request_bytes(&hub, id, left, encoding.as_deref()).await?;
+                    }
+                    return mapped_file_response(
+                        &hub,
+                        id,
+                        resolved.as_deref(),
+                        *status,
+                        &response_ops,
+                        cors,
+                    )
+                    .map(|res| res.map(|b| b.with_throttle(throttle_down_bps)));
                 }
-                return mapped_file_response(
-                    &hub,
-                    id,
-                    file.as_deref(),
-                    *status,
-                    &response_ops,
-                    cors,
-                )
-                .map(|res| res.map(|b| b.with_throttle(throttle_down_bps)));
-            }
+                Err(rules::MapLocalError::NotFound(_)) if *fallback => {
+                    hub.append_comment(id, "map-local(fallback)");
+                }
+                Err(err) => {
+                    if let Some(left) = incoming.take() {
+                        record_request_bytes(&hub, id, left, encoding.as_deref()).await?;
+                    }
+                    let text = err.message();
+                    hub.set_error(id, text.clone());
+                    return synthetic_response(
+                        &hub,
+                        id,
+                        StatusCode::BAD_GATEWAY,
+                        "text/plain",
+                        text.into_bytes(),
+                    )
+                    .map(|res| res.map(|b| b.with_throttle(throttle_down_bps)));
+                }
+            },
             Some(Action::BreakRequest) => {
                 let decision = hub.wait_break(id, BreakSide::Request).await;
                 if decision.drop {
@@ -8205,6 +8275,73 @@ mod tests {
             .with_session(|session| session.flows().into_iter().next())
             .unwrap();
         assert_eq!(flow.rule_hit, "client-cert");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn https_h2_map_local_directory_serves_assets_and_falls_back_to_upstream() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let dir = std::env::temp_dir().join(format!("zniff-h2-mapdir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let dist = dir.join("dist");
+        std::fs::create_dir_all(dist.join("js")).unwrap();
+        std::fs::write(dist.join("index.html"), b"<html>index</html>").unwrap();
+        std::fs::write(dist.join("js/app.js"), b"export const v = 1;").unwrap();
+
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let (origin_ca, origin_leaf, leaf_key) = test_origin_cert();
+        let mut hub = Hub::new(ca.clone()).unwrap();
+        hub.add_trust_anchor(origin_ca.der().clone());
+        hub.set_rules(&format!(
+            "map-local 127.0.0.1/assets \"{}\" fallback",
+            dist.display()
+        ));
+        let hub = Arc::new(hub);
+
+        let server = origin_tls_config(&origin_ca, &origin_leaf, &leaf_key, vec![b"h2".to_vec()]);
+        let (origin_addr, accepts) = spawn_h2_origin(server).await;
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        serve_proxy(proxy, hub.clone());
+
+        let mut sender = h2_client(&ca, proxy_addr, origin_addr).await;
+
+        // 1. Existing local asset is served from disk without hitting upstream handler
+        let (status, body) = h2_send(&mut sender, "/assets/js/app.js?v=42").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(&body[..], b"export const v = 1;");
+
+        // 2. Directory root defaults to index.html
+        let (status, body) = h2_send(&mut sender, "/assets/").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(&body[..], b"<html>index</html>");
+
+        // 3. Missing file falls back to upstream when `fallback` is enabled
+        let (status, body) = h2_send(&mut sender, "/assets/js/remote-only.js").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(&body[..], b"h2-/assets/js/remote-only.js");
+        assert_eq!(accepts.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // 4. Directory traversal is blocked with 502 even when `fallback` is enabled
+        let (status, _body) = h2_send(&mut sender, "/assets/%2e%2e/ca.crt").await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+
+        let flows = hub.with_session(|session| session.flows());
+        assert_eq!(flows.len(), 4);
+        assert!(
+            flows[0].response_headers.iter().any(|(k, v)| {
+                k.eq_ignore_ascii_case("content-type") && v.starts_with("application/javascript")
+            }),
+            "expected application/javascript Content-Type on .js asset"
+        );
+        assert!(flows[2].comment.contains("map-local(fallback)"));
+        assert!(
+            flows[3]
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("拒绝越界路径"))
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
