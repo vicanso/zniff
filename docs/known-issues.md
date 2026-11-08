@@ -186,11 +186,10 @@ P0 到 P3 里点名的能力已经接上。下面是仍然接受的缺口，不�
       - **Code Export 扩展（`present.rs`）**：在详情「更多」菜单中新增复制 **Rust (`reqwest`)** 请求代码（`present::rust_reqwest`）、**Go (`net/http`)** 请求代码（`present::go_http`），以及从响应 JSON 一键推导 **Rust `#[derive(Debug, Clone, Serialize, Deserialize)] struct`**（`present::rust_serde_struct`，自动将字段名转为 `snake_case`、处理 Rust 保留字 `r#` 与数字开头标识符并补充 `#[serde(rename = "...")]`）。
       - **内置本地 MCP 接口（`mcp.rs` + `proxy.rs`）**：在代理监听端口新增仅限本机回环（`peer.ip().is_loopback()`）访问的 `POST /mcp` JSON-RPC 2.0 路由（不记入抓包会话列表），并支持命令行 `zniff --mcp [--port <port>]` stdio 桥接模式；暴露 `list_flows`（直接复用 `zniff` 过滤表达式）、`get_flow_detail`（含头、完整正文、连接耗时明细与 WebSocket 消息）、`replay_flow`（支持重放已有流量或构造新请求并返回新流量详情）、`get_rules` 与 `set_rules`（实时读取与校验/更新规则及直通名单）共 5 个 MCP Tool。顶栏「更多」菜单新增「复制 MCP 配置」（`Copy MCP config`）一键复制 Claude Code / Cursor / Antigravity 可直接粘贴的 `mcpServers.zniff` 配置 JSON。
 
-17. **快捷语义规则：`no-cache`（禁用缓存）与 `block`（阻断连接）**
-    - **现状与痛点**：虽然通过多条 `header <pattern> req del If-Modified-Since` / `If-None-Match` 可以手工拼出禁用缓存，通过 `map-local <pattern> status=403` 可以模拟报错，但高频调试时不如语义化单条指令直观，且缺少直接掐断 TCP 连接（模拟网络 Drop/Reset）的快捷规则。
-    - **架构方案（中短期）**：
-      - `no-cache <主机[/路径]>`：叠加类规则，转发请求时自动剥离 `If-Modified-Since`、`If-None-Match`，并向请求与响应注入 `Cache-Control: no-cache, no-store, must-revalidate`（避免 `304 Not Modified` 干扰抓包查看正文）。
-      - `block <主机[/路径]> [drop|status=<code,默认403>]`：终点类规则，支持直接关闭底层连接（模拟连接被重置/掐断）或立即返回指定拦截状态码，不拨号源站。
+17. **快捷语义规则：`no-cache`（禁用缓存）与 `block`（阻断连接）** — ✅ 已完成
+    - **实现**：
+      - **`no-cache` / `nocache`（禁用缓存）**：叠加类规则 `no-cache <主机[/路径]> [op=<操作名>]`，匹配时自动从请求头剥离 `If-Modified-Since` 与 `If-None-Match` 并写入 `Cache-Control: no-cache, no-store, must-revalidate`、`Pragma: no-cache`，同时从响应头剥离 `ETag` 与 `Last-Modified` 并写入 `Cache-Control: no-cache, no-store, must-revalidate`、`Pragma: no-cache`、`Expires: 0`，避免 `304 Not Modified` 干扰抓包查看正文。
+      - **`block`（阻断连接）**：终点类规则 `block <主机[/路径]> [drop|reset|status=<code,默认403>] [op=<操作名>]`，不拨号源站；`status` 模式立即返回指定拦截状态码（默认 `403 Forbidden`）与空正文，`drop` / `reset` 模式直接关闭底层连接或重置流并在流量上记录 `规则阻断 (连接已断开)`。过滤弹出层快速添加区同步提供「禁缓存」与「阻断」（含「状态码 / 断开」切换）。
 
 18. **macOS iOS Simulator 一键注入证书 & Linux 系统级证书指引**
     - **现状与痛点**：

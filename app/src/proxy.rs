@@ -2339,6 +2339,33 @@ where
             }
         }
         Some(Action::BreakResponse) | None => {}
+        Some(Action::Block { drop_conn, status }) => {
+            if !request_taken {
+                let _ = drain_request(client, &headers, &hub, id).await;
+            }
+            if *drop_conn {
+                hub.set_error(id, "规则阻断 (连接已断开)");
+                hub.mark_finished(id);
+                let _ = client.shutdown().await;
+                return Ok(());
+            }
+            let mut resp_headers = vec![("Content-Length".to_string(), "0".to_string())];
+            if cors {
+                rules::ensure_cors(&mut resp_headers);
+            }
+            rules::apply_header_ops(&mut resp_headers, &response_ops);
+            write_static(
+                client,
+                &hub,
+                id,
+                *status,
+                reason_phrase(*status),
+                &resp_headers,
+                &[],
+            )
+            .await?;
+            return Ok(());
+        }
     }
     if let Some(next) = rules::apply_query_ops(&path, &plan.query_ops) {
         path = next;
@@ -4799,6 +4826,12 @@ async fn forward_request(
             let mut pairs = header_pairs(&parts.headers);
             rules::apply_header_ops(&mut pairs, &plan.request_headers);
             replace_header_map(&mut parts.headers, &pairs);
+            let existing = hub.with_session(|s| {
+                s.get(id)
+                    .map(|f| f.request_body.clone())
+                    .unwrap_or_default()
+            });
+            hub.replace_request(id, pairs, existing);
             headers_replaced = true;
         }
         if cors && parts.method == Method::OPTIONS && plan.action.is_none() {
@@ -4909,6 +4942,23 @@ async fn forward_request(
                 }
             }
             Some(Action::BreakResponse) => break_response = true,
+            Some(Action::Block { drop_conn, status }) => {
+                if let Some(left) = incoming.take() {
+                    let _ = record_request_bytes(&hub, id, left, encoding.as_deref()).await;
+                }
+                if *drop_conn {
+                    hub.set_error(id, "规则阻断 (连接已断开)");
+                    hub.mark_finished(id);
+                    anyhow::bail!("规则阻断 (连接已断开)");
+                }
+                let code = StatusCode::from_u16(*status).unwrap_or(StatusCode::FORBIDDEN);
+                let mut resp_headers = vec![("Content-Length".into(), "0".into())];
+                if cors {
+                    rules::ensure_cors(&mut resp_headers);
+                }
+                rules::apply_header_ops(&mut resp_headers, &response_ops);
+                return synthetic_headers(&hub, id, code, resp_headers, Vec::new());
+            }
             None => {}
         }
         if let Some(next) = rules::apply_query_ops(&path, &plan.query_ops) {
@@ -8688,6 +8738,86 @@ mod tests {
         assert!(json["result"]["tools"].is_array());
         // MCP calls must not pollute the captured flow session
         assert_eq!(hub.with_session(|session| session.len()), 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn https_h2_applies_no_cache_and_block_rules() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let dir =
+            std::env::temp_dir().join(format!("zniff-h2-nocache-block-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let (origin_ca, origin_leaf, leaf_key) = test_origin_cert();
+        let mut hub = Hub::new(ca.clone()).unwrap();
+        hub.add_trust_anchor(origin_ca.der().clone());
+        hub.set_rules(
+            "no-cache 127.0.0.1/api\n\
+             block 127.0.0.1/ads\n\
+             block 127.0.0.1/ban status=451\n\
+             block 127.0.0.1/drop drop\n",
+        );
+        let hub = Arc::new(hub);
+
+        let server = origin_tls_config(&origin_ca, &origin_leaf, &leaf_key, vec![b"h2".to_vec()]);
+        let (origin_addr, _accepts) = spawn_h2_origin(server).await;
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        serve_proxy(proxy, hub.clone());
+
+        let mut sender = h2_client(&ca, proxy_addr, origin_addr).await;
+
+        // 1. no-cache sets Cache-Control on request and response
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/api/items")
+            .header("If-None-Match", "\"etag-1\"")
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+        let res = sender.send_request(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers()
+                .get("cache-control")
+                .and_then(|v| v.to_str().ok()),
+            Some("no-cache, no-store, must-revalidate")
+        );
+        let _ = res.into_body().collect().await.unwrap();
+
+        // 2. block default 403
+        let (status_403, body_403) = h2_send(&mut sender, "/ads/pixel").await;
+        assert_eq!(status_403, StatusCode::FORBIDDEN);
+        assert!(body_403.is_empty());
+
+        // 3. block custom status 451
+        let (status_451, body_451) = h2_send(&mut sender, "/ban/check").await;
+        assert_eq!(status_451.as_u16(), 451);
+        assert!(body_451.is_empty());
+
+        // 4. block drop resets stream / closes connection and records error
+        let drop_req = Request::builder()
+            .method(Method::GET)
+            .uri("/drop")
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+        let drop_res = sender.send_request(drop_req).await;
+        assert!(drop_res.is_err());
+
+        let flows = hub.with_session(|session| session.flows());
+        assert_eq!(flows.len(), 4);
+        assert!(
+            !flows[0]
+                .request_headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("if-none-match"))
+        );
+        assert!(flows[0].request_headers.iter().any(|(k, v)| {
+            k.eq_ignore_ascii_case("cache-control") && v == "no-cache, no-store, must-revalidate"
+        }));
+        assert_eq!(flows[1].status, Some(403));
+        assert_eq!(flows[2].status, Some(451));
+        assert_eq!(flows[3].error.as_deref(), Some("规则阻断 (连接已断开)"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -117,6 +117,22 @@ pub enum Rule {
         cert_path: PathBuf,
         key_path: Option<PathBuf>,
     },
+    /// Strips conditional request headers and sets `Cache-Control: no-cache, no-store, must-revalidate`
+    /// on both request and response. Not a terminal rule.
+    NoCache {
+        host: String,
+        path_prefix: String,
+        op: Option<String>,
+    },
+    /// Blocks the request either by immediately closing/resetting the connection (`drop_conn: true`)
+    /// or returning a synthetic empty response with `status` (default `403`). Terminal rule.
+    Block {
+        host: String,
+        path_prefix: String,
+        drop_conn: bool,
+        status: u16,
+        op: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -155,6 +171,10 @@ pub enum Action {
     },
     BreakRequest,
     BreakResponse,
+    Block {
+        drop_conn: bool,
+        status: u16,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -216,7 +236,9 @@ impl Rule {
             Self::MapLocal { op, .. }
             | Self::MapRemote { op, .. }
             | Self::Break { op, .. }
-            | Self::BreakResponse { op, .. } => op.as_deref(),
+            | Self::BreakResponse { op, .. }
+            | Self::NoCache { op, .. }
+            | Self::Block { op, .. } => op.as_deref(),
             _ => None,
         }
     }
@@ -254,6 +276,12 @@ impl Rule {
                 host, path_prefix, ..
             }
             | Self::Throttle {
+                host, path_prefix, ..
+            }
+            | Self::NoCache {
+                host, path_prefix, ..
+            }
+            | Self::Block {
                 host, path_prefix, ..
             } => (host, path_prefix),
             Self::Cert { host, .. } | Self::ClientCert { host, .. } => (host, "/"),
@@ -337,6 +365,8 @@ pub fn hit_summary_with_ops(rules: &[Rule], host: &str, path: &str, ops: &[Strin
             Rule::Cors { .. } => ("cors", false),
             Rule::Replace { .. } => ("replace", false),
             Rule::Json { .. } => ("json", false),
+            Rule::NoCache { .. } => ("no-cache", false),
+            Rule::Block { .. } => ("block", true),
         };
         if terminal {
             if took_terminal {
@@ -442,6 +472,40 @@ pub fn effect_with_ops(rules: &[Rule], host: &str, path: &str, ops: &[String]) -
                 effect.query_ops.push(op);
             }
             Rule::Cors { .. } => effect.cors = true,
+            Rule::NoCache { .. } => {
+                effect.request_headers.push(HeaderOp::Remove {
+                    name: "If-Modified-Since".to_string(),
+                });
+                effect.request_headers.push(HeaderOp::Remove {
+                    name: "If-None-Match".to_string(),
+                });
+                effect.request_headers.push(HeaderOp::Set {
+                    name: "Cache-Control".to_string(),
+                    value: "no-cache, no-store, must-revalidate".to_string(),
+                });
+                effect.request_headers.push(HeaderOp::Set {
+                    name: "Pragma".to_string(),
+                    value: "no-cache".to_string(),
+                });
+                effect.response_headers.push(HeaderOp::Remove {
+                    name: "ETag".to_string(),
+                });
+                effect.response_headers.push(HeaderOp::Remove {
+                    name: "Last-Modified".to_string(),
+                });
+                effect.response_headers.push(HeaderOp::Set {
+                    name: "Cache-Control".to_string(),
+                    value: "no-cache, no-store, must-revalidate".to_string(),
+                });
+                effect.response_headers.push(HeaderOp::Set {
+                    name: "Pragma".to_string(),
+                    value: "no-cache".to_string(),
+                });
+                effect.response_headers.push(HeaderOp::Set {
+                    name: "Expires".to_string(),
+                    value: "0".to_string(),
+                });
+            }
             Rule::Replace {
                 response, from, to, ..
             } => {
@@ -499,6 +563,14 @@ pub fn effect_with_ops(rules: &[Rule], host: &str, path: &str, ops: &[String]) -
             }
             Rule::BreakResponse { .. } if effect.action.is_none() => {
                 effect.action = Some(Action::BreakResponse);
+            }
+            Rule::Block {
+                drop_conn, status, ..
+            } if effect.action.is_none() => {
+                effect.action = Some(Action::Block {
+                    drop_conn: *drop_conn,
+                    status: *status,
+                });
             }
             _ => {}
         }
@@ -915,6 +987,62 @@ fn parse_line(line: &str) -> Option<Rule> {
             }
             Some(Rule::Cors { host, path_prefix })
         }
+        "no-cache" | "nocache" => {
+            let tokens = rule_tokens(rest)?;
+            let op = match tokens.as_slice() {
+                [] => None,
+                [token] => {
+                    let op_str = token
+                        .strip_prefix("op=")
+                        .or_else(|| token.strip_prefix("operation="))?;
+                    Some(parse_op_opt(op_str)?)
+                }
+                _ => return None,
+            };
+            Some(Rule::NoCache {
+                host,
+                path_prefix,
+                op,
+            })
+        }
+        "block" => {
+            let tokens = rule_tokens(rest)?;
+            let mut drop_conn = false;
+            let mut status = 403u16;
+            let mut mode_set = false;
+            let mut op = None;
+            for token in tokens {
+                if let Some(op_str) = token
+                    .strip_prefix("op=")
+                    .or_else(|| token.strip_prefix("operation="))
+                {
+                    if op.is_some() {
+                        return None;
+                    }
+                    op = Some(parse_op_opt(op_str)?);
+                } else if !mode_set
+                    && (token.eq_ignore_ascii_case("drop")
+                        || token.eq_ignore_ascii_case("reset")
+                        || token.eq_ignore_ascii_case("abort"))
+                {
+                    drop_conn = true;
+                    mode_set = true;
+                } else if !mode_set && let Some(code) = parse_status_opt(&token) {
+                    status = code;
+                    drop_conn = false;
+                    mode_set = true;
+                } else {
+                    return None;
+                }
+            }
+            Some(Rule::Block {
+                host,
+                path_prefix,
+                drop_conn,
+                status,
+                op,
+            })
+        }
         "replace" => {
             let (side, rest) = next_rule_token(rest)?;
             let rest = rest.trim();
@@ -1316,6 +1444,8 @@ pub enum QuickRule {
     Query,
     Cors,
     Cert,
+    NoCache,
+    Block,
 }
 
 impl QuickRule {
@@ -1333,6 +1463,8 @@ impl QuickRule {
             Self::Query => ("改参", "Query"),
             Self::Cors => ("跨域", "CORS"),
             Self::Cert => ("证书", "Cert"),
+            Self::NoCache => ("禁缓存", "No-cache"),
+            Self::Block => ("阻断", "Block"),
         }
     }
 }
@@ -1538,6 +1670,54 @@ pub fn append_quick_rule(
             }
         }
         QuickRule::Cors => format!("cors {pattern}"),
+        QuickRule::NoCache => {
+            if from.is_empty() {
+                format!("no-cache {pattern}")
+            } else {
+                let op = parse_op_opt(from)?;
+                format!("no-cache {pattern} op={op}")
+            }
+        }
+        QuickRule::Block => {
+            let is_drop = response
+                || from.eq_ignore_ascii_case("drop")
+                || from.eq_ignore_ascii_case("reset")
+                || from.eq_ignore_ascii_case("abort");
+            if is_drop {
+                let op_raw = if response {
+                    if !from.is_empty() { from } else { to }
+                } else {
+                    to
+                };
+                if op_raw.is_empty() {
+                    format!("block {pattern} drop")
+                } else {
+                    let op = parse_op_opt(op_raw)?;
+                    format!("block {pattern} drop op={op}")
+                }
+            } else {
+                let status = if from.is_empty() {
+                    None
+                } else {
+                    Some(parse_status_opt(from)?)
+                };
+                let op = if to.is_empty() {
+                    None
+                } else {
+                    Some(parse_op_opt(to)?)
+                };
+                let mut line = format!("block {pattern}");
+                if let Some(code) = status
+                    && code != 403
+                {
+                    line.push_str(&format!(" status={code}"));
+                }
+                if let Some(op) = op {
+                    line.push_str(&format!(" op={op}"));
+                }
+                line
+            }
+        }
         QuickRule::Cert => {
             if from.is_empty() || from.contains('\n') || to.contains('\n') {
                 return None;
@@ -2740,5 +2920,154 @@ break-res example.com/graphql op=anonymous
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn no_cache_and_block_rules_parse_and_apply_effects() {
+        let rules = parse_rules(
+            "no-cache example.com/api\n\
+             nocache example.com/graphql op=GetUser\n\
+             block ads.example.com/track\n\
+             block api.example.com/ban status=451\n\
+             block bad.example.com/v1 drop\n\
+             block example.com/graphql reset op=DeleteAccount\n",
+        );
+        assert_eq!(rules.len(), 6);
+
+        // no-cache strips conditional request headers and sets no-cache on req & res
+        let eff = effect(&rules, "example.com", "/api/items");
+        assert!(eff.action.is_none());
+        assert_eq!(hit_summary(&rules, "example.com", "/api/items"), "no-cache");
+
+        let mut req_headers = vec![
+            (
+                "If-Modified-Since".to_string(),
+                "Wed, 21 Oct 2015 07:28:00 GMT".to_string(),
+            ),
+            ("If-None-Match".to_string(), "\"abc\"".to_string()),
+            ("Cache-Control".to_string(), "max-age=3600".to_string()),
+        ];
+        apply_header_ops(&mut req_headers, &eff.request_headers);
+        assert_eq!(
+            req_headers,
+            vec![
+                (
+                    "Cache-Control".to_string(),
+                    "no-cache, no-store, must-revalidate".to_string()
+                ),
+                ("Pragma".to_string(), "no-cache".to_string()),
+            ]
+        );
+
+        let mut res_headers = vec![
+            ("ETag".to_string(), "\"abc\"".to_string()),
+            (
+                "Last-Modified".to_string(),
+                "Wed, 21 Oct 2015 07:28:00 GMT".to_string(),
+            ),
+        ];
+        apply_header_ops(&mut res_headers, &eff.response_headers);
+        assert_eq!(
+            res_headers,
+            vec![
+                (
+                    "Cache-Control".to_string(),
+                    "no-cache, no-store, must-revalidate".to_string()
+                ),
+                ("Pragma".to_string(), "no-cache".to_string()),
+                ("Expires".to_string(), "0".to_string()),
+            ]
+        );
+
+        // block default 403
+        let block_default = effect(&rules, "ads.example.com", "/track/pixel");
+        assert_eq!(
+            block_default.action,
+            Some(Action::Block {
+                drop_conn: false,
+                status: 403,
+            })
+        );
+        assert_eq!(
+            hit_summary(&rules, "ads.example.com", "/track/pixel"),
+            "block"
+        );
+
+        // block custom status
+        let block_451 = effect(&rules, "api.example.com", "/ban/check");
+        assert_eq!(
+            block_451.action,
+            Some(Action::Block {
+                drop_conn: false,
+                status: 451,
+            })
+        );
+
+        // block drop
+        let block_drop = effect(&rules, "bad.example.com", "/v1/ping");
+        assert_eq!(
+            block_drop.action,
+            Some(Action::Block {
+                drop_conn: true,
+                status: 403,
+            })
+        );
+
+        // GraphQL op-scoped no-cache and block
+        let gql_get = effect_with_ops(&rules, "example.com", "/graphql", &["GetUser".to_string()]);
+        assert!(gql_get.action.is_none());
+        assert!(!gql_get.request_headers.is_empty());
+
+        let gql_del = effect_with_ops(
+            &rules,
+            "example.com",
+            "/graphql",
+            &["DeleteAccount".to_string()],
+        );
+        assert_eq!(
+            gql_del.action,
+            Some(Action::Block {
+                drop_conn: true,
+                status: 403,
+            })
+        );
+
+        // QuickRule helpers
+        assert_eq!(
+            append_quick_rule("", QuickRule::NoCache, "example.com/api", false, "", "").unwrap(),
+            "no-cache example.com/api\n"
+        );
+        assert_eq!(
+            append_quick_rule(
+                "",
+                QuickRule::NoCache,
+                "example.com/graphql",
+                false,
+                "GetUser",
+                ""
+            )
+            .unwrap(),
+            "no-cache example.com/graphql op=GetUser\n"
+        );
+        assert_eq!(
+            append_quick_rule("", QuickRule::Block, "ads.example.com", false, "", "").unwrap(),
+            "block ads.example.com\n"
+        );
+        assert_eq!(
+            append_quick_rule(
+                "",
+                QuickRule::Block,
+                "ads.example.com",
+                false,
+                "451",
+                "GetAd"
+            )
+            .unwrap(),
+            "block ads.example.com status=451 op=GetAd\n"
+        );
+        assert_eq!(
+            append_quick_rule("", QuickRule::Block, "ads.example.com", true, "GetAd", "").unwrap(),
+            "block ads.example.com drop op=GetAd\n"
+        );
     }
 }

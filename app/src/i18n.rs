@@ -554,6 +554,10 @@ pub fn localize_error(lang: Lang, text: &str) -> String {
         ("客户端 TLS 超时", "Client TLS timed out"),
         ("断点丢弃", "Dropped at the break"),
         (
+            "规则阻断 (连接已断开)",
+            "Blocked by rule (connection dropped)",
+        ),
+        (
             "响应断点跳过，body 超过 1 MB",
             "Response break skipped, body is over 1 MB",
         ),

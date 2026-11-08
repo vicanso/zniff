@@ -4280,7 +4280,7 @@ fn replace_row(
     response: Signal<bool>,
     kind: Signal<u8>,
 ) -> impl IntoElement {
-    let kinds = [0_u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+    let kinds = [0_u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
     let ready_to_add = move || {
         let combined = crate::rules::combine_rule_pattern(&host_pattern.get(), &path_pattern.get());
         crate::rules::append_quick_rule(
@@ -4350,7 +4350,7 @@ fn replace_row(
                             .cursor(Cursor::Pointer)
                             .on_press(move || {
                                 kind.set(idx);
-                                if idx == 2 || idx == 10 {
+                                if idx == 2 || idx == 10 || idx == 13 {
                                     response.set(false);
                                 }
                             })
@@ -4389,7 +4389,7 @@ fn replace_row(
                             move |text| path_pattern.set(text.to_string()),
                         )))
                         .child(when(
-                            move || matches!(kind.get(), 0 | 2 | 6 | 10 | 11),
+                            move || matches!(kind.get(), 0 | 2 | 6 | 10 | 11 | 13),
                             move || {
                                 view()
                                     .h(px(28.0))
@@ -4429,7 +4429,24 @@ fn replace_row(
                                         },
                                     ))
                                     .child(when(
-                                        move || kind.get() != 10 && kind.get() != 2,
+                                        move || kind.get() == 13,
+                                        move || {
+                                            view()
+                                                .flex_row()
+                                                .items_center()
+                                                .child(quick_side_chip(
+                                                    response,
+                                                    false,
+                                                    "状态码",
+                                                    "Status",
+                                                ))
+                                                .child(quick_side_chip(
+                                                    response, true, "断开", "Drop",
+                                                ))
+                                        },
+                                    ))
+                                    .child(when(
+                                        move || !matches!(kind.get(), 2 | 10 | 13),
                                         move || {
                                             view()
                                                 .flex_row()
@@ -4474,7 +4491,7 @@ fn replace_row(
                                             "Delay duration: 2000ms or 2s",
                                         )
                                         .to_string(),
-                                        4 | 5 => t(
+                                        4 | 5 | 12 => t(
                                             lang,
                                             "GraphQL 操作名 (可选): GetUser",
                                             "GraphQL op (optional): GetUser",
@@ -4503,6 +4520,23 @@ fn replace_row(
                                             "JSON path: /data/enabled or items[0].price",
                                         )
                                         .to_string(),
+                                        13 => {
+                                            if response.get() {
+                                                t(
+                                                    lang,
+                                                    "GraphQL 操作名 (可选): GetUser",
+                                                    "GraphQL op (optional): GetUser",
+                                                )
+                                                .to_string()
+                                            } else {
+                                                t(
+                                                    lang,
+                                                    "状态码 (默认 403): 403 / 404 / 503",
+                                                    "Status (default 403): 403 / 404 / 503",
+                                                )
+                                                .to_string()
+                                            }
+                                        }
                                         _ => t(lang, "查找原文 (from)", "Find text (from)")
                                             .to_string(),
                                     }
@@ -4565,6 +4599,7 @@ fn replace_row(
                                     || kind.get() == 9
                                     || kind.get() == 10
                                     || kind.get() == 11
+                                    || (kind.get() == 13 && !response.get())
                             },
                             move || {
                                 let placeholder = move || {
@@ -4600,6 +4635,12 @@ fn replace_row(
                                             lang,
                                             "JSON 值: true / 42 / \"text\" (留空删除)",
                                             "JSON value: true / 42 / \"text\" (empty to delete)",
+                                        )
+                                        .to_string(),
+                                        13 => t(
+                                            lang,
+                                            "GraphQL 操作名 (可选): GetUser",
+                                            "GraphQL op (optional): GetUser",
                                         )
                                         .to_string(),
                                         _ => {
@@ -4655,7 +4696,7 @@ fn replace_row(
                                 .h(px(28.0))
                                 .px_3()
                                 .flex_grow(move || {
-                                    if matches!(kind.get(), 4 | 5 | 8) {
+                                    if matches!(kind.get(), 4 | 5 | 8 | 12) {
                                         1.0_f32
                                     } else {
                                         0.0_f32
@@ -5622,7 +5663,7 @@ fn closing(open: Signal<bool>, run: impl Fn() + 'static) -> impl Fn() + 'static 
 
 fn quick_kind(kind: u8) -> crate::rules::QuickRule {
     use crate::rules::QuickRule;
-    match kind % 12 {
+    match kind % 14 {
         0 => QuickRule::Replace,
         1 => QuickRule::Remote,
         2 => QuickRule::Local,
@@ -5634,7 +5675,9 @@ fn quick_kind(kind: u8) -> crate::rules::QuickRule {
         8 => QuickRule::Cors,
         9 => QuickRule::Throttle,
         10 => QuickRule::Cert,
-        _ => QuickRule::Json,
+        11 => QuickRule::Json,
+        12 => QuickRule::NoCache,
+        _ => QuickRule::Block,
     }
 }
 
