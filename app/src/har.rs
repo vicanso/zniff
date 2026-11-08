@@ -28,14 +28,32 @@ pub struct Imported {
     pub comment: Option<String>,
 }
 
+#[cfg(test)]
 pub fn export_har(flows: &[Flow]) -> Value {
-    json!({
-        "log": {
-            "version": "1.2",
-            "creator": {"name": "zniff", "version": "0.1.0"},
-            "entries": flows.iter().map(entry).collect::<Vec<_>>(),
-        }
-    })
+    export_har_with_redact(flows, &crate::share::RedactOptions::default())
+}
+
+pub fn export_har_with_redact(flows: &[Flow], redact: &crate::share::RedactOptions) -> Value {
+    let entries: Vec<Value> = if redact.enabled {
+        flows
+            .iter()
+            .map(|f| {
+                let (sanitized, _) = crate::share::redact_flow(f, redact);
+                entry(&sanitized)
+            })
+            .collect()
+    } else {
+        flows.iter().map(entry).collect()
+    };
+    let mut log = json!({
+        "version": "1.2",
+        "creator": {"name": "zniff", "version": "0.1.0"},
+        "entries": entries,
+    });
+    if redact.enabled {
+        log["_redacted"] = json!(true);
+    }
+    json!({ "log": log })
 }
 
 pub fn import_har(value: &Value) -> Vec<Imported> {

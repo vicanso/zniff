@@ -15,6 +15,112 @@ const FLOW_CAP: usize = 400;
 /// Characters of one body included in the share.
 const BODY_CHARS: usize = 16_000;
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RedactOptions {
+    pub enabled: bool,
+    pub extra_fields: Vec<String>,
+}
+
+impl RedactOptions {
+    pub fn new(enabled: bool, extra_raw: &str) -> Self {
+        let extra_fields = extra_raw
+            .split(|c: char| c == ',' || c == ';' || c.is_whitespace())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_ascii_lowercase)
+            .collect();
+        Self {
+            enabled,
+            extra_fields,
+        }
+    }
+
+    pub fn is_sensitive_header(&self, name: &str) -> bool {
+        let lower = name.trim().to_ascii_lowercase();
+        const DEFAULT_HEADERS: &[&str] = &[
+            "authorization",
+            "proxy-authorization",
+            "cookie",
+            "set-cookie",
+            "x-api-key",
+            "x-auth-token",
+            "x-access-token",
+            "x-csrf-token",
+            "x-xsrf-token",
+            "api-key",
+            "apikey",
+        ];
+        DEFAULT_HEADERS.contains(&lower.as_str())
+            || self.extra_fields.iter().any(|extra| extra == &lower)
+    }
+
+    pub fn is_sensitive_field(&self, name: &str) -> bool {
+        let lower = name.trim().to_ascii_lowercase();
+        const DEFAULT_FIELDS: &[&str] = &[
+            "password",
+            "passwd",
+            "pass",
+            "pwd",
+            "secret",
+            "client_secret",
+            "token",
+            "access_token",
+            "refresh_token",
+            "id_token",
+            "auth_token",
+            "api_key",
+            "apikey",
+            "private_key",
+            "session_id",
+            "sessionid",
+            "sid",
+            "jwt",
+            "authorization",
+            "credential",
+            "credentials",
+            "cvv",
+            "ssn",
+            "pin",
+        ];
+        DEFAULT_FIELDS.contains(&lower.as_str())
+            || self.extra_fields.iter().any(|extra| extra == &lower)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RedactReport {
+    pub redacted_headers: usize,
+    pub redacted_query_params: usize,
+    pub redacted_body_fields: usize,
+    pub unsanitizable_req_body: bool,
+    pub unsanitizable_res_body: bool,
+}
+
+impl RedactReport {
+    pub fn total_redacted(&self) -> usize {
+        self.redacted_headers + self.redacted_query_params + self.redacted_body_fields
+    }
+
+    pub fn has_unsanitizable_body(&self) -> bool {
+        self.unsanitizable_req_body || self.unsanitizable_res_body
+    }
+
+    pub fn note(&self) -> Option<String> {
+        let total = self.total_redacted();
+        match (
+            total > 0,
+            self.unsanitizable_req_body,
+            self.unsanitizable_res_body,
+        ) {
+            (_, true, true) => Some("[REDACTED; req/res body format not sanitizable]".into()),
+            (_, true, false) => Some("[REDACTED; req body format not sanitizable]".into()),
+            (_, false, true) => Some("[REDACTED; res body format not sanitizable]".into()),
+            (true, false, false) => Some("[REDACTED]".into()),
+            (false, false, false) => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LiveShare {
     pub id: String,
@@ -22,6 +128,7 @@ pub struct LiveShare {
     /// Filter text from the box at the moment the link was created.
     /// Later polls keep using it, including on flows that arrive after that.
     pub filter: String,
+    pub redact: RedactOptions,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -110,6 +217,8 @@ pub fn grant_ok(share: &LiveShare, id: &str, now: SystemTime) -> bool {
 struct ShareDoc {
     expires: u64,
     filter: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    redacted: bool,
     omitted: usize,
     rev: u64,
     incremental: bool,
@@ -161,16 +270,22 @@ struct ShareFlow {
     messages: Vec<String>,
 }
 
-pub fn document(flows: &[Flow], expires: SystemTime, filter: &str) -> String {
-    document_since(flows, expires, filter, 0, None)
+pub fn document_with_redact(
+    flows: &[Flow],
+    expires: SystemTime,
+    filter: &str,
+    redact: &RedactOptions,
+) -> String {
+    document_since_with_redact(flows, expires, filter, 0, None, redact)
 }
 
-pub fn document_since(
+pub fn document_since_with_redact(
     flows: &[Flow],
     expires: SystemTime,
     filter: &str,
     session_rev: u64,
     since: Option<u64>,
+    redact: &RedactOptions,
 ) -> String {
     let omitted = flows.len().saturating_sub(FLOW_CAP);
     let window = &flows[omitted..];
@@ -182,7 +297,12 @@ pub fn document_since(
         let prev = previous;
         previous = Some(flow.started);
         if since.is_none_or(|s| flow.rev > s) {
-            out.push(share_flow(flow, prev));
+            if redact.enabled {
+                let (sanitized, _) = redact_flow(flow, redact);
+                out.push(share_flow(&sanitized, prev));
+            } else {
+                out.push(share_flow(flow, prev));
+            }
         }
     }
     let doc = ShareDoc {
@@ -191,6 +311,7 @@ pub fn document_since(
             .map(|duration| duration.as_secs())
             .unwrap_or(0),
         filter: filter.to_string(),
+        redacted: redact.enabled,
         omitted,
         rev,
         incremental: since.is_some(),
@@ -200,24 +321,32 @@ pub fn document_since(
     serde_json::to_string(&doc).unwrap_or_else(|_| "{}".into())
 }
 
-pub fn flow_body_document(flow: &Flow) -> String {
-    let req_ct = crate::present::content_type(&flow.request_headers);
-    let res_ct = crate::present::content_type(&flow.response_headers);
+pub fn flow_body_document_with_redact(flow: &Flow, redact: &RedactOptions) -> String {
+    let owned;
+    let target = if redact.enabled {
+        let (sanitized, _) = redact_flow(flow, redact);
+        owned = sanitized;
+        &owned
+    } else {
+        flow
+    };
+    let req_ct = crate::present::content_type(&target.request_headers);
+    let res_ct = crate::present::content_type(&target.response_headers);
     let (request_body, request_body_pretty) = share_body_pair(
-        &flow.request_body,
-        flow.request_truncated,
-        flow.request_expired,
+        &target.request_body,
+        target.request_truncated,
+        target.request_expired,
         req_ct,
     );
     let (response_body, response_body_pretty) = share_body_pair(
-        &flow.response_body,
-        flow.response_truncated,
-        flow.response_expired,
+        &target.response_body,
+        target.response_truncated,
+        target.response_expired,
         res_ct,
     );
-    let messages = extract_messages(flow, res_ct);
+    let messages = extract_messages(target, res_ct);
     let doc = ShareFlowBody {
-        id: flow.id,
+        id: target.id,
         request_body,
         request_body_pretty,
         response_body,
@@ -225,6 +354,334 @@ pub fn flow_body_document(flow: &Flow) -> String {
         messages,
     };
     serde_json::to_string(&doc).unwrap_or_else(|_| "{}".into())
+}
+
+pub fn redact_flow(flow: &Flow, opts: &RedactOptions) -> (Flow, RedactReport) {
+    let mut out = flow.clone();
+    if !opts.enabled {
+        return (out, RedactReport::default());
+    }
+    let mut report = RedactReport::default();
+
+    for (name, value) in &mut out.request_headers {
+        if let Some(new_val) = redact_header_value(name, value, opts)
+            && *value != new_val
+        {
+            *value = new_val;
+            report.redacted_headers += 1;
+        }
+    }
+    for (name, value) in &mut out.response_headers {
+        if let Some(new_val) = redact_header_value(name, value, opts)
+            && *value != new_val
+        {
+            *value = new_val;
+            report.redacted_headers += 1;
+        }
+    }
+
+    let (new_url, url_q_count) = redact_url_query(&out.url, opts);
+    out.url = new_url;
+    let (new_path, path_q_count) = redact_url_query(&out.path, opts);
+    out.path = new_path;
+    report.redacted_query_params += url_q_count.max(path_q_count);
+
+    let req_ct = crate::present::content_type(&out.request_headers)
+        .unwrap_or("")
+        .to_string();
+    if !out.request_body.is_empty() {
+        let (new_body, count, unsanitizable) = redact_body_bytes(&out.request_body, &req_ct, opts);
+        out.request_body = new_body;
+        report.redacted_body_fields += count;
+        report.unsanitizable_req_body = unsanitizable;
+    }
+
+    let res_ct = crate::present::content_type(&out.response_headers)
+        .unwrap_or("")
+        .to_string();
+    if !out.response_body.is_empty() {
+        let (new_body, count, unsanitizable) = redact_body_bytes(&out.response_body, &res_ct, opts);
+        out.response_body = new_body;
+        report.redacted_body_fields += count;
+        report.unsanitizable_res_body = unsanitizable;
+    }
+
+    for msg in &mut out.messages {
+        if let Ok(mut json_val) = serde_json::from_str::<serde_json::Value>(&msg.text) {
+            let count = redact_json_value(&mut json_val, opts);
+            if count > 0
+                && let Ok(serialized) = serde_json::to_string(&json_val)
+            {
+                msg.text = serialized;
+                report.redacted_body_fields += count;
+            }
+        }
+    }
+
+    if let Some(note) = report.note() {
+        if out.comment.is_empty() {
+            out.comment = note;
+        } else if !out.comment.contains("[REDACTED") {
+            out.comment = format!("{} {note}", out.comment);
+        }
+    }
+
+    (out, report)
+}
+
+fn redact_header_value(name: &str, value: &str, opts: &RedactOptions) -> Option<String> {
+    if !opts.is_sensitive_header(name) {
+        return None;
+    }
+    let lower = name.trim().to_ascii_lowercase();
+    if lower == "authorization" || lower == "proxy-authorization" {
+        let trimmed = value.trim();
+        if let Some((scheme, rest)) = trimmed.split_once(char::is_whitespace)
+            && !rest.trim().is_empty()
+        {
+            return Some(format!("{scheme} [REDACTED]"));
+        }
+        return Some("[REDACTED]".into());
+    }
+    if lower == "cookie" {
+        let parts: Vec<String> = value
+            .split(';')
+            .map(|seg| {
+                let s = seg.trim();
+                if let Some((k, _)) = s.split_once('=') {
+                    format!("{}=[REDACTED]", k.trim())
+                } else if s.is_empty() {
+                    String::new()
+                } else {
+                    "[REDACTED]".into()
+                }
+            })
+            .filter(|s| !s.is_empty())
+            .collect();
+        return Some(parts.join("; "));
+    }
+    if lower == "set-cookie" {
+        let mut iter = value.split(';');
+        let first = iter.next().unwrap_or("").trim();
+        let redacted_first = if let Some((k, _)) = first.split_once('=') {
+            format!("{}=[REDACTED]", k.trim())
+        } else {
+            "[REDACTED]".into()
+        };
+        let mut out = vec![redacted_first];
+        for attr in iter {
+            let attr_trimmed = attr.trim();
+            if !attr_trimmed.is_empty() {
+                out.push(attr_trimmed.to_string());
+            }
+        }
+        return Some(out.join("; "));
+    }
+    Some("[REDACTED]".into())
+}
+
+fn redact_url_query(url_or_path: &str, opts: &RedactOptions) -> (String, usize) {
+    let Some((before_q, after_q)) = url_or_path.split_once('?') else {
+        return (url_or_path.to_string(), 0);
+    };
+    let (query, frag) = match after_q.split_once('#') {
+        Some((q, f)) => (q, Some(f)),
+        None => (after_q, None),
+    };
+    let (new_query, count) = redact_urlencoded_pairs(query, opts);
+    if count == 0 {
+        return (url_or_path.to_string(), 0);
+    }
+    let mut out = format!("{before_q}?{new_query}");
+    if let Some(f) = frag {
+        out.push('#');
+        out.push_str(f);
+    }
+    (out, count)
+}
+
+fn redact_urlencoded_pairs(query: &str, opts: &RedactOptions) -> (String, usize) {
+    let mut count = 0;
+    let mut parts = Vec::new();
+    for seg in query.split('&') {
+        if let Some((k, v)) = seg.split_once('=') {
+            let decoded_k = percent_decode_key(k);
+            if opts.is_sensitive_field(&decoded_k) && v != "[REDACTED]" {
+                parts.push(format!("{k}=[REDACTED]"));
+                count += 1;
+            } else {
+                parts.push(seg.to_string());
+            }
+        } else {
+            parts.push(seg.to_string());
+        }
+    }
+    (parts.join("&"), count)
+}
+
+fn percent_decode_key(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Ok(hex) = std::str::from_utf8(&bytes[i + 1..i + 3])
+            && let Ok(val) = u8::from_str_radix(hex, 16)
+        {
+            out.push(val);
+            i += 3;
+            continue;
+        }
+        if bytes[i] == b'+' {
+            out.push(b' ');
+        } else {
+            out.push(bytes[i]);
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn redact_body_bytes(
+    body: &[u8],
+    content_type: &str,
+    opts: &RedactOptions,
+) -> (Vec<u8>, usize, bool) {
+    let ct_lower = content_type.to_ascii_lowercase();
+    let Ok(text) = std::str::from_utf8(body) else {
+        return (body.to_vec(), 0, true);
+    };
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return (body.to_vec(), 0, false);
+    }
+    let looks_json = ct_lower.contains("json")
+        || (trimmed.starts_with('{') && trimmed.ends_with('}'))
+        || (trimmed.starts_with('[') && trimmed.ends_with(']'));
+    if looks_json {
+        if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            let count = redact_json_value(&mut val, opts);
+            if count > 0
+                && let Ok(out) = serde_json::to_vec(&val)
+            {
+                return (out, count, false);
+            }
+            return (body.to_vec(), 0, false);
+        }
+        if ct_lower.contains("json") {
+            return (body.to_vec(), 0, true);
+        }
+    }
+    if ct_lower.contains("application/x-www-form-urlencoded") {
+        let (redacted_form, count) = redact_urlencoded_pairs(text, opts);
+        if count > 0 {
+            return (redacted_form.into_bytes(), count, false);
+        }
+        return (body.to_vec(), 0, false);
+    }
+    (body.to_vec(), 0, true)
+}
+
+fn redact_json_value(val: &mut serde_json::Value, opts: &RedactOptions) -> usize {
+    match val {
+        serde_json::Value::Object(map) => {
+            let mut count = 0;
+            for (k, v) in map.iter_mut() {
+                if opts.is_sensitive_field(k) && !v.is_null() {
+                    *v = serde_json::Value::String("[REDACTED]".into());
+                    count += 1;
+                } else {
+                    count += redact_json_value(v, opts);
+                }
+            }
+            count
+        }
+        serde_json::Value::Array(arr) => arr
+            .iter_mut()
+            .map(|item| redact_json_value(item, opts))
+            .sum(),
+        _ => 0,
+    }
+}
+
+pub fn format_redact_preview(
+    flow: &Flow,
+    opts: &RedactOptions,
+    zh: bool,
+) -> (String, String, RedactReport) {
+    let mut enabled_opts = opts.clone();
+    enabled_opts.enabled = true;
+    let (sanitized, report) = redact_flow(flow, &enabled_opts);
+    (
+        format_flow_snapshot(flow, zh),
+        format_flow_snapshot(&sanitized, zh),
+        report,
+    )
+}
+
+fn format_flow_snapshot(flow: &Flow, zh: bool) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!("{} {}", flow.method, flow.url));
+    if !flow.comment.is_empty() {
+        let label = if zh { "备注" } else { "Note" };
+        lines.push(format!("# {label}: {}", flow.comment));
+    }
+    lines.push(String::new());
+    lines.push(if zh {
+        "--- 请求头 ---".into()
+    } else {
+        "--- Request Headers ---".into()
+    });
+    for (k, v) in &flow.request_headers {
+        lines.push(format!("{k}: {v}"));
+    }
+    if !flow.request_body.is_empty() {
+        lines.push(String::new());
+        lines.push(if zh {
+            "--- 请求 Body ---".into()
+        } else {
+            "--- Request Body ---".into()
+        });
+        let req_ct = crate::present::content_type(&flow.request_headers);
+        if let Ok(text) = std::str::from_utf8(&flow.request_body) {
+            lines.push(clip_chars(
+                &crate::present::pretty_body(req_ct, text),
+                4_000,
+            ));
+        } else {
+            lines.push(format!("[binary {} bytes]", flow.request_body.len()));
+        }
+    }
+    if !flow.response_headers.is_empty() || flow.status.is_some() {
+        lines.push(String::new());
+        lines.push(if zh {
+            format!("--- 响应头 ({}) ---", flow.status.unwrap_or(0))
+        } else {
+            format!("--- Response Headers ({}) ---", flow.status.unwrap_or(0))
+        });
+        for (k, v) in &flow.response_headers {
+            lines.push(format!("{k}: {v}"));
+        }
+    }
+    if !flow.response_body.is_empty() {
+        lines.push(String::new());
+        lines.push(if zh {
+            "--- 响应 Body ---".into()
+        } else {
+            "--- Response Body ---".into()
+        });
+        let res_ct = crate::present::content_type(&flow.response_headers);
+        if let Ok(text) = std::str::from_utf8(&flow.response_body) {
+            lines.push(clip_chars(
+                &crate::present::pretty_body(res_ct, text),
+                4_000,
+            ));
+        } else {
+            lines.push(format!("[binary {} bytes]", flow.response_body.len()));
+        }
+    }
+    lines.join("\n")
 }
 
 fn format_bytes_short(bytes: u64) -> String {
@@ -636,6 +1093,7 @@ const I18N = ZH ? {{
   ended: "分享已结束或已过期",
   expiresAt: "有效期至 ",
   frozenFilter: "分享过滤: ",
+  redacted: "已脱敏",
   omitted: "较早的记录已省略",
   filterPlaceholder: "过滤域名、路径、状态码、方法、type:json、body:、header:…",
   chipJson: "JSON",
@@ -678,6 +1136,7 @@ const I18N = ZH ? {{
   ended: "This share has ended or expired",
   expiresAt: "Expires ",
   frozenFilter: "Share filter: ",
+  redacted: "Redacted",
   omitted: "Older flows omitted",
   filterPlaceholder: "Filter host, path, status, method, type:json, body:, header:…",
   chipJson: "JSON",
@@ -896,6 +1355,7 @@ function renderToolbar(filteredCount, totalCount) {{
     const when = new Date(state.data.expires * 1000);
     parts.push(I18N.expiresAt + when.toLocaleTimeString());
   }}
+  if (state.data.redacted) parts.push(I18N.redacted);
   if (state.data.filter) parts.push(I18N.frozenFilter + state.data.filter);
   if (state.data.omitted) parts.push(I18N.omitted + " (" + state.data.omitted + ")");
   meta.textContent = parts.join(" · ");
@@ -1038,6 +1498,7 @@ function renderDetail(flow) {{
   const statusText = flow.status == null ? (failed ? "ERR" : I18N.inProgress) : String(flow.status);
   const sBadgeCls = statusBadgeClass(flow);
   const ruleHtml = flow.rule_hit ? `<span class="rule-badge mono">${{esc(flow.rule_hit)}}</span>` : "";
+  const commentHtml = flow.comment ? `<span class="proto-badge mono">${{esc(flow.comment)}}</span>` : "";
   const errHtml = flow.error ? `<div class="err-box mono">${{esc(flow.error)}}</div>` : "";
 
   const mParts = [flow.started || ""];
@@ -1053,6 +1514,7 @@ function renderDetail(flow) {{
     + `<span class="${{sBadgeCls}} mono">${{esc(statusText)}}</span>`
     + `<span class="proto-badge mono">${{esc(flow.protocol || "HTTP/1.1")}}</span>`
     + ruleHtml
+    + commentHtml
     + `</div>`
     + `<div class="card-actions">`
     + `<button class="mini-btn" id="copy-url-btn" type="button">${{esc(I18N.copyUrl)}}</button>`
@@ -1296,6 +1758,7 @@ mod tests {
             id: "550e8400-e29b-41d4-a716-446655440000".into(),
             expires: UNIX_EPOCH + std::time::Duration::from_secs(100),
             filter: "header:cookie".into(),
+            redact: RedactOptions::default(),
         };
         assert!(grant_ok(
             &share,
@@ -1322,6 +1785,7 @@ mod tests {
         let doc = ShareDoc {
             expires: 0,
             filter: String::new(),
+            redacted: false,
             omitted: 0,
             rev: 1,
             incremental: false,
@@ -1360,5 +1824,94 @@ mod tests {
             }],
         };
         serde_json::to_string(&doc).unwrap()
+    }
+
+    #[test]
+    fn redact_flow_sanitizes_headers_query_json_form_and_flags_binary() {
+        let mut session = crate::session::Session::default();
+        let id = session.open(crate::session::FlowDraft {
+            protocol: crate::session::Protocol::Http11,
+            method: "POST".into(),
+            host: "api.example.test".into(),
+            path: "/v1/login?access_token=tok123&page=2&custom_sec=abc".into(),
+            url: "https://api.example.test/v1/login?access_token=tok123&page=2&custom_sec=abc"
+                .into(),
+            request_headers: vec![
+                ("Authorization".into(), "Bearer eyJhbGciOiJIUzI1NiJ9".into()),
+                ("Cookie".into(), "sid=s1; theme=dark".into()),
+                ("X-Custom-Header".into(), "my-secret-header".into()),
+                ("Content-Type".into(), "application/json".into()),
+            ],
+        });
+        session.append_body(
+            id,
+            Direction::Request,
+            br#"{"username":"alice","password":"p@ssw0rd","nested":{"custom_sec":"xyz","ok":1}}"#,
+        );
+        session.set_response(
+            id,
+            200,
+            vec![
+                (
+                    "Set-Cookie".into(),
+                    "session_id=abc999; Path=/; HttpOnly; Secure".into(),
+                ),
+                ("Content-Type".into(), "application/octet-stream".into()),
+            ],
+            None,
+        );
+        session.append_body(id, Direction::Response, &[0xff, 0x00, 0xfe, 0x01]);
+        session.mark_finished(id);
+
+        let original = session.hydrated(id).unwrap();
+        let opts = RedactOptions::new(true, "custom_sec, X-Custom-Header");
+        let (sanitized, report) = redact_flow(&original, &opts);
+
+        // Original capture in session is untouched
+        let untouched = session.hydrated(id).unwrap();
+        assert!(untouched.url.contains("tok123"));
+
+        // Query parameters
+        assert_eq!(
+            sanitized.url,
+            "https://api.example.test/v1/login?access_token=[REDACTED]&page=2&custom_sec=[REDACTED]"
+        );
+        assert_eq!(
+            sanitized.path,
+            "/v1/login?access_token=[REDACTED]&page=2&custom_sec=[REDACTED]"
+        );
+        assert_eq!(report.redacted_query_params, 2);
+
+        // Headers
+        assert_eq!(sanitized.request_headers[0].1, "Bearer [REDACTED]");
+        assert_eq!(
+            sanitized.request_headers[1].1,
+            "sid=[REDACTED]; theme=[REDACTED]"
+        );
+        assert_eq!(sanitized.request_headers[2].1, "[REDACTED]");
+        assert_eq!(
+            sanitized.response_headers[0].1,
+            "session_id=[REDACTED]; Path=/; HttpOnly; Secure"
+        );
+        assert_eq!(report.redacted_headers, 4);
+
+        // Request JSON body
+        let body_json: serde_json::Value = serde_json::from_slice(&sanitized.request_body).unwrap();
+        assert_eq!(body_json["username"], "alice");
+        assert_eq!(body_json["password"], "[REDACTED]");
+        assert_eq!(body_json["nested"]["custom_sec"], "[REDACTED]");
+        assert_eq!(body_json["nested"]["ok"], 1);
+        assert_eq!(report.redacted_body_fields, 2);
+
+        // Binary response body flagged as unsanitizable
+        assert!(!report.unsanitizable_req_body);
+        assert!(report.unsanitizable_res_body);
+        assert!(
+            sanitized
+                .comment
+                .contains("[REDACTED; res body format not sanitizable]"),
+            "comment={}",
+            sanitized.comment
+        );
     }
 }

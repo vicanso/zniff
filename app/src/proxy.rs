@@ -312,10 +312,20 @@ impl Hub {
     }
 
     /// Replaces any previous link. The id is unguessable and dies at `ttl`.
+    #[cfg(test)]
     pub fn begin_share(
         &self,
         ttl: std::time::Duration,
         filter: &str,
+    ) -> (String, std::time::SystemTime) {
+        self.begin_share_with_redact(ttl, filter, crate::share::RedactOptions::default())
+    }
+
+    pub fn begin_share_with_redact(
+        &self,
+        ttl: std::time::Duration,
+        filter: &str,
+        redact: crate::share::RedactOptions,
     ) -> (String, std::time::SystemTime) {
         let id = crate::share::new_id();
         let expires = std::time::SystemTime::now() + ttl;
@@ -323,6 +333,7 @@ impl Hub {
             id: id.clone(),
             expires,
             filter: filter.to_string(),
+            redact,
         });
         (id, expires)
     }
@@ -359,11 +370,12 @@ impl Hub {
         }
         let expires = share.expires;
         let filter = share.filter.clone();
+        let redact = share.redact.clone();
         drop(slot);
         let (flows, rev) = self
             .with_session(|session| (session.flows_matching_unhydrated(&filter), session.rev()));
-        Some(crate::share::document_since(
-            &flows, expires, &filter, rev, since,
+        Some(crate::share::document_since_with_redact(
+            &flows, expires, &filter, rev, since, &redact,
         ))
     }
 
@@ -378,9 +390,10 @@ impl Hub {
             return None;
         }
         let filter = share.filter.clone();
+        let redact = share.redact.clone();
         drop(slot);
         let flow = self.with_session(|session| session.hydrated_matching(flow_id, &filter))?;
-        Some(crate::share::flow_body_document(&flow))
+        Some(crate::share::flow_body_document_with_redact(&flow, &redact))
     }
 
     pub fn set_bypass(&self, text: &str) {
@@ -825,9 +838,13 @@ impl Hub {
     }
 
     /// Exports the flows the list is showing. An empty filter exports the session.
-    pub fn export_har_matching(&self, filter: &str) -> serde_json::Value {
+    pub fn export_har_matching_with_redact(
+        &self,
+        filter: &str,
+        redact: &crate::share::RedactOptions,
+    ) -> serde_json::Value {
         let flows = self.with_session(|session| session.flows_matching(filter));
-        crate::har::export_har(&flows)
+        crate::har::export_har_with_redact(&flows, redact)
     }
 
     pub fn import_har(&self, value: &serde_json::Value) -> usize {

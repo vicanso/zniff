@@ -69,6 +69,8 @@ struct Controls {
     /// Next 「开始」binds `0.0.0.0` when this is on.
     listen_all: Mutex<bool>,
     update_state: Mutex<UpdateState>,
+    redact_export: Mutex<bool>,
+    redact_fields: Mutex<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -177,6 +179,10 @@ struct SeqBuilder {
     diagram: Signal<present::SequenceDiagramData>,
     view_mode: Signal<u8>,
     hover_bar: Signal<Option<usize>>,
+    redact_open: Signal<bool>,
+    redact_export: Signal<bool>,
+    redact_fields: Signal<String>,
+    redact_flow_id: Signal<Option<u64>>,
 }
 
 /// The app's UI set (`nsh.json` `"rust"`).
@@ -979,12 +985,17 @@ pub fn App() -> impl IntoElement {
         diagram: signal(present::SequenceDiagramData::default()),
         view_mode: signal(0),
         hover_bar: signal(None),
+        redact_open: signal(false),
+        redact_export: signal(saved.redact_export),
+        redact_fields: signal(saved.redact_fields.clone()),
+        redact_flow_id: signal(None),
     };
     effect(move || {
         let has_selected = selected.get().is_some();
         let is_composing = compose.composing.get();
         if has_selected || is_composing {
             seq_builder.open.set(false);
+            seq_builder.redact_open.set(false);
         }
     });
     let list_width = signal(saved.list_width as f32);
@@ -6284,113 +6295,141 @@ fn detail_pane(
                         },
                     )
                     .otherwise(move || {
+                        let redact_controls = summary_controls.clone();
                         let summary_controls = summary_controls.clone();
-                        view()
-                            .flex_1()
-                            .pl_3p5()
-                            .pr_5()
-                            .py_3p5()
-                            .gap_3p5()
-                            .child(when(
-                                move || filtered_stats.with(|s| s.total_count > 0),
-                                move || {
-                                    let controls = summary_controls.clone();
-                                    filtered_summary_card(filtered_stats, selected, move || {
-                                        begin_sequence_diagram(
-                                            &controls,
-                                            rows,
-                                            seq_builder,
-                                            compose,
-                                            selected,
-                                            shown.phase,
-                                        );
-                                    })
-                                },
-                            ))
-                            .child(
+                        when(
+                            move || seq_builder.redact_open.get(),
+                            move || {
                                 view()
-                                    .flex_1()
-                                    .items_center()
-                                    .justify_center()
-                                    .gap_1p5()
-                                    .px_6()
-                                    .py_8()
-                                    .child(glyph_px(28.0, || Glyph::List, || color(fg_muted())))
-                                    .child(
-                                        text({
-                                            let langs = ui_langs();
-                                            move || -> SharedString {
-                                                let lang = ui_lang(langs);
-                                                match shown.phase.get() {
-                                                    Phase::Gone => t(
-                                                        lang,
-                                                        "这条记录已经不在了",
-                                                        "That flow is gone",
-                                                    )
-                                                    .into(),
-                                                    _ => t(lang, "还没有选择", "Nothing selected")
+                                    .pl_3p5()
+                                    .pr_5()
+                                    .py_3p5()
+                                    .gap_3p5()
+                                    .child(redact_preview_panel(
+                                        seq_builder,
+                                        redact_controls.clone(),
+                                        rows,
+                                        filter,
+                                    ))
+                            },
+                        )
+                        .otherwise(move || {
+                            let summary_controls = summary_controls.clone();
+                            view()
+                                .flex_1()
+                                .pl_3p5()
+                                .pr_5()
+                                .py_3p5()
+                                .gap_3p5()
+                                .child(when(
+                                    move || filtered_stats.with(|s| s.total_count > 0),
+                                    move || {
+                                        let controls = summary_controls.clone();
+                                        filtered_summary_card(filtered_stats, selected, move || {
+                                            begin_sequence_diagram(
+                                                &controls,
+                                                rows,
+                                                seq_builder,
+                                                compose,
+                                                selected,
+                                                shown.phase,
+                                            );
+                                        })
+                                    },
+                                ))
+                                .child(
+                                    view()
+                                        .flex_1()
+                                        .items_center()
+                                        .justify_center()
+                                        .gap_1p5()
+                                        .px_6()
+                                        .py_8()
+                                        .child(glyph_px(
+                                            28.0,
+                                            || Glyph::List,
+                                            || color(fg_muted()),
+                                        ))
+                                        .child(
+                                            text({
+                                                let langs = ui_langs();
+                                                move || -> SharedString {
+                                                    let lang = ui_lang(langs);
+                                                    match shown.phase.get() {
+                                                        Phase::Gone => t(
+                                                            lang,
+                                                            "这条记录已经不在了",
+                                                            "That flow is gone",
+                                                        )
                                                         .into(),
+                                                        _ => t(
+                                                            lang,
+                                                            "还没有选择",
+                                                            "Nothing selected",
+                                                        )
+                                                        .into(),
+                                                    }
                                                 }
-                                            }
-                                        })
-                                        .text_size(px(13.5))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(fg_secondary()),
-                                    )
-                                    .child(
-                                        text({
-                                            let langs = ui_langs();
-                                            move || -> SharedString {
-                                                let lang = ui_lang(langs);
-                                                match shown.phase.get() {
-                                                    Phase::Gone => t(
-                                                        lang,
-                                                        "它因为内存上限被丢掉了。",
-                                                        "It was dropped because the session hit its memory cap.",
-                                                    )
-                                                    .into(),
-                                                    _ => t(
-                                                        lang,
-                                                        "从左边选一条流量，查看请求头、响应头和 body。",
-                                                        "Pick a flow on the left to see headers and the body.",
-                                                    )
-                                                    .into(),
+                                            })
+                                            .text_size(px(13.5))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(fg_secondary()),
+                                        )
+                                        .child(
+                                            text({
+                                                let langs = ui_langs();
+                                                move || -> SharedString {
+                                                    let lang = ui_lang(langs);
+                                                    match shown.phase.get() {
+                                                        Phase::Gone => t(
+                                                            lang,
+                                                            "它因为内存上限被丢掉了。",
+                                                            "It was dropped because the session hit its memory cap.",
+                                                        )
+                                                        .into(),
+                                                        _ => t(
+                                                            lang,
+                                                            "从左边选一条流量，查看请求头、响应头和 body。",
+                                                            "Pick a flow on the left to see headers and the body.",
+                                                        )
+                                                        .into(),
+                                                    }
                                                 }
-                                            }
-                                        })
-                                        .text_size(px(12.0))
-                                        .text_color(fg_muted()),
-                                    )
-                                    .child(
-                                        view()
-                                            .mt_1p5()
-                                            .h(px(28.0))
-                                            .px_3()
-                                            .rounded(px(6.0))
-                                            .border_1()
-                                            .border_color(border_control())
-                                            .bg(bg_control())
-                                            .hover(|style| style.bg(bg_control_hover()))
-                                            .active(|style| style.opacity(0.8))
-                                            .cursor(Cursor::Pointer)
-                                            .flex_row()
-                                            .items_center()
-                                            .gap_1p5()
-                                            .on_press(move || begin_new_request(compose, selected))
-                                            .child(glyph_px(
-                                                13.0,
-                                                || Glyph::Prompt,
-                                                || color(fg_secondary()),
-                                            ))
-                                            .child(
-                                                text(tr("构造请求", "New request"))
-                                                    .number_of_lines(1)
-                                                    .text_size(px(12.0))
-                                                    .font_weight(FontWeight::MEDIUM)
-                                                    .text_color(fg_primary()),
-                                            ),
-                                    ),
-                            )
+                                            })
+                                            .text_size(px(12.0))
+                                            .text_color(fg_muted()),
+                                        )
+                                        .child(
+                                            view()
+                                                .mt_1p5()
+                                                .h(px(28.0))
+                                                .px_3()
+                                                .rounded(px(6.0))
+                                                .border_1()
+                                                .border_color(border_control())
+                                                .bg(bg_control())
+                                                .hover(|style| style.bg(bg_control_hover()))
+                                                .active(|style| style.opacity(0.8))
+                                                .cursor(Cursor::Pointer)
+                                                .flex_row()
+                                                .items_center()
+                                                .gap_1p5()
+                                                .on_press(move || begin_new_request(compose, selected))
+                                                .child(glyph_px(
+                                                    13.0,
+                                                    || Glyph::Prompt,
+                                                    || color(fg_secondary()),
+                                                ))
+                                                .child(
+                                                    text(tr("构造请求", "New request"))
+                                                        .number_of_lines(1)
+                                                        .text_size(px(12.0))
+                                                        .font_weight(FontWeight::MEDIUM)
+                                                        .text_color(fg_primary()),
+                                                ),
+                                        ),
+                                )
+                        })
                     })
                 })
             }),
@@ -9104,6 +9143,46 @@ fn more_menu(
                 }
             },
         ))
+        .child(menu_action_meta(
+            Glyph::Shield,
+            tr("导出/分享脱敏", "Redact exports & shares"),
+            move || {
+                if seq_builder.redact_export.get() {
+                    SharedString::from("✓")
+                } else {
+                    SharedString::default()
+                }
+            },
+            {
+                let controls = import_controls.clone();
+                move || {
+                    let next = !seq_builder.redact_export.get();
+                    seq_builder.redact_export.set(next);
+                    *controls
+                        .redact_export
+                        .lock()
+                        .unwrap_or_else(|err| err.into_inner()) = next;
+                    let _ = save_config(|cfg| cfg.redact_export = next);
+                }
+            },
+        ))
+        .child(menu_action(
+            Glyph::Prompt,
+            tr("脱敏预览与设置", "Redaction preview"),
+            {
+                let controls = import_controls.clone();
+                move || {
+                    begin_redact_preview(
+                        &controls,
+                        rows,
+                        seq_builder,
+                        compose,
+                        selected,
+                        shown_phase,
+                    );
+                }
+            },
+        ))
         .child(menu_action_enabled(
             Glyph::List,
             tr("生成时序图", "Sequence diagram"),
@@ -10422,6 +10501,7 @@ fn body_text(
 }
 
 fn open_controls() -> Arc<Controls> {
+    let saved = saved_config();
     match Ca::open_default().and_then(|ca| Hub::new(Arc::new(ca))) {
         Ok(hub) => {
             apply_saved_prefs(&hub);
@@ -10439,6 +10519,8 @@ fn open_controls() -> Arc<Controls> {
                 ops: Mutex::new(()),
                 listen_all: Mutex::new(load_listen_all()),
                 update_state: Mutex::new(UpdateState::from_disk()),
+                redact_export: Mutex::new(saved.redact_export),
+                redact_fields: Mutex::new(saved.redact_fields),
             })
         }
         Err(err) => {
@@ -10462,9 +10544,21 @@ fn open_controls() -> Arc<Controls> {
                 ops: Mutex::new(()),
                 listen_all: Mutex::new(load_listen_all()),
                 update_state: Mutex::new(UpdateState::from_disk()),
+                redact_export: Mutex::new(saved.redact_export),
+                redact_fields: Mutex::new(saved.redact_fields),
             })
         }
     }
+}
+
+fn redact_options(controls: &Controls) -> share::RedactOptions {
+    let enabled = lock_bool(&controls.redact_export);
+    let extra = controls
+        .redact_fields
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .clone();
+    share::RedactOptions::new(enabled, &extra)
 }
 
 fn lock_update_state(controls: &Controls) -> UpdateState {
@@ -12027,10 +12121,314 @@ fn begin_sequence_diagram(
     reset_compose(compose);
     selected.set(None);
     shown_phase.set(Phase::Empty);
+    seq_builder.redact_open.set(false);
     seq_builder.items.set(candidates);
     seq_builder.hover_bar.set(None);
     refresh_seq_diagram(controls, seq_builder);
     seq_builder.open.set(true);
+}
+
+fn begin_redact_preview(
+    _controls: &Controls,
+    rows: Signal<Vec<RowLine>>,
+    seq_builder: SeqBuilder,
+    compose: Compose,
+    selected: Signal<Option<u64>>,
+    shown_phase: Signal<Phase>,
+) {
+    let pick = selected
+        .get()
+        .or_else(|| rows.with(|list| list.last().map(|r| r.id)));
+    seq_builder.redact_flow_id.set(pick);
+    reset_compose(compose);
+    selected.set(None);
+    shown_phase.set(Phase::Empty);
+    seq_builder.open.set(false);
+    seq_builder.redact_open.set(true);
+}
+
+fn redact_preview_panel(
+    seq_builder: SeqBuilder,
+    controls: Arc<Controls>,
+    rows: Signal<Vec<RowLine>>,
+    filter: Signal<String>,
+) -> impl IntoElement {
+    let toggle_controls = controls.clone();
+    let fields_controls = controls.clone();
+    let export_har_controls = controls.clone();
+    let export_html_controls = controls.clone();
+    let preview_controls = controls;
+    let langs = ui_langs();
+
+    let preview_pair = move || {
+        let zh = ui_lang(langs) == Lang::Zh;
+        let flow_id = seq_builder
+            .redact_flow_id
+            .get()
+            .or_else(|| rows.with(|list| list.last().map(|r| r.id)));
+        let extra = seq_builder.redact_fields.get();
+        let opts = share::RedactOptions::new(true, &extra);
+        let Some(id) = flow_id else {
+            return (
+                None,
+                String::new(),
+                String::new(),
+                share::RedactReport::default(),
+            );
+        };
+        let Some(flow) = preview_controls
+            .hub
+            .with_session(|session| session.hydrated(id))
+        else {
+            return (
+                None,
+                String::new(),
+                String::new(),
+                share::RedactReport::default(),
+            );
+        };
+        let (before, after, report) = share::format_redact_preview(&flow, &opts, zh);
+        (
+            Some((flow.id, flow.method, flow.url)),
+            before,
+            after,
+            report,
+        )
+    };
+
+    view()
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(border_strong())
+        .bg(bg_card())
+        .overflow_hidden()
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .px_3p5()
+                .py_2()
+                .border_b_1()
+                .border_b_color(border_subtle())
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(section_title(tr(
+                            "导出与分享脱敏设置",
+                            "Export & share redaction",
+                        )))
+                        .child(
+                            view()
+                                .px_2()
+                                .py_0p5()
+                                .rounded(px(5.0))
+                                .bg(move || {
+                                    if seq_builder.redact_export.get() {
+                                        status_ok_bg()
+                                    } else {
+                                        bg_control()
+                                    }
+                                })
+                                .cursor(Cursor::Pointer)
+                                .on_press(move || {
+                                    let next = !seq_builder.redact_export.get();
+                                    seq_builder.redact_export.set(next);
+                                    *toggle_controls
+                                        .redact_export
+                                        .lock()
+                                        .unwrap_or_else(|err| err.into_inner()) = next;
+                                    let _ = save_config(|cfg| cfg.redact_export = next);
+                                })
+                                .child(
+                                    text(move || -> SharedString {
+                                        let lang = ui_lang(langs);
+                                        if seq_builder.redact_export.get() {
+                                            t(lang, "脱敏：已开启", "Redaction: ON").into()
+                                        } else {
+                                            t(lang, "脱敏：已关闭（点击开启）", "Redaction: OFF (click to enable)").into()
+                                        }
+                                    })
+                                    .text_size(px(11.0))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(move || {
+                                        if seq_builder.redact_export.get() {
+                                            status_ok_fg()
+                                        } else {
+                                            fg_secondary()
+                                        }
+                                    }),
+                                ),
+                        ),
+                )
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_1p5()
+                        .child(seq_action_button(
+                            tr("导出 HAR", "Export HAR"),
+                            || true,
+                            move || {
+                                export_har_file(export_har_controls.clone(), &filter.get());
+                            },
+                        ))
+                        .child(seq_action_button(
+                            tr("导出 HTML", "Export HTML"),
+                            || true,
+                            move || {
+                                export_html_file(
+                                    export_html_controls.clone(),
+                                    &filter.get(),
+                                    ui_lang(langs) == Lang::Zh,
+                                );
+                            },
+                        ))
+                        .child(seq_action_button(tr("关闭", "Close"), || true, move || {
+                            seq_builder.redact_open.set(false);
+                        })),
+                ),
+        )
+        .child(
+            view()
+                .p_3p5()
+                .gap_2p5()
+                .child(
+                    text(tr(
+                        "默认脱敏：Authorization、Proxy-Authorization、Cookie、Set-Cookie、X-Api-Key，以及 URL 查询参数、JSON 和表单中的 password、token、access_token、secret、api_key、session_id、jwt 等字段。仅作用于导出的 HAR/HTML 与实时分享副本，不改动抓包记录或重放数据。",
+                        "Defaults: Authorization, Proxy-Authorization, Cookie, Set-Cookie, X-Api-Key, plus password, token, access_token, secret, api_key, session_id, jwt in query/JSON/form. Sanitizes exported/shared copies only without modifying captured flows or replay data.",
+                    ))
+                    .text_size(px(11.5))
+                    .text_color(fg_muted()),
+                )
+                .child(
+                    view()
+                        .gap_1()
+                        .child(
+                            text(tr(
+                                "附加敏感字段或请求头名（逗号或空格分隔）",
+                                "Extra sensitive field or header names (comma or space separated)",
+                            ))
+                            .text_size(px(11.5))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(fg_secondary()),
+                        )
+                        .child(
+                            input()
+                                .value(seq_builder.redact_fields)
+                                .placeholder(tr(
+                                    "例如: x-custom-token, phone, id_card",
+                                    "e.g. x-custom-token, phone, card_number",
+                                ))
+                                .h(px(30.0))
+                                .px_2p5()
+                                .rounded(px(6.0))
+                                .border_1()
+                                .border_color(border_control())
+                                .bg(bg_code())
+                                .text_size(px(12.0))
+                                .text_color(fg_primary())
+                                .on_change(move |val: &str| {
+                                    let text_val = val.to_string();
+                                    seq_builder.redact_fields.set(text_val.clone());
+                                    *fields_controls
+                                        .redact_fields
+                                        .lock()
+                                        .unwrap_or_else(|err| err.into_inner()) = text_val.clone();
+                                    let _ = save_config(|cfg| cfg.redact_fields = text_val);
+                                }),
+                        ),
+                )
+                .child({
+                    let pair_header = preview_pair.clone();
+                    let pair_diff_old = preview_pair.clone();
+                    let pair_diff_new = preview_pair;
+                    view()
+                        .mt_1()
+                        .rounded(px(8.0))
+                        .border_1()
+                        .border_color(border_subtle())
+                        .bg(bg_code())
+                        .overflow_hidden()
+                        .child(
+                            view()
+                                .flex_row()
+                                .flex_wrap()
+                                .items_center()
+                                .justify_between()
+                                .gap_2()
+                                .px_3()
+                                .py_2()
+                                .border_b_1()
+                                .border_b_color(border_subtle())
+                                .child(
+                                    mono(move || {
+                                        let lang = ui_lang(langs);
+                                        let (meta, _, _, report) = pair_header();
+                                        let Some((id, method, url)) = meta else {
+                                            return t(
+                                                lang,
+                                                "脱敏预览（当前列表暂无流量）",
+                                                "Redaction preview (no flows in current list)",
+                                            )
+                                            .to_string();
+                                        };
+                                        match lang {
+                                            Lang::Zh => format!(
+                                                "预览 #{id} {method} {url} · 脱敏头 {} · 参数 {} · 正文字段 {}{}",
+                                                report.redacted_headers,
+                                                report.redacted_query_params,
+                                                report.redacted_body_fields,
+                                                if report.has_unsanitizable_body() {
+                                                    " · ⚠ 含非结构化/二进制正文（无法按字段脱敏）"
+                                                } else {
+                                                    ""
+                                                }
+                                            ),
+                                            Lang::En => format!(
+                                                "Preview #{id} {method} {url} · headers {} · query {} · body fields {}{}",
+                                                report.redacted_headers,
+                                                report.redacted_query_params,
+                                                report.redacted_body_fields,
+                                                if report.has_unsanitizable_body() {
+                                                    " · ⚠ body format cannot be structurally sanitized"
+                                                } else {
+                                                    ""
+                                                }
+                                            ),
+                                        }
+                                    })
+                                    .text_size(px(11.5))
+                                    .text_color(fg_secondary()),
+                                ),
+                        )
+                        .child(
+                            view()
+                                .h(px(360.0))
+                                .overflow_hidden()
+                                .child(
+                                    diff_view()
+                                        .old_value(move || {
+                                            let (_, before, _, _) = pair_diff_old();
+                                            SharedString::from(before)
+                                        })
+                                        .new_value(move || {
+                                            let (_, _, after, _) = pair_diff_new();
+                                            SharedString::from(after)
+                                        })
+                                        .layout(DiffLayout::Unified)
+                                        .language("plaintext")
+                                        .soft_wrap(true)
+                                        .font_size(Points(12.0))
+                                        .line_height(Points(18.0))
+                                        .size_full(),
+                                ),
+                        )
+                }),
+        )
 }
 
 fn refresh_seq_diagram(controls: &Controls, seq_builder: SeqBuilder) -> String {
@@ -14440,7 +14838,10 @@ fn parse_header_text(text: &str) -> Vec<(String, String)> {
 }
 
 fn export_har_file(controls: Arc<Controls>, filter: &str) {
-    let value = controls.hub.export_har_matching(filter);
+    let redact = redact_options(&controls);
+    let value = controls
+        .hub
+        .export_har_matching_with_redact(filter, &redact);
     let bytes = match serde_json::to_vec_pretty(&value) {
         Ok(bytes) => bytes,
         Err(err) => {
@@ -14476,7 +14877,8 @@ fn export_html_file(controls: Arc<Controls>, filter: &str, zh: bool) {
     let flows = controls
         .hub
         .with_session(|session| session.flows_matching(filter));
-    let json = share::document(&flows, SystemTime::now(), filter);
+    let redact = redact_options(&controls);
+    let json = share::document_with_redact(&flows, SystemTime::now(), filter, &redact);
     let html = share::page(&json, "", zh);
     let secs = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -14510,9 +14912,12 @@ fn begin_share(controls: &Controls, minutes: u64, filter: &str, share_id: Signal
         set_status(controls, StatusMsg::ShareNeedsCapture);
         return;
     }
-    let (id, _expires) = controls
-        .hub
-        .begin_share(Duration::from_secs(minutes.saturating_mul(60)), filter);
+    let redact = redact_options(controls);
+    let (id, _expires) = controls.hub.begin_share_with_redact(
+        Duration::from_secs(minutes.saturating_mul(60)),
+        filter,
+        redact,
+    );
     let (base, local_only) = share_base(controls);
     let url = format!("{base}/s/{id}");
     share_id.set(id);

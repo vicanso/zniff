@@ -321,6 +321,12 @@ pub struct Config {
     /// Custom list-column order when reordered from [`DEFAULT_COLUMN_ORDER`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub column_order: Vec<String>,
+    /// Sanitize sensitive headers, query params, and JSON/form fields on HAR/HTML export and live share.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub redact_export: bool,
+    /// Extra comma-separated sensitive header or field names to redact on export/share.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub redact_fields: String,
 }
 
 impl Default for Config {
@@ -357,6 +363,8 @@ impl Default for Config {
             saved_profiles: Vec::new(),
             column_widths: HashMap::new(),
             column_order: Vec::new(),
+            redact_export: false,
+            redact_fields: String::new(),
         }
     }
 }
