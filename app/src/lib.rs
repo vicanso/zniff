@@ -943,6 +943,7 @@ pub fn App() -> impl IntoElement {
     let selected = signal(None::<u64>);
     let rows = signal(Vec::<RowLine>::new());
     let filtered_stats = signal(session::FilteredStats::default());
+    let facets = signal(session::SessionFacets::default());
     let flow_total = signal(0_usize);
     let listen = signal(String::new());
     let saved = saved_config();
@@ -1077,6 +1078,7 @@ pub fn App() -> impl IntoElement {
     let selected_tick = selected;
     let rows_tick = rows;
     let stats_tick = filtered_stats;
+    let facets_tick = facets;
     let total_tick = flow_total;
     let shown_tick = shown;
     let seen_gen = stored(0_u64);
@@ -1255,6 +1257,7 @@ pub fn App() -> impl IntoElement {
                 full_url_now,
             );
             total_tick.set(controls_tick.hub.with_session(|session| session.len()));
+            facets_tick.set(controls_tick.hub.with_session(|session| session.facets()));
             rows_tick.set(lines);
             stats_tick.set(stats);
             memory.set(format_bytes(
@@ -1424,6 +1427,7 @@ pub fn App() -> impl IntoElement {
                 .flex_row()
                 .child(flow_list(
                     rows,
+                    facets,
                     selected,
                     compose,
                     filter,
@@ -3681,6 +3685,7 @@ fn store_list_width(width: f32, controls: &Controls) {
 
 fn flow_list(
     rows: Signal<Vec<RowLine>>,
+    facets: Signal<session::SessionFacets>,
     selected: Signal<Option<u64>>,
     compose: Compose,
     filter: Signal<String>,
@@ -3698,6 +3703,8 @@ fn flow_list(
     let picked = signal(None::<u64>);
     let menu_open = signal(false);
     let menu_at = signal(Point::<Points>::default());
+    let facets_open = signal(false);
+    let facet_tab = signal(0_u8);
     let effective_width = move || clamp_list_px_for_window(width.get(), window().width.0);
     view()
         .w(move || px(effective_width()))
@@ -3761,8 +3768,13 @@ fn flow_list(
                             },
                         )),
                 )
+                .child(facet_toggle_button(facets_open, filter))
                 .child(column_menu(columns, column_controls)),
         )
+        .child(when(
+            move || facets_open.get(),
+            move || facet_drawer(facets, facet_tab, filter, effective_width),
+        ))
         .child(view().flex_1().min_h(px(0.0)).child(list_menu(
             rows,
             selected,
@@ -3778,6 +3790,299 @@ fn flow_list(
             menu_open,
             menu_at,
         )))
+}
+
+fn facet_toggle_button(facets_open: Signal<bool>, filter: Signal<String>) -> impl IntoElement {
+    let has_facet_filter = move || {
+        let f = filter.get();
+        !extract_host_or(&f).is_empty() || !extract_app_or(&f).is_empty()
+    };
+    view()
+        .w(px(30.0))
+        .h(px(30.0))
+        .flex_shrink_0()
+        .flex_row()
+        .items_center()
+        .justify_center()
+        .rounded(px(CONTROL_RADIUS))
+        .border_1()
+        .border_color(move || {
+            if facets_open.get() || has_facet_filter() {
+                accent_blue_border()
+            } else {
+                border_control()
+            }
+        })
+        .bg(move || {
+            if facets_open.get() || has_facet_filter() {
+                accent_blue_soft()
+            } else {
+                bg_control()
+            }
+        })
+        .hover(|style| {
+            style.bg(move || {
+                if facets_open.get() || has_facet_filter() {
+                    accent_blue_soft()
+                } else {
+                    bg_control_hover()
+                }
+            })
+        })
+        .cursor(Cursor::Pointer)
+        .tooltip(label_tip("域名与应用导航", "Domains & Apps"))
+        .on_press(move || facets_open.set(!facets_open.get()))
+        .child(glyph(
+            || Glyph::List,
+            move || {
+                if facets_open.get() || has_facet_filter() {
+                    color(accent_blue_text())
+                } else {
+                    color(fg_secondary())
+                }
+            },
+        ))
+}
+
+fn facet_drawer(
+    facets: Signal<session::SessionFacets>,
+    facet_tab: Signal<u8>,
+    filter: Signal<String>,
+    effective_width: impl Fn() -> f32 + Copy + 'static,
+) -> impl IntoElement {
+    let tab_btn = move |idx: u8,
+                        zh: &'static str,
+                        en: &'static str,
+                        count_fn: fn(&session::SessionFacets) -> usize| {
+        let langs = ui_langs();
+        view()
+            .h(px(22.0))
+            .px_2()
+            .rounded(px(5.0))
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .bg(move || {
+                if facet_tab.get() == idx {
+                    accent_blue_soft()
+                } else {
+                    AdaptiveColor::TRANSPARENT
+                }
+            })
+            .border_1()
+            .border_color(move || {
+                if facet_tab.get() == idx {
+                    accent_blue_border()
+                } else {
+                    AdaptiveColor::TRANSPARENT
+                }
+            })
+            .hover(|style| {
+                style.bg(move || {
+                    if facet_tab.get() == idx {
+                        accent_blue_soft()
+                    } else {
+                        bg_control_hover()
+                    }
+                })
+            })
+            .cursor(Cursor::Pointer)
+            .on_press(move || facet_tab.set(idx))
+            .child(
+                control_text(move || -> SharedString {
+                    let count = facets.with(count_fn);
+                    format!("{} ({count})", t(ui_lang(langs), zh, en)).into()
+                })
+                .text_size(px(11.5))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(move || {
+                    if facet_tab.get() == idx {
+                        accent_blue_text()
+                    } else {
+                        fg_secondary()
+                    }
+                }),
+            )
+    };
+    let items_list = move || -> Vec<session::FacetEntry> {
+        if facet_tab.get() == 0 {
+            facets.with(|f| f.domains.clone())
+        } else {
+            facets.with(|f| f.apps.clone())
+        }
+    };
+    view()
+        .w(move || px(effective_width()))
+        .flex_shrink_0()
+        .bg(bg_chrome())
+        .border_b_1()
+        .border_b_color(border_strong())
+        .px(px(LIST_INSET))
+        .py_1p5()
+        .gap_1p5()
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_1()
+                        .child(tab_btn(0, "域名", "Domains", |f| f.domains.len()))
+                        .child(tab_btn(1, "应用 / 来源", "Apps / Clients", |f| {
+                            f.apps.len()
+                        })),
+                )
+                .child(
+                    text(move || -> SharedString {
+                        if facet_tab.get() == 0 {
+                            tr("点击只看 · × 屏蔽", "Click to filter · × to mute")().into()
+                        } else {
+                            tr("点击按进程/来源筛选", "Click to filter by app/client")().into()
+                        }
+                    })
+                    .text_size(px(11.0))
+                    .text_color(fg_muted()),
+                ),
+        )
+        .child(
+            when(
+                move || items_list().is_empty(),
+                move || {
+                    view().py_1p5().child(
+                        text(tr(
+                            "暂无捕获到的域名或应用",
+                            "No captured domains or apps yet",
+                        ))
+                        .text_size(px(11.5))
+                        .text_color(fg_muted()),
+                    )
+                },
+            )
+            .otherwise(move || {
+                scroll()
+                    .max_h(px(116.0))
+                    .child(view().flex_row().flex_wrap().gap_1().child(each(
+                        items_list,
+                        |entry| format!("{}:{}", entry.token, entry.count),
+                        move |entry, _index| {
+                            let is_domain = facet_tab.get() == 0;
+                            let is_active = move || {
+                                let f = filter.get();
+                                let tok = entry.with(|e| e.token.clone());
+                                if is_domain {
+                                    host_facet_active(&f, &tok)
+                                } else {
+                                    app_facet_active(&f, &tok)
+                                }
+                            };
+                            let is_muted = move || {
+                                is_domain
+                                    && mute_facet_active(
+                                        &filter.get(),
+                                        &entry.with(|e| e.token.clone()),
+                                    )
+                            };
+                            view()
+                                .h(px(23.0))
+                                .rounded(px(5.0))
+                                .border_1()
+                                .border_color(move || {
+                                    if is_active() {
+                                        accent_blue_border()
+                                    } else if is_muted() {
+                                        status_err_fg()
+                                    } else {
+                                        border_control()
+                                    }
+                                })
+                                .bg(move || {
+                                    if is_active() {
+                                        accent_blue_soft()
+                                    } else if is_muted() {
+                                        status_err_bg()
+                                    } else {
+                                        bg_control()
+                                    }
+                                })
+                                .flex_row()
+                                .items_center()
+                                .overflow_hidden()
+                                .child(
+                                    view()
+                                        .h_full()
+                                        .px_2()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap_1()
+                                        .hover(|style| style.bg(bg_control_hover()))
+                                        .cursor(Cursor::Pointer)
+                                        .on_press(move || {
+                                            let cur = filter.get();
+                                            let tok = entry.with(|e| e.token.clone());
+                                            let next = if is_domain {
+                                                toggle_host_facet(&cur, &tok)
+                                            } else {
+                                                toggle_app_facet(&cur, &tok)
+                                            };
+                                            filter.set(next);
+                                        })
+                                        .child(
+                                            mono(move || entry.with(|e| e.label.clone()))
+                                                .text_size(px(11.0))
+                                                .text_color(move || {
+                                                    if is_active() {
+                                                        accent_blue_text()
+                                                    } else if is_muted() {
+                                                        status_err_fg()
+                                                    } else {
+                                                        fg_primary()
+                                                    }
+                                                }),
+                                        )
+                                        .child(
+                                            mono(move || entry.with(|e| format!("{}", e.count)))
+                                                .text_size(px(10.5))
+                                                .text_color(move || {
+                                                    if entry.with(|e| e.error_count > 0) {
+                                                        status_err_fg()
+                                                    } else {
+                                                        fg_muted()
+                                                    }
+                                                }),
+                                        ),
+                                )
+                                .child(when(
+                                    move || is_domain,
+                                    move || {
+                                        view()
+                                            .h_full()
+                                            .px_1p5()
+                                            .flex_row()
+                                            .items_center()
+                                            .justify_center()
+                                            .border_l_1()
+                                            .border_l_color(border_subtle())
+                                            .hover(|style| style.bg(bg_control_hover()))
+                                            .cursor(Cursor::Pointer)
+                                            .on_press(move || {
+                                                let tok = entry.with(|e| e.token.clone());
+                                                filter.set(toggle_mute_facet(&filter.get(), &tok));
+                                            })
+                                            .child(
+                                                control_text("×")
+                                                    .text_size(px(11.5))
+                                                    .text_color(fg_muted()),
+                                            )
+                                    },
+                                ))
+                        },
+                    )))
+            }),
+        )
 }
 
 const JSON_ALIASES: &[&str] = &["type:json", "ct:json"];
@@ -4060,6 +4365,119 @@ fn set_exclude_or(filter: &str, input: &str) -> String {
         out.push(format!("mute:{}", items.join("|")));
     }
     out.join(" ")
+}
+
+fn extract_app_or(filter: &str) -> String {
+    let normalized = crate::session::normalize_filter_pipes(filter);
+    let mut items = Vec::new();
+    for token in normalized.split_whitespace() {
+        let lower = token.to_ascii_lowercase();
+        let rest_len = if lower.starts_with("app:") {
+            Some(4)
+        } else if lower.starts_with("proc:") {
+            Some(5)
+        } else if lower.starts_with("ip:") {
+            Some(3)
+        } else if lower.starts_with("client:") {
+            Some(7)
+        } else {
+            None
+        };
+        if let Some(prefix_len) = rest_len {
+            for part in split_ui_or_items(&token[prefix_len..]) {
+                if !items
+                    .iter()
+                    .any(|existing: &String| existing.eq_ignore_ascii_case(&part))
+                {
+                    items.push(part);
+                }
+            }
+        }
+    }
+    items.join(" | ")
+}
+
+fn set_app_or(filter: &str, input: &str) -> String {
+    let normalized = crate::session::normalize_filter_pipes(filter);
+    let items = split_ui_or_items(input);
+    let mut out = Vec::new();
+    let mut inserted = false;
+    for token in normalized.split_whitespace() {
+        let lower = token.to_ascii_lowercase();
+        if lower.starts_with("app:")
+            || lower.starts_with("proc:")
+            || lower.starts_with("ip:")
+            || lower.starts_with("client:")
+        {
+            if !inserted && !items.is_empty() {
+                out.push(format!("app:{}", items.join("|")));
+                inserted = true;
+            }
+            continue;
+        }
+        out.push(token.to_string());
+    }
+    if !inserted && !items.is_empty() {
+        out.push(format!("app:{}", items.join("|")));
+    }
+    out.join(" ")
+}
+
+fn host_facet_active(filter: &str, host: &str) -> bool {
+    split_ui_or_items(&extract_host_or(filter))
+        .iter()
+        .any(|item| item.eq_ignore_ascii_case(host))
+}
+
+fn toggle_host_facet(filter: &str, host: &str) -> String {
+    let mut items = split_ui_or_items(&extract_host_or(filter));
+    if let Some(pos) = items
+        .iter()
+        .position(|item| item.eq_ignore_ascii_case(host))
+    {
+        items.remove(pos);
+    } else {
+        items.push(host.to_string());
+    }
+    set_host_or(filter, &items.join(" | "))
+}
+
+fn app_facet_active(filter: &str, app_token: &str) -> bool {
+    split_ui_or_items(&extract_app_or(filter))
+        .iter()
+        .any(|item| item.eq_ignore_ascii_case(app_token))
+}
+
+fn toggle_app_facet(filter: &str, app_token: &str) -> String {
+    let mut items = split_ui_or_items(&extract_app_or(filter));
+    if let Some(pos) = items
+        .iter()
+        .position(|item| item.eq_ignore_ascii_case(app_token))
+    {
+        items.remove(pos);
+    } else {
+        items.push(app_token.to_string());
+    }
+    set_app_or(filter, &items.join(" | "))
+}
+
+fn mute_facet_active(filter: &str, token: &str) -> bool {
+    split_ui_or_items(&extract_exclude_or(filter))
+        .iter()
+        .any(|item| item.eq_ignore_ascii_case(token))
+}
+
+fn toggle_mute_facet(filter: &str, token: &str) -> String {
+    let mut items = split_ui_or_items(&extract_exclude_or(filter));
+    if let Some(pos) = items
+        .iter()
+        .position(|item| item.eq_ignore_ascii_case(token))
+    {
+        items.remove(pos);
+    } else {
+        items.push(token.to_string());
+    }
+    set_exclude_or(filter, &items.join(" | "))
 }
 
 fn side_input(
@@ -17083,5 +17501,33 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
         super::write_export_file(&exported, b"{\"log\":{}}").unwrap();
         assert_eq!(std::fs::read(&exported).unwrap(), b"{\"log\":{}}");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn facet_toggles_host_app_and_mute_tokens_cleanly() {
+        let f0 = "type:json";
+        let f1 = super::toggle_host_facet(f0, "api.example.com");
+        assert_eq!(f1, "host:api.example.com type:json");
+        assert!(super::host_facet_active(&f1, "api.example.com"));
+        let f2 = super::toggle_host_facet(&f1, "cdn.example.com");
+        assert_eq!(f2, "host:api.example.com|cdn.example.com type:json");
+        let f3 = super::toggle_host_facet(&f2, "api.example.com");
+        assert_eq!(f3, "host:cdn.example.com type:json");
+        let f4 = super::toggle_host_facet(&f3, "cdn.example.com");
+        assert_eq!(f4, "type:json");
+
+        let a1 = super::toggle_app_facet("type:json", "Google_Chrome");
+        assert_eq!(a1, "type:json app:Google_Chrome");
+        assert!(super::app_facet_active(&a1, "google_chrome"));
+        let a2 = super::toggle_app_facet(&a1, "curl");
+        assert_eq!(a2, "type:json app:Google_Chrome|curl");
+        let a3 = super::toggle_app_facet(&a2, "Google_Chrome");
+        assert_eq!(a3, "type:json app:curl");
+
+        let m1 = super::toggle_mute_facet("type:json", "ads.example.com");
+        assert_eq!(m1, "type:json mute:ads.example.com");
+        assert!(super::mute_facet_active(&m1, "ads.example.com"));
+        let m2 = super::toggle_mute_facet(&m1, "ads.example.com");
+        assert_eq!(m2, "type:json");
     }
 }

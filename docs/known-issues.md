@@ -196,10 +196,10 @@ P0 到 P3 里点名的能力已经接上。下面是仍然接受的缺口，不�
       - **iOS 模拟器证书一键安装（macOS）**：在顶栏「更多」菜单证书区域新增「安装证书到 iOS 模拟器」（`Install on iOS Simulator`），后台执行 `xcrun simctl list devices booted` 枚举当前所有已启动（`Booted`）的模拟器设备 UDID，并逐台调用 `xcrun simctl keychain <udid> add-root-cert <ca.crt>` 一键写入并信任根证书；未检测到运行中模拟器时状态栏给出明确提示。
       - **Linux 系统级证书命令一键复制**：在 Linux 平台「更多」菜单证书区域新增「复制系统证书命令」（`Copy system CA command`），自动检测 `/etc/os-release` 与发行版标识文件（Arch/Manjaro、Debian/Ubuntu、Fedora/RHEL/Rocky、openSUSE、Alpine）并生成对应的系统级 Trust Store 安装命令（如 `sudo trust anchor --store ...`、`sudo cp ... /usr/local/share/ca-certificates/zniff-ca.crt && sudo update-ca-certificates` 或 `sudo update-ca-trust`）复制到剪贴板。
 
-19. **可选折叠的 Domain / App 快速导航抽屉（Sidebar Tree / Filter Facets）**
-    - **现状与痛点**：`zniff` 的单行过滤表达式（`host:`、`app:`、`path:`）对键盘流极高效，但从 Charles / Proxyman 迁移的用户习惯按「应用进程（Apps）」或「域名（Domains）」点选聚合列表来快速聚焦某个客户端或服务。
-    - **架构方案（中期）**：
-      - 在不破坏默认两栏紧凑布局的前提下，支持在左栏列表顶部或左侧展开一个轻量可折叠的「**应用 / 域名（Apps / Domains）**」快速分面导航（基于当前会话中已捕获流量的 `client_app` 与 `host` 实时聚合计数），点击某一项即自动切换/追加 `app:xxx` 或 `host:xxx` 过滤词，右键支持一键「只看」「屏蔽（`mute:`）」或「加入直通名单」。
+19. **可选折叠的 Domain / App 快速导航抽屉（Sidebar Tree / Filter Facets）** — ✅ 已完成
+    - **实现**：
+      - 在 `session::Session::facets` 中实时聚合当前会话中的「域名（`Domains`）」与「应用 / 来源（`Apps / Clients`）」（从 `127.0.0.1 (进程名)` 提取应用进程名或保留远端来源 IP，含空格进程名自动映射为下划线并在 `app:` 过滤中双向匹配），按流量条数降序排列并统计各分面的异常/报错条数。
+      - 在左栏搜索框右侧（列设置按钮旁）新增「域名与应用导航」折叠开关，展开后在列表上方显示双标签分面导航抽屉（`域名 (N)` / `应用 / 来源 (M)`）；点击分面胶囊即可一键切换/追加 `host:xxx` 或 `app:xxx` OR 过滤词，点击域名胶囊右侧 `×` 可一键切换 `mute:xxx` 屏蔽。
 
 ---
 

@@ -457,6 +457,41 @@ impl FilteredStats {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FacetEntry {
+    pub label: String,
+    pub token: String,
+    pub count: usize,
+    pub error_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SessionFacets {
+    pub domains: Vec<FacetEntry>,
+    pub apps: Vec<FacetEntry>,
+}
+
+pub fn extract_client_app_facet(client_ip: &str) -> Option<(String, String)> {
+    let raw = client_ip.trim();
+    if raw.is_empty() || raw == "—" {
+        return None;
+    }
+    let label = if let Some(rest) = raw.strip_suffix(')')
+        && let Some(idx) = rest.rfind('(')
+    {
+        let proc_name = rest[idx + 1..].trim();
+        if proc_name.is_empty() { raw } else { proc_name }
+    } else {
+        raw
+    };
+    let token = label.split_whitespace().collect::<Vec<_>>().join("_");
+    if token.is_empty() {
+        None
+    } else {
+        Some((label.to_string(), token))
+    }
+}
+
 impl Flow {
     pub fn req_bytes(&self) -> usize {
         if self.request_bytes > 0 {
@@ -1175,6 +1210,54 @@ impl Session {
         out
     }
 
+    pub fn facets(&self) -> SessionFacets {
+        const FACET_CAP: usize = 64;
+        let mut domain_map: HashMap<String, FacetEntry> = HashMap::new();
+        let mut app_map: HashMap<String, FacetEntry> = HashMap::new();
+        for id in &self.order {
+            let Some(flow) = self.flows.get(id) else {
+                continue;
+            };
+            let is_err = flow.error.is_some() || flow.status.is_some_and(|code| code >= 400);
+            let host = flow.host.trim();
+            if !host.is_empty() {
+                let key = host.to_ascii_lowercase();
+                let entry = domain_map.entry(key.clone()).or_insert_with(|| FacetEntry {
+                    label: host.to_string(),
+                    token: key,
+                    count: 0,
+                    error_count: 0,
+                });
+                entry.count += 1;
+                if is_err {
+                    entry.error_count += 1;
+                }
+            }
+            if let Some((label, token)) = extract_client_app_facet(&flow.client_ip) {
+                let key = token.to_ascii_lowercase();
+                let entry = app_map.entry(key).or_insert_with(|| FacetEntry {
+                    label,
+                    token,
+                    count: 0,
+                    error_count: 0,
+                });
+                entry.count += 1;
+                if is_err {
+                    entry.error_count += 1;
+                }
+            }
+        }
+        let sort_facets = |mut items: Vec<FacetEntry>| -> Vec<FacetEntry> {
+            items.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.token.cmp(&b.token)));
+            items.truncate(FACET_CAP);
+            items
+        };
+        SessionFacets {
+            domains: sort_facets(domain_map.into_values().collect()),
+            apps: sort_facets(app_map.into_values().collect()),
+        }
+    }
+
     #[cfg(test)]
     pub fn filtered_stats(&self, filter: &str) -> FilteredStats {
         let query = FlowQuery::parse(filter);
@@ -1628,10 +1711,11 @@ impl FlowQuery {
             return false;
         }
         if !self.client_ips.is_empty()
-            && !self
-                .client_ips
-                .iter()
-                .any(|ip| !client_ip.is_empty() && client_ip.contains(ip))
+            && !self.client_ips.iter().any(|ip| {
+                !client_ip.is_empty()
+                    && (client_ip.contains(ip)
+                        || (ip.contains('_') && client_ip.contains(&ip.replace('_', " "))))
+            })
         {
             return false;
         }
@@ -2212,5 +2296,59 @@ mod tests {
             vec![f1, f2]
         );
         let _ = f3;
+    }
+
+    #[test]
+    fn facets_aggregate_domains_and_apps_sorted_by_count() {
+        let mut session = Session::default();
+        let f1 = session.open(draft("api.example.com"));
+        session.set_client_ip(f1, "127.0.0.1 (curl)");
+        session.replace_response(f1, 200, Vec::new(), Vec::new());
+
+        let f2 = session.open(draft("api.example.com"));
+        session.set_client_ip(f2, "127.0.0.1 (Google Chrome)");
+        session.replace_response(f2, 502, Vec::new(), Vec::new());
+
+        let f3 = session.open(draft("cdn.example.com"));
+        session.set_client_ip(f3, "127.0.0.1 (Google Chrome)");
+        session.replace_response(f3, 200, Vec::new(), Vec::new());
+
+        let facets = session.facets();
+        assert_eq!(
+            facets.domains,
+            vec![
+                FacetEntry {
+                    label: "api.example.com".into(),
+                    token: "api.example.com".into(),
+                    count: 2,
+                    error_count: 1,
+                },
+                FacetEntry {
+                    label: "cdn.example.com".into(),
+                    token: "cdn.example.com".into(),
+                    count: 1,
+                    error_count: 0,
+                },
+            ]
+        );
+        assert_eq!(
+            facets.apps,
+            vec![
+                FacetEntry {
+                    label: "Google Chrome".into(),
+                    token: "Google_Chrome".into(),
+                    count: 2,
+                    error_count: 1,
+                },
+                FacetEntry {
+                    label: "curl".into(),
+                    token: "curl".into(),
+                    count: 1,
+                    error_count: 0,
+                },
+            ]
+        );
+        assert_eq!(session.ids_matching("app:Google_Chrome"), vec![f2, f3]);
+        assert_eq!(session.ids_matching("app:curl"), vec![f1]);
     }
 }
