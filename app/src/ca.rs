@@ -168,7 +168,38 @@ impl Ca {
     /// Looks up a custom certificate in `<data_dir>/certs/` for `host`
     /// (exact `<host>.crt`/`.pem` + `.key`, or wildcard `_wildcard.<parent>` / `*.<parent>`).
     fn dir_custom_cert(&self, host: &str) -> Option<(PathBuf, Option<PathBuf>)> {
-        let certs_dir = self.dir.join("certs");
+        self.dir_custom_cert_in("certs", host)
+    }
+
+    pub fn has_client_cert_in_dir(&self, host: &str) -> bool {
+        self.dir_custom_cert_in("client-certs", host).is_some()
+    }
+
+    pub fn client_identity_for_host(
+        &self,
+        host: &str,
+        custom: Option<(&Path, Option<&Path>)>,
+    ) -> Result<Option<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>> {
+        let dir_found;
+        let effective_custom = match custom {
+            Some(pair) => Some(pair),
+            None => {
+                dir_found = self.dir_custom_cert_in("client-certs", host);
+                dir_found
+                    .as_ref()
+                    .map(|(cert, key)| (cert.as_path(), key.as_deref()))
+            }
+        };
+        let Some((cert_path, key_path)) = effective_custom else {
+            return Ok(None);
+        };
+        let (certs, key) = load_custom_cert_pair(cert_path, key_path)
+            .with_context(|| format!("读取客户端证书 {}", cert_path.display()))?;
+        Ok(Some((certs, key)))
+    }
+
+    fn dir_custom_cert_in(&self, subdir: &str, host: &str) -> Option<(PathBuf, Option<PathBuf>)> {
+        let certs_dir = self.dir.join(subdir);
         if !certs_dir.is_dir() {
             return None;
         }
@@ -709,6 +740,20 @@ mod tests {
         assert!(ca.dir_custom_cert("sub.example.com").is_some());
         let dir_cfg = ca.server_config("sub.example.com", b"http/1.1").unwrap();
         assert_eq!(dir_cfg.alpn_protocols, vec![b"http/1.1".to_vec()]);
+
+        let client_certs_dir = dir.join("client-certs");
+        fs::create_dir_all(&client_certs_dir).unwrap();
+        fs::write(
+            client_certs_dir.join("mtls.example.com.pem"),
+            format!("{}\n{}", custom_cert.pem(), custom_key.serialize_pem()),
+        )
+        .unwrap();
+        assert!(ca.has_client_cert_in_dir("mtls.example.com"));
+        assert!(
+            ca.client_identity_for_host("mtls.example.com", None)
+                .unwrap()
+                .is_some()
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

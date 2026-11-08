@@ -4352,7 +4352,7 @@ fn replace_row(
                             move |text| path_pattern.set(text.to_string()),
                         )))
                         .child(when(
-                            move || kind.get() == 0 || kind.get() == 6 || kind.get() == 11,
+                            move || matches!(kind.get(), 0 | 6 | 10 | 11),
                             move || {
                                 view()
                                     .h(px(28.0))
@@ -4363,8 +4363,34 @@ fn replace_row(
                                     .border_1()
                                     .border_color(border_control())
                                     .overflow_hidden()
-                                    .child(quick_side_chip(response, false, "请求", "Req"))
-                                    .child(quick_side_chip(response, true, "响应", "Res"))
+                                    .child(when(
+                                        move || kind.get() == 10,
+                                        move || {
+                                            view()
+                                                .flex_row()
+                                                .items_center()
+                                                .child(quick_side_chip(
+                                                    response, false, "MITM", "MITM",
+                                                ))
+                                                .child(quick_side_chip(
+                                                    response, true, "mTLS", "mTLS",
+                                                ))
+                                        },
+                                    ))
+                                    .child(when(
+                                        move || kind.get() != 10,
+                                        move || {
+                                            view()
+                                                .flex_row()
+                                                .items_center()
+                                                .child(quick_side_chip(
+                                                    response, false, "请求", "Req",
+                                                ))
+                                                .child(quick_side_chip(
+                                                    response, true, "响应", "Res",
+                                                ))
+                                        },
+                                    ))
                             },
                         )),
                 )

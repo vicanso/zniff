@@ -485,6 +485,45 @@ impl Hub {
         self.ca.server_config_with_custom(host, alpn, custom_ref)
     }
 
+    fn has_client_cert_for_host(&self, host: &str) -> bool {
+        if self.apply_rules.load(Ordering::Relaxed) {
+            let rules = self
+                .rules
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .clone();
+            if rules::custom_client_cert(&rules, host).is_some() {
+                return true;
+            }
+        }
+        self.ca.has_client_cert_in_dir(host)
+    }
+
+    fn client_config_for_host(&self, host: &str, alpn: &[Vec<u8>]) -> Result<ClientConfig> {
+        let rule_cert = if self.apply_rules.load(Ordering::Relaxed) {
+            let rules = self
+                .rules
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .clone();
+            rules::custom_client_cert(&rules, host)
+        } else {
+            None
+        };
+        let custom_ref = rule_cert
+            .as_ref()
+            .map(|(cert, key)| (cert.as_path(), key.as_deref()));
+        let builder = ClientConfig::builder().with_root_certificates(self.roots.clone());
+        let mut config = match self.ca.client_identity_for_host(host, custom_ref)? {
+            Some((certs, key)) => builder
+                .with_client_auth_cert(certs, key)
+                .with_context(|| format!("配置源站 mTLS 客户端证书 ({host})"))?,
+            None => builder.with_no_client_auth(),
+        };
+        config.alpn_protocols = alpn.to_vec();
+        Ok(config)
+    }
+
     #[cfg(test)]
     fn note_rules(&self, id: u64, host: &str, path: &str) {
         self.note_rules_with_ops(id, host, path, &[]);
@@ -1312,7 +1351,8 @@ where
             // only when the fallback tunnel actually carries traffic.
             let reason = origin_tls_reason(&err);
             log::debug!("源站 TLS 失败，改隧道 {sni_host}:{port}: {reason} ({err:#})");
-            let recorded = hub.show_tunnel_failures.load(Ordering::Relaxed);
+            let recorded = hub.show_tunnel_failures.load(Ordering::Relaxed)
+                || hub.has_client_cert_for_host(&sni_host);
             if recorded {
                 record_tunnel(&hub, &sni_host, port, reason.clone());
             }
@@ -1346,10 +1386,7 @@ async fn connect_origin(
         .await
         .context("连接源站超时")??;
     tcp.set_nodelay(true).ok();
-    let mut config = ClientConfig::builder()
-        .with_root_certificates(hub.roots.clone())
-        .with_no_client_auth();
-    config.alpn_protocols = alpn.to_vec();
+    let config = hub.client_config_for_host(host, alpn)?;
     let connector = TlsConnector::from(Arc::new(config));
     let name = server_name(host)?;
     let tls = connector.connect(name, tcp).await.context("源站 TLS")?;
@@ -8086,6 +8123,88 @@ mod tests {
         }
         assert_eq!(throttle_sleep_duration(4096, Some(4096)).as_millis(), 1000);
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn https_upstream_mtls_authenticates_with_client_cert_rule() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let dir = std::env::temp_dir().join(format!("zniff-mtls-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let (origin_ca, origin_leaf, leaf_key) = test_origin_cert();
+
+        // Issue a client certificate signed by `origin_ca`
+        let mut ca_params = rcgen::CertificateParams::default();
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let client_ca_key = rcgen::KeyPair::generate().unwrap();
+        let client_ca = ca_params.self_signed(&client_ca_key).unwrap();
+        let client_issuer = rcgen::Issuer::new(ca_params, client_ca_key);
+        let client_key = rcgen::KeyPair::generate().unwrap();
+        let mut client_params = rcgen::CertificateParams::default();
+        client_params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth];
+        let client_cert = client_params
+            .signed_by(&client_key, &client_issuer)
+            .unwrap();
+
+        let client_cert_path = dir.join("client.crt");
+        let client_key_path = dir.join("client.key");
+        std::fs::write(&client_cert_path, client_cert.pem()).unwrap();
+        std::fs::write(&client_key_path, client_key.serialize_pem()).unwrap();
+
+        let mut hub = Hub::new(ca.clone()).unwrap();
+        hub.add_trust_anchor(origin_ca.der().clone());
+        hub.set_rules(&format!(
+            "client-cert 127.0.0.1 {} {}",
+            client_cert_path.display(),
+            client_key_path.display()
+        ));
+        let hub = Arc::new(hub);
+
+        // Configure an origin server that requires client certificate authentication
+        let mut client_roots = RootCertStore::empty();
+        client_roots.add(client_ca.der().clone()).unwrap();
+        let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(client_roots))
+            .build()
+            .unwrap();
+        let cert_der = rustls::pki_types::CertificateDer::from(origin_leaf.der().to_vec());
+        let key_der = rustls::pki_types::PrivateKeyDer::Pkcs8(
+            rustls::pki_types::PrivatePkcs8KeyDer::from(leaf_key.serialize_der()),
+        );
+        let mut server_cfg = rustls::ServerConfig::builder()
+            .with_client_cert_verifier(verifier)
+            .with_single_cert(vec![cert_der], key_der)
+            .unwrap();
+        server_cfg.alpn_protocols = vec![b"h2".to_vec()];
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_cfg));
+
+        let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (sock, _) = origin.accept().await.unwrap();
+            let tls = acceptor.accept(sock).await.unwrap();
+            let peer_certs = tls.get_ref().1.peer_certificates();
+            assert!(peer_certs.is_some_and(|c| !c.is_empty()));
+            let service = hyper::service::service_fn(move |_req: Request<Incoming>| async move {
+                Ok::<_, std::convert::Infallible>(Response::new(http_body_util::Full::new(
+                    Bytes::from_static(b"mtls-verified"),
+                )))
+            });
+            let _ = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+                .serve_connection(TokioIo::new(tls), service)
+                .await;
+        });
+
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        serve_one(proxy, hub.clone());
+        let (status, body) = h2_get(&ca, proxy_addr, origin_addr, "/mtls-check").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(&body[..], b"mtls-verified");
+        let flow = hub
+            .with_session(|session| session.flows().into_iter().next())
+            .unwrap();
+        assert_eq!(flow.rule_hit, "client-cert");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

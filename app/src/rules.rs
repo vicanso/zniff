@@ -110,6 +110,12 @@ pub enum Rule {
         cert_path: PathBuf,
         key_path: Option<PathBuf>,
     },
+    /// Client certificate chain and private key for upstream mutual TLS (mTLS) on `host`.
+    ClientCert {
+        host: String,
+        cert_path: PathBuf,
+        key_path: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -242,7 +248,7 @@ impl Rule {
             | Self::Throttle {
                 host, path_prefix, ..
             } => (host, path_prefix),
-            Self::Cert { host, .. } => (host, "/"),
+            Self::Cert { host, .. } | Self::ClientCert { host, .. } => (host, "/"),
         }
     }
 }
@@ -251,6 +257,18 @@ impl Rule {
 pub fn custom_cert(rules: &[Rule], host: &str) -> Option<(PathBuf, Option<PathBuf>)> {
     rules.iter().find_map(|rule| match rule {
         Rule::Cert {
+            host: rule_host,
+            cert_path,
+            key_path,
+        } if host_matches(rule_host, host) => Some((cert_path.clone(), key_path.clone())),
+        _ => None,
+    })
+}
+
+/// First matching `client-cert` rule for `host`, returning `(cert_path, key_path)`.
+pub fn custom_client_cert(rules: &[Rule], host: &str) -> Option<(PathBuf, Option<PathBuf>)> {
+    rules.iter().find_map(|rule| match rule {
+        Rule::ClientCert {
             host: rule_host,
             cert_path,
             key_path,
@@ -305,6 +323,7 @@ pub fn hit_summary_with_ops(rules: &[Rule], host: &str, path: &str, ops: &[Strin
             Rule::Delay { .. } => ("delay", false),
             Rule::Throttle { .. } => ("throttle", false),
             Rule::Cert { .. } => ("cert", false),
+            Rule::ClientCert { .. } => ("client-cert", false),
             Rule::Header { .. } => ("header", false),
             Rule::Query { .. } => ("query", false),
             Rule::Cors { .. } => ("cors", false),
@@ -784,6 +803,19 @@ fn parse_line(line: &str) -> Option<Rule> {
             let cert_path = PathBuf::from(&tokens[0]);
             let key_path = tokens.get(1).filter(|s| !s.is_empty()).map(PathBuf::from);
             Some(Rule::Cert {
+                host,
+                cert_path,
+                key_path,
+            })
+        }
+        "client-cert" | "mtls" => {
+            let tokens = rule_tokens(rest)?;
+            if tokens.is_empty() || tokens.len() > 2 || tokens[0].is_empty() {
+                return None;
+            }
+            let cert_path = PathBuf::from(&tokens[0]);
+            let key_path = tokens.get(1).filter(|s| !s.is_empty()).map(PathBuf::from);
+            Some(Rule::ClientCert {
                 host,
                 cert_path,
                 key_path,
@@ -1486,12 +1518,13 @@ pub fn append_quick_rule(
                 return None;
             }
             let (host_only, _) = split_pattern(pattern);
+            let cmd = if response { "client-cert" } else { "cert" };
             let quoted_cert = quote_rule_token(from);
             if to.is_empty() {
-                format!("cert {host_only} {quoted_cert}")
+                format!("{cmd} {host_only} {quoted_cert}")
             } else {
                 let quoted_key = quote_rule_token(to);
-                format!("cert {host_only} {quoted_cert} {quoted_key}")
+                format!("{cmd} {host_only} {quoted_cert} {quoted_key}")
             }
         }
     };
@@ -2358,5 +2391,44 @@ break-res example.com/graphql op=anonymous
             &["anonymous".to_string()],
         );
         assert_eq!(break_res_eff.action, Some(Action::BreakResponse));
+    }
+
+    #[test]
+    fn parses_client_cert_rules_and_matches_hosts() {
+        let rules = parse_rules(
+            "client-cert *.corp.internal /tmp/client.crt /tmp/client.key\n\
+             mtls api.partner.test \"/tmp/my bundle/partner.pem\"\n",
+        );
+        assert_eq!(rules.len(), 2);
+        assert_eq!(
+            custom_client_cert(&rules, "svc.corp.internal"),
+            Some((
+                PathBuf::from("/tmp/client.crt"),
+                Some(PathBuf::from("/tmp/client.key")),
+            ))
+        );
+        assert_eq!(
+            custom_client_cert(&rules, "api.partner.test"),
+            Some((PathBuf::from("/tmp/my bundle/partner.pem"), None))
+        );
+        assert_eq!(custom_client_cert(&rules, "other.example.com"), None);
+        assert_eq!(
+            hit_summary_with_ops(&rules, "svc.corp.internal", "/v1/health", &[]),
+            "client-cert"
+        );
+
+        let appended = append_quick_rule(
+            "",
+            QuickRule::Cert,
+            "mtls.example.com/v1",
+            true,
+            "/tmp/client.pem",
+            "/tmp/client.key",
+        )
+        .unwrap();
+        assert_eq!(
+            appended,
+            "client-cert mtls.example.com /tmp/client.pem /tmp/client.key\n"
+        );
     }
 }
