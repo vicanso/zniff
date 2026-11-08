@@ -698,6 +698,177 @@ fn delete_linux_cert(db: &str, name: &str) -> Result<bool> {
     Ok(output.status.success())
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IosSimOutcome {
+    Installed(usize),
+    NoneBooted,
+}
+
+pub fn simctl_add_root_cert_args<'a>(target: &'a str, cert_path: &'a str) -> [&'a str; 5] {
+    ["simctl", "keychain", target, "add-root-cert", cert_path]
+}
+
+pub fn parse_booted_simulators(output: &str) -> Vec<(String, String)> {
+    let mut devices = Vec::new();
+    for line in output.lines() {
+        let trimmed = line.trim();
+        let Some(rest) = trimmed
+            .strip_suffix("(Booted)")
+            .or_else(|| trimmed.strip_suffix("(booted)"))
+        else {
+            continue;
+        };
+        let rest = rest.trim_end();
+        let Some(rest) = rest.strip_suffix(')') else {
+            continue;
+        };
+        let Some(open_idx) = rest.rfind('(') else {
+            continue;
+        };
+        let name = rest[..open_idx].trim();
+        let udid = rest[open_idx + 1..].trim();
+        if !name.is_empty()
+            && udid.len() >= 8
+            && udid.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
+        {
+            devices.push((name.to_string(), udid.to_string()));
+        }
+    }
+    devices
+}
+
+pub fn install_ios_simulators(ca: &Ca) -> Result<IosSimOutcome> {
+    let cert_path = ca.cert_path();
+    let cert_str = cert_path.to_str().context("证书路径不是 UTF-8")?;
+    let output = std::process::Command::new("xcrun")
+        .args(["simctl", "list", "devices", "booted"])
+        .output()
+        .context("运行 xcrun simctl list devices booted")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = stderr.trim();
+        if detail.is_empty() {
+            anyhow::bail!("xcrun simctl list 退出码 {}", output.status);
+        } else {
+            anyhow::bail!("{detail}");
+        }
+    }
+    let booted = parse_booted_simulators(&String::from_utf8_lossy(&output.stdout));
+    if booted.is_empty() {
+        return Ok(IosSimOutcome::NoneBooted);
+    }
+    for (name, udid) in &booted {
+        let out = std::process::Command::new("xcrun")
+            .args(simctl_add_root_cert_args(udid, cert_str))
+            .output()
+            .with_context(|| format!("向模拟器 {name} ({udid}) 安装证书"))?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let detail = stderr.trim();
+            if detail.is_empty() {
+                anyhow::bail!("模拟器 {name} 退出码 {}", out.status);
+            } else {
+                anyhow::bail!("模拟器 {name}: {detail}");
+            }
+        }
+    }
+    Ok(IosSimOutcome::Installed(booted.len()))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinuxDistroFamily {
+    Arch,
+    Debian,
+    RedHat,
+    Suse,
+    Alpine,
+}
+
+pub fn detect_linux_distro_from(
+    os_release: Option<&str>,
+    has_arch_release: bool,
+    has_redhat_release: bool,
+) -> LinuxDistroFamily {
+    if let Some(text) = os_release {
+        let mut tokens = Vec::new();
+        for line in text.lines() {
+            let line = line.trim();
+            if let Some(val) = line
+                .strip_prefix("ID=")
+                .or_else(|| line.strip_prefix("ID_LIKE="))
+            {
+                let unquoted = val.trim().trim_matches('"').trim_matches('\'');
+                for word in unquoted.split_whitespace() {
+                    tokens.push(word.to_ascii_lowercase());
+                }
+            }
+        }
+        for tok in &tokens {
+            match tok.as_str() {
+                "arch" | "manjaro" | "endeavouros" | "cachyos" => return LinuxDistroFamily::Arch,
+                "fedora" | "rhel" | "centos" | "rocky" | "almalinux" => {
+                    return LinuxDistroFamily::RedHat;
+                }
+                "suse" | "opensuse" | "opensuse-leap" | "opensuse-tumbleweed" | "sles" => {
+                    return LinuxDistroFamily::Suse;
+                }
+                "alpine" => return LinuxDistroFamily::Alpine,
+                "debian" | "ubuntu" | "linuxmint" | "pop" | "kali" | "elementary" | "raspbian" => {
+                    return LinuxDistroFamily::Debian;
+                }
+                _ => {}
+            }
+        }
+    }
+    if has_arch_release {
+        LinuxDistroFamily::Arch
+    } else if has_redhat_release {
+        LinuxDistroFamily::RedHat
+    } else {
+        LinuxDistroFamily::Debian
+    }
+}
+
+fn shell_quote_path(path: &str) -> String {
+    if !path.is_empty()
+        && path
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'-' | b'_'))
+    {
+        path.to_string()
+    } else {
+        format!("'{}'", path.replace('\'', "'\\''"))
+    }
+}
+
+pub fn linux_system_ca_command_for(family: LinuxDistroFamily, cert_path: &str) -> String {
+    let quoted = shell_quote_path(cert_path);
+    match family {
+        LinuxDistroFamily::Arch => format!("sudo trust anchor --store {quoted}"),
+        LinuxDistroFamily::RedHat => format!(
+            "sudo cp {quoted} /etc/pki/ca-trust/source/anchors/zniff-ca.crt && sudo update-ca-trust"
+        ),
+        LinuxDistroFamily::Suse => format!(
+            "sudo cp {quoted} /etc/pki/trust/anchors/zniff-ca.crt && sudo update-ca-certificates"
+        ),
+        LinuxDistroFamily::Alpine | LinuxDistroFamily::Debian => format!(
+            "sudo cp {quoted} /usr/local/share/ca-certificates/zniff-ca.crt && sudo update-ca-certificates"
+        ),
+    }
+}
+
+pub fn linux_system_ca_command(cert_path: &Path) -> String {
+    let os_release = fs::read_to_string("/etc/os-release")
+        .or_else(|_| fs::read_to_string("/usr/lib/os-release"))
+        .ok();
+    let family = detect_linux_distro_from(
+        os_release.as_deref(),
+        Path::new("/etc/arch-release").exists(),
+        Path::new("/etc/redhat-release").exists(),
+    );
+    linux_system_ca_command_for(family, &cert_path.display().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -795,5 +966,83 @@ mod tests {
         assert!(!CaStatus::NotInstalled.is_installed());
         assert!(CaStatus::InstalledUntrusted.is_installed());
         assert!(CaStatus::Trusted.is_installed());
+    }
+
+    #[test]
+    fn parses_booted_simulators_and_builds_simctl_args() {
+        let sample = "\
+== Devices ==
+-- iOS 17.5 --
+    iPhone 15 (11111111-2222-3333-4444-555555555555) (Shutdown)
+    iPhone 15 Pro (AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE) (Booted)
+-- iOS 18.0 --
+    iPad Pro 13-inch (M4) (12345678-9ABC-DEF0-1234-56789ABCDEF0) (Booted)
+";
+        let booted = parse_booted_simulators(sample);
+        assert_eq!(
+            booted,
+            vec![
+                (
+                    "iPhone 15 Pro".to_string(),
+                    "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE".to_string()
+                ),
+                (
+                    "iPad Pro 13-inch (M4)".to_string(),
+                    "12345678-9ABC-DEF0-1234-56789ABCDEF0".to_string()
+                ),
+            ]
+        );
+        assert_eq!(
+            simctl_add_root_cert_args("AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE", "/tmp/ca.crt"),
+            [
+                "simctl",
+                "keychain",
+                "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE",
+                "add-root-cert",
+                "/tmp/ca.crt"
+            ]
+        );
+    }
+
+    #[test]
+    fn detects_linux_distro_and_builds_system_ca_command() {
+        assert_eq!(
+            detect_linux_distro_from(Some("ID=ubuntu\nID_LIKE=debian\n"), false, false),
+            LinuxDistroFamily::Debian
+        );
+        assert_eq!(
+            detect_linux_distro_from(Some("ID=\"manjaro\"\nID_LIKE=arch\n"), false, false),
+            LinuxDistroFamily::Arch
+        );
+        assert_eq!(
+            detect_linux_distro_from(Some("ID=fedora\n"), false, false),
+            LinuxDistroFamily::RedHat
+        );
+        assert_eq!(
+            detect_linux_distro_from(Some("ID=\"opensuse-tumbleweed\"\n"), false, false),
+            LinuxDistroFamily::Suse
+        );
+        assert_eq!(
+            detect_linux_distro_from(None, true, false),
+            LinuxDistroFamily::Arch
+        );
+        assert_eq!(
+            linux_system_ca_command_for(
+                LinuxDistroFamily::Debian,
+                "/home/alice/.local/share/zniff/ca.crt"
+            ),
+            "sudo cp /home/alice/.local/share/zniff/ca.crt /usr/local/share/ca-certificates/zniff-ca.crt && sudo update-ca-certificates"
+        );
+        assert_eq!(
+            linux_system_ca_command_for(
+                LinuxDistroFamily::Arch,
+                "/home/alice/My Config/zniff/ca.crt"
+            ),
+            "sudo trust anchor --store '/home/alice/My Config/zniff/ca.crt'"
+        );
+        assert_eq!(
+            linux_system_ca_command_for(LinuxDistroFamily::RedHat, "/tmp/ca.crt"),
+            "sudo cp /tmp/ca.crt /etc/pki/ca-trust/source/anchors/zniff-ca.crt && sudo update-ca-trust"
+        );
     }
 }

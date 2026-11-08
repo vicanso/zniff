@@ -191,13 +191,10 @@ P0 到 P3 里点名的能力已经接上。下面是仍然接受的缺口，不�
       - **`no-cache` / `nocache`（禁用缓存）**：叠加类规则 `no-cache <主机[/路径]> [op=<操作名>]`，匹配时自动从请求头剥离 `If-Modified-Since` 与 `If-None-Match` 并写入 `Cache-Control: no-cache, no-store, must-revalidate`、`Pragma: no-cache`，同时从响应头剥离 `ETag` 与 `Last-Modified` 并写入 `Cache-Control: no-cache, no-store, must-revalidate`、`Pragma: no-cache`、`Expires: 0`，避免 `304 Not Modified` 干扰抓包查看正文。
       - **`block`（阻断连接）**：终点类规则 `block <主机[/路径]> [drop|reset|status=<code,默认403>] [op=<操作名>]`，不拨号源站；`status` 模式立即返回指定拦截状态码（默认 `403 Forbidden`）与空正文，`drop` / `reset` 模式直接关闭底层连接或重置流并在流量上记录 `规则阻断 (连接已断开)`。过滤弹出层快速添加区同步提供「禁缓存」与「阻断」（含「状态码 / 断开」切换）。
 
-18. **macOS iOS Simulator 一键注入证书 & Linux 系统级证书指引**
-    - **现状与痛点**：
-      - macOS 移动端开发者使用 Xcode iOS 模拟器联调时，需要把 `zniff CA` 拖进模拟器再手动进「设置 -> 通用 -> 关于本机 -> 证书信任设置」开启信任，步骤繁琐。
-      - Linux 下目前自动安装了 `~/.pki/nssdb`（覆盖 Chromium/Chrome），但 `curl`、`wget` 或系统级 OpenSSL 客户端走的是发行版系统级 Trust Store（如 Arch 的 `trust anchor --store` 或 Debian/Ubuntu 的 `update-ca-certificates`）。
-    - **架构方案（中短期）**：
-      - **iOS 模拟器证书一键安装（macOS）**：在「更多」菜单证书区域，检测到本机有运行中的 iOS Simulator（`xcrun simctl list devices booted`）时，提供「安装证书到 iOS 模拟器」（`Install on iOS Simulators`），直接调用 `xcrun simctl keychain booted add-root-cert <ca.crt>` 一键写入并信任。
-      - **Linux 系统级证书辅助**：在 Linux 平台提供一键复制系统级安装命令（自动识别 `/etc/arch-release` 生成 `sudo trust anchor --store .../ca.crt` 或 `/etc/debian_version` 生成 `sudo cp .../ca.crt /usr/local/share/ca-certificates/zniff-ca.crt && sudo update-ca-certificates`）。
+18. **macOS iOS Simulator 一键注入证书 & Linux 系统级证书指引** — ✅ 已完成
+    - **实现**：
+      - **iOS 模拟器证书一键安装（macOS）**：在顶栏「更多」菜单证书区域新增「安装证书到 iOS 模拟器」（`Install on iOS Simulator`），后台执行 `xcrun simctl list devices booted` 枚举当前所有已启动（`Booted`）的模拟器设备 UDID，并逐台调用 `xcrun simctl keychain <udid> add-root-cert <ca.crt>` 一键写入并信任根证书；未检测到运行中模拟器时状态栏给出明确提示。
+      - **Linux 系统级证书命令一键复制**：在 Linux 平台「更多」菜单证书区域新增「复制系统证书命令」（`Copy system CA command`），自动检测 `/etc/os-release` 与发行版标识文件（Arch/Manjaro、Debian/Ubuntu、Fedora/RHEL/Rocky、openSUSE、Alpine）并生成对应的系统级 Trust Store 安装命令（如 `sudo trust anchor --store ...`、`sudo cp ... /usr/local/share/ca-certificates/zniff-ca.crt && sudo update-ca-certificates` 或 `sudo update-ca-trust`）复制到剪贴板。
 
 19. **可选折叠的 Domain / App 快速导航抽屉（Sidebar Tree / Filter Facets）**
     - **现状与痛点**：`zniff` 的单行过滤表达式（`host:`、`app:`、`path:`）对键盘流极高效，但从 Charles / Proxyman 迁移的用户习惯按「应用进程（Apps）」或「域名（Domains）」点选聚合列表来快速聚焦某个客户端或服务。

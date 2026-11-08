@@ -160,6 +160,10 @@ pub enum StatusMsg {
         version: String,
         err: String,
     },
+    IosSimInstalled(usize),
+    IosSimNoneBooted,
+    IosSimFailed(String),
+    CopiedLinuxCaCmd(String),
 }
 
 fn port_in_use(err: &str) -> bool {
@@ -472,6 +476,26 @@ impl StatusMsg {
             Self::UpdateFailed { version, err } => match lang {
                 Lang::Zh => format!("升级 {version} 失败: {err}"),
                 Lang::En => format!("Failed to update to {version}: {err}"),
+            },
+            Self::IosSimInstalled(count) => match lang {
+                Lang::Zh => format!("已向 {count} 台运行中的 iOS 模拟器安装并信任根证书"),
+                Lang::En => {
+                    format!("Installed and trusted root CA on {count} booted iOS simulator(s)")
+                }
+            },
+            Self::IosSimNoneBooted => t(
+                lang,
+                "未检测到运行中的 iOS 模拟器，请先启动 Simulator",
+                "No booted iOS Simulator found; launch Simulator first",
+            )
+            .into(),
+            Self::IosSimFailed(err) => match lang {
+                Lang::Zh => format!("iOS 模拟器证书安装失败: {err}"),
+                Lang::En => format!("iOS Simulator certificate install failed: {err}"),
+            },
+            Self::CopiedLinuxCaCmd(cmd) => match lang {
+                Lang::Zh => format!("已复制系统证书安装命令 · {cmd}"),
+                Lang::En => format!("Copied system CA install command · {cmd}"),
             },
         }
     }
@@ -844,6 +868,18 @@ mod tests {
         assert_eq!(
             StatusMsg::CopiedMermaidMarkdown.text(Lang::En),
             "Copied Markdown sequence diagram"
+        );
+        assert_eq!(
+            StatusMsg::IosSimInstalled(2).text(Lang::Zh),
+            "已向 2 台运行中的 iOS 模拟器安装并信任根证书"
+        );
+        assert_eq!(
+            StatusMsg::IosSimNoneBooted.text(Lang::En),
+            "No booted iOS Simulator found; launch Simulator first"
+        );
+        assert_eq!(
+            StatusMsg::CopiedLinuxCaCmd("sudo update-ca-certificates".into()).text(Lang::Zh),
+            "已复制系统证书安装命令 · sudo update-ca-certificates"
         );
     }
 }

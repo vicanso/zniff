@@ -9698,6 +9698,7 @@ fn more_menu(
                 )
             }),
         )
+        .child(platform_ca_extra_menu_item(&import_controls))
         .child(menu_rule())
         .child(marked_action(
             move || pretty.get(),
@@ -11207,6 +11208,56 @@ fn remove_ca(controls: Arc<Controls>) {
             }
         }
     });
+}
+
+#[cfg(target_os = "macos")]
+fn platform_ca_extra_menu_item(controls: &Arc<Controls>) -> impl IntoElement {
+    let controls = controls.clone();
+    menu_action(
+        Glyph::Badge,
+        tr("安装证书到 iOS 模拟器", "Install on iOS Simulator"),
+        move || install_ca_ios_sim(controls.clone()),
+    )
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn platform_ca_extra_menu_item(controls: &Arc<Controls>) -> impl IntoElement {
+    let controls = controls.clone();
+    menu_action(
+        Glyph::Prompt,
+        tr("复制系统证书命令", "Copy system CA command"),
+        move || copy_linux_ca_cmd(&controls),
+    )
+}
+
+#[cfg(not(unix))]
+fn platform_ca_extra_menu_item(_controls: &Arc<Controls>) -> impl IntoElement {
+    div().w(0.0).h(0.0)
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn install_ca_ios_sim(controls: Arc<Controls>) {
+    std::thread::spawn(move || {
+        let ca = controls.hub.ca.clone();
+        match ca::install_ios_simulators(&ca) {
+            Ok(ca::IosSimOutcome::Installed(count)) => {
+                set_status(&controls, StatusMsg::IosSimInstalled(count));
+            }
+            Ok(ca::IosSimOutcome::NoneBooted) => {
+                set_status(&controls, StatusMsg::IosSimNoneBooted);
+            }
+            Err(err) => {
+                set_status(&controls, StatusMsg::IosSimFailed(format!("{err:#}")));
+            }
+        }
+    });
+}
+
+#[cfg_attr(not(all(unix, not(target_os = "macos"))), allow(dead_code))]
+fn copy_linux_ca_cmd(controls: &Controls) {
+    let cmd = ca::linux_system_ca_command(&controls.hub.ca.cert_path());
+    set_clipboard(cmd.clone());
+    set_status(controls, StatusMsg::CopiedLinuxCaCmd(cmd));
 }
 
 fn set_ca_status(controls: &Controls, status: ca::CaStatus) {
