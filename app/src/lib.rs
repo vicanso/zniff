@@ -58,7 +58,7 @@ struct Controls {
     running: Mutex<bool>,
     listen: Mutex<String>,
     listen_port: Mutex<u16>,
-    ca_installed: Mutex<bool>,
+    ca_status: Mutex<ca::CaStatus>,
     /// User preference. Off until they turn on 「系统代理」.
     use_system_proxy: Mutex<bool>,
     /// True only after this session's `sysproxy::enable` returned `Applied`.
@@ -786,6 +786,9 @@ struct Shown {
     pinned: Signal<bool>,
     comment: Signal<String>,
     editing_comment: Signal<bool>,
+    repeating: Signal<bool>,
+    repeat_count: Signal<String>,
+    repeat_interval: Signal<String>,
     req_search: Signal<String>,
     res_search: Signal<String>,
 }
@@ -805,7 +808,7 @@ pub fn App() -> impl IntoElement {
     provide_context(langs);
     let status = signal(StatusMsg::Idle);
     let running = signal(false);
-    let ca_installed = signal(false);
+    let ca_status = signal(ca::CaStatus::NotInstalled);
     let use_system_proxy = signal(false);
     let memory = signal(String::from("0 B"));
     let dropped = signal(0_u64);
@@ -814,6 +817,7 @@ pub fn App() -> impl IntoElement {
     let saved_profiles = signal(saved_filter.saved_profiles);
     let selected = signal(None::<u64>);
     let rows = signal(Vec::<RowLine>::new());
+    let filtered_stats = signal(session::FilteredStats::default());
     let flow_total = signal(0_usize);
     let listen = signal(String::new());
     let saved = saved_config();
@@ -854,6 +858,9 @@ pub fn App() -> impl IntoElement {
         pinned: signal(false),
         comment: signal(String::new()),
         editing_comment: signal(false),
+        repeating: signal(false),
+        repeat_count: signal(present::REPEAT_COUNT_DEFAULT.to_string()),
+        repeat_interval: signal(present::REPEAT_INTERVAL_DEFAULT_MS.to_string()),
         req_search: signal(String::new()),
         res_search: signal(String::new()),
     };
@@ -895,7 +902,7 @@ pub fn App() -> impl IntoElement {
     let qr_path = signal(String::new());
     let controls = open_controls();
     status.set(lock_status(&controls));
-    ca_installed.set(lock_bool(&controls.ca_installed));
+    ca_status.set(lock_ca_status(&controls));
     use_system_proxy.set(lock_bool(&controls.use_system_proxy));
     port_text.set(lock_port(&controls.listen_port).to_string());
     listen_all.set(lock_bool(&controls.listen_all));
@@ -912,6 +919,7 @@ pub fn App() -> impl IntoElement {
     let win_since = stored(None::<SystemTime>);
     let selected_tick = selected;
     let rows_tick = rows;
+    let stats_tick = filtered_stats;
     let total_tick = flow_total;
     let shown_tick = shown;
     let seen_gen = stored(0_u64);
@@ -958,7 +966,7 @@ pub fn App() -> impl IntoElement {
         );
         let listen_now = lock_string(&controls_tick.listen);
         listen.set(listen_now.clone());
-        ca_installed.set(lock_bool(&controls_tick.ca_installed));
+        ca_status.set(lock_ca_status(&controls_tick));
         use_system_proxy.set(lock_bool(&controls_tick.use_system_proxy));
         let paused_now = controls_tick.hub.paused();
         let paused_len = controls_tick.hub.paused_queue_len();
@@ -1055,6 +1063,7 @@ pub fn App() -> impl IntoElement {
         {
             if selected_now != seen_selected.get() {
                 shown_tick.editing_comment.set(false);
+                shown_tick.repeating.set(false);
             }
             seen_gen.replace(generation);
             seen_filter.replace(filter_now.clone());
@@ -1064,7 +1073,7 @@ pub fn App() -> impl IntoElement {
             seen_pretty.replace(pretty_now);
             seen_sort.replace(sort_now);
             seen_full_url.replace(full_url_now);
-            let lines = row_lines(
+            let (lines, stats) = row_lines(
                 &controls_tick.hub,
                 &filter_now,
                 lang_now,
@@ -1073,6 +1082,7 @@ pub fn App() -> impl IntoElement {
             );
             total_tick.set(controls_tick.hub.with_session(|session| session.len()));
             rows_tick.set(lines);
+            stats_tick.set(stats);
             memory.set(format_bytes(
                 controls_tick
                     .hub
@@ -1153,6 +1163,20 @@ pub fn App() -> impl IntoElement {
             ReplayOverride::default(),
         );
     });
+    let selected_esc = selected;
+    let compose_esc = compose;
+    let shown_esc = shown;
+    on_key("escape", move |_| {
+        if compose_esc.composing.get() {
+            reset_compose(compose_esc);
+        } else if shown_esc.repeating.get() {
+            shown_esc.repeating.set(false);
+        } else if shown_esc.editing_comment.get() {
+            shown_esc.editing_comment.set(false);
+        } else if selected_esc.get().is_some() {
+            selected_esc.set(None);
+        }
+    });
 
     view()
         .flex_1()
@@ -1164,7 +1188,7 @@ pub fn App() -> impl IntoElement {
         .child(toolbar(
             status,
             running,
-            ca_installed,
+            ca_status,
             use_system_proxy,
             move || install_ca(controls_ca.clone()),
             move || remove_ca(controls_remove.clone()),
@@ -1239,6 +1263,7 @@ pub fn App() -> impl IntoElement {
                     baseline,
                     folded,
                     pane_px,
+                    filtered_stats,
                 )),
         )
         .child(footer(
@@ -1251,7 +1276,7 @@ pub fn App() -> impl IntoElement {
 fn toolbar(
     status: Signal<StatusMsg>,
     running: Signal<bool>,
-    ca_installed: Signal<bool>,
+    ca_status: Signal<ca::CaStatus>,
     use_system_proxy: Signal<bool>,
     install: impl Fn() + 'static,
     remove: impl Fn() + 'static,
@@ -1361,7 +1386,7 @@ fn toolbar(
         }))
         .child(saved_filter_menu(profiles, filter_controls))
         .child(toolbar_menu(
-            ca_installed,
+            ca_status,
             use_system_proxy,
             install,
             remove,
@@ -5225,6 +5250,7 @@ fn row_context_menu(
         .child(action_item(
             tr("备注", "Note"),
             closing(menu_open, move || {
+                shown.repeating.set(false);
                 shown.editing_comment.set(true);
             }),
         ))
@@ -5233,6 +5259,13 @@ fn row_context_menu(
             tr("重放", "Replay"),
             closing(menu_open, move || {
                 replay_flow(&replay_controls, picked.get(), ReplayOverride::default());
+            }),
+        ))
+        .child(action_item(
+            tr("批量重放", "Repeat…"),
+            closing(menu_open, move || {
+                shown.editing_comment.set(false);
+                shown.repeating.set(true);
             }),
         ))
         .child(action_item(
@@ -5964,6 +5997,7 @@ fn detail_pane(
     baseline: Signal<Option<u64>>,
     folded: Signal<u8>,
     pane_px: Rc<Cell<f32>>,
+    filtered_stats: Signal<session::FilteredStats>,
 ) -> impl IntoElement {
     let ready_controls = controls.clone();
     scroll()
@@ -6009,81 +6043,302 @@ fn detail_pane(
                 .otherwise(move || {
                     view()
                         .flex_1()
-                        .items_center()
-                        .justify_center()
-                        .gap_1p5()
-                        .px_6()
-                        .child(glyph_px(28.0, || Glyph::List, || color(fg_muted())))
-                        .child(
-                            text({
-                                let langs = ui_langs();
-                                move || -> SharedString {
-                                    let lang = ui_lang(langs);
-                                    match shown.phase.get() {
-                                        Phase::Gone => {
-                                            t(lang, "这条记录已经不在了", "That flow is gone")
-                                                .into()
-                                        }
-                                        _ => t(lang, "还没有选择", "Nothing selected").into(),
-                                    }
-                                }
-                            })
-                            .text_size(px(13.5))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(fg_secondary()),
-                        )
-                        .child(
-                            text({
-                                let langs = ui_langs();
-                                move || -> SharedString {
-                                    let lang = ui_lang(langs);
-                                    match shown.phase.get() {
-                                        Phase::Gone => t(
-                                            lang,
-                                            "它因为内存上限被丢掉了。",
-                                            "It was dropped because the session hit its memory cap.",
-                                        )
-                                        .into(),
-                                        _ => t(
-                                            lang,
-                                            "从左边选一条流量，查看请求头、响应头和 body。",
-                                            "Pick a flow on the left to see headers and the body.",
-                                        )
-                                        .into(),
-                                    }
-                                }
-                            })
-                            .text_size(px(12.0))
-                            .text_color(fg_muted()),
-                        )
+                        .pl_3p5()
+                        .pr_5()
+                        .py_3p5()
+                        .gap_3p5()
+                        .child(when(
+                            move || filtered_stats.with(|s| s.total_count > 0),
+                            move || filtered_summary_card(filtered_stats, selected),
+                        ))
                         .child(
                             view()
-                                .mt_1p5()
-                                .h(px(28.0))
-                                .px_3()
-                                .rounded(px(6.0))
-                                .border_1()
-                                .border_color(border_control())
-                                .bg(bg_control())
-                                .hover(|style| style.bg(bg_control_hover()))
-                                .active(|style| style.opacity(0.8))
-                                .cursor(Cursor::Pointer)
-                                .flex_row()
+                                .flex_1()
                                 .items_center()
+                                .justify_center()
                                 .gap_1p5()
-                                .on_press(move || begin_new_request(compose, selected))
-                                .child(glyph_px(13.0, || Glyph::Prompt, || color(fg_secondary())))
+                                .px_6()
+                                .py_8()
+                                .child(glyph_px(28.0, || Glyph::List, || color(fg_muted())))
                                 .child(
-                                    text(tr("构造请求", "New request"))
-                                        .number_of_lines(1)
-                                        .text_size(px(12.0))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .text_color(fg_primary()),
+                                    text({
+                                        let langs = ui_langs();
+                                        move || -> SharedString {
+                                            let lang = ui_lang(langs);
+                                            match shown.phase.get() {
+                                                Phase::Gone => t(
+                                                    lang,
+                                                    "这条记录已经不在了",
+                                                    "That flow is gone",
+                                                )
+                                                .into(),
+                                                _ => t(lang, "还没有选择", "Nothing selected")
+                                                    .into(),
+                                            }
+                                        }
+                                    })
+                                    .text_size(px(13.5))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(fg_secondary()),
+                                )
+                                .child(
+                                    text({
+                                        let langs = ui_langs();
+                                        move || -> SharedString {
+                                            let lang = ui_lang(langs);
+                                            match shown.phase.get() {
+                                                Phase::Gone => t(
+                                                    lang,
+                                                    "它因为内存上限被丢掉了。",
+                                                    "It was dropped because the session hit its memory cap.",
+                                                )
+                                                .into(),
+                                                _ => t(
+                                                    lang,
+                                                    "从左边选一条流量，查看请求头、响应头和 body。",
+                                                    "Pick a flow on the left to see headers and the body.",
+                                                )
+                                                .into(),
+                                            }
+                                        }
+                                    })
+                                    .text_size(px(12.0))
+                                    .text_color(fg_muted()),
+                                )
+                                .child(
+                                    view()
+                                        .mt_1p5()
+                                        .h(px(28.0))
+                                        .px_3()
+                                        .rounded(px(6.0))
+                                        .border_1()
+                                        .border_color(border_control())
+                                        .bg(bg_control())
+                                        .hover(|style| style.bg(bg_control_hover()))
+                                        .active(|style| style.opacity(0.8))
+                                        .cursor(Cursor::Pointer)
+                                        .flex_row()
+                                        .items_center()
+                                        .gap_1p5()
+                                        .on_press(move || begin_new_request(compose, selected))
+                                        .child(glyph_px(
+                                            13.0,
+                                            || Glyph::Prompt,
+                                            || color(fg_secondary()),
+                                        ))
+                                        .child(
+                                            text(tr("构造请求", "New request"))
+                                                .number_of_lines(1)
+                                                .text_size(px(12.0))
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_color(fg_primary()),
+                                        ),
                                 ),
                         )
                 })
             }),
         )
+}
+
+fn filtered_summary_card(
+    stats: Signal<session::FilteredStats>,
+    selected: Signal<Option<u64>>,
+) -> impl IntoElement {
+    view()
+        .p_3p5()
+        .gap_3()
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(border_strong())
+        .bg(bg_card())
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .child(section_title(tr("当前列表统计", "Filtered summary"))),
+        )
+        .child(
+            view()
+                .flex_row()
+                .gap_2p5()
+                .child(summary_stat_tile(
+                    tr("总请求", "Total requests"),
+                    move || stats.with(|s| s.total_count.to_string()),
+                ))
+                .child(summary_stat_tile(
+                    tr("总流量", "Total transfer"),
+                    move || {
+                        stats.with(|s| {
+                            format!(
+                                "{} (↑{} · ↓{})",
+                                present::bytes(s.total_bytes),
+                                present::bytes(s.total_req_bytes),
+                                present::bytes(s.total_res_bytes)
+                            )
+                        })
+                    },
+                ))
+                .child(summary_stat_tile(
+                    tr("平均耗时", "Avg latency"),
+                    move || {
+                        stats.with(|s| match s.avg_elapsed_ms {
+                            Some(ms) => format!("{ms} ms"),
+                            None => "—".to_string(),
+                        })
+                    },
+                )),
+        )
+        .child(
+            view()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .gap_1p5()
+                .child(status_count_badge(
+                    "2xx",
+                    move || stats.with(|s| s.s2xx),
+                    status_ok_bg(),
+                    status_ok_fg(),
+                ))
+                .child(status_count_badge(
+                    "3xx",
+                    move || stats.with(|s| s.s3xx),
+                    status_warn_bg(),
+                    status_warn_fg(),
+                ))
+                .child(status_count_badge(
+                    "4xx",
+                    move || stats.with(|s| s.s4xx),
+                    status_err_bg(),
+                    status_err_fg(),
+                ))
+                .child(status_count_badge(
+                    "5xx",
+                    move || stats.with(|s| s.s5xx),
+                    status_err_bg(),
+                    status_err_fg(),
+                ))
+                .child(status_count_badge(
+                    "ERR",
+                    move || stats.with(|s| s.failed),
+                    status_err_bg(),
+                    status_err_fg(),
+                ))
+                .child(when(
+                    move || stats.with(|s| s.pending > 0),
+                    move || {
+                        let langs = ui_langs();
+                        view()
+                            .px_2()
+                            .py_0p5()
+                            .rounded(px(5.0))
+                            .bg(bg_control())
+                            .child(
+                                mono(move || {
+                                    format!(
+                                        "{} {}",
+                                        t(ui_lang(langs), "进行中", "Pending"),
+                                        stats.with(|s| s.pending)
+                                    )
+                                })
+                                .text_size(px(11.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(fg_muted()),
+                            )
+                    },
+                )),
+        )
+        .child(when(
+            move || stats.with(|s| s.max_elapsed.is_some()),
+            move || {
+                view()
+                    .px_3()
+                    .py_2()
+                    .rounded(px(7.0))
+                    .border_1()
+                    .border_color(border_subtle())
+                    .bg(bg_code())
+                    .hover(|style| style.bg(bg_control_hover()))
+                    .active(|style| style.opacity(0.8))
+                    .cursor(Cursor::Pointer)
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .on_press(move || {
+                        if let Some(id) =
+                            stats.with(|s| s.max_elapsed.as_ref().map(|(id, _, _)| *id))
+                        {
+                            selected.set(Some(id));
+                        }
+                    })
+                    .child(
+                        text(tr("最慢请求", "Slowest"))
+                            .flex_shrink_0()
+                            .text_size(px(11.5))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(fg_muted()),
+                    )
+                    .child(
+                        mono(move || {
+                            stats.with(|s| match &s.max_elapsed {
+                                Some((id, ms, target)) => format!("#{id} · {ms} ms · {target}"),
+                                None => String::new(),
+                            })
+                        })
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .number_of_lines(1)
+                        .text_overflow(EllipsizeMode::Middle)
+                        .text_size(px(12.0))
+                        .text_color(accent_blue_text()),
+                    )
+            },
+        ))
+}
+
+fn summary_stat_tile(
+    label: impl IntoReactive<SharedString>,
+    value: impl Fn() -> String + 'static,
+) -> impl IntoElement {
+    view()
+        .flex_1()
+        .min_w(px(0.0))
+        .px_3()
+        .py_2()
+        .gap_0p5()
+        .rounded(px(7.0))
+        .border_1()
+        .border_color(border_subtle())
+        .bg(bg_code())
+        .child(
+            text(label)
+                .number_of_lines(1)
+                .text_size(px(11.0))
+                .text_color(fg_muted()),
+        )
+        .child(
+            mono(value)
+                .number_of_lines(1)
+                .text_overflow(EllipsizeMode::Tail)
+                .text_size(px(12.5))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(fg_primary()),
+        )
+}
+
+fn status_count_badge(
+    tag: &'static str,
+    count: impl Fn() -> usize + 'static,
+    bg_color: AdaptiveColor,
+    fg_color: AdaptiveColor,
+) -> impl IntoElement {
+    view().px_2().py_0p5().rounded(px(5.0)).bg(bg_color).child(
+        mono(move || format!("{tag} {}", count()))
+            .text_size(px(11.0))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(fg_color),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6305,7 +6560,10 @@ fn summary(
                             .border_color(accent_blue_border())
                             .bg(accent_blue_soft())
                             .cursor(Cursor::Pointer)
-                            .on_press(move || shown.editing_comment.set(true))
+                            .on_press(move || {
+                                shown.repeating.set(false);
+                                shown.editing_comment.set(true);
+                            })
                             .child(
                                 text(move || format!("# {}", shown.comment.get()))
                                     .number_of_lines(1)
@@ -6316,6 +6574,10 @@ fn summary(
                     },
                 ))
                 .child(view().flex_1())
+                .child(detail_button(tr("统计", "Summary"), move || {
+                    reset_compose(compose);
+                    selected.set(None);
+                }))
                 .child(detail_actions(
                     shown,
                     controls.clone(),
@@ -6342,6 +6604,10 @@ fn summary(
                         .text_color(fg_primary()),
                 ),
         )
+        .child(when(move || shown.repeating.get(), {
+            let controls = controls.clone();
+            move || repeat_inline_bar(shown, controls.clone(), selected)
+        }))
         .child(when(move || shown.editing_comment.get(), {
             let controls = controls.clone();
             move || {
@@ -6411,6 +6677,135 @@ fn summary(
                     )
             },
         ))
+}
+
+fn repeat_inline_bar(
+    shown: Shown,
+    controls: Arc<Controls>,
+    selected: Signal<Option<u64>>,
+) -> impl IntoElement {
+    let submit_count_controls = controls.clone();
+    let submit_interval_controls = controls.clone();
+    let run_controls = controls;
+    view()
+        .flex_row()
+        .flex_wrap()
+        .items_center()
+        .gap_1p5()
+        .px_3()
+        .py_2()
+        .rounded(px(7.0))
+        .bg(bg_code())
+        .border_1()
+        .border_color(border_subtle())
+        .child(
+            text(tr("次数", "Count"))
+                .number_of_lines(1)
+                .text_size(px(11.5))
+                .text_color(fg_secondary()),
+        )
+        .child(
+            view().w(px(56.0)).flex_shrink_0().child(
+                compose_input_on(shown.repeat_count, "5", 26.0, false, move |text| {
+                    shown.repeat_count.set(text.to_string())
+                })
+                .on_submit(move |text: &str| {
+                    shown.repeat_count.set(text.to_string());
+                    repeat_flow_batch(&submit_count_controls, selected.get(), shown);
+                }),
+            ),
+        )
+        .child(repeat_preset_chip(shown.repeat_count, "5", "5×"))
+        .child(repeat_preset_chip(shown.repeat_count, "10", "10×"))
+        .child(repeat_preset_chip(shown.repeat_count, "20", "20×"))
+        .child(
+            text(tr("间隔 ms", "Interval (ms)"))
+                .pl_1()
+                .number_of_lines(1)
+                .text_size(px(11.5))
+                .text_color(fg_secondary()),
+        )
+        .child(
+            view().w(px(68.0)).flex_shrink_0().child(
+                compose_input_on(shown.repeat_interval, "200", 26.0, false, move |text| {
+                    shown.repeat_interval.set(text.to_string())
+                })
+                .on_submit(move |text: &str| {
+                    shown.repeat_interval.set(text.to_string());
+                    repeat_flow_batch(&submit_interval_controls, selected.get(), shown);
+                }),
+            ),
+        )
+        .child(view().flex_1())
+        .child(
+            view()
+                .h(px(26.0))
+                .px_2p5()
+                .rounded(px(6.0))
+                .bg(accent_blue())
+                .hover(|style| style.bg(accent_blue_hover()))
+                .active(|style| style.opacity(0.85))
+                .cursor(Cursor::Pointer)
+                .flex_row()
+                .items_center()
+                .on_press(move || {
+                    repeat_flow_batch(&run_controls, selected.get(), shown);
+                })
+                .child(
+                    text(tr("开始重放", "Run"))
+                        .number_of_lines(1)
+                        .text_size(px(11.5))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(white()),
+                ),
+        )
+        .child(detail_button(tr("取消", "Cancel"), move || {
+            shown.repeating.set(false);
+        }))
+}
+
+fn repeat_preset_chip(
+    count_sig: Signal<String>,
+    val: &'static str,
+    label: &'static str,
+) -> impl IntoElement {
+    let is_active = move || count_sig.get().trim() == val;
+    view()
+        .h(px(24.0))
+        .px_2()
+        .rounded(px(5.0))
+        .border_1()
+        .border_color(move || {
+            if is_active() {
+                accent_blue_border()
+            } else {
+                border_control()
+            }
+        })
+        .bg(move || {
+            if is_active() {
+                accent_blue_soft()
+            } else {
+                bg_control()
+            }
+        })
+        .hover(|style| style.bg(bg_control_hover()))
+        .cursor(Cursor::Pointer)
+        .flex_row()
+        .items_center()
+        .on_press(move || count_sig.set(val.to_string()))
+        .child(
+            mono(label)
+                .text_size(px(11.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(move || {
+                    if is_active() {
+                        accent_blue_text()
+                    } else {
+                        fg_secondary()
+                    }
+                }),
+        )
 }
 
 fn card_folded(folded: Signal<u8>, bit: u8) -> bool {
@@ -7333,6 +7728,7 @@ fn detail_actions(
                     },
                 ))
                 .child(action_item(tr("备注", "Note"), move || {
+                    shown.repeating.set(false);
                     shown.editing_comment.set(true);
                 }))
                 .child(marked_action(
@@ -7364,6 +7760,10 @@ fn detail_actions(
                 .child(menu_rule())
                 .child(action_item(tr("重放", "Replay"), move || {
                     replay_flow(&replay_controls, selected.get(), ReplayOverride::default());
+                }))
+                .child(action_item(tr("批量重放", "Repeat…"), move || {
+                    shown.editing_comment.set(false);
+                    shown.repeating.set(true);
                 }))
                 .child(action_item(tr("编辑重发", "Edit"), move || {
                     begin_compose(&edit_controls, selected.get(), compose);
@@ -7878,7 +8278,7 @@ fn control_text(label: impl IntoReactive<SharedString>) -> Text {
 
 #[allow(clippy::too_many_arguments)]
 fn toolbar_menu(
-    installed: Signal<bool>,
+    ca_status: Signal<ca::CaStatus>,
     proxy_on: Signal<bool>,
     install: Rc<impl Fn() + 'static>,
     remove: Rc<impl Fn() + 'static>,
@@ -7901,9 +8301,9 @@ fn toolbar_menu(
         .align(Align::End)
         .offset(px(6.0))
         .margin(px(8.0))
-        .trigger(more_trigger(installed, proxy_on))
+        .trigger(more_trigger(ca_status, proxy_on))
         .child(more_menu(
-            installed,
+            ca_status,
             proxy_on,
             install,
             remove,
@@ -7970,8 +8370,8 @@ fn flow_count_badge(
         )
 }
 
-fn more_trigger(installed: Signal<bool>, proxy_on: Signal<bool>) -> impl IntoElement {
-    let dot_installed = installed;
+fn more_trigger(ca_status: Signal<ca::CaStatus>, proxy_on: Signal<bool>) -> impl IntoElement {
+    let dot_status = ca_status;
     let dot_proxy = proxy_on;
     let label_proxy = proxy_on;
     view()
@@ -8009,13 +8409,13 @@ fn more_trigger(installed: Signal<bool>, proxy_on: Signal<bool>) -> impl IntoEle
         .cursor(Cursor::Pointer)
         .active(|style| style.opacity(0.75))
         .child(when(
-            move || dot_proxy.get() || !dot_installed.get(),
+            move || dot_proxy.get() || dot_status.get() != ca::CaStatus::Trusted,
             move || {
                 view().w(px(6.0)).h(px(6.0)).rounded(px(99.0)).bg(move || {
-                    if dot_proxy.get() {
-                        accent_blue()
-                    } else {
+                    if dot_status.get() != ca::CaStatus::Trusted {
                         status_warn_fg()
+                    } else {
+                        accent_blue()
                     }
                 })
             },
@@ -8041,7 +8441,7 @@ fn more_trigger(installed: Signal<bool>, proxy_on: Signal<bool>) -> impl IntoEle
 
 #[allow(clippy::too_many_arguments)]
 fn more_menu(
-    installed: Signal<bool>,
+    ca_status: Signal<ca::CaStatus>,
     proxy_on: Signal<bool>,
     install: Rc<impl Fn() + 'static>,
     remove: Rc<impl Fn() + 'static>,
@@ -8170,10 +8570,24 @@ fn more_menu(
         .child(menu_rule())
         .child(proxy_menu_item(proxy_on, toggle_proxy))
         .child(menu_rule())
-        .child(cert_menu_status(installed))
+        .child(cert_menu_status(ca_status))
+        .child({
+            let install_untrusted = install.clone();
+            when(
+                move || ca_status.get() == ca::CaStatus::InstalledUntrusted,
+                move || {
+                    let install = install_untrusted.clone();
+                    menu_action(
+                        Glyph::Badge,
+                        tr("信任证书", "Trust certificate"),
+                        move || install.as_ref()(),
+                    )
+                },
+            )
+        })
         .child(
             when(
-                move || installed.get(),
+                move || ca_status.get().is_installed(),
                 move || {
                     let remove = remove.clone();
                     menu_action(
@@ -8385,8 +8799,9 @@ fn proxy_menu_item(on: Signal<bool>, toggle: impl Fn() + 'static) -> impl IntoEl
         )
 }
 
-fn cert_menu_status(installed: Signal<bool>) -> impl IntoElement {
-    let dot_installed = installed;
+fn cert_menu_status(ca_status: Signal<ca::CaStatus>) -> impl IntoElement {
+    let dot_status = ca_status;
+    let color_status = ca_status;
     view()
         .h(px(28.0))
         .px_2p5()
@@ -8394,25 +8809,39 @@ fn cert_menu_status(installed: Signal<bool>) -> impl IntoElement {
         .flex_row()
         .items_center()
         .child(glyph(|| Glyph::Badge, || color(fg_muted())))
-        .child(view().w(px(6.0)).h(px(6.0)).rounded(px(99.0)).bg(move || {
-            if dot_installed.get() {
-                status_ok_fg()
-            } else {
-                status_warn_fg()
-            }
-        }))
+        .child(
+            view()
+                .w(px(6.0))
+                .h(px(6.0))
+                .rounded(px(99.0))
+                .bg(move || match dot_status.get() {
+                    ca::CaStatus::Trusted => status_ok_fg(),
+                    ca::CaStatus::InstalledUntrusted | ca::CaStatus::NotInstalled => {
+                        status_warn_fg()
+                    }
+                }),
+        )
         .child(
             control_text({
                 let langs = ui_langs();
                 move || -> SharedString {
-                    if installed.get() {
-                        t(ui_lang(langs), "证书已安装", "Certificate installed").into()
-                    } else {
-                        t(ui_lang(langs), "证书未安装", "Certificate missing").into()
+                    match ca_status.get() {
+                        ca::CaStatus::Trusted => {
+                            t(ui_lang(langs), "证书：已信任", "CA: trusted").into()
+                        }
+                        ca::CaStatus::InstalledUntrusted => {
+                            t(ui_lang(langs), "证书：未开启信任", "CA: not trusted").into()
+                        }
+                        ca::CaStatus::NotInstalled => {
+                            t(ui_lang(langs), "证书：未安装", "CA: not installed").into()
+                        }
                     }
                 }
             })
-            .text_color(fg_muted()),
+            .text_color(move || match color_status.get() {
+                ca::CaStatus::InstalledUntrusted => status_warn_fg(),
+                ca::CaStatus::Trusted | ca::CaStatus::NotInstalled => fg_muted(),
+            }),
         )
 }
 
@@ -8508,10 +8937,13 @@ fn row_lines(
     lang: Lang,
     sort: Option<ListSort>,
     full_url: bool,
-) -> Vec<RowLine> {
-    let mut rows: Vec<RowLine> = hub.with_session(|session| {
-        session
-            .matching_with_previous_start(filter)
+) -> (Vec<RowLine>, session::FilteredStats) {
+    let (mut rows, stats) = hub.with_session(|session| {
+        let matched = session.matching_with_previous_start(filter);
+        let stats = session::FilteredStats::from_flows(
+            matched.iter().filter_map(|(id, _)| session.get(*id)),
+        );
+        let rows: Vec<RowLine> = matched
             .into_iter()
             .filter_map(|(id, previous)| {
                 let flow = session.get(id)?;
@@ -8555,12 +8987,13 @@ fn row_lines(
                     pinned: flow.pinned,
                 })
             })
-            .collect()
+            .collect();
+        (rows, stats)
     });
     if let Some(sort) = sort {
         sort_row_lines(&mut rows, sort, full_url);
     }
-    rows
+    (rows, stats)
 }
 
 fn sort_row_lines(rows: &mut [RowLine], sort: ListSort, full_url: bool) {
@@ -8616,6 +9049,8 @@ fn status_sort_rank(row: &RowLine) -> (u8, u16) {
 fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baseline: Option<u64>) {
     let Some(id) = id else {
         shown.phase.set(Phase::Empty);
+        shown.editing_comment.set(false);
+        shown.repeating.set(false);
         shown.request_hex.set(Vec::new());
         shown.response_hex.set(Vec::new());
         shown.preview.set(String::new());
@@ -8638,6 +9073,8 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baselin
     let snapshot = hub.with_session(|session| session.hydrated(id));
     let Some(flow) = snapshot else {
         shown.phase.set(Phase::Gone);
+        shown.editing_comment.set(false);
+        shown.repeating.set(false);
         shown.request_hex.set(Vec::new());
         shown.response_hex.set(Vec::new());
         shown.preview.set(String::new());
@@ -9050,6 +9487,7 @@ fn open_controls() -> Arc<Controls> {
     match Ca::open_default().and_then(|ca| Hub::new(Arc::new(ca))) {
         Ok(hub) => {
             apply_saved_prefs(&hub);
+            let ca_status = hub.ca.trust_status();
             Arc::new(Controls {
                 hub: Arc::new(hub),
                 capture: Mutex::new(None),
@@ -9057,7 +9495,7 @@ fn open_controls() -> Arc<Controls> {
                 running: Mutex::new(false),
                 listen: Mutex::new(String::new()),
                 listen_port: Mutex::new(load_listen_port()),
-                ca_installed: Mutex::new(ca::is_installed()),
+                ca_status: Mutex::new(ca_status),
                 use_system_proxy: Mutex::new(load_use_system_proxy()),
                 proxy_applied: Mutex::new(false),
                 ops: Mutex::new(()),
@@ -9079,7 +9517,7 @@ fn open_controls() -> Arc<Controls> {
                 running: Mutex::new(false),
                 listen: Mutex::new(String::new()),
                 listen_port: Mutex::new(load_listen_port()),
-                ca_installed: Mutex::new(false),
+                ca_status: Mutex::new(ca::CaStatus::NotInstalled),
                 use_system_proxy: Mutex::new(load_use_system_proxy()),
                 proxy_applied: Mutex::new(false),
                 ops: Mutex::new(()),
@@ -9093,9 +9531,9 @@ fn install_ca(controls: Arc<Controls>) {
     std::thread::spawn(move || {
         let ca = controls.hub.ca.clone();
         match ca::install(&ca) {
-            Ok(_) => set_ca_installed(&controls, true),
+            Ok(_) => set_ca_status(&controls, ca::trust_status(&ca)),
             Err(err) => {
-                set_ca_installed(&controls, ca::is_installed());
+                set_ca_status(&controls, ca::trust_status(&ca));
                 set_status(&controls, StatusMsg::InstallFailed(format!("{err:#}")));
             }
         }
@@ -9106,20 +9544,27 @@ fn remove_ca(controls: Arc<Controls>) {
     std::thread::spawn(move || {
         let ca = controls.hub.ca.clone();
         match ca::remove(&ca) {
-            Ok(_) => set_ca_installed(&controls, ca::is_installed()),
+            Ok(_) => set_ca_status(&controls, ca::trust_status(&ca)),
             Err(err) => {
-                set_ca_installed(&controls, ca::is_installed());
+                set_ca_status(&controls, ca::trust_status(&ca));
                 set_status(&controls, StatusMsg::RemoveFailed(format!("{err:#}")));
             }
         }
     });
 }
 
-fn set_ca_installed(controls: &Controls, installed: bool) {
+fn set_ca_status(controls: &Controls, status: ca::CaStatus) {
     *controls
-        .ca_installed
+        .ca_status
         .lock()
-        .unwrap_or_else(|err| err.into_inner()) = installed;
+        .unwrap_or_else(|err| err.into_inner()) = status;
+}
+
+fn lock_ca_status(controls: &Controls) -> ca::CaStatus {
+    *controls
+        .ca_status
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
 }
 
 fn set_status(controls: &Controls, message: StatusMsg) {
@@ -9401,7 +9846,7 @@ enum Snippet {
 fn copy_proxy_env(controls: &Controls) {
     let port = lock_port(&controls.listen_port);
     let cert = controls.hub.ca.cert_path();
-    set_clipboard(present::proxy_env(port, &cert.display().to_string()));
+    set_clipboard(present::proxy_env_export(port, &cert.display().to_string()));
     set_status(controls, StatusMsg::CopiedEnv);
 }
 
@@ -10489,6 +10934,37 @@ fn replay_flow(controls: &Arc<Controls>, id: Option<u64>, edit: ReplayOverride) 
         Ok(new_id) => set_status(&controls, StatusMsg::Replayed(new_id)),
         Err(err) => set_status(&controls, StatusMsg::ReplayFailed(format!("{err:#}"))),
     });
+}
+
+fn repeat_flow_batch(controls: &Arc<Controls>, id: Option<u64>, shown: Shown) {
+    let Some(id) = id else {
+        shown.repeating.set(false);
+        set_status(controls, StatusMsg::NeedSelection);
+        return;
+    };
+    let count = present::parse_repeat_count(&shown.repeat_count.get());
+    let interval_ms = present::parse_repeat_interval_ms(&shown.repeat_interval.get());
+    shown.repeat_count.set(count.to_string());
+    shown.repeat_interval.set(interval_ms.to_string());
+    shown.repeating.set(false);
+    let hub = controls.hub.clone();
+    let controls = Arc::clone(controls);
+    hub.replay_batch_later(
+        id,
+        count,
+        interval_ms,
+        ReplayOverride::default(),
+        move |result| match result {
+            Ok(ids) => set_status(
+                &controls,
+                StatusMsg::Repeated {
+                    id,
+                    count: ids.len() as u32,
+                },
+            ),
+            Err(err) => set_status(&controls, StatusMsg::ReplayFailed(format!("{err:#}"))),
+        },
+    );
 }
 
 fn parse_header_text(text: &str) -> Vec<(String, String)> {

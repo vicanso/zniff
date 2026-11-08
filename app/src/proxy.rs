@@ -880,6 +880,40 @@ impl Hub {
         });
     }
 
+    /// Replays one stored request `count` times sequentially with `interval_ms`
+    /// between iterations on a fresh runtime. Map and break rules are not applied.
+    pub fn replay_batch_later<F>(
+        self: &Arc<Self>,
+        id: u64,
+        count: u32,
+        interval_ms: u64,
+        edit: ReplayOverride,
+        on_done: F,
+    ) where
+        F: FnOnce(Result<Vec<u64>>) + Send + 'static,
+    {
+        let flow = self.with_session(|session| session.hydrated(id));
+        let Some(flow) = flow else {
+            on_done(Err(anyhow!("没有这条记录")));
+            return;
+        };
+        if flow.protocol == Protocol::Tunnel || flow.method.eq_ignore_ascii_case("CONNECT") {
+            on_done(Err(anyhow!("隧道不能重放")));
+            return;
+        }
+        let hub = Arc::clone(self);
+        std::thread::spawn(move || {
+            let result = (|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .context("重放运行时")?;
+                runtime.block_on(replay_batch(hub, flow, count, interval_ms, edit))
+            })();
+            on_done(result);
+        });
+    }
+
     /// Sends a standalone composed request on a fresh runtime without a source
     /// flow. Map and break rules are not applied.
     pub fn send_composed_later<F>(self: &Arc<Self>, edit: ReplayOverride, on_done: F)
@@ -2855,11 +2889,45 @@ where
     .await
 }
 
+pub async fn replay_batch(
+    hub: Arc<Hub>,
+    source: crate::session::Flow,
+    count: u32,
+    interval_ms: u64,
+    edit: ReplayOverride,
+) -> Result<Vec<u64>> {
+    let total = count.clamp(
+        crate::present::REPEAT_COUNT_MIN,
+        crate::present::REPEAT_COUNT_MAX,
+    );
+    let delay_ms = interval_ms.min(crate::present::REPEAT_INTERVAL_MAX_MS);
+    let mut ids = Vec::with_capacity(total as usize);
+    for idx in 0..total {
+        if idx > 0 && delay_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        }
+        let (replayed_id, _sent) =
+            replay_once_attempt(Arc::clone(&hub), Some(source.clone()), edit.clone()).await?;
+        ids.push(replayed_id);
+    }
+    Ok(ids)
+}
+
 async fn replay_once(
     hub: Arc<Hub>,
     source: Option<crate::session::Flow>,
     edit: ReplayOverride,
 ) -> Result<u64> {
+    let (id, sent) = replay_once_attempt(hub, source, edit).await?;
+    sent?;
+    Ok(id)
+}
+
+async fn replay_once_attempt(
+    hub: Arc<Hub>,
+    source: Option<crate::session::Flow>,
+    edit: ReplayOverride,
+) -> Result<(u64, Result<()>)> {
     let custom_method = edit.method.unwrap_or_default();
     let custom_method = custom_method.trim();
     let method = if custom_method.is_empty() {
@@ -2930,8 +2998,7 @@ async fn replay_once(
     if let Err(err) = &sent {
         hub.set_error(id, explain_flow_error(err));
     }
-    sent?;
-    Ok(id)
+    Ok((id, sent))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3032,6 +3099,9 @@ where
     ));
     origin.write_all(outbound.as_bytes()).await?;
     origin.write_all(body).await?;
+    if !body.is_empty() {
+        hub.add_transfer(id, Direction::Request, body.len() as u64);
+    }
     let (resp_bytes, resp_rest) = read_header_block(&mut origin).await?;
     let resp = parse_head(&resp_bytes)?;
     let status = resp
@@ -7325,6 +7395,112 @@ mod tests {
         store_cached_local_app(65431, "curl".into());
         assert_eq!(cached_local_app(65431).as_deref(), Some("curl"));
         assert_eq!(resolve_local_process_name(0), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn replay_batch_repeats_sequentially_and_records_each_flow() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let dir = std::env::temp_dir().join(format!("zniff-repeat-batch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+
+        let origin = listen().await.unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        tokio::spawn(async move {
+            for seq in 1..=3u32 {
+                let (mut socket, _) = origin.accept().await.unwrap();
+                let mut buf = vec![0u8; 4096];
+                let _ = socket.read(&mut buf).await.unwrap();
+                let body = format!("hit-{seq}");
+                let res = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(res.as_bytes()).await.unwrap();
+            }
+        });
+
+        let source_id = hub.open(FlowDraft {
+            protocol: Protocol::Http11,
+            method: "GET".into(),
+            host: origin_addr.to_string(),
+            path: "/repeat-target".into(),
+            url: format!("http://{origin_addr}/repeat-target"),
+            request_headers: vec![("Host".into(), origin_addr.to_string())],
+        });
+        hub.set_response(source_id, 200, Vec::new(), None);
+        hub.mark_finished(source_id);
+        let source_flow = hub
+            .with_session(|session| session.hydrated(source_id))
+            .unwrap();
+
+        let ids = replay_batch(
+            hub.clone(),
+            source_flow.clone(),
+            3,
+            5,
+            ReplayOverride::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ids.len(), 3);
+        for (idx, id) in ids.iter().enumerate() {
+            let flow = hub
+                .with_session(|session| session.get(*id).cloned())
+                .unwrap();
+            assert_eq!(flow.status, Some(200));
+            assert_eq!(
+                String::from_utf8_lossy(&flow.response_body),
+                format!("hit-{}", idx + 1)
+            );
+        }
+
+        // A transient origin failure on an intermediate iteration records ERR on that flow
+        // and continues replaying the remaining iterations.
+        let flaky_origin = listen().await.unwrap();
+        let flaky_addr = flaky_origin.local_addr().unwrap();
+        tokio::spawn(async move {
+            for seq in 1..=3u32 {
+                let (mut socket, _) = flaky_origin.accept().await.unwrap();
+                let mut buf = vec![0u8; 4096];
+                let _ = socket.read(&mut buf).await.unwrap();
+                if seq == 2 {
+                    drop(socket);
+                    continue;
+                }
+                let body = format!("flaky-{seq}");
+                let res = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(res.as_bytes()).await.unwrap();
+            }
+        });
+        let mut flaky_source = source_flow;
+        flaky_source.host = flaky_addr.to_string();
+        flaky_source.url = format!("http://{flaky_addr}/repeat-target");
+        flaky_source.request_headers = vec![("Host".into(), flaky_addr.to_string())];
+        let flaky_ids = replay_batch(hub.clone(), flaky_source, 3, 0, ReplayOverride::default())
+            .await
+            .unwrap();
+        assert_eq!(flaky_ids.len(), 3);
+        let first = hub
+            .with_session(|session| session.get(flaky_ids[0]).cloned())
+            .unwrap();
+        let second = hub
+            .with_session(|session| session.get(flaky_ids[1]).cloned())
+            .unwrap();
+        let third = hub
+            .with_session(|session| session.get(flaky_ids[2]).cloned())
+            .unwrap();
+        assert_eq!(first.status, Some(200));
+        assert_eq!(second.status, None);
+        assert!(second.error.is_some());
+        assert_eq!(third.status, Some(200));
+        assert_eq!(String::from_utf8_lossy(&third.response_body), "flaky-3");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -376,22 +376,58 @@ pub fn is_slow(started: SystemTime, finished: Option<SystemTime>, now: SystemTim
     crate::session::is_slow(started, finished, now)
 }
 
-/// Shell exports so curl, Node, Python, and Git trust this proxy.
+pub const REPEAT_COUNT_MIN: u32 = 1;
+pub const REPEAT_COUNT_MAX: u32 = 100;
+pub const REPEAT_COUNT_DEFAULT: u32 = 5;
+pub const REPEAT_INTERVAL_MAX_MS: u64 = 60_000;
+pub const REPEAT_INTERVAL_DEFAULT_MS: u64 = 200;
+
+pub fn parse_repeat_count(text: &str) -> u32 {
+    text.trim()
+        .parse::<u32>()
+        .unwrap_or(REPEAT_COUNT_DEFAULT)
+        .clamp(REPEAT_COUNT_MIN, REPEAT_COUNT_MAX)
+}
+
+pub fn parse_repeat_interval_ms(text: &str) -> u64 {
+    text.trim()
+        .parse::<u64>()
+        .unwrap_or(REPEAT_INTERVAL_DEFAULT_MS)
+        .min(REPEAT_INTERVAL_MAX_MS)
+}
+
+pub fn bytes(bytes: usize) -> String {
+    format_count(bytes as u64)
+}
+
+/// Shell exports so curl, Node, Python, Git, Cargo, Deno, and JVM tools trust this proxy.
 pub fn proxy_env(port: u16, cert_path: &str) -> String {
     let proxy = format!("http://127.0.0.1:{port}");
     let cert = shell_quote(cert_path);
+    let java_opts = shell_quote(&format!(
+        "-Dhttp.proxyHost=127.0.0.1 -Dhttp.proxyPort={port} -Dhttps.proxyHost=127.0.0.1 -Dhttps.proxyPort={port}"
+    ));
     [
         format!("export http_proxy={proxy}"),
         format!("export https_proxy={proxy}"),
+        format!("export all_proxy={proxy}"),
         format!("export HTTP_PROXY={proxy}"),
         format!("export HTTPS_PROXY={proxy}"),
+        format!("export ALL_PROXY={proxy}"),
         format!("export SSL_CERT_FILE={cert}"),
         format!("export NODE_EXTRA_CA_CERTS={cert}"),
         format!("export REQUESTS_CA_BUNDLE={cert}"),
         format!("export CURL_CA_BUNDLE={cert}"),
         format!("export GIT_SSL_CAINFO={cert}"),
+        format!("export CARGO_HTTP_CAINFO={cert}"),
+        format!("export DENO_CERT={cert}"),
+        format!("export JAVA_TOOL_OPTIONS={java_opts}"),
     ]
     .join("\n")
+}
+
+pub fn proxy_env_export(port: u16, cert_path: &str) -> String {
+    proxy_env(port, cert_path)
 }
 
 pub fn fetch_snippet(flow: &Flow) -> String {
@@ -2299,9 +2335,25 @@ mod tests {
         let python = python_requests(&flow);
         assert!(python.contains("import requests"));
         assert!(python.contains("'''POST'''"));
-        let env = proxy_env(8877, "/tmp/zniff/ca.crt");
+        let env = proxy_env_export(8877, "/tmp/zniff/ca.crt");
         assert!(env.contains("export https_proxy=http://127.0.0.1:8877"));
+        assert!(env.contains("export ALL_PROXY=http://127.0.0.1:8877"));
         assert!(env.contains("export NODE_EXTRA_CA_CERTS='/tmp/zniff/ca.crt'"));
+        assert!(env.contains("export CARGO_HTTP_CAINFO='/tmp/zniff/ca.crt'"));
+        assert!(env.contains("export DENO_CERT='/tmp/zniff/ca.crt'"));
+        assert!(env.contains(
+            "export JAVA_TOOL_OPTIONS='-Dhttp.proxyHost=127.0.0.1 -Dhttp.proxyPort=8877 -Dhttps.proxyHost=127.0.0.1 -Dhttps.proxyPort=8877'"
+        ));
+        assert_eq!(parse_repeat_count(""), 5);
+        assert_eq!(parse_repeat_count("0"), 1);
+        assert_eq!(parse_repeat_count("12"), 12);
+        assert_eq!(parse_repeat_count("999"), 100);
+        assert_eq!(parse_repeat_interval_ms(""), 200);
+        assert_eq!(parse_repeat_interval_ms("0"), 0);
+        assert_eq!(parse_repeat_interval_ms("500"), 500);
+        assert_eq!(parse_repeat_interval_ms("120000"), 60_000);
+        assert_eq!(bytes(512), "512 B");
+        assert_eq!(bytes(2048), "2.0 KB");
         let parsed = parse_curl(
             "curl -X POST 'https://example.com/v1' -H 'Accept: text/plain' --data-raw '{\"a\":1}'",
         )

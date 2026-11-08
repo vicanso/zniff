@@ -354,6 +354,128 @@ pub struct Flow {
     accounted: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FilteredStats {
+    pub total_count: usize,
+    pub s2xx: usize,
+    pub s3xx: usize,
+    pub s4xx: usize,
+    pub s5xx: usize,
+    pub failed: usize,
+    pub pending: usize,
+    pub total_req_bytes: usize,
+    pub total_res_bytes: usize,
+    pub total_bytes: usize,
+    pub avg_elapsed_ms: Option<u64>,
+    pub max_elapsed: Option<(u64, u64, String)>,
+}
+
+impl FilteredStats {
+    pub fn from_flows<'a>(flows: impl IntoIterator<Item = &'a Flow>) -> Self {
+        let mut stats = Self::default();
+        let mut elapsed_sum_ms: u128 = 0;
+        let mut elapsed_count: u64 = 0;
+        for flow in flows {
+            stats.total_count += 1;
+            match flow.status {
+                Some(200..=299) => stats.s2xx += 1,
+                Some(300..=399) => stats.s3xx += 1,
+                Some(400..=499) => stats.s4xx += 1,
+                Some(500..=599) => stats.s5xx += 1,
+                Some(_) => {
+                    if flow.error.is_some() {
+                        stats.failed += 1;
+                    } else if flow.finished_at.is_none() {
+                        stats.pending += 1;
+                    }
+                }
+                None => {
+                    if flow.error.is_some() {
+                        stats.failed += 1;
+                    } else {
+                        stats.pending += 1;
+                    }
+                }
+            }
+            let req = flow.req_bytes();
+            let res = flow.res_bytes();
+            stats.total_req_bytes = stats.total_req_bytes.saturating_add(req);
+            stats.total_res_bytes = stats.total_res_bytes.saturating_add(res);
+            stats.total_bytes = stats.total_bytes.saturating_add(flow.transfer_bytes());
+            if let Some(ms) = flow.elapsed_ms() {
+                elapsed_sum_ms += u128::from(ms);
+                elapsed_count += 1;
+                let replace = stats
+                    .max_elapsed
+                    .as_ref()
+                    .is_none_or(|(_, max_ms, _)| ms > *max_ms);
+                if replace {
+                    stats.max_elapsed = Some((flow.id, ms, flow.display_target()));
+                }
+            }
+        }
+        if elapsed_count > 0 {
+            stats.avg_elapsed_ms = Some((elapsed_sum_ms / u128::from(elapsed_count)) as u64);
+        }
+        stats
+    }
+}
+
+impl Flow {
+    pub fn req_bytes(&self) -> usize {
+        if self.request_bytes > 0 {
+            self.request_bytes as usize
+        } else if let Some(sref) = self.request_spill {
+            sref.len as usize
+        } else if let Some(exp) = self.request_expired {
+            exp
+        } else {
+            self.request_body.len()
+        }
+    }
+
+    pub fn res_bytes(&self) -> usize {
+        if self.response_bytes > 0 {
+            self.response_bytes as usize
+        } else if let Some(sref) = self.response_spill {
+            sref.len as usize
+        } else if let Some(exp) = self.response_expired {
+            exp
+        } else {
+            self.response_body.len()
+        }
+    }
+
+    pub fn transfer_bytes(&self) -> usize {
+        self.req_bytes().saturating_add(self.res_bytes())
+    }
+
+    pub fn elapsed_ms(&self) -> Option<u64> {
+        self.finished_at?
+            .duration_since(self.started)
+            .ok()
+            .map(|d| d.as_millis() as u64)
+    }
+
+    pub fn display_target(&self) -> String {
+        if !self.path.is_empty() && self.path != "/" {
+            if self.host.is_empty() {
+                self.path.clone()
+            } else if self.path.starts_with('/') || self.path.starts_with(':') {
+                format!("{}{}", self.host, self.path)
+            } else {
+                format!("{}/{}", self.host, self.path)
+            }
+        } else if !self.url.is_empty() {
+            self.url.clone()
+        } else if !self.host.is_empty() {
+            self.host.clone()
+        } else {
+            self.path.clone()
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Message {
     pub direction: Direction,
@@ -1005,6 +1127,16 @@ impl Session {
             previous = Some(flow.started);
         }
         out
+    }
+
+    #[cfg(test)]
+    pub fn filtered_stats(&self, filter: &str) -> FilteredStats {
+        let query = FlowQuery::parse(filter);
+        let matching = self.order.iter().filter_map(|id| {
+            let flow = self.flows.get(id)?;
+            query.matches(flow, &self.spill).then_some(flow)
+        });
+        FilteredStats::from_flows(matching)
     }
 
     fn evict(&mut self, keep: u64) {
@@ -1820,5 +1952,93 @@ mod tests {
         assert_eq!(session.clear_unpinned(), 1);
         assert_eq!(session.len(), 1);
         assert_eq!(session.ids_matching(""), vec![a]);
+    }
+
+    #[test]
+    fn filtered_stats_aggregates_status_bytes_and_latency() {
+        let mut session = Session::default();
+        let f1 = session.open(FlowDraft {
+            protocol: Protocol::Http11,
+            method: "GET".into(),
+            host: "api.test".into(),
+            path: "/users".into(),
+            url: "https://api.test/users".into(),
+            request_headers: Vec::new(),
+        });
+        session.set_response(f1, 200, Vec::new(), None);
+        session.append_body(f1, Direction::Request, b"1234");
+        session.append_body(f1, Direction::Response, b"123456");
+        session.add_transfer(f1, Direction::Request, 100);
+        session.add_transfer(f1, Direction::Response, 300);
+        session.mark_finished(f1);
+        if let Some(flow) = session.flows.get_mut(&f1) {
+            flow.finished_at = Some(flow.started + Duration::from_millis(120));
+        }
+
+        let f2 = session.open(FlowDraft {
+            protocol: Protocol::Http2,
+            method: "POST".into(),
+            host: "api.test".into(),
+            path: "/slow-checkout".into(),
+            url: "https://api.test/slow-checkout".into(),
+            request_headers: Vec::new(),
+        });
+        session.set_response(f2, 502, Vec::new(), None);
+        session.add_transfer(f2, Direction::Request, 200);
+        session.add_transfer(f2, Direction::Response, 400);
+        session.mark_finished(f2);
+        if let Some(flow) = session.flows.get_mut(&f2) {
+            flow.finished_at = Some(flow.started + Duration::from_millis(480));
+        }
+
+        let f3 = session.open(FlowDraft {
+            protocol: Protocol::Http11,
+            method: "GET".into(),
+            host: "cdn.test".into(),
+            path: "/asset.js".into(),
+            url: "https://cdn.test/asset.js".into(),
+            request_headers: Vec::new(),
+        });
+        session.set_error(f3, "connection reset");
+        if let Some(flow) = session.flows.get_mut(&f3) {
+            flow.finished_at = Some(flow.started + Duration::from_millis(300));
+        }
+
+        let f4 = session.open(FlowDraft {
+            protocol: Protocol::Http11,
+            method: "GET".into(),
+            host: "api.test".into(),
+            path: "/pending".into(),
+            url: "https://api.test/pending".into(),
+            request_headers: Vec::new(),
+        });
+        let _ = f4;
+
+        let all = session.filtered_stats("");
+        assert_eq!(all.total_count, 4);
+        assert_eq!(all.s2xx, 1);
+        assert_eq!(all.s3xx, 0);
+        assert_eq!(all.s4xx, 0);
+        assert_eq!(all.s5xx, 1);
+        assert_eq!(all.failed, 1);
+        assert_eq!(all.pending, 1);
+        assert_eq!(all.total_req_bytes, 300);
+        assert_eq!(all.total_res_bytes, 700);
+        assert_eq!(all.total_bytes, 1000);
+        assert_eq!(all.avg_elapsed_ms, Some(300));
+        assert_eq!(
+            all.max_elapsed,
+            Some((f2, 480, "api.test/slow-checkout".to_string()))
+        );
+
+        let filtered = session.filtered_stats("host:api.test 2xx");
+        assert_eq!(filtered.total_count, 1);
+        assert_eq!(filtered.s2xx, 1);
+        assert_eq!(filtered.total_bytes, 400);
+        assert_eq!(filtered.avg_elapsed_ms, Some(120));
+        assert_eq!(
+            filtered.max_elapsed,
+            Some((f1, 120, "api.test/users".to_string()))
+        );
     }
 }

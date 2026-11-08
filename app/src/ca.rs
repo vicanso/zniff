@@ -112,6 +112,10 @@ impl Ca {
         self.dir.join("ca.crt")
     }
 
+    pub fn trust_status(&self) -> CaStatus {
+        trust_status(self)
+    }
+
     #[cfg(test)]
     pub fn cert_der(&self) -> CertificateDer<'static> {
         self.ca_der.clone()
@@ -279,6 +283,57 @@ pub fn remove(ca: &Ca) -> Result<String> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaStatus {
+    Trusted,
+    InstalledUntrusted,
+    NotInstalled,
+}
+
+impl CaStatus {
+    pub fn is_installed(self) -> bool {
+        !matches!(self, Self::NotInstalled)
+    }
+}
+
+pub fn classify_trust_status(installed: bool, verified: bool) -> CaStatus {
+    if !installed {
+        CaStatus::NotInstalled
+    } else if verified {
+        CaStatus::Trusted
+    } else {
+        CaStatus::InstalledUntrusted
+    }
+}
+
+/// Best-effort: checks whether the certificate is installed and trusted in the user store.
+pub fn trust_status(ca: &Ca) -> CaStatus {
+    let installed = is_installed();
+    if !installed {
+        return CaStatus::NotInstalled;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let verified = ca
+            .cert_path()
+            .to_str()
+            .map(|cert_path| {
+                std::process::Command::new("security")
+                    .args(macos_verify_cert_args(cert_path))
+                    .output()
+                    .map(|output| output.status.success())
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+        classify_trust_status(installed, verified)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = ca;
+        classify_trust_status(installed, installed)
+    }
+}
+
 /// Best-effort: the certificate is present in the user store.
 pub fn is_installed() -> bool {
     #[cfg(target_os = "macos")]
@@ -312,6 +367,11 @@ fn windows_has_cert(name: &str) -> bool {
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
+}
+
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn macos_verify_cert_args(cert_path: &str) -> [&str; 4] {
+    ["verify-cert", "-c", cert_path, "-L"]
 }
 
 #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
@@ -502,5 +562,23 @@ mod tests {
             linux_certutil_del_args(&db, CA_NAME),
             ["-d", "sql:/home/alice/.pki/nssdb", "-D", "-n", "zniff CA"]
         );
+        assert_eq!(
+            macos_verify_cert_args("/tmp/zniff/ca.crt"),
+            ["verify-cert", "-c", "/tmp/zniff/ca.crt", "-L"]
+        );
+    }
+
+    #[test]
+    fn classify_trust_status_distinguishes_installed_untrusted() {
+        assert_eq!(classify_trust_status(false, false), CaStatus::NotInstalled);
+        assert_eq!(classify_trust_status(false, true), CaStatus::NotInstalled);
+        assert_eq!(
+            classify_trust_status(true, false),
+            CaStatus::InstalledUntrusted
+        );
+        assert_eq!(classify_trust_status(true, true), CaStatus::Trusted);
+        assert!(!CaStatus::NotInstalled.is_installed());
+        assert!(CaStatus::InstalledUntrusted.is_installed());
+        assert!(CaStatus::Trusted.is_installed());
     }
 }

@@ -101,6 +101,10 @@ pub enum StatusMsg {
     BreakDone,
     NeedSelection,
     Replayed(u64),
+    Repeated {
+        id: u64,
+        count: u32,
+    },
     ReplayFailed(String),
     ExportCancelled,
     ExportFailed(String),
@@ -307,6 +311,9 @@ impl StatusMsg {
             Self::BreakDone => t(lang, "这个断点已经结束", "That break already finished").into(),
             Self::NeedSelection => t(lang, "先选一条流量", "Select a flow first").into(),
             Self::Replayed(id) => format!("{} #{id}", t(lang, "已重放为", "Replayed as")),
+            Self::Repeated { id, count } => {
+                format!("{} #{id} ×{count}", t(lang, "已批量重放", "Repeated"))
+            }
             Self::ReplayFailed(err) => format!("{} {err}", t(lang, "重放失败:", "Replay failed:")),
             Self::ExportCancelled => t(lang, "已取消导出", "Export cancelled").into(),
             Self::ExportFailed(err) => format!("{} {err}", t(lang, "导出失败:", "Export failed:")),
@@ -724,5 +731,13 @@ mod tests {
         );
         assert_eq!(StatusMsg::SaveCancelled.text(Lang::Zh), "已取消保存");
         assert_eq!(StatusMsg::SaveCancelled.text(Lang::En), "Save cancelled");
+        assert_eq!(
+            StatusMsg::Repeated { id: 7, count: 5 }.text(Lang::Zh),
+            "已批量重放 #7 ×5"
+        );
+        assert_eq!(
+            StatusMsg::Repeated { id: 7, count: 5 }.text(Lang::En),
+            "Repeated #7 ×5"
+        );
     }
 }
