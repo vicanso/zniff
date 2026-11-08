@@ -36,19 +36,23 @@ pub enum Rule {
         file: Option<PathBuf>,
         status: Option<u16>,
         delay: Duration,
+        op: Option<String>,
     },
     MapRemote {
         host: String,
         path_prefix: String,
         url: String,
+        op: Option<String>,
     },
     Break {
         host: String,
         path_prefix: String,
+        op: Option<String>,
     },
     BreakResponse {
         host: String,
         path_prefix: String,
+        op: Option<String>,
     },
     Delay {
         host: String,
@@ -177,9 +181,30 @@ impl Default for Effect {
 }
 
 impl Rule {
+    #[cfg(test)]
     pub fn matches(&self, host: &str, path: &str) -> bool {
+        self.matches_with_ops(host, path, &[])
+    }
+
+    pub fn matches_with_ops(&self, host: &str, path: &str, ops: &[String]) -> bool {
         let (rule_host, prefix) = self.target();
-        host_matches(rule_host, host) && path_matches(prefix, path)
+        if !host_matches(rule_host, host) || !path_matches(prefix, path) {
+            return false;
+        }
+        match self.op() {
+            Some(op_pattern) => op_matches(op_pattern, ops),
+            None => true,
+        }
+    }
+
+    pub fn op(&self) -> Option<&str> {
+        match self {
+            Self::MapLocal { op, .. }
+            | Self::MapRemote { op, .. }
+            | Self::Break { op, .. }
+            | Self::BreakResponse { op, .. } => op.as_deref(),
+            _ => None,
+        }
     }
 
     fn target(&self) -> (&str, &str) {
@@ -246,13 +271,30 @@ pub fn parse_rules(text: &str) -> Vec<Rule> {
         .collect()
 }
 
+/// Returns true when at least one rule matching `(host, path)` by host and path
+/// also carries a GraphQL `op=<name>` condition.
+pub fn has_op_rules(rules: &[Rule], host: &str, path: &str) -> bool {
+    rules.iter().any(|rule| {
+        if rule.op().is_none() {
+            return false;
+        }
+        let (rule_host, prefix) = rule.target();
+        host_matches(rule_host, host) && path_matches(prefix, path)
+    })
+}
+
 /// Labels of the rules that actually apply, in text order. The first terminal
 /// rule stops later terminal rules. Modifiers still count after it.
+#[cfg(test)]
 pub fn hit_summary(rules: &[Rule], host: &str, path: &str) -> String {
+    hit_summary_with_ops(rules, host, path, &[])
+}
+
+pub fn hit_summary_with_ops(rules: &[Rule], host: &str, path: &str, ops: &[String]) -> String {
     let mut labels = Vec::new();
     let mut took_terminal = false;
     for rule in rules {
-        if !rule.matches(host, path) {
+        if !rule.matches_with_ops(host, path, ops) {
             continue;
         }
         let (label, terminal) = match rule {
@@ -308,10 +350,15 @@ pub fn first_match<'a>(rules: &'a [Rule], host: &str, path: &str) -> Option<&'a 
 }
 
 /// Modifiers accumulate. The first matching terminal rule is the action.
+#[cfg(test)]
 pub fn effect(rules: &[Rule], host: &str, path: &str) -> Effect {
+    effect_with_ops(rules, host, path, &[])
+}
+
+pub fn effect_with_ops(rules: &[Rule], host: &str, path: &str, ops: &[String]) -> Effect {
     let mut effect = Effect::default();
     for rule in rules {
-        if !rule.matches(host, path) {
+        if !rule.matches_with_ops(host, path, ops) {
             continue;
         }
         match rule {
@@ -586,6 +633,19 @@ fn parse_status_opt(text: &str) -> Option<u16> {
     (100..600).contains(&code).then_some(code)
 }
 
+fn parse_op_opt(text: &str) -> Option<String> {
+    let raw = text
+        .trim()
+        .strip_prefix("op=")
+        .or_else(|| text.trim().strip_prefix("operation="))
+        .unwrap_or(text.trim())
+        .trim();
+    if raw.is_empty() || raw.contains(char::is_whitespace) {
+        return None;
+    }
+    Some(raw.to_string())
+}
+
 fn parse_line(line: &str) -> Option<Rule> {
     let (kind, rest) = next_rule_token(line)?;
     let (pattern, rest) = next_rule_token(rest)?;
@@ -596,11 +656,20 @@ fn parse_line(line: &str) -> Option<Rule> {
             let mut file: Option<PathBuf> = None;
             let mut status = None;
             let mut delay = Duration::ZERO;
+            let mut op = None;
             for token in tokens {
                 if let Some(code_str) = token.strip_prefix("status=") {
                     status = Some(parse_status_opt(code_str)?);
                 } else if let Some(delay_str) = token.strip_prefix("delay=") {
                     delay = parse_delay(delay_str)?;
+                } else if let Some(op_str) = token
+                    .strip_prefix("op=")
+                    .or_else(|| token.strip_prefix("operation="))
+                {
+                    if op.is_some() {
+                        return None;
+                    }
+                    op = Some(parse_op_opt(op_str)?);
                 } else if file.is_none() && !token.is_empty() {
                     file = Some(PathBuf::from(token));
                 } else {
@@ -616,34 +685,75 @@ fn parse_line(line: &str) -> Option<Rule> {
                 file,
                 status,
                 delay,
+                op,
             })
         }
         "map-remote" => {
             let tokens = rule_tokens(rest)?;
-            if tokens.len() != 1 {
+            if tokens.is_empty() || tokens.len() > 2 {
                 return None;
             }
-            let url = tokens.into_iter().next()?;
-            if !(url.starts_with("http://") || url.starts_with("https://")) {
-                return None;
+            let mut url = None;
+            let mut op = None;
+            for token in tokens {
+                if let Some(op_str) = token
+                    .strip_prefix("op=")
+                    .or_else(|| token.strip_prefix("operation="))
+                {
+                    if op.is_some() {
+                        return None;
+                    }
+                    op = Some(parse_op_opt(op_str)?);
+                } else if url.is_none()
+                    && (token.starts_with("http://") || token.starts_with("https://"))
+                {
+                    url = Some(token);
+                } else {
+                    return None;
+                }
             }
             Some(Rule::MapRemote {
                 host,
                 path_prefix,
-                url,
+                url: url?,
+                op,
             })
         }
         "break" => {
-            if !rest.trim().is_empty() {
-                return None;
-            }
-            Some(Rule::Break { host, path_prefix })
+            let tokens = rule_tokens(rest)?;
+            let op = match tokens.as_slice() {
+                [] => None,
+                [token] => {
+                    let op_str = token
+                        .strip_prefix("op=")
+                        .or_else(|| token.strip_prefix("operation="))?;
+                    Some(parse_op_opt(op_str)?)
+                }
+                _ => return None,
+            };
+            Some(Rule::Break {
+                host,
+                path_prefix,
+                op,
+            })
         }
         "break-res" | "break-response" => {
-            if !rest.trim().is_empty() {
-                return None;
-            }
-            Some(Rule::BreakResponse { host, path_prefix })
+            let tokens = rule_tokens(rest)?;
+            let op = match tokens.as_slice() {
+                [] => None,
+                [token] => {
+                    let op_str = token
+                        .strip_prefix("op=")
+                        .or_else(|| token.strip_prefix("operation="))?;
+                    Some(parse_op_opt(op_str)?)
+                }
+                _ => return None,
+            };
+            Some(Rule::BreakResponse {
+                host,
+                path_prefix,
+                op,
+            })
         }
         "delay" => {
             let tokens = rule_tokens(rest)?;
@@ -1275,7 +1385,12 @@ pub fn append_quick_rule(
             {
                 return None;
             }
-            format!("map-remote {pattern} {from}")
+            if to.is_empty() {
+                format!("map-remote {pattern} {from}")
+            } else {
+                let op = parse_op_opt(to)?;
+                format!("map-remote {pattern} {from} op={op}")
+            }
         }
         QuickRule::Local => {
             if from.contains('\n') || to.contains('\n') {
@@ -1322,8 +1437,22 @@ pub fn append_quick_rule(
             let _ = parse_throttle_tokens(&tokens)?;
             format!("throttle {pattern} {}", tokens.join(" "))
         }
-        QuickRule::Break => format!("break {pattern}"),
-        QuickRule::BreakRes => format!("break-res {pattern}"),
+        QuickRule::Break => {
+            if from.is_empty() {
+                format!("break {pattern}")
+            } else {
+                let op = parse_op_opt(from)?;
+                format!("break {pattern} op={op}")
+            }
+        }
+        QuickRule::BreakRes => {
+            if from.is_empty() {
+                format!("break-res {pattern}")
+            } else {
+                let op = parse_op_opt(from)?;
+                format!("break-res {pattern} op={op}")
+            }
+        }
         QuickRule::Header => {
             let from = from.trim_end_matches(':').trim();
             if from.is_empty() || from.contains(char::is_whitespace) || to.contains('\n') {
@@ -1654,6 +1783,53 @@ fn normalize_host(host: &str) -> String {
         .trim_matches(|ch| ch == '[' || ch == ']')
         .trim_end_matches('.')
         .to_ascii_lowercase()
+}
+
+pub fn op_matches(pattern: &str, ops: &[String]) -> bool {
+    if ops.is_empty() {
+        return false;
+    }
+    pattern
+        .split(['|', ','])
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .any(|part| {
+            let pat_lower = part.to_ascii_lowercase();
+            ops.iter()
+                .any(|op| wildcard_matches(&pat_lower, &op.to_ascii_lowercase()))
+        })
+}
+
+fn wildcard_matches(pattern: &str, text: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    if !pattern.contains('*') {
+        return pattern == text;
+    }
+    let parts: Vec<&str> = pattern.split('*').collect();
+    let mut pos = 0usize;
+    for (idx, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+        if idx == 0 {
+            if !text.starts_with(part) {
+                return false;
+            }
+            pos = part.len();
+        } else if idx + 1 == parts.len() {
+            if !text[pos..].ends_with(part) {
+                return false;
+            }
+            pos = text.len();
+        } else if let Some(found) = text[pos..].find(part) {
+            pos += found + part.len();
+        } else {
+            return false;
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -2118,5 +2294,69 @@ json example.com/api req set user.roles [\"admin\",\"ops\"]
             .as_deref(),
             Some("json example.com/api res del /data/secret\n")
         );
+    }
+
+    #[test]
+    fn graphql_op_rules_narrow_terminal_matching() {
+        let rules = parse_rules(
+            "\
+map-local example.com/graphql ./cart.json op=GetCart|UpdateCart
+map-remote example.com/graphql https://staging.test/graphql op=Checkout*
+break example.com/graphql op=PlaceOrder
+break-res example.com/graphql op=anonymous
+",
+        );
+        assert_eq!(rules.len(), 4);
+        assert!(has_op_rules(&rules, "example.com", "/graphql"));
+        assert!(!has_op_rules(&rules, "other.com", "/graphql"));
+        // Without ops, op-scoped rules do not match
+        assert!(effect(&rules, "example.com", "/graphql").action.is_none());
+
+        let cart_eff = effect_with_ops(
+            &rules,
+            "example.com",
+            "/graphql",
+            &["UpdateCart".to_string()],
+        );
+        assert_eq!(
+            cart_eff.action,
+            Some(Action::MapLocal {
+                file: Some(PathBuf::from("./cart.json")),
+                status: 200,
+            })
+        );
+        assert_eq!(
+            hit_summary_with_ops(&rules, "example.com", "/graphql", &["GetCart".to_string()]),
+            "map-local"
+        );
+
+        let remote_eff = effect_with_ops(
+            &rules,
+            "example.com",
+            "/graphql",
+            &["CheckoutSession".to_string()],
+        );
+        assert_eq!(
+            remote_eff.action,
+            Some(Action::MapRemote {
+                url: "https://staging.test/graphql".to_string()
+            })
+        );
+
+        let break_eff = effect_with_ops(
+            &rules,
+            "example.com",
+            "/graphql",
+            &["PlaceOrder".to_string()],
+        );
+        assert_eq!(break_eff.action, Some(Action::BreakRequest));
+
+        let break_res_eff = effect_with_ops(
+            &rules,
+            "example.com",
+            "/graphql",
+            &["anonymous".to_string()],
+        );
+        assert_eq!(break_res_eff.action, Some(Action::BreakResponse));
     }
 }

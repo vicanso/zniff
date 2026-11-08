@@ -1339,6 +1339,7 @@ struct FlowQuery {
     headers: Vec<Vec<String>>,
     comments: Vec<Vec<String>>,
     repeats: Vec<Vec<String>>,
+    ops: Vec<Vec<String>>,
     pinned_only: bool,
     slow_only: bool,
 }
@@ -1359,6 +1360,7 @@ impl FlowQuery {
             headers: Vec::new(),
             comments: Vec::new(),
             repeats: Vec::new(),
+            ops: Vec::new(),
             pinned_only: false,
             slow_only: false,
         };
@@ -1413,6 +1415,14 @@ impl FlowQuery {
                     .filter(|term| !term.is_empty())
                     .collect();
                 query.repeats.push(group);
+                continue;
+            }
+            if let Some(rest) = lower
+                .strip_prefix("op:")
+                .or_else(|| lower.strip_prefix("gql:"))
+                .or_else(|| lower.strip_prefix("operation:"))
+            {
+                query.ops.push(split_or_terms(rest));
                 continue;
             }
             if let Some(rest) = lower.strip_prefix("path:") {
@@ -1603,6 +1613,23 @@ impl FlowQuery {
             })
         }) {
             return false;
+        }
+        if !self.ops.is_empty() {
+            let req_spilled = flow.request_spill.and_then(|sref| spill.read(sref));
+            let req_bytes = req_spilled.as_deref().unwrap_or(&flow.request_body);
+            let ops = crate::present::graphql_operations(&flow.path, req_bytes);
+            if ops.is_empty() {
+                return false;
+            }
+            if !self.ops.iter().all(|group| {
+                if group.is_empty() {
+                    !ops.is_empty()
+                } else {
+                    group.iter().any(|pat| crate::rules::op_matches(pat, &ops))
+                }
+            }) {
+                return false;
+            }
         }
         body_groups_match(flow, spill, &self.bodies)
     }
@@ -2098,5 +2125,46 @@ mod tests {
         assert_eq!(session.ids_matching("repeat:"), vec![f2, f3]);
         assert_eq!(session.ids_matching("repeat:1"), vec![f1, f2]);
         assert_eq!(session.ids_matching("repeat:#10"), vec![f3]);
+    }
+
+    #[test]
+    fn filter_matches_graphql_operations() {
+        let mut session = Session::default();
+        let f1 = session.open(FlowDraft {
+            protocol: Protocol::Http2,
+            method: "POST".into(),
+            host: "api.test".into(),
+            path: "/graphql".into(),
+            url: "https://api.test/graphql".into(),
+            request_headers: Vec::new(),
+        });
+        session.append_body(
+            f1,
+            Direction::Request,
+            br#"{"operationName":"GetCart","query":"query GetCart { cart { id } }"}"#,
+        );
+        let f2 = session.open(FlowDraft {
+            protocol: Protocol::Http2,
+            method: "POST".into(),
+            host: "api.test".into(),
+            path: "/graphql".into(),
+            url: "https://api.test/graphql".into(),
+            request_headers: Vec::new(),
+        });
+        session.append_body(
+            f2,
+            Direction::Request,
+            br#"{"query":"mutation CheckoutOrder { checkout { id } }"}"#,
+        );
+        let f3 = session.open(draft("api.test"));
+
+        assert_eq!(session.ids_matching("op:"), vec![f1, f2]);
+        assert_eq!(session.ids_matching("op:GetCart"), vec![f1]);
+        assert_eq!(session.ids_matching("gql:Checkout*"), vec![f2]);
+        assert_eq!(
+            session.ids_matching("op:GetCart|CheckoutOrder"),
+            vec![f1, f2]
+        );
+        let _ = f3;
     }
 }

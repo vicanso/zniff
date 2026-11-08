@@ -4374,14 +4374,7 @@ fn replace_row(
                         .items_center()
                         .gap_1()
                         .child(when(
-                            move || {
-                                kind.get() < 4
-                                    || kind.get() == 6
-                                    || kind.get() == 7
-                                    || kind.get() == 9
-                                    || kind.get() == 10
-                                    || kind.get() == 11
-                            },
+                            move || kind.get() != 8,
                             move || {
                                 let placeholder = move || {
                                     let lang = ui_lang(ui_langs());
@@ -4402,6 +4395,12 @@ fn replace_row(
                                             lang,
                                             "延迟时长: 2000ms 或 2s",
                                             "Delay duration: 2000ms or 2s",
+                                        )
+                                        .to_string(),
+                                        4 | 5 => t(
+                                            lang,
+                                            "GraphQL 操作名 (可选): GetUser",
+                                            "GraphQL op (optional): GetUser",
                                         )
                                         .to_string(),
                                         6 => {
@@ -10203,7 +10202,17 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baselin
     shown.method.set(flow.method);
     shown.url.set(flow.url);
     shown.protocol.set(flow.protocol.label_in(lang).to_string());
-    shown.rules.set(flow.rule_hit.clone());
+    let mut badges = flow.rule_hit.clone();
+    if let Some(op_label) = present::graphql_operation_label(&flow.path, &flow.request_body) {
+        let tag = format!("gql:{op_label}");
+        if badges.is_empty() {
+            badges = tag;
+        } else {
+            badges.push(' ');
+            badges.push_str(&tag);
+        }
+    }
+    shown.rules.set(badges);
     shown.status.set(flow.status);
     shown.error.set(flow.error.clone().unwrap_or_default());
     shown

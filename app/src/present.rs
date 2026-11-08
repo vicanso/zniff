@@ -2722,6 +2722,118 @@ pub fn pretty_graphql_json(body: &str) -> Option<String> {
     Some(out)
 }
 
+/// Extracts GraphQL operation name(s) from a request's URL query string (GET)
+/// or JSON body (POST single object or batched array).
+///
+/// Order of precedence per operation:
+/// 1. Explicit `operationName` field/query param when non-empty.
+/// 2. Named `query <Name>`, `mutation <Name>`, or `subscription <Name>` in `query`.
+/// 3. `"anonymous"` when `query` is a valid anonymous GraphQL selection set.
+pub fn graphql_operations(path: &str, body: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(text) = std::str::from_utf8(body) {
+        let trimmed = text.trim();
+        if (trimmed.starts_with('{') || trimmed.starts_with('['))
+            && let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed)
+        {
+            match &val {
+                serde_json::Value::Object(map) => {
+                    if let Some(op) = graphql_op_from_map(map) {
+                        out.push(op);
+                    }
+                }
+                serde_json::Value::Array(arr) => {
+                    for item in arr {
+                        if let Some(map) = item.as_object()
+                            && let Some(op) = graphql_op_from_map(map)
+                            && !out.contains(&op)
+                        {
+                            out.push(op);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if out.is_empty() && path.contains('?') {
+        let pairs = query_pairs(path);
+        if let Some((_, op)) = pairs
+            .iter()
+            .find(|(k, v)| k == "operationName" && !v.trim().is_empty())
+        {
+            out.push(op.trim().to_string());
+        } else if let Some((_, q)) = pairs.iter().find(|(k, _)| k == "query")
+            && let Some(op) = infer_graphql_operation_from_query(q)
+        {
+            out.push(op);
+        }
+    }
+    out
+}
+
+pub fn graphql_operation_label(path: &str, body: &[u8]) -> Option<String> {
+    let ops = graphql_operations(path, body);
+    (!ops.is_empty()).then(|| ops.join(", "))
+}
+
+fn graphql_op_from_map(map: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    let only_gql_keys = map.keys().all(|k| {
+        matches!(
+            k.as_str(),
+            "query" | "operationName" | "variables" | "extensions"
+        )
+    });
+    if !only_gql_keys {
+        return None;
+    }
+    if let Some(op) = map
+        .get("operationName")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Some(op.to_string());
+    }
+    let query = map.get("query")?.as_str()?;
+    infer_graphql_operation_from_query(query)
+}
+
+fn infer_graphql_operation_from_query(query: &str) -> Option<String> {
+    let mut rest = query;
+    loop {
+        rest = rest.trim_start();
+        if let Some(after_hash) = rest.strip_prefix('#') {
+            rest = after_hash.split_once('\n').map_or("", |(_, tail)| tail);
+        } else {
+            break;
+        }
+    }
+    for kw in ["query", "mutation", "subscription"] {
+        if let Some(after_kw) = rest.strip_prefix(kw)
+            && after_kw.starts_with(|c: char| c.is_whitespace() || c == '{' || c == '(')
+        {
+            let after_ws = after_kw.trim_start();
+            let ident: String = after_ws
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if !ident.is_empty()
+                && ident
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            {
+                return Some(ident);
+            }
+            if looks_like_graphql_query(rest) {
+                return Some("anonymous".into());
+            }
+        }
+    }
+    looks_like_graphql_query(rest).then(|| "anonymous".into())
+}
+
 fn looks_like_graphql_query(query: &str) -> bool {
     let trimmed = query.trim_start();
     if !trimmed.contains('{') || !trimmed.contains('}') {
@@ -3940,5 +4052,35 @@ Content-Type: image/png\r\n\r\n\
         assert!(!dag.bars[1].on_critical_path);
         assert!(dag.bars[2].on_critical_path);
         assert!(dag.flowchart_mermaid.starts_with("flowchart TD\n"));
+    }
+
+    #[test]
+    fn graphql_operations_extract_explicit_inferred_anonymous_and_batched() {
+        let explicit =
+            br#"{"operationName":"GetUser","query":"query GetUser($id:ID!){user(id:$id){name}}"}"#;
+        assert_eq!(graphql_operations("/graphql", explicit), vec!["GetUser"]);
+        assert_eq!(
+            graphql_operation_label("/graphql", explicit).as_deref(),
+            Some("GetUser")
+        );
+
+        let inferred = br#"{"query":"mutation UpdateCart($input: CartInput!) { updateCart(input: $input) { id } }"}"#;
+        assert_eq!(graphql_operations("/graphql", inferred), vec!["UpdateCart"]);
+
+        let anon = br#"{"query":"{ viewer { id } }"}"#;
+        assert_eq!(graphql_operations("/graphql", anon), vec!["anonymous"]);
+
+        let batched = br#"[{"operationName":"GetHeader","query":"query GetHeader{h}"},{"query":"query GetFooter { f }"}]"#;
+        assert_eq!(
+            graphql_operations("/graphql", batched),
+            vec!["GetHeader", "GetFooter"]
+        );
+        assert_eq!(
+            graphql_operation_label("/graphql", batched).as_deref(),
+            Some("GetHeader, GetFooter")
+        );
+
+        let get_query = "/graphql?query=query%20ViewerProfile%20%7B%20me%20%7B%20id%20%7D%20%7D";
+        assert_eq!(graphql_operations(get_query, b""), vec!["ViewerProfile"]);
     }
 }
