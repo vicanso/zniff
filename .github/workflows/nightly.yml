@@ -92,6 +92,7 @@ jobs:
             gh release edit "$NIGHTLY_TAG" \
               --title "$title" \
               --notes-file /tmp/notes.md \
+              --draft=false \
               --prerelease \
               --latest=false
           else
@@ -326,3 +327,4 @@ jobs:
           (cd downloaded && sha256sum -- * | sort -k2 > ../SHA256SUMS)
           cat SHA256SUMS
           gh release upload "$NIGHTLY_TAG" SHA256SUMS --clobber
+          gh release edit "$NIGHTLY_TAG" --draft=false --prerelease --latest=false
