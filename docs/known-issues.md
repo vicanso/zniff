@@ -160,7 +160,7 @@ P0 到 P3 里点名的能力已经接上。下面是仍然接受的缺口，不�
     - **实现**：在列表右键与详情「更多」菜单中提供「批量重放…」（`Repeat…`），在详情摘要卡片内展开内联批量重放配置栏，支持指定重放次数（`1..=100`，默认 `5`，含 `5×` / `10×` / `20×` 快捷预设）与间隔毫秒数（`0..=60000`，默认 `200 ms`），在后台按序逐条重放并记录至会话列表，完成后状态栏反馈 `已批量重放 #id ×N`。
 
 12. **当前列表聚合统计（Filtered Summary）** — ✅ 已完成
-    - **实现**：新增 `session::FilteredStats` 实时汇总当前筛选集合的总请求数、总传输字节（及上行/下行拆分）、平均耗时、状态码分布（`2xx` / `3xx` / `4xx` / `5xx` / `ERR` / `进行中` 语义色角标）与最慢请求；在右栏未选中流量的空态顶部展示「当前列表统计」卡片（点击最慢请求直接跳转选中该条流量），详情摘要右上角提供「统计」（`Summary`）按钮并支持 `Esc` 键一键返回统计视图。
+    - **实现**：新增 `session::FilteredStats` 实时汇总当前筛选集合的总请求数、总传输字节（及上行/下行拆分）、平均耗时、状态码分布（`2xx` / `3xx` / `4xx` / `5xx` / `ERR` / `进行中` 语义色角标）与最慢请求；在右栏未选中流量的空态顶部展示「当前列表统计」卡片（点击最慢请求直接跳转选中该条流量），顶栏「清空」按钮旁提供「统计」（`Summary`）按钮（或点击会话条数角标、按 `Esc` 键）一键返回统计视图。
 
 13. **客户端代理环境与证书信任一键诊断** — ✅ 已完成
     - **实现**：「复制代理环境」（`present::proxy_env_export`）扩展覆盖 `http_proxy` / `https_proxy` / `all_proxy`（含大小写）、`SSL_CERT_FILE`、`NODE_EXTRA_CA_CERTS`、`REQUESTS_CA_BUNDLE`、`CURL_CA_BUNDLE`、`GIT_SSL_CAINFO`、`CARGO_HTTP_CAINFO`、`DENO_CERT` 与 `JAVA_TOOL_OPTIONS`；新增 `ca::CaStatus`（`Trusted` / `InstalledUntrusted` / `NotInstalled`），macOS 下结合 `security find-certificate` 与 `security verify-cert -c <ca.crt> -L` 精确区分「证书：已信任」「证书：未开启信任」（警告色提示并同时提供「信任证书」与「移除证书」）和「证书：未安装」。

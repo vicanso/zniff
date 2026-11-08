@@ -95,6 +95,28 @@ struct Compose {
     status: Signal<String>,
 }
 
+#[derive(Clone, PartialEq)]
+struct SeqCandidate {
+    id: u64,
+    method: String,
+    host: String,
+    path: String,
+    status: Option<u16>,
+    failed: bool,
+    elapsed: String,
+    comment: String,
+    checked: bool,
+}
+
+#[derive(Clone, Copy)]
+struct SeqBuilder {
+    open: Signal<bool>,
+    items: Signal<Vec<SeqCandidate>>,
+    include_response: Signal<bool>,
+    include_query: Signal<bool>,
+    output: Signal<String>,
+}
+
 /// The app's UI set (`nsh.json` `"rust"`).
 #[native_module("zniff/native")]
 fn native(registry: &mut Registry) {
@@ -878,6 +900,20 @@ pub fn App() -> impl IntoElement {
         body: signal(String::new()),
         status: signal(String::new()),
     };
+    let seq_builder = SeqBuilder {
+        open: signal(false),
+        items: signal(Vec::new()),
+        include_response: signal(true),
+        include_query: signal(false),
+        output: signal(String::new()),
+    };
+    effect(move || {
+        let has_selected = selected.get().is_some();
+        let is_composing = compose.composing.get();
+        if has_selected || is_composing {
+            seq_builder.open.set(false);
+        }
+    });
     let list_width = signal(saved.list_width as f32);
     let columns = signal(ListColumns::from_config(&saved));
     let sort = signal(None::<ListSort>);
@@ -1146,12 +1182,14 @@ pub fn App() -> impl IntoElement {
     let selected_clear_key = selected;
     let baseline_clear_key = baseline;
     let compose_clear_key = compose;
+    let seq_clear_key = seq_builder;
     on_key("mod+k", move |_| {
         clear_captured(
             &controls_clear_key,
             selected_clear_key,
             baseline_clear_key,
             compose_clear_key,
+            seq_clear_key,
         );
     });
     on_key("mod+f", move |_| filter_focus.focus());
@@ -1165,10 +1203,13 @@ pub fn App() -> impl IntoElement {
     });
     let selected_esc = selected;
     let compose_esc = compose;
+    let seq_esc = seq_builder;
     let shown_esc = shown;
     on_key("escape", move |_| {
         if compose_esc.composing.get() {
             reset_compose(compose_esc);
+        } else if seq_esc.open.get() {
+            seq_esc.open.set(false);
         } else if shown_esc.repeating.get() {
             shown_esc.repeating.set(false);
         } else if shown_esc.editing_comment.get() {
@@ -1199,6 +1240,7 @@ pub fn App() -> impl IntoElement {
                     selected_clear,
                     baseline_clear,
                     compose_clear,
+                    seq_builder,
                 );
             },
             move || {
@@ -1207,6 +1249,7 @@ pub fn App() -> impl IntoElement {
                     selected_clear_unpinned,
                     baseline_clear_unpinned,
                     compose_clear_unpinned,
+                    seq_builder,
                 );
             },
             move || export_har_file(controls_export.clone(), &filter.get()),
@@ -1217,9 +1260,11 @@ pub fn App() -> impl IntoElement {
             flow_total,
             filter,
             shown.pretty,
+            shown.phase,
             share_id,
             profile_signals,
             compose,
+            seq_builder,
             selected,
         ))
         .child(when(
@@ -1258,6 +1303,8 @@ pub fn App() -> impl IntoElement {
                     controls_detail,
                     selected,
                     compose,
+                    seq_builder,
+                    rows,
                     filter,
                     rules_text,
                     baseline,
@@ -1291,9 +1338,11 @@ fn toolbar(
     flow_total: Signal<usize>,
     filter: Signal<String>,
     pretty: Signal<bool>,
+    shown_phase: Signal<Phase>,
     share_id: Signal<String>,
     profiles: ProfileSignals,
     compose: Compose,
+    seq_builder: SeqBuilder,
     selected: Signal<Option<u64>>,
 ) -> impl IntoElement {
     let install = Rc::new(install);
@@ -1379,7 +1428,16 @@ fn toolbar(
                     }),
                 ),
         )
-        .child(flow_count_badge(rows, flow_total, filter))
+        .child(flow_count_badge(rows, flow_total, filter, move || {
+            reset_compose(compose);
+            seq_builder.open.set(false);
+            selected.set(None);
+        }))
+        .child(toolbar_text_button(tr("统计", "Summary"), move || {
+            reset_compose(compose);
+            seq_builder.open.set(false);
+            selected.set(None);
+        }))
         .child(toolbar_text_button(tr("清空", "Clear"), {
             let clear = Rc::clone(&clear);
             move || clear()
@@ -1406,8 +1464,10 @@ fn toolbar(
             flow_total,
             filter,
             pretty,
+            shown_phase,
             share_id,
             compose,
+            seq_builder,
             selected,
         ))
         .child(primary_button(
@@ -5992,6 +6052,8 @@ fn detail_pane(
     controls: Arc<Controls>,
     selected: Signal<Option<u64>>,
     compose: Compose,
+    seq_builder: SeqBuilder,
+    rows: Signal<Vec<RowLine>>,
     filter: Signal<String>,
     rules_text: Signal<String>,
     baseline: Signal<Option<u64>>,
@@ -6029,6 +6091,8 @@ fn detail_pane(
             )
             .otherwise(move || {
                 let compose_controls = controls.clone();
+                let seq_controls = controls.clone();
+                let summary_controls = controls.clone();
                 when(
                     move || compose.composing.get(),
                     move || {
@@ -6041,100 +6105,128 @@ fn detail_pane(
                     },
                 )
                 .otherwise(move || {
-                    view()
-                        .flex_1()
-                        .pl_3p5()
-                        .pr_5()
-                        .py_3p5()
-                        .gap_3p5()
-                        .child(when(
-                            move || filtered_stats.with(|s| s.total_count > 0),
-                            move || filtered_summary_card(filtered_stats, selected),
-                        ))
-                        .child(
+                    let seq_controls = seq_controls.clone();
+                    let summary_controls = summary_controls.clone();
+                    when(
+                        move || seq_builder.open.get(),
+                        move || {
                             view()
-                                .flex_1()
-                                .items_center()
-                                .justify_center()
-                                .gap_1p5()
-                                .px_6()
-                                .py_8()
-                                .child(glyph_px(28.0, || Glyph::List, || color(fg_muted())))
-                                .child(
-                                    text({
-                                        let langs = ui_langs();
-                                        move || -> SharedString {
-                                            let lang = ui_lang(langs);
-                                            match shown.phase.get() {
-                                                Phase::Gone => t(
-                                                    lang,
-                                                    "这条记录已经不在了",
-                                                    "That flow is gone",
-                                                )
-                                                .into(),
-                                                _ => t(lang, "还没有选择", "Nothing selected")
+                                .pl_3p5()
+                                .pr_5()
+                                .py_3p5()
+                                .gap_3p5()
+                                .child(sequence_diagram_panel(seq_builder, seq_controls.clone()))
+                        },
+                    )
+                    .otherwise(move || {
+                        let summary_controls = summary_controls.clone();
+                        view()
+                            .flex_1()
+                            .pl_3p5()
+                            .pr_5()
+                            .py_3p5()
+                            .gap_3p5()
+                            .child(when(
+                                move || filtered_stats.with(|s| s.total_count > 0),
+                                move || {
+                                    let controls = summary_controls.clone();
+                                    filtered_summary_card(filtered_stats, selected, move || {
+                                        begin_sequence_diagram(
+                                            &controls,
+                                            rows,
+                                            seq_builder,
+                                            compose,
+                                            selected,
+                                            shown.phase,
+                                        );
+                                    })
+                                },
+                            ))
+                            .child(
+                                view()
+                                    .flex_1()
+                                    .items_center()
+                                    .justify_center()
+                                    .gap_1p5()
+                                    .px_6()
+                                    .py_8()
+                                    .child(glyph_px(28.0, || Glyph::List, || color(fg_muted())))
+                                    .child(
+                                        text({
+                                            let langs = ui_langs();
+                                            move || -> SharedString {
+                                                let lang = ui_lang(langs);
+                                                match shown.phase.get() {
+                                                    Phase::Gone => t(
+                                                        lang,
+                                                        "这条记录已经不在了",
+                                                        "That flow is gone",
+                                                    )
                                                     .into(),
+                                                    _ => t(lang, "还没有选择", "Nothing selected")
+                                                        .into(),
+                                                }
                                             }
-                                        }
-                                    })
-                                    .text_size(px(13.5))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(fg_secondary()),
-                                )
-                                .child(
-                                    text({
-                                        let langs = ui_langs();
-                                        move || -> SharedString {
-                                            let lang = ui_lang(langs);
-                                            match shown.phase.get() {
-                                                Phase::Gone => t(
-                                                    lang,
-                                                    "它因为内存上限被丢掉了。",
-                                                    "It was dropped because the session hit its memory cap.",
-                                                )
-                                                .into(),
-                                                _ => t(
-                                                    lang,
-                                                    "从左边选一条流量，查看请求头、响应头和 body。",
-                                                    "Pick a flow on the left to see headers and the body.",
-                                                )
-                                                .into(),
+                                        })
+                                        .text_size(px(13.5))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(fg_secondary()),
+                                    )
+                                    .child(
+                                        text({
+                                            let langs = ui_langs();
+                                            move || -> SharedString {
+                                                let lang = ui_lang(langs);
+                                                match shown.phase.get() {
+                                                    Phase::Gone => t(
+                                                        lang,
+                                                        "它因为内存上限被丢掉了。",
+                                                        "It was dropped because the session hit its memory cap.",
+                                                    )
+                                                    .into(),
+                                                    _ => t(
+                                                        lang,
+                                                        "从左边选一条流量，查看请求头、响应头和 body。",
+                                                        "Pick a flow on the left to see headers and the body.",
+                                                    )
+                                                    .into(),
+                                                }
                                             }
-                                        }
-                                    })
-                                    .text_size(px(12.0))
-                                    .text_color(fg_muted()),
-                                )
-                                .child(
-                                    view()
-                                        .mt_1p5()
-                                        .h(px(28.0))
-                                        .px_3()
-                                        .rounded(px(6.0))
-                                        .border_1()
-                                        .border_color(border_control())
-                                        .bg(bg_control())
-                                        .hover(|style| style.bg(bg_control_hover()))
-                                        .active(|style| style.opacity(0.8))
-                                        .cursor(Cursor::Pointer)
-                                        .flex_row()
-                                        .items_center()
-                                        .gap_1p5()
-                                        .on_press(move || begin_new_request(compose, selected))
-                                        .child(glyph_px(
-                                            13.0,
-                                            || Glyph::Prompt,
-                                            || color(fg_secondary()),
-                                        ))
-                                        .child(
-                                            text(tr("构造请求", "New request"))
-                                                .number_of_lines(1)
-                                                .text_size(px(12.0))
-                                                .font_weight(FontWeight::MEDIUM)
-                                                .text_color(fg_primary()),
-                                        ),
-                                ),
-                        )
+                                        })
+                                        .text_size(px(12.0))
+                                        .text_color(fg_muted()),
+                                    )
+                                    .child(
+                                        view()
+                                            .mt_1p5()
+                                            .h(px(28.0))
+                                            .px_3()
+                                            .rounded(px(6.0))
+                                            .border_1()
+                                            .border_color(border_control())
+                                            .bg(bg_control())
+                                            .hover(|style| style.bg(bg_control_hover()))
+                                            .active(|style| style.opacity(0.8))
+                                            .cursor(Cursor::Pointer)
+                                            .flex_row()
+                                            .items_center()
+                                            .gap_1p5()
+                                            .on_press(move || begin_new_request(compose, selected))
+                                            .child(glyph_px(
+                                                13.0,
+                                                || Glyph::Prompt,
+                                                || color(fg_secondary()),
+                                            ))
+                                            .child(
+                                                text(tr("构造请求", "New request"))
+                                                    .number_of_lines(1)
+                                                    .text_size(px(12.0))
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .text_color(fg_primary()),
+                                            ),
+                                    ),
+                            )
+                    })
                 })
             }),
         )
@@ -6143,6 +6235,7 @@ fn detail_pane(
 fn filtered_summary_card(
     stats: Signal<session::FilteredStats>,
     selected: Signal<Option<u64>>,
+    on_seq: impl Fn() + 'static,
 ) -> impl IntoElement {
     view()
         .p_3p5()
@@ -6156,7 +6249,8 @@ fn filtered_summary_card(
                 .flex_row()
                 .items_center()
                 .justify_between()
-                .child(section_title(tr("当前列表统计", "Filtered summary"))),
+                .child(section_title(tr("当前列表统计", "Filtered summary")))
+                .child(detail_button(tr("生成时序图", "Sequence diagram"), on_seq)),
         )
         .child(
             view()
@@ -6225,29 +6319,30 @@ fn filtered_summary_card(
                     status_err_bg(),
                     status_err_fg(),
                 ))
-                .child(when(
-                    move || stats.with(|s| s.pending > 0),
-                    move || {
-                        let langs = ui_langs();
-                        view()
-                            .px_2()
-                            .py_0p5()
-                            .rounded(px(5.0))
-                            .bg(bg_control())
-                            .child(
-                                mono(move || {
-                                    format!(
-                                        "{} {}",
-                                        t(ui_lang(langs), "进行中", "Pending"),
-                                        stats.with(|s| s.pending)
-                                    )
-                                })
-                                .text_size(px(11.0))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(fg_muted()),
-                            )
-                    },
-                )),
+                .child({
+                    let langs = ui_langs();
+                    view()
+                        .h(px(22.0))
+                        .px_2()
+                        .flex_row()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(5.0))
+                        .bg(bg_control())
+                        .child(
+                            mono(move || {
+                                format!(
+                                    "{} {}",
+                                    t(ui_lang(langs), "进行中", "Pending"),
+                                    stats.with(|s| s.pending)
+                                )
+                            })
+                            .number_of_lines(1)
+                            .text_size(px(11.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(fg_muted()),
+                        )
+                }),
         )
         .child(when(
             move || stats.with(|s| s.max_elapsed.is_some()),
@@ -6333,12 +6428,21 @@ fn status_count_badge(
     bg_color: AdaptiveColor,
     fg_color: AdaptiveColor,
 ) -> impl IntoElement {
-    view().px_2().py_0p5().rounded(px(5.0)).bg(bg_color).child(
-        mono(move || format!("{tag} {}", count()))
-            .text_size(px(11.0))
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_color(fg_color),
-    )
+    view()
+        .h(px(22.0))
+        .px_2()
+        .flex_row()
+        .items_center()
+        .justify_center()
+        .rounded(px(5.0))
+        .bg(bg_color)
+        .child(
+            mono(move || format!("{tag} {}", count()))
+                .number_of_lines(1)
+                .text_size(px(11.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(fg_color),
+        )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6574,10 +6678,6 @@ fn summary(
                     },
                 ))
                 .child(view().flex_1())
-                .child(detail_button(tr("统计", "Summary"), move || {
-                    reset_compose(compose);
-                    selected.set(None);
-                }))
                 .child(detail_actions(
                     shown,
                     controls.clone(),
@@ -8292,8 +8392,10 @@ fn toolbar_menu(
     flow_total: Signal<usize>,
     filter: Signal<String>,
     pretty: Signal<bool>,
+    shown_phase: Signal<Phase>,
     share_id: Signal<String>,
     compose: Compose,
+    seq_builder: SeqBuilder,
     selected: Signal<Option<u64>>,
 ) -> impl IntoElement {
     menu()
@@ -8317,8 +8419,10 @@ fn toolbar_menu(
             flow_total,
             filter,
             pretty,
+            shown_phase,
             share_id,
             compose,
+            seq_builder,
             selected,
         ))
 }
@@ -8349,6 +8453,7 @@ fn flow_count_badge(
     rows: Signal<Vec<RowLine>>,
     flow_total: Signal<usize>,
     filter: Signal<String>,
+    on_press: impl Fn() + 'static,
 ) -> impl IntoElement {
     view()
         .h(px(CONTROL_H))
@@ -8359,8 +8464,12 @@ fn flow_count_badge(
         .justify_center()
         .rounded(px(CONTROL_RADIUS))
         .bg(bg_control())
+        .hover(|style| style.bg(bg_control_hover()))
+        .active(|style| style.opacity(0.8))
+        .cursor(Cursor::Pointer)
         .border_1()
         .border_color(border_control())
+        .on_press(on_press)
         .child(
             mono(move || SharedString::from(flow_count_now(rows, flow_total, filter)))
                 .number_of_lines(1)
@@ -8455,8 +8564,10 @@ fn more_menu(
     flow_total: Signal<usize>,
     filter: Signal<String>,
     pretty: Signal<bool>,
+    shown_phase: Signal<Phase>,
     share_id: Signal<String>,
     compose: Compose,
+    seq_builder: SeqBuilder,
     selected: Signal<Option<u64>>,
 ) -> impl IntoElement {
     let export_har = Rc::new(export_har);
@@ -8510,6 +8621,32 @@ fn more_menu(
                 let langs = ui_langs();
                 move || {
                     export_html_file(controls.clone(), &filter.get(), ui_lang(langs) == Lang::Zh)
+                }
+            },
+        ))
+        .child(menu_action_enabled(
+            Glyph::List,
+            tr("生成时序图", "Sequence diagram"),
+            move || {
+                let len = rows.with(Vec::len);
+                if len > 0 {
+                    SharedString::from(len.to_string())
+                } else {
+                    SharedString::default()
+                }
+            },
+            move || !rows.with(Vec::is_empty),
+            {
+                let controls = import_controls.clone();
+                move || {
+                    begin_sequence_diagram(
+                        &controls,
+                        rows,
+                        seq_builder,
+                        compose,
+                        selected,
+                        shown_phase,
+                    );
                 }
             },
         ))
@@ -8668,6 +8805,60 @@ fn menu_action_meta(
         .cursor(Cursor::Pointer)
         .child(glyph(move || icon, || color(fg_secondary())))
         .child(control_text(label).flex_1().text_color(fg_secondary()))
+        .child(
+            mono(meta)
+                .flex_shrink_0()
+                .number_of_lines(1)
+                .text_size(px(11.0))
+                .text_color(fg_muted()),
+        )
+}
+
+fn menu_action_enabled(
+    icon: Glyph,
+    label: impl IntoReactive<SharedString>,
+    meta: impl Fn() -> SharedString + 'static,
+    enabled: impl Fn() -> bool + 'static + Clone,
+    on_select: impl Fn() + 'static,
+) -> impl IntoElement {
+    let enabled_off = enabled.clone();
+    let enabled_run = enabled.clone();
+    let enabled_icon = enabled.clone();
+    let enabled_text = enabled;
+    menu_item()
+        .disabled(move || !enabled_off())
+        .disabled_style(|style| style.opacity(0.45).cursor(Cursor::Default))
+        .on_select(move || {
+            if enabled_run() {
+                on_select();
+            }
+        })
+        .h(px(32.0))
+        .px_2p5()
+        .gap_2()
+        .rounded(px(6.0))
+        .flex_row()
+        .items_center()
+        .hover(|style| style.bg(bg_control_hover()))
+        .active(|style| style.opacity(0.75))
+        .cursor(Cursor::Pointer)
+        .child(glyph(
+            move || icon,
+            move || {
+                color(if enabled_icon() {
+                    fg_secondary()
+                } else {
+                    fg_muted()
+                })
+            },
+        ))
+        .child(control_text(label).flex_1().text_color(move || {
+            if enabled_text() {
+                fg_secondary()
+            } else {
+                fg_muted()
+            }
+        }))
         .child(
             mono(meta)
                 .flex_shrink_0()
@@ -10766,6 +10957,701 @@ fn begin_new_request(compose: Compose, selected: Signal<Option<u64>>) {
     compose.composing.set(true);
 }
 
+fn begin_sequence_diagram(
+    controls: &Controls,
+    rows: Signal<Vec<RowLine>>,
+    seq_builder: SeqBuilder,
+    compose: Compose,
+    selected: Signal<Option<u64>>,
+    shown_phase: Signal<Phase>,
+) {
+    let current_rows = rows.get();
+    if current_rows.is_empty() {
+        return;
+    }
+    let mut candidates: Vec<SeqCandidate> = controls.hub.with_session(|session| {
+        current_rows
+            .into_iter()
+            .map(|row| {
+                if let Some(f) = session.get(row.id) {
+                    let failed = f.error.is_some() && f.status.is_none();
+                    SeqCandidate {
+                        id: row.id,
+                        method: f.method.clone(),
+                        host: present::resolve_flow_host(f),
+                        path: present::resolve_flow_target(f, true),
+                        status: f.status,
+                        failed,
+                        elapsed: present::format_elapsed(f.started, f.finished_at),
+                        comment: f.comment.clone(),
+                        checked: true,
+                    }
+                } else {
+                    SeqCandidate {
+                        id: row.id,
+                        method: row.method,
+                        host: row.host,
+                        path: row.path,
+                        status: row.status,
+                        failed: row.failed,
+                        elapsed: row.elapsed,
+                        comment: row.comment,
+                        checked: true,
+                    }
+                }
+            })
+            .collect()
+    });
+    candidates.sort_by_key(|c| c.id);
+    reset_compose(compose);
+    selected.set(None);
+    shown_phase.set(Phase::Empty);
+    seq_builder.items.set(candidates);
+    let diagram = build_mermaid_from_state(controls, seq_builder);
+    seq_builder.output.set(diagram);
+    seq_builder.open.set(true);
+}
+
+fn build_mermaid_from_state(controls: &Controls, seq_builder: SeqBuilder) -> String {
+    let include_res = seq_builder.include_response.get();
+    let include_query = seq_builder.include_query.get();
+    controls.hub.with_session(|session| {
+        seq_builder.items.update(|items| {
+            for item in items.iter_mut() {
+                if let Some(f) = session.get(item.id) {
+                    item.method = f.method.clone();
+                    item.host = present::resolve_flow_host(f);
+                    item.path = present::resolve_flow_target(f, true);
+                    item.status = f.status;
+                    item.failed = f.error.is_some() && f.status.is_none();
+                    item.elapsed = present::format_elapsed(f.started, f.finished_at);
+                    item.comment = f.comment.clone();
+                }
+            }
+        });
+        let mut checked_ids: Vec<u64> = seq_builder.items.with(|items| {
+            items
+                .iter()
+                .filter(|item| item.checked)
+                .map(|item| item.id)
+                .collect()
+        });
+        checked_ids.sort_unstable();
+        let flows: Vec<&crate::session::Flow> = checked_ids
+            .iter()
+            .filter_map(|id| session.get(*id))
+            .collect();
+        present::mermaid_sequence_diagram(&flows, include_res, include_query)
+    })
+}
+
+fn seq_candidate_target(item: &SeqCandidate, include_query: bool) -> String {
+    let path = if include_query {
+        item.path.as_str()
+    } else {
+        item.path.split(['?', '#']).next().unwrap_or(&item.path)
+    };
+    let path = if path.is_empty() { "/" } else { path };
+    if item.host.is_empty() {
+        path.to_string()
+    } else if path.starts_with('/') || path.starts_with(':') {
+        format!("{}{}", item.host, path)
+    } else {
+        format!("{}/{}", item.host, path)
+    }
+}
+
+fn seq_action_button(
+    label: impl IntoReactive<SharedString>,
+    enabled: impl Fn() -> bool + 'static + Clone,
+    on_press: impl Fn() + 'static,
+) -> impl IntoElement {
+    let enabled_border = enabled.clone();
+    let enabled_hover = enabled.clone();
+    let enabled_off = enabled.clone();
+    let enabled_text = enabled;
+    view()
+        .h(px(26.0))
+        .px_2p5()
+        .rounded(px(6.0))
+        .border_1()
+        .border_color(move || {
+            if enabled_border() {
+                border_control()
+            } else {
+                border_subtle()
+            }
+        })
+        .bg(bg_control())
+        .hover(|style| {
+            style.bg(move || {
+                if enabled_hover() {
+                    bg_control_hover()
+                } else {
+                    bg_control()
+                }
+            })
+        })
+        .active(|style| style.opacity(0.75))
+        .cursor(Cursor::Pointer)
+        .disabled(move || !enabled_off())
+        .disabled_style(|style| style.cursor(Cursor::Default))
+        .flex_row()
+        .items_center()
+        .on_press(on_press)
+        .child(control_text(label).text_color(move || {
+            if enabled_text() {
+                fg_secondary()
+            } else {
+                fg_muted()
+            }
+        }))
+}
+
+fn seq_option_toggle(
+    on: Signal<bool>,
+    zh: &'static str,
+    en: &'static str,
+    on_toggle: impl Fn() + 'static,
+) -> impl IntoElement {
+    view()
+        .h(px(24.0))
+        .px_2p5()
+        .rounded(px(6.0))
+        .border_1()
+        .border_color(move || {
+            if on.get() {
+                accent_blue_border()
+            } else {
+                border_control()
+            }
+        })
+        .bg(move || {
+            if on.get() {
+                accent_blue_soft()
+            } else {
+                bg_control()
+            }
+        })
+        .hover(|style| {
+            style.bg(move || {
+                if on.get() {
+                    accent_blue_soft()
+                } else {
+                    bg_control_hover()
+                }
+            })
+        })
+        .cursor(Cursor::Pointer)
+        .flex_row()
+        .items_center()
+        .gap_1p5()
+        .on_press(move || {
+            on.set(!on.get());
+            on_toggle();
+        })
+        .child(
+            view()
+                .w(px(6.0))
+                .h(px(6.0))
+                .rounded(px(99.0))
+                .bg(move || if on.get() { accent_blue() } else { fg_muted() }),
+        )
+        .child(
+            text(tr(zh, en))
+                .number_of_lines(1)
+                .text_size(px(11.5))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(move || {
+                    if on.get() {
+                        accent_blue_text()
+                    } else {
+                        fg_secondary()
+                    }
+                }),
+        )
+}
+
+fn sequence_diagram_panel(seq_builder: SeqBuilder, controls: Arc<Controls>) -> impl IntoElement {
+    let select_all_controls = controls.clone();
+    let clear_controls = controls.clone();
+    let invert_controls = controls.clone();
+    let res_controls = controls.clone();
+    let query_controls = controls.clone();
+    let row_controls = controls.clone();
+    let gen_controls = controls.clone();
+    let copy_mermaid_controls = controls.clone();
+    let copy_md_controls = controls;
+    let has_checked = move || {
+        seq_builder
+            .items
+            .with(|items| items.iter().any(|item| item.checked))
+    };
+    view()
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(border_strong())
+        .bg(bg_card())
+        .overflow_hidden()
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .px_3p5()
+                .py_2()
+                .border_b_1()
+                .border_b_color(border_subtle())
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(section_title(tr("生成时序图", "Sequence diagram")))
+                        .child(
+                            view()
+                                .px_2()
+                                .py_0p5()
+                                .rounded(px(5.0))
+                                .bg(accent_blue_soft())
+                                .child(
+                                    mono({
+                                        let langs = ui_langs();
+                                        move || {
+                                            let (checked, total) =
+                                                seq_builder.items.with(|items| {
+                                                    let c = items
+                                                        .iter()
+                                                        .filter(|item| item.checked)
+                                                        .count();
+                                                    (c, items.len())
+                                                });
+                                            match ui_lang(langs) {
+                                                Lang::Zh => format!("已选 {checked} / {total}"),
+                                                Lang::En => format!("{checked} / {total} selected"),
+                                            }
+                                        }
+                                    })
+                                    .text_size(px(11.0))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(accent_blue_text()),
+                                ),
+                        ),
+                )
+                .child(detail_button(tr("关闭", "Close"), move || {
+                    seq_builder.open.set(false);
+                })),
+        )
+        .child(
+            view()
+                .p_3p5()
+                .gap_3()
+                .child(
+                    view()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .gap_1p5()
+                                .child(detail_button(tr("全选", "Select all"), move || {
+                                    seq_builder.items.update(|items| {
+                                        for item in items {
+                                            item.checked = true;
+                                        }
+                                    });
+                                    seq_builder.output.set(build_mermaid_from_state(
+                                        &select_all_controls,
+                                        seq_builder,
+                                    ));
+                                }))
+                                .child(detail_button(tr("全不选", "Clear"), move || {
+                                    seq_builder.items.update(|items| {
+                                        for item in items {
+                                            item.checked = false;
+                                        }
+                                    });
+                                    seq_builder.output.set(build_mermaid_from_state(
+                                        &clear_controls,
+                                        seq_builder,
+                                    ));
+                                }))
+                                .child(detail_button(tr("反选", "Invert"), move || {
+                                    seq_builder.items.update(|items| {
+                                        for item in items {
+                                            item.checked = !item.checked;
+                                        }
+                                    });
+                                    seq_builder.output.set(build_mermaid_from_state(
+                                        &invert_controls,
+                                        seq_builder,
+                                    ));
+                                })),
+                        )
+                        .child(
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .gap_1p5()
+                                .child(seq_option_toggle(
+                                    seq_builder.include_response,
+                                    "含响应",
+                                    "Responses",
+                                    move || {
+                                        seq_builder.output.set(build_mermaid_from_state(
+                                            &res_controls,
+                                            seq_builder,
+                                        ));
+                                    },
+                                ))
+                                .child(seq_option_toggle(
+                                    seq_builder.include_query,
+                                    "含查询参数",
+                                    "Query string",
+                                    move || {
+                                        seq_builder.output.set(build_mermaid_from_state(
+                                            &query_controls,
+                                            seq_builder,
+                                        ));
+                                    },
+                                )),
+                        ),
+                )
+                .child(
+                    view()
+                        .w_full()
+                        .h(move || {
+                            let rows = seq_builder.items.with(Vec::len).clamp(1, 7) as f32;
+                            px(rows * 32.0)
+                        })
+                        .rounded(px(7.0))
+                        .border_1()
+                        .border_color(border_subtle())
+                        .bg(bg_code())
+                        .overflow_hidden()
+                        .child(scroll().size_full().child(each(
+                            seq_builder.items,
+                            |item| item.id,
+                            move |item, index| {
+                                let row_controls = row_controls.clone();
+                                let item_id = item.with(|i| i.id);
+                                view()
+                                    .h(px(32.0))
+                                    .px_2p5()
+                                    .gap_2()
+                                    .flex_row()
+                                    .items_center()
+                                    .bg(move || {
+                                        if index.get() % 2 == 1 {
+                                            bg_code()
+                                        } else {
+                                            bg_card()
+                                        }
+                                    })
+                                    .border_t(
+                                        move || {
+                                            if index.get() > 0 { px(1.0) } else { px(0.0) }
+                                        },
+                                    )
+                                    .border_t_color(border_subtle())
+                                    .hover(|style| style.bg(bg_control_hover()))
+                                    .cursor(Cursor::Pointer)
+                                    .on_press(move || {
+                                        seq_builder.items.update(|items| {
+                                            if let Some(target) =
+                                                items.iter_mut().find(|i| i.id == item_id)
+                                            {
+                                                target.checked = !target.checked;
+                                            }
+                                        });
+                                        seq_builder.output.set(build_mermaid_from_state(
+                                            &row_controls,
+                                            seq_builder,
+                                        ));
+                                    })
+                                    .child(
+                                        view()
+                                            .w(px(14.0))
+                                            .h(px(14.0))
+                                            .flex_shrink_0()
+                                            .rounded(px(4.0))
+                                            .border_1()
+                                            .border_color(move || {
+                                                if item.with(|i| i.checked) {
+                                                    accent_blue()
+                                                } else {
+                                                    border_control()
+                                                }
+                                            })
+                                            .bg(move || {
+                                                if item.with(|i| i.checked) {
+                                                    accent_blue()
+                                                } else {
+                                                    bg_card()
+                                                }
+                                            })
+                                            .items_center()
+                                            .justify_center()
+                                            .child(when(
+                                                move || item.with(|i| i.checked),
+                                                || {
+                                                    canvas(|| {
+                                                        Painter::new()
+                                                            .line_width(1.8)
+                                                            .stroke_color(white())
+                                                            .stroke_svg(
+                                                                "M2.2 5.2 L4.4 7.4 L8.0 3.0",
+                                                            )
+                                                    })
+                                                    .w(px(10.0))
+                                                    .h(px(10.0))
+                                                },
+                                            )),
+                                    )
+                                    .child(
+                                        mono(move || format!("#{}", item.with(|i| i.id)))
+                                            .flex_shrink_0()
+                                            .text_size(px(11.5))
+                                            .text_color(fg_muted()),
+                                    )
+                                    .child(
+                                        view()
+                                            .px(px(5.0))
+                                            .py_0p5()
+                                            .rounded(px(4.0))
+                                            .flex_shrink_0()
+                                            .bg(move || item.with(|i| method_bg(&i.method)))
+                                            .child(
+                                                mono(move || item.with(|i| i.method.clone()))
+                                                    .text_size(px(10.5))
+                                                    .font_weight(FontWeight::BOLD)
+                                                    .text_color(move || {
+                                                        item.with(|i| method_fg(&i.method))
+                                                    }),
+                                            ),
+                                    )
+                                    .child(
+                                        mono(move || {
+                                            item.with(|i| {
+                                                seq_candidate_target(
+                                                    i,
+                                                    seq_builder.include_query.get(),
+                                                )
+                                            })
+                                        })
+                                        .flex_1()
+                                        .min_w(px(0.0))
+                                        .number_of_lines(1)
+                                        .text_overflow(EllipsizeMode::Middle)
+                                        .text_size(px(12.0))
+                                        .text_color(fg_primary()),
+                                    )
+                                    .child(when(
+                                        move || item.with(|i| !i.comment.is_empty()),
+                                        move || {
+                                            view()
+                                                .px_1p5()
+                                                .py(px(1.0))
+                                                .rounded(px(4.0))
+                                                .max_w(px(140.0))
+                                                .flex_shrink_0()
+                                                .bg(accent_blue_soft())
+                                                .child(
+                                                    text(move || {
+                                                        format!(
+                                                            "# {}",
+                                                            item.with(|i| i.comment.clone())
+                                                        )
+                                                    })
+                                                    .number_of_lines(1)
+                                                    .text_overflow(EllipsizeMode::Tail)
+                                                    .text_size(px(10.5))
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .text_color(accent_blue_text()),
+                                                )
+                                        },
+                                    ))
+                                    .child(
+                                        mono(move || {
+                                            item.with(|i| list_status(i.status, i.failed))
+                                        })
+                                        .flex_shrink_0()
+                                        .text_size(px(11.5))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(
+                                            move || {
+                                                item.with(|i| http_status_fg(i.status, i.failed))
+                                            },
+                                        ),
+                                    )
+                                    .child(
+                                        mono(move || item.with(|i| i.elapsed.clone()))
+                                            .flex_shrink_0()
+                                            .text_size(px(11.5))
+                                            .text_color(fg_muted()),
+                                    )
+                            },
+                        ))),
+                )
+                .child(
+                    view()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .gap_1p5()
+                                .child(
+                                    view()
+                                        .h(px(26.0))
+                                        .px_3()
+                                        .rounded(px(6.0))
+                                        .bg(move || {
+                                            if has_checked() {
+                                                accent_blue()
+                                            } else {
+                                                bg_control()
+                                            }
+                                        })
+                                        .hover(|style| {
+                                            style.bg(move || {
+                                                if has_checked() {
+                                                    accent_blue_hover()
+                                                } else {
+                                                    bg_control()
+                                                }
+                                            })
+                                        })
+                                        .active(|style| style.opacity(0.85))
+                                        .cursor(Cursor::Pointer)
+                                        .disabled(move || !has_checked())
+                                        .disabled_style(|style| style.cursor(Cursor::Default))
+                                        .flex_row()
+                                        .items_center()
+                                        .on_press(move || {
+                                            let count = seq_builder.items.with(|items| {
+                                                items.iter().filter(|i| i.checked).count()
+                                            });
+                                            if count == 0 {
+                                                return;
+                                            }
+                                            let diagram = build_mermaid_from_state(
+                                                &gen_controls,
+                                                seq_builder,
+                                            );
+                                            seq_builder.output.set(diagram.clone());
+                                            set_clipboard(diagram);
+                                            set_status(
+                                                &gen_controls,
+                                                StatusMsg::SequenceGenerated { count },
+                                            );
+                                        })
+                                        .child(
+                                            text(tr("生成时序图", "Generate"))
+                                                .number_of_lines(1)
+                                                .text_size(px(12.0))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(move || {
+                                                    if has_checked() {
+                                                        AdaptiveColor::rgb(0xffffff, 0xffffff)
+                                                    } else {
+                                                        fg_muted()
+                                                    }
+                                                }),
+                                        ),
+                                )
+                                .child(seq_action_button(
+                                    tr("复制 Mermaid", "Copy Mermaid"),
+                                    has_checked,
+                                    move || {
+                                        let count = seq_builder.items.with(|items| {
+                                            items.iter().filter(|i| i.checked).count()
+                                        });
+                                        if count == 0 {
+                                            return;
+                                        }
+                                        let diagram = build_mermaid_from_state(
+                                            &copy_mermaid_controls,
+                                            seq_builder,
+                                        );
+                                        seq_builder.output.set(diagram.clone());
+                                        set_clipboard(diagram);
+                                        set_status(
+                                            &copy_mermaid_controls,
+                                            StatusMsg::CopiedMermaid,
+                                        );
+                                    },
+                                ))
+                                .child(seq_action_button(
+                                    tr("复制 Markdown", "Copy Markdown"),
+                                    has_checked,
+                                    move || {
+                                        let count = seq_builder.items.with(|items| {
+                                            items.iter().filter(|i| i.checked).count()
+                                        });
+                                        if count == 0 {
+                                            return;
+                                        }
+                                        let diagram = build_mermaid_from_state(
+                                            &copy_md_controls,
+                                            seq_builder,
+                                        );
+                                        seq_builder.output.set(diagram.clone());
+                                        set_clipboard(present::mermaid_markdown_block(&diagram));
+                                        set_status(
+                                            &copy_md_controls,
+                                            StatusMsg::CopiedMermaidMarkdown,
+                                        );
+                                    },
+                                )),
+                        )
+                        .child(
+                            text(tr(
+                                "Mermaid sequenceDiagram 语法",
+                                "Mermaid sequenceDiagram syntax",
+                            ))
+                            .text_size(px(11.0))
+                            .text_color(fg_muted()),
+                        ),
+                )
+                .child(
+                    view()
+                        .w_full()
+                        .h(move || {
+                            let lines = body_line_count(&seq_builder.output.get()).clamp(6, 16);
+                            px(lines as f32 * BODY_LINE_H + BODY_CHROME)
+                        })
+                        .rounded(px(7.0))
+                        .border_1()
+                        .border_color(border_control())
+                        .bg(bg_code())
+                        .overflow_hidden()
+                        .child(
+                            editor()
+                                .value(move || SharedString::from(seq_builder.output.get()))
+                                .read_only(true)
+                                .language("plaintext")
+                                .line_numbers(true)
+                                .folding(false)
+                                .soft_wrap(true)
+                                .font_size(Points(12.0))
+                                .line_height(Points(18.0))
+                                .scroll_beyond_last_line(false)
+                                .size_full(),
+                        ),
+                ),
+        )
+}
+
 fn begin_compose(controls: &Controls, id: Option<u64>, compose: Compose) {
     if id.is_none() {
         compose.response.set(false);
@@ -10830,11 +11716,15 @@ fn clear_captured(
     selected: Signal<Option<u64>>,
     baseline: Signal<Option<u64>>,
     compose: Compose,
+    seq_builder: SeqBuilder,
 ) {
     controls.hub.clear_session();
     selected.set(None);
     baseline.set(None);
     reset_compose(compose);
+    seq_builder.open.set(false);
+    seq_builder.items.set(Vec::new());
+    seq_builder.output.set(String::new());
 }
 
 fn clear_unpinned_captured(
@@ -10842,6 +11732,7 @@ fn clear_unpinned_captured(
     selected: Signal<Option<u64>>,
     baseline: Signal<Option<u64>>,
     compose: Compose,
+    seq_builder: SeqBuilder,
 ) {
     controls.hub.clear_unpinned();
     if let Some(id) = selected.get()
@@ -10858,6 +11749,21 @@ fn clear_unpinned_captured(
             .with_session(|session| session.get(id).is_none())
     {
         baseline.set(None);
+    }
+    if seq_builder.open.get() {
+        let remaining_empty = controls.hub.with_session(|session| {
+            seq_builder
+                .items
+                .update(|items| items.retain(|item| session.get(item.id).is_some()));
+            seq_builder.items.with(Vec::is_empty)
+        });
+        if remaining_empty {
+            seq_builder.open.set(false);
+            seq_builder.output.set(String::new());
+        } else {
+            let diagram = build_mermaid_from_state(controls, seq_builder);
+            seq_builder.output.set(diagram);
+        }
     }
 }
 
@@ -12688,5 +13594,25 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
         let ids: Vec<u64> = by_elapsed_desc.iter().map(|r| r.id).collect();
         // Unfinished (`None`, id 3) stays at the bottom even in descending sort.
         assert_eq!(ids, vec![1, 4, 2, 3]);
+
+        let candidate = super::SeqCandidate {
+            id: 9,
+            method: "GET".into(),
+            host: "api.example.com".into(),
+            path: "/v1/orders?limit=10".into(),
+            status: Some(200),
+            failed: false,
+            elapsed: "12 ms".into(),
+            comment: "fetch orders".into(),
+            checked: true,
+        };
+        assert_eq!(
+            super::seq_candidate_target(&candidate, false),
+            "api.example.com/v1/orders"
+        );
+        assert_eq!(
+            super::seq_candidate_target(&candidate, true),
+            "api.example.com/v1/orders?limit=10"
+        );
     }
 }

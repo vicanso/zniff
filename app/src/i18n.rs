@@ -136,6 +136,11 @@ pub enum StatusMsg {
         count: usize,
     },
     MappedLocal(String),
+    SequenceGenerated {
+        count: usize,
+    },
+    CopiedMermaid,
+    CopiedMermaidMarkdown,
 }
 
 fn port_in_use(err: &str) -> bool {
@@ -387,6 +392,24 @@ impl StatusMsg {
                 Lang::Zh => format!("已添加本地映射规则 · {target}"),
                 Lang::En => format!("Added map-local rule · {target}"),
             },
+            Self::SequenceGenerated { count } => match lang {
+                Lang::Zh => format!("已生成 {count} 条流量的时序图并复制 Mermaid"),
+                Lang::En => {
+                    format!("Generated sequence diagram for {count} flows and copied Mermaid")
+                }
+            },
+            Self::CopiedMermaid => t(
+                lang,
+                "已复制 Mermaid 时序图",
+                "Copied Mermaid sequence diagram",
+            )
+            .into(),
+            Self::CopiedMermaidMarkdown => t(
+                lang,
+                "已复制 Markdown 时序图",
+                "Copied Markdown sequence diagram",
+            )
+            .into(),
         }
     }
 }
@@ -738,6 +761,22 @@ mod tests {
         assert_eq!(
             StatusMsg::Repeated { id: 7, count: 5 }.text(Lang::En),
             "Repeated #7 ×5"
+        );
+        assert_eq!(
+            StatusMsg::SequenceGenerated { count: 4 }.text(Lang::Zh),
+            "已生成 4 条流量的时序图并复制 Mermaid"
+        );
+        assert_eq!(
+            StatusMsg::SequenceGenerated { count: 4 }.text(Lang::En),
+            "Generated sequence diagram for 4 flows and copied Mermaid"
+        );
+        assert_eq!(
+            StatusMsg::CopiedMermaid.text(Lang::Zh),
+            "已复制 Mermaid 时序图"
+        );
+        assert_eq!(
+            StatusMsg::CopiedMermaidMarkdown.text(Lang::En),
+            "Copied Markdown sequence diagram"
         );
     }
 }

@@ -820,6 +820,270 @@ pub fn flow_snapshot(flow: &Flow, lang: Lang) -> String {
     out
 }
 
+/// Builds a Mermaid `sequenceDiagram` from the given flows, interleaving
+/// request start and response finish timestamps along the real timeline so
+/// concurrent/overlapping requests and lifeline activations (`+`/`-`) are visible.
+pub fn mermaid_sequence_diagram(
+    flows: &[&Flow],
+    include_response: bool,
+    include_query: bool,
+) -> String {
+    let mut lines = vec![
+        "sequenceDiagram".to_string(),
+        "    autonumber".to_string(),
+        "    participant C as Client".to_string(),
+    ];
+    if flows.is_empty() {
+        return lines.join("\n");
+    }
+    let mut sorted: Vec<&Flow> = flows.to_vec();
+    sorted.sort_by_key(|flow| (flow.started, flow.id));
+    let base_start = sorted[0].started;
+    let show_offset = sorted.len() > 1;
+
+    let mut participants: Vec<(String, String)> = Vec::new();
+    let mut flow_aliases: Vec<String> = Vec::with_capacity(sorted.len());
+    let mut flow_targets: Vec<String> = Vec::with_capacity(sorted.len());
+    let mut end_times: Vec<SystemTime> = Vec::with_capacity(sorted.len());
+
+    for flow in &sorted {
+        let host = resolve_flow_host(flow);
+        let alias = if let Some((_, existing)) = participants.iter().find(|(h, _)| h == &host) {
+            existing.clone()
+        } else {
+            let alias = format!("H{}", participants.len() + 1);
+            let label = format_mermaid_participant(&host);
+            lines.push(format!("    participant {alias} as {label}"));
+            participants.push((host, alias.clone()));
+            alias
+        };
+        flow_aliases.push(alias);
+        let target_raw = resolve_flow_target(flow, include_query);
+        flow_targets.push(sanitize_mermaid_text(&target_raw));
+        let end_time = flow
+            .finished_at
+            .map(|fin| fin.max(flow.started))
+            .unwrap_or(flow.started);
+        end_times.push(end_time);
+    }
+
+    // Detect if a flow overlaps in time with another flow targeting the same host
+    // so response arrows on shared lifelines can include the path to disambiguate.
+    let mut same_host_overlap = vec![false; sorted.len()];
+    if include_response {
+        for i in 0..sorted.len() {
+            for j in (i + 1)..sorted.len() {
+                if flow_aliases[i] == flow_aliases[j] && sorted[j].started < end_times[i] {
+                    same_host_overlap[i] = true;
+                    same_host_overlap[j] = true;
+                }
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    enum EventKind {
+        Request,
+        Response,
+    }
+
+    let mut events: Vec<(SystemTime, EventKind, usize)> =
+        Vec::with_capacity(sorted.len() * if include_response { 2 } else { 1 });
+    for (idx, flow) in sorted.iter().enumerate() {
+        events.push((flow.started, EventKind::Request, idx));
+        if include_response {
+            events.push((end_times[idx], EventKind::Response, idx));
+        }
+    }
+    events.sort_by_key(|(time, kind, idx)| (*time, *kind, *idx));
+
+    let act = if include_response { "+" } else { "" };
+    for (_, kind, idx) in events {
+        let flow = sorted[idx];
+        let alias = &flow_aliases[idx];
+        let target = &flow_targets[idx];
+        match kind {
+            EventKind::Request => {
+                let comment = sanitize_mermaid_text(&flow.comment);
+                if !comment.is_empty() {
+                    lines.push(format!("    Note over C,{alias}: {comment}"));
+                }
+                let method_raw = if flow.method.trim().is_empty() {
+                    "GET"
+                } else {
+                    flow.method.trim()
+                };
+                let method = sanitize_mermaid_text(method_raw);
+                let offset_suffix = if show_offset {
+                    let delta = flow.started.duration_since(base_start).unwrap_or_default();
+                    format!(" [+{}]", format_delta(delta))
+                } else {
+                    String::new()
+                };
+                let failed_without_res = flow.status.is_none() && flow.error.is_some();
+                if failed_without_res {
+                    lines.push(format!(
+                        "    C-x{act}{alias}: {method} {target}{offset_suffix}"
+                    ));
+                } else {
+                    lines.push(format!(
+                        "    C->>{act}{alias}: {method} {target}{offset_suffix}"
+                    ));
+                }
+            }
+            EventKind::Response => {
+                let path_hint = if same_host_overlap[idx] {
+                    format!(" {target}")
+                } else {
+                    String::new()
+                };
+                match flow.status {
+                    Some(code) => {
+                        let status_text = match http::StatusCode::from_u16(code)
+                            .ok()
+                            .and_then(|s| s.canonical_reason())
+                        {
+                            Some(reason) => format!("{code} {reason}"),
+                            None => code.to_string(),
+                        };
+                        let elapsed = flow
+                            .finished_at
+                            .and_then(|fin| fin.duration_since(flow.started).ok())
+                            .map(format_duration);
+                        let res_bytes = flow.res_bytes();
+                        let size = (res_bytes > 0).then(|| format_count(res_bytes as u64));
+                        let meta = match (elapsed, size) {
+                            (Some(e), Some(s)) => format!(" ({e}, {s})"),
+                            (Some(e), None) => format!(" ({e})"),
+                            (None, Some(s)) => format!(" ({s})"),
+                            (None, None) => String::new(),
+                        };
+                        lines.push(format!("    {alias}-->>-C: {status_text}{path_hint}{meta}"));
+                    }
+                    None if flow.error.is_some() => {
+                        let reason = sanitize_mermaid_text(flow.error.as_deref().unwrap_or(""));
+                        if reason.is_empty() {
+                            lines.push(format!("    {alias}--x-C: ERR{path_hint}"));
+                        } else {
+                            lines.push(format!("    {alias}--x-C: ERR{path_hint} ({reason})"));
+                        }
+                    }
+                    None => {
+                        lines.push(format!("    {alias}-->>-C: ...{path_hint}"));
+                    }
+                }
+            }
+        }
+    }
+    lines.join("\n")
+}
+
+/// Wraps a Mermaid diagram string in a fenced Markdown code block.
+pub fn mermaid_markdown_block(diagram: &str) -> String {
+    format!("```mermaid\n{}\n```", diagram.trim_end())
+}
+
+pub(crate) fn resolve_flow_host(flow: &Flow) -> String {
+    let trimmed = flow.host.trim();
+    if !trimmed.is_empty() {
+        return trimmed.to_string();
+    }
+    if let Some((_, rest)) = flow.url.split_once("://") {
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or("").trim();
+        let host = authority
+            .rsplit_once('@')
+            .map(|(_, h)| h)
+            .unwrap_or(authority)
+            .trim();
+        if !host.is_empty() {
+            return host.to_string();
+        }
+    } else {
+        let raw = flow.url.trim();
+        if !raw.is_empty() && !raw.starts_with('/') {
+            let host = raw.split(['/', '?', '#']).next().unwrap_or("").trim();
+            if !host.is_empty() {
+                return host.to_string();
+            }
+        }
+    }
+    "unknown".to_string()
+}
+
+pub(crate) fn resolve_flow_target(flow: &Flow, include_query: bool) -> String {
+    let raw: String = if !flow.path.trim().is_empty() {
+        flow.path.trim().to_string()
+    } else if let Some((_, rest)) = flow.url.split_once("://") {
+        if let Some(idx) = rest.find('/') {
+            rest[idx..].to_string()
+        } else if let Some(idx) = rest.find(['?', '#']) {
+            format!("/{}", &rest[idx..])
+        } else {
+            "/".to_string()
+        }
+    } else {
+        "/".to_string()
+    };
+    let sliced = if include_query {
+        raw.as_str()
+    } else {
+        raw.split(['?', '#']).next().unwrap_or(&raw)
+    };
+    if sliced.is_empty() {
+        "/".to_string()
+    } else if sliced.starts_with('/') || sliced.starts_with(':') {
+        sliced.to_string()
+    } else {
+        format!("/{sliced}")
+    }
+}
+
+fn format_mermaid_participant(host: &str) -> String {
+    let clean = sanitize_mermaid_text(&host.replace('"', "'"));
+    let clean = if clean.is_empty() {
+        "unknown".to_string()
+    } else {
+        clean
+    };
+    let simple = clean
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_'));
+    if simple {
+        clean
+    } else {
+        format!("\"{clean}\"")
+    }
+}
+
+fn sanitize_mermaid_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut prev_space = false;
+    for ch in text.chars() {
+        match ch {
+            ';' => {
+                out.push_str("#59;");
+                prev_space = false;
+            }
+            '#' => {
+                out.push_str("#35;");
+                prev_space = false;
+            }
+            '\r' | '\n' | '\t' | ' ' => {
+                if !prev_space && !out.is_empty() {
+                    out.push(' ');
+                    prev_space = true;
+                }
+            }
+            c if c.is_control() => {}
+            c => {
+                out.push(c);
+                prev_space = false;
+            }
+        }
+    }
+    out.trim().to_string()
+}
+
 fn push_section(out: &mut String, title: &str, body: &str) {
     if !out.is_empty() {
         out.push_str("\n\n");
@@ -2489,5 +2753,151 @@ Content-Type: image/png\r\n\r\n\
         let (hits, filtered) = filter_body_lines("alpha\nBeta match\ngamma MATCH two", "match");
         assert_eq!(hits, 2);
         assert_eq!(filtered, "[L2] Beta match\n[L3] gamma MATCH two");
+    }
+
+    #[test]
+    fn mermaid_sequence_diagram_deduplicates_hosts_and_sanitizes_messages() {
+        let mut session = Session::default();
+        let start = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+
+        let id1 = session.open(FlowDraft {
+            protocol: Protocol::Http2,
+            method: "GET".into(),
+            host: "api.example.com".into(),
+            path: "/api/v1/items?page=1&filter=a;b#sec".into(),
+            url: "https://api.example.com/api/v1/items?page=1&filter=a;b#sec".into(),
+            request_headers: vec![],
+        });
+        session.set_response(id1, 200, vec![], None);
+        session.add_transfer(id1, crate::session::Direction::Response, 1229);
+        let _ = session.set_comment(id1, "Load list; step #1\nnext line");
+
+        let id2 = session.open(FlowDraft {
+            protocol: Protocol::Http11,
+            method: "POST".into(),
+            host: "auth.example.com:8443".into(),
+            path: "/oauth/token".into(),
+            url: "https://auth.example.com:8443/oauth/token".into(),
+            request_headers: vec![],
+        });
+        session.set_error(id2, "connection reset; peer #2");
+
+        let id3 = session.open(FlowDraft {
+            protocol: Protocol::Http2,
+            method: "GET".into(),
+            host: "api.example.com".into(),
+            path: "/api/v1/stream".into(),
+            url: "https://api.example.com/api/v1/stream".into(),
+            request_headers: vec![],
+        });
+
+        let mut f1 = session.get(id1).unwrap().clone();
+        f1.started = start;
+        f1.finished_at = Some(start + Duration::from_millis(45));
+        let mut f2 = session.get(id2).unwrap().clone();
+        f2.started = start + Duration::from_millis(60);
+        f2.finished_at = Some(start + Duration::from_millis(70));
+        let mut f3 = session.get(id3).unwrap().clone();
+        f3.started = start + Duration::from_millis(80);
+        f3.finished_at = None;
+
+        let flows = [&f1, &f2, &f3];
+        let diagram = mermaid_sequence_diagram(&flows, true, false);
+        assert!(diagram.starts_with(
+            "sequenceDiagram\n    autonumber\n    participant C as Client\n    participant H1 as api.example.com\n    participant H2 as \"auth.example.com:8443\""
+        ));
+        // Deduplicated H1 (only 2 host participants total)
+        assert!(!diagram.contains("participant H3"));
+        // Sanitized comment note
+        assert!(diagram.contains("Note over C,H1: Load list#59; step #35;1 next line"));
+        // Stripped query string when include_query == false, with activation `+` and `[+0 ms]`
+        assert!(diagram.contains("C->>+H1: GET /api/v1/items [+0 ms]\n"));
+        assert!(!diagram.contains("page=1"));
+        // Response arrow with deactivation `-`, status, elapsed time, and size
+        assert!(diagram.contains("H1-->>-C: 200 OK (45 ms, 1.2 KB)"));
+        // Failed request and error response arrows with sanitized error
+        assert!(diagram.contains("C-x+H2: POST /oauth/token [+60 ms]"));
+        assert!(diagram.contains("H2--x-C: ERR (connection reset#59; peer #35;2)"));
+        // In-progress response arrow
+        assert!(diagram.contains("C->>+H1: GET /api/v1/stream [+80 ms]\n    H1-->>-C: ..."));
+
+        // With include_query == true and include_response == false
+        let req_only = mermaid_sequence_diagram(&flows, false, true);
+        assert!(req_only.contains("C->>H1: GET /api/v1/items?page=1&filter=a#59;b#35;sec [+0 ms]"));
+        assert!(!req_only.contains("-->>"));
+        assert!(!req_only.contains("--x"));
+
+        let md = mermaid_markdown_block(&req_only);
+        assert!(md.starts_with("```mermaid\nsequenceDiagram\n"));
+        assert!(md.ends_with("\n```"));
+
+        // Concurrent overlapping requests: slow request starts at +0ms (500ms duration),
+        // fast request on the same host starts at +2ms (48ms duration) and finishes first at +50ms!
+        let mut slow = f1.clone();
+        slow.id = 10;
+        slow.path = "/api/v1/slow".into();
+        slow.comment.clear();
+        slow.started = start;
+        slow.finished_at = Some(start + Duration::from_millis(500));
+        let mut fast = f1.clone();
+        fast.id = 11;
+        fast.path = "/api/v1/fast".into();
+        fast.comment.clear();
+        fast.started = start + Duration::from_millis(2);
+        fast.finished_at = Some(start + Duration::from_millis(50));
+        let concurrent = mermaid_sequence_diagram(&[&slow, &fast], true, false);
+        let idx_req_slow = concurrent
+            .find("C->>+H1: GET /api/v1/slow [+0 ms]")
+            .unwrap();
+        let idx_req_fast = concurrent
+            .find("C->>+H1: GET /api/v1/fast [+2 ms]")
+            .unwrap();
+        let idx_res_fast = concurrent
+            .find("H1-->>-C: 200 OK /api/v1/fast (48 ms, 1.2 KB)")
+            .unwrap();
+        let idx_res_slow = concurrent
+            .find("H1-->>-C: 200 OK /api/v1/slow (500 ms, 1.2 KB)")
+            .unwrap();
+        assert!(idx_req_slow < idx_req_fast);
+        assert!(idx_req_fast < idx_res_fast);
+        assert!(idx_res_fast < idx_res_slow);
+
+        // Empty slice edge case
+        let empty = mermaid_sequence_diagram(&[], true, false);
+        assert_eq!(
+            empty,
+            "sequenceDiagram\n    autonumber\n    participant C as Client"
+        );
+
+        // Fallback host extraction from URL when flow.host is empty, and status without body/elapsed
+        let id4 = session.open(FlowDraft {
+            protocol: Protocol::Http11,
+            method: "HEAD".into(),
+            host: String::new(),
+            path: String::new(),
+            url: "https://[::1]:8443/healthz?probe=1".into(),
+            request_headers: vec![],
+        });
+        session.set_response(id4, 204, vec![], None);
+        let mut f4 = session.get(id4).unwrap().clone();
+        f4.finished_at = None;
+        let single = mermaid_sequence_diagram(&[&f4], true, false);
+        assert!(single.contains("participant H1 as \"[::1]:8443\""));
+        assert!(single.contains("C->>+H1: HEAD /healthz\n"));
+        assert!(single.contains("H1-->>-C: 204 No Content"));
+
+        // URL without slash before query string and relative path without leading slash
+        let id5 = session.open(FlowDraft {
+            protocol: Protocol::Http11,
+            method: "GET".into(),
+            host: String::new(),
+            path: String::new(),
+            url: "https://user:pass@search.example.com?q=rust".into(),
+            request_headers: vec![],
+        });
+        let f5 = session.get(id5).unwrap().clone();
+        assert_eq!(resolve_flow_host(&f5), "search.example.com");
+        assert_eq!(resolve_flow_target(&f5, false), "/");
+        assert_eq!(resolve_flow_target(&f5, true), "/?q=rust");
     }
 }
