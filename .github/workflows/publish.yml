@@ -212,13 +212,17 @@ jobs:
             os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             bin: zniff
+          - name: linux-aarch64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            bin: zniff
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@v7
       - name: GTK 4
-        if: matrix.name == 'linux-x86_64'
+        if: startsWith(matrix.name, 'linux-')
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends pkg-config libgtk-4-dev
@@ -234,7 +238,7 @@ jobs:
       - name: release
         run: cargo build --manifest-path app/Cargo.toml --release --target ${{ matrix.target }}
       - name: check glibc symbol baseline
-        if: matrix.name == 'linux-x86_64'
+        if: startsWith(matrix.name, 'linux-')
         run: |
           set -euo pipefail
           bin="app/target/${{ matrix.target }}/release/${{ matrix.bin }}"
