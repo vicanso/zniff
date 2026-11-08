@@ -631,10 +631,11 @@ fn next_rule_token(input: &str) -> Option<(String, &str)> {
                 '\\' => {
                     let (_, esc) = chars.next()?;
                     match esc {
-                        'n' => out.push('\n'),
-                        'r' => out.push('\r'),
-                        't' => out.push('\t'),
-                        other => out.push(other),
+                        '"' | '\\' => out.push(esc),
+                        other => {
+                            out.push('\\');
+                            out.push(other);
+                        }
                     }
                 }
                 other => out.push(other),
@@ -2721,6 +2722,22 @@ break-res example.com/graphql op=anonymous
         )
         .unwrap();
         assert_eq!(quick_fb, "map-local example.com/assets ./dist fallback\n");
+
+        // Windows paths with unescaped backslashes inside double quotes stay intact
+        let win_rules = parse_rules(
+            "map-local example.com/assets \"C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\zniff-mapdir-8100\\dist\" fallback\n",
+        );
+        assert_eq!(
+            effect(&win_rules, "example.com", "/assets/js/app.js").action,
+            Some(Action::MapLocal {
+                path_prefix: "/assets".to_string(),
+                file: Some(PathBuf::from(
+                    "C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\zniff-mapdir-8100\\dist"
+                )),
+                status: 200,
+                fallback: true,
+            })
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
