@@ -18,6 +18,9 @@ pub enum Glyph {
     List,
     Prompt,
     Columns,
+    Check,
+    Close,
+    History,
 }
 
 pub fn glyph(
@@ -89,6 +92,14 @@ fn draw(kind: Glyph, paint: Hsla, size: f32) -> Painter {
             .stroke_svg("M3.2 3.2 H12.8 V12.8 H3.2 Z")
             .stroke_svg("M5.2 8.2 L7.2 9.6 L5.2 11")
             .stroke_svg("M8.4 11 H10.8"),
+        Glyph::Check => painter.stroke_svg("M3.4 8.2 L6.6 11.4 L12.6 4.6"),
+        Glyph::Close => painter
+            .stroke_svg("M4.2 4.2 L11.8 11.8")
+            .stroke_svg("M11.8 4.2 L4.2 11.8"),
+        Glyph::History => painter
+            .stroke_svg("M3.2 5.4 A5.2 5.2 0 1 1 2.9 8.8")
+            .stroke_svg("M2.8 2.8 V5.6 H5.6")
+            .stroke_svg("M8 5.4 V8.2 L10 9.4"),
     };
     painter
 }

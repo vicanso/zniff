@@ -1210,14 +1210,23 @@ impl Session {
         out
     }
 
+    #[cfg(test)]
     pub fn facets(&self) -> SessionFacets {
+        self.facets_matching("")
+    }
+
+    pub fn facets_matching(&self, filter: &str) -> SessionFacets {
         const FACET_CAP: usize = 64;
+        let query = FlowQuery::parse(filter);
         let mut domain_map: HashMap<String, FacetEntry> = HashMap::new();
         let mut app_map: HashMap<String, FacetEntry> = HashMap::new();
         for id in &self.order {
             let Some(flow) = self.flows.get(id) else {
                 continue;
             };
+            if !query.matches(flow, &self.spill) {
+                continue;
+            }
             let is_err = flow.error.is_some() || flow.status.is_some_and(|code| code >= 400);
             let host = flow.host.trim();
             if !host.is_empty() {
@@ -1376,6 +1385,20 @@ fn split_or_terms(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// Combines a base setup filter and a secondary list filter into a two-stage
+/// filter string (`\n`-separated) so the secondary filter narrows down the
+/// results of the base filter.
+pub fn combine_filters(base: &str, secondary: &str) -> String {
+    let b = base.trim();
+    let s = secondary.trim();
+    match (b.is_empty(), s.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => b.to_string(),
+        (true, false) => s.to_string(),
+        (false, false) => format!("{b}\n{s}"),
+    }
+}
+
 /// Joins `|` tokens separated by spaces (`a | b` -> `a|b`) so whitespace
 /// splitting keeps an OR group together.
 pub fn normalize_filter_pipes(filter: &str) -> String {
@@ -1456,6 +1479,27 @@ fn comment_has_repeat_id(comment_lower: &str, id_str: &str) -> bool {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FlowQuery {
+    stages: Vec<FlowStage>,
+}
+
+impl FlowQuery {
+    fn parse(filter: &str) -> Self {
+        let stages = filter
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(FlowStage::parse)
+            .collect();
+        Self { stages }
+    }
+
+    fn matches(&self, flow: &Flow, spill: &SpillStore) -> bool {
+        self.stages.iter().all(|stage| stage.matches(flow, spill))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FlowStage {
     texts: Vec<Vec<String>>,
     hosts: Vec<String>,
     client_ips: Vec<String>,
@@ -1473,7 +1517,7 @@ struct FlowQuery {
     slow_only: bool,
 }
 
-impl FlowQuery {
+impl FlowStage {
     fn parse(filter: &str) -> Self {
         let normalized = normalize_filter_pipes(filter);
         let mut query = Self {
@@ -2350,5 +2394,55 @@ mod tests {
         );
         assert_eq!(session.ids_matching("app:Google_Chrome"), vec![f2, f3]);
         assert_eq!(session.ids_matching("app:curl"), vec![f1]);
+
+        let filtered_facets = session.facets_matching("host:api.example.com");
+        assert_eq!(filtered_facets.domains.len(), 1);
+        assert_eq!(filtered_facets.domains[0].token, "api.example.com");
+        assert_eq!(filtered_facets.domains[0].count, 2);
+    }
+
+    #[test]
+    fn combine_filters_applies_secondary_filter_strictly_within_base_results() {
+        let mut session = Session::default();
+        let f1 = session.open(FlowDraft {
+            protocol: Protocol::Http11,
+            method: "GET".into(),
+            host: "a.example.com".into(),
+            path: "/api/orders".into(),
+            url: "https://a.example.com/api/orders".into(),
+            request_headers: Vec::new(),
+        });
+        let f2 = session.open(FlowDraft {
+            protocol: Protocol::Http11,
+            method: "POST".into(),
+            host: "b.example.com".into(),
+            path: "/api/users".into(),
+            url: "https://b.example.com/api/users".into(),
+            request_headers: Vec::new(),
+        });
+        let f3 = session.open(FlowDraft {
+            protocol: Protocol::Http11,
+            method: "GET".into(),
+            host: "c.example.com".into(),
+            path: "/api/orders".into(),
+            url: "https://c.example.com/api/orders".into(),
+            request_headers: Vec::new(),
+        });
+
+        let base = "host:a.example.com|b.example.com path:/api";
+        assert_eq!(session.ids_matching(base), vec![f1, f2]);
+
+        // Secondary host filter narrows to `a.example.com`, does NOT union with `b.example.com`.
+        let combined_a = combine_filters(base, "host:a.example.com");
+        assert_eq!(session.ids_matching(&combined_a), vec![f1]);
+
+        // Secondary host filter for `c.example.com` (excluded by base) returns empty.
+        let combined_c = combine_filters(base, "host:c.example.com");
+        assert!(session.ids_matching(&combined_c).is_empty());
+
+        // Secondary path prefix filter narrows within base `path:/api`.
+        let combined_orders = combine_filters(base, "path:/api/orders");
+        assert_eq!(session.ids_matching(&combined_orders), vec![f1]);
+        let _ = f3;
     }
 }

@@ -228,6 +228,7 @@ pub struct Hub {
     generation: AtomicU64,
     pub ca: Arc<Ca>,
     roots: RootCertStore,
+    default_client_config: ClientConfig,
     bypass: Mutex<BypassRules>,
     bypass_text: Mutex<String>,
     rules: Mutex<Vec<Rule>>,
@@ -294,11 +295,15 @@ impl Hub {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let mut roots = RootCertStore::empty();
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let default_client_config = ClientConfig::builder()
+            .with_root_certificates(roots.clone())
+            .with_no_client_auth();
         Ok(Self {
             session: Mutex::new(Session::default()),
             generation: AtomicU64::new(1),
             ca,
             roots,
+            default_client_config,
             bypass: Mutex::new(BypassRules::default()),
             bypass_text: Mutex::new(String::new()),
             rules: Mutex::new(Vec::new()),
@@ -549,12 +554,16 @@ impl Hub {
         let custom_ref = rule_cert
             .as_ref()
             .map(|(cert, key)| (cert.as_path(), key.as_deref()));
-        let builder = ClientConfig::builder().with_root_certificates(self.roots.clone());
         let mut config = match self.ca.client_identity_for_host(host, custom_ref)? {
-            Some((certs, key)) => builder
-                .with_client_auth_cert(certs, key)
-                .with_context(|| format!("配置源站 mTLS 客户端证书 ({host})"))?,
-            None => builder.with_no_client_auth(),
+            Some((certs, key)) => {
+                let mut cfg = ClientConfig::builder()
+                    .with_root_certificates(self.roots.clone())
+                    .with_client_auth_cert(certs, key)
+                    .with_context(|| format!("配置源站 mTLS 客户端证书 ({host})"))?;
+                cfg.resumption = self.default_client_config.resumption.clone();
+                cfg
+            }
+            None => self.default_client_config.clone(),
         };
         config.alpn_protocols = alpn.to_vec();
         Ok(config)
@@ -860,14 +869,26 @@ impl Hub {
     }
 
     async fn take_idle(&self, key: (String, u16)) -> Option<TcpStream> {
-        self.pool
-            .lock()
-            .await
-            .get_mut(&key)
-            .and_then(|slots| slots.pop())
+        let mut pool = self.pool.lock().await;
+        let slots = pool.get_mut(&key)?;
+        while let Some(stream) = slots.pop() {
+            let mut probe = [0u8; 1];
+            match stream.try_read(&mut probe) {
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => return Some(stream),
+                _ => continue,
+            }
+        }
+        None
     }
 
     async fn park_idle(&self, key: (String, u16), stream: TcpStream) {
+        let mut probe = [0u8; 1];
+        if !matches!(
+            stream.try_read(&mut probe),
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock
+        ) {
+            return;
+        }
         let mut pool = self.pool.lock().await;
         if pool.len() >= 32 && !pool.contains_key(&key) {
             pool.clear();
@@ -882,6 +903,9 @@ impl Hub {
     #[cfg(test)]
     pub fn add_trust_anchor(&mut self, der: CertificateDer<'static>) {
         let _ = self.roots.add(der);
+        self.default_client_config = ClientConfig::builder()
+            .with_root_certificates(self.roots.clone())
+            .with_no_client_auth();
     }
 
     pub fn generation(&self) -> u64 {
@@ -1624,16 +1648,10 @@ fn host_ends_with(host: &str, suffix: &str) -> bool {
         && host[host.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
 }
 
-async fn serve_h1<C, O>(
-    client: C,
-    origin: O,
-    host: String,
-    port: u16,
-    conn_info: crate::session::ConnInfo,
-    hub: Arc<Hub>,
-) -> Result<()>
+type H1Sender = hyper::client::conn::http1::SendRequest<RecordingBody<Incoming>>;
+
+async fn handshake_h1<O>(origin: O) -> Result<H1Sender>
 where
-    C: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     O: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (sender, connection) = hyper::client::conn::http1::Builder::new()
@@ -1647,25 +1665,80 @@ where
             log::debug!("上游 HTTP/1.1 连接结束: {err}");
         }
     });
-    // hyper 1.12's HTTP/1 SendRequest is not Clone. One task owns it.
+    Ok(sender)
+}
+
+async fn dial_h1(host: &str, port: u16, hub: &Hub) -> Result<(H1Sender, crate::session::ConnInfo)> {
+    let (origin, _, conn_info) = timeout(
+        IO_TIMEOUT,
+        connect_origin(host, port, &[b"http/1.1".to_vec()], hub),
+    )
+    .await
+    .context("连接源站超时")??;
+    let sender = handshake_h1(origin).await?;
+    Ok((sender, conn_info))
+}
+
+async fn serve_h1<C, O>(
+    client: C,
+    origin: O,
+    host: String,
+    port: u16,
+    conn_info: crate::session::ConnInfo,
+    hub: Arc<Hub>,
+) -> Result<()>
+where
+    C: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    O: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let sender = handshake_h1(origin).await?;
+    // hyper 1.12's HTTP/1 SendRequest is not Clone. One task owns it and
+    // redials the origin if an idle keep-alive connection was closed upstream.
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<H1Job>();
+    let host_for_worker = host.clone();
+    let hub_for_worker = hub.clone();
     tokio::spawn(async move {
         let mut sender = sender;
+        let mut conn_info = conn_info;
         let mut first = true;
+        let mut broken = false;
         while let Some(job) = rx.recv().await {
-            let info = if first {
-                first = false;
-                conn_info.clone()
-            } else {
-                conn_info.as_reused()
-            };
             let result = async {
-                sender.ready().await.context("上游 HTTP/1.1 未就绪")?;
-                let resp = sender
-                    .send_request(job.req)
-                    .await
-                    .context("上游 HTTP/1.1")?;
-                Ok((resp, info))
+                let mut pending = Some(job.req);
+                for attempt in 0..2 {
+                    let Some(req) = pending.take() else {
+                        break;
+                    };
+                    if broken || sender.is_closed() || sender.ready().await.is_err() {
+                        let (next_sender, next_info) =
+                            dial_h1(&host_for_worker, port, &hub_for_worker).await?;
+                        sender = next_sender;
+                        conn_info = next_info;
+                        first = true;
+                        broken = false;
+                        sender.ready().await.context("上游 HTTP/1.1 未就绪")?;
+                    }
+                    let info = if first {
+                        first = false;
+                        conn_info.clone()
+                    } else {
+                        conn_info.as_reused()
+                    };
+                    match sender.try_send_request(req).await {
+                        Ok(resp) => return Ok((resp, info)),
+                        Err(mut err) => {
+                            broken = true;
+                            pending = err.take_message();
+                            if attempt == 0 && pending.is_some() {
+                                continue;
+                            }
+                            return Err(
+                                anyhow::Error::from(err.into_error()).context("上游 HTTP/1.1")
+                            );
+                        }
+                    }
+                }
+                Err(anyhow!("上游 HTTP/1.1 未就绪"))
             }
             .await;
             let _ = job.reply.send(result);
@@ -8818,6 +8891,111 @@ mod tests {
         assert_eq!(flows[1].status, Some(403));
         assert_eq!(flows[2].status, Some(451));
         assert_eq!(flows[3].error.as_deref(), Some("规则阻断 (连接已断开)"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn https_h1_redials_on_the_same_client_connection_when_origin_closes_idle() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let dir = std::env::temp_dir().join(format!("zniff-h1-redial-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let (origin_ca, origin_leaf, leaf_key) = test_origin_cert();
+        let mut hub = Hub::new(ca.clone()).unwrap();
+        hub.add_trust_anchor(origin_ca.der().clone());
+        let hub = Arc::new(hub);
+
+        let server = origin_tls_config(
+            &origin_ca,
+            &origin_leaf,
+            &leaf_key,
+            vec![b"http/1.1".to_vec()],
+        );
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server));
+        let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        let accepts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let accepts_bg = accepts.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((sock, _)) = origin.accept().await else {
+                    break;
+                };
+                let n = accepts_bg.fetch_add(1, Ordering::SeqCst) + 1;
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    let mut tls = acceptor.accept(sock).await.unwrap();
+                    let mut buf = vec![0u8; 4096];
+                    let _ = tls.read(&mut buf).await.unwrap();
+                    let body = format!("h1-origin-{n}");
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/plain\r\n\r\n{body}",
+                        body.len()
+                    );
+                    tls.write_all(resp.as_bytes()).await.unwrap();
+                    tls.shutdown().await.ok();
+                });
+            }
+        });
+
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        serve_proxy(proxy, hub.clone());
+
+        let mut client_tcp = TcpStream::connect(proxy_addr).await.unwrap();
+        let connect = format!("CONNECT {origin_addr} HTTP/1.1\r\nHost: {origin_addr}\r\n\r\n");
+        client_tcp.write_all(connect.as_bytes()).await.unwrap();
+        let mut head = [0u8; 128];
+        let n = client_tcp.read(&mut head).await.unwrap();
+        assert!(String::from_utf8_lossy(&head[..n]).starts_with("HTTP/1.1 200"));
+
+        let mut roots = RootCertStore::empty();
+        roots.add(ca.cert_der()).unwrap();
+        let mut client_cfg = ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        client_cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let connector = TlsConnector::from(Arc::new(client_cfg));
+        let tls = connector
+            .connect(server_name("127.0.0.1").unwrap(), client_tcp)
+            .await
+            .unwrap();
+        let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(tls))
+            .await
+            .unwrap();
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+
+        // First request on the client TLS connection
+        let req1 = Request::builder()
+            .method(Method::GET)
+            .uri("/first")
+            .header("Host", origin_addr.to_string())
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+        let res1 = sender.send_request(req1).await.unwrap();
+        assert_eq!(res1.status(), StatusCode::OK);
+        let body1 = res1.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body1[..], b"h1-origin-1");
+
+        // Wait briefly for the first origin connection to close on EOF
+        tokio::time::sleep(Duration::from_millis(40)).await;
+
+        // Second request reuses the SAME client-to-proxy TLS connection; proxy redials origin
+        sender.ready().await.unwrap();
+        let req2 = Request::builder()
+            .method(Method::GET)
+            .uri("/second")
+            .header("Host", origin_addr.to_string())
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+        let res2 = sender.send_request(req2).await.unwrap();
+        assert_eq!(res2.status(), StatusCode::OK);
+        let body2 = res2.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body2[..], b"h1-origin-2");
+        assert_eq!(accepts.load(Ordering::SeqCst), 2);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

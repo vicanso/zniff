@@ -315,6 +315,9 @@ pub struct Config {
     /// Filter, bypass, rules, and upstream saved as one preset. Newest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub saved_profiles: Vec<SavedProfile>,
+    /// Recent setup snapshots (up to 10, newest first) for recovering previous versions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub profile_history: Vec<SavedProfile>,
     /// Dragged list-column widths, in points, keyed by `method`, `path`, and the rest.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub column_widths: HashMap<String, u32>,
@@ -361,6 +364,7 @@ impl Default for Config {
             saved_filters: Vec::new(),
             saved_rules: Vec::new(),
             saved_profiles: Vec::new(),
+            profile_history: Vec::new(),
             column_widths: HashMap::new(),
             column_order: Vec::new(),
             redact_export: false,
@@ -683,6 +687,7 @@ fn normalize_for(mut config: Config, dev: bool) -> Config {
     clamp_saved_filters(&mut config.saved_filters);
     clamp_saved_rules(&mut config.saved_rules);
     migrate_saved_profiles(&mut config);
+    clamp_profile_history(&mut config.profile_history);
     config
 }
 
@@ -738,6 +743,57 @@ fn migrate_saved_profiles(config: &mut Config) {
 }
 
 const SAVED_PROFILE_CAP: usize = 16;
+pub const PROFILE_HISTORY_CAP: usize = 10;
+
+pub fn same_profile_content(a: &SavedProfile, b: &SavedProfile) -> bool {
+    a.filter.trim() == b.filter.trim()
+        && a.bypass_hosts.trim() == b.bypass_hosts.trim()
+        && a.rules.trim() == b.rules.trim()
+        && a.upstream_proxy.trim() == b.upstream_proxy.trim()
+        && a.rules_enabled == b.rules_enabled
+        && a.breaks_enabled == b.breaks_enabled
+        && a.show_tunnel_failures == b.show_tunnel_failures
+}
+
+fn clamp_profile_history(items: &mut Vec<SavedProfile>) {
+    let mut kept = Vec::new();
+    for item in items.drain(..) {
+        let name = item.name.trim().to_string();
+        if item.filter.trim().is_empty()
+            && item.bypass_hosts.trim().is_empty()
+            && item.rules.trim().is_empty()
+            && item.upstream_proxy.trim().is_empty()
+        {
+            continue;
+        }
+        let name = if name.is_empty() {
+            "配置".to_string()
+        } else {
+            name
+        };
+        let normalized = SavedProfile {
+            name,
+            filter: item.filter.trim().to_string(),
+            bypass_hosts: item.bypass_hosts.trim().to_string(),
+            rules: item.rules.trim().to_string(),
+            upstream_proxy: item.upstream_proxy.trim().to_string(),
+            rules_enabled: item.rules_enabled,
+            breaks_enabled: item.breaks_enabled,
+            show_tunnel_failures: item.show_tunnel_failures,
+        };
+        if kept
+            .iter()
+            .any(|existing: &SavedProfile| same_profile_content(existing, &normalized))
+        {
+            continue;
+        }
+        kept.push(normalized);
+        if kept.len() == PROFILE_HISTORY_CAP {
+            break;
+        }
+    }
+    *items = kept;
+}
 
 fn clamp_saved_profiles(items: &mut Vec<SavedProfile>) {
     let mut kept = Vec::new();

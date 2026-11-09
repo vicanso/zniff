@@ -7,7 +7,7 @@ use std::fs;
 use std::io::Write;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use rcgen::{
@@ -23,18 +23,16 @@ const CA_NAME: &str = "zniff CA";
 /// The previous product name. Still removed so an already-trusted root does not linger.
 const LEGACY_CA_NAME: &str = "Snoop CA";
 
+const MAX_CACHED_LEAVES: usize = 256;
+
 pub struct Ca {
     dir: PathBuf,
     /// Subject and key of the installed root. Leaf signing reads these.
     /// The PEM on disk is what gets installed.
     issuer: Issuer<'static, KeyPair>,
     ca_der: CertificateDer<'static>,
-    leaves: Mutex<Vec<(String, Leaf)>>,
-}
-
-struct Leaf {
-    cert: CertificateDer<'static>,
-    key: PrivateKeyDer<'static>,
+    session_storage: Arc<dyn rustls::server::StoresServerSessions>,
+    leaves: Mutex<Vec<(String, ServerConfig)>>,
 }
 
 pub fn data_dir() -> PathBuf {
@@ -99,6 +97,7 @@ impl Ca {
     }
 
     fn from_pem(dir: PathBuf, cert_pem: String, key_pem: String) -> Result<Self> {
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let issuer_key = KeyPair::from_pem(&key_pem).context("读取根 CA 私钥")?;
         let issuer = Issuer::from_ca_cert_pem(&cert_pem, issuer_key).context("读取根 CA 证书")?;
         let ca_der = ca_der_from_pem(&cert_pem)?;
@@ -106,6 +105,7 @@ impl Ca {
             dir,
             issuer,
             ca_der,
+            session_storage: rustls::server::ServerSessionMemoryCache::new(64),
             leaves: Mutex::new(Vec::new()),
         })
     }
@@ -150,17 +150,11 @@ impl Ca {
                 .with_no_client_auth()
                 .with_single_cert(certs, key)
                 .with_context(|| format!("组装自定义证书 {}", cert_path.display()))?;
+            config.session_storage = Arc::clone(&self.session_storage);
             config.alpn_protocols = vec![alpn.to_vec()];
             return Ok(config);
         }
-        let leaf = self.leaf(host)?;
-        let mut config = ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(
-                vec![leaf.cert.clone(), self.ca_der.clone()],
-                leaf.key.clone_key(),
-            )
-            .context("组装叶子证书")?;
+        let mut config = self.leaf_config(host)?;
         config.alpn_protocols = vec![alpn.to_vec()];
         Ok(config)
     }
@@ -232,17 +226,23 @@ impl Ca {
         None
     }
 
-    fn leaf(&self, host: &str) -> Result<Leaf> {
+    fn leaf_config(&self, host: &str) -> Result<ServerConfig> {
         let mut guard = self.leaves.lock().unwrap_or_else(|err| err.into_inner());
-        if let Some((_, leaf)) = guard.iter().find(|(name, _)| name == host) {
-            return Ok(leaf.clone());
+        if let Some(pos) = guard.iter().position(|(name, _)| name == host) {
+            let entry = guard.remove(pos);
+            let cfg = entry.1.clone();
+            guard.push(entry);
+            return Ok(cfg);
         }
-        let leaf = self.sign_leaf(host)?;
-        guard.push((host.to_string(), leaf.clone()));
-        Ok(leaf)
+        let cfg = self.sign_leaf_config(host)?;
+        while guard.len() >= MAX_CACHED_LEAVES {
+            guard.remove(0);
+        }
+        guard.push((host.to_string(), cfg.clone()));
+        Ok(cfg)
     }
 
-    fn sign_leaf(&self, host: &str) -> Result<Leaf> {
+    fn sign_leaf_config(&self, host: &str) -> Result<ServerConfig> {
         let leaf_key = KeyPair::generate()?;
         let mut params = CertificateParams::default();
         let mut name = DistinguishedName::new();
@@ -257,19 +257,14 @@ impl Ca {
         let cert = params
             .signed_by(&leaf_key, &self.issuer)
             .context("签发叶子证书")?;
-        Ok(Leaf {
-            cert: CertificateDer::from(cert.der().to_vec()),
-            key: PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf_key.serialize_der())),
-        })
-    }
-}
-
-impl Clone for Leaf {
-    fn clone(&self) -> Self {
-        Self {
-            cert: self.cert.clone(),
-            key: self.key.clone_key(),
-        }
+        let leaf_der = CertificateDer::from(cert.der().to_vec());
+        let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf_key.serialize_der()));
+        let mut config = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![leaf_der, self.ca_der.clone()], key_der)
+            .context("组装叶子证书")?;
+        config.session_storage = Arc::clone(&self.session_storage);
+        Ok(config)
     }
 }
 
@@ -495,7 +490,8 @@ pub fn trust_status(ca: &Ca) -> CaStatus {
                     .map(|output| output.status.success())
                     .unwrap_or(false)
             })
-            .unwrap_or(false);
+            .unwrap_or(false)
+            || macos_has_trust_root(CA_NAME);
         classify_trust_status(installed, verified)
     }
     #[cfg(not(target_os = "macos"))]
@@ -545,6 +541,72 @@ fn macos_verify_cert_args(cert_path: &str) -> [&str; 4] {
     ["verify-cert", "-c", cert_path, "-L"]
 }
 
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn macos_add_trusted_cert_args<'a>(keychain: &'a str, cert_path: &'a str) -> [&'a str; 6] {
+    [
+        "add-trusted-cert",
+        "-r",
+        "trustRoot",
+        "-k",
+        keychain,
+        cert_path,
+    ]
+}
+
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+pub fn parse_macos_trust_settings(dump: &str, cert_name: &str) -> bool {
+    let mut in_target = false;
+    let mut has_trust_root = false;
+    for line in dump.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("Cert ")
+            && let Some((_, name)) = rest.split_once(':')
+        {
+            if in_target && has_trust_root {
+                return true;
+            }
+            in_target = name.trim() == cert_name;
+            has_trust_root = false;
+            continue;
+        }
+        if !in_target {
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("Result Type")
+            && let Some((_, result)) = rest.split_once(':')
+        {
+            let val = result.trim();
+            if val == "kSecTrustSettingsResultDeny" {
+                return false;
+            }
+            if val == "kSecTrustSettingsResultTrustRoot"
+                || val == "kSecTrustSettingsResultTrustAsRoot"
+            {
+                has_trust_root = true;
+            }
+        }
+    }
+    in_target && has_trust_root
+}
+
+#[cfg(target_os = "macos")]
+fn macos_has_trust_root(cert_name: &str) -> bool {
+    for args in [
+        &["dump-trust-settings"][..],
+        &["dump-trust-settings", "-d"][..],
+    ] {
+        if let Ok(output) = std::process::Command::new("security").args(args).output()
+            && output.status.success()
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if parse_macos_trust_settings(&stdout, cert_name) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
 fn windows_certutil_verify_args(name: &str) -> [&str; 4] {
     ["-user", "-verifystore", "Root", name]
@@ -572,17 +634,11 @@ fn linux_certutil_del_args<'a>(db: &'a str, name: &'a str) -> [&'a str; 5] {
 
 #[cfg(target_os = "macos")]
 fn install_macos(ca: &Ca) -> Result<String> {
+    let keychain = login_keychain();
+    let cert_path = ca.cert_path();
+    let cert_str = cert_path.to_str().context("证书路径不是 UTF-8")?;
     let status = std::process::Command::new("security")
-        .args([
-            "add-trusted-cert",
-            "-r",
-            "trustRoot",
-            "-p",
-            "ssl",
-            "-k",
-            &login_keychain(),
-            ca.cert_path().to_str().context("证书路径不是 UTF-8")?,
-        ])
+        .args(macos_add_trusted_cert_args(&keychain, cert_str))
         .status()
         .context("运行 security add-trusted-cert")?;
     if status.success() {
@@ -952,6 +1008,20 @@ mod tests {
             macos_verify_cert_args("/tmp/zniff/ca.crt"),
             ["verify-cert", "-c", "/tmp/zniff/ca.crt", "-L"]
         );
+        assert_eq!(
+            macos_add_trusted_cert_args(
+                "/Users/alice/Library/Keychains/login.keychain-db",
+                "/tmp/zniff/ca.crt"
+            ),
+            [
+                "add-trusted-cert",
+                "-r",
+                "trustRoot",
+                "-k",
+                "/Users/alice/Library/Keychains/login.keychain-db",
+                "/tmp/zniff/ca.crt"
+            ]
+        );
     }
 
     #[test]
@@ -966,6 +1036,27 @@ mod tests {
         assert!(!CaStatus::NotInstalled.is_installed());
         assert!(CaStatus::InstalledUntrusted.is_installed());
         assert!(CaStatus::Trusted.is_installed());
+
+        let ssl_only_dump = "\
+Number of certs: 2
+Cert 0: Other Root CA
+   Number of trust settings : 0
+Cert 1: zniff CA
+   Number of trust settings : 1
+   Trust Setting 0:
+      Policy OID            : SSL
+      Result Type           : kSecTrustSettingsResultTrustRoot
+";
+        assert!(parse_macos_trust_settings(ssl_only_dump, CA_NAME));
+        assert!(!parse_macos_trust_settings(ssl_only_dump, "Other Root CA"));
+
+        let deny_dump = "\
+Cert 0: zniff CA
+   Number of trust settings : 1
+   Trust Setting 0:
+      Result Type           : kSecTrustSettingsResultDeny
+";
+        assert!(!parse_macos_trust_settings(deny_dump, CA_NAME));
     }
 
     #[test]
