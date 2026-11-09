@@ -1662,7 +1662,7 @@ fn analyze_flow_dependencies_and_stages(
                     from_flow_id: sorted[i].id,
                     from_index: i,
                     kind: DepKind::Redirect,
-                    label: "Location 重定向".to_string(),
+                    label: "Location".to_string(),
                 });
                 break;
             }

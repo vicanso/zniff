@@ -2445,4 +2445,126 @@ mod tests {
         assert_eq!(session.ids_matching(&combined_orders), vec![f1]);
         let _ = f3;
     }
+
+    #[test]
+    fn bidirectional_large_bodies_spill_and_hydrate_correctly() {
+        let mut session = Session::with_spill_limits(1024, 64 * 1024, 4, Duration::from_secs(60));
+        let id = session.open(FlowDraft {
+            protocol: Protocol::Http11,
+            method: "POST".into(),
+            host: "storage.test".into(),
+            path: "/upload".into(),
+            url: "http://storage.test/upload".into(),
+            request_headers: vec![("Content-Type".into(), "application/octet-stream".into())],
+        });
+
+        // Request body: 2048 bytes (> 1024 limit) containing unique keyword
+        let mut req_payload = vec![b'A'; 2048];
+        req_payload[100..115].copy_from_slice(b"UNIQUE_REQ_MARK");
+        assert!(!session.append_body(id, Direction::Request, &req_payload));
+
+        session.set_response(
+            id,
+            200,
+            vec![("Content-Type".into(), "text/plain".into())],
+            None,
+        );
+
+        // Response body: 4096 bytes (> 1024 limit) containing unique keyword
+        let mut res_payload = vec![b'B'; 4096];
+        res_payload[200..215].copy_from_slice(b"UNIQUE_RES_MARK");
+        assert!(!session.append_body(id, Direction::Response, &res_payload));
+
+        // Before mark_finished, in-memory bodies are present and spill refs are None
+        {
+            let raw_flow = session.get(id).unwrap();
+            assert_eq!(raw_flow.request_body.len(), 2048);
+            assert_eq!(raw_flow.response_body.len(), 4096);
+            assert!(raw_flow.request_spill.is_none());
+            assert!(raw_flow.response_spill.is_none());
+        }
+
+        // Mark finished triggers spill of both request and response to segment file
+        session.mark_finished(id);
+
+        {
+            let raw_flow = session.get(id).unwrap();
+            // In-memory vectors should be freed
+            assert!(raw_flow.request_body.is_empty());
+            assert!(raw_flow.response_body.is_empty());
+            assert!(raw_flow.request_spill.is_some());
+            assert!(raw_flow.response_spill.is_some());
+        }
+
+        // Hydration reloads both bodies from disk
+        let hydrated = session.hydrated(id).unwrap();
+        assert_eq!(hydrated.request_body, req_payload);
+        assert_eq!(hydrated.response_body, res_payload);
+
+        // Body matching can search both request and response spilled content
+        assert_eq!(session.ids_matching("body:UNIQUE_REQ_MARK"), vec![id]);
+        assert_eq!(session.ids_matching("body:UNIQUE_RES_MARK"), vec![id]);
+        assert!(session.ids_matching("body:NON_EXISTENT_MARK").is_empty());
+    }
+
+    #[test]
+    fn composite_filters_and_negations_work_as_expected() {
+        let mut session = Session::default();
+        let f1 = session.open(FlowDraft {
+            protocol: Protocol::Http2,
+            method: "POST".into(),
+            host: "graphql.example.com".into(),
+            path: "/graphql".into(),
+            url: "https://graphql.example.com/graphql".into(),
+            request_headers: vec![
+                ("Content-Type".into(), "application/json".into()),
+                ("X-Client-ID".into(), "MobileApp-v2".into()),
+            ],
+        });
+        session.append_body(
+            f1,
+            Direction::Request,
+            br#"{"operationName":"FetchUserProfile","query":"query FetchUserProfile { me { id name } }"}"#,
+        );
+        session.set_response(
+            f1,
+            200,
+            vec![("Content-Type".into(), "application/json".into())],
+            None,
+        );
+        session.append_body(
+            f1,
+            Direction::Response,
+            br#"{"data":{"me":{"id":"42","name":"Alice"}}}"#,
+        );
+        session.mark_finished(f1);
+
+        let f2 = session.open(FlowDraft {
+            protocol: Protocol::Http11,
+            method: "GET".into(),
+            host: "cdn.example.com".into(),
+            path: "/assets/style.css".into(),
+            url: "https://cdn.example.com/assets/style.css".into(),
+            request_headers: vec![("X-Client-ID".into(), "WebApp".into())],
+        });
+        session.set_response(f2, 404, vec![], None);
+        session.mark_finished(f2);
+
+        // GraphQL op filter
+        assert_eq!(session.ids_matching("op:FetchUserProfile"), vec![f1]);
+        assert_eq!(session.ids_matching("gql:FetchUserProfile"), vec![f1]);
+        assert!(session.ids_matching("op:NonExistent").is_empty());
+
+        // Header filter (case-insensitive name and value)
+        assert_eq!(session.ids_matching("header:x-client-id"), vec![f1, f2]);
+        assert_eq!(session.ids_matching("header:mobileapp"), vec![f1]);
+
+        // Negative term exclusion (-word or mute:word)
+        assert_eq!(session.ids_matching("host:example.com -graphql"), vec![f2]);
+        assert_eq!(session.ids_matching("host:example.com mute:cdn"), vec![f1]);
+
+        // Method and status combinations
+        assert_eq!(session.ids_matching("POST 200"), vec![f1]);
+        assert_eq!(session.ids_matching("GET 4xx"), vec![f2]);
+    }
 }
