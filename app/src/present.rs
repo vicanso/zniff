@@ -1021,7 +1021,7 @@ pub struct DependencyStage {
     pub bar_indices: Vec<usize>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct SequenceStep {
     pub step_no: usize,
     pub flow_id: u64,
@@ -1034,7 +1034,7 @@ pub struct SequenceStep {
     pub active_hosts: Vec<bool>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct WaterfallBar {
     pub flow_id: u64,
     pub method: String,
@@ -1071,6 +1071,26 @@ pub fn build_sequence_diagram_data(
     flows: &[&Flow],
     include_response: bool,
     include_query: bool,
+) -> SequenceDiagramData {
+    build_sequence_inner(flows, include_response, include_query, true)
+}
+
+/// Only the Mermaid `sequenceDiagram` text, skipping the dependency analysis
+/// (which reads bodies and compares every pair). Used for large selections
+/// whose preview is capped but whose copy must still cover every flow.
+pub fn build_sequence_mermaid(
+    flows: &[&Flow],
+    include_response: bool,
+    include_query: bool,
+) -> String {
+    build_sequence_inner(flows, include_response, include_query, false).mermaid
+}
+
+fn build_sequence_inner(
+    flows: &[&Flow],
+    include_response: bool,
+    include_query: bool,
+    analyze: bool,
 ) -> SequenceDiagramData {
     let mut lines = vec![
         "sequenceDiagram".to_string(),
@@ -1168,8 +1188,11 @@ pub fn build_sequence_diagram_data(
         });
     }
 
-    let (stages, hard_dep_count, flowchart_mermaid) =
-        analyze_flow_dependencies_and_stages(&sorted, &mut bars);
+    let (stages, hard_dep_count, flowchart_mermaid) = if analyze {
+        analyze_flow_dependencies_and_stages(&sorted, &mut bars)
+    } else {
+        (Vec::new(), 0, "flowchart TD".to_string())
+    };
 
     // Detect if a flow overlaps in time with another flow targeting the same host
     // so response arrows on shared lifelines can include the path to disambiguate.

@@ -139,6 +139,8 @@ pub enum StatusMsg {
     ProfilesImported {
         count: usize,
     },
+    ProfileSaved(String),
+    ProfileRestored(String),
     MappedLocal(String),
     SequenceGenerated {
         count: usize,
@@ -413,12 +415,32 @@ impl StatusMsg {
                 t(lang, "已取消对比基准", "Cleared the comparison baseline").into()
             }
             Self::ProfilesExported { count } => match lang {
-                Lang::Zh => format!("已导出 {count} 套配置到剪贴板"),
-                Lang::En => format!("Exported {count} setups to clipboard"),
+                Lang::Zh => {
+                    if *count == 1 {
+                        "已导出当前配置到剪贴板".into()
+                    } else {
+                        format!("已导出 {count} 套配置到剪贴板")
+                    }
+                }
+                Lang::En => {
+                    if *count == 1 {
+                        "Exported current setup to clipboard".into()
+                    } else {
+                        format!("Exported {count} setups to clipboard")
+                    }
+                }
             },
             Self::ProfilesImported { count } => match lang {
                 Lang::Zh => format!("已导入 {count} 套配置"),
                 Lang::En => format!("Imported {count} setups"),
+            },
+            Self::ProfileSaved(name) => match lang {
+                Lang::Zh => format!("已保存配置「{name}」"),
+                Lang::En => format!("Saved setup \"{name}\""),
+            },
+            Self::ProfileRestored(name) => match lang {
+                Lang::Zh => format!("已恢复历史配置「{name}」"),
+                Lang::En => format!("Restored setup \"{name}\" from history"),
             },
             Self::MappedLocal(target) => match lang {
                 Lang::Zh => format!("已添加本地映射规则 · {target}"),
@@ -497,6 +519,114 @@ impl StatusMsg {
                 Lang::Zh => format!("已复制系统证书安装命令 · {cmd}"),
                 Lang::En => format!("Copied system CA install command · {cmd}"),
             },
+        }
+    }
+
+    /// `Some(false)` for a normal/success toast, `Some(true)` for a warning/error
+    /// toast, or `None` for persistent status updates (e.g. `Idle`, `Listening`).
+    pub fn toast_kind(&self) -> Option<bool> {
+        match self {
+            Self::ProfilesExported { .. }
+            | Self::ProfilesImported { .. }
+            | Self::ProfileSaved(_)
+            | Self::ProfileRestored(_)
+            | Self::Exported(_)
+            | Self::Imported { .. }
+            | Self::Saved(_)
+            | Self::CopiedUrl
+            | Self::CopiedCurl { .. }
+            | Self::CopiedBody { .. }
+            | Self::CopiedEnv
+            | Self::CopiedMcpConfig(_)
+            | Self::CopiedFetch
+            | Self::CopiedPython
+            | Self::CopiedRustReqwest
+            | Self::CopiedGoHttp
+            | Self::CopiedInterface
+            | Self::CopiedRustStruct
+            | Self::CopiedMermaid
+            | Self::CopiedMermaidMarkdown
+            | Self::SequenceGenerated { .. }
+            | Self::CopiedLinuxCaCmd(_)
+            | Self::Shared { .. }
+            | Self::ShareStopped
+            | Self::MappedLocal(_)
+            | Self::BaselineSet
+            | Self::BaselineCleared
+            | Self::Replayed(_)
+            | Self::Repeated { .. }
+            | Self::IosSimInstalled(_)
+            | Self::UpdateUpToDate(_)
+            | Self::UpdateAvailable(_) => Some(false),
+            Self::ExportFailed(_)
+            | Self::ImportFailed(_)
+            | Self::SaveFailed(_)
+            | Self::ReplayFailed(_)
+            | Self::InstallFailed(_)
+            | Self::RemoveFailed(_)
+            | Self::BindFailed { .. }
+            | Self::CaUnavailable(_)
+            | Self::StopRestoreFailed(_)
+            | Self::ProxyApplyFailed { .. }
+            | Self::ProxyRestoreFailed(_)
+            | Self::EmptyCopy(_)
+            | Self::EmptyResponse
+            | Self::InterfaceUnavailable
+            | Self::PinLimit
+            | Self::ShareNeedsCapture
+            | Self::NeedSelection
+            | Self::FlowGone
+            | Self::IosSimNoneBooted
+            | Self::IosSimFailed(_)
+            | Self::UpdateCheckFailed(_)
+            | Self::UpdateFailed { .. } => Some(true),
+            _ => None,
+        }
+    }
+
+    pub fn toast_title(&self, lang: Lang) -> &'static str {
+        match self {
+            Self::ProfilesExported { .. } | Self::Exported(_) => {
+                t(lang, "导出成功", "Export Succeeded")
+            }
+            Self::ProfilesImported { .. } | Self::Imported { .. } => {
+                t(lang, "导入成功", "Import Succeeded")
+            }
+            Self::ProfileSaved(_) | Self::Saved(_) | Self::MappedLocal(_) => {
+                t(lang, "保存成功", "Saved Successfully")
+            }
+            Self::ProfileRestored(_) => t(lang, "已恢复历史版本", "History Restored"),
+            Self::CopiedUrl
+            | Self::CopiedCurl { .. }
+            | Self::CopiedBody { .. }
+            | Self::CopiedEnv
+            | Self::CopiedMcpConfig(_)
+            | Self::CopiedFetch
+            | Self::CopiedPython
+            | Self::CopiedRustReqwest
+            | Self::CopiedGoHttp
+            | Self::CopiedInterface
+            | Self::CopiedRustStruct
+            | Self::CopiedMermaid
+            | Self::CopiedMermaidMarkdown
+            | Self::SequenceGenerated { .. }
+            | Self::CopiedLinuxCaCmd(_)
+            | Self::Shared { .. } => t(lang, "已复制到剪贴板", "Copied to Clipboard"),
+            Self::Replayed(_) | Self::Repeated { .. } => t(lang, "重放已发送", "Replay Sent"),
+            Self::UpdateUpToDate(_) | Self::UpdateAvailable(_) => {
+                t(lang, "检查更新", "Update Check")
+            }
+            Self::ExportFailed(_)
+            | Self::ImportFailed(_)
+            | Self::SaveFailed(_)
+            | Self::ReplayFailed(_)
+            | Self::InstallFailed(_)
+            | Self::RemoveFailed(_)
+            | Self::IosSimFailed(_)
+            | Self::UpdateCheckFailed(_)
+            | Self::UpdateFailed { .. } => t(lang, "操作失败", "Action Failed"),
+            _ if self.toast_kind() == Some(true) => t(lang, "操作提示", "Notice"),
+            _ => t(lang, "操作成功", "Action Completed"),
         }
     }
 }
