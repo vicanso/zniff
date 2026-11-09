@@ -26,7 +26,7 @@ use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use nsh_base::{
     Anchor, DataTable, DataTableApi, DataTableCell, DataTableClasses, DataTableColumn,
@@ -4379,17 +4379,18 @@ fn resolve_profile_name(name: &str, filter: &str, rules: &str) -> String {
     if !filter.is_empty() {
         return filter.chars().take(28).collect();
     }
+    let fallback = t(ui_lang(ui_langs()), "配置", "Profile");
     if !rules.is_empty() {
         return rules
             .lines()
             .map(str::trim)
             .find(|line| !line.is_empty() && !line.starts_with('#'))
-            .unwrap_or("配置")
+            .unwrap_or(fallback)
             .chars()
             .take(28)
             .collect();
     }
-    "配置".to_string()
+    fallback.to_string()
 }
 
 /// True when 保存 would store a different snapshot. The open setup is the
@@ -8386,6 +8387,8 @@ fn summary(
         )
         .child(
             view()
+                .w_full()
+                .overflow_hidden()
                 .px_3()
                 .py_2()
                 .rounded(px(7.0))
@@ -8458,6 +8461,8 @@ fn summary(
             move || !shown.error.get().is_empty(),
             move || {
                 view()
+                    .w_full()
+                    .overflow_hidden()
                     .px_3()
                     .py_2()
                     .rounded(px(7.0))
@@ -9481,6 +9486,8 @@ fn body_section(
                         view()
                             .w(move || px(shown.preview_w.get()))
                             .h(move || px(shown.preview_h.get()))
+                            .min_w(px(64.0))
+                            .min_h(px(64.0))
                             .flex_shrink_0()
                             .rounded(px(8.0))
                             .border_1()
@@ -13466,6 +13473,9 @@ fn break_bar(
             move || {
                 let controls = release_all.clone();
                 detail_button(tr("全部放行", "Continue all"), move || {
+                    if !break_all_allowed() {
+                        return;
+                    }
                     if compose.composing.get() {
                         reset_compose(compose);
                     }
@@ -13474,6 +13484,10 @@ fn break_bar(
             },
         ))
         .child(detail_button(tr("丢弃", "Drop"), move || {
+            let paused_now = drop_controls.hub.paused().or_else(|| paused.get());
+            if !break_action_allowed(paused_now.map(|(id, _)| id)) {
+                return;
+            }
             if compose.composing.get() {
                 reset_compose(compose);
             }
@@ -13486,6 +13500,36 @@ fn break_bar(
         }))
 }
 
+static LAST_BREAK_RESOLVE: Mutex<Option<(u64, Instant)>> = Mutex::new(None);
+static LAST_BREAK_ALL: Mutex<Option<Instant>> = Mutex::new(None);
+
+fn break_action_allowed(flow_id: Option<u64>) -> bool {
+    let now = Instant::now();
+    let mut lock = LAST_BREAK_RESOLVE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(id) = flow_id {
+        if let Some((last_id, last_time)) = *lock
+            && last_id == id
+            && now.duration_since(last_time) < Duration::from_millis(300)
+        {
+            return false;
+        }
+        *lock = Some((id, now));
+    }
+    true
+}
+
+fn break_all_allowed() -> bool {
+    let now = Instant::now();
+    let mut lock = LAST_BREAK_ALL.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(last_time) = *lock
+        && now.duration_since(last_time) < Duration::from_millis(300)
+    {
+        return false;
+    }
+    *lock = Some(now);
+    true
+}
+
 fn continue_break(
     controls: &Controls,
     compose: Compose,
@@ -13493,6 +13537,9 @@ fn continue_break(
     paused: Signal<Option<(u64, BreakSide)>>,
 ) {
     let current_paused = controls.hub.paused().or_else(|| paused.get());
+    if !break_action_allowed(current_paused.map(|(id, _)| id)) {
+        return;
+    }
     let edited = compose.composing.get()
         && current_paused.is_some_and(|(id, side)| {
             (selected.get() == Some(id) || selected.get().is_none())
@@ -15562,6 +15609,7 @@ fn seq_waterfall_view(seq_builder: SeqBuilder) -> impl IntoElement {
                             .child(
                                 mono(move || {
                                     let hovered = seq_builder.hover_bar.get();
+                                    let langs = ui_langs();
                                     seq_builder.diagram.with(|d| {
                                         if let Some(idx) = hovered
                                             && let Some(bar) = d.bars.get(idx)
@@ -15570,8 +15618,10 @@ fn seq_waterfall_view(seq_builder: SeqBuilder) -> impl IntoElement {
                                                 .deps
                                                 .first()
                                                 .map(|dep| {
+                                                    let prefix =
+                                                        t(ui_lang(langs), " · 依赖 #", " · dep #");
                                                     format!(
-                                                        " · 依赖 #{} ({})",
+                                                        "{prefix}{} ({})",
                                                         dep.from_flow_id, dep.label
                                                     )
                                                 })
@@ -16432,21 +16482,36 @@ fn sequence_diagram_panel(seq_builder: SeqBuilder, controls: Arc<Controls>) -> i
                     },
                     move || {
                         let langs = ui_langs();
-                        text(move || {
-                            let checked = seq_builder
-                                .items
-                                .with(|items| items.iter().filter(|i| i.checked).count());
-                            match ui_lang(langs) {
-                                Lang::Zh => format!(
-                                    "仅预览最近 {SEQ_PREVIEW_CAP} 条；复制 Mermaid / Markdown 仍包含全部 {checked} 条"
-                                ),
-                                Lang::En => format!(
-                                    "Previewing the newest {SEQ_PREVIEW_CAP}; Copy Mermaid / Markdown still includes all {checked}"
-                                ),
-                            }
-                        })
-                        .text_size(px(11.5))
-                        .text_color(status_warn_fg())
+                        view()
+                            .w_full()
+                            .px_3()
+                            .py_1p5()
+                            .rounded(px(6.0))
+                            .bg(status_warn_bg())
+                            .border_1()
+                            .border_color(status_warn_fg())
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .child(glyph_px(13.0, || Glyph::Alert, || color(status_warn_fg())))
+                            .child(
+                                text(move || {
+                                    let checked = seq_builder
+                                        .items
+                                        .with(|items| items.iter().filter(|i| i.checked).count());
+                                    match ui_lang(langs) {
+                                        Lang::Zh => format!(
+                                            "仅预览最近 {SEQ_PREVIEW_CAP} 条；复制 Mermaid / Markdown 仍包含全部 {checked} 条"
+                                        ),
+                                        Lang::En => format!(
+                                            "Previewing newest {SEQ_PREVIEW_CAP} flows; Copy Mermaid / Markdown still includes all {checked}"
+                                        ),
+                                    }
+                                })
+                                .text_size(px(12.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(status_warn_fg()),
+                            )
                     },
                 ))
                 .child(when(

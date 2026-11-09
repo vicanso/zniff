@@ -21,6 +21,7 @@ pub enum Glyph {
     Check,
     Close,
     History,
+    Alert,
 }
 
 pub fn glyph(
@@ -100,6 +101,10 @@ fn draw(kind: Glyph, paint: Hsla, size: f32) -> Painter {
             .stroke_svg("M3.2 5.4 A5.2 5.2 0 1 1 2.9 8.8")
             .stroke_svg("M2.8 2.8 V5.6 H5.6")
             .stroke_svg("M8 5.4 V8.2 L10 9.4"),
+        Glyph::Alert => painter
+            .stroke_svg("M8 2.2 L14.5 13.8 H1.5 Z")
+            .stroke_svg("M8 6.5 V9.5")
+            .fill_svg("M8 12.1 m-0.8 0 a0.8 0.8 0 1 0 1.6 0 a0.8 0.8 0 1 0 -1.6 0"),
     };
     painter
 }
