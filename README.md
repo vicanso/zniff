@@ -2,7 +2,28 @@
 
 English | [简体中文](./README-zh.md)
 
-**zniff** is a lightweight, native desktop HTTP(S) debugging proxy and packet capture tool written in Rust. Both the proxy engine and the native GUI (`nsh`) run in a single process with zero external database dependencies.
+**zniff** is a lightweight HTTP(S) debugging proxy written in Rust. The desktop app runs the proxy and the native UI (`nsh`) in one process. The same UI also compiles to WebAssembly and is served by `zniff --web`; that server process does the capture. Sessions stay in memory, with no external database.
+
+---
+
+## Desktop and web
+
+![The code zniff shares between the desktop app and the web version](./docs/zniff-architecture.svg)
+
+The UI (`App`) and the capture layer (`Hub` plus TLS, HTTP/2, and rules) are written once and compiled into each program.
+
+| | Desktop | Web |
+| :--- | :--- | :--- |
+| UI | Native window in the same process | The same `App`, as WebAssembly in the browser |
+| Capture | The UI calls `Hub` in-process | The page calls `zniff --web` over `/api` |
+| Who is captured | Clients that use this process as their HTTP proxy | The same, on the server |
+| System proxy and root CA | This machine | Stay on the desktop app |
+
+`make web` serves the shared page at `http://127.0.0.1:8080`. The page is the operator UI. Capture runs in the `zniff --web` process, and only for clients that set that process as their HTTP proxy. The capture port (dev config `listen_port`, otherwise `8877`) stays closed until **Start**. `zniff --web` does not change the system proxy and does not follow the desktop `capturing` flag.
+
+`make web-ui` rebuilds that page with nsh 0.4 into `app/.nsh/web`. After a UI change, run it again and reload the browser. The installed `nsh` may be 0.2; packaging needs 0.4 and must not replace `~/.nsh`. Library tests still use the small console and do not load `app/.nsh/web`.
+
+A relay is optional and off by default. With a relay URL and token, a live share is pushed to that host about once a second. `zniff --relay --token <secret>` only stores and serves `/s/{id}`. Another zniff can accept the same uploads on its capture port when **Receive relay** is on. Those rows can be viewed, filtered, copied, and starred. Replay stays on the machine that captured them.
 
 ---
 
@@ -96,8 +117,17 @@ User settings are stored in `config.toml` and system proxy recovery state in `pr
 Run all commands from the repository root (`app/` is the single crate and workspace):
 
 ```bash
-# Run in development mode with hot-reload (port 8878)
+# Desktop window. bacon stays attached. Dev config, default port 8878
 make dev
+
+# Shared UI at http://127.0.0.1:8080. Capture stays closed until Start
+make web
+
+# Rebuild app/.nsh/web after a UI change (nsh 0.4)
+make web-ui
+
+# Extra flags, for example another web port
+make web ARGS="--web-port 8090"
 
 # Build debug binary
 make build
@@ -113,6 +143,15 @@ make release
 # Package macOS application bundle (zniff.app)
 make bundle
 ```
+
+The Docker image runs the server only. It does not include `app/.nsh/web`, so the page is the small console:
+
+```bash
+docker build -t zniff .
+docker run --rm -p 8080:8080 -p 8877:8877 zniff
+```
+
+The entrypoint is `zniff --web --web-bind 0.0.0.0 --bind 0.0.0.0 --port 8877`. The capture port still opens only after **Start**. Keep `8080` and `8877` off the public internet: the page can show bodies and cookies.
 
 See [docs/known-issues.md](./docs/known-issues.md) for documented platform boundaries and design trade-offs.
 

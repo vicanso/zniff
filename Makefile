@@ -7,7 +7,7 @@ MANIFEST := app/Cargo.toml
 CARGO_FLAGS := --manifest-path $(MANIFEST)
 VERSION := $(shell sed -n 's/^version = "\([^"]*\)"/\1/p' $(MANIFEST) | head -1)
 
-.PHONY: all help build dev debug run fmt lint test check release bundle clean \
+.PHONY: all help build dev debug run web web-ui fmt lint test check release bundle clean \
 	bloat udeps version version-patch version-minor version-major tag nightly changelog
 
 # --- develop ---------------------------------------------------------------
@@ -20,6 +20,8 @@ help:
 		'dev      bacon: rebuild and open the window, console stays attached' \
 		'debug    dev with RUST_LOG=debug' \
 		'run      same as dev' \
+		'web      shared UI at http://127.0.0.1:8080, capture stays closed' \
+		'web-ui   rebuild the shared page with nsh 0.4' \
 		'fmt      cargo fmt' \
 		'lint     clippy, warnings denied' \
 		'check    type-check every target' \
@@ -47,6 +49,30 @@ debug:
 	RUST_LOG=debug $(MAKE) dev
 
 run: dev
+
+# Headless operator console. No window, no system-proxy change, and the
+# capture port stays closed until the page starts it. The server captures
+# only clients that set this process as their HTTP proxy. Open
+# http://127.0.0.1:8080. The page is the shared App in app/.nsh/web.
+# `make web-ui` rebuilds that directory with nsh 0.4. Extra flags go in
+# ARGS, for example make web ARGS="--web-port 8090".
+WEB_DIR := $(CURDIR)/app/.nsh/web
+NSH_04 := $(shell if [ -x /tmp/nsh-0.4/nsh/bin/nsh ]; then printf '%s' /tmp/nsh-0.4/nsh/bin/nsh; elif command -v nsh >/dev/null 2>&1; then command -v nsh; fi)
+
+web-ui:
+	@test -n "$(NSH_04)" || { echo "需要 nsh 0.4 才能打包共用界面"; exit 1; }
+	@case "$$($(NSH_04) --version 2>/dev/null)" in \
+		*0.4*) ;; \
+		*) echo "nsh 必须是 0.4，当前是 $$($(NSH_04) --version)"; exit 1 ;; \
+	esac
+	@llvm=""; if [ -d /opt/homebrew/opt/llvm/bin ]; then llvm="/opt/homebrew/opt/llvm/bin:"; fi; \
+		PATH="$$llvm$$PATH" $(NSH_04) package --target web $(CURDIR)/app -o $(CURDIR)/app/.nsh/web-pkg
+	rm -rf $(WEB_DIR)
+	mv $(CURDIR)/app/.nsh/web-pkg/zniff $(WEB_DIR)
+
+web:
+	@test -f $(WEB_DIR)/index.html || $(MAKE) web-ui
+	ZNIFF_DEV=1 ZNIFF_WEB_ROOT=$(WEB_DIR) $(CARGO) run $(CARGO_FLAGS) -- --web $(ARGS)
 
 build:
 	$(CARGO) build $(CARGO_FLAGS) $(ARGS)

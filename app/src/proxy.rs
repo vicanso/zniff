@@ -38,7 +38,7 @@ use crate::ca::Ca;
 use crate::client_hello::{ReadHello, read_client_hello};
 use crate::decompress::Decoder;
 use crate::rules::{self, Action, Rule};
-use crate::session::{Direction, FlowDraft, Protocol, Session};
+use crate::session::{Direction, FlowDraft, Message, Protocol, RelayDraft, Session};
 use crate::ws::{self, FrameFeed};
 
 const IO_TIMEOUT: Duration = Duration::from_secs(20);
@@ -391,6 +391,7 @@ pub struct Hub {
     /// Off by default. On records an origin TLS probe that fell back to a tunnel.
     show_tunnel_failures: AtomicBool,
     upstream: Mutex<Option<Upstream>>,
+    upstream_text: Mutex<String>,
     /// Idle plaintext origin sockets, used only on the proxy runtime.
     pool: tokio::sync::Mutex<HashMap<(String, u16), Vec<TcpStream>>>,
     /// Origin HTTP/2 senders. Each browser connection keeps its own lane.
@@ -402,6 +403,52 @@ pub struct Hub {
     break_queue: Mutex<std::collections::VecDeque<BreakSlot>>,
     /// One live HTML share. A new call replaces the id.
     share: Mutex<Option<crate::share::LiveShare>>,
+    /// Off until the user turns on 「接收中继」. Uploads stay a 404 until then.
+    relay_accept: AtomicBool,
+    relay_token: Mutex<String>,
+    /// Documents pushed by other zniff processes, keyed by share id.
+    relay_in: Mutex<HashMap<String, InboundShare>>,
+}
+
+struct InboundShare {
+    document: Vec<u8>,
+    bodies: HashMap<u64, Vec<u8>>,
+    expires: std::time::SystemTime,
+}
+
+/// One snapshot the capture process pushes to a relay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ShareExport {
+    pub rev: u64,
+    pub document: String,
+    pub bodies: Vec<(u64, String)>,
+}
+
+pub(crate) fn spilled_flow_ids(document: &str) -> Vec<u64> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(document) else {
+        return Vec::new();
+    };
+    let Some(flows) = value.get("flows").and_then(|item| item.as_array()) else {
+        return Vec::new();
+    };
+    flows
+        .iter()
+        .filter_map(|flow| {
+            let request = flow
+                .get("request_body_spilled")
+                .and_then(|item| item.as_bool())
+                .unwrap_or(false);
+            let response = flow
+                .get("response_body_spilled")
+                .and_then(|item| item.as_bool())
+                .unwrap_or(false);
+            if request || response {
+                flow.get("id").and_then(|item| item.as_u64())
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -464,6 +511,7 @@ impl Hub {
             apply_breaks: AtomicBool::new(true),
             show_tunnel_failures: AtomicBool::new(false),
             upstream: Mutex::new(None),
+            upstream_text: Mutex::new(String::new()),
             pool: tokio::sync::Mutex::new(HashMap::new()),
             h2_pool: Mutex::new(HashMap::new()),
             h2_generation: AtomicU64::new(1),
@@ -471,7 +519,47 @@ impl Hub {
             refresh_h2: AtomicBool::new(false),
             break_queue: Mutex::new(std::collections::VecDeque::new()),
             share: Mutex::new(None),
+            relay_accept: AtomicBool::new(false),
+            relay_token: Mutex::new(String::new()),
+            relay_in: Mutex::new(HashMap::new()),
         })
+    }
+
+    pub fn set_relay_ingress(&self, accept: bool, token: &str) {
+        self.set_relay_token(token);
+        self.relay_accept.store(accept, Ordering::Relaxed);
+    }
+
+    pub fn set_relay_token(&self, token: &str) {
+        *self
+            .relay_token
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = crate::relay::usable_token(token);
+    }
+
+    pub fn set_relay_accept(&self, accept: bool) {
+        self.relay_accept.store(accept, Ordering::Relaxed);
+    }
+
+    pub fn relay_accepts(&self) -> bool {
+        self.relay_accept.load(Ordering::Relaxed)
+    }
+
+    pub fn relay_token_ready(&self) -> bool {
+        !self
+            .relay_token
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .is_empty()
+    }
+
+    fn relay_authorized(&self, authorization: Option<&str>) -> bool {
+        let expected = self
+            .relay_token
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone();
+        crate::relay::bearer_ok(&expected, authorization)
     }
 
     /// Replaces any previous link. The id is unguessable and dies at `ttl`.
@@ -566,6 +654,176 @@ impl Hub {
         Some(crate::share::flow_body_document_with_redact(&flow, &redact))
     }
 
+    /// Full share document plus any spilled bodies the page will ask for.
+    /// `rev` is the document revision. A later call with the same `rev` has
+    /// the same flow list.
+    pub(crate) fn share_export(&self, id: &str) -> Option<ShareExport> {
+        let document = self.share_document_since(id, None)?;
+        let rev = serde_json::from_str::<serde_json::Value>(&document)
+            .ok()
+            .and_then(|value| value.get("rev")?.as_u64())
+            .unwrap_or(0);
+        let mut bodies = Vec::new();
+        for flow_id in spilled_flow_ids(&document) {
+            if let Some(body) = self.share_flow_body(id, flow_id) {
+                bodies.push((flow_id, body));
+            }
+        }
+        Some(ShareExport {
+            rev,
+            document,
+            bodies,
+        })
+    }
+
+    fn put_inbound_flows(&self, id: &str, body: &[u8]) -> Result<(), crate::relay::RelayStatus> {
+        let now = std::time::SystemTime::now();
+        let (bytes, expires) = crate::relay::prepare_flows(body, now)?;
+        let parsed =
+            crate::share::parse_inbound_share(&bytes).ok_or(crate::relay::RelayStatus {
+                status: 400,
+                reason: "Bad Request",
+                message: "flows.json must be a JSON object",
+            })?;
+        self.gc_inbound(now);
+        {
+            let mut slots = self.relay_in.lock().unwrap_or_else(|err| err.into_inner());
+            if !slots.contains_key(id) && slots.len() >= crate::relay::SLOT_CAP {
+                return Err(crate::relay::RelayStatus {
+                    status: 429,
+                    reason: "Too Many Requests",
+                    message: "too many shares",
+                });
+            }
+            match slots.get_mut(id) {
+                Some(slot) => {
+                    slot.document = bytes;
+                    slot.expires = expires;
+                }
+                None => {
+                    slots.insert(
+                        id.to_string(),
+                        InboundShare {
+                            document: bytes,
+                            bodies: HashMap::new(),
+                            expires,
+                        },
+                    );
+                }
+            }
+        }
+        let drafts = relay_drafts(&parsed);
+        self.with_session(|session| session.sync_relay_share(id, drafts));
+        self.touch();
+        Ok(())
+    }
+
+    fn put_inbound_body(
+        &self,
+        id: &str,
+        flow_id: u64,
+        body: &[u8],
+    ) -> Result<(), crate::relay::RelayStatus> {
+        if body.is_empty() || body.len() > crate::relay::MAX_BODY {
+            return Err(crate::relay::RelayStatus {
+                status: 413,
+                reason: "Content Too Large",
+                message: "body is too large",
+            });
+        }
+        if serde_json::from_slice::<serde_json::Value>(body).is_err() {
+            return Err(crate::relay::RelayStatus {
+                status: 400,
+                reason: "Bad Request",
+                message: "flow body must be JSON",
+            });
+        }
+        let now = std::time::SystemTime::now();
+        self.gc_inbound(now);
+        {
+            let mut slots = self.relay_in.lock().unwrap_or_else(|err| err.into_inner());
+            let Some(slot) = slots.get_mut(id) else {
+                return Err(crate::relay::RelayStatus {
+                    status: 409,
+                    reason: "Conflict",
+                    message: "upload flows.json first",
+                });
+            };
+            slot.bodies.insert(flow_id, body.to_vec());
+        }
+        if let Some(parsed) = crate::share::parse_inbound_body(body) {
+            let messages = shared_messages(&parsed.messages);
+            self.with_session(|session| {
+                session.apply_relay_body(
+                    id,
+                    flow_id,
+                    parsed.request_body.into_bytes(),
+                    parsed.response_body.into_bytes(),
+                    messages,
+                );
+            });
+            self.touch();
+        }
+        Ok(())
+    }
+
+    fn delete_inbound(&self, id: &str) {
+        self.relay_in
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .remove(id);
+        self.with_session(|session| {
+            session.drop_relay_source(id);
+        });
+        self.touch();
+    }
+
+    fn gc_inbound(&self, now: std::time::SystemTime) {
+        let expired: Vec<String> = {
+            let mut slots = self.relay_in.lock().unwrap_or_else(|err| err.into_inner());
+            let expired: Vec<String> = slots
+                .iter()
+                .filter(|(_, slot)| now >= slot.expires)
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in &expired {
+                slots.remove(id);
+            }
+            expired
+        };
+        if expired.is_empty() {
+            return;
+        }
+        self.with_session(|session| {
+            for id in &expired {
+                session.drop_relay_source(id);
+            }
+        });
+        self.touch();
+    }
+
+    fn inbound_document(&self, id: &str) -> Option<String> {
+        let now = std::time::SystemTime::now();
+        self.gc_inbound(now);
+        let slots = self.relay_in.lock().unwrap_or_else(|err| err.into_inner());
+        let slot = slots.get(id)?;
+        if now >= slot.expires {
+            return None;
+        }
+        Some(String::from_utf8_lossy(&slot.document).into_owned())
+    }
+
+    fn inbound_body(&self, id: &str, flow_id: u64) -> Option<Vec<u8>> {
+        let now = std::time::SystemTime::now();
+        self.gc_inbound(now);
+        let slots = self.relay_in.lock().unwrap_or_else(|err| err.into_inner());
+        let slot = slots.get(id)?;
+        if now >= slot.expires {
+            return None;
+        }
+        slot.bodies.get(&flow_id).cloned()
+    }
+
     pub fn set_bypass(&self, text: &str) {
         *self
             .bypass_text
@@ -616,8 +874,23 @@ impl Hub {
         self.show_tunnel_failures.store(show, Ordering::Relaxed);
     }
 
+    pub fn tunnel_failures_shown(&self) -> bool {
+        self.show_tunnel_failures.load(Ordering::Relaxed)
+    }
+
     pub fn set_upstream(&self, text: &str) {
+        *self
+            .upstream_text
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = text.to_string();
         *self.upstream.lock().unwrap_or_else(|err| err.into_inner()) = parse_upstream(text);
+    }
+
+    pub fn upstream_text(&self) -> String {
+        self.upstream_text
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
     }
 
     fn upstream(&self) -> Option<Upstream> {
@@ -765,6 +1038,38 @@ impl Hub {
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .len()
+    }
+
+    /// Ids and sides from front to back. The front is the flow `resolve_break` edits.
+    pub fn paused_queue(&self) -> Vec<(u64, BreakSide)> {
+        self.break_queue
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .iter()
+            .map(|slot| (slot.id, slot.side))
+            .collect()
+    }
+
+    /// Moves `id` to the front and restarts its 60s timer. Other slots stay paused.
+    pub fn promote_break(&self, id: u64) -> bool {
+        let mut queue = self
+            .break_queue
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let Some(index) = queue.iter().position(|slot| slot.id == id) else {
+            return false;
+        };
+        if index > 0
+            && let Some(slot) = queue.remove(index)
+        {
+            queue.push_front(slot);
+        }
+        if let Some(front) = queue.front_mut() {
+            front.touched = Instant::now();
+        }
+        drop(queue);
+        self.touch();
+        true
     }
 
     #[cfg(test)]
@@ -1132,7 +1437,7 @@ impl Hub {
         (plan.finish(), rev)
     }
 
-    fn open(&self, draft: FlowDraft) -> u64 {
+    pub(crate) fn open(&self, draft: FlowDraft) -> u64 {
         let ctx = current_client_ctx();
         let client_ip = ctx
             .as_ref()
@@ -1289,6 +1594,10 @@ impl Hub {
             on_done(Err(anyhow!("隧道不能重放")));
             return;
         }
+        if flow.relay_source.is_some() {
+            on_done(Err(anyhow!("中继流量只能查看")));
+            return;
+        }
         let hub = Arc::clone(self);
         std::thread::spawn(move || {
             let result = (|| {
@@ -1323,6 +1632,10 @@ impl Hub {
         };
         if flow.protocol == Protocol::Tunnel || flow.method.eq_ignore_ascii_case("CONNECT") {
             on_done(Err(anyhow!("隧道不能重放")));
+            return;
+        }
+        if flow.relay_source.is_some() {
+            on_done(Err(anyhow!("中继流量只能查看")));
             return;
         }
         let hub = Arc::clone(self);
@@ -1562,6 +1875,9 @@ async fn handle_conn_inner(mut socket: TcpStream, hub: Arc<Hub>) -> Result<()> {
         Some(LocalRoute::Install) => return serve_install_page(&mut socket, &hub, &head).await,
         Some(LocalRoute::Share(id, kind)) => {
             return serve_share(&mut socket, &hub, &head, &id, kind).await;
+        }
+        Some(LocalRoute::Relay(id, kind, verb)) => {
+            return serve_relay(&mut socket, rest, &hub, &head, &id, kind, verb).await;
         }
         Some(LocalRoute::Mcp) => {
             return serve_mcp(&mut socket, rest, hub, &method, &head).await;
@@ -3355,8 +3671,14 @@ enum LocalRoute {
     Cert,
     Install,
     Share(String, crate::share::SharePath),
+    Relay(String, crate::share::SharePath, RelayVerb),
     Favicon,
     Mcp,
+}
+
+enum RelayVerb {
+    Put,
+    Delete,
 }
 
 fn targets_self(local_addr: Option<SocketAddr>, head: &Head, method: &str, target: &str) -> bool {
@@ -3411,6 +3733,17 @@ fn local_route_for(method: &str, target: &str, self_target: bool) -> Option<Loca
     let direct = origin_form || self_target;
     if direct && (path == "/mcp" || path == "/mcp/") {
         return Some(LocalRoute::Mcp);
+    }
+    if direct
+        && (method.eq_ignore_ascii_case("PUT") || method.eq_ignore_ascii_case("DELETE"))
+        && let Some((id, kind)) = crate::share::parse_share_path(path_and_query)
+    {
+        let verb = if method.eq_ignore_ascii_case("DELETE") {
+            RelayVerb::Delete
+        } else {
+            RelayVerb::Put
+        };
+        return Some(LocalRoute::Relay(id, kind, verb));
     }
     if !method.eq_ignore_ascii_case("GET") && !method.eq_ignore_ascii_case("HEAD") {
         return None;
@@ -3495,6 +3828,230 @@ async fn serve_mcp(
     }
 }
 
+async fn serve_relay(
+    socket: &mut TcpStream,
+    rest: Vec<u8>,
+    hub: &Hub,
+    head: &Head,
+    id: &str,
+    kind: crate::share::SharePath,
+    verb: RelayVerb,
+) -> Result<()> {
+    if !hub.relay_accepts() {
+        return write_untracked(
+            socket,
+            404,
+            "Not Found",
+            "text/plain; charset=utf-8",
+            b"Not Found",
+        )
+        .await;
+    }
+    let authorization = header_value(&head.headers, "authorization");
+    if matches!(verb, RelayVerb::Delete) {
+        if !hub.relay_authorized(authorization.as_deref()) {
+            return write_untracked(
+                socket,
+                401,
+                "Unauthorized",
+                "text/plain; charset=utf-8",
+                b"unauthorized",
+            )
+            .await;
+        }
+        return match kind {
+            crate::share::SharePath::Page => {
+                hub.delete_inbound(id);
+                write_untracked(socket, 204, "No Content", "text/plain; charset=utf-8", b"").await
+            }
+            _ => {
+                write_untracked(
+                    socket,
+                    405,
+                    "Method Not Allowed",
+                    "text/plain; charset=utf-8",
+                    b"delete the share url",
+                )
+                .await
+            }
+        };
+    }
+    let body = match read_relay_body(socket, head, &rest).await {
+        Ok(body) => body,
+        Err(status) => {
+            return write_untracked(
+                socket,
+                status.status,
+                status.reason,
+                "text/plain; charset=utf-8",
+                status.message.as_bytes(),
+            )
+            .await;
+        }
+    };
+    if !hub.relay_authorized(authorization.as_deref()) {
+        return write_untracked(
+            socket,
+            401,
+            "Unauthorized",
+            "text/plain; charset=utf-8",
+            b"unauthorized",
+        )
+        .await;
+    }
+    let result = match kind {
+        crate::share::SharePath::Data { .. } => hub.put_inbound_flows(id, &body),
+        crate::share::SharePath::FlowBody(flow_id) => hub.put_inbound_body(id, flow_id, &body),
+        crate::share::SharePath::Page => Err(crate::relay::RelayStatus {
+            status: 405,
+            reason: "Method Not Allowed",
+            message: "upload flows.json",
+        }),
+    };
+    match result {
+        Ok(()) => {
+            write_untracked(socket, 204, "No Content", "text/plain; charset=utf-8", b"").await
+        }
+        Err(status) => {
+            write_untracked(
+                socket,
+                status.status,
+                status.reason,
+                "text/plain; charset=utf-8",
+                status.message.as_bytes(),
+            )
+            .await
+        }
+    }
+}
+
+async fn read_relay_body(
+    socket: &mut TcpStream,
+    head: &Head,
+    rest: &[u8],
+) -> Result<Vec<u8>, crate::relay::RelayStatus> {
+    if is_chunked(&head.headers) {
+        return Err(crate::relay::RelayStatus {
+            status: 411,
+            reason: "Length Required",
+            message: "chunked bodies are not accepted",
+        });
+    }
+    let Some(raw) = header_value(&head.headers, "content-length") else {
+        return Err(crate::relay::RelayStatus {
+            status: 411,
+            reason: "Length Required",
+            message: "content-length required",
+        });
+    };
+    let len: usize = match raw.parse() {
+        Ok(len) => len,
+        Err(_) => {
+            return Err(crate::relay::RelayStatus {
+                status: 400,
+                reason: "Bad Request",
+                message: "bad content-length",
+            });
+        }
+    };
+    if len > crate::relay::MAX_BODY {
+        return Err(crate::relay::RelayStatus {
+            status: 413,
+            reason: "Content Too Large",
+            message: "body is too large",
+        });
+    }
+    let mut body = Vec::with_capacity(len);
+    let take = rest.len().min(len);
+    body.extend_from_slice(&rest[..take]);
+    while body.len() < len {
+        let mut buf = [0_u8; 8192];
+        let read = match timeout(Duration::from_secs(5), socket.read(&mut buf)).await {
+            Ok(Ok(0)) => {
+                return Err(crate::relay::RelayStatus {
+                    status: 400,
+                    reason: "Bad Request",
+                    message: "body ended early",
+                });
+            }
+            Ok(Ok(count)) => count,
+            Ok(Err(_)) | Err(_) => {
+                return Err(crate::relay::RelayStatus {
+                    status: 400,
+                    reason: "Bad Request",
+                    message: "body read failed",
+                });
+            }
+        };
+        let need = len - body.len();
+        body.extend_from_slice(&buf[..read.min(need)]);
+    }
+    Ok(body)
+}
+
+fn relay_drafts(doc: &crate::share::InboundShare) -> Vec<RelayDraft> {
+    doc.flows
+        .iter()
+        .map(|flow| RelayDraft {
+            remote_id: flow.id,
+            protocol: protocol_from_label(&flow.protocol),
+            method: flow.method.clone(),
+            host: flow.host.clone(),
+            path: flow.path.clone(),
+            url: flow.url.clone(),
+            status: flow.status,
+            error: flow.error.clone(),
+            request_headers: flow.request_headers.clone(),
+            response_headers: flow.response_headers.clone(),
+            request_body: flow.request_body.as_bytes().to_vec(),
+            response_body: flow.response_body.as_bytes().to_vec(),
+            request_bytes: flow.request_bytes,
+            response_bytes: flow.response_bytes,
+            ttfb: flow.ttfb_ms.map(millis),
+            total: flow.total_ms.map(millis),
+            comment: flow.comment.clone(),
+            rule_hit: flow.rule_hit.clone(),
+            messages: shared_messages(&flow.messages),
+        })
+        .collect()
+}
+
+fn millis(ms: u128) -> Duration {
+    Duration::from_millis(u64::try_from(ms).unwrap_or(u64::MAX))
+}
+
+fn protocol_from_label(label: &str) -> Protocol {
+    if label.eq_ignore_ascii_case("HTTP/2") {
+        Protocol::Http2
+    } else if label.eq_ignore_ascii_case("WebSocket") {
+        Protocol::WebSocket
+    } else if label == "隧道" || label.eq_ignore_ascii_case("Tunnel") {
+        Protocol::Tunnel
+    } else {
+        Protocol::Http11
+    }
+}
+
+fn shared_messages(lines: &[String]) -> Vec<Message> {
+    lines
+        .iter()
+        .filter_map(|line| {
+            let (direction, rest) = if let Some(rest) = line.strip_prefix("→ ") {
+                (Direction::Request, rest)
+            } else {
+                let rest = line.strip_prefix("← ")?;
+                (Direction::Response, rest)
+            };
+            let (kind, text) = rest.split_once(' ').unwrap_or((rest, ""));
+            Some(Message {
+                direction,
+                kind: kind.to_string(),
+                text: text.to_string(),
+            })
+        })
+        .collect()
+}
+
 async fn serve_share<S>(
     socket: &mut S,
     hub: &Hub,
@@ -3508,7 +4065,10 @@ where
     let zh = crate::share::prefers_zh(header_value(&head.headers, "accept-language").as_deref());
     match kind {
         crate::share::SharePath::Data { since } => {
-            let Some(json) = hub.share_document_since(id, since) else {
+            let Some(json) = hub
+                .share_document_since(id, since)
+                .or_else(|| hub.inbound_document(id))
+            else {
                 let body = crate::share::expired_page(zh);
                 return write_untracked(
                     socket,
@@ -3519,17 +4079,32 @@ where
                 )
                 .await;
             };
-            write_untracked(
+            let raw = json.into_bytes();
+            let accept = header_value(&head.headers, "accept-encoding");
+            let (encoding, body) = if accepts_gzip(accept.as_deref()) {
+                match gzip_bytes(&raw) {
+                    Some(compressed) => (Some("gzip"), compressed),
+                    None => (None, raw),
+                }
+            } else {
+                (None, raw)
+            };
+            write_untracked_encoded(
                 socket,
                 200,
                 "OK",
                 "application/json; charset=utf-8",
-                json.as_bytes(),
+                encoding,
+                &body,
             )
             .await
         }
         crate::share::SharePath::FlowBody(flow_id) => {
-            let Some(json) = hub.share_flow_body(id, flow_id) else {
+            let stored = hub
+                .share_flow_body(id, flow_id)
+                .map(String::into_bytes)
+                .or_else(|| hub.inbound_body(id, flow_id));
+            let Some(json) = stored else {
                 return write_untracked(
                     socket,
                     404,
@@ -3539,17 +4114,13 @@ where
                 )
                 .await;
             };
-            write_untracked(
-                socket,
-                200,
-                "OK",
-                "application/json; charset=utf-8",
-                json.as_bytes(),
-            )
-            .await
+            write_untracked(socket, 200, "OK", "application/json; charset=utf-8", &json).await
         }
         crate::share::SharePath::Page => {
-            let Some(json) = hub.share_document_since(id, None) else {
+            let Some(json) = hub
+                .share_document_since(id, None)
+                .or_else(|| hub.inbound_document(id))
+            else {
                 let body = crate::share::expired_page(zh);
                 return write_untracked(
                     socket,
@@ -3584,13 +4155,64 @@ async fn write_untracked<S>(
 where
     S: AsyncWrite + Unpin,
 {
+    write_untracked_encoded(socket, status, reason, content_type, None, body).await
+}
+
+async fn write_untracked_encoded<S>(
+    socket: &mut S,
+    status: u16,
+    reason: &str,
+    content_type: &str,
+    content_encoding: Option<&str>,
+    body: &[u8],
+) -> Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
+    let encoding = match content_encoding {
+        Some(value) if !value.is_empty() => format!("Content-Encoding: {value}\r\n"),
+        _ => String::new(),
+    };
     let head = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\n{encoding}Content-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n",
         body.len()
     );
     socket.write_all(head.as_bytes()).await?;
     socket.write_all(body).await?;
     Ok(())
+}
+
+fn accepts_gzip(header: Option<&str>) -> bool {
+    let Some(header) = header else {
+        return false;
+    };
+    for part in header.split(',') {
+        let mut bits = part.split(';');
+        let coding = bits.next().unwrap_or("").trim();
+        if !coding.eq_ignore_ascii_case("gzip") {
+            continue;
+        }
+        let mut quality = 1.0_f32;
+        for param in bits {
+            let param = param.trim();
+            let Some(value) = param
+                .strip_prefix("q=")
+                .or_else(|| param.strip_prefix("Q="))
+            else {
+                continue;
+            };
+            quality = value.trim().parse().unwrap_or(0.0);
+        }
+        return quality > 0.0;
+    }
+    false
+}
+
+fn gzip_bytes(body: &[u8]) -> Option<Vec<u8>> {
+    use std::io::Write;
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder.write_all(body).ok()?;
+    encoder.finish().ok()
 }
 
 const INSTALL_PAGE: &str = r#"<!DOCTYPE html>
@@ -7279,6 +7901,31 @@ mod tests {
         ));
         assert!(local_route("POST", "/zniff").is_none());
         assert!(local_route("CONNECT", "example.com:443").is_none());
+        assert!(local_route("PUT", &format!("http://example.com/s/{id}/flows.json")).is_none());
+        assert!(matches!(
+            local_route("PUT", &format!("/s/{id}/flows.json")),
+            Some(LocalRoute::Relay(
+                _,
+                crate::share::SharePath::Data { .. },
+                RelayVerb::Put
+            ))
+        ));
+        assert!(matches!(
+            local_route("DELETE", &format!("/s/{id}")),
+            Some(LocalRoute::Relay(
+                _,
+                crate::share::SharePath::Page,
+                RelayVerb::Delete
+            ))
+        ));
+        assert!(
+            local_route_for(
+                "PUT",
+                &format!("http://example.com/s/{id}/flows.json"),
+                false
+            )
+            .is_none()
+        );
     }
 
     #[tokio::test]
@@ -7320,6 +7967,319 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[tokio::test]
+    async fn relay_accept_puts_shares_in_the_session() {
+        let dir = std::env::temp_dir().join(format!("zniff-relay-in-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+        let proxy = listen().await.unwrap();
+        let addr = proxy.local_addr().unwrap();
+        serve_proxy(proxy, hub.clone());
+
+        let id = "550e8400-e29b-41d4-a716-446655440000";
+        let other = "550e8400-e29b-41d4-a716-446655440001";
+        let missing = "550e8400-e29b-41d4-a716-446655440002";
+        let expires = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3600;
+        let alpha = inbound_doc("alpha.test", 7, "ready", false, expires);
+        let beta = inbound_doc("beta.test", 8, "beta", false, expires);
+
+        let (status, _) = relay_exchange(
+            addr,
+            &relay_put(&format!("/s/{id}/flows.json"), "secret", &alpha),
+        )
+        .await;
+        assert_eq!(status, 404);
+        assert_eq!(hub.with_session(|session| session.flows().len()), 0);
+
+        hub.set_relay_ingress(true, "a b");
+        let (status, _) = relay_exchange(
+            addr,
+            &relay_put(&format!("/s/{id}/flows.json"), "a b", &alpha),
+        )
+        .await;
+        assert_eq!(status, 401);
+        hub.set_relay_token("secret");
+        let (status, _) = relay_exchange(
+            addr,
+            &relay_put(&format!("/s/{id}/flows.json"), "nope", &alpha),
+        )
+        .await;
+        assert_eq!(status, 401);
+        assert_eq!(hub.with_session(|session| session.flows().len()), 0);
+
+        let (status, _) = relay_exchange(
+            addr,
+            &relay_put(&format!("/s/{id}/flows.json"), "secret", &alpha),
+        )
+        .await;
+        assert_eq!(status, 204);
+        let (local_id, host, label) = hub.with_session(|session| {
+            let flow = session.flows().into_iter().next().unwrap();
+            (flow.id, flow.host.clone(), flow.client_ip.clone())
+        });
+        assert_eq!(host, "alpha.test");
+        assert_eq!(label, "中继 550e8400");
+        let flow = hub
+            .with_session(|session| session.get(local_id).cloned())
+            .unwrap();
+        assert_eq!(flow.relay_source.as_deref(), Some(id));
+        assert_eq!(flow.relay_remote_id, Some(7));
+        assert_eq!(flow.response_body, b"ready");
+        assert!(flow.comment.is_empty());
+        assert_eq!(flow.messages.len(), 1);
+        assert!(hub.with_session(|session| session.flows_matching("550e8400").len()) == 1);
+
+        let (status, page) = relay_exchange(
+            addr,
+            &format!("GET /s/{id} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert!(page.contains("alpha.test"), "{page}");
+        let (status, flows) = relay_exchange(
+            addr,
+            &format!(
+                "GET /s/{id}/flows.json?since=1 HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+            ),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert!(flows.contains("\"incremental\":false"), "{flows}");
+        assert!(!flows.contains("\"incremental\":true"), "{flows}");
+
+        let packed = raw_exchange(
+            addr,
+            &format!(
+                "GET /s/{id}/flows.json HTTP/1.1\r\nHost: {addr}\r\nAccept-Encoding: gzip\r\nConnection: close\r\n\r\n"
+            ),
+        )
+        .await;
+        let packed_text = String::from_utf8_lossy(&packed);
+        assert!(
+            packed_text.contains("Content-Encoding: gzip"),
+            "{packed_text}"
+        );
+        assert!(
+            packed.windows(2).any(|pair| pair == [0x1f, 0x8b]),
+            "gzip magic missing"
+        );
+
+        let (status, _) = relay_exchange(
+            addr,
+            &format!(
+                "PUT http://{addr}/s/{other}/flows.json HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer secret\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{beta}",
+                beta.len()
+            ),
+        )
+        .await;
+        assert_eq!(status, 204);
+        let hosts = hub.with_session(|session| {
+            session
+                .flows()
+                .into_iter()
+                .map(|flow| flow.host)
+                .collect::<Vec<_>>()
+        });
+        assert!(hosts.contains(&"alpha.test".to_string()), "{hosts:?}");
+        assert!(hosts.contains(&"beta.test".to_string()), "{hosts:?}");
+
+        assert!(hub.with_session(|session| session.set_pinned(local_id, true)));
+        let gamma = inbound_doc("gamma.test", 7, "gamma", false, expires);
+        let (status, _) = relay_exchange(
+            addr,
+            &relay_put(&format!("/s/{id}/flows.json"), "secret", &gamma),
+        )
+        .await;
+        assert_eq!(status, 204);
+        let updated = hub
+            .with_session(|session| session.get(local_id).cloned())
+            .unwrap();
+        assert_eq!(updated.host, "gamma.test");
+        assert!(updated.pinned);
+        assert!(hub.with_session(|session| {
+            session.flows().iter().any(|flow| flow.host == "beta.test")
+        }));
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        hub.replay_later(local_id, ReplayOverride::default(), move |result| {
+            let _ = tx.send(result.err().map(|err| err.to_string()).unwrap_or_default());
+        });
+        let err = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(err.contains("中继"), "{err}");
+        let (tx, rx) = std::sync::mpsc::channel();
+        hub.replay_batch_later(
+            local_id,
+            2,
+            1,
+            0,
+            ReplayOverride::default(),
+            move |result| {
+                let _ = tx.send(result.err().map(|err| err.to_string()).unwrap_or_default());
+            },
+        );
+        let err = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(err.contains("中继"), "{err}");
+
+        let spilled = inbound_doc("gamma.test", 7, "hello", true, expires);
+        relay_exchange(
+            addr,
+            &relay_put(&format!("/s/{id}/flows.json"), "secret", &spilled),
+        )
+        .await;
+        assert!(
+            hub.with_session(|session| session.get(local_id).unwrap().response_body.is_empty())
+        );
+        let flow_body =
+            r#"{"id":7,"request_body":"ping","response_body":"hello","messages":["← text pong"]}"#;
+        let (status, _) = relay_exchange(
+            addr,
+            &relay_put(&format!("/s/{missing}/flows/7.json"), "secret", flow_body),
+        )
+        .await;
+        assert_eq!(status, 409);
+        let (status, _) = relay_exchange(
+            addr,
+            &relay_put(&format!("/s/{id}/flows/7.json"), "secret", flow_body),
+        )
+        .await;
+        assert_eq!(status, 204);
+        let filled = hub
+            .with_session(|session| session.get(local_id).cloned())
+            .unwrap();
+        assert_eq!(filled.response_body, b"hello");
+        assert_eq!(filled.id, local_id);
+        let (status, body_page) = relay_exchange(
+            addr,
+            &format!(
+                "GET /s/{id}/flows/7.json HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+            ),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert!(body_page.contains("hello"), "{body_page}");
+
+        let (status, _) = relay_exchange(
+            addr,
+            &format!(
+                "DELETE /s/{other} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer nope\r\nConnection: close\r\n\r\n"
+            ),
+        )
+        .await;
+        assert_eq!(status, 401);
+        assert!(
+            hub.with_session(|session| session.flows().iter().any(|flow| flow.host == "beta.test"))
+        );
+        let (status, _) = relay_exchange(
+            addr,
+            &format!(
+                "DELETE /s/{other} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer secret\r\nConnection: close\r\n\r\n"
+            ),
+        )
+        .await;
+        assert_eq!(status, 204);
+        assert!(
+            hub.with_session(|session| session.flows().iter().all(|flow| flow.host != "beta.test"))
+        );
+        assert!(hub.with_session(|session| session.get(local_id).is_some()));
+
+        let local = hub.open(FlowDraft {
+            protocol: Protocol::Http11,
+            method: "GET".into(),
+            host: "local.test".into(),
+            path: "/mine".into(),
+            url: "http://local.test/mine".into(),
+            request_headers: Vec::new(),
+        });
+        let (status, _) = relay_exchange(
+            addr,
+            &format!(
+                "DELETE /s/{id} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer secret\r\nConnection: close\r\n\r\n"
+            ),
+        )
+        .await;
+        assert_eq!(status, 204);
+        assert!(hub.with_session(|session| session.get(local_id).is_none()));
+        assert!(hub.with_session(|session| session.get(local).is_some()));
+        let (status, _) = relay_exchange(
+            addr,
+            &format!(
+                "DELETE /s/{missing} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer secret\r\nConnection: close\r\n\r\n"
+            ),
+        )
+        .await;
+        assert_eq!(status, 204);
+
+        let (status, text) = relay_exchange(
+            addr,
+            &format!(
+                "PUT /s/{id}/flows.json HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer secret\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+            ),
+        )
+        .await;
+        assert_eq!(status, 411, "{text}");
+        let (status, text) = relay_exchange(
+            addr,
+            &format!(
+                "PUT /s/{id}/flows.json HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer secret\r\nContent-Length: 99999999\r\nConnection: close\r\n\r\n"
+            ),
+        )
+        .await;
+        assert_eq!(status, 413, "{text}");
+
+        hub.set_relay_accept(false);
+        let (status, _) = relay_exchange(
+            addr,
+            &relay_put(&format!("/s/{id}/flows.json"), "secret", &alpha),
+        )
+        .await;
+        assert_eq!(status, 404);
+        assert!(hub.with_session(|session| session.get(local).is_some()));
+        assert_eq!(hub.with_session(|session| session.flows().len()), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn inbound_doc(host: &str, remote_id: u64, body: &str, spilled: bool, expires: u64) -> String {
+        let flag = if spilled { "true" } else { "false" };
+        let response = if spilled { "" } else { body };
+        format!(
+            r#"{{"expires":{expires},"filter":"host:{host}","omitted":0,"rev":3,"incremental":true,"ids":[{remote_id}],"flows":[{{"id":{remote_id},"method":"POST","status":201,"protocol":"HTTP/1.1","host":"{host}","path":"/inbox","url":"http://{host}/inbox","request_headers":[["Accept","text/plain"]],"response_headers":[["Content-Type","text/plain"]],"request_body":"ping","response_body":"{response}","request_body_spilled":false,"response_body_spilled":{flag},"request_bytes":4,"response_bytes":5,"ttfb_ms":8,"total_ms":20,"comment":"","rule_hit":"","messages":["→ text hi"]}}]}}"#
+        )
+    }
+
+    fn relay_put(path: &str, token: &str, body: &str) -> String {
+        format!(
+            "PUT {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    async fn relay_exchange(addr: SocketAddr, request: &str) -> (u16, String) {
+        let bytes = raw_exchange(addr, request).await;
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        let status = text
+            .split_whitespace()
+            .nth(1)
+            .and_then(|code| code.parse().ok())
+            .unwrap_or(0);
+        (status, text)
+    }
+
+    async fn raw_exchange(addr: SocketAddr, request: &str) -> Vec<u8> {
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client.write_all(request.as_bytes()).await.unwrap();
+        let mut resp = Vec::new();
+        timeout(Duration::from_secs(5), client.read_to_end(&mut resp))
+            .await
+            .unwrap()
+            .unwrap();
+        resp
+    }
+
     #[test]
     fn share_document_keeps_only_the_frozen_filter() {
         let dir = std::env::temp_dir().join(format!("zniff-share-filter-{}", std::process::id()));
@@ -7349,6 +8309,165 @@ mod tests {
         assert!(!json.contains("http://b.test/other"), "{json}");
         assert!(json.contains("header:cookie"), "{json}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn gzip_is_offered_only_when_the_coding_is_accepted() {
+        assert!(!accepts_gzip(None));
+        assert!(!accepts_gzip(Some("")));
+        assert!(!accepts_gzip(Some("identity")));
+        assert!(!accepts_gzip(Some("*")));
+        assert!(!accepts_gzip(Some("gzip;q=0")));
+        assert!(!accepts_gzip(Some("deflate, gzip;q=0.0")));
+        assert!(!accepts_gzip(Some("gzip;q=nope")));
+        assert!(accepts_gzip(Some("gzip")));
+        assert!(accepts_gzip(Some("GZIP")));
+        assert!(accepts_gzip(Some("deflate, gzip")));
+        assert!(accepts_gzip(Some("br, gzip;q=0.5")));
+        let packed = gzip_bytes(b"{\"ok\":true}").expect("gzip");
+        assert!(packed.starts_with(&[0x1f, 0x8b]));
+        let mut decoder = flate2::read::GzDecoder::new(packed.as_slice());
+        let mut plain = Vec::new();
+        std::io::Read::read_to_end(&mut decoder, &mut plain).unwrap();
+        assert_eq!(plain, b"{\"ok\":true}");
+    }
+
+    #[tokio::test]
+    async fn share_flows_json_is_gzipped_only_when_the_client_accepts_it() {
+        let dir = std::env::temp_dir().join(format!("zniff-share-gzip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+        let flow_id = hub.open(FlowDraft {
+            protocol: Protocol::Http11,
+            method: "GET".into(),
+            host: "share.example".into(),
+            path: "/items".into(),
+            url: "http://share.example/items".into(),
+            request_headers: vec![("Accept".into(), "application/json".into())],
+        });
+        hub.set_response(
+            flow_id,
+            200,
+            vec![("Content-Type".into(), "application/json".into())],
+            None,
+        );
+        hub.append_body(flow_id, Direction::Response, b"{\"n\":1}");
+        hub.mark_finished(flow_id);
+        hub.begin_share(Duration::from_secs(60), "");
+        let id = hub.share_id().expect("share id");
+        let before = hub.with_session(|session| session.flows().len());
+
+        let proxy = listen().await.unwrap();
+        let addr = proxy.local_addr().unwrap();
+        serve_proxy(proxy, hub.clone());
+
+        let plain_req =
+            format!("GET /s/{id}/flows.json HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+        let (plain_head, plain_body) = read_closed_http(addr, &plain_req).await;
+        assert!(plain_head.starts_with("HTTP/1.1 200"), "{plain_head}");
+        assert!(
+            header_field(&plain_head, "content-encoding").is_none(),
+            "{plain_head}"
+        );
+        assert_eq!(
+            header_field(&plain_head, "content-length"),
+            Some(plain_body.len().to_string()).as_deref()
+        );
+        assert_eq!(header_field(&plain_head, "cache-control"), Some("no-store"));
+        assert!(
+            plain_head
+                .to_ascii_lowercase()
+                .contains("connection: close")
+        );
+        assert!(
+            plain_body
+                .windows(b"share.example".len())
+                .any(|w| w == b"share.example")
+        );
+
+        let gzip_req = format!(
+            "GET /s/{id}/flows.json HTTP/1.1\r\nHost: {addr}\r\nAccept-Encoding: deflate, gzip\r\nConnection: close\r\n\r\n"
+        );
+        let (gzip_head, gzip_body) = read_closed_http(addr, &gzip_req).await;
+        assert!(gzip_head.starts_with("HTTP/1.1 200"), "{gzip_head}");
+        assert_eq!(header_field(&gzip_head, "content-encoding"), Some("gzip"));
+        assert_eq!(
+            header_field(&gzip_head, "content-length"),
+            Some(gzip_body.len().to_string()).as_deref(),
+            "{gzip_head}"
+        );
+        assert_eq!(
+            header_field(&gzip_head, "content-type"),
+            Some("application/json; charset=utf-8")
+        );
+        assert!(gzip_body.starts_with(&[0x1f, 0x8b]), "{gzip_body:?}");
+        assert_ne!(gzip_body, plain_body);
+        let mut decoder = flate2::read::GzDecoder::new(gzip_body.as_slice());
+        let mut inflated = Vec::new();
+        std::io::Read::read_to_end(&mut decoder, &mut inflated).unwrap();
+        assert_eq!(inflated, plain_body);
+
+        let refused = format!(
+            "GET /s/{id}/flows.json HTTP/1.1\r\nHost: {addr}\r\nAccept-Encoding: gzip;q=0, identity\r\nConnection: close\r\n\r\n"
+        );
+        let (refused_head, refused_body) = read_closed_http(addr, &refused).await;
+        assert!(
+            header_field(&refused_head, "content-encoding").is_none(),
+            "{refused_head}"
+        );
+        assert_eq!(refused_body, plain_body);
+
+        let page_req = format!(
+            "GET /s/{id} HTTP/1.1\r\nHost: {addr}\r\nAccept-Encoding: gzip\r\nConnection: close\r\n\r\n"
+        );
+        let (page_head, page_body) = read_closed_http(addr, &page_req).await;
+        assert!(page_head.starts_with("HTTP/1.1 200"), "{page_head}");
+        assert!(
+            header_field(&page_head, "content-encoding").is_none(),
+            "{page_head}"
+        );
+        assert!(page_body.starts_with(b"<!DOCTYPE html") || page_body.starts_with(b"<html"));
+
+        let one_req = format!(
+            "GET /s/{id}/flows/{flow_id}.json HTTP/1.1\r\nHost: {addr}\r\nAccept-Encoding: gzip\r\nConnection: close\r\n\r\n"
+        );
+        let (one_head, one_body) = read_closed_http(addr, &one_req).await;
+        assert!(one_head.starts_with("HTTP/1.1 200"), "{one_head}");
+        assert!(
+            header_field(&one_head, "content-encoding").is_none(),
+            "{one_head}"
+        );
+        let one_text = String::from_utf8_lossy(&one_body);
+        assert!(one_text.contains("response_body"), "{one_text}");
+        assert!(one_text.contains('n'), "{one_text}");
+
+        assert_eq!(hub.with_session(|session| session.flows().len()), before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    async fn read_closed_http(addr: std::net::SocketAddr, request: &str) -> (String, Vec<u8>) {
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client.write_all(request.as_bytes()).await.unwrap();
+        let mut raw = Vec::new();
+        timeout(Duration::from_secs(5), client.read_to_end(&mut raw))
+            .await
+            .unwrap()
+            .unwrap();
+        let split = raw
+            .windows(4)
+            .position(|mark| mark == b"\r\n\r\n")
+            .expect("http header");
+        let head = String::from_utf8_lossy(&raw[..split]).into_owned();
+        let body = raw[split + 4..].to_vec();
+        (head, body)
+    }
+
+    fn header_field<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+        head.lines().find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            key.eq_ignore_ascii_case(name).then_some(value.trim())
+        })
     }
 
     #[test]
@@ -8659,6 +9778,81 @@ mod tests {
         store_cached_local_app(65431, "curl".into());
         assert_eq!(cached_local_app(65431).as_deref(), Some("curl"));
         assert_eq!(resolve_local_process_name(0), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn promote_break_selects_that_slot_without_releasing_the_others() {
+        let dir = std::env::temp_dir().join(format!("zniff-break-promote-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+
+        let h1 = hub.clone();
+        let w1 = tokio::spawn(async move { h1.wait_break(10, BreakSide::Request).await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let h2 = hub.clone();
+        let w2 = tokio::spawn(async move { h2.wait_break(20, BreakSide::Response).await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let h3 = hub.clone();
+        let mut w3 = tokio::spawn(async move { h3.wait_break(30, BreakSide::Request).await });
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while hub.paused_queue_len() < 3 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            hub.paused_queue(),
+            vec![
+                (10, BreakSide::Request),
+                (20, BreakSide::Response),
+                (30, BreakSide::Request),
+            ]
+        );
+        assert!(hub.promote_break(30));
+        assert_eq!(hub.paused(), Some((30, BreakSide::Request)));
+        assert_eq!(
+            hub.paused_queue(),
+            vec![
+                (30, BreakSide::Request),
+                (10, BreakSide::Request),
+                (20, BreakSide::Response),
+            ]
+        );
+        assert!(!hub.promote_break(99));
+        assert_eq!(hub.paused_queue_len(), 3);
+        assert!(hub.promote_break(30));
+        assert_eq!(hub.paused_queue()[0], (30, BreakSide::Request));
+
+        let mut w1 = w1;
+        let mut w2 = w2;
+        assert!(
+            timeout(Duration::from_millis(80), &mut w1).await.is_err(),
+            "promoting another slot released the first"
+        );
+        assert!(timeout(Duration::from_millis(80), &mut w2).await.is_err());
+
+        assert!(hub.resolve_break(BreakDecision {
+            drop: true,
+            headers: None,
+            body: None,
+            status: None,
+        }));
+        let dropped = timeout(Duration::from_secs(2), &mut w3)
+            .await
+            .expect("promoted break did not finish")
+            .unwrap();
+        assert!(dropped.drop);
+        assert_eq!(hub.paused(), Some((10, BreakSide::Request)));
+        assert_eq!(hub.paused_queue_len(), 2);
+
+        assert_eq!(hub.resolve_all_breaks(), 2);
+        let kept_first = w1.await.unwrap();
+        let kept_second = w2.await.unwrap();
+        assert!(!kept_first.drop);
+        assert!(!kept_second.drop);
+        assert!(hub.paused_queue().is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

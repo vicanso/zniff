@@ -1,0 +1,171 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="464" viewBox="0 0 960 464" role="img" aria-labelledby="zniff-architecture-title zniff-architecture-desc">
+  <title id="zniff-architecture-title">The code zniff shares between the desktop app and the web version</title>
+  <desc id="zniff-architecture-desc">Code-sharing diagram, not a deployment. The zniff UI and the capture layer are written once and compiled into more than one program, and neither runs as a service of its own. The desktop app is one native process holding both, and its UI calls Hub in-process. In the web version the same UI runs as WebAssembly in a browser tab and calls zniff --web over an HTTP API. That server process turns those calls into the same Hub. The browser does not capture. The capture port stays closed until start. Only clients that set the desktop app or the server as their HTTP proxy are captured, and both programs forward that traffic to origin sites. The web page does not change the system proxy.</desc>
+  <defs>
+    <marker id="zniff-architecture-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#8b98a8"/>
+    </marker>
+    <style>
+      .name{font:600 16px Inter, 'SF Pro Text', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;fill:#e8edf4}
+      .hero{font:600 20px Inter, 'SF Pro Text', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;fill:#e8edf4}
+      .sub{font:400 12px 'JetBrains Mono', 'SF Mono', ui-monospace, Menlo, Consolas, monospace;fill:#8b98a8}
+      .label,.eyebrow,.zone,.tag,.band{font:500 12px 'JetBrains Mono', 'SF Mono', ui-monospace, Menlo, Consolas, monospace;fill:#8b98a8;letter-spacing:.06em}
+      .eyebrow,.zone,.tag,.band{letter-spacing:.14em}
+      .tag{fill:#7aa8e8}
+      .title{font:600 24px Inter, 'SF Pro Text', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;fill:#e8edf4;letter-spacing:-.01em}
+      .wire{fill:none;stroke:#8b98a8;stroke-width:1.5}
+      .token path{fill:none;stroke-linecap:round}
+      .tail{stroke:#4d8ff2;stroke-width:3}
+      .head{stroke:#e3edff;stroke-width:5}
+      .flow-a-0{stroke-dasharray:0.1px 2000px;stroke-dashoffset:8px;animation:flow-a-0 6.8s linear infinite}
+      .flow-a-1{stroke-dasharray:80px 2000px;stroke-dashoffset:88px;animation:flow-a-1 6.8s linear infinite}
+      .flow-a-2{stroke-dasharray:48px 2000px;stroke-dashoffset:56px;animation:flow-a-2 6.8s linear infinite}
+      .flow-a-3{stroke-dasharray:20px 2000px;stroke-dashoffset:28px;animation:flow-a-3 6.8s linear infinite}
+      .flow-ra-0{stroke-dasharray:0.1px 2000px;stroke-dashoffset:8px;animation:flow-ra-0 6.8s linear infinite}
+      .flow-ra-1{stroke-dasharray:80px 2000px;stroke-dashoffset:88px;animation:flow-ra-1 6.8s linear infinite}
+      .flow-ra-2{stroke-dasharray:48px 2000px;stroke-dashoffset:56px;animation:flow-ra-2 6.8s linear infinite}
+      .flow-ra-3{stroke-dasharray:20px 2000px;stroke-dashoffset:28px;animation:flow-ra-3 6.8s linear infinite}
+      .flow-b1-0{stroke-dasharray:0.1px 2000px;stroke-dashoffset:8px;animation:flow-b1-0 6.8s linear infinite}
+      .flow-b1-1{stroke-dasharray:80px 2000px;stroke-dashoffset:88px;animation:flow-b1-1 6.8s linear infinite}
+      .flow-b1-2{stroke-dasharray:48px 2000px;stroke-dashoffset:56px;animation:flow-b1-2 6.8s linear infinite}
+      .flow-b1-3{stroke-dasharray:20px 2000px;stroke-dashoffset:28px;animation:flow-b1-3 6.8s linear infinite}
+      .flow-b2-0{stroke-dasharray:0.1px 2000px;stroke-dashoffset:8px;animation:flow-b2-0 6.8s linear infinite}
+      .flow-b2-1{stroke-dasharray:80px 2000px;stroke-dashoffset:88px;animation:flow-b2-1 6.8s linear infinite}
+      .flow-b2-2{stroke-dasharray:48px 2000px;stroke-dashoffset:56px;animation:flow-b2-2 6.8s linear infinite}
+      .flow-b2-3{stroke-dasharray:20px 2000px;stroke-dashoffset:28px;animation:flow-b2-3 6.8s linear infinite}
+      .flow-rb-0{stroke-dasharray:0.1px 2000px;stroke-dashoffset:8px;animation:flow-rb-0 6.8s linear infinite}
+      .flow-rb-1{stroke-dasharray:80px 2000px;stroke-dashoffset:88px;animation:flow-rb-1 6.8s linear infinite}
+      .flow-rb-2{stroke-dasharray:48px 2000px;stroke-dashoffset:56px;animation:flow-rb-2 6.8s linear infinite}
+      .flow-rb-3{stroke-dasharray:20px 2000px;stroke-dashoffset:28px;animation:flow-rb-3 6.8s linear infinite}
+      @keyframes flow-a-0{0%{stroke-dashoffset:8px}42.6%,100%{stroke-dashoffset:-460px}}
+      @keyframes flow-a-1{0%{stroke-dashoffset:88px}42.6%,100%{stroke-dashoffset:-380px}}
+      @keyframes flow-a-2{0%{stroke-dashoffset:56px}42.6%,100%{stroke-dashoffset:-412px}}
+      @keyframes flow-a-3{0%{stroke-dashoffset:28px}42.6%,100%{stroke-dashoffset:-440px}}
+      @keyframes flow-ra-0{0%,36%{stroke-dashoffset:8px}51.2%,100%{stroke-dashoffset:-160px}}
+      @keyframes flow-ra-1{0%,36%{stroke-dashoffset:88px}51.2%,100%{stroke-dashoffset:-80px}}
+      @keyframes flow-ra-2{0%,36%{stroke-dashoffset:56px}51.2%,100%{stroke-dashoffset:-112px}}
+      @keyframes flow-ra-3{0%,36%{stroke-dashoffset:28px}51.2%,100%{stroke-dashoffset:-140px}}
+      @keyframes flow-b1-0{0%,44.1%{stroke-dashoffset:8px}68.8%,100%{stroke-dashoffset:-256px}}
+      @keyframes flow-b1-1{0%,44.1%{stroke-dashoffset:88px}68.8%,100%{stroke-dashoffset:-176px}}
+      @keyframes flow-b1-2{0%,44.1%{stroke-dashoffset:56px}68.8%,100%{stroke-dashoffset:-208px}}
+      @keyframes flow-b1-3{0%,44.1%{stroke-dashoffset:28px}68.8%,100%{stroke-dashoffset:-236px}}
+      @keyframes flow-b2-0{0%,61.8%{stroke-dashoffset:8px}76.9%,100%{stroke-dashoffset:-164px}}
+      @keyframes flow-b2-1{0%,61.8%{stroke-dashoffset:88px}76.9%,100%{stroke-dashoffset:-84px}}
+      @keyframes flow-b2-2{0%,61.8%{stroke-dashoffset:56px}76.9%,100%{stroke-dashoffset:-116px}}
+      @keyframes flow-b2-3{0%,61.8%{stroke-dashoffset:28px}76.9%,100%{stroke-dashoffset:-144px}}
+      @keyframes flow-rb-0{0%,69.9%{stroke-dashoffset:8px}85%,100%{stroke-dashoffset:-160px}}
+      @keyframes flow-rb-1{0%,69.9%{stroke-dashoffset:88px}85%,100%{stroke-dashoffset:-80px}}
+      @keyframes flow-rb-2{0%,69.9%{stroke-dashoffset:56px}85%,100%{stroke-dashoffset:-112px}}
+      @keyframes flow-rb-3{0%,69.9%{stroke-dashoffset:28px}85%,100%{stroke-dashoffset:-140px}}
+      @media (prefers-reduced-motion: reduce){.token{display:none}}
+      @media print{.token{display:none}}
+    </style>
+  </defs>
+
+  <!-- Card -->
+  <rect x="0.5" y="0.5" width="959" height="463" rx="16" fill="#0c0f14" stroke="rgba(255,255,255,0.08)"/>
+
+  <!-- Header -->
+  <text class="eyebrow" x="40" y="56">CODE SHARING</text>
+  <text class="title" x="40" y="92">Two ways to run zniff, the same code in both</text>
+
+  <!-- What runs: one dashed outline per process -->
+  <g>
+      <rect x="40" y="136" width="668" height="104" rx="12" fill="rgba(255,255,255,0.015)" stroke="rgba(232,237,244,0.30)" stroke-dasharray="5 4"/>
+      <rect x="48" y="128" width="318" height="16" fill="#0c0f14"/>
+      <text class="band" x="56" y="140">DESKTOP APP · ONE NATIVE PROCESS</text>
+      <rect x="40" y="256" width="276" height="104" rx="12" fill="rgba(255,255,255,0.015)" stroke="rgba(232,237,244,0.30)" stroke-dasharray="5 4"/>
+      <rect x="48" y="352" width="240" height="16" fill="#0c0f14"/>
+      <text class="band" x="56" y="364">BROWSER TAB · WEBASSEMBLY</text>
+      <rect x="340" y="256" width="368" height="104" rx="12" fill="rgba(255,255,255,0.015)" stroke="rgba(232,237,244,0.30)" stroke-dasharray="5 4"/>
+      <rect x="348" y="352" width="252" height="16" fill="#0c0f14"/>
+      <text class="band" x="356" y="364">ZNIFF --WEB · HTTP SERVER</text>
+  </g>
+
+  <!-- Wires, then the tokens that travel along them, then the code on top -->
+  <g aria-label="A call's path: in-process inside the desktop app; over HTTP from the browser tab to zniff --web; and HTTP proxy from each of the two programs to clients and origin sites">
+      <path class="wire" d="M188,188 H560" marker-end="url(#zniff-architecture-arrow)"/>
+      <rect x="308" y="164" width="136" height="16" rx="2" fill="#0c0f14"/>
+      <text class="label" x="376" y="176" text-anchor="middle">IN-PROCESS CALL</text>
+      <path class="wire" d="M696,188 H768" marker-end="url(#zniff-architecture-arrow)"/>
+      <rect x="708" y="164" width="52" height="16" rx="2" fill="#0c0f14"/>
+      <text class="label" x="734" y="176" text-anchor="middle">PROXY</text>
+      <path class="wire" d="M188,308 H356" marker-end="url(#zniff-architecture-arrow)"/>
+      <rect x="216" y="284" width="72" height="16" rx="2" fill="#0c0f14"/>
+      <text class="label" x="252" y="296" text-anchor="middle">HTTP API</text>
+      <path class="wire" d="M484,308 H560" marker-end="url(#zniff-architecture-arrow)"/>
+      <path class="wire" d="M696,308 H768" marker-end="url(#zniff-architecture-arrow)"/>
+      <rect x="708" y="284" width="52" height="16" rx="2" fill="#0c0f14"/>
+      <text class="label" x="734" y="296" text-anchor="middle">PROXY</text>
+  </g>
+  <g>
+      <g class="token" aria-hidden="true" focusable="false">
+        <path class="tail flow-a-1" d="M188,188 H560" opacity="0.2"/>
+        <path class="tail flow-a-2" d="M188,188 H560" opacity="0.45"/>
+        <path class="tail flow-a-3" d="M188,188 H560" opacity="0.9"/>
+        <path class="head flow-a-0" d="M188,188 H560"/>
+      </g>
+      <g class="token" aria-hidden="true" focusable="false">
+        <path class="tail flow-ra-1" d="M696,188 H768" opacity="0.2"/>
+        <path class="tail flow-ra-2" d="M696,188 H768" opacity="0.45"/>
+        <path class="tail flow-ra-3" d="M696,188 H768" opacity="0.9"/>
+        <path class="head flow-ra-0" d="M696,188 H768"/>
+      </g>
+      <g class="token" aria-hidden="true" focusable="false">
+        <path class="tail flow-b1-1" d="M188,308 H356" opacity="0.2"/>
+        <path class="tail flow-b1-2" d="M188,308 H356" opacity="0.45"/>
+        <path class="tail flow-b1-3" d="M188,308 H356" opacity="0.9"/>
+        <path class="head flow-b1-0" d="M188,308 H356"/>
+      </g>
+      <g class="token" aria-hidden="true" focusable="false">
+        <path class="tail flow-b2-1" d="M484,308 H560" opacity="0.2"/>
+        <path class="tail flow-b2-2" d="M484,308 H560" opacity="0.45"/>
+        <path class="tail flow-b2-3" d="M484,308 H560" opacity="0.9"/>
+        <path class="head flow-b2-0" d="M484,308 H560"/>
+      </g>
+      <g class="token" aria-hidden="true" focusable="false">
+        <path class="tail flow-rb-1" d="M696,308 H768" opacity="0.2"/>
+        <path class="tail flow-rb-2" d="M696,308 H768" opacity="0.45"/>
+        <path class="tail flow-rb-3" d="M696,308 H768" opacity="0.9"/>
+        <path class="head flow-rb-0" d="M696,308 H768"/>
+      </g>
+  </g>
+
+  <g>
+      <rect x="52" y="148" width="136" height="200" rx="8" fill="#0c0f14"/>
+      <rect x="52" y="148" width="136" height="200" rx="8" fill="rgba(31,111,235,0.14)" stroke="#1f6feb" stroke-width="1.5"/>
+      <text class="tag" x="120" y="216" text-anchor="middle">SHARED CODE</text>
+      <text class="hero" x="120" y="248" text-anchor="middle">zniff UI</text>
+      <text class="sub" x="120" y="272" text-anchor="middle">views · state</text>
+      <text class="sub" x="120" y="292" text-anchor="middle">Rust · nsh</text>
+      <rect x="356" y="268" width="128" height="80" rx="8" fill="#0c0f14"/>
+      <rect x="356" y="268" width="128" height="80" rx="8" fill="#141a22" stroke="rgba(232,237,244,0.32)" stroke-width="1"/>
+      <text class="name" x="420" y="300" text-anchor="middle">HTTP → Hub</text>
+      <text class="sub" x="420" y="324" text-anchor="middle">/api · start</text>
+      <rect x="560" y="148" width="136" height="200" rx="8" fill="#0c0f14"/>
+      <rect x="560" y="148" width="136" height="200" rx="8" fill="rgba(31,111,235,0.14)" stroke="#1f6feb" stroke-width="1.5"/>
+      <text class="tag" x="628" y="216" text-anchor="middle">SHARED CODE</text>
+      <text class="hero" x="628" y="248" text-anchor="middle">Capture</text>
+      <text class="sub" x="628" y="272" text-anchor="middle">Hub · TLS</text>
+      <text class="sub" x="628" y="292" text-anchor="middle">HTTP/2 · rules</text>
+      <rect x="768" y="136" width="152" height="224" rx="8" fill="#0c0f14"/>
+      <rect x="768" y="136" width="152" height="224" rx="8" fill="rgba(232,237,244,0.05)" stroke="rgba(139,152,168,0.55)" stroke-width="1"/>
+      <text class="zone" x="780" y="164">CLIENTS · SITES</text>
+      <circle cx="796" cy="216" r="6" fill="#8b98a8"/>
+      <text class="name" x="820" y="221">Apps</text>
+      <rect x="791" y="240" width="10" height="16" rx="2" fill="none" stroke="#8b98a8" stroke-width="1.2"/>
+      <path d="M794,252 H798" stroke="#8b98a8" stroke-width="1.2"/>
+      <text class="name" x="820" y="253">Phones</text>
+      <circle cx="796" cy="284" r="6" fill="none" stroke="#8b98a8" stroke-width="1.2"/>
+      <path d="M790,284 H802 M796,278 V290" stroke="#8b98a8" stroke-width="1.2"/>
+      <text class="name" x="820" y="289">Origins</text>
+  </g>
+
+  <!-- Legend -->
+  <rect x="40" y="410" width="12" height="12" rx="2" fill="rgba(31,111,235,0.14)" stroke="#1f6feb"/>
+  <text class="label" x="60" y="420">THE SAME CODE, COMPILED INTO EACH</text>
+  <rect x="336" y="410" width="20" height="12" rx="3" fill="none" stroke="rgba(232,237,244,0.30)" stroke-dasharray="5 4"/>
+  <text class="label" x="364" y="420">ONE RUNNING PROCESS</text>
+  <text class="sub" x="920" y="420" text-anchor="end">zniff</text>
+</svg>
