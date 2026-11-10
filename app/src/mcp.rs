@@ -228,12 +228,16 @@ fn tool_list_flows(hub: &Hub, args: &Value) -> Value {
         .and_then(Value::as_u64)
         .unwrap_or(50)
         .clamp(1, 200) as usize;
+    let (matched, _) = hub.matching_ids(filter);
+    let start = matched.len().saturating_sub(limit);
     let items: Vec<Value> = hub.with_session(|session| {
-        let matched = session.flows_matching_unhydrated(filter);
-        matched
+        let mut newest: Vec<_> = matched[start..]
+            .iter()
+            .filter_map(|(id, _)| session.get(*id).cloned())
+            .collect();
+        newest.reverse();
+        newest
             .into_iter()
-            .rev()
-            .take(limit)
             .map(|f| {
                 let tb = present::flow_timing_breakdown(&f);
                 json!({

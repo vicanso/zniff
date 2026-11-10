@@ -3,7 +3,7 @@ name: Publish
 # Tagged releases. The version lives in app/Cargo.toml, and the tag must
 # match it (v0.1.0 for version 0.1.0). macOS builds signed and notarized
 # DMGs wrapping zniff.app with icons/zniff.icns. Windows and Linux archives
-# contain the binary.
+# contain the binary. The Linux archive also carries install-linux.sh.
 
 on:
   push:
@@ -257,6 +257,12 @@ jobs:
           rm -rf "$stage"
           mkdir -p "$stage"
           cp "$bin" "$stage/"
+          case "${{ matrix.name }}" in
+            linux-*)
+              cp scripts/install-linux.sh "$stage/install-linux.sh"
+              chmod 755 "$stage/install-linux.sh"
+              ;;
+          esac
           tar -czf "$stage.tar.gz" "$stage"
           ls -l "$stage.tar.gz"
       - name: upload

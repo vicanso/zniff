@@ -44,6 +44,18 @@ use crate::ws::{self, FrameFeed};
 const IO_TIMEOUT: Duration = Duration::from_secs(20);
 /// Drop a cached origin HTTP/2 connection before a typical server idle timeout.
 const H2_IDLE: Duration = Duration::from_secs(45);
+/// List refreshes follow `generation`. Streaming body chunks bump it at most this often.
+const BODY_UI_TOUCH: Duration = Duration::from_millis(100);
+
+fn body_clock_ms() -> u64 {
+    use std::sync::OnceLock;
+    static START: OnceLock<Instant> = OnceLock::new();
+    START
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
+}
 /// Maximum number of concurrent flows waiting in the breakpoint FIFO queue.
 pub const BREAK_QUEUE_CAP: usize = 8;
 
@@ -82,78 +94,98 @@ fn cached_local_app(port: u16) -> Option<String> {
 }
 
 fn store_cached_local_app(port: u16, app: String) {
+    if app.is_empty() {
+        return;
+    }
     let mut guard = local_app_cache()
         .lock()
         .unwrap_or_else(|err| err.into_inner());
     guard.insert(port, (app, Instant::now()));
 }
 
-/// Identifies the local process name owning `peer_port` on loopback connections.
-pub fn resolve_local_process_name(peer_port: u16) -> Option<String> {
-    if peer_port == 0 {
-        return None;
-    }
-    #[cfg(target_os = "linux")]
-    {
-        if let Some(name) = resolve_local_process_linux(peer_port) {
-            return Some(name);
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let out = std::process::Command::new("lsof")
-            .args(["-nP", "-iTCP", "-sTCP:ESTABLISHED", "-Fpcn"])
-            .output()
-            .ok()?;
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let needle = format!(":{peer_port}->");
-        let mut current_cmd = String::new();
-        for line in stdout.lines() {
-            if let Some(cmd) = line.strip_prefix('c') {
-                current_cmd = cmd.trim().to_string();
-            } else if let Some(net) = line.strip_prefix('n')
-                && net.contains(&needle)
-                && !current_cmd.is_empty()
-            {
-                return Some(clean_process_name(&current_cmd));
-            }
-        }
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let out = std::process::Command::new("netstat")
-            .args(["-ano", "-p", "TCP"])
-            .output()
-            .ok()?;
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let needle = format!(":{peer_port} ");
-        for line in stdout.lines() {
-            if line.contains(&needle)
-                && let Some(pid_str) = line.split_whitespace().last()
-                && let Ok(pid) = pid_str.parse::<u32>()
-                && pid > 0
-            {
-                let tlist = std::process::Command::new("tasklist")
-                    .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
-                    .output()
-                    .ok()?;
-                let t_out = String::from_utf8_lossy(&tlist.stdout);
-                if let Some(first_col) = t_out.lines().next().and_then(|l| l.split(',').next()) {
-                    let name = first_col.trim().trim_matches('"');
-                    if !name.is_empty() {
-                        return Some(clean_process_name(name));
-                    }
-                }
-            }
-        }
-    }
-    None
+struct LocalPorts {
+    at: Instant,
+    map: HashMap<u16, String>,
+    ok: bool,
 }
 
-#[cfg(target_os = "linux")]
-fn resolve_local_process_linux(peer_port: u16) -> Option<String> {
-    let port_hex = format!(":{peer_port:04X}");
-    let mut target_inode = None;
+/// One process-name snapshot for every local TCP port. Callers share a scan
+/// instead of spawning `lsof` once per loopback connection.
+fn port_snapshot() -> HashMap<u16, String> {
+    use std::sync::OnceLock;
+    static SNAP: OnceLock<Mutex<LocalPorts>> = OnceLock::new();
+    let snap = SNAP.get_or_init(|| {
+        Mutex::new(LocalPorts {
+            at: Instant::now() - Duration::from_secs(60),
+            map: HashMap::new(),
+            ok: false,
+        })
+    });
+    let mut guard = snap.lock().unwrap_or_else(|err| err.into_inner());
+    // A failed scan keeps the previous map and waits out the same TTL, so one
+    // outage does not spawn `lsof` again on every new connection.
+    let stale = guard.at.elapsed() >= Duration::from_millis(1500);
+    if stale {
+        match scan_local_ports() {
+            Some(map) => {
+                guard.map = map;
+                guard.ok = true;
+                guard.at = Instant::now();
+            }
+            None => {
+                // A failed scan is not "no process". Keep the previous map, but
+                // don't retry every connection for the next 1.5s.
+                guard.ok = false;
+                guard.at = Instant::now();
+            }
+        }
+    }
+    guard.map.clone()
+}
+
+#[cfg_attr(test, allow(dead_code))]
+fn local_endpoint_port(name: &str) -> Option<u16> {
+    let local = name.split("->").next()?.trim();
+    let port = local.rsplit(':').next()?.trim();
+    if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    port.parse().ok()
+}
+
+#[cfg(test)]
+fn scan_local_ports() -> Option<HashMap<u16, String>> {
+    Some(HashMap::new())
+}
+
+#[cfg(all(not(test), target_os = "macos"))]
+fn scan_local_ports() -> Option<HashMap<u16, String>> {
+    let out = std::process::Command::new("lsof")
+        .args(["-nP", "-iTCP", "-sTCP:ESTABLISHED", "-Fpcn"])
+        .output()
+        .ok()?;
+    if !out.status.success() && out.stdout.is_empty() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut map = HashMap::new();
+    let mut current = String::new();
+    for line in stdout.lines() {
+        if let Some(cmd) = line.strip_prefix('c') {
+            current = clean_process_name(cmd.trim());
+        } else if let Some(net) = line.strip_prefix('n')
+            && !current.is_empty()
+            && let Some(port) = local_endpoint_port(net)
+        {
+            map.entry(port).or_insert_with(|| current.clone());
+        }
+    }
+    Some(map)
+}
+
+#[cfg(all(not(test), target_os = "linux"))]
+fn scan_local_ports() -> Option<HashMap<u16, String>> {
+    let mut inode_port: HashMap<String, u16> = HashMap::new();
     for path in ["/proc/net/tcp", "/proc/net/tcp6"] {
         let Ok(content) = std::fs::read_to_string(path) else {
             continue;
@@ -164,50 +196,167 @@ fn resolve_local_process_linux(peer_port: u16) -> Option<String> {
             let Some(local_addr) = cols.next() else {
                 continue;
             };
-            if local_addr.ends_with(&port_hex) {
-                let Some(inode) = cols.nth(7) else {
-                    continue;
-                };
-                if inode != "0" {
-                    target_inode = Some(inode.to_string());
-                    break;
-                }
+            let Some((_, port_hex)) = local_addr.rsplit_once(':') else {
+                continue;
+            };
+            let Ok(port) = u16::from_str_radix(port_hex, 16) else {
+                continue;
+            };
+            let Some(inode) = cols.nth(7) else {
+                continue;
+            };
+            if inode != "0" {
+                inode_port.entry(inode.to_string()).or_insert(port);
             }
         }
-        if target_inode.is_some() {
-            break;
-        }
     }
-    let inode = target_inode?;
-    let socket_tag = format!("socket:[{inode}]");
+    if inode_port.is_empty() {
+        return Some(HashMap::new());
+    }
+    let mut map = HashMap::new();
     let entries = std::fs::read_dir("/proc").ok()?;
     for entry in entries.flatten() {
         let fname = entry.file_name();
         let Some(pid_str) = fname.to_str() else {
             continue;
         };
-        if !pid_str.bytes().all(|b| b.is_ascii_digit()) {
+        if !pid_str.bytes().all(|byte| byte.is_ascii_digit()) {
             continue;
         }
         let fd_dir = entry.path().join("fd");
         let Ok(fds) = std::fs::read_dir(fd_dir) else {
             continue;
         };
+        let mut name = None;
         for fd in fds.flatten() {
-            if let Ok(link) = std::fs::read_link(fd.path())
-                && link.to_string_lossy() == socket_tag
-            {
-                let comm = std::fs::read_to_string(entry.path().join("comm")).ok()?;
-                let name = clean_process_name(comm.trim());
-                if !name.is_empty() {
-                    return Some(name);
-                }
+            let Ok(link) = std::fs::read_link(fd.path()) else {
+                continue;
+            };
+            let link = link.to_string_lossy();
+            let Some(inode) = link
+                .strip_prefix("socket:[")
+                .and_then(|rest| rest.strip_suffix(']'))
+            else {
+                continue;
+            };
+            let Some(port) = inode_port.get(inode).copied() else {
+                continue;
+            };
+            if name.is_none() {
+                let comm = std::fs::read_to_string(entry.path().join("comm")).unwrap_or_default();
+                name = Some(clean_process_name(comm.trim()));
+            }
+            let Some(name) = name.as_ref() else {
+                continue;
+            };
+            if !name.is_empty() {
+                map.entry(port).or_insert_with(|| name.clone());
             }
         }
     }
+    Some(map)
+}
+
+#[cfg(all(not(test), target_os = "windows"))]
+fn scan_local_ports() -> Option<HashMap<u16, String>> {
+    let out = std::process::Command::new("netstat")
+        .args(["-ano", "-p", "TCP"])
+        .output()
+        .ok()?;
+    if !out.status.success() && out.stdout.is_empty() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut port_pid: HashMap<u16, u32> = HashMap::new();
+    for line in stdout.lines() {
+        let mut cols = line.split_whitespace();
+        let Some(proto) = cols.next() else {
+            continue;
+        };
+        if !proto.eq_ignore_ascii_case("TCP") {
+            continue;
+        }
+        let Some(local) = cols.next() else {
+            continue;
+        };
+        let Some(_remote) = cols.next() else {
+            continue;
+        };
+        let Some(state) = cols.next() else {
+            continue;
+        };
+        let Some(pid) = cols.next().and_then(|text| text.parse::<u32>().ok()) else {
+            continue;
+        };
+        if !state.eq_ignore_ascii_case("ESTABLISHED") || pid == 0 {
+            continue;
+        }
+        if let Some(port) = local_endpoint_port(local) {
+            port_pid.entry(port).or_insert(pid);
+        }
+    }
+    let tlist = std::process::Command::new("tasklist")
+        .args(["/FO", "CSV", "/NH"])
+        .output()
+        .ok()?;
+    let t_out = String::from_utf8_lossy(&tlist.stdout);
+    let mut pid_name: HashMap<u32, String> = HashMap::new();
+    for line in t_out.lines() {
+        let mut cols = line.split(',');
+        let Some(name) = cols.next() else {
+            continue;
+        };
+        let name = name.trim().trim_matches('"');
+        let Some(pid) = cols
+            .next()
+            .map(|text| text.trim().trim_matches('"'))
+            .and_then(|text| text.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if !name.is_empty() && pid > 0 {
+            pid_name
+                .entry(pid)
+                .or_insert_with(|| clean_process_name(name));
+        }
+    }
+    let mut map = HashMap::new();
+    for (port, pid) in port_pid {
+        if let Some(name) = pid_name.get(&pid)
+            && !name.is_empty()
+        {
+            map.insert(port, name.clone());
+        }
+    }
+    Some(map)
+}
+
+#[cfg(all(
+    not(test),
+    not(any(target_os = "macos", target_os = "linux", target_os = "windows"))
+))]
+fn scan_local_ports() -> Option<HashMap<u16, String>> {
     None
 }
 
+/// Identifies the local process name owning `peer_port` on loopback connections.
+pub fn resolve_local_process_name(peer_port: u16) -> Option<String> {
+    if peer_port == 0 {
+        return None;
+    }
+    if let Some(name) = cached_local_app(peer_port) {
+        return Some(name);
+    }
+    let map = port_snapshot();
+    let name = map.get(&peer_port)?.clone();
+    if name.is_empty() {
+        return None;
+    }
+    store_cached_local_app(peer_port, name.clone());
+    Some(name)
+}
+
+#[cfg_attr(test, allow(dead_code))]
 fn clean_process_name(raw: &str) -> String {
     let trimmed = raw.trim().trim_end_matches(".exe");
     trimmed.replace("\\x20", " ")
@@ -226,6 +375,8 @@ struct PooledH2 {
 pub struct Hub {
     session: Mutex<Session>,
     generation: AtomicU64,
+    /// Milliseconds since [`body_clock`] of the last streaming UI bump.
+    body_touch_ms: AtomicU64,
     pub ca: Arc<Ca>,
     roots: RootCertStore,
     default_client_config: ClientConfig,
@@ -301,6 +452,7 @@ impl Hub {
         Ok(Self {
             session: Mutex::new(Session::default()),
             generation: AtomicU64::new(1),
+            body_touch_ms: AtomicU64::new(0),
             ca,
             roots,
             default_client_config,
@@ -383,8 +535,15 @@ impl Hub {
         let filter = share.filter.clone();
         let redact = share.redact.clone();
         drop(slot);
-        let (flows, rev) = self
-            .with_session(|session| (session.flows_matching_unhydrated(&filter), session.rev()));
+        let (plan, rev) =
+            self.with_session(|session| (session.plan_filter(&filter), session.rev()));
+        let matched = plan.finish();
+        let flows = self.with_session(|session| {
+            matched
+                .iter()
+                .filter_map(|(id, _)| session.get(*id).cloned())
+                .collect::<Vec<_>>()
+        });
         Some(crate::share::document_since_with_redact(
             &flows, expires, &filter, rev, since, &redact,
         ))
@@ -921,6 +1080,58 @@ impl Hub {
         self.generation.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// At most one list refresh per [`BODY_UI_TOUCH`] while a body is streaming.
+    fn touch_body(&self) {
+        let now = body_clock_ms();
+        let prev = self.body_touch_ms.load(Ordering::Relaxed);
+        if now.saturating_sub(prev) < BODY_UI_TOUCH.as_millis() as u64 {
+            return;
+        }
+        if self
+            .body_touch_ms
+            .compare_exchange(prev, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            self.touch();
+        }
+    }
+
+    fn record_chunk(
+        &self,
+        id: u64,
+        direction: Direction,
+        wire: u64,
+        decoded: &[u8],
+        encoding_error: Option<&str>,
+    ) {
+        if wire == 0 && decoded.is_empty() && encoding_error.is_none() {
+            return;
+        }
+        self.with_session(|session| {
+            if wire > 0 {
+                session.add_transfer(id, direction, wire);
+            }
+            if !decoded.is_empty() {
+                session.append_body(id, direction, decoded);
+            }
+            if let Some(error) = encoding_error {
+                session.set_encoding_error(id, direction, error);
+            }
+        });
+        if encoding_error.is_some() {
+            self.touch();
+        } else {
+            self.touch_body();
+        }
+    }
+
+    /// Ids that match `filter`, oldest first, with the session revision taken
+    /// in the same lock as the plan. Spill reads happen in `finish`, outside the lock.
+    pub fn matching_ids(&self, filter: &str) -> (Vec<(u64, Option<std::time::SystemTime>)>, u64) {
+        let (plan, rev) = self.with_session(|session| (session.plan_filter(filter), session.rev()));
+        (plan.finish(), rev)
+    }
+
     fn open(&self, draft: FlowDraft) -> u64 {
         let ctx = current_client_ctx();
         let client_ip = ctx
@@ -970,7 +1181,7 @@ impl Hub {
             return;
         }
         self.with_session(|session| session.append_body(id, direction, data));
-        self.touch();
+        self.touch_body();
     }
 
     fn add_transfer(&self, id: u64, direction: Direction, bytes: u64) {
@@ -978,11 +1189,16 @@ impl Hub {
             return;
         }
         self.with_session(|session| session.add_transfer(id, direction, bytes));
-        self.touch();
+        self.touch_body();
     }
 
     pub fn mark_finished(&self, id: u64) {
-        self.with_session(|session| session.mark_finished(id));
+        let flushed = self
+            .with_session(|session| session.begin_finish(id, std::time::SystemTime::now()))
+            .flush();
+        if !flushed.is_empty() {
+            self.with_session(|session| session.commit_finish(id, flushed));
+        }
         self.touch();
     }
 
@@ -1005,7 +1221,13 @@ impl Hub {
         filter: &str,
         redact: &crate::share::RedactOptions,
     ) -> serde_json::Value {
-        let flows = self.with_session(|session| session.flows_matching(filter));
+        let (matched, _) = self.matching_ids(filter);
+        let flows = self.with_session(|session| {
+            matched
+                .into_iter()
+                .filter_map(|(id, _)| session.hydrated(id))
+                .collect::<Vec<_>>()
+        });
         crate::har::export_har_with_redact(&flows, redact)
     }
 
@@ -1046,6 +1268,7 @@ impl Hub {
                     session.set_conn_info(id, item.conn_info);
                 }
             });
+            self.touch();
         }
         count
     }
@@ -1317,8 +1540,6 @@ async fn handle_conn(socket: TcpStream, hub: Arc<Hub>) -> Result<()> {
                     });
                     hub_bg.touch();
                 }
-            } else {
-                store_cached_local_app(port, String::new());
             }
         });
     }
@@ -3922,9 +4143,9 @@ where
                 break;
             }
             write_all_throttled(to, &buf[..n], throttle_bps).await?;
-            hub.add_transfer(id, direction, n as u64);
             let decoded = decoder.push(&buf[..n]);
-            hub.append_body(id, direction, &decoded);
+            let error = decoder.error().map(|err| err.to_string());
+            hub.record_chunk(id, direction, n as u64, &decoded, error.as_deref());
             left -= n;
         }
         left == 0
@@ -3939,19 +4160,17 @@ where
                 break;
             }
             write_all_throttled(to, &buf[..n], throttle_bps).await?;
-            hub.add_transfer(id, direction, n as u64);
             let decoded = decoder.push(&buf[..n]);
-            hub.append_body(id, direction, &decoded);
+            let error = decoder.error().map(|err| err.to_string());
+            hub.record_chunk(id, direction, n as u64, &decoded, error.as_deref());
         }
         false
     } else {
         true
     };
     let tail = decoder.finish();
-    hub.append_body(id, direction, &tail);
-    if let Some(error) = decoder.error() {
-        hub.set_encoding_error(id, direction, error.to_string());
-    }
+    let error = decoder.error().map(|err| err.to_string());
+    hub.record_chunk(id, direction, 0, &tail, error.as_deref());
     Ok(reusable)
 }
 
@@ -3993,9 +4212,9 @@ where
                 anyhow::bail!("分块 body 提前结束");
             }
             write_all_throttled(to, &buf[..n], throttle_bps).await?;
-            hub.add_transfer(id, direction, n as u64);
             let decoded = decoder.push(&buf[..n]);
-            hub.append_body(id, direction, &decoded);
+            let error = decoder.error().map(|err| err.to_string());
+            hub.record_chunk(id, direction, n as u64, &decoded, error.as_deref());
             left -= n;
         }
         let crlf = read_exact(from, 2).await?;
@@ -4504,18 +4723,15 @@ impl<B> RecordingBody<B> {
         let Some(record) = self.record.as_mut() else {
             return;
         };
-        record
-            .hub
-            .add_transfer(record.id, record.direction, bytes.len() as u64);
         let decoded = record.decoder.push(bytes);
-        record
-            .hub
-            .append_body(record.id, record.direction, &decoded);
-        if let Some(error) = record.decoder.error() {
-            record
-                .hub
-                .set_encoding_error(record.id, record.direction, error.to_string());
-        }
+        let error = record.decoder.error().map(|err| err.to_string());
+        record.hub.record_chunk(
+            record.id,
+            record.direction,
+            bytes.len() as u64,
+            &decoded,
+            error.as_deref(),
+        );
     }
 
     fn finish_record(&mut self) {
@@ -5488,18 +5704,15 @@ fn rewrite_body(
 }
 
 fn note_decoded(hub: &Hub, id: u64, direction: Direction, raw: &[u8], encoding: Option<&str>) {
-    hub.add_transfer(id, direction, raw.len() as u64);
     let mut decoder = Decoder::from_header(encoding);
-    if let Some(error) = decoder.error() {
-        hub.set_encoding_error(id, direction, error.to_string());
-    }
-    let decoded = decoder.push(raw);
-    hub.append_body(id, direction, &decoded);
+    let early = decoder.error().map(|err| err.to_string());
+    let mut decoded = decoder.push(raw);
     let tail = decoder.finish();
-    hub.append_body(id, direction, &tail);
-    if let Some(error) = decoder.error() {
-        hub.set_encoding_error(id, direction, error.to_string());
+    if !tail.is_empty() {
+        decoded.extend(tail);
     }
+    let error = decoder.error().map(|err| err.to_string()).or(early);
+    hub.record_chunk(id, direction, raw.len() as u64, &decoded, error.as_deref());
 }
 
 fn mapped_file_response(
@@ -5787,6 +6000,27 @@ async fn splice_upgrades(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn local_port_is_the_side_before_the_arrow() {
+        assert_eq!(
+            super::local_endpoint_port("127.0.0.1:54321->1.2.3.4:443"),
+            Some(54321)
+        );
+        assert_eq!(
+            super::local_endpoint_port("[::1]:54321->1.2.3.4:443"),
+            Some(54321)
+        );
+        assert_eq!(
+            super::local_endpoint_port("10.0.0.5:8080->1.2.3.4:80"),
+            Some(8080)
+        );
+        assert_eq!(
+            super::local_endpoint_port("192.168.1.5:443->192.168.1.9:54321"),
+            Some(443)
+        );
+        assert_eq!(super::local_endpoint_port("127.0.0.1:443"), Some(443));
+    }
+
     #[test]
     fn forward_errors_include_a_guess() {
         let dead = anyhow::Error::msg("connection was not ready").context("HTTP/2 上游");
