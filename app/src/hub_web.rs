@@ -52,6 +52,7 @@ pub struct Hub {
     pub ca: Arc<Ca>,
     bypass_text: Mutex<String>,
     rules_text: Mutex<String>,
+    rules_rev: AtomicU64,
     upstream_text: Mutex<String>,
     rules_on: AtomicBool,
     breaks_on: AtomicBool,
@@ -70,6 +71,7 @@ impl Hub {
             ca,
             bypass_text: Mutex::new(String::new()),
             rules_text: Mutex::new(String::new()),
+            rules_rev: AtomicU64::new(0),
             upstream_text: Mutex::new(String::new()),
             rules_on: AtomicBool::new(true),
             breaks_on: AtomicBool::new(true),
@@ -170,7 +172,19 @@ impl Hub {
             .rules_text
             .lock()
             .unwrap_or_else(|err| err.into_inner()) = text.to_string();
+        self.rules_rev.fetch_add(1, Ordering::Relaxed);
         post_op(json!({"op": "set_rules", "text": text}));
+    }
+
+    pub fn rules_revision(&self) -> u64 {
+        self.rules_rev.load(Ordering::Relaxed)
+    }
+
+    pub fn rules_text(&self) -> String {
+        self.rules_text
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
     }
 
     pub fn set_rules_enabled(&self, enabled: bool) {

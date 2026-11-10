@@ -406,12 +406,20 @@ fn tool_set_rules(hub: &Hub, args: &Value) -> Value {
         ));
     }
     hub.set_rules(&combined);
+    let save_res =
+        crate::config::update_mode(hub.ca.dir(), crate::config::is_dev_mode(), |config| {
+            config.rules = combined.clone()
+        });
     let parsed_count = rules::parse_rules(&combined).len();
-    tool_json(&json!({
+    let mut resp = json!({
         "ok": true,
         "active_rule_count": parsed_count,
         "rules": combined,
-    }))
+    });
+    if let Err(err) = save_res {
+        resp["warning"] = json!(format!("Failed to persist rules to disk: {err}"));
+    }
+    tool_json(&resp)
 }
 
 fn parse_headers_arg(val: &Value) -> Option<Vec<(String, String)>> {
@@ -674,5 +682,38 @@ mod tests {
                 .unwrap();
         assert_eq!(set_res["result"]["isError"], false);
         assert_eq!(hub.rules_text().trim(), "cors api.example.com");
+    }
+
+    #[tokio::test]
+    async fn test_mcp_set_rules_persists_to_disk_and_increments_revision() {
+        let dir = std::env::temp_dir().join(format!("zniff-mcp-persist-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+
+        assert_eq!(hub.rules_revision(), 0);
+
+        let set_req = br#"{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"set_rules","arguments":{"rules":"cors test.example.com"}}}"#;
+        let set_res: Value =
+            serde_json::from_slice(&handle_http_jsonrpc(hub.clone(), set_req).await.unwrap())
+                .unwrap();
+        assert_eq!(set_res["result"]["isError"], false);
+        assert_eq!(hub.rules_revision(), 1);
+
+        // Verify rules on disk
+        let config_file = dir.join(crate::config::config_file_name(crate::config::is_dev_mode()));
+        assert!(config_file.exists());
+        let saved_text = std::fs::read_to_string(&config_file).unwrap();
+        assert!(saved_text.contains("cors test.example.com"));
+
+        // Syntax error does NOT persist and does NOT increment revision
+        let bad_req = br#"{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"set_rules","arguments":{"rules":"cors test.example.com op=Invalid"}}}"#;
+        let bad_res: Value =
+            serde_json::from_slice(&handle_http_jsonrpc(hub.clone(), bad_req).await.unwrap())
+                .unwrap();
+        assert_eq!(bad_res["result"]["isError"], true);
+        assert_eq!(hub.rules_revision(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

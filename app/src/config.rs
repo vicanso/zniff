@@ -451,7 +451,7 @@ pub fn column_width_limit(key: &str) -> Option<ColumnWidth> {
             max: 260,
         },
         "size" => ColumnWidth {
-            default: 66,
+            default: 74,
             min: 48,
             max: 180,
         },
@@ -587,30 +587,60 @@ enum Read {
 /// Reads `config.toml`, or the old one-file-per-setting layout the first time.
 /// A broken file stays on disk and this returns the defaults.
 #[cfg_attr(not(test), allow(dead_code))]
+static LAST_LOAD_ERROR: Mutex<Option<String>> = Mutex::new(None);
+
+#[allow(dead_code)]
+pub fn last_load_error() -> Option<String> {
+    LAST_LOAD_ERROR
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+pub fn take_last_load_error() -> Option<String> {
+    LAST_LOAD_ERROR
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+}
+
 pub fn load(dir: &Path) -> Config {
     load_mode(dir, false)
 }
 
-/// Reads `config.toml` (`dev == false`) or `config.dev.toml` (`dev == true`).
-/// Dev mode never touches `config.toml` or legacy single-setting files.
-pub fn load_mode(dir: &Path, dev: bool) -> Config {
+pub fn load_mode_ext(dir: &Path, dev: bool) -> (Config, Option<String>) {
     let _guard = lock();
     match read_config(dir, dev) {
-        Read::Ready(config) => *config,
-        Read::Broken(_) => Config::default_for(dev),
+        Read::Ready(config) => {
+            *LAST_LOAD_ERROR.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            (*config, None)
+        }
+        Read::Broken(err) => {
+            let msg = err.to_string();
+            *LAST_LOAD_ERROR.lock().unwrap_or_else(|e| e.into_inner()) = Some(msg.clone());
+            (Config::default_for(dev), Some(msg))
+        }
         Read::Missing if dev => {
             let config = Config::default_for(true);
             let _ = store_unlocked(dir, true, &config);
-            config
+            *LAST_LOAD_ERROR.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            (config, None)
         }
         Read::Missing => {
             let config = migrate_legacy(dir);
             if store_unlocked(dir, false, &config).is_ok() {
                 remove_legacy(dir);
             }
-            config
+            *LAST_LOAD_ERROR.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            (config, None)
         }
     }
+}
+
+/// Reads `config.toml` (`dev == false`) or `config.dev.toml` (`dev == true`).
+/// Dev mode never touches `config.toml` or legacy single-setting files.
+pub fn load_mode(dir: &Path, dev: bool) -> Config {
+    load_mode_ext(dir, dev).0
 }
 
 /// Changes one or more fields and writes the whole file back.
@@ -634,6 +664,7 @@ pub fn update_mode(dir: &Path, dev: bool, change: impl FnOnce(&mut Config)) -> R
     if !dev {
         remove_legacy(dir);
     }
+    *LAST_LOAD_ERROR.lock().unwrap_or_else(|e| e.into_inner()) = None;
     Ok(())
 }
 
@@ -1121,6 +1152,13 @@ mod tests {
     }
 
     #[test]
+    fn size_column_width_default_is_74() {
+        let limit = column_width_limit("size").unwrap();
+        assert_eq!(limit.default, 74);
+        assert_eq!(limit.min, 48);
+    }
+
+    #[test]
     fn default_pretty_stays_on_unless_the_file_turns_it_off() {
         let dir = Scratch::new();
         fs::write(dir.path().join("config.toml"), "listen_port = 8877\n").unwrap();
@@ -1415,5 +1453,50 @@ mod tests {
         assert!(reset.column_order.is_empty());
         let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
         assert!(!text.contains("column_order"), "{text}");
+    }
+
+    #[test]
+    fn load_mode_ext_captures_broken_toml_syntax_error() {
+        let dir = Scratch::new();
+        fs::write(
+            dir.path().join("config.toml"),
+            "listen_port = \"unclosed string",
+        )
+        .unwrap();
+        let (config, err) = load_mode_ext(dir.path(), false);
+        assert_eq!(config.listen_port, DEFAULT_PORT);
+        assert!(err.is_some());
+        let err_msg = err.unwrap();
+        assert!(
+            err_msg.contains("TOML parse error") || err_msg.contains("invalid data"),
+            "{err_msg}"
+        );
+        assert!(last_load_error().is_some());
+        assert_eq!(take_last_load_error().as_deref(), Some(err_msg.as_str()));
+        assert!(last_load_error().is_none());
+    }
+
+    #[test]
+    fn update_mode_preserves_broken_file_without_clobbering() {
+        let dir = Scratch::new();
+        let broken_content = "listen_port = \"broken string\n";
+        fs::write(dir.path().join("config.toml"), broken_content).unwrap();
+
+        let res = update_mode(dir.path(), false, |cfg| cfg.listen_port = 8899);
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err().kind(), ErrorKind::InvalidData);
+
+        let file_after = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert_eq!(file_after, broken_content);
+    }
+
+    #[test]
+    fn load_mode_ext_clears_error_on_valid_config() {
+        let dir = Scratch::new();
+        fs::write(dir.path().join("config.toml"), "listen_port = 8899\n").unwrap();
+        let (config, err) = load_mode_ext(dir.path(), false);
+        assert_eq!(config.listen_port, 8899);
+        assert!(err.is_none());
+        assert!(last_load_error().is_none());
     }
 }
