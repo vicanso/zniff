@@ -24,6 +24,8 @@ fn main() -> impl std::process::Termination {
         if let Err(err) = zniff::restore_if_dirty() {
             eprintln!("panic 时恢复系统代理失败: {err:#}");
         }
+        zniff::clear_ios_simulator_proxies();
+        zniff::shutdown_relay_push();
         previous(info);
     }));
     let result = platform::run_app(
@@ -39,6 +41,8 @@ fn main() -> impl std::process::Termination {
     if let Err(err) = zniff::restore_if_dirty() {
         log::error!("退出时恢复系统代理失败: {err:#}");
     }
+    zniff::clear_ios_simulator_proxies();
+    zniff::shutdown_relay_push();
     result
 }
 

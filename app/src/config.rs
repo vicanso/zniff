@@ -330,6 +330,16 @@ pub struct Config {
     /// Extra comma-separated sensitive header or field names to redact on export/share.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub redact_fields: String,
+    /// Base URL of a `zniff --relay` process, such as `http://10.0.0.1:8877`.
+    /// Empty keeps the share link on this computer.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub relay_url: String,
+    /// Bearer token sent with share uploads. The relay process expects the same value.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub relay_token: String,
+    /// Accept relay uploads on the capture port. Off until the user turns it on.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub relay_accept: bool,
 }
 
 impl Default for Config {
@@ -369,6 +379,9 @@ impl Default for Config {
             column_order: Vec::new(),
             redact_export: false,
             redact_fields: String::new(),
+            relay_url: String::new(),
+            relay_token: String::new(),
+            relay_accept: false,
         }
     }
 }
@@ -684,6 +697,8 @@ fn normalize_for(mut config: Config, dev: bool) -> Config {
     config.window_height = clamp_window_height(config.window_height);
     clamp_column_widths(&mut config.column_widths);
     config.column_order = normalize_column_order(&config.column_order);
+    config.relay_url = config.relay_url.trim().to_string();
+    config.relay_token = config.relay_token.trim().to_string();
     clamp_saved_filters(&mut config.saved_filters);
     clamp_saved_rules(&mut config.saved_rules);
     migrate_saved_profiles(&mut config);
@@ -1244,6 +1259,40 @@ mod tests {
 
         fs::write(dir.path().join("config.toml"), "ellipsize = \"invalid\"\n").unwrap();
         assert_eq!(load(dir.path()).ellipsize, ListEllipsize::Middle);
+    }
+
+    #[test]
+    fn relay_settings_default_empty_and_trim_on_write() {
+        let dir = Scratch::new();
+        fs::write(dir.path().join("config.toml"), "listen_port = 9\n").unwrap();
+        let config = load(dir.path());
+        assert_eq!(config.relay_url, "");
+        assert_eq!(config.relay_token, "");
+        assert!(!config.relay_accept);
+        let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(!text.contains("relay_"), "{text}");
+
+        update(dir.path(), |config| {
+            config.relay_url = "  http://10.1.2.3:9/  ".into();
+            config.relay_token = "\tsecret\t".into();
+            config.relay_accept = true;
+        })
+        .unwrap();
+        let config = load(dir.path());
+        assert_eq!(config.relay_url, "http://10.1.2.3:9/");
+        assert_eq!(config.relay_token, "secret");
+        assert!(config.relay_accept);
+        let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(text.contains("relay_accept = true"), "{text}");
+
+        update(dir.path(), |config| {
+            config.relay_url.clear();
+            config.relay_token.clear();
+            config.relay_accept = false;
+        })
+        .unwrap();
+        let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(!text.contains("relay_"), "{text}");
     }
 
     #[test]

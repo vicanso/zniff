@@ -43,6 +43,7 @@ pub enum PrefName {
     Pretty,
     Tunnel,
     Capture,
+    Relay,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -113,9 +114,16 @@ pub enum StatusMsg {
         url: String,
         minutes: u64,
         local_only: bool,
+        relay: bool,
     },
     ShareNeedsCapture,
     ShareStopped,
+    RelayBadUrl,
+    RelayNeedToken,
+    RelayAcceptNeedToken,
+    RelayViewOnly,
+    RelayPushFailed(String),
+    RelayConnected(String),
     ImportFailed(String),
     Imported {
         count: usize,
@@ -162,7 +170,10 @@ pub enum StatusMsg {
         version: String,
         err: String,
     },
-    IosSimInstalled(usize),
+    IosSimInstalled {
+        count: usize,
+        port: u16,
+    },
     IosSimNoneBooted,
     IosSimFailed(String),
     CopiedLinuxCaCmd(String),
@@ -290,6 +301,9 @@ impl StatusMsg {
                     PrefName::Capture => {
                         t(lang, "抓包开关没有记住:", "Capture switch was not saved:")
                     }
+                    PrefName::Relay => {
+                        t(lang, "中转设置没有记住:", "Relay settings were not saved:")
+                    }
                 };
                 format!("{name} {err}")
             }
@@ -352,12 +366,22 @@ impl StatusMsg {
                 url,
                 minutes,
                 local_only,
+                relay,
             } => {
                 let base = match lang {
                     Lang::Zh => format!("已复制分享地址，{minutes} 分钟内有效 · {url}"),
                     Lang::En => format!("Copied the share link, valid for {minutes} min · {url}"),
                 };
-                if *local_only {
+                if *relay {
+                    format!(
+                        "{base} · {}",
+                        t(
+                            lang,
+                            "对方打开这个中转地址即可。",
+                            "The other person opens this relay address."
+                        )
+                    )
+                } else if *local_only {
                     format!(
                         "{base} · {}",
                         t(
@@ -369,6 +393,39 @@ impl StatusMsg {
                 } else {
                     base
                 }
+            }
+            Self::RelayBadUrl => t(
+                lang,
+                "中转地址要写成 http://主机:端口",
+                "Relay address must look like http://host:port",
+            )
+            .into(),
+            Self::RelayNeedToken => t(
+                lang,
+                "先填写中转密钥，再分享",
+                "Fill in the relay token before sharing",
+            )
+            .into(),
+            Self::RelayAcceptNeedToken => t(
+                lang,
+                "先填写中转密钥，再接收上传",
+                "Fill in the relay token before accepting uploads",
+            )
+            .into(),
+            Self::RelayViewOnly => t(
+                lang,
+                "中继来的流量只能查看、过滤和复制",
+                "Relay flows can only be viewed, filtered, and copied",
+            )
+            .into(),
+            Self::RelayPushFailed(err) => {
+                format!("{} {err}", t(lang, "中转推送失败:", "Relay push failed:"))
+            }
+            Self::RelayConnected(url) => {
+                format!(
+                    "{} · {url}",
+                    t(lang, "中转已恢复", "Relay is receiving again")
+                )
             }
             Self::ShareNeedsCapture => t(
                 lang,
@@ -499,11 +556,17 @@ impl StatusMsg {
                 Lang::Zh => format!("升级 {version} 失败: {err}"),
                 Lang::En => format!("Failed to update to {version}: {err}"),
             },
-            Self::IosSimInstalled(count) => match lang {
-                Lang::Zh => format!("已向 {count} 台运行中的 iOS 模拟器安装并信任根证书"),
-                Lang::En => {
+            Self::IosSimInstalled { count, port } => match (lang, *port) {
+                (Lang::Zh, 0) => format!("已向 {count} 台运行中的 iOS 模拟器安装并信任根证书"),
+                (Lang::En, 0) => {
                     format!("Installed and trusted root CA on {count} booted iOS simulator(s)")
                 }
+                (Lang::Zh, port) => format!(
+                    "已向 {count} 台运行中的 iOS 模拟器安装并信任根证书，HTTP/HTTPS 代理设为 127.0.0.1:{port}"
+                ),
+                (Lang::En, port) => format!(
+                    "Installed and trusted the root CA on {count} booted iOS simulator(s); HTTP/HTTPS proxy is 127.0.0.1:{port}"
+                ),
             },
             Self::IosSimNoneBooted => t(
                 lang,
@@ -512,8 +575,8 @@ impl StatusMsg {
             )
             .into(),
             Self::IosSimFailed(err) => match lang {
-                Lang::Zh => format!("iOS 模拟器证书安装失败: {err}"),
-                Lang::En => format!("iOS Simulator certificate install failed: {err}"),
+                Lang::Zh => format!("iOS 模拟器配置失败: {err}"),
+                Lang::En => format!("iOS Simulator setup failed: {err}"),
             },
             Self::CopiedLinuxCaCmd(cmd) => match lang {
                 Lang::Zh => format!("已复制系统证书安装命令 · {cmd}"),
@@ -550,12 +613,13 @@ impl StatusMsg {
             | Self::CopiedLinuxCaCmd(_)
             | Self::Shared { .. }
             | Self::ShareStopped
+            | Self::RelayConnected(_)
             | Self::MappedLocal(_)
             | Self::BaselineSet
             | Self::BaselineCleared
             | Self::Replayed(_)
             | Self::Repeated { .. }
-            | Self::IosSimInstalled(_)
+            | Self::IosSimInstalled { .. }
             | Self::UpdateUpToDate(_)
             | Self::UpdateAvailable(_) => Some(false),
             Self::ExportFailed(_)
@@ -574,6 +638,11 @@ impl StatusMsg {
             | Self::InterfaceUnavailable
             | Self::PinLimit
             | Self::ShareNeedsCapture
+            | Self::RelayBadUrl
+            | Self::RelayNeedToken
+            | Self::RelayAcceptNeedToken
+            | Self::RelayViewOnly
+            | Self::RelayPushFailed(_)
             | Self::NeedSelection
             | Self::FlowGone
             | Self::IosSimNoneBooted
@@ -611,7 +680,8 @@ impl StatusMsg {
             | Self::CopiedMermaidMarkdown
             | Self::SequenceGenerated { .. }
             | Self::CopiedLinuxCaCmd(_)
-            | Self::Shared { .. } => t(lang, "已复制到剪贴板", "Copied to Clipboard"),
+            | Self::Shared { .. }
+            | Self::RelayConnected(_) => t(lang, "已复制到剪贴板", "Copied to Clipboard"),
             Self::Replayed(_) | Self::Repeated { .. } => t(lang, "重放已发送", "Replay Sent"),
             Self::UpdateUpToDate(_) | Self::UpdateAvailable(_) => {
                 t(lang, "检查更新", "Update Check")
@@ -1000,8 +1070,24 @@ mod tests {
             "Copied Markdown sequence diagram"
         );
         assert_eq!(
-            StatusMsg::IosSimInstalled(2).text(Lang::Zh),
-            "已向 2 台运行中的 iOS 模拟器安装并信任根证书"
+            StatusMsg::IosSimInstalled {
+                count: 2,
+                port: 8877
+            }
+            .text(Lang::Zh),
+            "已向 2 台运行中的 iOS 模拟器安装并信任根证书，HTTP/HTTPS 代理设为 127.0.0.1:8877"
+        );
+        assert_eq!(
+            StatusMsg::IosSimInstalled {
+                count: 2,
+                port: 8877
+            }
+            .text(Lang::En),
+            "Installed and trusted the root CA on 2 booted iOS simulator(s); HTTP/HTTPS proxy is 127.0.0.1:8877"
+        );
+        assert_eq!(
+            StatusMsg::IosSimInstalled { count: 1, port: 0 }.text(Lang::Zh),
+            "已向 1 台运行中的 iOS 模拟器安装并信任根证书"
         );
         assert_eq!(
             StatusMsg::IosSimNoneBooted.text(Lang::En),
@@ -1010,6 +1096,36 @@ mod tests {
         assert_eq!(
             StatusMsg::CopiedLinuxCaCmd("sudo update-ca-certificates".into()).text(Lang::Zh),
             "已复制系统证书安装命令 · sudo update-ca-certificates"
+        );
+        assert_eq!(
+            StatusMsg::Shared {
+                url: "http://10.0.0.1:9/s/abc".into(),
+                minutes: 15,
+                local_only: false,
+                relay: true,
+            }
+            .text(Lang::Zh),
+            "已复制分享地址，15 分钟内有效 · http://10.0.0.1:9/s/abc · 对方打开这个中转地址即可。"
+        );
+        assert_eq!(
+            StatusMsg::RelayPushFailed("HTTP 401".into()).text(Lang::En),
+            "Relay push failed: HTTP 401"
+        );
+        assert_eq!(
+            StatusMsg::RelayConnected("http://10.0.0.1:9/s/abc".into()).text(Lang::Zh),
+            "中转已恢复 · http://10.0.0.1:9/s/abc"
+        );
+        assert_eq!(
+            StatusMsg::RelayNeedToken.text(Lang::En),
+            "Fill in the relay token before sharing"
+        );
+        assert_eq!(
+            StatusMsg::RelayViewOnly.text(Lang::Zh),
+            "中继来的流量只能查看、过滤和复制"
+        );
+        assert_eq!(
+            StatusMsg::RelayAcceptNeedToken.text(Lang::En),
+            "Fill in the relay token before accepting uploads"
         );
     }
 }

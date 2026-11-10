@@ -5,8 +5,9 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(not(target_arch = "wasm32"))]
 use ring::rand::{SecureRandom, SystemRandom};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::session::{Direction, Flow};
 
@@ -140,8 +141,12 @@ pub enum SharePath {
 
 pub fn new_id() -> String {
     let mut bytes = [0_u8; 16];
-    if SystemRandom::new().fill(&mut bytes).is_err() {
-        let nanos = SystemTime::now()
+    #[cfg(not(target_arch = "wasm32"))]
+    let filled = SystemRandom::new().fill(&mut bytes).is_ok();
+    #[cfg(target_arch = "wasm32")]
+    let filled = false;
+    if !filled {
+        let nanos = crate::clock::now()
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_nanos())
             .unwrap_or(0);
@@ -168,6 +173,72 @@ pub fn new_id() -> String {
         bytes[14],
         bytes[15],
     )
+}
+
+#[derive(Deserialize, Default)]
+pub struct InboundShare {
+    #[serde(default)]
+    pub flows: Vec<InboundFlow>,
+}
+
+#[derive(Deserialize, Default)]
+pub struct InboundFlow {
+    #[serde(default)]
+    pub id: u64,
+    #[serde(default)]
+    pub method: String,
+    #[serde(default)]
+    pub status: Option<u16>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub protocol: String,
+    #[serde(default)]
+    pub host: String,
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub request_headers: Vec<(String, String)>,
+    #[serde(default)]
+    pub response_headers: Vec<(String, String)>,
+    #[serde(default)]
+    pub request_body: String,
+    #[serde(default)]
+    pub response_body: String,
+    #[serde(default)]
+    pub request_bytes: u64,
+    #[serde(default)]
+    pub response_bytes: u64,
+    #[serde(default)]
+    pub ttfb_ms: Option<u128>,
+    #[serde(default)]
+    pub total_ms: Option<u128>,
+    #[serde(default)]
+    pub comment: String,
+    #[serde(default)]
+    pub rule_hit: String,
+    #[serde(default)]
+    pub messages: Vec<String>,
+}
+
+#[derive(Deserialize, Default)]
+pub struct InboundBody {
+    #[serde(default)]
+    pub request_body: String,
+    #[serde(default)]
+    pub response_body: String,
+    #[serde(default)]
+    pub messages: Vec<String>,
+}
+
+pub fn parse_inbound_share(bytes: &[u8]) -> Option<InboundShare> {
+    serde_json::from_slice(bytes).ok()
+}
+
+pub fn parse_inbound_body(bytes: &[u8]) -> Option<InboundBody> {
+    serde_json::from_slice(bytes).ok()
 }
 
 pub fn valid_id(id: &str) -> bool {

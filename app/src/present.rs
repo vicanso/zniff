@@ -1112,7 +1112,7 @@ fn build_sequence_inner(
     sorted.sort_by_key(|flow| (flow.started, flow.id));
     let base_start = sorted[0].started;
     let show_offset = sorted.len() > 1;
-    let now = SystemTime::now();
+    let now = crate::clock::now();
 
     let mut participants: Vec<(String, String)> = Vec::new();
     let mut flow_host_indices: Vec<usize> = Vec::with_capacity(sorted.len());
@@ -2620,23 +2620,16 @@ fn format_delta(duration: Duration) -> String {
     if ms < 1_000 {
         return format!("{ms} ms");
     }
-    if ms < 10_000 {
-        let whole = ms / 1_000;
-        let frac = (ms % 1_000) / 10;
-        return format!("{whole}.{frac:02} s");
-    }
     if ms < 60_000 {
-        let whole = ms / 1_000;
-        let frac = (ms % 1_000) / 100;
-        return format!("{whole}.{frac} s");
+        return format_seconds(ms);
     }
     if ms < 3_600_000 {
-        // Hundredths of a minute. 60_000 ms is `1.00 m`.
-        let hundredths = ms / 600;
-        if hundredths < 1_000 {
-            return format!("{}.{:02} m", hundredths / 100, hundredths % 100);
+        // Tenths of a minute. 60_000 ms is `1.0 m`. From 10 minutes the fraction is dropped.
+        let tenths = ms.saturating_add(3_000) / 6_000;
+        if tenths < 100 {
+            return format!("{}.{} m", tenths / 10, tenths % 10);
         }
-        return format!("{} m", hundredths / 100);
+        return format!("{} m", tenths / 10);
     }
     let tenths = ms / 360_000;
     if tenths < 100 {
@@ -2650,22 +2643,29 @@ fn local_offset_secs() -> i64 {
     use std::sync::OnceLock;
     static OFFSET: OnceLock<i64> = OnceLock::new();
     *OFFSET.get_or_init(|| {
-        let Ok(output) = std::process::Command::new("date").arg("+%z").output() else {
-            return 0;
-        };
-        let text = String::from_utf8_lossy(&output.stdout);
-        let text = text.trim();
-        let (sign, rest) = match text.as_bytes().first() {
-            Some(b'+') => (1, &text[1..]),
-            Some(b'-') => (-1, &text[1..]),
-            _ => return 0,
-        };
-        if rest.len() < 4 {
-            return 0;
+        #[cfg(target_arch = "wasm32")]
+        {
+            0
         }
-        let hours: i64 = rest[..2].parse().unwrap_or(0);
-        let minutes: i64 = rest[2..4].parse().unwrap_or(0);
-        sign * (hours * 3600 + minutes * 60)
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let Ok(output) = std::process::Command::new("date").arg("+%z").output() else {
+                return 0;
+            };
+            let text = String::from_utf8_lossy(&output.stdout);
+            let text = text.trim();
+            let (sign, rest) = match text.as_bytes().first() {
+                Some(b'+') => (1, &text[1..]),
+                Some(b'-') => (-1, &text[1..]),
+                _ => return 0,
+            };
+            if rest.len() < 4 {
+                return 0;
+            }
+            let hours: i64 = rest[..2].parse().unwrap_or(0);
+            let minutes: i64 = rest[2..4].parse().unwrap_or(0);
+            sign * (hours * 3600 + minutes * 60)
+        }
     })
 }
 
@@ -2684,10 +2684,16 @@ pub fn format_elapsed(started: SystemTime, finished: Option<SystemTime>) -> Stri
 fn format_duration(duration: Duration) -> String {
     let ms = duration.as_millis();
     if ms >= 1000 {
-        format!("{:.2} s", ms as f64 / 1000.0)
+        format_seconds(ms)
     } else {
         format!("{ms} ms")
     }
+}
+
+/// One decimal second, half up. 1_240 ms is `1.2 s`, 1_250 ms is `1.3 s`.
+fn format_seconds(ms: u128) -> String {
+    let tenths = ms.saturating_add(50) / 100;
+    format!("{}.{} s", tenths / 10, tenths % 10)
 }
 
 fn format_count(bytes: u64) -> String {
@@ -3932,8 +3938,16 @@ mod tests {
             "45 ms"
         );
         assert_eq!(
+            format_elapsed(start, Some(start + Duration::from_millis(1_000))),
+            "1.0 s"
+        );
+        assert_eq!(
             format_elapsed(start, Some(start + Duration::from_millis(1_240))),
-            "1.24 s"
+            "1.2 s"
+        );
+        assert_eq!(
+            format_elapsed(start, Some(start + Duration::from_millis(1_250))),
+            "1.3 s"
         );
         assert_eq!(format_gap(None, start), "0 ms");
         assert_eq!(
@@ -3946,7 +3960,7 @@ mod tests {
         );
         assert_eq!(
             format_gap(Some(start), start + Duration::from_millis(1_240)),
-            "1.24 s"
+            "1.2 s"
         );
         assert_eq!(
             format_gap(Some(start), start + Duration::from_millis(10_500)),
@@ -3954,7 +3968,7 @@ mod tests {
         );
         assert_eq!(
             format_gap(Some(start), start + Duration::from_millis(90_000)),
-            "1.50 m"
+            "1.5 m"
         );
         let clock = format_clock(start + Duration::from_millis(123));
         assert!(clock.ends_with(".123"), "{clock}");

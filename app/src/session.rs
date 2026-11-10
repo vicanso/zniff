@@ -5,7 +5,7 @@
 //! spill to rotating temporary segment files so the 256 MB in-memory cap keeps
 //! flow metadata and small payloads resident.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Once;
@@ -89,8 +89,29 @@ impl Default for SpillStore {
     }
 }
 
+fn host_pid() -> u32 {
+    // `std::process::id` panics on wasm32 ("no pids on this platform").
+    #[cfg(target_arch = "wasm32")]
+    {
+        0
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::process::id()
+    }
+}
+
 fn spill_base_dir() -> PathBuf {
-    std::env::temp_dir().join("zniff-spill")
+    // wasm32's `std::env::temp_dir` panics ("no filesystem on this platform").
+    // The browser view never creates spill files, so a dummy path is enough.
+    #[cfg(target_arch = "wasm32")]
+    {
+        PathBuf::from("zniff-spill")
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::env::temp_dir().join("zniff-spill")
+    }
 }
 
 /// Cleans up leftover spill directories from previous terminated processes.
@@ -98,7 +119,7 @@ fn sweep_orphan_spill_dirs(base: &Path, now: SystemTime, ttl: Duration) {
     let Ok(entries) = std::fs::read_dir(base) else {
         return;
     };
-    let my_prefix = format!("{}-", std::process::id());
+    let my_prefix = format!("{}-", host_pid());
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(name_str) = name.to_str() else {
@@ -133,7 +154,7 @@ impl SpillStore {
     ) -> Self {
         static NEXT_STORE: AtomicUsize = AtomicUsize::new(1);
         let seq = NEXT_STORE.fetch_add(1, Ordering::Relaxed);
-        let dir = spill_base_dir().join(format!("{}-{seq}", std::process::id()));
+        let dir = spill_base_dir().join(format!("{}-{seq}", host_pid()));
         Self {
             dir,
             dir_created: false,
@@ -322,6 +343,22 @@ fn write_at(file: &File, data: &[u8], offset: u64) -> std::io::Result<()> {
     file.write_all_at(data, offset)
 }
 
+#[cfg(not(any(unix, windows)))]
+fn read_at(_file: &File, _buf: &mut [u8], _offset: u64) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "spill read",
+    ))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn write_at(_file: &File, _data: &[u8], _offset: u64) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "spill write",
+    ))
+}
+
 #[cfg(windows)]
 fn write_at(file: &File, mut data: &[u8], mut offset: u64) -> std::io::Result<()> {
     use std::os::windows::fs::FileExt;
@@ -364,6 +401,17 @@ impl Protocol {
             Self::Http2 => "HTTP/2",
             Self::WebSocket => "WebSocket",
             Self::Tunnel => crate::i18n::t(lang, "隧道", "Tunnel"),
+        }
+    }
+
+    /// Accepts the labels `label_in` writes, in either language.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub fn from_label(label: &str) -> Self {
+        match label {
+            "HTTP/2" => Self::Http2,
+            "WebSocket" => Self::WebSocket,
+            "隧道" | "Tunnel" => Self::Tunnel,
+            _ => Self::Http11,
         }
     }
 }
@@ -453,6 +501,10 @@ pub struct Flow {
     pub rule_hit: String,
     /// User-supplied note/comment attached to this flow.
     pub comment: String,
+    /// Share id when another zniff pushed this row. Local captures stay `None`.
+    pub relay_source: Option<String>,
+    /// Id inside that share document. A later body upload finds the row with this.
+    pub relay_remote_id: Option<u64>,
     /// Monotonic revision bumped whenever this flow is created or modified.
     pub rev: u64,
     accounted: usize,
@@ -586,6 +638,19 @@ impl SessionFacets {
     }
 }
 
+/// First 8 hex characters of a share id. The list badge and the source label use it.
+pub fn relay_short(id: &str) -> String {
+    id.chars()
+        .filter(|ch| ch.is_ascii_hexdigit())
+        .take(8)
+        .collect()
+}
+
+/// Stored on `client_ip` so search and the app facet can see which share a row came from.
+pub fn relay_label(id: &str) -> String {
+    format!("中继 {}", relay_short(id))
+}
+
 pub fn extract_client_app_facet(client_ip: &str) -> Option<(String, String)> {
     let raw = client_ip.trim();
     if raw.is_empty() || raw == "—" {
@@ -669,6 +734,30 @@ pub struct Message {
     pub text: String,
 }
 
+/// One shared flow, already decoded from a relay `flows.json` snapshot.
+#[derive(Debug, Clone)]
+pub struct RelayDraft {
+    pub remote_id: u64,
+    pub protocol: Protocol,
+    pub method: String,
+    pub host: String,
+    pub path: String,
+    pub url: String,
+    pub status: Option<u16>,
+    pub error: Option<String>,
+    pub request_headers: Vec<(String, String)>,
+    pub response_headers: Vec<(String, String)>,
+    pub request_body: Vec<u8>,
+    pub response_body: Vec<u8>,
+    pub request_bytes: u64,
+    pub response_bytes: u64,
+    pub ttfb: Option<Duration>,
+    pub total: Option<Duration>,
+    pub comment: String,
+    pub rule_hit: String,
+    pub messages: Vec<Message>,
+}
+
 #[derive(Debug, Clone)]
 pub struct FlowDraft {
     pub protocol: Protocol,
@@ -677,6 +766,103 @@ pub struct FlowDraft {
     pub path: String,
     pub url: String,
     pub request_headers: Vec<(String, String)>,
+}
+
+/// One list row cached by the web view. Desktop capture does not build these.
+#[derive(Clone, Debug)]
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub struct CachedFlowView {
+    pub id: u64,
+    pub protocol: Protocol,
+    pub method: String,
+    pub host: String,
+    pub path: String,
+    pub url: String,
+    pub client_ip: String,
+    pub status: Option<u16>,
+    pub error: Option<String>,
+    pub started: SystemTime,
+    pub finished_at: Option<SystemTime>,
+    pub request_bytes: u64,
+    pub response_bytes: u64,
+    pub pinned: bool,
+    pub comment: String,
+    pub relay_source: Option<String>,
+}
+
+/// Headers and bodies for one cached row. A later summary keeps them.
+#[derive(Clone, Debug)]
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub struct CachedFlowDetail {
+    pub id: u64,
+    pub request_headers: Vec<(String, String)>,
+    pub response_headers: Vec<(String, String)>,
+    pub request_body: Vec<u8>,
+    pub response_body: Vec<u8>,
+    pub request_truncated: bool,
+    pub response_truncated: bool,
+    pub messages: Vec<Message>,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn blank_cached_flow(id: u64) -> Flow {
+    Flow {
+        id,
+        protocol: Protocol::Http11,
+        method: String::new(),
+        host: String::new(),
+        path: String::new(),
+        url: String::new(),
+        client_ip: String::new(),
+        conn_info: ConnInfo::default(),
+        status: None,
+        error: None,
+        request_headers: Vec::new(),
+        response_headers: Vec::new(),
+        request_body: Vec::new(),
+        response_body: Vec::new(),
+        request_spill: None,
+        response_spill: None,
+        request_expired: None,
+        response_expired: None,
+        request_truncated: false,
+        response_truncated: false,
+        request_encoding_error: None,
+        response_encoding_error: None,
+        started: SystemTime::UNIX_EPOCH,
+        response_at: None,
+        finished_at: None,
+        request_bytes: 0,
+        response_bytes: 0,
+        messages: Vec::new(),
+        messages_truncated: false,
+        pinned: false,
+        rule_hit: String::new(),
+        comment: String::new(),
+        relay_source: None,
+        relay_remote_id: None,
+        rev: 0,
+        accounted: 0,
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn same_cached_view(flow: &Flow, row: &CachedFlowView) -> bool {
+    flow.protocol == row.protocol
+        && flow.method == row.method
+        && flow.host == row.host
+        && flow.path == row.path
+        && flow.url == row.url
+        && flow.client_ip == row.client_ip
+        && flow.status == row.status
+        && flow.error == row.error
+        && flow.started == row.started
+        && flow.finished_at == row.finished_at
+        && flow.request_bytes == row.request_bytes
+        && flow.response_bytes == row.response_bytes
+        && flow.pinned == row.pinned
+        && flow.comment == row.comment
+        && flow.relay_source == row.relay_source
 }
 
 #[derive(Debug, Default)]
@@ -709,7 +895,7 @@ impl Session {
     }
 
     pub fn open(&mut self, draft: FlowDraft) -> u64 {
-        let now = SystemTime::now();
+        let now = crate::clock::now();
         self.spill.gc(now);
         self.next_id += 1;
         self.next_rev += 1;
@@ -749,6 +935,8 @@ impl Session {
             pinned: false,
             rule_hit: String::new(),
             comment: String::new(),
+            relay_source: None,
+            relay_remote_id: None,
             rev,
             accounted: headers_size,
         };
@@ -792,7 +980,7 @@ impl Session {
         };
         flow.status = Some(status);
         if flow.response_at.is_none() {
-            flow.response_at = Some(SystemTime::now());
+            flow.response_at = Some(crate::clock::now());
         }
         flow.response_headers = headers;
         if let Some(protocol) = protocol {
@@ -810,7 +998,7 @@ impl Session {
         if let Some(flow) = self.flows.get_mut(&id) {
             flow.error = Some(error.into());
             if flow.finished_at.is_none() {
-                flow.finished_at = Some(SystemTime::now());
+                flow.finished_at = Some(crate::clock::now());
             }
             flow.rev = rev;
         }
@@ -893,7 +1081,7 @@ impl Session {
         flow.rev = rev;
         flow.accounted = flow.accounted.saturating_sub(old) + new_size;
         self.bytes = self.bytes.saturating_sub(old) + new_size;
-        self.spill_flow_if_needed(id, SystemTime::now());
+        self.spill_flow_if_needed(id, crate::clock::now());
     }
 
     pub fn replace_response(
@@ -917,13 +1105,200 @@ impl Session {
         flow.response_expired = None;
         flow.response_truncated = false;
         if flow.response_at.is_none() {
-            flow.response_at = Some(SystemTime::now());
+            flow.response_at = Some(crate::clock::now());
         }
         flow.rev = rev;
         flow.accounted = flow.accounted.saturating_sub(old) + new_size;
         self.bytes = self.bytes.saturating_sub(old) + new_size;
-        self.spill_flow_if_needed(id, SystemTime::now());
+        self.spill_flow_if_needed(id, crate::clock::now());
         self.evict(id);
+    }
+
+    /// Drops every row that arrived from `source`, including pinned ones.
+    pub fn drop_relay_source(&mut self, source: &str) -> usize {
+        let doomed: Vec<u64> = self
+            .flows
+            .iter()
+            .filter(|(_, flow)| flow.relay_source.as_deref() == Some(source))
+            .map(|(id, _)| *id)
+            .collect();
+        let count = doomed.len();
+        self.drop_ids(&doomed);
+        count
+    }
+
+    /// Replaces the rows for one share. A remote id that is already present keeps
+    /// its local id. Rows from other shares and from this computer stay.
+    pub fn sync_relay_share(&mut self, source: &str, drafts: Vec<RelayDraft>) {
+        let incoming: HashSet<u64> = drafts.iter().map(|draft| draft.remote_id).collect();
+        let doomed: Vec<u64> = self
+            .flows
+            .iter()
+            .filter(|(_, flow)| {
+                flow.relay_source.as_deref() == Some(source)
+                    && flow
+                        .relay_remote_id
+                        .is_some_and(|remote| !incoming.contains(&remote))
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        self.drop_ids(&doomed);
+        let label = relay_label(source);
+        for draft in drafts {
+            let remote_id = draft.remote_id;
+            if let Some(id) = self.relay_local_id(source, remote_id) {
+                self.write_relay_flow(id, source, &label, draft);
+            } else {
+                let id = self.open(FlowDraft {
+                    protocol: draft.protocol,
+                    method: if draft.method.is_empty() {
+                        "GET".to_string()
+                    } else {
+                        draft.method.clone()
+                    },
+                    host: draft.host.clone(),
+                    path: if draft.path.is_empty() {
+                        "/".to_string()
+                    } else {
+                        draft.path.clone()
+                    },
+                    url: draft.url.clone(),
+                    request_headers: Vec::new(),
+                });
+                self.write_relay_flow(id, source, &label, draft);
+            }
+        }
+        self.evict(u64::MAX);
+    }
+
+    /// Fills a row after `PUT /s/{id}/flows/{remote_id}.json`. Missing rows are
+    /// left alone; the stored share document still serves the page.
+    pub fn apply_relay_body(
+        &mut self,
+        source: &str,
+        remote_id: u64,
+        request: Vec<u8>,
+        response: Vec<u8>,
+        messages: Vec<Message>,
+    ) -> bool {
+        let Some(id) = self.relay_local_id(source, remote_id) else {
+            return false;
+        };
+        let Some(flow) = self.flows.get(&id) else {
+            return false;
+        };
+        let request_headers = flow.request_headers.clone();
+        let response_headers = flow.response_headers.clone();
+        let status = flow.status.unwrap_or(200);
+        self.replace_request(id, request_headers, request);
+        self.replace_response(id, status, response_headers, response);
+        if !messages.is_empty() {
+            if let Some(flow) = self.flows.get_mut(&id) {
+                flow.messages.clear();
+                flow.messages_truncated = false;
+            }
+            for message in messages {
+                self.add_message(id, message.direction, message.kind, message.text);
+            }
+        }
+        true
+    }
+
+    fn relay_local_id(&self, source: &str, remote_id: u64) -> Option<u64> {
+        self.flows.iter().find_map(|(id, flow)| {
+            (flow.relay_source.as_deref() == Some(source)
+                && flow.relay_remote_id == Some(remote_id))
+            .then_some(*id)
+        })
+    }
+
+    fn drop_ids(&mut self, ids: &[u64]) {
+        if ids.is_empty() {
+            return;
+        }
+        for id in ids {
+            if let Some(flow) = self.flows.remove(id) {
+                self.bytes = self.bytes.saturating_sub(flow.accounted);
+            }
+        }
+        self.order.retain(|id| self.flows.contains_key(id));
+        self.next_rev += 1;
+    }
+
+    fn write_relay_flow(&mut self, id: u64, source: &str, label: &str, draft: RelayDraft) {
+        self.next_rev += 1;
+        let rev = self.next_rev;
+        {
+            let Some(flow) = self.flows.get_mut(&id) else {
+                return;
+            };
+            let old = headers_size(&flow.request_headers)
+                + flow.request_body.len()
+                + headers_size(&flow.response_headers)
+                + flow.response_body.len();
+            let started = flow.started;
+            flow.protocol = draft.protocol;
+            flow.method = if draft.method.is_empty() {
+                "GET".to_string()
+            } else {
+                draft.method
+            };
+            flow.host = draft.host;
+            flow.path = if draft.path.is_empty() {
+                "/".to_string()
+            } else {
+                draft.path
+            };
+            flow.url = if draft.url.is_empty() {
+                if flow.host.is_empty() {
+                    flow.path.clone()
+                } else {
+                    format!("http://{}{}", flow.host, flow.path)
+                }
+            } else {
+                draft.url
+            };
+            flow.client_ip = label.to_string();
+            flow.relay_source = Some(source.to_string());
+            flow.relay_remote_id = Some(draft.remote_id);
+            flow.status = draft.status;
+            flow.error = draft.error.filter(|text| !text.is_empty());
+            flow.request_headers = draft.request_headers;
+            flow.response_headers = draft.response_headers;
+            flow.request_body = draft.request_body;
+            flow.response_body = draft.response_body;
+            flow.request_spill = None;
+            flow.response_spill = None;
+            flow.request_expired = None;
+            flow.response_expired = None;
+            flow.request_truncated = false;
+            flow.response_truncated = false;
+            flow.request_bytes = draft.request_bytes;
+            flow.response_bytes = draft.response_bytes;
+            flow.comment = draft.comment;
+            flow.rule_hit = draft.rule_hit;
+            flow.messages.clear();
+            flow.messages_truncated = false;
+            let mut used = 0usize;
+            for message in draft.messages {
+                if flow.messages.len() >= 200 || used >= 256 * 1024 {
+                    flow.messages_truncated = true;
+                    break;
+                }
+                used += message.text.len();
+                flow.messages.push(message);
+            }
+            flow.response_at = draft.ttfb.map(|delta| started + delta);
+            flow.finished_at = Some(started + draft.total.unwrap_or_default());
+            flow.rev = rev;
+            let new_size = headers_size(&flow.request_headers)
+                + flow.request_body.len()
+                + headers_size(&flow.response_headers)
+                + flow.response_body.len();
+            flow.accounted = flow.accounted.saturating_sub(old) + new_size;
+            self.bytes = self.bytes.saturating_sub(old) + new_size;
+        }
+        self.spill_flow_if_needed(id, crate::clock::now());
     }
 
     /// Pins until [`PIN_CAP`]. Returns false when the flow is missing or the cap is full.
@@ -992,7 +1367,7 @@ impl Session {
             self.next_rev += 1;
             flow.pinned = false;
             flow.rev = self.next_rev;
-            self.spill_flow_if_needed(id, SystemTime::now());
+            self.spill_flow_if_needed(id, crate::clock::now());
             true
         } else {
             false
@@ -1003,7 +1378,7 @@ impl Session {
     /// the `pwrite` does not block other flows; tests keep this path.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn mark_finished(&mut self, id: u64) {
-        self.mark_finished_at(id, SystemTime::now());
+        self.mark_finished_at(id, crate::clock::now());
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -1398,6 +1773,71 @@ impl Session {
             }
         }
         Some(flow)
+    }
+
+    /// Replaces the rows the web view is showing. A summary does not erase a
+    /// body already filled for that id. Desktop capture does not call this.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub fn replace_cached_views(&mut self, rows: Vec<CachedFlowView>) {
+        let mut next = HashMap::new();
+        let mut order = VecDeque::new();
+        let mut max_id = 0_u64;
+        for row in rows {
+            max_id = max_id.max(row.id);
+            let mut flow = self
+                .flows
+                .remove(&row.id)
+                .unwrap_or_else(|| blank_cached_flow(row.id));
+            if !same_cached_view(&flow, &row) {
+                self.next_rev += 1;
+                flow.rev = self.next_rev;
+            }
+            flow.protocol = row.protocol;
+            flow.method = row.method;
+            flow.host = row.host;
+            flow.path = row.path;
+            flow.url = row.url;
+            flow.client_ip = row.client_ip;
+            flow.status = row.status;
+            flow.error = row.error;
+            flow.started = row.started;
+            flow.finished_at = row.finished_at;
+            flow.request_bytes = row.request_bytes;
+            flow.response_bytes = row.response_bytes;
+            flow.pinned = row.pinned;
+            flow.comment = row.comment;
+            flow.relay_source = row.relay_source;
+            next.insert(flow.id, flow);
+            order.push_back(row.id);
+        }
+        self.flows = next;
+        self.order = order;
+        self.next_id = self.next_id.max(max_id.saturating_add(1));
+    }
+
+    /// Stores one detail payload. The same payload keeps the current revision.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub fn fill_cached_detail(&mut self, detail: CachedFlowDetail) -> Option<u64> {
+        let flow = self.flows.get_mut(&detail.id)?;
+        let same = flow.request_headers == detail.request_headers
+            && flow.response_headers == detail.response_headers
+            && flow.request_body == detail.request_body
+            && flow.response_body == detail.response_body
+            && flow.request_truncated == detail.request_truncated
+            && flow.response_truncated == detail.response_truncated
+            && flow.messages == detail.messages;
+        if !same {
+            self.next_rev += 1;
+            flow.rev = self.next_rev;
+            flow.request_headers = detail.request_headers;
+            flow.response_headers = detail.response_headers;
+            flow.request_body = detail.request_body;
+            flow.response_body = detail.response_body;
+            flow.request_truncated = detail.request_truncated;
+            flow.response_truncated = detail.response_truncated;
+            flow.messages = detail.messages;
+        }
+        Some(flow.rev)
     }
 
     pub fn len(&self) -> usize {
@@ -2185,7 +2625,7 @@ impl FlowStage {
         if self.pinned_only && !flow.pinned {
             return false;
         }
-        if self.slow_only && !is_slow(flow.started, flow.finished_at, SystemTime::now()) {
+        if self.slow_only && !is_slow(flow.started, flow.finished_at, crate::clock::now()) {
             return false;
         }
         if !self.methods.is_empty()
@@ -2524,10 +2964,10 @@ mod tests {
         session.set_started(edge, now);
         session.restore_imported(edge, None, Some(now + SLOW_AFTER), None, None);
         let young = session.open(draft("young.test"));
-        session.set_started(young, SystemTime::now() - Duration::from_millis(200));
+        session.set_started(young, crate::clock::now() - Duration::from_millis(200));
         let _ = young;
         let pending = session.open(draft("pending.test"));
-        session.set_started(pending, SystemTime::now() - Duration::from_secs(2));
+        session.set_started(pending, crate::clock::now() - Duration::from_secs(2));
 
         assert_eq!(session.ids_matching("slow:"), vec![slow, edge, pending]);
         assert_eq!(session.ids_matching("SLOW: slow.test"), vec![slow]);
@@ -2667,7 +3107,7 @@ mod tests {
         std::fs::create_dir_all(&own_dir).unwrap();
         std::fs::write(own_dir.join("seg-000001.dat"), b"active").unwrap();
 
-        let future = SystemTime::now() + Duration::from_secs(3600);
+        let future = crate::clock::now() + Duration::from_secs(3600);
         sweep_orphan_spill_dirs(&base, future, Duration::from_secs(60));
         assert!(!empty_orphan.exists());
         assert!(!stale_orphan.exists());

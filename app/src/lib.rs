@@ -4,29 +4,50 @@
 #![allow(clippy::too_many_arguments)]
 
 mod bypass;
+#[cfg(not(target_arch = "wasm32"))]
 mod ca;
+#[cfg(target_arch = "wasm32")]
+#[path = "ca_web.rs"]
+mod ca;
+#[cfg(not(target_arch = "wasm32"))]
 mod client_hello;
+mod clock;
 mod config;
+#[cfg(not(target_arch = "wasm32"))]
 mod decompress;
 mod har;
 mod i18n;
 mod icon;
+#[cfg(not(target_arch = "wasm32"))]
 mod mcp;
 mod present;
+#[cfg(not(target_arch = "wasm32"))]
 mod proxy;
+#[cfg(target_arch = "wasm32")]
+#[path = "hub_web.rs"]
+mod proxy;
+#[cfg(not(target_arch = "wasm32"))]
+mod relay;
 mod rules;
 mod session;
 mod share;
+#[cfg(not(target_arch = "wasm32"))]
 mod sysproxy;
+#[cfg(not(target_arch = "wasm32"))]
 mod updater;
+#[cfg(not(target_arch = "wasm32"))]
+mod web;
 mod ws;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+#[cfg_attr(target_arch = "wasm32", allow(unused_imports))]
 use std::net::{Ipv4Addr, SocketAddr};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime};
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+use std::time::{Duration, SystemTime};
 
 use nsh_base::{
     Anchor, DataTable, DataTableApi, DataTableCell, DataTableClasses, DataTableColumn,
@@ -47,19 +68,54 @@ use crate::icon::{Glyph, glyph, glyph_px};
 use crate::proxy::{BreakDecision, BreakSide, Capture, Hub, ReplayOverride};
 use crate::session::Direction;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub use ca::clear_ios_simulator_proxies;
+#[cfg(not(target_arch = "wasm32"))]
+pub use relay::shutdown_relay_push;
+#[cfg(not(target_arch = "wasm32"))]
 pub use sysproxy::restore_if_dirty;
+
+/// A desktop-only child. Native stays `parent.child(child)`. The web build
+/// drops the child, so system proxy, certificates, and updates are not shown.
+macro_rules! desktop_child {
+    ($parent:expr, $child:expr) => {{
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            $parent.child($child)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            $parent
+        }
+    }};
+}
 
 pub fn initial_window_size() -> (i32, i32) {
     let cfg = saved_config();
     (cfg.window_width as i32, cfg.window_height as i32)
 }
 
-/// Checks if `--mcp` was passed on the command line. When present, runs the
-/// stdio MCP JSON-RPC 2.0 bridge forwarding to the local `zniff` proxy and
-/// returns its exit code so `main()` can exit without opening a window.
+/// Headless modes exit before the desktop window. `--web` serves the operator
+/// console and leaves the capture port closed. `--relay` and `--mcp` are separate.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn maybe_run_cli_mode() -> Option<i32> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if !args.iter().any(|arg| arg == "--mcp") {
+    let web = args.iter().any(|arg| arg == "--web");
+    let relay_mode = args.iter().any(|arg| arg == "--relay");
+    let mcp = args.iter().any(|arg| arg == "--mcp");
+    if web && (relay_mode || mcp) {
+        eprintln!("zniff --web 不能和 --relay 或 --mcp 一起用");
+        return Some(2);
+    }
+    if web {
+        let saved = saved_config();
+        return Some(web::run_cli(&args, saved.listen_port));
+    }
+    if relay_mode {
+        let saved = saved_config();
+        return Some(relay::run_cli(&args, saved.listen_port, &saved.relay_token));
+    }
+    if !mcp {
         return None;
     }
     let mut port = saved_config().listen_port;
@@ -102,6 +158,10 @@ struct Controls {
     update_state: Mutex<UpdateState>,
     redact_export: Mutex<bool>,
     redact_fields: Mutex<String>,
+    relay_url: Mutex<String>,
+    relay_token: Mutex<String>,
+    #[cfg(not(target_arch = "wasm32"))]
+    relay_push: Mutex<Option<relay::PushHandle>>,
     toast_seq: std::sync::atomic::AtomicU64,
     toast_queue: Mutex<Vec<(u64, StatusMsg)>>,
 }
@@ -135,6 +195,7 @@ struct UpdateState {
 }
 
 impl UpdateState {
+    #[cfg(not(target_arch = "wasm32"))]
     fn from_disk() -> Self {
         Self {
             phase: UpdatePhase::Idle,
@@ -225,7 +286,8 @@ struct SeqBuilder {
     flat_rows: Memo<Vec<DepFlatRow>>,
 }
 
-/// The app's UI set (`nsh.json` `"rust"`).
+/// The app's UI set (`nsh.json` `"rust"`). The web package calls this entry
+/// even though `rust_app!` also sets the root.
 #[native_module("zniff/native")]
 fn native(registry: &mut Registry) {
     registry.register::<App>();
@@ -449,6 +511,8 @@ struct RowLine {
     size_bytes: u64,
     failed: bool,
     pinned: bool,
+    /// First 8 hex characters of the share that pushed this row. Empty for local capture.
+    relay_short: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -928,6 +992,12 @@ struct Shown {
     msg_search: Signal<String>,
     msg_dir: Signal<u8>,
     msg_kind: Signal<u8>,
+    /// Eight hex characters of the share that pushed the selected row. Empty locally.
+    relay: Signal<String>,
+    request_offset: Signal<usize>,
+    response_offset: Signal<usize>,
+    request_window: Signal<TextWindow>,
+    response_window: Signal<TextWindow>,
 }
 
 #[derive(Clone, Copy)]
@@ -1013,11 +1083,17 @@ pub fn App() -> impl IntoElement {
         msg_search: signal(String::new()),
         msg_dir: signal(0),
         msg_kind: signal(0),
+        relay: signal(String::new()),
+        request_offset: signal(0),
+        response_offset: signal(0),
+        request_window: signal(TextWindow::default()),
+        response_window: signal(TextWindow::default()),
     };
     let port_text = signal(String::new());
     let listen_all = signal(false);
     let paused = signal(None::<(u64, BreakSide)>);
     let paused_count = signal(0_usize);
+    let paused_queue = signal(Vec::<(u64, BreakSide)>::new());
     let baseline = signal(None::<u64>);
     let compose = Compose {
         composing: signal(false),
@@ -1093,14 +1169,30 @@ pub fn App() -> impl IntoElement {
     use_system_proxy.set(lock_bool(&controls.use_system_proxy));
     port_text.set(lock_port(&controls.listen_port).to_string());
     listen_all.set(lock_bool(&controls.listen_all));
-    std::thread::spawn(updater::sweep_installer_mounts);
-    if updater::auto_check_due(SystemTime::now()) {
-        auto_check_update(controls.clone());
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::thread::spawn(updater::sweep_installer_mounts);
+        if updater::auto_check_due(clock::now()) {
+            auto_check_update(controls.clone());
+        }
+        if saved_config().capturing {
+            let controls_boot = controls.clone();
+            std::thread::spawn(move || start_capture(&controls_boot));
+        }
     }
-    if saved_config().capturing {
-        let controls_boot = controls.clone();
-        std::thread::spawn(move || start_capture(&controls_boot));
-    }
+    #[cfg(target_arch = "wasm32")]
+    start_web_poll(
+        controls.clone(),
+        port_text,
+        listen_all,
+        profile_signals.bypass,
+        profile_signals.rules,
+        profile_signals.upstream,
+        profile_signals.rules_on,
+        profile_signals.breaks_on,
+        profile_signals.show_tunnels,
+        selected,
+    );
 
     let controls_tick = controls.clone();
     let filter_tick = filter;
@@ -1117,7 +1209,7 @@ pub fn App() -> impl IntoElement {
         true,
         saved.show_tunnel_failures,
     ));
-    let history_since = stored(Some(SystemTime::now()));
+    let history_since = stored(Some(clock::now()));
     let win_pending = stored((saved.window_width, saved.window_height));
     let win_since = stored(None::<SystemTime>);
     let selected_tick = selected;
@@ -1131,6 +1223,11 @@ pub fn App() -> impl IntoElement {
     let seen_filter = stored(String::new());
     let seen_setup_filter = stored(String::new());
     let seen_selected = stored(None::<u64>);
+    // One follow-up after the selection frame. Layout can put the previous
+    // offset back once; the same flow updating does not scroll.
+    let detail_scroll = element_ref();
+    let detail_scroll_tick = detail_scroll;
+    let detail_top_left = stored(false);
     let seen_detail_stamp = stored((
         true,
         None::<u64>,
@@ -1154,8 +1251,8 @@ pub fn App() -> impl IntoElement {
     let seen_share = stored(String::new());
     let update_tick = update_state;
     let seen_update = stored(update_state.get());
-    let update_probe_at = stored(SystemTime::now());
-    let spill_gc_at = stored(SystemTime::now());
+    let update_probe_at = stored(clock::now());
+    let spill_gc_at = stored(clock::now());
     let seen_facets_open = stored(false);
     let detail_hold = stored(SystemTime::UNIX_EPOCH);
     let row_cache_tick = Rc::new(RefCell::new(RowCache {
@@ -1238,11 +1335,16 @@ pub fn App() -> impl IntoElement {
             seen_update.replace(update_now.clone());
             update_tick.set(update_now);
         }
-        if update_probe_at.get().elapsed().unwrap_or_default() >= Duration::from_secs(3600) {
-            update_probe_at.replace(SystemTime::now());
-            if updater::auto_check_due(SystemTime::now()) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if clock::elapsed(update_probe_at.get()) >= Duration::from_secs(3600) {
+            update_probe_at.replace(clock::now());
+            if updater::auto_check_due(clock::now()) {
                 auto_check_update(controls_tick.clone());
             }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = update_probe_at.get();
         }
         let status_now = lock_status(&controls_tick);
         if status.with(|cur| cur != &status_now) {
@@ -1269,11 +1371,15 @@ pub fn App() -> impl IntoElement {
         }
         let paused_now = controls_tick.hub.paused();
         let paused_len = controls_tick.hub.paused_queue_len();
+        let paused_queue_now = controls_tick.hub.paused_queue();
         if paused.get_untracked() != paused_now {
             paused.set(paused_now);
         }
         if paused_count.get_untracked() != paused_len {
             paused_count.set(paused_len);
+        }
+        if paused_queue.with(|cur| cur != &paused_queue_now) {
+            paused_queue.set(paused_queue_now);
         }
         if paused_now != seen_paused.get() {
             let prev_paused = seen_paused.replace(paused_now);
@@ -1310,10 +1416,10 @@ pub fn App() -> impl IntoElement {
         let effective_filter_now = effective_filter_tick.get();
         if filter_now != filter_pending.get() {
             filter_pending.replace(filter_now.clone());
-            filter_since.replace(Some(SystemTime::now()));
+            filter_since.replace(Some(clock::now()));
         } else if filter_since
             .get()
-            .is_some_and(|at| at.elapsed().unwrap_or_default() >= Duration::from_millis(500))
+            .is_some_and(|at| clock::elapsed(at) >= Duration::from_millis(500))
         {
             remember_filter(&filter_now);
             filter_since.replace(None);
@@ -1329,10 +1435,10 @@ pub fn App() -> impl IntoElement {
         );
         if history_now != history_pending.get() {
             history_pending.replace(history_now);
-            history_since.replace(Some(SystemTime::now()));
+            history_since.replace(Some(clock::now()));
         } else if history_since
             .get()
-            .is_some_and(|at| at.elapsed().unwrap_or_default() >= Duration::from_millis(1200))
+            .is_some_and(|at| clock::elapsed(at) >= Duration::from_millis(1200))
         {
             record_profile_history(
                 &profile_tick.name.get(),
@@ -1359,26 +1465,25 @@ pub fn App() -> impl IntoElement {
             );
             if win_now != win_pending.get() {
                 win_pending.replace(win_now);
-                win_since.replace(Some(SystemTime::now()));
+                win_since.replace(Some(clock::now()));
             } else if win_since
                 .get()
-                .is_some_and(|at| at.elapsed().unwrap_or_default() >= Duration::from_millis(500))
+                .is_some_and(|at| clock::elapsed(at) >= Duration::from_millis(500))
             {
                 remember_window_size(win_now.0, win_now.1);
                 win_since.replace(None);
             }
         }
         release_sequence_data(seq_builder);
-        let spill_expired =
-            if spill_gc_at.get().elapsed().unwrap_or_default() >= Duration::from_secs(15) {
-                let now = SystemTime::now();
-                spill_gc_at.replace(now);
-                controls_tick
-                    .hub
-                    .with_session(|session| session.gc_spill(now))
-            } else {
-                false
-            };
+        let spill_expired = if clock::elapsed(spill_gc_at.get()) >= Duration::from_secs(15) {
+            let now = clock::now();
+            spill_gc_at.replace(now);
+            controls_tick
+                .hub
+                .with_session(|session| session.gc_spill(now))
+        } else {
+            false
+        };
         let selected_now = selected_tick.get();
         let lang_now = ui_lang(langs);
         let baseline_now = baseline_tick.get();
@@ -1489,6 +1594,11 @@ pub fn App() -> impl IntoElement {
             shown_tick.msg_search.set(String::new());
             shown_tick.msg_dir.set(0);
             shown_tick.msg_kind.set(0);
+            detail_scroll_tick.scroll_to_offset(px(0.0), false);
+            detail_top_left.replace(true);
+        } else if detail_top_left.get() {
+            detail_scroll_tick.scroll_to_offset(px(0.0), false);
+            detail_top_left.replace(false);
         }
         let (selected_rev, selected_done, baseline_rev) =
             if selected_now.is_some() || baseline_now.is_some() {
@@ -1521,10 +1631,13 @@ pub fn App() -> impl IntoElement {
                 || prev.5 != pretty_now
                 || prev.6 != lang_now;
             let streaming = selected_now.is_some() && !selected_done;
-            let due = detail_hold.get().elapsed().unwrap_or_default() >= Duration::from_millis(200);
+            let due = clock::elapsed(detail_hold.get()) >= Duration::from_millis(200);
             if !streaming || view_changed || spill_expired || due {
                 seen_detail_stamp.replace(detail_stamp);
-                detail_hold.replace(SystemTime::now());
+                detail_hold.replace(clock::now());
+                if prev.1 != selected_now || prev.5 != pretty_now {
+                    reset_body_offsets(shown_tick);
+                }
                 publish_detail(
                     &shown_tick,
                     &controls_tick.hub,
@@ -1679,6 +1792,7 @@ pub fn App() -> impl IntoElement {
                 break_bar(
                     paused,
                     paused_count,
+                    paused_queue,
                     compose,
                     selected,
                     controls_break.clone(),
@@ -1721,6 +1835,7 @@ pub fn App() -> impl IntoElement {
                     folded,
                     pane_px,
                     filtered_stats,
+                    detail_scroll,
                 )),
         )
         .child(footer(
@@ -1923,8 +2038,9 @@ fn toolbar(
     let clear_unpinned = Rc::new(clear_unpinned);
     let remove = Rc::new(remove);
     let filter_controls = import_controls.clone();
+    #[cfg(not(target_arch = "wasm32"))]
     let update_controls = import_controls.clone();
-    view()
+    let bar = view()
         .flex_row()
         .items_center()
         .gap_2()
@@ -2065,65 +2181,66 @@ fn toolbar(
                         }
                     }),
                 )
-        })
-        .child(toolbar_update_pill(update_state, update_controls))
-        .child(flow_count_badge(rows, flow_total, filter, move || {
-            reset_compose(compose);
-            close_sequence_diagram(seq_builder);
-            selected.set(None);
-        }))
-        .child(toolbar_text_button(tr("统计", "Summary"), move || {
-            reset_compose(compose);
-            close_sequence_diagram(seq_builder);
-            selected.set(None);
-        }))
-        .child(toolbar_text_button(tr("清空", "Clear"), {
+        });
+    #[cfg(not(target_arch = "wasm32"))]
+    let bar = bar.child(toolbar_update_pill(update_state, update_controls));
+    bar.child(flow_count_badge(rows, flow_total, filter, move || {
+        reset_compose(compose);
+        close_sequence_diagram(seq_builder);
+        selected.set(None);
+    }))
+    .child(toolbar_text_button(tr("统计", "Summary"), move || {
+        reset_compose(compose);
+        close_sequence_diagram(seq_builder);
+        selected.set(None);
+    }))
+    .child(toolbar_text_button(tr("清空", "Clear"), {
+        let clear = Rc::clone(&clear);
+        move || clear()
+    }))
+    .child(saved_filter_menu(profiles, filter_controls))
+    .child(toolbar_menu(
+        ca_status,
+        use_system_proxy,
+        install,
+        remove,
+        toggle_proxy,
+        export_har,
+        copy_env,
+        {
             let clear = Rc::clone(&clear);
             move || clear()
-        }))
-        .child(saved_filter_menu(profiles, filter_controls))
-        .child(toolbar_menu(
-            ca_status,
-            use_system_proxy,
-            install,
-            remove,
-            toggle_proxy,
-            export_har,
-            copy_env,
-            {
-                let clear = Rc::clone(&clear);
-                move || clear()
-            },
-            {
-                let clear_unpinned = Rc::clone(&clear_unpinned);
-                move || clear_unpinned()
-            },
-            import_controls,
-            rows,
-            flow_total,
-            filter,
-            pretty,
-            shown_phase,
-            share_id,
-            compose,
-            seq_builder,
-            selected,
-            update_state,
-        ))
-        .child(primary_button(
-            {
-                let langs = ui_langs();
-                move || -> SharedString {
-                    if running.get() {
-                        t(ui_lang(langs), "停止", "Stop").into()
-                    } else {
-                        t(ui_lang(langs), "开始", "Start").into()
-                    }
+        },
+        {
+            let clear_unpinned = Rc::clone(&clear_unpinned);
+            move || clear_unpinned()
+        },
+        import_controls,
+        rows,
+        flow_total,
+        filter,
+        pretty,
+        shown_phase,
+        share_id,
+        compose,
+        seq_builder,
+        selected,
+        update_state,
+    ))
+    .child(primary_button(
+        {
+            let langs = ui_langs();
+            move || -> SharedString {
+                if running.get() {
+                    t(ui_lang(langs), "停止", "Stop").into()
+                } else {
+                    t(ui_lang(langs), "开始", "Start").into()
                 }
-            },
-            move || running.get(),
-            toggle,
-        ))
+            }
+        },
+        move || running.get(),
+        toggle,
+    ))
 }
 
 fn toolbar_text_button(
@@ -2309,6 +2426,12 @@ fn saved_filter_panel(profiles: ProfileSignals, controls: Arc<Controls>) -> impl
     let rules_save_controls = controls.clone();
     let rules_clear_controls = controls.clone();
     let upstream_controls = controls.clone();
+    let relay_url_text = signal(lock_string(&controls.relay_url));
+    let relay_token_text = signal(lock_string(&controls.relay_token));
+    let relay_accept_on = signal(controls.hub.relay_accepts());
+    let relay_url_controls = controls.clone();
+    let relay_token_controls = controls.clone();
+    let relay_accept_controls = controls.clone();
     let tunnel_controls = controls;
     let draft_host = signal(String::new());
     let draft_path = signal(String::new());
@@ -2744,7 +2867,99 @@ fn saved_filter_panel(profiles: ProfileSignals, controls: Arc<Controls>) -> impl
                                     }
                                 },
                             ),
-                        )),
+                        ))
+                        .child(config_field(
+                            "中转地址",
+                            "Relay address",
+                            side_input(
+                                relay_url_text,
+                                tr(
+                                    "http://主机:端口，空着只在本机分享",
+                                    "http://host:port, empty shares locally",
+                                ),
+                                28.0,
+                                false,
+                                move |text| {
+                                    relay_url_text.set(text.to_string());
+                                    let stored = text.trim().to_string();
+                                    *relay_url_controls
+                                        .relay_url
+                                        .lock()
+                                        .unwrap_or_else(|err| err.into_inner()) = stored.clone();
+                                    if let Err(err) =
+                                        save_config(|config| config.relay_url = stored)
+                                    {
+                                        set_status(
+                                            &relay_url_controls,
+                                            StatusMsg::PrefUnsaved {
+                                                name: PrefName::Relay,
+                                                err: err.to_string(),
+                                            },
+                                        );
+                                    }
+                                },
+                            ),
+                        ))
+                        .child(config_field(
+                            "中转密钥",
+                            "Relay token",
+                            side_input(
+                                relay_token_text,
+                                tr(
+                                    "上传和接收用同一个密钥",
+                                    "Same secret for upload and receive",
+                                ),
+                                28.0,
+                                false,
+                                move |text| {
+                                    relay_token_text.set(text.to_string());
+                                    let stored = text.trim().to_string();
+                                    *relay_token_controls
+                                        .relay_token
+                                        .lock()
+                                        .unwrap_or_else(|err| err.into_inner()) = stored.clone();
+                                    relay_token_controls.hub.set_relay_token(&stored);
+                                    if let Err(err) =
+                                        save_config(|config| config.relay_token = stored)
+                                    {
+                                        set_status(
+                                            &relay_token_controls,
+                                            StatusMsg::PrefUnsaved {
+                                                name: PrefName::Relay,
+                                                err: err.to_string(),
+                                            },
+                                        );
+                                    }
+                                },
+                            ),
+                        ))
+                        .child(
+                            view().w_full().flex_row().child(enable_switch(
+                                relay_accept_on,
+                                "接收中继",
+                                "Accept relay",
+                                move |on| {
+                                    relay_accept_controls.hub.set_relay_accept(on);
+                                    if on && !relay_accept_controls.hub.relay_token_ready() {
+                                        set_status(
+                                            &relay_accept_controls,
+                                            StatusMsg::RelayAcceptNeedToken,
+                                        );
+                                    }
+                                    if let Err(err) =
+                                        save_config(|config| config.relay_accept = on)
+                                    {
+                                        set_status(
+                                            &relay_accept_controls,
+                                            StatusMsg::PrefUnsaved {
+                                                name: PrefName::Relay,
+                                                err: err.to_string(),
+                                            },
+                                        );
+                                    }
+                                },
+                            )),
+                        ),
                 ),
         )
         .child(profile_dock(
@@ -6984,6 +7199,7 @@ fn row_context_menu(
     let pin_label = controls.clone();
     let base_controls = controls.clone();
     let map_local_controls = controls.clone();
+    let repeat_controls = controls.clone();
     let replay_controls = controls;
     view()
         .w(px(196.0))
@@ -7081,6 +7297,9 @@ fn row_context_menu(
         .child(action_item(
             tr("批量重放", "Repeat…"),
             closing(menu_open, move || {
+                if refuse_relay(&repeat_controls, picked.get()) {
+                    return;
+                }
                 shown.editing_comment.set(false);
                 shown.repeating.set(true);
             }),
@@ -7127,6 +7346,9 @@ fn quick_kind(kind: u8) -> crate::rules::QuickRule {
 }
 
 fn fill_break_rule(controls: &Controls, id: Option<u64>, rules_text: Signal<String>) {
+    if refuse_relay(controls, id) {
+        return;
+    }
     let Some(flow) = selected_flow(controls, id) else {
         return;
     };
@@ -7148,6 +7370,9 @@ fn fill_break_rule(controls: &Controls, id: Option<u64>, rules_text: Signal<Stri
 }
 
 fn map_local_from_flow(controls: Arc<Controls>, id: Option<u64>, rules_text: Signal<String>) {
+    if refuse_relay(&controls, id) {
+        return;
+    }
     let Some(flow) = selected_flow(&controls, id) else {
         return;
     };
@@ -7722,6 +7947,37 @@ fn path_cell(
         .overflow_hidden()
         .flex_row()
         .items_center()
+        .child(when(
+            move || {
+                rows.with(|rows| {
+                    rows.get(index)
+                        .is_some_and(|row| !row.relay_short.is_empty())
+                })
+            },
+            move || {
+                let langs = ui_langs();
+                view()
+                    .mr(px(6.0))
+                    .px(px(4.0))
+                    .rounded(px(4.0))
+                    .flex_shrink_0()
+                    .bg(accent_blue_soft())
+                    .child(
+                        text(move || {
+                            let short = rows.with(|rows| {
+                                rows.get(index)
+                                    .map(|row| row.relay_short.clone())
+                                    .unwrap_or_default()
+                            });
+                            format!("{} {short}", t(ui_lang(langs), "中继", "relay"))
+                        })
+                        .number_of_lines(1)
+                        .text_size(px(10.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(accent_blue_text()),
+                    )
+            },
+        ))
         .child(
             mono(move || {
                 let full_url = columns.get().full_url;
@@ -7746,9 +8002,21 @@ fn path_cell(
         )
         .on_mouse_move(move |event: &MouseEvent| {
             let full_url = columns.get().full_url;
+            let langs = ui_langs();
             let path = tip_rows.with(|rows| {
                 rows.get(index)
-                    .map(|row| row_target_display(row, full_url))
+                    .map(|row| {
+                        let target = row_target_display(row, full_url);
+                        if row.relay_short.is_empty() {
+                            target
+                        } else {
+                            format!(
+                                "{} {} · {target}",
+                                t(ui_lang(langs), "中继", "relay"),
+                                row.relay_short
+                            )
+                        }
+                    })
                     .unwrap_or_default()
             });
             show_cell_hover(hover, event, path);
@@ -7825,9 +8093,11 @@ fn detail_pane(
     folded: Signal<u8>,
     pane_px: Rc<Cell<f32>>,
     filtered_stats: Signal<session::FilteredStats>,
+    detail_scroll: ElementRef,
 ) -> impl IntoElement {
     let ready_controls = controls.clone();
     scroll()
+        .element_ref(&detail_scroll)
         .flex_1()
         .min_w(px(0.0))
         .bg(bg_canvas())
@@ -8481,6 +8751,23 @@ fn summary(
                     baseline,
                 )),
         )
+        .child(when(
+            move || !shown.relay.get().is_empty(),
+            move || {
+                let langs = ui_langs();
+                text(move || {
+                    let short = shown.relay.get();
+                    format!(
+                        "{} {} {short}",
+                        t(ui_lang(langs), "来源", "From"),
+                        t(ui_lang(langs), "中继", "relay")
+                    )
+                })
+                .number_of_lines(1)
+                .text_size(px(12.0))
+                .text_color(fg_secondary())
+            },
+        ))
         .child(
             view()
                 .w_full()
@@ -9519,6 +9806,28 @@ fn body_section(
                         .flex_row()
                         .items_center()
                         .gap_1p5()
+                        .child(when(
+                            move || {
+                                let window = if embed_image {
+                                    shown.response_window.get()
+                                } else {
+                                    shown.request_window.get()
+                                };
+                                window.has_prev() || window.has_more()
+                            },
+                            {
+                                let controls = controls.clone();
+                                move || {
+                                    body_window_nav(
+                                        embed_image,
+                                        shown,
+                                        controls.clone(),
+                                        selected,
+                                        baseline,
+                                    )
+                                }
+                            },
+                        ))
                         .child(when(can_search, move || {
                             body_search_box(search, body, hex, form, shown.pane_width)
                         }))
@@ -9722,6 +10031,97 @@ fn body_section(
                 )
             },
         ))
+}
+
+fn body_window_nav(
+    response: bool,
+    shown: Shown,
+    controls: Arc<Controls>,
+    selected: Signal<Option<u64>>,
+    baseline: Signal<Option<u64>>,
+) -> impl IntoElement {
+    let back_controls = controls.clone();
+    let next_controls = controls;
+    view()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .child(when(
+            move || {
+                let window = if response {
+                    shown.response_window.get()
+                } else {
+                    shown.request_window.get()
+                };
+                window.has_prev()
+            },
+            move || {
+                let controls = back_controls.clone();
+                detail_button(tr("往前", "Previous"), move || {
+                    nudge_body_window(shown, &controls, selected, baseline, response, false)
+                })
+            },
+        ))
+        .child(when(
+            move || {
+                let window = if response {
+                    shown.response_window.get()
+                } else {
+                    shown.request_window.get()
+                };
+                window.has_more()
+            },
+            move || {
+                let controls = next_controls.clone();
+                detail_button(tr("往后", "Next"), move || {
+                    nudge_body_window(shown, &controls, selected, baseline, response, true)
+                })
+            },
+        ))
+}
+
+fn nudge_body_window(
+    shown: Shown,
+    controls: &Controls,
+    selected: Signal<Option<u64>>,
+    baseline: Signal<Option<u64>>,
+    response: bool,
+    forward: bool,
+) {
+    let window = if response {
+        shown.response_window.get()
+    } else {
+        shown.request_window.get()
+    };
+    if (forward && !window.has_more()) || (!forward && !window.has_prev()) {
+        return;
+    }
+    let next = if forward {
+        window.end
+    } else {
+        window.offset.saturating_sub(BODY_DISPLAY_CAP)
+    };
+    if response {
+        shown.response_offset.set(next);
+    } else {
+        shown.request_offset.set(next);
+    }
+    publish_detail(
+        &shown,
+        &controls.hub,
+        selected.get(),
+        ui_lang(ui_langs()),
+        baseline.get(),
+    );
+}
+
+fn reset_body_offsets(shown: Shown) {
+    if shown.request_offset.get_untracked() != 0 {
+        shown.request_offset.set(0);
+    }
+    if shown.response_offset.get_untracked() != 0 {
+        shown.response_offset.set(0);
+    }
 }
 
 fn filtered_plain_body(body: &str, hex: &[u8], pane_width: f32, query: &str) -> String {
@@ -10015,6 +10415,7 @@ fn pretty_chip(
                 return;
             }
             shown.pretty.set(on);
+            reset_body_offsets(shown);
             publish_detail(
                 &shown,
                 &controls.hub,
@@ -10063,6 +10464,7 @@ fn detail_actions(
     let pin_controls = controls.clone();
     let base_controls = controls.clone();
     let replay_controls = controls.clone();
+    let repeat_controls = controls.clone();
     let edit_controls = controls.clone();
     let send_controls = controls.clone();
     let break_controls = controls.clone();
@@ -10203,6 +10605,7 @@ fn detail_actions(
                         let langs = ui_langs();
                         move || {
                             shown.pretty.set(!shown.pretty.get());
+                            reset_body_offsets(shown);
                             publish_detail(
                                 &shown,
                                 &pretty_controls.hub,
@@ -10218,6 +10621,9 @@ fn detail_actions(
                     replay_flow(&replay_controls, selected.get(), ReplayOverride::default());
                 }))
                 .child(action_item(tr("批量重放", "Repeat…"), move || {
+                    if refuse_relay(&repeat_controls, selected.get()) {
+                        return;
+                    }
                     shown.editing_comment.set(false);
                     shown.repeating.set(true);
                 }))
@@ -10519,7 +10925,7 @@ fn qr_panel(
     qr_path: Signal<String>,
 ) -> impl IntoElement {
     view()
-        .w(px(300.0))
+        .w(px(612.0))
         .p_3()
         .gap_2()
         .items_center()
@@ -10549,41 +10955,68 @@ fn qr_panel(
                 ),
         )
         .child(
-            text({
-                let langs = ui_langs();
-                move || -> SharedString {
-                    let lang = ui_lang(langs);
-                    let ip = lan_choice.get();
-                    let name = lan_addrs.with(|addrs| {
-                        addrs
-                            .iter()
-                            .find(|addr| addr.ip.to_string() == ip)
-                            .map(|addr| addr.name.clone())
-                            .unwrap_or_default()
-                    });
-                    if lan_addrs.with(Vec::len) > 1 {
-                        t(
-                            lang,
-                            "点下面换一张网卡。手机要和这个地址在同一网络。",
-                            "Pick a network below. The phone must be on that network.",
-                        )
-                        .into()
-                    } else if name.is_empty() {
-                        t(
-                            lang,
-                            "手机要能访问这个地址。",
-                            "The phone must be able to reach this address.",
-                        )
-                        .into()
-                    } else if lang == Lang::Zh {
-                        format!("网卡 {name}。手机要和它在同一网络。").into()
-                    } else {
-                        format!("Interface {name}. The phone must be on that network.").into()
+            view()
+                .w_full()
+                .flex_row()
+                .items_start()
+                .gap_3()
+                .child(qr_code_side(
+                    listen, lan_url, lan_choice, lan_addrs, qr_path,
+                ))
+                .child(qr_phone_steps()),
+        )
+}
+
+fn qr_code_side(
+    listen: Signal<String>,
+    lan_url: Signal<String>,
+    lan_choice: Signal<String>,
+    lan_addrs: Signal<Vec<LanAddr>>,
+    qr_path: Signal<String>,
+) -> impl IntoElement {
+    view()
+        .w(px(236.0))
+        .flex_shrink_0()
+        .items_center()
+        .gap_2()
+        .child(
+            view().w_full().child(
+                text({
+                    let langs = ui_langs();
+                    move || -> SharedString {
+                        let lang = ui_lang(langs);
+                        let ip = lan_choice.get();
+                        let name = lan_addrs.with(|addrs| {
+                            addrs
+                                .iter()
+                                .find(|addr| addr.ip.to_string() == ip)
+                                .map(|addr| addr.name.clone())
+                                .unwrap_or_default()
+                        });
+                        if lan_addrs.with(Vec::len) > 1 {
+                            t(
+                                lang,
+                                "点下面换一张网卡。手机要和这个地址在同一网络。",
+                                "Pick a network below. The phone must be on that network.",
+                            )
+                            .into()
+                        } else if name.is_empty() {
+                            t(
+                                lang,
+                                "手机要能访问这个地址。",
+                                "The phone must be able to reach this address.",
+                            )
+                            .into()
+                        } else if lang == Lang::Zh {
+                            format!("网卡 {name}。手机要和它在同一网络。").into()
+                        } else {
+                            format!("Interface {name}. The phone must be on that network.").into()
+                        }
                     }
-                }
-            })
-            .text_size(px(12.0))
-            .text_color(fg_muted()),
+                })
+                .text_size(px(12.0))
+                .text_color(fg_muted()),
+            ),
         )
         .child(when(
             move || lan_addrs.with(Vec::len) > 1,
@@ -10611,6 +11044,121 @@ fn qr_panel(
             move || qr_path.get().is_empty(),
             move || muted_line(tr("二维码没有生成", "QR code was not generated")),
         ))
+}
+
+/// Steps shown beside the QR. Same path as the phone install page, plus the
+/// Wi-Fi proxy the page only mentions in one sentence.
+fn qr_phone_steps() -> impl IntoElement {
+    view()
+        .w(px(340.0))
+        .flex_shrink_0()
+        .gap_3()
+        .child(
+            view()
+                .w_full()
+                .gap_1p5()
+                .child(qr_os_heading("iOS"))
+                .child(
+                    view()
+                        .w_full()
+                        .gap_2()
+                        .child(qr_step(
+                            "1.",
+                            tr(
+                                "扫码打开安装页，点「下载根证书」。系统会提示安装描述文件。",
+                                "Scan to open the page and tap Download the root certificate. The system offers to install a profile.",
+                            ),
+                        ))
+                        .child(qr_step(
+                            "2.",
+                            tr(
+                                "打开「设置」→「已下载描述文件」，安装 zniff CA。",
+                                "Open Settings → Profile Downloaded and install zniff CA.",
+                            ),
+                        ))
+                        .child(qr_step(
+                            "3.",
+                            tr(
+                                "再到「设置」→「通用」→「关于本机」→「证书信任设置」，打开 zniff CA 的完全信任。",
+                                "Then open Settings → General → About → Certificate Trust Settings and enable full trust for zniff CA.",
+                            ),
+                        ))
+                        .child(qr_step(
+                            "4.",
+                            tr(
+                                "「设置」→「无线局域网」→ 当前网络右侧 ⓘ →「配置代理」→「手动」。服务器和端口填上面的地址。",
+                                "Settings → Wi-Fi → the ⓘ beside this network → Configure Proxy → Manual. Use the server and port above.",
+                            ),
+                        )),
+                ),
+        )
+        .child(
+            view()
+                .w_full()
+                .gap_1p5()
+                .child(qr_os_heading("Android"))
+                .child(
+                    view()
+                        .w_full()
+                        .gap_2()
+                        .child(qr_step(
+                            "1.",
+                            tr(
+                                "扫码打开安装页，点下载并保存 zniff-ca.crt。",
+                                "Scan to open the page, then download and save zniff-ca.crt.",
+                            ),
+                        ))
+                        .child(qr_step(
+                            "2.",
+                            tr(
+                                "打开「设置」→「安全」→「加密与凭据」→「安装证书」→「CA 证书」。",
+                                "Open Settings → Security → Encryption & credentials → Install a certificate → CA certificate.",
+                            ),
+                        ))
+                        .child(qr_step(
+                            "3.",
+                            tr(
+                                "打开当前 WLAN 的详情，或「修改网络」→「高级选项」。代理选「手动」，主机名和端口填上面的地址。",
+                                "Open this WLAN's details, or Modify network → Advanced. Set Proxy to Manual and use the hostname and port above.",
+                            ),
+                        )),
+                ),
+        )
+}
+
+fn qr_step(
+    index: &'static str,
+    body: impl IntoReactive<SharedString> + 'static,
+) -> impl IntoElement {
+    view()
+        .w_full()
+        .flex_row()
+        .items_start()
+        .gap_1p5()
+        .child(
+            view().w(px(18.0)).flex_shrink_0().child(
+                text(index)
+                    .text_size(px(12.0))
+                    .line_height(Points(18.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(fg_secondary()),
+            ),
+        )
+        .child(
+            view().flex_1().min_w(px(0.0)).child(
+                text(body)
+                    .text_size(px(12.0))
+                    .line_height(Points(18.0))
+                    .text_color(fg_muted()),
+            ),
+        )
+}
+
+fn qr_os_heading(title: &'static str) -> Text {
+    text(title)
+        .text_size(px(12.0))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(fg_primary())
 }
 
 fn lan_choice_row(
@@ -10882,9 +11430,21 @@ fn more_trigger(
         .active(|style| style.opacity(0.75))
         .child(when(
             move || {
-                dot_proxy.get()
-                    || dot_status.get() != ca::CaStatus::Trusted
-                    || dot_update.get().nudge.is_some()
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let _ = (
+                        dot_proxy.get(),
+                        dot_status.get(),
+                        dot_update.get().nudge.is_some(),
+                    );
+                    return false;
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    dot_proxy.get()
+                        || dot_status.get() != ca::CaStatus::Trusted
+                        || dot_update.get().nudge.is_some()
+                }
             },
             move || {
                 view().w(px(6.0)).h(px(6.0)).rounded(px(99.0)).bg(move || {
@@ -10916,6 +11476,7 @@ fn more_trigger(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
 fn more_menu(
     ca_status: Signal<ca::CaStatus>,
     proxy_on: Signal<bool>,
@@ -10941,7 +11502,7 @@ fn more_menu(
     let export_har = Rc::new(export_har);
     let export_all = Rc::clone(&export_har);
     let export_filtered = Rc::clone(&export_har);
-    view()
+    let menu = view()
         .w(px(280.0))
         .p_1()
         .gap_0p5()
@@ -11111,55 +11672,56 @@ fn more_menu(
             Glyph::Prompt,
             tr("复制代理环境", "Copy proxy env"),
             copy_env,
-        ))
-        .child(menu_action(
-            Glyph::Prompt,
-            tr("复制 MCP 配置", "Copy MCP config"),
-            {
-                let controls = import_controls.clone();
-                move || copy_mcp_config(&controls)
-            },
-        ))
-        .child(menu_rule())
-        .child(proxy_menu_item(proxy_on, toggle_proxy))
-        .child(menu_rule())
-        .child(cert_menu_status(ca_status))
-        .child({
-            let install_untrusted = install.clone();
-            when(
-                move || ca_status.get() == ca::CaStatus::InstalledUntrusted,
-                move || {
-                    let install = install_untrusted.clone();
-                    menu_action(
-                        Glyph::Badge,
-                        tr("信任证书", "Trust certificate"),
-                        move || install.as_ref()(),
-                    )
-                },
-            )
-        })
-        .child(
-            when(
-                move || ca_status.get().is_installed(),
-                move || {
-                    let remove = remove.clone();
-                    menu_action(
-                        Glyph::Badge,
-                        tr("移除证书", "Remove certificate"),
-                        move || remove.as_ref()(),
-                    )
-                },
-            )
-            .otherwise(move || {
-                let install = install.clone();
+        ));
+    let menu = desktop_child!(
+        menu,
+        menu_action(Glyph::Prompt, tr("复制 MCP 配置", "Copy MCP config"), {
+            let controls = import_controls.clone();
+            move || copy_mcp_config(&controls)
+        },)
+    );
+    let menu = desktop_child!(menu, menu_rule());
+    let menu = desktop_child!(menu, proxy_menu_item(proxy_on, toggle_proxy));
+    let menu = desktop_child!(menu, menu_rule());
+    let menu = desktop_child!(menu, cert_menu_status(ca_status));
+    let menu = desktop_child!(menu, {
+        let install_untrusted = install.clone();
+        when(
+            move || ca_status.get() == ca::CaStatus::InstalledUntrusted,
+            move || {
+                let install = install_untrusted.clone();
                 menu_action(
                     Glyph::Badge,
-                    tr("安装证书", "Install certificate"),
+                    tr("信任证书", "Trust certificate"),
                     move || install.as_ref()(),
                 )
-            }),
+            },
         )
-        .child(platform_ca_extra_menu_item(&import_controls))
+    });
+    let menu = desktop_child!(
+        menu,
+        when(
+            move || ca_status.get().is_installed(),
+            move || {
+                let remove = remove.clone();
+                menu_action(
+                    Glyph::Badge,
+                    tr("移除证书", "Remove certificate"),
+                    move || remove.as_ref()(),
+                )
+            },
+        )
+        .otherwise(move || {
+            let install = install.clone();
+            menu_action(
+                Glyph::Badge,
+                tr("安装证书", "Install certificate"),
+                move || install.as_ref()(),
+            )
+        })
+    );
+    let menu = desktop_child!(menu, platform_ca_extra_menu_item(&import_controls));
+    let menu = menu
         .child(menu_rule())
         .child(marked_action(
             move || pretty.get(),
@@ -11183,11 +11745,12 @@ fn more_menu(
         ))
         .child(lang_choice(None, "跟随系统", "Follow system"))
         .child(lang_choice(Some(Lang::Zh), "中文", "中文"))
-        .child(lang_choice(Some(Lang::En), "English", "English"))
-        .child(menu_rule())
-        .child(update_menu_section(update_state, import_controls))
+        .child(lang_choice(Some(Lang::En), "English", "English"));
+    let menu = desktop_child!(menu, menu_rule());
+    desktop_child!(menu, update_menu_section(update_state, import_controls))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn toolbar_update_pill(
     update_state: Signal<UpdateState>,
     controls: Arc<Controls>,
@@ -11285,6 +11848,7 @@ fn toolbar_update_pill(
     )
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn update_menu_section(
     update_state: Signal<UpdateState>,
     controls: Arc<Controls>,
@@ -11870,7 +12434,7 @@ fn project_rows(
             elapsed: present::format_elapsed(flow.started, flow.finished_at),
             elapsed_nanos,
             elapsed_slow: flow.finished_at.is_some()
-                && present::is_slow(flow.started, flow.finished_at, SystemTime::now()),
+                && present::is_slow(flow.started, flow.finished_at, clock::now()),
             host: flow.host.clone(),
             client_ip: if flow.client_ip.is_empty() {
                 "—".to_string()
@@ -11885,6 +12449,11 @@ fn project_rows(
             size_bytes: flow.response_bytes,
             failed,
             pinned: flow.pinned,
+            relay_short: flow
+                .relay_source
+                .as_deref()
+                .map(session::relay_short)
+                .unwrap_or_default(),
         });
         cache.rows.insert(
             *id,
@@ -11995,6 +12564,7 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baselin
         request_type,
         pretty,
         lang,
+        shown.request_offset.get(),
     );
     let response = display_body(
         &flow.response_body,
@@ -12004,8 +12574,11 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baselin
         response_type,
         pretty,
         lang,
+        shown.response_offset.get(),
     );
     let response_hex = response.hex;
+    let request_window = request.window;
+    let response_window = response.window;
     let preview = image_preview_path(id, &flow);
     let response = present::image_body(
         pretty,
@@ -12129,6 +12702,18 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baselin
         .set(response_hex_for_view(pretty, &preview, response_hex));
     shown.request_note.set(request.note);
     shown.response_note.set(response.note);
+    if shown.request_window.get_untracked() != request_window {
+        shown.request_window.set(request_window);
+    }
+    if shown.response_window.get_untracked() != response_window {
+        shown.response_window.set(response_window);
+    }
+    if shown.request_offset.get_untracked() != request_window.offset {
+        shown.request_offset.set(request_window.offset);
+    }
+    if shown.response_offset.get_untracked() != response_window.offset {
+        shown.response_offset.set(response_window.offset);
+    }
     let (box_w, box_h) = present::image_pixel_size(&flow.response_body)
         .map(|(w, h)| present::preview_box(w, h))
         .unwrap_or((160, 160));
@@ -12141,6 +12726,12 @@ fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baselin
     shown.diff_old.set(diff_old);
     shown.diff_new.set(diff_new);
     shown.pinned.set(flow.pinned);
+    shown.relay.set(
+        flow.relay_source
+            .as_deref()
+            .map(session::relay_short)
+            .unwrap_or_default(),
+    );
     if !shown.editing_comment.get() {
         shown.comment.set(flow.comment);
     }
@@ -12246,11 +12837,32 @@ fn annotated(name: &str, value: &str) -> String {
     }
 }
 
+/// One page of a UTF-8 body in the detail pane. The record can be up to 1 MB.
+const BODY_DISPLAY_CAP: usize = 256 * 1024;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct TextWindow {
+    offset: usize,
+    end: usize,
+    total: usize,
+}
+
+impl TextWindow {
+    fn has_prev(self) -> bool {
+        self.offset > 0
+    }
+
+    fn has_more(self) -> bool {
+        self.end < self.total
+    }
+}
+
 struct BodyText {
     text: String,
     note: String,
     /// Set for a binary body. The view breaks it into 16 or 32 byte rows.
     hex: Vec<u8>,
+    window: TextWindow,
 }
 
 fn display_body(
@@ -12261,46 +12873,127 @@ fn display_body(
     content_type: Option<&str>,
     pretty: bool,
     lang: Lang,
+    offset: usize,
 ) -> BodyText {
-    let mut presented = body_text(body, truncated, expired, encoding_error, lang);
+    let mut presented = body_text(body, truncated, expired, encoding_error, lang, offset);
     if pretty {
         if let Some(decoded) = present::pretty_binary_body(content_type, body) {
             presented.hex.clear();
             presented.note = present::without_hex_cap_note(&presented.note);
             presented.text = decoded;
+            presented.window = TextWindow {
+                offset: 0,
+                end: body.len(),
+                total: body.len(),
+            };
             return presented;
         }
         if std::str::from_utf8(body).is_ok() {
             presented.hex.clear();
         }
-        apply_pretty(&mut presented, body, content_type, lang);
+        apply_pretty(&mut presented, body, content_type, lang, offset);
     }
     presented
 }
 
-fn apply_pretty(presented: &mut BodyText, body: &[u8], content_type: Option<&str>, lang: Lang) {
+fn apply_pretty(
+    presented: &mut BodyText,
+    body: &[u8],
+    content_type: Option<&str>,
+    lang: Lang,
+    offset: usize,
+) {
     let Ok(text) = std::str::from_utf8(body) else {
         return;
     };
     let pretty = present::pretty_body(content_type, text);
-    const DISPLAY_CAP: usize = 256 * 1024;
-    if pretty.len() > DISPLAY_CAP {
-        let end = pretty.floor_char_boundary(DISPLAY_CAP);
-        presented.text = pretty[..end].to_string();
-        let marker = t(lang, "界面只显示", "Showing only");
-        if !presented.note.contains(marker) {
-            if !presented.note.is_empty() {
-                presented.note.push('\n');
-            }
-            presented.note.push_str(t(
-                lang,
-                "界面只显示前 256KB。",
-                "Showing only the first 256 KB.",
-            ));
-        }
+    let (window, slice) = window_text(&pretty, offset);
+    presented.text = slice.to_string();
+    let extra = if window.has_prev() || window.has_more() {
+        Some(window_note(lang, window))
     } else {
-        presented.text = pretty;
+        None
+    };
+    replace_window_note(&mut presented.note, extra);
+    presented.window = window;
+}
+
+fn window_text(text: &str, offset: usize) -> (TextWindow, &str) {
+    let total = text.len();
+    if total == 0 {
+        return (TextWindow::default(), "");
     }
+    let mut start = offset.min(total);
+    if start == total {
+        start = total.saturating_sub(BODY_DISPLAY_CAP);
+    }
+    if !text.is_char_boundary(start) {
+        start = text.floor_char_boundary(start);
+    }
+    if start >= total {
+        start = text.floor_char_boundary(
+            total
+                .saturating_sub(1)
+                .min(total.saturating_sub(BODY_DISPLAY_CAP)),
+        );
+    }
+    let mut end = start.saturating_add(BODY_DISPLAY_CAP).min(total);
+    if end < total && !text.is_char_boundary(end) {
+        end = text.floor_char_boundary(end);
+    }
+    if end <= start {
+        end = text[start..]
+            .chars()
+            .next()
+            .map(|ch| start + ch.len_utf8())
+            .unwrap_or(total);
+    }
+    (
+        TextWindow {
+            offset: start,
+            end,
+            total,
+        },
+        &text[start..end],
+    )
+}
+
+fn window_note(lang: Lang, window: TextWindow) -> String {
+    if window.offset == 0 {
+        let rest = window.total - window.end;
+        return match lang {
+            Lang::Zh => format!("界面只显示前 256KB，记录里还有 {rest} 字节。"),
+            Lang::En => format!("Showing only the first 256 KB; {rest} more bytes are stored."),
+        };
+    }
+    let start = window.offset + 1;
+    match lang {
+        Lang::Zh => format!(
+            "界面显示第 {start}-{} 字节，共 {} 字节。",
+            window.end, window.total
+        ),
+        Lang::En => format!("Showing bytes {start}-{} of {}.", window.end, window.total),
+    }
+}
+
+fn is_window_note_line(line: &str) -> bool {
+    line.starts_with("界面只显示前 ")
+        || line.starts_with("界面显示第 ")
+        || line.starts_with("Showing only the first ")
+        || line.starts_with("Showing bytes ")
+}
+
+fn replace_window_note(note: &mut String, extra: Option<String>) {
+    let mut kept = Vec::new();
+    for line in note.lines() {
+        if !line.is_empty() && !is_window_note_line(line) {
+            kept.push(line.to_string());
+        }
+    }
+    if let Some(extra) = extra {
+        kept.push(extra);
+    }
+    *note = kept.join("\n");
 }
 
 fn body_text(
@@ -12309,6 +13002,7 @@ fn body_text(
     expired: Option<usize>,
     encoding_error: Option<&str>,
     lang: Lang,
+    offset: usize,
 ) -> BodyText {
     let mut note = String::new();
     let mut hex = Vec::new();
@@ -12332,24 +13026,23 @@ fn body_text(
             ),
         });
     }
+    let mut window = TextWindow {
+        offset: 0,
+        end: body.len(),
+        total: body.len(),
+    };
     let text = if body.is_empty() {
         String::new()
     } else if let Ok(text) = std::str::from_utf8(body) {
-        const DISPLAY_CAP: usize = 256 * 1024;
-        if text.len() > DISPLAY_CAP {
+        let (slice_window, slice) = window_text(text, offset);
+        window = slice_window;
+        if window.has_prev() || window.has_more() {
             if !note.is_empty() {
                 note.push('\n');
             }
-            let end = text.floor_char_boundary(DISPLAY_CAP);
-            let rest = text.len() - end;
-            note.push_str(&match lang {
-                Lang::Zh => format!("界面只显示前 256KB，记录里还有 {rest} 字节。"),
-                Lang::En => format!("Showing only the first 256 KB; {rest} more bytes are stored."),
-            });
-            text[..end].to_string()
-        } else {
-            text.to_string()
+            note.push_str(&window_note(lang, window));
         }
+        slice.to_string()
     } else {
         const HEX_CAP: usize = 4096;
         let shown = body.len().min(HEX_CAP);
@@ -12377,9 +13070,40 @@ fn body_text(
             "The body passed 1 MB. The record is truncated; forwarding continued.",
         ));
     }
-    BodyText { text, note, hex }
+    BodyText {
+        text,
+        note,
+        hex,
+        window,
+    }
 }
 
+#[cfg(target_arch = "wasm32")]
+fn open_controls() -> Arc<Controls> {
+    let hub = Hub::new(Arc::new(Ca::unavailable())).expect("hub");
+    Arc::new(Controls {
+        hub: Arc::new(hub),
+        capture: Mutex::new(None),
+        status: Mutex::new(StatusMsg::Idle),
+        running: Mutex::new(false),
+        listen: Mutex::new(String::new()),
+        listen_port: Mutex::new(load_listen_port()),
+        ca_status: Mutex::new(ca::CaStatus::NotInstalled),
+        use_system_proxy: Mutex::new(false),
+        proxy_applied: Mutex::new(false),
+        ops: Mutex::new(()),
+        listen_all: Mutex::new(false),
+        update_state: Mutex::new(UpdateState::default()),
+        redact_export: Mutex::new(false),
+        redact_fields: Mutex::new(String::new()),
+        relay_url: Mutex::new(String::new()),
+        relay_token: Mutex::new(String::new()),
+        toast_seq: std::sync::atomic::AtomicU64::new(0),
+        toast_queue: Mutex::new(Vec::new()),
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn open_controls() -> Arc<Controls> {
     let saved = saved_config();
     match Ca::open_default().and_then(|ca| Hub::new(Arc::new(ca))) {
@@ -12400,7 +13124,10 @@ fn open_controls() -> Arc<Controls> {
                 listen_all: Mutex::new(load_listen_all()),
                 update_state: Mutex::new(UpdateState::from_disk()),
                 redact_export: Mutex::new(saved.redact_export),
-                redact_fields: Mutex::new(saved.redact_fields),
+                redact_fields: Mutex::new(saved.redact_fields.clone()),
+                relay_url: Mutex::new(saved.relay_url.clone()),
+                relay_token: Mutex::new(saved.relay_token.clone()),
+                relay_push: Mutex::new(None),
                 toast_seq: std::sync::atomic::AtomicU64::new(0),
                 toast_queue: Mutex::new(Vec::new()),
             })
@@ -12428,6 +13155,9 @@ fn open_controls() -> Arc<Controls> {
                 update_state: Mutex::new(UpdateState::from_disk()),
                 redact_export: Mutex::new(saved.redact_export),
                 redact_fields: Mutex::new(saved.redact_fields),
+                relay_url: Mutex::new(saved.relay_url),
+                relay_token: Mutex::new(saved.relay_token),
+                relay_push: Mutex::new(None),
                 toast_seq: std::sync::atomic::AtomicU64::new(0),
                 toast_queue: Mutex::new(Vec::new()),
             })
@@ -12461,13 +13191,14 @@ fn with_update_state(controls: &Controls, f: impl FnOnce(&mut UpdateState)) {
     f(&mut guard);
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn auto_check_update(controls: Arc<Controls>) {
     if lock_update_state(&controls).is_busy() {
         return;
     }
     std::thread::spawn(move || {
         let outcome = updater::check();
-        updater::record_outcome(SystemTime::now(), &outcome);
+        updater::record_outcome(clock::now(), &outcome);
         with_update_state(&controls, |st| {
             st.nudge = updater::nudge();
             st.ignored = updater::ignored();
@@ -12475,6 +13206,7 @@ fn auto_check_update(controls: Arc<Controls>) {
     });
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn check_update_manual(controls: Arc<Controls>) {
     {
         let mut st = controls
@@ -12489,7 +13221,7 @@ fn check_update_manual(controls: Arc<Controls>) {
     set_status(&controls, StatusMsg::UpdateChecking);
     std::thread::spawn(move || {
         let outcome = updater::check_with_skipped();
-        updater::record_outcome(SystemTime::now(), &outcome);
+        updater::record_outcome(clock::now(), &outcome);
         match &outcome {
             updater::UpdateCheck::UpToDate => {
                 set_status(
@@ -12513,6 +13245,7 @@ fn check_update_manual(controls: Arc<Controls>) {
     });
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn skip_update(controls: &Controls, version: &str) {
     updater::ignore(version);
     with_update_state(controls, |st| {
@@ -12521,6 +13254,7 @@ fn skip_update(controls: &Controls, version: &str) {
     });
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn unskip_update(controls: &Controls) {
     updater::unignore();
     with_update_state(controls, |st| {
@@ -12529,6 +13263,7 @@ fn unskip_update(controls: &Controls) {
     });
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn start_upgrade(controls: Arc<Controls>, version: String) {
     {
         let mut st = controls
@@ -12628,6 +13363,7 @@ fn start_upgrade(controls: Arc<Controls>, version: String) {
     });
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn shutdown_capture_for_exit(controls: &Controls) {
     let _ops = lock_ops(controls);
     if let Some(capture) = controls
@@ -12638,6 +13374,15 @@ fn shutdown_capture_for_exit(controls: &Controls) {
     {
         capture.stop();
     }
+    if let Some(handle) = controls
+        .relay_push
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .take()
+    {
+        handle.stop_and_wait(Duration::from_secs(3));
+    }
+    relay::shutdown_relay_push();
     controls.hub.end_share();
     if lock_bool(&controls.proxy_applied) {
         set_bool(&controls.proxy_applied, false);
@@ -12647,17 +13392,20 @@ fn shutdown_capture_for_exit(controls: &Controls) {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn relaunch_and_exit(controls: &Controls) {
     shutdown_capture_for_exit(controls);
     updater::relaunch();
     std::process::exit(0);
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn quit_for_manual_install(controls: &Controls) {
     shutdown_capture_for_exit(controls);
     std::process::exit(0);
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn install_ca(controls: Arc<Controls>) {
     std::thread::spawn(move || {
         let ca = controls.hub.ca.clone();
@@ -12671,6 +13419,7 @@ fn install_ca(controls: Arc<Controls>) {
     });
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn remove_ca(controls: Arc<Controls>) {
     std::thread::spawn(move || {
         let ca = controls.hub.ca.clone();
@@ -12705,17 +13454,20 @@ fn platform_ca_extra_menu_item(controls: &Arc<Controls>) -> impl IntoElement {
 }
 
 #[cfg(not(unix))]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 fn platform_ca_extra_menu_item(_controls: &Arc<Controls>) -> impl IntoElement {
     view().w(px(0.0)).h(px(0.0))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn install_ca_ios_sim(controls: Arc<Controls>) {
     std::thread::spawn(move || {
         let ca = controls.hub.ca.clone();
-        match ca::install_ios_simulators(&ca) {
-            Ok(ca::IosSimOutcome::Installed(count)) => {
-                set_status(&controls, StatusMsg::IosSimInstalled(count));
+        let port = current_listen_port(&controls);
+        match ca::install_ios_simulators(&ca, port) {
+            Ok(ca::IosSimOutcome::Installed { count, port }) => {
+                set_status(&controls, StatusMsg::IosSimInstalled { count, port });
             }
             Ok(ca::IosSimOutcome::NoneBooted) => {
                 set_status(&controls, StatusMsg::IosSimNoneBooted);
@@ -12727,6 +13479,7 @@ fn install_ca_ios_sim(controls: Arc<Controls>) {
     });
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(not(all(unix, not(target_os = "macos"))), allow(dead_code))]
 fn copy_linux_ca_cmd(controls: &Controls) {
     let cmd = ca::linux_system_ca_command(&controls.hub.ca.cert_path());
@@ -12774,6 +13527,16 @@ fn lock_status(controls: &Controls) -> StatusMsg {
         .clone()
 }
 
+#[cfg(target_arch = "wasm32")]
+fn install_ca(_controls: Arc<Controls>) {}
+
+#[cfg(target_arch = "wasm32")]
+fn remove_ca(_controls: Arc<Controls>) {}
+
+#[cfg(target_arch = "wasm32")]
+fn toggle_system_proxy(_controls: Arc<Controls>) {}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn toggle_capture(controls: Arc<Controls>) {
     std::thread::spawn(move || {
         let running = *controls
@@ -12788,6 +13551,212 @@ fn toggle_capture(controls: Arc<Controls>) {
     });
 }
 
+#[cfg(target_arch = "wasm32")]
+fn toggle_capture(controls: Arc<Controls>) {
+    let running = lock_bool(&controls.running);
+    let listen_all = lock_bool(&controls.listen_all);
+    let port = lock_port(&controls.listen_port);
+    spawn(async move {
+        let body = if running {
+            b"{\"on\":false}".to_vec()
+        } else {
+            serde_json::json!({"on": true, "listen_all": listen_all, "port": port})
+                .to_string()
+                .into_bytes()
+        };
+        let request =
+            HttpRequest::post("/api/capture", body).header("content-type", "application/json");
+        match fetch(request).await {
+            Ok(response) => {
+                let value: serde_json::Value =
+                    serde_json::from_str(&response.text()).unwrap_or(serde_json::json!({}));
+                apply_capture_state(&controls, &value, response.ok());
+            }
+            Err(err) => set_status(&controls, StatusMsg::BindFailed { port, err }),
+        }
+    });
+}
+
+/// The browser does not capture. This loop copies the server process into the
+/// same signals the desktop tick already reads.
+#[cfg(target_arch = "wasm32")]
+fn start_web_poll(
+    controls: Arc<Controls>,
+    port_text: Signal<String>,
+    listen_all: Signal<bool>,
+    bypass_text: Signal<String>,
+    rules_text: Signal<String>,
+    upstream_text: Signal<String>,
+    rules_on: Signal<bool>,
+    breaks_on: Signal<bool>,
+    show_tunnels: Signal<bool>,
+    selected: Signal<Option<u64>>,
+) {
+    spawn(async move {
+        let mut seeded = false;
+        let mut seen_error = String::new();
+        let mut seen_detail = None::<u64>;
+        loop {
+            if let Ok(response) = fetch(HttpRequest::get("/api/state")).await
+                && let Ok(value) = serde_json::from_str::<serde_json::Value>(&response.text())
+            {
+                controls.hub.apply_state(&value);
+                if !seeded {
+                    seeded = true;
+                    if let Some(port) = json_port(&value) {
+                        set_port(&controls.listen_port, port);
+                        port_text.set(port.to_string());
+                    }
+                    if let Some(all) = value.get("listen_all").and_then(serde_json::Value::as_bool)
+                    {
+                        set_bool(&controls.listen_all, all);
+                        listen_all.set(all);
+                    }
+                    if let Some(prefs) = value.get("prefs") {
+                        if let Some(text) = prefs.get("bypass").and_then(serde_json::Value::as_str)
+                        {
+                            bypass_text.set(text.to_string());
+                        }
+                        if let Some(text) = prefs.get("rules").and_then(serde_json::Value::as_str) {
+                            rules_text.set(text.to_string());
+                        }
+                        if let Some(text) =
+                            prefs.get("upstream").and_then(serde_json::Value::as_str)
+                        {
+                            upstream_text.set(text.to_string());
+                        }
+                        if let Some(on) = prefs
+                            .get("rules_enabled")
+                            .and_then(serde_json::Value::as_bool)
+                        {
+                            rules_on.set(on);
+                        }
+                        if let Some(on) = prefs
+                            .get("breaks_enabled")
+                            .and_then(serde_json::Value::as_bool)
+                        {
+                            breaks_on.set(on);
+                        }
+                        if let Some(on) = prefs
+                            .get("show_tunnels")
+                            .and_then(serde_json::Value::as_bool)
+                        {
+                            show_tunnels.set(on);
+                        }
+                    }
+                }
+                let capturing = value
+                    .get("capturing")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                set_bool(&controls.running, capturing);
+                let listen = value
+                    .get("listen")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                *controls
+                    .listen
+                    .lock()
+                    .unwrap_or_else(|err| err.into_inner()) = listen.to_string();
+                let error = value
+                    .get("error")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                if !error.is_empty() && error != seen_error {
+                    seen_error = error.to_string();
+                    set_status(
+                        &controls,
+                        StatusMsg::BindFailed {
+                            port: json_port(&value).unwrap_or(0),
+                            err: error.to_string(),
+                        },
+                    );
+                } else if error.is_empty() {
+                    seen_error.clear();
+                }
+            }
+            if let Ok(response) = fetch(HttpRequest::get("/api/flows")).await
+                && let Ok(value) = serde_json::from_str::<serde_json::Value>(&response.text())
+            {
+                controls.hub.apply_flows(&value);
+            }
+            let picked = selected.get();
+            if picked != seen_detail {
+                seen_detail = picked;
+                if let Some(id) = picked
+                    && let Ok(response) = fetch(HttpRequest::get(format!("/api/flows/{id}"))).await
+                    && response.ok()
+                    && let Ok(value) = serde_json::from_str::<serde_json::Value>(&response.text())
+                {
+                    controls.hub.fill_detail(&value);
+                }
+            }
+            timer(Duration::from_millis(400)).await;
+        }
+    });
+}
+
+#[cfg(target_arch = "wasm32")]
+fn json_port(value: &serde_json::Value) -> Option<u16> {
+    value
+        .get("listen_port")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|port| u16::try_from(port).ok())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn apply_capture_state(controls: &Controls, value: &serde_json::Value, http_ok: bool) {
+    let capturing = value
+        .get("capturing")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let listen = value
+        .get("listen")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let port = json_port(value);
+    let error = value
+        .get("error")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    set_bool(&controls.running, capturing);
+    *controls
+        .listen
+        .lock()
+        .unwrap_or_else(|err| err.into_inner()) = listen;
+    if let Some(port) = port {
+        set_port(&controls.listen_port, port);
+    }
+    if let Some(all) = value.get("listen_all").and_then(serde_json::Value::as_bool) {
+        set_bool(&controls.listen_all, all);
+    }
+    if capturing {
+        set_status(
+            controls,
+            StatusMsg::Listening {
+                port: port.unwrap_or(0),
+                via_system_proxy: false,
+            },
+        );
+    } else if !http_ok || !error.is_empty() {
+        set_status(
+            controls,
+            StatusMsg::BindFailed {
+                port: port.unwrap_or(0),
+                err: if error.is_empty() {
+                    "没有开始".to_string()
+                } else {
+                    error.to_string()
+                },
+            },
+        );
+    } else {
+        set_status(controls, StatusMsg::Stopped);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn start_capture(controls: &Controls) {
     let _ops = lock_ops(controls);
     if lock_bool(&controls.running) {
@@ -12851,6 +13820,7 @@ fn start_capture(controls: &Controls) {
     remember_capturing(controls, true);
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn stop_capture(controls: &Controls) {
     let _ops = lock_ops(controls);
     if let Some(capture) = controls
@@ -12861,7 +13831,9 @@ fn stop_capture(controls: &Controls) {
     {
         capture.stop();
     }
+    stop_relay_push(controls);
     controls.hub.end_share();
+    ca::clear_ios_simulator_proxies();
     *controls
         .listen
         .lock()
@@ -12880,6 +13852,7 @@ fn stop_capture(controls: &Controls) {
     remember_capturing(controls, false);
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn remember_capturing(controls: &Controls, on: bool) {
     if let Err(err) = save_config(|config| config.capturing = on) {
         set_status(
@@ -12892,6 +13865,7 @@ fn remember_capturing(controls: &Controls, on: bool) {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn toggle_system_proxy(controls: Arc<Controls>) {
     std::thread::spawn(move || {
         let _ops = lock_ops(&controls);
@@ -12915,6 +13889,7 @@ fn toggle_system_proxy(controls: Arc<Controls>) {
     });
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn apply_system_proxy(controls: &Controls) {
     let Some(port) = capture_port(controls) else {
         set_bool(&controls.proxy_applied, false);
@@ -12948,6 +13923,7 @@ fn apply_system_proxy(controls: &Controls) {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn clear_system_proxy(controls: &Controls) {
     let port = capture_port(controls);
     if !lock_bool(&controls.proxy_applied) {
@@ -12996,12 +13972,24 @@ fn lock_ops(controls: &Controls) -> std::sync::MutexGuard<'_, ()> {
     controls.ops.lock().unwrap_or_else(|err| err.into_inner())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn saved_config() -> config::Config {
     config::load_mode(&ca::data_dir(), config::is_dev_mode())
 }
 
+#[cfg(target_arch = "wasm32")]
+fn saved_config() -> config::Config {
+    config::Config::default_for(false)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn save_config(change: impl FnOnce(&mut config::Config)) -> std::io::Result<()> {
     config::update_mode(&ca::data_dir(), config::is_dev_mode(), change)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn save_config(_change: impl FnOnce(&mut config::Config)) -> std::io::Result<()> {
+    Ok(())
 }
 
 fn load_use_system_proxy() -> bool {
@@ -13018,6 +14006,18 @@ fn load_listen_port() -> u16 {
 
 fn store_listen_port(port: u16) -> std::io::Result<()> {
     save_config(|config| config.listen_port = port)
+}
+
+fn current_listen_port(controls: &Controls) -> u16 {
+    if let Some(capture) = controls
+        .capture
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .as_ref()
+    {
+        return capture.addr.port();
+    }
+    lock_port(&controls.listen_port)
 }
 
 fn lock_port(slot: &Mutex<u16>) -> u16 {
@@ -13045,6 +14045,7 @@ fn copy_proxy_env(controls: &Controls) {
     set_status(controls, StatusMsg::CopiedEnv);
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn copy_mcp_config(controls: &Controls) {
     let port = lock_port(&controls.listen_port);
     set_clipboard(mcp::mcp_config_json(port));
@@ -13507,100 +14508,203 @@ fn lock_string(slot: &Mutex<String>) -> String {
 fn break_bar(
     paused: Signal<Option<(u64, BreakSide)>>,
     paused_count: Signal<usize>,
+    paused_queue: Signal<Vec<(u64, BreakSide)>>,
     compose: Compose,
     selected: Signal<Option<u64>>,
     controls: Arc<Controls>,
 ) -> impl IntoElement {
     let release = controls.clone();
     let release_all = controls.clone();
+    let chip_controls = controls.clone();
     let drop_controls = controls;
     view()
-        .h(px(40.0))
+        .min_h(px(40.0))
         .px_3()
-        .gap_2()
-        .flex_row()
-        .items_center()
+        .py_1p5()
+        .gap_1p5()
         .bg(status_warn_bg())
         .border_b_1()
         .border_b_color(status_warn_fg())
         .child(
-            text({
-                let langs = ui_langs();
-                move || -> SharedString {
-                    let count = paused_count.get();
-                    let queue_suffix = if count > 1 {
-                        format!(" (1 / {count})")
-                    } else {
-                        String::new()
-                    };
-                    match paused.get() {
-                        Some((id, BreakSide::Response)) => format!(
-                            "{} #{id} {}{queue_suffix}",
-                            t(ui_lang(langs), "流量", "Flow"),
-                            t(ui_lang(langs), "停在响应断点", "is paused on the response")
-                        )
-                        .into(),
-                        Some((id, BreakSide::Request)) => format!(
-                            "{} #{id} {}{queue_suffix}",
-                            t(ui_lang(langs), "流量", "Flow"),
-                            t(ui_lang(langs), "停在请求断点", "is paused on the request")
-                        )
-                        .into(),
-                        None => "".into(),
-                    }
-                }
-            })
-            .flex_1()
-            .number_of_lines(1)
-            .text_size(px(12.5))
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(status_warn_fg()),
-        )
-        .child(detail_button(tr("放行", "Continue"), move || {
-            continue_break(&release, compose, selected, paused);
-        }))
-        .child(when(
-            move || paused_count.get() > 1,
-            move || {
-                let controls = release_all.clone();
-                detail_button(tr("全部放行", "Continue all"), move || {
-                    if !break_all_allowed() {
+            view()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(
+                    text({
+                        let langs = ui_langs();
+                        move || -> SharedString {
+                            let count = paused_count.get();
+                            let queue_suffix = if count > 1 {
+                                format!(" (1 / {count})")
+                            } else {
+                                String::new()
+                            };
+                            match paused.get() {
+                                Some((id, BreakSide::Response)) => format!(
+                                    "{} #{id} {}{queue_suffix}",
+                                    t(ui_lang(langs), "流量", "Flow"),
+                                    t(ui_lang(langs), "停在响应断点", "is paused on the response")
+                                )
+                                .into(),
+                                Some((id, BreakSide::Request)) => format!(
+                                    "{} #{id} {}{queue_suffix}",
+                                    t(ui_lang(langs), "流量", "Flow"),
+                                    t(ui_lang(langs), "停在请求断点", "is paused on the request")
+                                )
+                                .into(),
+                                None => "".into(),
+                            }
+                        }
+                    })
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .number_of_lines(1)
+                    .text_size(px(12.5))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(status_warn_fg()),
+                )
+                .child(detail_button(tr("放行", "Continue"), move || {
+                    continue_break(&release, compose, selected, paused);
+                }))
+                .child(when(
+                    move || paused_count.get() > 1,
+                    move || {
+                        let controls = release_all.clone();
+                        detail_button(tr("全部放行", "Continue all"), move || {
+                            if !break_all_allowed() {
+                                return;
+                            }
+                            if compose.composing.get() {
+                                reset_compose(compose);
+                            }
+                            controls.hub.resolve_all_breaks();
+                        })
+                    },
+                ))
+                .child(detail_button(tr("丢弃", "Drop"), move || {
+                    let paused_now = drop_controls.hub.paused().or_else(|| paused.get());
+                    if !break_action_allowed(paused_now.map(|(id, _)| id)) {
                         return;
                     }
                     if compose.composing.get() {
                         reset_compose(compose);
                     }
-                    controls.hub.resolve_all_breaks();
-                })
+                    let _ = drop_controls.hub.resolve_break(BreakDecision {
+                        drop: true,
+                        headers: None,
+                        body: None,
+                        status: None,
+                    });
+                })),
+        )
+        .child(when(
+            move || paused_queue.with(|queue| queue.len() > 1),
+            move || {
+                let controls = chip_controls.clone();
+                view().flex_row().flex_wrap().gap_1().child(each(
+                    move || paused_queue.get(),
+                    |item| item.0,
+                    move |item, index| {
+                        let controls = controls.clone();
+                        view()
+                            .h(px(22.0))
+                            .px_2()
+                            .rounded(px(11.0))
+                            .border_1()
+                            .border_color(move || {
+                                if index.get() == 0 {
+                                    accent_blue_border()
+                                } else {
+                                    border_control()
+                                }
+                            })
+                            .bg(move || {
+                                if index.get() == 0 {
+                                    accent_blue_soft()
+                                } else {
+                                    bg_control()
+                                }
+                            })
+                            .hover(|style| style.bg(bg_control_hover()))
+                            .cursor(Cursor::Pointer)
+                            .active(|style| style.opacity(0.75))
+                            .flex_row()
+                            .items_center()
+                            .on_press(move || {
+                                let id = item.with(|pair| pair.0);
+                                focus_queued_break(&controls, id, selected, compose);
+                            })
+                            .child(
+                                text({
+                                    let langs = ui_langs();
+                                    move || -> SharedString {
+                                        let (id, side) = item.with(|pair| *pair);
+                                        let which = match side {
+                                            BreakSide::Request => {
+                                                t(ui_lang(langs), "请求", "Request")
+                                            }
+                                            BreakSide::Response => {
+                                                t(ui_lang(langs), "响应", "Response")
+                                            }
+                                        };
+                                        format!("#{id} {which}").into()
+                                    }
+                                })
+                                .number_of_lines(1)
+                                .text_size(px(11.5))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(move || {
+                                    if index.get() == 0 {
+                                        accent_blue_text()
+                                    } else {
+                                        fg_secondary()
+                                    }
+                                }),
+                            )
+                    },
+                ))
             },
         ))
-        .child(detail_button(tr("丢弃", "Drop"), move || {
-            let paused_now = drop_controls.hub.paused().or_else(|| paused.get());
-            if !break_action_allowed(paused_now.map(|(id, _)| id)) {
-                return;
-            }
-            if compose.composing.get() {
-                reset_compose(compose);
-            }
-            let _ = drop_controls.hub.resolve_break(BreakDecision {
-                drop: true,
-                headers: None,
-                body: None,
-                status: None,
-            });
-        }))
 }
 
+fn focus_queued_break(
+    controls: &Controls,
+    id: u64,
+    selected: Signal<Option<u64>>,
+    compose: Compose,
+) {
+    let already =
+        selected.get() == Some(id) && controls.hub.paused().is_some_and(|(cur, _)| cur == id);
+    if !controls.hub.promote_break(id) {
+        return;
+    }
+    if !already && compose.composing.get() {
+        reset_compose(compose);
+    }
+    selected.set(Some(id));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 static LAST_BREAK_RESOLVE: Mutex<Option<(u64, Instant)>> = Mutex::new(None);
+#[cfg(not(target_arch = "wasm32"))]
 static LAST_BREAK_ALL: Mutex<Option<Instant>> = Mutex::new(None);
+#[cfg(target_arch = "wasm32")]
+static LAST_BREAK_RESOLVE: Mutex<Option<(u64, SystemTime)>> = Mutex::new(None);
+#[cfg(target_arch = "wasm32")]
+static LAST_BREAK_ALL: Mutex<Option<SystemTime>> = Mutex::new(None);
 
 fn break_action_allowed(flow_id: Option<u64>) -> bool {
+    // `Instant::now` panics on wasm32. The debounce there uses the wall clock.
+    #[cfg(not(target_arch = "wasm32"))]
     let now = Instant::now();
+    #[cfg(target_arch = "wasm32")]
+    let now = clock::now();
     let mut lock = LAST_BREAK_RESOLVE.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(id) = flow_id {
         if let Some((last_id, last_time)) = *lock
             && last_id == id
-            && now.duration_since(last_time) < Duration::from_millis(300)
+            && debounce_elapsed(now, last_time) < Duration::from_millis(300)
         {
             return false;
         }
@@ -13610,15 +14714,28 @@ fn break_action_allowed(flow_id: Option<u64>) -> bool {
 }
 
 fn break_all_allowed() -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
     let now = Instant::now();
+    #[cfg(target_arch = "wasm32")]
+    let now = clock::now();
     let mut lock = LAST_BREAK_ALL.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(last_time) = *lock
-        && now.duration_since(last_time) < Duration::from_millis(300)
+        && debounce_elapsed(now, last_time) < Duration::from_millis(300)
     {
         return false;
     }
     *lock = Some(now);
     true
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn debounce_elapsed(now: Instant, earlier: Instant) -> Duration {
+    now.duration_since(earlier)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn debounce_elapsed(now: SystemTime, earlier: SystemTime) -> Duration {
+    now.duration_since(earlier).unwrap_or_default()
 }
 
 fn continue_break(
@@ -15789,7 +16906,7 @@ fn seq_waterfall_view(seq_builder: SeqBuilder) -> impl IntoElement {
                                                 });
                                                 let ms = max_ms * ratio;
                                                 if ms >= 1000.0 {
-                                                    format!("+{:.2}s", ms / 1000.0)
+                                                    format!("+{:.1}s", ms / 1000.0)
                                                 } else {
                                                     format!("+{ms:.0}ms")
                                                 }
@@ -16622,6 +17739,9 @@ fn sequence_diagram_panel(seq_builder: SeqBuilder, controls: Arc<Controls>) -> i
 }
 
 fn begin_compose(controls: &Controls, id: Option<u64>, compose: Compose) {
+    if refuse_relay(controls, id) {
+        return;
+    }
     if id.is_none() {
         compose.response.set(false);
         compose.method.set("GET".to_string());
@@ -16701,6 +17821,9 @@ fn clear_shown(shown: Shown) {
     shown.request_form.set(Vec::new());
     shown.request_note.set(String::new());
     shown.response_note.set(String::new());
+    reset_body_offsets(shown);
+    shown.request_window.set(TextWindow::default());
+    shown.response_window.set(TextWindow::default());
     shown.metrics.set(String::new());
     shown.timing_bar.set(present::TimingBreakdown::default());
     shown.query.set(Vec::new());
@@ -16713,6 +17836,7 @@ fn clear_shown(shown: Shown) {
     shown.diff_old.set(String::new());
     shown.diff_new.set(String::new());
     shown.pinned.set(false);
+    shown.relay.set(String::new());
     shown.comment.set(String::new());
     shown.editing_comment.set(false);
     shown.repeating.set(false);
@@ -16875,6 +17999,9 @@ fn replay_flow(controls: &Arc<Controls>, id: Option<u64>, edit: ReplayOverride) 
         }
         return;
     };
+    if refuse_relay(controls, Some(id)) {
+        return;
+    }
     let controls = Arc::clone(controls);
     hub.replay_later(id, edit, move |result| match result {
         Ok(new_id) => set_status(&controls, StatusMsg::Replayed(new_id)),
@@ -16895,6 +18022,9 @@ fn repeat_flow_batch(controls: &Arc<Controls>, id: Option<u64>, shown: Shown) {
     shown.repeat_interval.set(interval_ms.to_string());
     shown.repeat_concurrency.set(concurrency.to_string());
     shown.repeating.set(false);
+    if refuse_relay(controls, Some(id)) {
+        return;
+    }
     let hub = controls.hub.clone();
     let controls = Arc::clone(controls);
     hub.replay_batch_later(
@@ -16941,7 +18071,7 @@ fn export_har_file(controls: Arc<Controls>, filter: &str) {
             return;
         }
     };
-    let secs = std::time::SystemTime::now()
+    let secs = clock::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
@@ -16974,9 +18104,9 @@ fn export_html_file(controls: Arc<Controls>, filter: &str, zh: bool) {
             .collect::<Vec<_>>()
     });
     let redact = redact_options(&controls);
-    let json = share::document_with_redact(&flows, SystemTime::now(), filter, &redact);
+    let json = share::document_with_redact(&flows, clock::now(), filter, &redact);
     let html = share::page(&json, "", zh);
-    let secs = SystemTime::now()
+    let secs = clock::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
@@ -17003,19 +18133,63 @@ fn export_html_file(controls: Arc<Controls>, filter: &str, zh: bool) {
     });
 }
 
-fn begin_share(controls: &Controls, minutes: u64, filter: &str, share_id: Signal<String>) {
+#[cfg(not(target_arch = "wasm32"))]
+fn begin_share(controls: &Arc<Controls>, minutes: u64, filter: &str, share_id: Signal<String>) {
     if !lock_bool(&controls.running) {
         set_status(controls, StatusMsg::ShareNeedsCapture);
         return;
     }
+    let (local_base, local_only) = share_base(controls);
+    let relay_url = lock_string(&controls.relay_url);
+    let relay_token = lock_string(&controls.relay_token);
+    let route = match relay::share_route(&relay_url, &relay_token, &local_base, local_only) {
+        Ok(route) => route,
+        Err(relay::ShareRouteError::BadUrl) => {
+            set_status(controls, StatusMsg::RelayBadUrl);
+            return;
+        }
+        Err(relay::ShareRouteError::EmptyToken) => {
+            set_status(controls, StatusMsg::RelayNeedToken);
+            return;
+        }
+    };
+    stop_relay_push(controls);
     let redact = redact_options(controls);
     let (id, _expires) = controls.hub.begin_share_with_redact(
         Duration::from_secs(minutes.saturating_mul(60)),
         filter,
         redact,
     );
-    let (base, local_only) = share_base(controls);
-    let url = format!("{base}/s/{id}");
+    let (url, via_relay, local_only) = match route {
+        relay::ShareRoute::Local { base, local_only } => {
+            (format!("{base}/s/{id}"), false, local_only)
+        }
+        relay::ShareRoute::Relay(base) => {
+            let url = base.share_url(&id);
+            let status_controls = Arc::clone(controls);
+            let shown = url.clone();
+            let handle = relay::spawn_push(
+                Arc::clone(&controls.hub),
+                id.clone(),
+                base,
+                relay_token.trim().to_string(),
+                move |event| match event {
+                    relay::PushEvent::Failed(err) => {
+                        set_status(&status_controls, StatusMsg::RelayPushFailed(err));
+                    }
+                    relay::PushEvent::Connected => {
+                        set_status(&status_controls, StatusMsg::RelayConnected(shown.clone()));
+                    }
+                },
+            );
+            relay::remember_push(handle.clone());
+            *controls
+                .relay_push
+                .lock()
+                .unwrap_or_else(|err| err.into_inner()) = Some(handle);
+            (url, true, false)
+        }
+    };
     share_id.set(id);
     set_clipboard(url.clone());
     set_status(
@@ -17024,11 +18198,100 @@ fn begin_share(controls: &Controls, minutes: u64, filter: &str, share_id: Signal
             url,
             minutes,
             local_only,
+            relay: via_relay,
         },
     );
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn stop_relay_push(controls: &Controls) {
+    if let Some(handle) = controls
+        .relay_push
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .take()
+    {
+        handle.stop();
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn begin_share(controls: &Arc<Controls>, minutes: u64, filter: &str, share_id: Signal<String>) {
+    if !lock_bool(&controls.running) {
+        set_status(controls, StatusMsg::ShareNeedsCapture);
+        return;
+    }
+    let body = serde_json::json!({
+        "op": "begin_share",
+        "minutes": minutes,
+        "filter": filter,
+        "redact": lock_bool(&controls.redact_export),
+        "redact_fields": lock_string(&controls.redact_fields),
+        "relay_url": lock_string(&controls.relay_url),
+        "relay_token": lock_string(&controls.relay_token),
+    })
+    .to_string()
+    .into_bytes();
+    let controls = Arc::clone(controls);
+    spawn(async move {
+        let request =
+            HttpRequest::post("/api/hub", body).header("content-type", "application/json");
+        let Ok(response) = fetch(request).await else {
+            set_status(&controls, StatusMsg::RelayPushFailed("没有连上".into()));
+            return;
+        };
+        let value: serde_json::Value =
+            serde_json::from_str(&response.text()).unwrap_or(serde_json::json!({}));
+        if let Some(err) = value.get("error").and_then(serde_json::Value::as_str) {
+            let message = if err.contains("口令") {
+                StatusMsg::RelayNeedToken
+            } else if err.contains("地址") {
+                StatusMsg::RelayBadUrl
+            } else if err.contains("开始") {
+                StatusMsg::ShareNeedsCapture
+            } else {
+                StatusMsg::RelayPushFailed(err.to_string())
+            };
+            set_status(&controls, message);
+            return;
+        }
+        let Some(url) = value.get("url").and_then(serde_json::Value::as_str) else {
+            set_status(&controls, StatusMsg::RelayPushFailed("没有分享地址".into()));
+            return;
+        };
+        let id = value
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        share_id.set(id);
+        set_clipboard(url.to_string());
+        let relay = value
+            .get("url")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|url| !url.contains("127.0.0.1"));
+        set_status(
+            &controls,
+            StatusMsg::Shared {
+                url: url.to_string(),
+                minutes,
+                local_only: url.contains("127.0.0.1"),
+                relay,
+            },
+        );
+    });
+}
+
+#[cfg(target_arch = "wasm32")]
 fn end_share(controls: &Controls, share_id: Signal<String>) {
+    controls.hub.end_share();
+    share_id.set(String::new());
+    set_status(controls, StatusMsg::ShareStopped);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn end_share(controls: &Controls, share_id: Signal<String>) {
+    stop_relay_push(controls);
     controls.hub.end_share();
     share_id.set(String::new());
     set_status(controls, StatusMsg::ShareStopped);
@@ -17370,6 +18633,22 @@ fn apply_saved_prefs(hub: &Hub) {
     hub.set_rules(&saved.rules);
     hub.set_upstream(&saved.upstream_proxy);
     hub.set_show_tunnel_failures(saved.show_tunnel_failures);
+    hub.set_relay_ingress(saved.relay_accept, &saved.relay_token);
+}
+
+fn refuse_relay(controls: &Controls, id: Option<u64>) -> bool {
+    let Some(id) = id else {
+        return false;
+    };
+    let locked = controls.hub.with_session(|session| {
+        session
+            .get(id)
+            .is_some_and(|flow| flow.relay_source.is_some())
+    });
+    if locked {
+        set_status(controls, StatusMsg::RelayViewOnly);
+    }
+    locked
 }
 
 fn load_listen_all() -> bool {
@@ -17515,11 +18794,18 @@ fn usable_v4(ip: Ipv4Addr) -> bool {
 
 /// IPv4 of the interface the OS would use to reach the public internet.
 fn routed_v4() -> Option<Ipv4Addr> {
-    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-    socket.connect("1.1.1.1:80").ok()?;
-    match socket.local_addr().ok()?.ip() {
-        std::net::IpAddr::V4(ip) if usable_v4(ip) => Some(ip),
-        _ => None,
+    #[cfg(target_arch = "wasm32")]
+    {
+        return None;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+        socket.connect("1.1.1.1:80").ok()?;
+        match socket.local_addr().ok()?.ip() {
+            std::net::IpAddr::V4(ip) if usable_v4(ip) => Some(ip),
+            _ => None,
+        }
     }
 }
 
@@ -17938,15 +19224,17 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
         let mut raw = vec![b'a'; 256 * 1024 - 2];
         raw.extend_from_slice("不".as_bytes());
         raw.extend(std::iter::repeat_n(b'b', 40));
-        let shown = super::body_text(&raw, false, None, None, super::Lang::Zh);
+        let shown = super::body_text(&raw, false, None, None, super::Lang::Zh, 0);
         assert_eq!(shown.text.len(), 256 * 1024 - 2);
         assert!(shown.text.is_char_boundary(shown.text.len()));
         assert!(shown.text.chars().all(|ch| ch == 'a'));
         let rest = raw.len() - shown.text.len();
         assert!(shown.note.contains(&rest.to_string()), "{}", shown.note);
+        assert!(shown.window.has_more());
+        assert!(!shown.window.has_prev());
 
         let ascii = vec![b'x'; 256 * 1024 + 10];
-        let ascii_shown = super::body_text(&ascii, false, None, None, super::Lang::En);
+        let ascii_shown = super::body_text(&ascii, false, None, None, super::Lang::En, 0);
         assert_eq!(ascii_shown.text.len(), 256 * 1024);
         assert!(
             ascii_shown.note.contains("10 more bytes"),
@@ -17954,7 +19242,80 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
             ascii_shown.note
         );
 
-        let expired_shown = super::body_text(&[], false, Some(65536), None, super::Lang::Zh);
+        let next = super::body_text(
+            &ascii,
+            false,
+            None,
+            None,
+            super::Lang::En,
+            ascii_shown.window.end,
+        );
+        assert_eq!(next.text, "x".repeat(10));
+        assert!(next.window.has_prev());
+        assert!(!next.window.has_more());
+        assert!(
+            next.note.contains("Showing bytes 262145-262154 of 262154"),
+            "{}",
+            next.note
+        );
+
+        let continued =
+            super::body_text(&raw, false, None, None, super::Lang::Zh, shown.window.end);
+        assert!(continued.text.starts_with('不'), "{}", continued.text);
+        assert!(continued.text.ends_with('b'));
+        assert!(continued.window.has_prev());
+        let inside = super::body_text(&raw, false, None, None, super::Lang::Zh, 256 * 1024);
+        assert_eq!(inside.text, continued.text);
+
+        let mut binary = vec![0xff; 5000];
+        binary[0] = 0xfe;
+        let binary_shown = super::body_text(&binary, false, None, None, super::Lang::Zh, 4096);
+        assert_eq!(binary_shown.hex.len(), 4096);
+        assert!(!binary_shown.window.has_more());
+        assert!(!binary_shown.window.has_prev());
+        assert!(binary_shown.note.contains("4096"), "{}", binary_shown.note);
+
+        let payload = format!("{{\"k\":\"{}\"}}", "a".repeat(super::BODY_DISPLAY_CAP));
+        let mut pretty_first =
+            super::body_text(payload.as_bytes(), false, None, None, super::Lang::En, 0);
+        super::apply_pretty(
+            &mut pretty_first,
+            payload.as_bytes(),
+            Some("application/json"),
+            super::Lang::En,
+            0,
+        );
+        assert!(pretty_first.window.has_more(), "{}", pretty_first.note);
+        assert!(pretty_first.text.len() <= super::BODY_DISPLAY_CAP);
+        assert!(
+            pretty_first.note.contains("more bytes"),
+            "{}",
+            pretty_first.note
+        );
+        let mut pretty_next = super::body_text(
+            payload.as_bytes(),
+            false,
+            None,
+            None,
+            super::Lang::En,
+            pretty_first.window.end,
+        );
+        super::apply_pretty(
+            &mut pretty_next,
+            payload.as_bytes(),
+            Some("application/json"),
+            super::Lang::En,
+            pretty_first.window.end,
+        );
+        assert!(pretty_next.window.has_prev());
+        assert_ne!(pretty_next.text, pretty_first.text);
+        assert!(
+            pretty_next.note.contains("Showing bytes"),
+            "{}",
+            pretty_next.note
+        );
+
+        let expired_shown = super::body_text(&[], false, Some(65536), None, super::Lang::Zh, 0);
         assert!(expired_shown.text.is_empty());
         assert!(
             expired_shown.note.contains("64.0 KB"),
@@ -18018,6 +19379,7 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
             size_bytes: 128,
             failed: false,
             pinned: false,
+            relay_short: String::new(),
         };
         assert_eq!(super::row_target_text(&row, false), "/v1/users");
         assert_eq!(
@@ -18619,6 +19981,7 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
             size_bytes,
             failed,
             pinned: false,
+            relay_short: String::new(),
         };
 
         let base = vec![

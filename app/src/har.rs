@@ -204,7 +204,7 @@ fn import_entry(entry: &Value) -> Option<Imported> {
         .get("startedDateTime")
         .and_then(|value| value.as_str())
         .and_then(parse_iso)
-        .unwrap_or_else(SystemTime::now);
+        .unwrap_or_else(crate::clock::now);
     let timings = entry.get("timings");
     let wait = non_negative_ms(timings.and_then(|timings| timings.get("wait")));
     let receive = non_negative_ms(timings.and_then(|timings| timings.get("receive")));

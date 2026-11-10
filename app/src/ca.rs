@@ -756,12 +756,84 @@ fn delete_linux_cert(db: &str, name: &str) -> Result<bool> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IosSimOutcome {
-    Installed(usize),
+    Installed { count: usize, port: u16 },
     NoneBooted,
 }
 
 pub fn simctl_add_root_cert_args<'a>(target: &'a str, cert_path: &'a str) -> [&'a str; 5] {
     ["simctl", "keychain", target, "add-root-cert", cert_path]
+}
+
+/// Simulator shares the Mac network stack, so this host is the Mac itself.
+/// `simctl` has no proxy subcommand; CFNetwork reads these global defaults.
+pub const IOS_SIM_PROXY_HOST: &str = "127.0.0.1";
+
+pub fn simctl_set_proxy_args(udid: &str, port: u16) -> Vec<Vec<String>> {
+    let port = port.to_string();
+    vec![
+        simctl_defaults_write(udid, "HTTPEnable", "-int", "1"),
+        simctl_defaults_write(udid, "HTTPProxy", "-string", IOS_SIM_PROXY_HOST),
+        simctl_defaults_write(udid, "HTTPPort", "-int", &port),
+        simctl_defaults_write(udid, "HTTPSEnable", "-int", "1"),
+        simctl_defaults_write(udid, "HTTPSProxy", "-string", IOS_SIM_PROXY_HOST),
+        simctl_defaults_write(udid, "HTTPSPort", "-int", &port),
+    ]
+}
+
+pub fn simctl_clear_proxy_args(udid: &str) -> Vec<Vec<String>> {
+    vec![
+        simctl_defaults_write(udid, "HTTPEnable", "-int", "0"),
+        simctl_defaults_write(udid, "HTTPSEnable", "-int", "0"),
+        simctl_defaults_delete(udid, "HTTPProxy"),
+        simctl_defaults_delete(udid, "HTTPPort"),
+        simctl_defaults_delete(udid, "HTTPSProxy"),
+        simctl_defaults_delete(udid, "HTTPSPort"),
+    ]
+}
+
+fn simctl_defaults_write(udid: &str, key: &str, flag: &str, value: &str) -> Vec<String> {
+    [
+        "simctl", "spawn", udid, "defaults", "write", "-g", key, flag, value,
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+fn simctl_defaults_delete(udid: &str, key: &str) -> Vec<String> {
+    ["simctl", "spawn", udid, "defaults", "delete", "-g", key]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
+static IOS_SIM_PROXY_UDIDS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn remember_ios_sim_proxies(udids: &[String]) {
+    let mut kept = IOS_SIM_PROXY_UDIDS
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    for udid in udids {
+        if !kept.iter().any(|have| have == udid) {
+            kept.push(udid.clone());
+        }
+    }
+}
+
+/// Turns HTTP and HTTPS proxy off on simulators this process configured.
+/// Missing keys and a missing `xcrun` are ignored.
+pub fn clear_ios_simulator_proxies() {
+    let udids = {
+        let mut kept = IOS_SIM_PROXY_UDIDS
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        std::mem::take(&mut *kept)
+    };
+    for udid in udids {
+        for args in simctl_clear_proxy_args(&udid) {
+            let _ = std::process::Command::new("xcrun").args(&args).output();
+        }
+    }
 }
 
 pub fn parse_booted_simulators(output: &str) -> Vec<(String, String)> {
@@ -793,7 +865,7 @@ pub fn parse_booted_simulators(output: &str) -> Vec<(String, String)> {
     devices
 }
 
-pub fn install_ios_simulators(ca: &Ca) -> Result<IosSimOutcome> {
+pub fn install_ios_simulators(ca: &Ca, port: u16) -> Result<IosSimOutcome> {
     let cert_path = ca.cert_path();
     let cert_str = cert_path.to_str().context("证书路径不是 UTF-8")?;
     let output = std::process::Command::new("xcrun")
@@ -813,22 +885,51 @@ pub fn install_ios_simulators(ca: &Ca) -> Result<IosSimOutcome> {
     if booted.is_empty() {
         return Ok(IosSimOutcome::NoneBooted);
     }
+    let mut proxied = Vec::new();
     for (name, udid) in &booted {
-        let out = std::process::Command::new("xcrun")
-            .args(simctl_add_root_cert_args(udid, cert_str))
-            .output()
-            .with_context(|| format!("向模拟器 {name} ({udid}) 安装证书"))?;
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            let detail = stderr.trim();
-            if detail.is_empty() {
-                anyhow::bail!("模拟器 {name} 退出码 {}", out.status);
-            } else {
-                anyhow::bail!("模拟器 {name}: {detail}");
+        if let Err(err) = run_xcrun(
+            simctl_add_root_cert_args(udid, cert_str),
+            &format!("向模拟器 {name} ({udid}) 安装证书"),
+        ) {
+            remember_ios_sim_proxies(&proxied);
+            return Err(err);
+        }
+        if port > 0 {
+            proxied.push(udid.clone());
+            for args in simctl_set_proxy_args(udid, port) {
+                if let Err(err) = run_xcrun(&args, &format!("向模拟器 {name} 设置 HTTP/HTTPS 代理"))
+                {
+                    remember_ios_sim_proxies(&proxied);
+                    return Err(err);
+                }
             }
         }
     }
-    Ok(IosSimOutcome::Installed(booted.len()))
+    remember_ios_sim_proxies(&proxied);
+    Ok(IosSimOutcome::Installed {
+        count: booted.len(),
+        port,
+    })
+}
+
+fn run_xcrun<I, S>(args: I, context: &str) -> Result<()>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let output = std::process::Command::new("xcrun")
+        .args(args)
+        .output()
+        .with_context(|| context.to_string())?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let detail = stderr.trim();
+    if detail.is_empty() {
+        anyhow::bail!("{context}，退出码 {}", output.status);
+    }
+    anyhow::bail!("{context}: {detail}");
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1091,6 +1192,121 @@ Cert 0: zniff CA
                 "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE",
                 "add-root-cert",
                 "/tmp/ca.crt"
+            ]
+        );
+        let udid = "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE";
+        let set = simctl_set_proxy_args(udid, 8877);
+        assert_eq!(
+            set,
+            vec![
+                vec![
+                    "simctl",
+                    "spawn",
+                    udid,
+                    "defaults",
+                    "write",
+                    "-g",
+                    "HTTPEnable",
+                    "-int",
+                    "1"
+                ],
+                vec![
+                    "simctl",
+                    "spawn",
+                    udid,
+                    "defaults",
+                    "write",
+                    "-g",
+                    "HTTPProxy",
+                    "-string",
+                    "127.0.0.1"
+                ],
+                vec![
+                    "simctl", "spawn", udid, "defaults", "write", "-g", "HTTPPort", "-int", "8877"
+                ],
+                vec![
+                    "simctl",
+                    "spawn",
+                    udid,
+                    "defaults",
+                    "write",
+                    "-g",
+                    "HTTPSEnable",
+                    "-int",
+                    "1"
+                ],
+                vec![
+                    "simctl",
+                    "spawn",
+                    udid,
+                    "defaults",
+                    "write",
+                    "-g",
+                    "HTTPSProxy",
+                    "-string",
+                    "127.0.0.1"
+                ],
+                vec![
+                    "simctl",
+                    "spawn",
+                    udid,
+                    "defaults",
+                    "write",
+                    "-g",
+                    "HTTPSPort",
+                    "-int",
+                    "8877"
+                ],
+            ]
+            .into_iter()
+            .map(|args| args.into_iter().map(str::to_string).collect::<Vec<_>>())
+            .collect::<Vec<_>>()
+        );
+        let clear = simctl_clear_proxy_args(udid);
+        assert_eq!(clear.len(), 6);
+        assert_eq!(
+            clear[0],
+            [
+                "simctl",
+                "spawn",
+                udid,
+                "defaults",
+                "write",
+                "-g",
+                "HTTPEnable",
+                "-int",
+                "0"
+            ]
+            .map(str::to_string)
+        );
+        assert_eq!(
+            clear[1],
+            [
+                "simctl",
+                "spawn",
+                udid,
+                "defaults",
+                "write",
+                "-g",
+                "HTTPSEnable",
+                "-int",
+                "0"
+            ]
+            .map(str::to_string)
+        );
+        assert!(clear[2..].iter().all(|args| args[4] == "delete"));
+        assert_eq!(
+            clear
+                .iter()
+                .map(|args| args[6].as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "HTTPEnable",
+                "HTTPSEnable",
+                "HTTPProxy",
+                "HTTPPort",
+                "HTTPSProxy",
+                "HTTPSPort",
             ]
         );
     }

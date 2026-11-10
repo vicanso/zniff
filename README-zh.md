@@ -2,7 +2,28 @@
 
 [English](./README.md) | 简体中文
 
-**zniff** 是一款使用 Rust 编写的轻量级原生桌面 HTTP(S) 抓包与调试代理工具。代理核心（`hyper`、`rustls`、`tokio`）与原生图形界面（`nsh`）运行在同一进程内，无外部数据库依赖，启动迅速、资源占用可控。
+**zniff** 是一款使用 Rust 编写的轻量级 HTTP(S) 抓包与调试代理。桌面版把代理和原生界面（`nsh`）放在同一个进程里。同一份界面还会编成 WebAssembly，由 `zniff --web` 提供；抓包在这个服务器进程里完成。会话只在内存中，没有外部数据库。
+
+---
+
+## 桌面与网页
+
+![zniff 在桌面和网页之间共用的代码](./docs/zniff-architecture.svg)
+
+界面（`App`）和抓包层（`Hub`，加上 TLS、HTTP/2 和规则）各写一份，再分别编进桌面程序和网页程序。
+
+| | 桌面 | 网页 |
+| :--- | :--- | :--- |
+| 界面 | 同一进程里的原生窗口 | 同一份 `App`，在浏览器里以 WebAssembly 运行 |
+| 抓包 | 界面在进程内调用 `Hub` | 页面通过 `/api` 调用 `zniff --web` |
+| 抓到谁 | 把本进程设为 HTTP 代理的客户端 | 同样的规则，发生在服务器上 |
+| 系统代理与根证书 | 本机 | 留在桌面程序里 |
+
+`make web` 在 `http://127.0.0.1:8080` 提供共用界面。页面负责操作。抓包在 `zniff --web` 进程里，而且只记录把该进程设为 HTTP 代理的客户端。抓包端口（开发配置里的 `listen_port`，否则是 `8877`）要点「开始」才打开。`zniff --web` 不改系统代理，也不读取桌面的 `capturing`。
+
+改界面后运行 `make web-ui`，用 nsh 0.4 把页面重新打进 `app/.nsh/web`，再刷新浏览器。本机的 `nsh` 可能仍是 0.2；打包要用 0.4，且不要覆盖 `~/.nsh`。库测试仍走简易操作台，不加载 `app/.nsh/web`。
+
+中继默认关闭。填了中继地址和密钥后，实时分享大约每秒推到那台主机。`zniff --relay --token <secret>` 只保存并提供 `/s/{id}`，自己不抓包。另一台 zniff 打开「接收中继」后，可以在自己的抓包端口上接收同样的上传。这些行可以查看、过滤、复制和星标。重放留在当初抓到流量的那台机器上。
 
 ---
 
@@ -94,8 +115,17 @@
 在仓库根目录下执行（`app/` 为唯一的 crate 与 workspace）：
 
 ```bash
-# 开发模式运行（bacon 热重载，默认端口 8878）
+# 桌面窗口。bacon 保持终端附着。开发配置，默认端口 8878
 make dev
+
+# 共用界面：http://127.0.0.1:8080。抓包端口要点开始才打开
+make web
+
+# 改界面后用 nsh 0.4 重新打包 app/.nsh/web
+make web-ui
+
+# 额外参数，例如换网页端口
+make web ARGS="--web-port 8090"
 
 # 编译 Debug 二进制
 make build
@@ -111,6 +141,15 @@ make release
 # 打包 macOS 应用程序束（zniff.app）
 make bundle
 ```
+
+Docker 镜像只跑服务器，不带 `app/.nsh/web`，所以页面是简易操作台：
+
+```bash
+docker build -t zniff .
+docker run --rm -p 8080:8080 -p 8877:8877 zniff
+```
+
+入口是 `zniff --web --web-bind 0.0.0.0 --bind 0.0.0.0 --port 8877`。抓包端口仍要点「开始」才打开。不要把 `8080` 和 `8877` 暴露到公网：页面上能看到正文和 Cookie。
 
 关于各平台能力边界与已接受的设计取舍，请参考 [docs/known-issues.md](./docs/known-issues.md)。
 
