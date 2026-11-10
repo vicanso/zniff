@@ -384,6 +384,7 @@ pub struct Hub {
     bypass_text: Mutex<String>,
     rules: Mutex<Vec<Rule>>,
     rules_text: Mutex<String>,
+    rules_rev: AtomicU64,
     /// Session-only. Off skips every rule without rewriting the text.
     apply_rules: AtomicBool,
     /// Session-only. Off drops `break` and `break-res` and keeps the other rules.
@@ -507,6 +508,7 @@ impl Hub {
             bypass_text: Mutex::new(String::new()),
             rules: Mutex::new(Vec::new()),
             rules_text: Mutex::new(String::new()),
+            rules_rev: AtomicU64::new(0),
             apply_rules: AtomicBool::new(true),
             apply_breaks: AtomicBool::new(true),
             show_tunnel_failures: AtomicBool::new(false),
@@ -845,6 +847,11 @@ impl Hub {
             .lock()
             .unwrap_or_else(|err| err.into_inner()) = text.to_string();
         *self.rules.lock().unwrap_or_else(|err| err.into_inner()) = rules::parse_rules(text);
+        self.rules_rev.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn rules_revision(&self) -> u64 {
+        self.rules_rev.load(Ordering::Relaxed)
     }
 
     pub fn rules_text(&self) -> String {
@@ -986,7 +993,11 @@ impl Hub {
         let custom_ref = rule_cert
             .as_ref()
             .map(|(cert, key)| (cert.as_path(), key.as_deref()));
-        let mut config = match self.ca.client_identity_for_host(host, custom_ref)? {
+        let identity = self
+            .ca
+            .client_identity_for_host(host, custom_ref)
+            .with_context(|| format!("加载源站 mTLS 客户端证书 ({host})"))?;
+        let mut config = match identity {
             Some((certs, key)) => {
                 let mut cfg = ClientConfig::builder()
                     .with_root_certificates(self.roots.clone())
@@ -1982,8 +1993,10 @@ where
             // only when the fallback tunnel actually carries traffic.
             let reason = origin_tls_reason(&err);
             log::debug!("源站 TLS 失败，改隧道 {sni_host}:{port}: {reason} ({err:#})");
+            let is_client_cert = is_client_cert_error(&err);
             let recorded = hub.show_tunnel_failures.load(Ordering::Relaxed)
-                || hub.has_client_cert_for_host(&sni_host);
+                || hub.has_client_cert_for_host(&sni_host)
+                || is_client_cert;
             if recorded {
                 record_tunnel(&hub, &sni_host, port, reason.clone());
             }
@@ -2500,9 +2513,24 @@ fn server_name(host: &str) -> Result<ServerName<'static>> {
     }
 }
 
+/// Helper to distinguish local client certificate configuration / loading errors
+/// from upstream TLS handshake rejections.
+fn is_client_cert_error(err: &anyhow::Error) -> bool {
+    err.chain().any(|c| {
+        let s = c.to_string();
+        s.contains("客户端证书")
+            || s.contains("mTLS")
+            || s.contains("client certificate")
+            || s.contains("client-cert")
+    })
+}
+
 /// Short reason for a probe that never reached ServerHello. `{err}` alone is
 /// only the `context("源站 TLS")` label, so the list would repeat that label.
 fn origin_tls_reason(err: &anyhow::Error) -> String {
+    if is_client_cert_error(err) {
+        return format!("客户端证书加载失败，已改为隧道: {err:#}");
+    }
     if let Some(tls) = rustls_error(err) {
         return match tls {
             rustls::Error::InvalidCertificate(cert) => match cert {
@@ -2789,12 +2817,14 @@ where
     let mut request_recorded = false;
     let mut break_overrode_body = false;
     let mut strip_request_encoding = false;
+    let has_expect = header_has_expect_100_continue(&head.headers);
     let websocket = header_is_websocket(&headers);
     let plan = if websocket {
         rules::Effect::default()
     } else {
         let mut ops = crate::present::graphql_operations(&path, &[]);
-        if hub.has_op_rules(&host, &path)
+        if !has_expect
+            && hub.has_op_rules(&host, &path)
             && let Some(len) = content_length(&head.headers)
             && len <= crate::session::BODY_CAP
             && len > 0
@@ -2912,21 +2942,33 @@ where
                 strip_request_encoding = true;
             }
         }
-        Some(Action::MapRemote { url }) => {
-            if let Some((scheme, next_host, next_port, next_path)) = parse_http_url(url) {
+        Some(Action::MapRemote { url, path_prefix }) => {
+            if let Some((next_scheme, next_host, next_port, next_path)) = parse_http_url(url) {
                 host = next_host;
                 port = next_port;
-                path = next_path;
+                path = rules::map_remote_path(&next_path, path_prefix, &path);
+                let authority = display_authority(&host, port, next_scheme);
                 hub.retarget(
                     id,
                     host.clone(),
                     path.clone(),
-                    format!(
-                        "{scheme}://{}{path}",
-                        display_authority(&host, port, scheme)
-                    ),
+                    format!("{next_scheme}://{authority}{path}"),
                 );
-                if scheme == "https" {
+                if let Some(pos) = headers
+                    .iter()
+                    .position(|(k, _)| k.eq_ignore_ascii_case("host"))
+                {
+                    headers[pos].1 = authority.clone();
+                } else {
+                    headers.push(("Host".to_string(), authority.clone()));
+                }
+                let existing = hub.with_session(|s| {
+                    s.get(id)
+                        .map(|f| f.request_body.clone())
+                        .unwrap_or_default()
+                });
+                hub.replace_request(id, headers.clone(), existing);
+                if next_scheme == "https" {
                     if !request_taken {
                         let _ = drain_request(client, &headers, &hub, id).await;
                     }
@@ -2998,7 +3040,14 @@ where
     if !break_overrode_body
         && (!plan.request_replaces.is_empty() || !plan.request_json_ops.is_empty())
     {
-        if let Some(len) = content_length(&head.headers)
+        if has_expect && body_override.is_none() {
+            if !plan.request_json_ops.is_empty() {
+                hub.append_comment(
+                    id,
+                    "[json rule skipped: request body withheld by Expect: 100-continue]",
+                );
+            }
+        } else if let Some(len) = content_length(&head.headers)
             && len <= crate::session::BODY_CAP
         {
             if len > 0 {
@@ -3107,6 +3156,7 @@ where
     }
     hub.set_conn_info(id, conn_info);
     let encoding = header_value(&headers, "content-encoding");
+    let mut request_body_copied = false;
     if let Some(body) = &body_override {
         write_all_throttled(&mut origin, body, throttle_up_bps).await?;
         if strip_request_encoding || break_overrode_body || !request_recorded {
@@ -3115,7 +3165,7 @@ where
         if !request_taken {
             let _ = discard_request(client, &head.headers).await;
         }
-    } else {
+    } else if !has_expect {
         copy_message_body(
             client,
             &mut origin,
@@ -3123,17 +3173,51 @@ where
             &hub,
             id,
             Direction::Request,
-            encoding,
+            encoding.clone(),
             throttle_up_bps,
         )
         .await?;
+        request_body_copied = true;
     }
-    let (mut resp_bytes, resp_rest) = read_header_block(&mut origin).await?;
+    let (mut resp_bytes, mut resp_rest) = read_header_block(&mut origin).await?;
+    let mut resp = parse_head(&resp_bytes)?;
+    let (mut status, mut reason) = status_and_reason(&resp.start);
+    let mut interim_count = 0;
+    while (100..=199).contains(&status) && status != 101 {
+        interim_count += 1;
+        if interim_count > 16 {
+            anyhow::bail!("过多 1xx 中间响应");
+        }
+        client.write_all(&resp_bytes).await?;
+        if has_expect && status == 100 && !request_body_copied && body_override.is_none() {
+            copy_message_body(
+                client,
+                &mut origin,
+                &head.headers,
+                &hub,
+                id,
+                Direction::Request,
+                encoding.clone(),
+                throttle_up_bps,
+            )
+            .await?;
+            request_body_copied = true;
+        }
+        let (next_bytes, next_rest) = read_header_block_prefixed(&mut origin, resp_rest).await?;
+        resp_bytes = next_bytes;
+        resp_rest = next_rest;
+        resp = parse_head(&resp_bytes)?;
+        let (s, r) = status_and_reason(&resp.start);
+        status = s;
+        reason = r;
+    }
     if websocket {
         resp_bytes = strip_ws_extension(&resp_bytes);
+        resp = parse_head(&resp_bytes)?;
+        let (s, r) = status_and_reason(&resp.start);
+        status = s;
+        reason = r;
     }
-    let resp = parse_head(&resp_bytes)?;
-    let (mut status, reason) = status_and_reason(&resp.start);
     let mut resp_headers = resp.headers.clone();
     if !websocket {
         rules::apply_header_ops(&mut resp_headers, &response_ops);
@@ -3286,7 +3370,12 @@ where
     hub.mark_finished(id);
     let response_close = header_value(&resp.headers, "connection")
         .is_some_and(|value| value.eq_ignore_ascii_case("close"));
+    let req_has_body =
+        content_length(&head.headers).is_some_and(|l| l > 0) || is_chunked(&head.headers);
+    let request_body_settled =
+        !has_expect || !req_has_body || request_body_copied || body_override.is_some();
     if reusable
+        && request_body_settled
         && !connection_close
         && !response_close
         && status != 101
@@ -3386,6 +3475,9 @@ async fn drain_request<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    if header_has_expect_100_continue(headers) {
+        return Ok(());
+    }
     let mut sink = tokio::io::sink();
     let encoding = header_value(headers, "content-encoding");
     let _ = copy_message_body(
@@ -3406,6 +3498,9 @@ async fn discard_request<S>(client: &mut S, headers: &[(String, String)]) -> Res
 where
     S: AsyncRead + Unpin,
 {
+    if header_has_expect_100_continue(headers) {
+        return Ok(());
+    }
     if let Some(length) = content_length(headers) {
         let mut left = length;
         let mut buf = vec![0u8; 16 * 1024];
@@ -3765,6 +3860,27 @@ fn local_route_for(method: &str, target: &str, self_target: bool) -> Option<Loca
     None
 }
 
+fn is_loopback_host(authority: &str) -> bool {
+    let authority = authority.trim();
+    if authority.is_empty() {
+        return false;
+    }
+    if let Ok(ip) = authority.parse::<std::net::IpAddr>() {
+        return ip.is_loopback();
+    }
+    let (host, _port) = match split_host_port(authority, 80) {
+        Ok(res) => res,
+        Err(_) => return false,
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return ip.is_loopback();
+    }
+    false
+}
+
 async fn serve_mcp(
     socket: &mut TcpStream,
     rest: Vec<u8>,
@@ -3784,7 +3900,42 @@ async fn serve_mcp(
         .await;
     }
     if method.eq_ignore_ascii_case("OPTIONS") {
-        return write_untracked(socket, 204, "No Content", "text/plain", b"").await;
+        return write_untracked(
+            socket,
+            403,
+            "Forbidden",
+            "text/plain; charset=utf-8",
+            b"CORS preflight requests are forbidden.",
+        )
+        .await;
+    }
+    if head
+        .headers
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("origin"))
+    {
+        return write_untracked(
+            socket,
+            403,
+            "Forbidden",
+            "text/plain; charset=utf-8",
+            b"Cross-origin requests are forbidden on MCP endpoint.",
+        )
+        .await;
+    }
+    let host_valid = header_value(&head.headers, "host")
+        .as_deref()
+        .map(is_loopback_host)
+        .unwrap_or(false);
+    if !host_valid {
+        return write_untracked(
+            socket,
+            403,
+            "Forbidden",
+            "text/plain; charset=utf-8",
+            b"MCP endpoint requires loopback Host header (127.0.0.1, localhost, [::1]).",
+        )
+        .await;
     }
     if !method.eq_ignore_ascii_case("POST") {
         return write_untracked(
@@ -3793,6 +3944,26 @@ async fn serve_mcp(
             "Method Not Allowed",
             "text/plain; charset=utf-8",
             b"Use POST /mcp with JSON-RPC 2.0 payload.",
+        )
+        .await;
+    }
+    let is_json = header_value(&head.headers, "content-type")
+        .as_deref()
+        .map(|ct| {
+            ct.split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .eq_ignore_ascii_case("application/json")
+        })
+        .unwrap_or(false);
+    if !is_json {
+        return write_untracked(
+            socket,
+            415,
+            "Unsupported Media Type",
+            "text/plain; charset=utf-8",
+            b"MCP endpoint requires Content-Type: application/json.",
         )
         .await;
     }
@@ -4992,6 +5163,15 @@ fn trim_ascii(bytes: &[u8]) -> &[u8] {
     &bytes[start..end]
 }
 
+fn header_has_expect_100_continue(headers: &[(String, String)]) -> bool {
+    headers.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case("expect")
+            && value
+                .split(',')
+                .any(|token| token.trim().eq_ignore_ascii_case("100-continue"))
+    })
+}
+
 fn header_is_websocket(headers: &[(String, String)]) -> bool {
     header_value(headers, "upgrade")
         .map(|value| value.eq_ignore_ascii_case("websocket"))
@@ -5079,7 +5259,13 @@ fn parse_head(bytes: &[u8]) -> Result<Head> {
 }
 
 async fn read_header_block<R: AsyncRead + Unpin>(reader: &mut R) -> Result<(Vec<u8>, Vec<u8>)> {
-    let mut buf = Vec::new();
+    read_header_block_prefixed(reader, Vec::new()).await
+}
+
+async fn read_header_block_prefixed<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    mut buf: Vec<u8>,
+) -> Result<(Vec<u8>, Vec<u8>)> {
     let mut tmp = [0u8; 2048];
     loop {
         if let Some(end) = header_end(&buf) {
@@ -5814,12 +6000,12 @@ async fn forward_request(
                     strip_request_encoding = true;
                 }
             }
-            Some(Action::MapRemote { url }) => {
+            Some(Action::MapRemote { url, path_prefix }) => {
                 if let Some((next_scheme, next_host, next_port, next_path)) = parse_http_url(url) {
                     let same = next_scheme == scheme && next_host == host && next_port == port;
                     host = next_host;
                     port = next_port;
-                    path = next_path;
+                    path = rules::map_remote_path(&next_path, path_prefix, &path);
                     scheme = next_scheme.to_string();
                     let authority = display_authority(&host, port, &scheme);
                     hub.retarget(
@@ -5828,6 +6014,16 @@ async fn forward_request(
                         path.clone(),
                         format!("{scheme}://{authority}{path}"),
                     );
+                    if let Ok(val) = http::HeaderValue::from_str(&authority) {
+                        parts.headers.insert(http::header::HOST, val);
+                        let pairs = header_pairs(&parts.headers);
+                        let existing = hub.with_session(|s| {
+                            s.get(id)
+                                .map(|f| f.request_body.clone())
+                                .unwrap_or_default()
+                        });
+                        hub.replace_request(id, pairs, existing);
+                    }
                     if !same {
                         let raw = if let Some(b) = body_override.take() {
                             Bytes::from(b)
@@ -6475,9 +6671,15 @@ where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let authority = display_authority(host, port, scheme);
+    let target_uri = if hub.upstream().is_some() && scheme == "http" {
+        absolute_uri(scheme, &authority, path)?
+    } else {
+        let p = if path.is_empty() { "/" } else { path };
+        p.parse::<Uri>().context("组装上游 URI")?
+    };
     let mut outbound = Request::builder()
         .method(method)
-        .uri(absolute_uri(scheme, &authority, path)?)
+        .uri(target_uri)
         .body(Full::new(body.clone()))
         .context("组装映射请求")?;
     *outbound.headers_mut() = headers.clone();
@@ -6488,9 +6690,7 @@ where
         http::HeaderValue::from_str(&body.len().to_string())
             .unwrap_or(http::HeaderValue::from_static("0")),
     );
-    if !outbound.headers().contains_key(http::header::HOST)
-        && let Ok(value) = http::HeaderValue::from_str(&authority)
-    {
+    if let Ok(value) = http::HeaderValue::from_str(&authority) {
         outbound.headers_mut().insert(http::header::HOST, value);
     }
     let (mut sender, connection) = hyper::client::conn::http1::Builder::new()
@@ -6718,6 +6918,738 @@ mod tests {
             super::origin_tls_reason(&reset),
             "源站 TLS 失败，已改为隧道: connection reset"
         );
+    }
+
+    #[test]
+    fn origin_tls_reason_differentiates_client_cert_and_preserves_context() {
+        // 1. Encrypted key error preservation
+        let encrypted_root = anyhow::anyhow!(
+            "私钥已加密（ENCRYPTED PRIVATE KEY），zniff 暂不支持加密私钥；请先解密后再配置（例如：openssl pkcs8 -in encrypted.key -out decrypted.key）"
+        );
+        let err = encrypted_root
+            .context("解析私钥 /var/certs/badssl.key")
+            .context("读取客户端证书 /var/certs/badssl.crt")
+            .context("加载源站 mTLS 客户端证书 (client.badssl.com)");
+
+        let reason = super::origin_tls_reason(&err);
+        assert!(
+            reason.starts_with("客户端证书加载失败，已改为隧道: "),
+            "must have client cert failure prefix: {reason}"
+        );
+        assert!(
+            reason.contains("client.badssl.com"),
+            "must preserve host: {reason}"
+        );
+        assert!(
+            reason.contains("/var/certs/badssl.crt"),
+            "must preserve cert path: {reason}"
+        );
+        assert!(
+            reason.contains("/var/certs/badssl.key"),
+            "must preserve key path: {reason}"
+        );
+        assert!(
+            reason.contains("ENCRYPTED PRIVATE KEY"),
+            "must preserve encrypted key hint: {reason}"
+        );
+        assert!(
+            reason.contains("openssl pkcs8 -in encrypted.key -out decrypted.key"),
+            "must preserve openssl remediation command: {reason}"
+        );
+        assert!(
+            !reason.contains("源站 TLS 失败"),
+            "must NOT be labeled as origin TLS failure: {reason}"
+        );
+
+        // 2. Client auth key mismatch preservation
+        let mismatch = rustls::Error::InconsistentKeys(rustls::InconsistentKeys::Unknown);
+        let err =
+            anyhow::Error::from(mismatch).context("配置源站 mTLS 客户端证书 (client.badssl.com)");
+        let reason = super::origin_tls_reason(&err);
+        assert!(
+            reason.starts_with("客户端证书加载失败，已改为隧道: "),
+            "must have client cert failure prefix: {reason}"
+        );
+        assert!(
+            reason.contains("client.badssl.com"),
+            "must preserve host: {reason}"
+        );
+        assert!(
+            reason.contains("KeyMismatch") || reason.contains("keys may not be consistent"),
+            "must preserve mismatch details: {reason}"
+        );
+        assert!(
+            !reason.contains("源站 TLS 失败"),
+            "must NOT be labeled as origin TLS failure: {reason}"
+        );
+
+        // 3. File not found preservation
+        let io_err = std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "No such file or directory (os error 2)",
+        );
+        let err = anyhow::Error::from(io_err)
+            .context("读取私钥文件 /var/certs/missing.key")
+            .context("读取客户端证书 /var/certs/missing.crt")
+            .context("加载源站 mTLS 客户端证书 (api.internal.net)");
+        let reason = super::origin_tls_reason(&err);
+        assert!(
+            reason.starts_with("客户端证书加载失败，已改为隧道: "),
+            "must have client cert failure prefix: {reason}"
+        );
+        assert!(
+            reason.contains("api.internal.net"),
+            "must preserve host: {reason}"
+        );
+        assert!(
+            reason.contains("/var/certs/missing.key"),
+            "must preserve missing file: {reason}"
+        );
+        assert!(
+            reason.contains("No such file or directory"),
+            "must preserve io error: {reason}"
+        );
+    }
+
+    #[tokio::test]
+    async fn client_cert_loading_failure_records_clear_reason() {
+        let dir = std::env::temp_dir().join(format!("zniff-mtls-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let client_certs_dir = dir.join("client-certs");
+        std::fs::create_dir_all(&client_certs_dir).unwrap();
+
+        let (_, cert, _) = test_origin_cert();
+        std::fs::write(client_certs_dir.join("mtls.badssl.com.crt"), cert.pem()).unwrap();
+        std::fs::write(
+            client_certs_dir.join("mtls.badssl.com.key"),
+            "-----BEGIN ENCRYPTED PRIVATE KEY-----\nMIIF\n-----END ENCRYPTED PRIVATE KEY-----\n",
+        )
+        .unwrap();
+
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+
+        let res = hub.client_config_for_host("mtls.badssl.com", &[b"http/1.1".to_vec()]);
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        let reason = super::origin_tls_reason(&err);
+
+        assert!(reason.starts_with("客户端证书加载失败，已改为隧道: "));
+        assert!(reason.contains("mtls.badssl.com"));
+        assert!(reason.contains("mtls.badssl.com.key"));
+        assert!(reason.contains("ENCRYPTED PRIVATE KEY"));
+        assert!(reason.contains("openssl pkcs8 -in encrypted.key -out decrypted.key"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_is_loopback_host() {
+        assert!(super::is_loopback_host("localhost"));
+        assert!(super::is_loopback_host("localhost:8877"));
+        assert!(super::is_loopback_host("LOCALHOST:8877"));
+        assert!(super::is_loopback_host("127.0.0.1"));
+        assert!(super::is_loopback_host("127.0.0.1:8877"));
+        assert!(super::is_loopback_host("127.0.0.2:8877"));
+        assert!(super::is_loopback_host("[::1]"));
+        assert!(super::is_loopback_host("[::1]:8877"));
+        assert!(super::is_loopback_host("::1"));
+
+        assert!(!super::is_loopback_host(""));
+        assert!(!super::is_loopback_host("attacker.example"));
+        assert!(!super::is_loopback_host("attacker.example:8877"));
+        assert!(!super::is_loopback_host("192.168.1.10:8877"));
+        assert!(!super::is_loopback_host("0.0.0.0:8877"));
+        assert!(!super::is_loopback_host("evil.localhost:8877"));
+        assert!(!super::is_loopback_host("localhost.evil.com:8877"));
+    }
+
+    #[tokio::test]
+    async fn local_mcp_security_checks() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let dir = std::env::temp_dir().join(format!("zniff-mcp-sec-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        serve_proxy(proxy, hub.clone());
+
+        let payload = br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+
+        // 1. Foreign Host (DNS-rebinding attempt) -> 403 Forbidden
+        let req = format!(
+            "POST /mcp HTTP/1.1\r\nHost: attacker.example:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            proxy_addr.port(),
+            payload.len()
+        );
+        let mut full_req = req.into_bytes();
+        full_req.extend_from_slice(payload);
+        let mut sock = TcpStream::connect(proxy_addr).await.unwrap();
+        sock.write_all(&full_req).await.unwrap();
+        let mut raw = Vec::new();
+        sock.read_to_end(&mut raw).await.unwrap();
+        let text = String::from_utf8_lossy(&raw);
+        assert!(
+            text.starts_with("HTTP/1.1 403 Forbidden\r\n"),
+            "Foreign Host must be rejected with 403: {text}"
+        );
+
+        // 2. Cross-origin request with Origin header -> 403 Forbidden
+        let req = format!(
+            "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nOrigin: http://attacker.example\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            proxy_addr.port(),
+            payload.len()
+        );
+        let mut full_req = req.into_bytes();
+        full_req.extend_from_slice(payload);
+        let mut sock = TcpStream::connect(proxy_addr).await.unwrap();
+        sock.write_all(&full_req).await.unwrap();
+        let mut raw = Vec::new();
+        sock.read_to_end(&mut raw).await.unwrap();
+        let text = String::from_utf8_lossy(&raw);
+        assert!(
+            text.starts_with("HTTP/1.1 403 Forbidden\r\n"),
+            "Request with Origin must be rejected with 403: {text}"
+        );
+
+        // 3. Non-JSON Content-Type (CORS simple request with text/plain) -> 415 Unsupported Media Type
+        let req = format!(
+            "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            proxy_addr.port(),
+            payload.len()
+        );
+        let mut full_req = req.into_bytes();
+        full_req.extend_from_slice(payload);
+        let mut sock = TcpStream::connect(proxy_addr).await.unwrap();
+        sock.write_all(&full_req).await.unwrap();
+        let mut raw = Vec::new();
+        sock.read_to_end(&mut raw).await.unwrap();
+        let text = String::from_utf8_lossy(&raw);
+        assert!(
+            text.starts_with("HTTP/1.1 415 Unsupported Media Type\r\n"),
+            "Non-JSON Content-Type must be rejected with 415: {text}"
+        );
+
+        // 4. CORS preflight OPTIONS request -> 403 Forbidden
+        let req = format!(
+            "OPTIONS /mcp HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nOrigin: http://attacker.example\r\nAccess-Control-Request-Method: POST\r\nConnection: close\r\n\r\n",
+            proxy_addr.port()
+        );
+        let mut sock = TcpStream::connect(proxy_addr).await.unwrap();
+        sock.write_all(req.as_bytes()).await.unwrap();
+        let mut raw = Vec::new();
+        sock.read_to_end(&mut raw).await.unwrap();
+        let text = String::from_utf8_lossy(&raw);
+        assert!(
+            text.starts_with("HTTP/1.1 403 Forbidden\r\n"),
+            "CORS preflight OPTIONS must be rejected with 403: {text}"
+        );
+
+        // 5. Valid loopback request with localhost -> 200 OK
+        let req = format!(
+            "POST /mcp HTTP/1.1\r\nHost: localhost:{}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            proxy_addr.port(),
+            payload.len()
+        );
+        let mut full_req = req.into_bytes();
+        full_req.extend_from_slice(payload);
+        let mut sock = TcpStream::connect(proxy_addr).await.unwrap();
+        sock.write_all(&full_req).await.unwrap();
+        let mut raw = Vec::new();
+        sock.read_to_end(&mut raw).await.unwrap();
+        let text = String::from_utf8_lossy(&raw);
+        assert!(
+            text.starts_with("HTTP/1.1 200 OK\r\n"),
+            "Valid localhost request must succeed: {text}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_read_header_block_prefixed() {
+        let initial = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello".to_vec();
+        let mut empty_stream = tokio::io::empty();
+        let (head, rest) = super::read_header_block_prefixed(&mut empty_stream, initial)
+            .await
+            .unwrap();
+        assert_eq!(head, b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n");
+        assert_eq!(rest, b"hello");
+
+        // Partial in prefix, rest in stream
+        let initial = b"HTTP/1.1 200 OK\r\n".to_vec();
+        let stream_bytes = b"Content-Length: 0\r\n\r\n";
+        let mut stream = stream_bytes.as_slice();
+        let (head, rest) = super::read_header_block_prefixed(&mut stream, initial)
+            .await
+            .unwrap();
+        assert_eq!(head, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+        assert_eq!(rest, b"");
+    }
+
+    #[tokio::test]
+    async fn plain_http_expect_100_continue_records_final_response() {
+        let dir = std::env::temp_dir().join(format!("zniff-100-continue-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+        let origin = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        let req_body = b"hello-upload-data-12345";
+        tokio::spawn(async move {
+            let (mut sock, _) = origin.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let mut total_read = 0;
+            while !buf[..total_read].windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = sock.read(&mut buf[total_read..]).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                total_read += n;
+            }
+            let head = String::from_utf8_lossy(&buf[..total_read]);
+            assert!(
+                head.to_ascii_lowercase().contains("expect: 100-continue"),
+                "Origin must see Expect: 100-continue header"
+            );
+            // Verify origin has NOT received any body bytes yet because client waits for 100 Continue
+            let head_len = buf[..total_read]
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+                .map(|p| p + 4)
+                .unwrap();
+            assert_eq!(
+                total_read, head_len,
+                "Origin must not receive any body before sending 100 Continue"
+            );
+
+            // Origin sends 100 Continue interim response
+            sock.write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
+                .await
+                .unwrap();
+
+            // Origin now reads the upload body
+            let mut body_buf = Vec::new();
+            while body_buf.len() < req_body.len() {
+                let n = sock.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                body_buf.extend_from_slice(&buf[..n]);
+            }
+            assert_eq!(&body_buf[..req_body.len()], req_body);
+
+            // Origin sends final 200 OK response with body
+            let body = b"{\"result\":\"ok\"}";
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            sock.write_all(resp.as_bytes()).await.unwrap();
+            sock.write_all(body).await.unwrap();
+            let mut drain = [0u8; 64];
+            while let Ok(n) = sock.read(&mut drain).await {
+                if n == 0 {
+                    break;
+                }
+            }
+        });
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        let hub_serve = hub.clone();
+        tokio::spawn(async move {
+            let (socket, _) = proxy.accept().await.unwrap();
+            let _ = handle_conn(socket, hub_serve).await;
+        });
+
+        let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+        let req = format!(
+            "POST http://{origin_addr}/upload HTTP/1.1\r\nHost: {origin_addr}\r\nExpect: 100-continue\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            req_body.len()
+        );
+        // Client sends headers ONLY
+        client.write_all(req.as_bytes()).await.unwrap();
+
+        // Client explicitly awaits HTTP/1.1 100 Continue before sending body
+        let mut interim_buf = Vec::new();
+        let mut byte = [0u8; 1];
+        while !interim_buf.ends_with(b"\r\n\r\n") {
+            let n = timeout(Duration::from_secs(3), client.read(&mut byte))
+                .await
+                .expect("Client timed out waiting for 100 Continue (proxy deadlock detected!)")
+                .unwrap();
+            assert_ne!(n, 0, "Proxy closed connection before sending 100 Continue");
+            interim_buf.push(byte[0]);
+            assert!(
+                interim_buf.len() < 1024,
+                "Interim response header too large"
+            );
+        }
+        let interim_text = String::from_utf8_lossy(&interim_buf);
+        assert!(
+            interim_text.starts_with("HTTP/1.1 100"),
+            "Expected 100 Continue, got: {interim_text}"
+        );
+
+        // Client sends request body now that 100 Continue has arrived
+        client.write_all(req_body).await.unwrap();
+
+        // Client reads final 200 OK response
+        let mut resp = Vec::new();
+        let _ = timeout(Duration::from_secs(5), client.read_to_end(&mut resp))
+            .await
+            .expect("Client timed out waiting for final 200 OK")
+            .unwrap();
+        let text = String::from_utf8_lossy(&resp);
+        assert!(
+            text.contains("HTTP/1.1 200 OK"),
+            "client must receive final 200 OK: {text}"
+        );
+        assert!(
+            text.contains("{\"result\":\"ok\"}"),
+            "client must receive body: {text}"
+        );
+
+        let flow = hub.with_session(|session| session.get(1).cloned());
+        let flow = flow.expect("flow");
+        assert_eq!(flow.status, Some(200));
+        assert_eq!(flow.request_body, req_body);
+        assert_eq!(flow.response_body, b"{\"result\":\"ok\"}");
+        assert!(
+            flow.elapsed_ms().is_some(),
+            "flow must be marked finished with elapsed time"
+        );
+        let has_ct = flow
+            .response_headers
+            .iter()
+            .any(|(k, v)| k.eq_ignore_ascii_case("content-type") && v.contains("application/json"));
+        assert!(has_ct, "response headers must be recorded");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn plain_http_expect_100_continue_early_rejection_413() {
+        let dir =
+            std::env::temp_dir().join(format!("zniff-100-continue-413-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+        let origin = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = origin.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let mut total_read = 0;
+            while !buf[..total_read].windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = sock.read(&mut buf[total_read..]).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                total_read += n;
+            }
+            let head = String::from_utf8_lossy(&buf[..total_read]);
+            assert!(head.to_ascii_lowercase().contains("expect: 100-continue"));
+            assert!(
+                head.to_ascii_lowercase()
+                    .contains("content-length: 10485760")
+            );
+
+            // Origin rejects immediately with 413 Payload Too Large without sending 100 Continue
+            let body = b"{\"error\":\"payload_too_large\"}";
+            let resp = format!(
+                "HTTP/1.1 413 Payload Too Large\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            sock.write_all(resp.as_bytes()).await.unwrap();
+            sock.write_all(body).await.unwrap();
+        });
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        let hub_serve = hub.clone();
+        tokio::spawn(async move {
+            let (socket, _) = proxy.accept().await.unwrap();
+            let _ = handle_conn(socket, hub_serve).await;
+        });
+
+        let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+        // Client declares a 10MB payload with Expect: 100-continue
+        let req = format!(
+            "POST http://{origin_addr}/upload HTTP/1.1\r\nHost: {origin_addr}\r\nExpect: 100-continue\r\nContent-Length: 10485760\r\nConnection: close\r\n\r\n"
+        );
+        client.write_all(req.as_bytes()).await.unwrap();
+        // Under RFC 9110 §10.1.1, client does NOT send body bytes when awaiting 100-continue.
+        // If zniff blocks waiting for 10MB body, client read_to_end will time out (deadlock!).
+        let mut resp = Vec::new();
+        let _ = timeout(Duration::from_secs(3), client.read_to_end(&mut resp))
+            .await
+            .expect("Client timed out waiting for 413 rejection (deadlock detected: proxy blocked waiting for body!)")
+            .unwrap();
+        let text = String::from_utf8_lossy(&resp);
+        assert!(
+            text.contains("HTTP/1.1 413"),
+            "Client must receive 413 response: {text}"
+        );
+        assert!(
+            text.contains("payload_too_large"),
+            "Client must receive 413 body: {text}"
+        );
+
+        let flow = hub
+            .with_session(|session| session.get(1).cloned())
+            .expect("flow");
+        assert_eq!(flow.status, Some(413));
+        assert!(
+            flow.request_body.is_empty(),
+            "No request body should be recorded since client never sent one"
+        );
+        assert_eq!(flow.response_body, b"{\"error\":\"payload_too_large\"}");
+        assert!(
+            flow.elapsed_ms().is_some(),
+            "Flow must be marked finished with elapsed time"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn plain_http_expect_100_continue_with_early_hints_103_then_continue() {
+        let dir = std::env::temp_dir().join(format!("zniff-103-then-100-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+        let origin = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        let req_body = b"multi-interim-payload";
+        tokio::spawn(async move {
+            let (mut sock, _) = origin.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let mut total_read = 0;
+            while !buf[..total_read].windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = sock.read(&mut buf[total_read..]).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                total_read += n;
+            }
+            // 1. Origin sends 103 Early Hints
+            sock.write_all(b"HTTP/1.1 103 Early Hints\r\nLink: </app.js>; rel=preload\r\n\r\n")
+                .await
+                .unwrap();
+            // 2. Origin sends 100 Continue
+            sock.write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
+                .await
+                .unwrap();
+            // 3. Origin reads body
+            let mut body_buf = Vec::new();
+            while body_buf.len() < req_body.len() {
+                let n = sock.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                body_buf.extend_from_slice(&buf[..n]);
+            }
+            assert_eq!(&body_buf[..req_body.len()], req_body);
+            // 4. Origin sends 200 OK
+            let body = b"{\"done\":true}";
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            sock.write_all(resp.as_bytes()).await.unwrap();
+            sock.write_all(body).await.unwrap();
+        });
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        let hub_serve = hub.clone();
+        tokio::spawn(async move {
+            let (socket, _) = proxy.accept().await.unwrap();
+            let _ = handle_conn(socket, hub_serve).await;
+        });
+
+        let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+        let req = format!(
+            "POST http://{origin_addr}/multi HTTP/1.1\r\nHost: {origin_addr}\r\nExpect: 100-continue\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            req_body.len()
+        );
+        client.write_all(req.as_bytes()).await.unwrap();
+
+        // Client reads 103 Early Hints first
+        let mut byte = [0u8; 1];
+        let mut interim_103 = Vec::new();
+        while !interim_103.ends_with(b"\r\n\r\n") {
+            let n = timeout(Duration::from_secs(3), client.read(&mut byte))
+                .await
+                .expect("Client timed out waiting for 103 Early Hints")
+                .unwrap();
+            assert_ne!(
+                n, 0,
+                "Proxy closed connection before sending 103 Early Hints"
+            );
+            interim_103.push(byte[0]);
+        }
+        let text_103 = String::from_utf8_lossy(&interim_103);
+        assert!(
+            text_103.starts_with("HTTP/1.1 103 Early Hints"),
+            "{text_103}"
+        );
+
+        // Client reads 100 Continue second
+        let mut interim_100 = Vec::new();
+        while !interim_100.ends_with(b"\r\n\r\n") {
+            let n = timeout(Duration::from_secs(3), client.read(&mut byte))
+                .await
+                .expect("Client timed out waiting for 100 Continue")
+                .unwrap();
+            assert_ne!(n, 0, "Proxy closed connection before sending 100 Continue");
+            interim_100.push(byte[0]);
+        }
+        let text_100 = String::from_utf8_lossy(&interim_100);
+        assert!(text_100.starts_with("HTTP/1.1 100 Continue"), "{text_100}");
+
+        // Now client writes body
+        client.write_all(req_body).await.unwrap();
+
+        // Client reads final 200 OK
+        let mut resp = Vec::new();
+        let _ = timeout(Duration::from_secs(5), client.read_to_end(&mut resp))
+            .await
+            .expect("Client timed out waiting for 200 OK")
+            .unwrap();
+        let text = String::from_utf8_lossy(&resp);
+        assert!(text.contains("HTTP/1.1 200 OK"), "{text}");
+        assert!(text.contains("{\"done\":true}"), "{text}");
+
+        let flow = hub
+            .with_session(|session| session.get(1).cloned())
+            .expect("flow");
+        assert_eq!(flow.status, Some(200));
+        assert_eq!(flow.request_body, req_body);
+        assert_eq!(flow.response_body, b"{\"done\":true}");
+        assert!(flow.elapsed_ms().is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_adversarial_100_continue_client_waits_for_continue() {
+        let dir =
+            std::env::temp_dir().join(format!("zniff-100-continue-adv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+        let origin = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = origin.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let mut total_read = 0;
+            while !buf[..total_read].windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = sock.read(&mut buf[total_read..]).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                total_read += n;
+            }
+            sock.write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
+                .await
+                .unwrap();
+            let mut body = [0u8; 5];
+            sock.read_exact(&mut body).await.unwrap();
+            assert_eq!(&body, b"hello");
+            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .await
+                .unwrap();
+        });
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        let hub_serve = hub.clone();
+        tokio::spawn(async move {
+            let (socket, _) = proxy.accept().await.unwrap();
+            let _ = handle_conn(socket, hub_serve).await;
+        });
+
+        let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+        let req = format!(
+            "POST http://{origin_addr}/adv HTTP/1.1\r\nHost: {origin_addr}\r\nExpect: 100-continue\r\nContent-Length: 5\r\nConnection: close\r\n\r\n"
+        );
+        client.write_all(req.as_bytes()).await.unwrap();
+        let mut interim_buf = [0u8; 1024];
+        let res = timeout(Duration::from_millis(2000), client.read(&mut interim_buf)).await;
+        assert!(
+            res.is_ok(),
+            "DEADLOCK: Client timed out waiting for 100 Continue!"
+        );
+        let n = res.unwrap().unwrap();
+        assert!(String::from_utf8_lossy(&interim_buf[..n]).contains("100 Continue"));
+        client.write_all(b"hello").await.unwrap();
+        let mut final_resp = Vec::new();
+        client.read_to_end(&mut final_resp).await.unwrap();
+        assert!(String::from_utf8_lossy(&final_resp).contains("200 OK"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn plain_http_early_hints_103_records_final_response() {
+        let dir = std::env::temp_dir().join(format!("zniff-103-hints-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+        let origin = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = origin.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let _ = sock.read(&mut buf).await.unwrap();
+            // Origin sends 103 Early Hints
+            sock.write_all(b"HTTP/1.1 103 Early Hints\r\nLink: </style.css>; rel=preload\r\n\r\n")
+                .await
+                .unwrap();
+            // Origin sends final 200 OK response
+            let body = b"main page content";
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            sock.write_all(resp.as_bytes()).await.unwrap();
+            sock.write_all(body).await.unwrap();
+        });
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        let hub_serve = hub.clone();
+        tokio::spawn(async move {
+            let (socket, _) = proxy.accept().await.unwrap();
+            let _ = handle_conn(socket, hub_serve).await;
+        });
+        let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+        let req = format!(
+            "GET http://{origin_addr}/page HTTP/1.1\r\nHost: {origin_addr}\r\nConnection: close\r\n\r\n"
+        );
+        client.write_all(req.as_bytes()).await.unwrap();
+        let mut resp = Vec::new();
+        let _ = timeout(Duration::from_secs(5), client.read_to_end(&mut resp))
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&resp);
+        assert!(
+            text.contains("103 Early Hints"),
+            "client must receive 103 Early Hints"
+        );
+        assert!(text.contains("200 OK"), "client must receive 200 OK");
+        assert!(
+            text.contains("main page content"),
+            "client must receive body"
+        );
+
+        let flow = hub.with_session(|session| session.get(1).cloned());
+        let flow = flow.expect("flow");
+        assert_eq!(flow.status, Some(200));
+        assert_eq!(flow.response_body, b"main page content");
+        assert!(flow.elapsed_ms().is_some(), "flow must be marked finished");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -9077,6 +10009,139 @@ mod tests {
         let flow = hub.with_session(|session| session.get(1).cloned()).unwrap();
         assert!(flow.url.contains("/landed"), "{}", flow.url);
         assert_eq!(flow.response_body, b"remote-ok");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn https_map_remote_preserves_subpath_query_host_and_origin_form() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let dir =
+            std::env::temp_dir().join(format!("zniff-https-remote-subpath-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let (origin_ca, origin_leaf, leaf_key) = test_origin_cert();
+        let mut hub = Hub::new(ca.clone()).unwrap();
+        hub.add_trust_anchor(origin_ca.der().clone());
+
+        let remote = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let remote_addr = remote.local_addr().unwrap();
+        hub.set_rules(&format!("map-remote 127.0.0.1/api http://{remote_addr}/v2"));
+        let hub = Arc::new(hub);
+        let seen = Arc::new(Mutex::new(String::new()));
+        let seen_task = seen.clone();
+        tokio::spawn(async move {
+            let (mut sock, _) = remote.accept().await.unwrap();
+            let req = read_h1_message(&mut sock).await;
+            *seen_task.lock().unwrap() = String::from_utf8_lossy(&req).into_owned();
+            sock.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\nConnection: close\r\n\r\nremote-ok",
+            )
+            .await
+            .unwrap();
+        });
+
+        let server = origin_tls_config(
+            &origin_ca,
+            &origin_leaf,
+            &leaf_key,
+            vec![b"http/1.1".to_vec()],
+        );
+        let (origin_addr, _) = spawn_tls_sink(server);
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        serve_one(proxy, hub.clone());
+
+        let mut tls = connect_mitm(proxy_addr, origin_addr, &ca, vec![b"http/1.1".to_vec()]).await;
+        tls.write_all(
+            b"GET /api/users?id=1 HTTP/1.1\r\nHost: client-custom.test\r\nConnection: close\r\n\r\n",
+        )
+        .await
+        .unwrap();
+        let resp = read_h1_message(&mut tls).await;
+        let text = String::from_utf8_lossy(&resp);
+        assert!(text.contains("remote-ok"), "{text}");
+
+        let remote_text = seen.lock().unwrap().clone();
+        // 1. Verify origin-form request line (NOT absolute-form "GET http://...")
+        assert!(
+            remote_text.starts_with("GET /v2/users?id=1 HTTP/1.1\r\n"),
+            "Expected origin-form request line, got: {remote_text}"
+        );
+        // 2. Verify Host header was rewritten to destination authority
+        assert!(
+            remote_text
+                .to_ascii_lowercase()
+                .contains(&format!("host: {remote_addr}\r\n")),
+            "Expected rewritten Host header {remote_addr}, got: {remote_text}"
+        );
+        // 3. Verify original Host was NOT forwarded
+        assert!(
+            !remote_text.contains("client-custom.test"),
+            "Original Host leaked: {remote_text}"
+        );
+
+        let flow = hub.with_session(|session| session.get(1).cloned()).unwrap();
+        assert_eq!(flow.url, format!("http://{remote_addr}/v2/users?id=1"));
+        assert_eq!(flow.path, "/v2/users?id=1");
+        assert_eq!(flow.host, "127.0.0.1");
+        assert_eq!(flow.response_body, b"remote-ok");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn plain_http_map_remote_preserves_subpath_query_and_rewrites_host() {
+        let dir = std::env::temp_dir().join(format!("zniff-plain-remote-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Hub::new(ca.clone()).unwrap();
+
+        let remote = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let remote_addr = remote.local_addr().unwrap();
+        hub.set_rules(&format!("map-remote fake.test/api http://{remote_addr}/v2"));
+        let hub = Arc::new(hub);
+        let seen = Arc::new(Mutex::new(String::new()));
+        let seen_task = seen.clone();
+        tokio::spawn(async move {
+            let (mut sock, _) = remote.accept().await.unwrap();
+            let req = read_h1_message(&mut sock).await;
+            *seen_task.lock().unwrap() = String::from_utf8_lossy(&req).into_owned();
+            sock.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 15\r\nConnection: close\r\n\r\nplain-remote-ok",
+            )
+            .await
+            .unwrap();
+        });
+
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        serve_one(proxy, hub.clone());
+
+        let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+        client
+            .write_all(
+                b"GET http://fake.test/api/users?id=1 HTTP/1.1\r\nHost: fake.test\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let resp = read_h1_message(&mut client).await;
+        let text = String::from_utf8_lossy(&resp);
+        assert!(text.contains("plain-remote-ok"), "{text}");
+
+        let remote_text = seen.lock().unwrap().clone();
+        assert!(
+            remote_text.starts_with("GET /v2/users?id=1 HTTP/1.1\r\n"),
+            "Expected origin-form request line, got: {remote_text}"
+        );
+        assert!(
+            remote_text
+                .to_ascii_lowercase()
+                .contains(&format!("host: {remote_addr}\r\n")),
+            "Expected rewritten Host header, got: {remote_text}"
+        );
+        assert!(
+            !remote_text.contains("fake.test"),
+            "Original Host leaked: {remote_text}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
