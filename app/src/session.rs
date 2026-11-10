@@ -43,6 +43,29 @@ struct SpillSegment {
     last_write: SystemTime,
 }
 
+struct ReservedSpill {
+    file: File,
+    offset: u64,
+    len: u32,
+    segment_id: u32,
+}
+
+struct SpillIo {
+    file: File,
+    offset: u64,
+    len: u32,
+}
+
+impl SpillIo {
+    fn read(&self) -> Vec<u8> {
+        let mut buf = vec![0u8; self.len as usize];
+        if read_at(&self.file, &mut buf, self.offset).is_err() {
+            return Vec::new();
+        }
+        buf
+    }
+}
+
 #[derive(Debug)]
 struct SpillStore {
     dir: PathBuf,
@@ -124,72 +147,117 @@ impl SpillStore {
     }
 
     fn write(&mut self, data: &[u8], now: SystemTime) -> Option<SpillRef> {
-        if data.is_empty() {
+        let reserved = self.reserve(data.len(), now)?;
+        if write_at(&reserved.file, data, reserved.offset).is_err() {
+            self.rewind_if_tail(reserved.segment_id, reserved.offset, reserved.len);
             return None;
         }
-        let len = u32::try_from(data.len()).ok()?;
-        self.gc(now);
-        let need_roll = self.segments.back().is_none_or(|seg| {
-            seg.len > 0 && seg.len.saturating_add(data.len() as u64) > self.segment_cap
-        });
-        if need_roll {
-            static SWEEP_ONCE: Once = Once::new();
-            SWEEP_ONCE.call_once(|| {
-                sweep_orphan_spill_dirs(&spill_base_dir(), now, SPILL_SEGMENT_TTL);
-            });
-            if !self.dir_created {
-                std::fs::create_dir_all(&self.dir).ok()?;
-                self.dir_created = true;
-            }
-            self.next_segment_id = self.next_segment_id.wrapping_add(1).max(1);
-            let id = self.next_segment_id;
-            let path = self.dir.join(format!("seg-{id:06}.dat"));
-            let file = OpenOptions::new()
-                .create(true)
-                .truncate(true)
-                .read(true)
-                .write(true)
-                .open(&path)
-                .ok()?;
-            // On Unix, unlink the segment file immediately while keeping its File
-            // descriptor open. Positional pread/pwrite continue to work, and the OS
-            // kernel automatically reclaims the disk blocks even on SIGKILL (`kill -9`).
-            #[cfg(unix)]
-            {
-                let _ = std::fs::remove_file(&path);
-                let _ = std::fs::remove_dir(&self.dir);
-                self.dir_created = false;
-            }
-            self.segments.push_back(SpillSegment {
-                id,
-                path,
-                file,
-                len: 0,
-                last_write: now,
-            });
-            while self.segments.len() > self.max_segments {
-                if let Some(old) = self.segments.pop_front() {
-                    let _ = std::fs::remove_file(&old.path);
-                }
-            }
-        }
-        let seg = self.segments.back_mut()?;
-        let offset = seg.len;
-        write_at(&seg.file, data, offset).ok()?;
-        seg.len += data.len() as u64;
-        seg.last_write = now;
         Some(SpillRef {
-            segment_id: seg.id,
-            offset,
-            len,
+            segment_id: reserved.segment_id,
+            offset: reserved.offset,
+            len: reserved.len,
         })
     }
 
+    /// Bumps the segment length and returns a cloned descriptor. The caller writes
+    /// at `offset` and [`Self::rewind_if_tail`] on failure. Length moves first so a
+    /// later reservation cannot overlap this one.
+    fn reserve(&mut self, nbytes: usize, now: SystemTime) -> Option<ReservedSpill> {
+        if nbytes == 0 {
+            return None;
+        }
+        let len = u32::try_from(nbytes).ok()?;
+        self.ensure_tail(nbytes as u64, now)?;
+        let seg = self.segments.back_mut()?;
+        let offset = seg.len;
+        let file = seg.file.try_clone().ok()?;
+        let segment_id = seg.id;
+        seg.len += nbytes as u64;
+        seg.last_write = now;
+        Some(ReservedSpill {
+            file,
+            offset,
+            len,
+            segment_id,
+        })
+    }
+
+    fn rewind_if_tail(&mut self, segment_id: u32, offset: u64, len: u32) {
+        let end = offset.saturating_add(u64::from(len));
+        if let Some(seg) = self.segments.back_mut()
+            && seg.id == segment_id
+            && seg.len == end
+        {
+            seg.len = offset;
+        }
+    }
+
+    fn ensure_tail(&mut self, extra: u64, now: SystemTime) -> Option<()> {
+        self.gc(now);
+        let need_roll = self
+            .segments
+            .back()
+            .is_none_or(|seg| seg.len > 0 && seg.len.saturating_add(extra) > self.segment_cap);
+        if !need_roll {
+            return Some(());
+        }
+        static SWEEP_ONCE: Once = Once::new();
+        SWEEP_ONCE.call_once(|| {
+            sweep_orphan_spill_dirs(&spill_base_dir(), now, SPILL_SEGMENT_TTL);
+        });
+        if !self.dir_created {
+            std::fs::create_dir_all(&self.dir).ok()?;
+            self.dir_created = true;
+        }
+        self.next_segment_id = self.next_segment_id.wrapping_add(1).max(1);
+        let id = self.next_segment_id;
+        let path = self.dir.join(format!("seg-{id:06}.dat"));
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .ok()?;
+        // On Unix, unlink the segment file immediately while keeping its File
+        // descriptor open. Positional pread/pwrite continue to work, and the OS
+        // kernel automatically reclaims the disk blocks even on SIGKILL (`kill -9`).
+        #[cfg(unix)]
+        {
+            let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_dir(&self.dir);
+            self.dir_created = false;
+        }
+        self.segments.push_back(SpillSegment {
+            id,
+            path,
+            file,
+            len: 0,
+            last_write: now,
+        });
+        while self.segments.len() > self.max_segments {
+            if let Some(old) = self.segments.pop_front() {
+                let _ = std::fs::remove_file(&old.path);
+            }
+        }
+        Some(())
+    }
+
     fn read(&self, sref: SpillRef) -> Option<Vec<u8>> {
-        let seg = self.segments.iter().find(|seg| seg.id == sref.segment_id)?;
+        let io = self.reader(sref)?;
         let mut buf = vec![0u8; sref.len as usize];
-        read_at(&seg.file, &mut buf, sref.offset).ok()?;
+        read_at(&io.file, &mut buf, io.offset).ok()?;
         Some(buf)
+    }
+
+    /// Cloned segment descriptor. `pread` does not need the session lock.
+    fn reader(&self, sref: SpillRef) -> Option<SpillIo> {
+        let seg = self.segments.iter().find(|seg| seg.id == sref.segment_id)?;
+        Some(SpillIo {
+            file: seg.file.try_clone().ok()?,
+            offset: sref.offset,
+            len: sref.len,
+        })
     }
 
     fn gc(&mut self, now: SystemTime) -> bool {
@@ -469,6 +537,53 @@ pub struct FacetEntry {
 pub struct SessionFacets {
     pub domains: Vec<FacetEntry>,
     pub apps: Vec<FacetEntry>,
+}
+
+impl SessionFacets {
+    pub fn from_flows<'a>(flows: impl IntoIterator<Item = &'a Flow>) -> Self {
+        const FACET_CAP: usize = 64;
+        let mut domain_map: HashMap<String, FacetEntry> = HashMap::new();
+        let mut app_map: HashMap<String, FacetEntry> = HashMap::new();
+        for flow in flows {
+            let is_err = flow.error.is_some() || flow.status.is_some_and(|code| code >= 400);
+            let host = flow.host.trim();
+            if !host.is_empty() {
+                let key = host.to_ascii_lowercase();
+                let entry = domain_map.entry(key.clone()).or_insert_with(|| FacetEntry {
+                    label: host.to_string(),
+                    token: key,
+                    count: 0,
+                    error_count: 0,
+                });
+                entry.count += 1;
+                if is_err {
+                    entry.error_count += 1;
+                }
+            }
+            if let Some((label, token)) = extract_client_app_facet(&flow.client_ip) {
+                let key = token.to_ascii_lowercase();
+                let entry = app_map.entry(key).or_insert_with(|| FacetEntry {
+                    label,
+                    token,
+                    count: 0,
+                    error_count: 0,
+                });
+                entry.count += 1;
+                if is_err {
+                    entry.error_count += 1;
+                }
+            }
+        }
+        let sort_facets = |mut items: Vec<FacetEntry>| -> Vec<FacetEntry> {
+            items.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.token.cmp(&b.token)));
+            items.truncate(FACET_CAP);
+            items
+        };
+        Self {
+            domains: sort_facets(domain_map.into_values().collect()),
+            apps: sort_facets(app_map.into_values().collect()),
+        }
+    }
 }
 
 pub fn extract_client_app_facet(client_ip: &str) -> Option<(String, String)> {
@@ -884,10 +999,14 @@ impl Session {
         }
     }
 
+    /// Spills inside the session lock. The proxy uses [`Session::begin_finish`] so
+    /// the `pwrite` does not block other flows; tests keep this path.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn mark_finished(&mut self, id: u64) {
         self.mark_finished_at(id, SystemTime::now());
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn mark_finished_at(&mut self, id: u64, now: SystemTime) {
         self.spill.gc(now);
         self.next_rev += 1;
@@ -899,6 +1018,102 @@ impl Session {
             flow.rev = rev;
         }
         self.spill_flow_if_needed(id, now);
+    }
+
+    /// Marks `id` finished and detaches oversized bodies so the caller can `pwrite`
+    /// them without holding the session. [`Session::mark_finished_at`] still spills
+    /// inline; this path is for the proxy, where the write must not block other flows.
+    pub fn begin_finish(&mut self, id: u64, now: SystemTime) -> FinishSpill {
+        self.spill.gc(now);
+        self.next_rev += 1;
+        let rev = self.next_rev;
+        if let Some(flow) = self.flows.get_mut(&id) {
+            if flow.finished_at.is_none() {
+                flow.finished_at = Some(now);
+            }
+            flow.rev = rev;
+        }
+        let inline_cap = self.spill.inline_cap;
+        let (request, response) = {
+            let Some(flow) = self.flows.get_mut(&id) else {
+                return FinishSpill { writes: Vec::new() };
+            };
+            if flow.pinned {
+                return FinishSpill { writes: Vec::new() };
+            }
+            let request = (flow.request_spill.is_none() && flow.request_body.len() > inline_cap)
+                .then(|| std::mem::take(&mut flow.request_body));
+            let response = (flow.response_spill.is_none() && flow.response_body.len() > inline_cap)
+                .then(|| std::mem::take(&mut flow.response_body));
+            (request, response)
+        };
+        let mut writes = Vec::new();
+        if let Some(data) = request {
+            match self.spill.reserve(data.len(), now) {
+                Some(slot) => writes.push(SpillWrite::from_reserved(slot, data, true)),
+                None => {
+                    if let Some(flow) = self.flows.get_mut(&id) {
+                        flow.request_body = data;
+                    }
+                }
+            }
+        }
+        if let Some(data) = response {
+            match self.spill.reserve(data.len(), now) {
+                Some(slot) => writes.push(SpillWrite::from_reserved(slot, data, false)),
+                None => {
+                    if let Some(flow) = self.flows.get_mut(&id) {
+                        flow.response_body = data;
+                    }
+                }
+            }
+        }
+        FinishSpill { writes }
+    }
+
+    /// Attaches spill refs after the out-of-lock write. A flow evicted in between
+    /// already dropped `accounted` (which still included the detached body).
+    pub fn commit_finish(&mut self, id: u64, writes: Vec<(SpillWrite, bool)>) {
+        for (write, ok) in writes.iter().rev() {
+            if !ok {
+                self.spill
+                    .rewind_if_tail(write.segment_id, write.offset, write.len);
+            }
+        }
+        if !self.flows.contains_key(&id) {
+            return;
+        }
+        for (write, ok) in writes {
+            let freed = {
+                let Some(flow) = self.flows.get_mut(&id) else {
+                    return;
+                };
+                if !ok {
+                    if write.request {
+                        flow.request_body = write.data;
+                    } else {
+                        flow.response_body = write.data;
+                    }
+                    continue;
+                }
+                let freed = write.data.len();
+                let sref = SpillRef {
+                    segment_id: write.segment_id,
+                    offset: write.offset,
+                    len: write.len,
+                };
+                if write.request {
+                    flow.request_body.clear();
+                    flow.request_spill = Some(sref);
+                } else {
+                    flow.response_body.clear();
+                    flow.response_spill = Some(sref);
+                }
+                flow.accounted = flow.accounted.saturating_sub(freed);
+                freed
+            };
+            self.bytes = self.bytes.saturating_sub(freed);
+        }
     }
 
     /// Removes expired spill segments whose last write is older than [`SPILL_SEGMENT_TTL`].
@@ -999,21 +1214,12 @@ impl Session {
     }
 
     /// Flows that match `filter`, oldest first, with spilled bodies hydrated from disk.
-    /// An empty filter is the whole session.
+    /// An empty filter is the whole session. Live callers plan outside the lock.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn flows_matching(&self, filter: &str) -> Vec<Flow> {
         self.matching_with_previous_start(filter)
             .into_iter()
             .filter_map(|(id, _)| self.hydrated(id))
-            .collect()
-    }
-
-    /// Flows that match `filter`, oldest first, without reading spilled bodies from disk.
-    /// Spilled bodies remain referenced by `request_spill` / `response_spill` so live
-    /// share list polling can load them on demand when a row is clicked.
-    pub fn flows_matching_unhydrated(&self, filter: &str) -> Vec<Flow> {
-        self.matching_with_previous_start(filter)
-            .into_iter()
-            .filter_map(|(id, _)| self.flows.get(&id).cloned())
             .collect()
     }
 
@@ -1030,10 +1236,13 @@ impl Session {
     pub fn clear(&mut self) {
         self.next_rev += 1;
         self.order.clear();
+        self.order.shrink_to_fit();
         self.flows.clear();
+        self.flows.shrink_to_fit();
         self.spill.clear();
         self.bytes = 0;
         self.dropped = 0;
+        trim_memory();
     }
 
     /// Removes all unpinned flows while keeping pinned flows intact.
@@ -1043,15 +1252,35 @@ impl Session {
         self.flows.retain(|_, flow| flow.pinned);
         let removed = before.saturating_sub(self.flows.len());
         self.order.retain(|id| self.flows.contains_key(id));
+        self.order.shrink_to_fit();
+        self.flows.shrink_to_fit();
         if self.flows.is_empty() {
             self.spill.clear();
         }
         self.bytes = self.flows.values().map(|flow| flow.accounted).sum();
         self.dropped = 0;
         self.next_rev += 1;
+        trim_memory();
         removed
     }
+}
 
+/// Hints to the OS allocator to release freed and purgeable pages back to the kernel.
+pub fn trim_memory() {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        unsafe extern "C" {
+            fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize);
+        }
+        malloc_zone_pressure_relief(std::ptr::null_mut(), 0);
+    }
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
+impl Session {
     pub fn set_comment(&mut self, id: u64, comment: impl Into<String>) -> bool {
         let Some(flow) = self.flows.get_mut(&id) else {
             return false;
@@ -1191,23 +1420,98 @@ impl Session {
             .collect()
     }
 
-    /// Matching ids, oldest first. The time is when the previous *visible*
-    /// flow started. A row the filter hides does not count.
-    pub fn matching_with_previous_start(&self, filter: &str) -> Vec<(u64, Option<SystemTime>)> {
+    /// Splits a filter into metadata hits and spill probes. [`FilterPlan::finish`]
+    /// reads spilled bodies without the session lock.
+    pub fn plan_filter(&self, filter: &str) -> FilterPlan {
         let query = FlowQuery::parse(filter);
-        let mut previous = None;
-        let mut out = Vec::new();
+        let need_body = query.needs_body();
+        let need_op = query.needs_op();
+        let mut items = Vec::new();
         for id in &self.order {
             let Some(flow) = self.flows.get(id) else {
                 continue;
             };
-            if !query.matches(flow, &self.spill) {
+            if !query.matches_meta(flow) {
                 continue;
             }
-            out.push((*id, previous));
-            previous = Some(flow.started);
+            if !need_body && !need_op {
+                items.push(PlanItem::Ready {
+                    id: *id,
+                    started: flow.started,
+                });
+                continue;
+            }
+            let req_on_disk = (need_body || need_op) && flow.request_spill.is_some();
+            let res_on_disk = need_body && flow.response_spill.is_some();
+            if !req_on_disk && !res_on_disk {
+                let req = if need_body || need_op {
+                    flow.request_body.as_slice()
+                } else {
+                    &[]
+                };
+                let res = if need_body {
+                    flow.response_body.as_slice()
+                } else {
+                    &[]
+                };
+                let messages = if need_body {
+                    flow.messages.as_slice()
+                } else {
+                    &[]
+                };
+                if query.matches_payload(&flow.path, req, res, messages) {
+                    items.push(PlanItem::Ready {
+                        id: *id,
+                        started: flow.started,
+                    });
+                }
+                continue;
+            }
+            let req = if req_on_disk {
+                flow.request_spill
+                    .and_then(|sref| self.spill.reader(sref))
+                    .map(BodySource::File)
+                    .unwrap_or(BodySource::Empty)
+            } else if need_body || need_op {
+                BodySource::Memory(flow.request_body.clone())
+            } else {
+                BodySource::Empty
+            };
+            let res = if res_on_disk {
+                flow.response_spill
+                    .and_then(|sref| self.spill.reader(sref))
+                    .map(BodySource::File)
+                    .unwrap_or(BodySource::Empty)
+            } else if need_body {
+                BodySource::Memory(flow.response_body.clone())
+            } else {
+                BodySource::Empty
+            };
+            items.push(PlanItem::Probe {
+                id: *id,
+                started: flow.started,
+                path: if need_op {
+                    flow.path.clone()
+                } else {
+                    String::new()
+                },
+                req,
+                res,
+                messages: if need_body {
+                    flow.messages.clone()
+                } else {
+                    Vec::new()
+                },
+            });
         }
-        out
+        FilterPlan { query, items }
+    }
+
+    /// Matching ids, oldest first. The time is when the previous *visible*
+    /// flow started. A row the filter hides does not count.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn matching_with_previous_start(&self, filter: &str) -> Vec<(u64, Option<SystemTime>)> {
+        self.plan_filter(filter).finish()
     }
 
     #[cfg(test)]
@@ -1215,56 +1519,10 @@ impl Session {
         self.facets_matching("")
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn facets_matching(&self, filter: &str) -> SessionFacets {
-        const FACET_CAP: usize = 64;
-        let query = FlowQuery::parse(filter);
-        let mut domain_map: HashMap<String, FacetEntry> = HashMap::new();
-        let mut app_map: HashMap<String, FacetEntry> = HashMap::new();
-        for id in &self.order {
-            let Some(flow) = self.flows.get(id) else {
-                continue;
-            };
-            if !query.matches(flow, &self.spill) {
-                continue;
-            }
-            let is_err = flow.error.is_some() || flow.status.is_some_and(|code| code >= 400);
-            let host = flow.host.trim();
-            if !host.is_empty() {
-                let key = host.to_ascii_lowercase();
-                let entry = domain_map.entry(key.clone()).or_insert_with(|| FacetEntry {
-                    label: host.to_string(),
-                    token: key,
-                    count: 0,
-                    error_count: 0,
-                });
-                entry.count += 1;
-                if is_err {
-                    entry.error_count += 1;
-                }
-            }
-            if let Some((label, token)) = extract_client_app_facet(&flow.client_ip) {
-                let key = token.to_ascii_lowercase();
-                let entry = app_map.entry(key).or_insert_with(|| FacetEntry {
-                    label,
-                    token,
-                    count: 0,
-                    error_count: 0,
-                });
-                entry.count += 1;
-                if is_err {
-                    entry.error_count += 1;
-                }
-            }
-        }
-        let sort_facets = |mut items: Vec<FacetEntry>| -> Vec<FacetEntry> {
-            items.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.token.cmp(&b.token)));
-            items.truncate(FACET_CAP);
-            items
-        };
-        SessionFacets {
-            domains: sort_facets(domain_map.into_values().collect()),
-            apps: sort_facets(app_map.into_values().collect()),
-        }
+        let matched = self.plan_filter(filter).finish();
+        SessionFacets::from_flows(matched.iter().filter_map(|(id, _)| self.flows.get(id)))
     }
 
     #[cfg(test)]
@@ -1279,14 +1537,20 @@ impl Session {
 
     fn evict(&mut self, keep: u64) {
         while self.bytes > SESSION_CAP && self.order.len() > 1 {
-            let Some(pos) = self
-                .order
-                .iter()
-                .position(|id| *id != keep && self.flows.get(id).is_some_and(|flow| !flow.pinned))
-            else {
-                break;
+            let front_ok = self.order.front().is_some_and(|id| {
+                *id != keep && self.flows.get(id).is_some_and(|flow| !flow.pinned)
+            });
+            let old = if front_ok {
+                self.order.pop_front()
+            } else {
+                let Some(pos) = self.order.iter().position(|id| {
+                    *id != keep && self.flows.get(id).is_some_and(|flow| !flow.pinned)
+                }) else {
+                    break;
+                };
+                self.order.remove(pos)
             };
-            let Some(old) = self.order.remove(pos) else {
+            let Some(old) = old else {
                 break;
             };
             if let Some(flow) = self.flows.remove(&old) {
@@ -1297,29 +1561,119 @@ impl Session {
     }
 }
 
+/// One body reserved under the session lock and written outside it.
+pub struct SpillWrite {
+    file: File,
+    offset: u64,
+    len: u32,
+    segment_id: u32,
+    data: Vec<u8>,
+    request: bool,
+}
+
+impl SpillWrite {
+    fn from_reserved(slot: ReservedSpill, data: Vec<u8>, request: bool) -> Self {
+        Self {
+            file: slot.file,
+            offset: slot.offset,
+            len: slot.len,
+            segment_id: slot.segment_id,
+            data,
+            request,
+        }
+    }
+
+    fn flush(&self) -> bool {
+        write_at(&self.file, &self.data, self.offset).is_ok()
+    }
+}
+
+/// Bodies detached by [`Session::begin_finish`]. [`FinishSpill::flush`] does the `pwrite`.
+pub struct FinishSpill {
+    writes: Vec<SpillWrite>,
+}
+
+impl FinishSpill {
+    pub fn flush(self) -> Vec<(SpillWrite, bool)> {
+        self.writes
+            .into_iter()
+            .map(|write| {
+                let ok = write.flush();
+                (write, ok)
+            })
+            .collect()
+    }
+}
+
 fn headers_size(headers: &[(String, String)]) -> usize {
     headers.iter().map(|(k, v)| k.len() + v.len()).sum()
 }
 
-fn body_groups_match(flow: &Flow, spill: &SpillStore, groups: &[Vec<String>]) -> bool {
+fn contains_ascii_ignore_case(haystack: &str, needle: &str) -> bool {
+    contains_bytes_ascii_ignore_case(haystack.as_bytes(), needle.as_bytes())
+}
+
+fn contains_bytes_ascii_ignore_case(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if needle.len() > haystack.len() {
+        return false;
+    }
+    haystack.windows(needle.len()).any(|window| {
+        window
+            .iter()
+            .zip(needle)
+            .all(|(hay, pat)| hay.to_ascii_lowercase() == *pat)
+    })
+}
+
+fn starts_with_ignore_ascii(text: &str, prefix: &str) -> bool {
+    let text = text.as_bytes();
+    let prefix = prefix.as_bytes();
+    text.len() >= prefix.len()
+        && text
+            .iter()
+            .zip(prefix)
+            .all(|(hay, pat)| hay.to_ascii_lowercase() == *pat)
+}
+
+/// `*.suffix` matches `suffix` or a host that ends in `.suffix`. The byte before
+/// the suffix must be a dot, so `notexample.com` does not match `*.example.com`.
+fn ends_with_dot_suffix(host: &str, suffix: &str) -> bool {
+    let host = host.as_bytes();
+    let suffix = suffix.as_bytes();
+    if suffix.is_empty() || host.len() <= suffix.len() {
+        return false;
+    }
+    let dot = host.len() - suffix.len() - 1;
+    host[dot] == b'.'
+        && host[dot + 1..]
+            .iter()
+            .zip(suffix)
+            .all(|(hay, pat)| hay.to_ascii_lowercase() == *pat)
+}
+
+fn bytes_contain(bytes: &[u8], keyword: &str) -> bool {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => contains_ascii_ignore_case(text, keyword),
+        Err(_) => String::from_utf8_lossy(bytes)
+            .to_ascii_lowercase()
+            .contains(keyword),
+    }
+}
+
+fn body_groups_match(req: &[u8], res: &[u8], messages: &[Message], groups: &[Vec<String>]) -> bool {
     if groups.is_empty() {
         return true;
     }
-    let req_spilled = flow.request_spill.and_then(|sref| spill.read(sref));
-    let req_bytes = req_spilled.as_deref().unwrap_or(&flow.request_body);
-    let request = String::from_utf8_lossy(req_bytes).to_ascii_lowercase();
-
-    let res_spilled = flow.response_spill.and_then(|sref| spill.read(sref));
-    let res_bytes = res_spilled.as_deref().unwrap_or(&flow.response_body);
-    let response = String::from_utf8_lossy(res_bytes).to_ascii_lowercase();
-
     groups.iter().all(|group| {
         group.iter().any(|keyword| {
-            request.contains(keyword)
-                || response.contains(keyword)
-                || flow.messages.iter().any(|msg| {
-                    msg.text.to_ascii_lowercase().contains(keyword)
-                        || msg.kind.to_ascii_lowercase().contains(keyword)
+            bytes_contain(req, keyword)
+                || bytes_contain(res, keyword)
+                || messages.iter().any(|msg| {
+                    contains_ascii_ignore_case(&msg.text, keyword)
+                        || contains_ascii_ignore_case(&msg.kind, keyword)
                 })
         })
     })
@@ -1330,8 +1684,7 @@ fn header_contains(flow: &Flow, keyword: &str) -> bool {
         .iter()
         .chain(flow.response_headers.iter())
         .any(|(name, value)| {
-            name.to_ascii_lowercase().contains(keyword)
-                || value.to_ascii_lowercase().contains(keyword)
+            contains_ascii_ignore_case(name, keyword) || contains_ascii_ignore_case(value, keyword)
         })
 }
 
@@ -1443,9 +1796,9 @@ fn host_matches(host: &str, pattern: &str) -> bool {
         return true;
     }
     if let Some(suffix) = pattern.strip_prefix("*.") {
-        host == suffix || host.ends_with(&format!(".{suffix}"))
+        host.eq_ignore_ascii_case(suffix) || ends_with_dot_suffix(host, suffix)
     } else {
-        host.contains(pattern)
+        contains_ascii_ignore_case(host, pattern)
     }
 }
 
@@ -1454,25 +1807,77 @@ fn path_prefix_matches(path: &str, prefix: &str) -> bool {
     if prefix.is_empty() {
         return true;
     }
-    if prefix.starts_with('/') {
-        path.starts_with(prefix)
-    } else {
-        path.starts_with(prefix)
-            || path
-                .strip_prefix('/')
-                .is_some_and(|rest| rest.starts_with(prefix))
+    if starts_with_ignore_ascii(path, prefix) {
+        return true;
     }
+    if prefix.starts_with('/') {
+        return false;
+    }
+    path.strip_prefix('/')
+        .is_some_and(|rest| starts_with_ignore_ascii(rest, prefix))
 }
 
-fn comment_has_repeat_id(comment_lower: &str, id_str: &str) -> bool {
-    let tag = format!("repeat:{id_str}");
-    let mut rest = comment_lower;
-    while let Some(pos) = rest.find(&tag) {
-        let after = &rest[pos + tag.len()..];
-        if after.is_empty() || !after.as_bytes()[0].is_ascii_digit() {
+fn comment_has_repeat_id(comment: &str, id_str: &str) -> bool {
+    let bytes = comment.as_bytes();
+    let tag = b"repeat:";
+    let id = id_str.as_bytes();
+    if id.is_empty() || bytes.len() < tag.len() + id.len() {
+        return false;
+    }
+    let last = bytes.len() - tag.len() - id.len();
+    for i in 0..=last {
+        if !bytes[i..i + tag.len()]
+            .iter()
+            .zip(tag)
+            .all(|(hay, pat)| hay.to_ascii_lowercase() == *pat)
+        {
+            continue;
+        }
+        let after = i + tag.len();
+        if !bytes[after..after + id.len()]
+            .iter()
+            .zip(id)
+            .all(|(hay, pat)| hay.to_ascii_lowercase() == *pat)
+        {
+            continue;
+        }
+        let end = after + id.len();
+        if end == bytes.len() || !bytes[end].is_ascii_digit() {
             return true;
         }
-        rest = after;
+    }
+    false
+}
+
+fn u64_eq_digits(n: u64, digits: &str) -> bool {
+    let digits = digits.as_bytes();
+    if digits.is_empty() || !digits.iter().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    let mut buf = [0u8; 20];
+    let mut value = n;
+    let mut index = buf.len();
+    loop {
+        index -= 1;
+        buf[index] = b'0' + (value % 10) as u8;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+    digits == &buf[index..]
+}
+
+fn client_ip_matches(client_ip: &str, pattern: &str) -> bool {
+    if client_ip.is_empty() {
+        return false;
+    }
+    if contains_ascii_ignore_case(client_ip, pattern) {
+        return true;
+    }
+    if pattern.contains('_') {
+        let spaced = pattern.replace('_', " ");
+        return contains_ascii_ignore_case(client_ip, &spaced);
     }
     false
 }
@@ -1493,8 +1898,104 @@ impl FlowQuery {
         Self { stages }
     }
 
+    fn needs_body(&self) -> bool {
+        self.stages.iter().any(|stage| !stage.bodies.is_empty())
+    }
+
+    fn needs_op(&self) -> bool {
+        self.stages.iter().any(|stage| !stage.ops.is_empty())
+    }
+
+    fn matches_meta(&self, flow: &Flow) -> bool {
+        self.stages.iter().all(|stage| stage.matches_meta(flow))
+    }
+
+    fn matches_payload(&self, path: &str, req: &[u8], res: &[u8], messages: &[Message]) -> bool {
+        self.stages
+            .iter()
+            .all(|stage| stage.matches_payload(path, req, res, messages))
+    }
+
     fn matches(&self, flow: &Flow, spill: &SpillStore) -> bool {
-        self.stages.iter().all(|stage| stage.matches(flow, spill))
+        if !self.matches_meta(flow) {
+            return false;
+        }
+        if !self.needs_body() && !self.needs_op() {
+            return true;
+        }
+        let req_owned = flow.request_spill.and_then(|sref| spill.read(sref));
+        let res_owned = flow.response_spill.and_then(|sref| spill.read(sref));
+        let req = req_owned.as_deref().unwrap_or(&flow.request_body);
+        let res = res_owned.as_deref().unwrap_or(&flow.response_body);
+        self.matches_payload(&flow.path, req, res, &flow.messages)
+    }
+}
+
+enum BodySource {
+    Empty,
+    Memory(Vec<u8>),
+    File(SpillIo),
+}
+
+impl BodySource {
+    fn read(&self) -> std::borrow::Cow<'_, [u8]> {
+        match self {
+            Self::Empty => std::borrow::Cow::Borrowed(&[]),
+            Self::Memory(bytes) => std::borrow::Cow::Borrowed(bytes),
+            Self::File(io) => std::borrow::Cow::Owned(io.read()),
+        }
+    }
+}
+
+enum PlanItem {
+    Ready {
+        id: u64,
+        started: SystemTime,
+    },
+    Probe {
+        id: u64,
+        started: SystemTime,
+        path: String,
+        req: BodySource,
+        res: BodySource,
+        messages: Vec<Message>,
+    },
+}
+
+/// Metadata matches plus spill probes. [`FilterPlan::finish`] runs outside the session lock.
+pub struct FilterPlan {
+    query: FlowQuery,
+    items: Vec<PlanItem>,
+}
+
+impl FilterPlan {
+    pub fn finish(self) -> Vec<(u64, Option<SystemTime>)> {
+        let mut previous = None;
+        let mut out = Vec::new();
+        for item in self.items {
+            let (id, started, matched) = match item {
+                PlanItem::Ready { id, started } => (id, started, true),
+                PlanItem::Probe {
+                    id,
+                    started,
+                    path,
+                    req,
+                    res,
+                    messages,
+                } => {
+                    let req = req.read();
+                    let res = res.read();
+                    let matched = self.query.matches_payload(&path, &req, &res, &messages);
+                    (id, started, matched)
+                }
+            };
+            if !matched {
+                continue;
+            }
+            out.push((id, previous));
+            previous = Some(started);
+        }
+        out
     }
 }
 
@@ -1680,7 +2181,7 @@ impl FlowStage {
         query
     }
 
-    fn matches(&self, flow: &Flow, spill: &SpillStore) -> bool {
+    fn matches_meta(&self, flow: &Flow) -> bool {
         if self.pinned_only && !flow.pinned {
             return false;
         }
@@ -1704,10 +2205,12 @@ impl FlowStage {
                 .iter()
                 .chain(flow.request_headers.iter())
                 .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
-                .map(|(_, value)| value.to_ascii_lowercase());
-            if !header
-                .is_some_and(|value| self.content_types.iter().any(|kind| value.contains(kind)))
-            {
+                .map(|(_, value)| value);
+            if !header.is_some_and(|value| {
+                self.content_types
+                    .iter()
+                    .any(|kind| contains_ascii_ignore_case(value, kind))
+            }) {
                 return false;
             }
         }
@@ -1718,16 +2221,15 @@ impl FlowStage {
         {
             return false;
         }
-        let host = flow.host.to_ascii_lowercase();
-        let path = flow.path.to_ascii_lowercase();
-        let client_ip = flow.client_ip.to_ascii_lowercase();
-        let comment = flow.comment.to_ascii_lowercase();
         if !self.comments.is_empty()
             && !self.comments.iter().all(|group| {
                 if group.is_empty() {
-                    !comment.is_empty()
+                    !flow.comment.is_empty()
                 } else {
-                    !comment.is_empty() && group.iter().any(|kw| comment.contains(kw))
+                    !flow.comment.is_empty()
+                        && group
+                            .iter()
+                            .any(|keyword| contains_ascii_ignore_case(&flow.comment, keyword))
                 }
             })
         {
@@ -1736,10 +2238,11 @@ impl FlowStage {
         if !self.repeats.is_empty()
             && !self.repeats.iter().all(|group| {
                 if group.is_empty() {
-                    comment.contains("repeat:")
+                    contains_ascii_ignore_case(&flow.comment, "repeat:")
                 } else {
                     group.iter().any(|target| {
-                        flow.id.to_string() == *target || comment_has_repeat_id(&comment, target)
+                        u64_eq_digits(flow.id, target)
+                            || comment_has_repeat_id(&flow.comment, target)
                     })
                 }
             })
@@ -1750,16 +2253,15 @@ impl FlowStage {
             && !self
                 .hosts
                 .iter()
-                .any(|pattern| host_matches(&host, pattern))
+                .any(|pattern| host_matches(&flow.host, pattern))
         {
             return false;
         }
-        if !self.client_ips.is_empty()
-            && !self.client_ips.iter().any(|ip| {
-                !client_ip.is_empty()
-                    && (client_ip.contains(ip)
-                        || (ip.contains('_') && client_ip.contains(&ip.replace('_', " "))))
-            })
+        if !self
+            .client_ips
+            .iter()
+            .any(|ip| client_ip_matches(&flow.client_ip, ip))
+            && !self.client_ips.is_empty()
         {
             return false;
         }
@@ -1767,31 +2269,29 @@ impl FlowStage {
             && !self
                 .path_prefixes
                 .iter()
-                .any(|prefix| path_prefix_matches(&path, prefix))
+                .any(|prefix| path_prefix_matches(&flow.path, prefix))
         {
             return false;
         }
-        if self
-            .excludes
-            .iter()
-            .any(|text| host_matches(&host, text) || path.contains(text))
-        {
-            return false;
-        }
-        if !self.texts.iter().all(|group| {
-            group.iter().any(|text| {
-                host_matches(&host, text)
-                    || path.contains(text)
-                    || (!client_ip.is_empty() && client_ip.contains(text))
-                    || (!comment.is_empty() && comment.contains(text))
-            })
+        if self.excludes.iter().any(|text| {
+            host_matches(&flow.host, text) || contains_ascii_ignore_case(&flow.path, text)
         }) {
             return false;
         }
+        self.texts.iter().all(|group| {
+            group.iter().any(|text| {
+                host_matches(&flow.host, text)
+                    || contains_ascii_ignore_case(&flow.path, text)
+                    || (!flow.client_ip.is_empty()
+                        && contains_ascii_ignore_case(&flow.client_ip, text))
+                    || (!flow.comment.is_empty() && contains_ascii_ignore_case(&flow.comment, text))
+            })
+        })
+    }
+
+    fn matches_payload(&self, path: &str, req: &[u8], res: &[u8], messages: &[Message]) -> bool {
         if !self.ops.is_empty() {
-            let req_spilled = flow.request_spill.and_then(|sref| spill.read(sref));
-            let req_bytes = req_spilled.as_deref().unwrap_or(&flow.request_body);
-            let ops = crate::present::graphql_operations(&flow.path, req_bytes);
+            let ops = crate::present::graphql_operations(path, req);
             if ops.is_empty() {
                 return false;
             }
@@ -1805,7 +2305,7 @@ impl FlowStage {
                 return false;
             }
         }
-        body_groups_match(flow, spill, &self.bodies)
+        body_groups_match(req, res, messages, &self.bodies)
     }
 }
 

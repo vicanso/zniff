@@ -21,8 +21,8 @@ mod sysproxy;
 mod updater;
 mod ws;
 
-use std::cell::Cell;
-use std::collections::HashMap;
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -217,6 +217,12 @@ struct SeqBuilder {
     redact_export: Signal<bool>,
     redact_fields: Signal<String>,
     redact_flow_id: Signal<Option<u64>>,
+    /// Created with the app, not inside a panel. Virtualized rows can still read
+    /// these for a frame after the panel closes, so they must outlive it.
+    viewport_w: Signal<f32>,
+    track_w: Signal<f32>,
+    layout: Memo<(Vec<f32>, f32)>,
+    flat_rows: Memo<Vec<DepFlatRow>>,
 }
 
 /// The app's UI set (`nsh.json` `"rust"`).
@@ -953,9 +959,10 @@ pub fn App() -> impl IntoElement {
     let saved_profiles = signal(saved_filter.saved_profiles);
     let profile_history = signal(saved_filter.profile_history);
     let selected = signal(None::<u64>);
-    let rows = signal(Vec::<RowLine>::new());
+    let rows = signal(Vec::<Arc<RowLine>>::new());
     let filtered_stats = signal(session::FilteredStats::default());
     let facets = signal(session::SessionFacets::default());
+    let facets_open = signal(false);
     let flow_total = signal(0_usize);
     let listen = signal(String::new());
     let saved = saved_config();
@@ -1021,26 +1028,31 @@ pub fn App() -> impl IntoElement {
         body: signal(String::new()),
         status: signal(String::new()),
     };
+    let seq_diagram = signal(present::SequenceDiagramData::default());
+    let seq_viewport_w = signal(0.0_f32);
     let seq_builder = SeqBuilder {
         open: signal(false),
         items: signal(Vec::new()),
         include_response: signal(true),
         include_query: signal(false),
         output: signal(String::new()),
-        diagram: signal(present::SequenceDiagramData::default()),
+        diagram: seq_diagram,
         view_mode: signal(0),
         hover_bar: signal(None),
         redact_open: signal(false),
         redact_export: signal(saved.redact_export),
         redact_fields: signal(saved.redact_fields.clone()),
         redact_flow_id: signal(None),
+        viewport_w: seq_viewport_w,
+        track_w: signal(0.0_f32),
+        layout: computed(move || seq_diagram.with(|d| swimlane_layout(d, seq_viewport_w.get()))),
+        flat_rows: computed(move || seq_diagram.with(build_dep_flat_rows)),
     };
     effect(move || {
         let has_selected = selected.get().is_some();
         let is_composing = compose.composing.get();
         if has_selected || is_composing {
-            seq_builder.open.set(false);
-            seq_builder.redact_open.set(false);
+            close_sequence_diagram(seq_builder);
         }
     });
     let list_width = signal(saved.list_width as f32);
@@ -1112,6 +1124,7 @@ pub fn App() -> impl IntoElement {
     let rows_tick = rows;
     let stats_tick = filtered_stats;
     let facets_tick = facets;
+    let facets_open_tick = facets_open;
     let total_tick = flow_total;
     let shown_tick = shown;
     let seen_gen = stored(0_u64);
@@ -1143,6 +1156,12 @@ pub fn App() -> impl IntoElement {
     let seen_update = stored(update_state.get());
     let update_probe_at = stored(SystemTime::now());
     let spill_gc_at = stored(SystemTime::now());
+    let seen_facets_open = stored(false);
+    let detail_hold = stored(SystemTime::UNIX_EPOCH);
+    let row_cache_tick = Rc::new(RefCell::new(RowCache {
+        lang: ui_lang(langs),
+        rows: HashMap::new(),
+    }));
     let toast_manager = stored(ToastManager::<u64, StatusMsg>::new(ToastMotion::sonner()));
     let toast_shown = signal(Vec::<(u64, StatusMsg, ToastTransitionStatus)>::new());
     let toast_state = ToastStackState::new();
@@ -1349,6 +1368,7 @@ pub fn App() -> impl IntoElement {
                 win_since.replace(None);
             }
         }
+        release_sequence_data(seq_builder);
         let spill_expired =
             if spill_gc_at.get().elapsed().unwrap_or_default() >= Duration::from_secs(15) {
                 let now = SystemTime::now();
@@ -1365,13 +1385,19 @@ pub fn App() -> impl IntoElement {
         let pretty_now = shown_tick.pretty.get();
         let sort_now = sort_tick.get();
         let full_url_now = cols_tick.get().full_url;
+        let facets_open_now = facets_open_tick.get();
+        let facets_opened = facets_open_now && !seen_facets_open.get();
+        seen_facets_open.replace(facets_open_now);
         let list_changed = generation != seen_gen.get()
             || effective_filter_now != seen_filter.get()
             || filter_now != seen_setup_filter.get()
             || lang_now != seen_lang.get()
             || sort_now != seen_sort.get()
             || full_url_now != seen_full_url.get()
-            || spill_expired;
+            || spill_expired
+            || facets_opened;
+        let want_stats = selected_now.is_none();
+        let stats_only = !list_changed && want_stats && seen_selected.get().is_some();
         if list_changed {
             seen_gen.replace(generation);
             seen_filter.replace(effective_filter_now.clone());
@@ -1379,32 +1405,64 @@ pub fn App() -> impl IntoElement {
             seen_lang.replace(lang_now);
             seen_sort.replace(sort_now);
             seen_full_url.replace(full_url_now);
-            let (lines, stats) = row_lines(
-                &controls_tick.hub,
-                &effective_filter_now,
-                lang_now,
-                sort_now,
-                full_url_now,
-            );
-            let (next_total, next_facets, next_mem, next_dropped) =
+            let (matched, _) = controls_tick.hub.matching_ids(&effective_filter_now);
+            let facet_ids = if facets_open_now && filter_now != effective_filter_now {
+                Some(controls_tick.hub.matching_ids(&filter_now).0)
+            } else {
+                None
+            };
+            let (lines, stats, next_facets, next_total, next_mem, next_dropped) = {
+                let mut cache = row_cache_tick.borrow_mut();
                 controls_tick.hub.with_session(|session| {
+                    let lines = project_rows(
+                        session,
+                        &matched,
+                        lang_now,
+                        sort_now,
+                        full_url_now,
+                        &mut cache,
+                    );
+                    let stats = want_stats.then(|| {
+                        session::FilteredStats::from_flows(
+                            matched.iter().filter_map(|(id, _)| session.get(*id)),
+                        )
+                    });
+                    let next_facets = facets_open_now.then(|| {
+                        let ids = facet_ids.as_ref().unwrap_or(&matched);
+                        session::SessionFacets::from_flows(
+                            ids.iter().filter_map(|(id, _)| session.get(*id)),
+                        )
+                    });
                     (
+                        lines,
+                        stats,
+                        next_facets,
                         session.len(),
-                        session.facets_matching(&filter_now),
                         format_bytes(session.memory_bytes()),
                         session.dropped(),
                     )
-                });
+                })
+            };
             if total_tick.get_untracked() != next_total {
                 total_tick.set(next_total);
             }
-            if facets_tick.with(|cur| cur != &next_facets) {
+            if let Some(next_facets) = next_facets
+                && facets_tick.with(|cur| cur != &next_facets)
+            {
                 facets_tick.set(next_facets);
             }
-            if rows_tick.with(|cur| cur != &lines) {
+            let had_rows = rows_tick.with(|cur| !cur.is_empty());
+            if !rows_tick.with(|cur| same_row_arcs(cur, &lines)) {
                 rows_tick.set(lines);
             }
-            if stats_tick.with(|cur| cur != &stats) {
+            if had_rows && next_total == 0 {
+                // The session was just emptied: the list copies are freed only now,
+                // after the clear's own trim, so hand those pages back as well.
+                crate::session::trim_memory();
+            }
+            if let Some(stats) = stats
+                && stats_tick.with(|cur| cur != &stats)
+            {
                 stats_tick.set(stats);
             }
             if memory.with(|cur| cur != &next_mem) {
@@ -1412,6 +1470,16 @@ pub fn App() -> impl IntoElement {
             }
             if dropped.get_untracked() != next_dropped {
                 dropped.set(next_dropped);
+            }
+        } else if stats_only {
+            let (matched, _) = controls_tick.hub.matching_ids(&effective_filter_now);
+            let stats = controls_tick.hub.with_session(|session| {
+                session::FilteredStats::from_flows(
+                    matched.iter().filter_map(|(id, _)| session.get(*id)),
+                )
+            });
+            if stats_tick.with(|cur| cur != &stats) {
+                stats_tick.set(stats);
             }
         }
         if selected_now != seen_selected.get() {
@@ -1422,16 +1490,21 @@ pub fn App() -> impl IntoElement {
             shown_tick.msg_dir.set(0);
             shown_tick.msg_kind.set(0);
         }
-        let (selected_rev, baseline_rev) = if selected_now.is_some() || baseline_now.is_some() {
-            controls_tick.hub.with_session(|session| {
-                (
-                    selected_now.and_then(|id| session.get(id).map(|f| f.rev)),
-                    baseline_now.and_then(|id| session.get(id).map(|f| f.rev)),
-                )
-            })
-        } else {
-            (None, None)
-        };
+        let (selected_rev, selected_done, baseline_rev) =
+            if selected_now.is_some() || baseline_now.is_some() {
+                controls_tick.hub.with_session(|session| {
+                    let selected_flow = selected_now.and_then(|id| session.get(id));
+                    (
+                        selected_flow.map(|flow| flow.rev),
+                        selected_flow
+                            .map(|flow| flow.finished_at.is_some())
+                            .unwrap_or(true),
+                        baseline_now.and_then(|id| session.get(id).map(|flow| flow.rev)),
+                    )
+                })
+            } else {
+                (None, true, None)
+            };
         let detail_stamp = (
             false,
             selected_now,
@@ -1442,14 +1515,24 @@ pub fn App() -> impl IntoElement {
             lang_now,
         );
         if detail_stamp != seen_detail_stamp.get() || spill_expired {
-            seen_detail_stamp.replace(detail_stamp);
-            publish_detail(
-                &shown_tick,
-                &controls_tick.hub,
-                selected_now,
-                lang_now,
-                baseline_now,
-            );
+            let prev = seen_detail_stamp.get();
+            let view_changed = prev.1 != selected_now
+                || prev.3 != baseline_now
+                || prev.5 != pretty_now
+                || prev.6 != lang_now;
+            let streaming = selected_now.is_some() && !selected_done;
+            let due = detail_hold.get().elapsed().unwrap_or_default() >= Duration::from_millis(200);
+            if !streaming || view_changed || spill_expired || due {
+                seen_detail_stamp.replace(detail_stamp);
+                detail_hold.replace(SystemTime::now());
+                publish_detail(
+                    &shown_tick,
+                    &controls_tick.hub,
+                    selected_now,
+                    lang_now,
+                    baseline_now,
+                );
+            }
         }
     });
 
@@ -1501,6 +1584,7 @@ pub fn App() -> impl IntoElement {
     let baseline_clear_key = baseline;
     let compose_clear_key = compose;
     let seq_clear_key = seq_builder;
+    let shown_clear_key = shown;
     on_key("mod+k", move |_| {
         clear_captured(
             &controls_clear_key,
@@ -1508,6 +1592,7 @@ pub fn App() -> impl IntoElement {
             baseline_clear_key,
             compose_clear_key,
             seq_clear_key,
+            shown_clear_key,
         );
     });
     on_key("mod+f", move |_| filter_focus.focus());
@@ -1527,7 +1612,7 @@ pub fn App() -> impl IntoElement {
         if compose_esc.composing.get() {
             reset_compose(compose_esc);
         } else if seq_esc.open.get() {
-            seq_esc.open.set(false);
+            close_sequence_diagram(seq_esc);
         } else if shown_esc.repeating.get() {
             shown_esc.repeating.set(false);
         } else if shown_esc.editing_comment.get() {
@@ -1559,6 +1644,7 @@ pub fn App() -> impl IntoElement {
                     baseline_clear,
                     compose_clear,
                     seq_builder,
+                    shown,
                 );
             },
             move || {
@@ -1568,6 +1654,7 @@ pub fn App() -> impl IntoElement {
                     baseline_clear_unpinned,
                     compose_clear_unpinned,
                     seq_builder,
+                    shown,
                 );
             },
             move || export_har_file(controls_export.clone(), &effective_filter.get()),
@@ -1605,6 +1692,7 @@ pub fn App() -> impl IntoElement {
                 .child(flow_list(
                     rows,
                     facets,
+                    facets_open,
                     selected,
                     compose,
                     list_filter,
@@ -1818,7 +1906,7 @@ fn toolbar(
     copy_env: impl Fn() + 'static,
     toggle: impl Fn() + 'static,
     import_controls: Arc<Controls>,
-    rows: Signal<Vec<RowLine>>,
+    rows: Signal<Vec<Arc<RowLine>>>,
     flow_total: Signal<usize>,
     filter: Signal<String>,
     pretty: Signal<bool>,
@@ -1981,12 +2069,12 @@ fn toolbar(
         .child(toolbar_update_pill(update_state, update_controls))
         .child(flow_count_badge(rows, flow_total, filter, move || {
             reset_compose(compose);
-            seq_builder.open.set(false);
+            close_sequence_diagram(seq_builder);
             selected.set(None);
         }))
         .child(toolbar_text_button(tr("统计", "Summary"), move || {
             reset_compose(compose);
-            seq_builder.open.set(false);
+            close_sequence_diagram(seq_builder);
             selected.set(None);
         }))
         .child(toolbar_text_button(tr("清空", "Clear"), {
@@ -4606,8 +4694,9 @@ fn store_list_width(width: f32, controls: &Controls) {
 
 #[allow(clippy::too_many_arguments)]
 fn flow_list(
-    rows: Signal<Vec<RowLine>>,
+    rows: Signal<Vec<Arc<RowLine>>>,
     facets: Signal<session::SessionFacets>,
+    facets_open: Signal<bool>,
     selected: Signal<Option<u64>>,
     compose: Compose,
     list_filter: Signal<String>,
@@ -4626,7 +4715,6 @@ fn flow_list(
     let picked = signal(None::<u64>);
     let menu_open = signal(false);
     let menu_at = signal(Point::<Points>::default());
-    let facets_open = signal(false);
     let facet_tab = signal(0_u8);
     let effective_width = move || clamp_list_px_for_window(width.get(), window().width.0);
     view()
@@ -6195,7 +6283,7 @@ fn list_empty(filter: Signal<String>) -> impl IntoElement {
 
 #[allow(clippy::too_many_arguments)]
 fn list_menu(
-    rows: Signal<Vec<RowLine>>,
+    rows: Signal<Vec<Arc<RowLine>>>,
     selected: Signal<Option<u64>>,
     compose: Compose,
     columns: Signal<ListColumns>,
@@ -6272,7 +6360,7 @@ fn list_menu(
 }
 
 fn flow_table(
-    rows: Signal<Vec<RowLine>>,
+    rows: Signal<Vec<Arc<RowLine>>>,
     selected: Signal<Option<u64>>,
     baseline: Signal<Option<u64>>,
     compose: Compose,
@@ -7148,7 +7236,7 @@ fn flow_pinned(controls: &Controls, id: Option<u64>) -> bool {
 }
 
 fn flow_cell(
-    rows: Signal<Vec<RowLine>>,
+    rows: Signal<Vec<Arc<RowLine>>>,
     selected: Signal<Option<u64>>,
     baseline: Signal<Option<u64>>,
     columns: Signal<ListColumns>,
@@ -7240,7 +7328,7 @@ fn flow_header(
 }
 
 fn row_edge_mark(
-    rows: Signal<Vec<RowLine>>,
+    rows: Signal<Vec<Arc<RowLine>>>,
     selected: Signal<Option<u64>>,
     baseline: Signal<Option<u64>>,
     index: usize,
@@ -7254,7 +7342,7 @@ fn row_edge_mark(
 }
 
 fn method_cell(
-    rows: Signal<Vec<RowLine>>,
+    rows: Signal<Vec<Arc<RowLine>>>,
     selected: Signal<Option<u64>>,
     baseline: Signal<Option<u64>>,
     columns: Signal<ListColumns>,
@@ -7332,7 +7420,7 @@ fn method_cell(
 }
 
 fn id_cell(
-    rows: Signal<Vec<RowLine>>,
+    rows: Signal<Vec<Arc<RowLine>>>,
     selected: Signal<Option<u64>>,
     baseline: Signal<Option<u64>>,
     columns: Signal<ListColumns>,
@@ -7369,7 +7457,11 @@ fn id_cell(
         )
 }
 
-fn status_text(rows: Signal<Vec<RowLine>>, columns: Signal<ListColumns>, index: usize) -> Text {
+fn status_text(
+    rows: Signal<Vec<Arc<RowLine>>>,
+    columns: Signal<ListColumns>,
+    index: usize,
+) -> Text {
     mono(move || {
         rows.with(|rows| {
             rows.get(index)
@@ -7383,16 +7475,16 @@ fn status_text(rows: Signal<Vec<RowLine>>, columns: Signal<ListColumns>, index: 
     .text_size(px(12.0))
     .font_weight(FontWeight::SEMIBOLD)
     .text_color(move || {
-        let row = rows.with(|rows| rows.get(index).cloned());
-        match row {
-            Some(row) => http_status_fg(row.status, row.failed),
-            None => fg_muted(),
-        }
+        rows.with(|rows| {
+            rows.get(index)
+                .map(|row| http_status_fg(row.status, row.failed))
+                .unwrap_or_else(fg_muted)
+        })
     })
 }
 
 fn time_cell(
-    rows: Signal<Vec<RowLine>>,
+    rows: Signal<Vec<Arc<RowLine>>>,
     columns: Signal<ListColumns>,
     hover: CellHover,
     index: usize,
@@ -7432,7 +7524,7 @@ fn time_cell(
 }
 
 fn elapsed_cell(
-    rows: Signal<Vec<RowLine>>,
+    rows: Signal<Vec<Arc<RowLine>>>,
     columns: Signal<ListColumns>,
     index: usize,
 ) -> impl IntoElement {
@@ -7467,7 +7559,7 @@ fn elapsed_cell(
 }
 
 fn host_cell(
-    rows: Signal<Vec<RowLine>>,
+    rows: Signal<Vec<Arc<RowLine>>>,
     columns: Signal<ListColumns>,
     hover: CellHover,
     index: usize,
@@ -7509,7 +7601,7 @@ fn host_cell(
 }
 
 fn client_ip_cell(
-    rows: Signal<Vec<RowLine>>,
+    rows: Signal<Vec<Arc<RowLine>>>,
     columns: Signal<ListColumns>,
     hover: CellHover,
     index: usize,
@@ -7556,7 +7648,11 @@ fn client_ip_cell(
         )
 }
 
-fn protocol_cell(rows: Signal<Vec<RowLine>>, columns: Signal<ListColumns>, index: usize) -> Text {
+fn protocol_cell(
+    rows: Signal<Vec<Arc<RowLine>>>,
+    columns: Signal<ListColumns>,
+    index: usize,
+) -> Text {
     mono(move || {
         rows.with(|rows| {
             rows.get(index)
@@ -7572,7 +7668,7 @@ fn protocol_cell(rows: Signal<Vec<RowLine>>, columns: Signal<ListColumns>, index
 }
 
 fn size_cell(
-    rows: Signal<Vec<RowLine>>,
+    rows: Signal<Vec<Arc<RowLine>>>,
     columns: Signal<ListColumns>,
     index: usize,
 ) -> impl IntoElement {
@@ -7601,7 +7697,7 @@ fn size_cell(
 }
 
 fn path_cell(
-    rows: Signal<Vec<RowLine>>,
+    rows: Signal<Vec<Arc<RowLine>>>,
     selected: Signal<Option<u64>>,
     baseline: Signal<Option<u64>>,
     columns: Signal<ListColumns>,
@@ -7721,7 +7817,7 @@ fn detail_pane(
     selected: Signal<Option<u64>>,
     compose: Compose,
     seq_builder: SeqBuilder,
-    rows: Signal<Vec<RowLine>>,
+    rows: Signal<Vec<Arc<RowLine>>>,
     list_filter: Signal<String>,
     effective_filter: Signal<String>,
     rules_text: Signal<String>,
@@ -10648,7 +10744,7 @@ fn toolbar_menu(
     clear: impl Fn() + 'static,
     clear_unpinned: impl Fn() + 'static,
     import_controls: Arc<Controls>,
-    rows: Signal<Vec<RowLine>>,
+    rows: Signal<Vec<Arc<RowLine>>>,
     flow_total: Signal<usize>,
     filter: Signal<String>,
     pretty: Signal<bool>,
@@ -10700,7 +10796,7 @@ fn flow_count_text(filtered: usize, total: usize, filtering: bool) -> String {
 }
 
 fn flow_count_now(
-    rows: Signal<Vec<RowLine>>,
+    rows: Signal<Vec<Arc<RowLine>>>,
     flow_total: Signal<usize>,
     filter: Signal<String>,
 ) -> String {
@@ -10712,7 +10808,7 @@ fn flow_count_now(
 }
 
 fn flow_count_badge(
-    rows: Signal<Vec<RowLine>>,
+    rows: Signal<Vec<Arc<RowLine>>>,
     flow_total: Signal<usize>,
     filter: Signal<String>,
     on_press: impl Fn() + 'static,
@@ -10831,7 +10927,7 @@ fn more_menu(
     clear: impl Fn() + 'static,
     clear_unpinned: impl Fn() + 'static,
     import_controls: Arc<Controls>,
-    rows: Signal<Vec<RowLine>>,
+    rows: Signal<Vec<Arc<RowLine>>>,
     flow_total: Signal<usize>,
     filter: Signal<String>,
     pretty: Signal<bool>,
@@ -11710,73 +11806,107 @@ fn list_url(url: &str, path: &str, error: Option<&str>, failed: bool, lang: Lang
     }
 }
 
-fn row_lines(
-    hub: &Hub,
-    filter: &str,
+struct CachedRow {
+    rev: u64,
+    prev: Option<SystemTime>,
+    line: Arc<RowLine>,
+}
+
+struct RowCache {
+    lang: Lang,
+    rows: HashMap<u64, CachedRow>,
+}
+
+fn same_row_arcs(current: &[Arc<RowLine>], next: &[Arc<RowLine>]) -> bool {
+    current.len() == next.len()
+        && current
+            .iter()
+            .zip(next)
+            .all(|(left, right)| Arc::ptr_eq(left, right))
+}
+
+fn project_rows(
+    session: &session::Session,
+    matched: &[(u64, Option<SystemTime>)],
     lang: Lang,
     sort: Option<ListSort>,
     full_url: bool,
-) -> (Vec<RowLine>, session::FilteredStats) {
-    let (mut rows, stats) = hub.with_session(|session| {
-        let matched = session.matching_with_previous_start(filter);
-        let stats = session::FilteredStats::from_flows(
-            matched.iter().filter_map(|(id, _)| session.get(*id)),
-        );
-        let rows: Vec<RowLine> = matched
-            .into_iter()
-            .filter_map(|(id, previous)| {
-                let flow = session.get(id)?;
-                let failed = flow.error.is_some() && flow.status.is_none();
-                let gap_nanos = previous
-                    .and_then(|prev| flow.started.duration_since(prev).ok())
-                    .map(|duration| duration.as_nanos())
-                    .unwrap_or(0);
-                let elapsed_nanos = flow
-                    .finished_at
-                    .and_then(|fin| fin.duration_since(flow.started).ok())
-                    .map(|duration| duration.as_nanos());
-                Some(RowLine {
-                    id,
-                    method: flow.method.clone(),
-                    status: flow.status,
-                    time: present::format_gap(previous, flow.started),
-                    gap_nanos,
-                    clock: present::format_clock(flow.started),
-                    elapsed: present::format_elapsed(flow.started, flow.finished_at),
-                    elapsed_nanos,
-                    elapsed_slow: flow.finished_at.is_some()
-                        && present::is_slow(
-                            flow.started,
-                            flow.finished_at,
-                            std::time::SystemTime::now(),
-                        ),
-                    host: flow.host.clone(),
-                    client_ip: if flow.client_ip.is_empty() {
-                        "—".to_string()
-                    } else {
-                        flow.client_ip.clone()
-                    },
-                    path: list_path(&flow.path, flow.error.as_deref(), failed, lang),
-                    url: list_url(&flow.url, &flow.path, flow.error.as_deref(), failed, lang),
-                    comment: flow.comment.clone(),
-                    protocol: flow.protocol.label_in(lang).to_string(),
-                    size: format_bytes(flow.response_bytes as usize),
-                    size_bytes: flow.response_bytes,
-                    failed,
-                    pinned: flow.pinned,
-                })
-            })
-            .collect();
-        (rows, stats)
-    });
-    if let Some(sort) = sort {
-        sort_row_lines(&mut rows, sort, full_url);
+    cache: &mut RowCache,
+) -> Vec<Arc<RowLine>> {
+    if cache.lang != lang {
+        cache.rows.clear();
+        cache.lang = lang;
     }
-    (rows, stats)
+    let mut lines = Vec::with_capacity(matched.len());
+    let mut keep = HashSet::with_capacity(matched.len());
+    for (id, previous) in matched {
+        keep.insert(*id);
+        let Some(flow) = session.get(*id) else {
+            continue;
+        };
+        if let Some(hit) = cache.rows.get(id)
+            && hit.rev == flow.rev
+            && hit.prev == *previous
+        {
+            lines.push(Arc::clone(&hit.line));
+            continue;
+        }
+        let failed = flow.error.is_some() && flow.status.is_none();
+        let gap_nanos = previous
+            .and_then(|prev| flow.started.duration_since(prev).ok())
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let elapsed_nanos = flow
+            .finished_at
+            .and_then(|fin| fin.duration_since(flow.started).ok())
+            .map(|duration| duration.as_nanos());
+        let line = Arc::new(RowLine {
+            id: *id,
+            method: flow.method.clone(),
+            status: flow.status,
+            time: present::format_gap(*previous, flow.started),
+            gap_nanos,
+            clock: present::format_clock(flow.started),
+            elapsed: present::format_elapsed(flow.started, flow.finished_at),
+            elapsed_nanos,
+            elapsed_slow: flow.finished_at.is_some()
+                && present::is_slow(flow.started, flow.finished_at, SystemTime::now()),
+            host: flow.host.clone(),
+            client_ip: if flow.client_ip.is_empty() {
+                "—".to_string()
+            } else {
+                flow.client_ip.clone()
+            },
+            path: list_path(&flow.path, flow.error.as_deref(), failed, lang),
+            url: list_url(&flow.url, &flow.path, flow.error.as_deref(), failed, lang),
+            comment: flow.comment.clone(),
+            protocol: flow.protocol.label_in(lang).to_string(),
+            size: format_bytes(flow.response_bytes as usize),
+            size_bytes: flow.response_bytes,
+            failed,
+            pinned: flow.pinned,
+        });
+        cache.rows.insert(
+            *id,
+            CachedRow {
+                rev: flow.rev,
+                prev: *previous,
+                line: Arc::clone(&line),
+            },
+        );
+        lines.push(line);
+    }
+    cache.rows.retain(|id, _| keep.contains(id));
+    if let Some(sort) = sort {
+        sort_row_lines(&mut lines, sort, full_url);
+    }
+    lines
 }
 
-fn sort_row_lines(rows: &mut [RowLine], sort: ListSort, full_url: bool) {
+fn sort_row_lines<T: std::borrow::Borrow<RowLine>>(rows: &mut [T], sort: ListSort, full_url: bool) {
     rows.sort_by(|a, b| {
+        let a = a.borrow();
+        let b = b.borrow();
         let primary = match sort.column {
             ListColumn::Id => a.id.cmp(&b.id),
             ListColumn::Method => cmp_ignore_ascii_case(&a.method, &b.method),
@@ -11827,52 +11957,13 @@ fn status_sort_rank(row: &RowLine) -> (u8, u16) {
 
 fn publish_detail(shown: &Shown, hub: &Hub, id: Option<u64>, lang: Lang, baseline: Option<u64>) {
     let Some(id) = id else {
-        shown.phase.set(Phase::Empty);
-        shown.editing_comment.set(false);
-        shown.repeating.set(false);
-        shown.request_hex.set(Vec::new());
-        shown.response_hex.set(Vec::new());
-        shown.preview.set(String::new());
-        shown.preview_w.set(0.0);
-        shown.preview_h.set(0.0);
-        shown.image_caption.set(String::new());
-        shown.diff.set(String::new());
-        shown.diff_old.set(String::new());
-        shown.diff_new.set(String::new());
-        shown.request_language.set(String::new());
-        shown.response_language.set(String::new());
-        shown.request_doc.set(None);
-        shown.response_doc.set(None);
-        shown.request_form.set(Vec::new());
-        shown.rules.set(String::new());
-        shown.pinned.set(false);
-        shown.comment.set(String::new());
-        shown.timing_bar.set(present::TimingBreakdown::default());
+        clear_shown(*shown);
         return;
     };
     let snapshot = hub.with_session(|session| session.hydrated(id));
     let Some(flow) = snapshot else {
+        clear_shown(*shown);
         shown.phase.set(Phase::Gone);
-        shown.editing_comment.set(false);
-        shown.repeating.set(false);
-        shown.request_hex.set(Vec::new());
-        shown.response_hex.set(Vec::new());
-        shown.preview.set(String::new());
-        shown.preview_w.set(0.0);
-        shown.preview_h.set(0.0);
-        shown.image_caption.set(String::new());
-        shown.diff.set(String::new());
-        shown.diff_old.set(String::new());
-        shown.diff_new.set(String::new());
-        shown.request_language.set(String::new());
-        shown.response_language.set(String::new());
-        shown.request_doc.set(None);
-        shown.response_doc.set(None);
-        shown.request_form.set(Vec::new());
-        shown.rules.set(String::new());
-        shown.pinned.set(false);
-        shown.comment.set(String::new());
-        shown.timing_bar.set(present::TimingBreakdown::default());
         return;
     };
     let (diff_old, diff_new) = match baseline {
@@ -13995,7 +14086,7 @@ fn begin_new_request(compose: Compose, selected: Signal<Option<u64>>) {
 
 fn begin_sequence_diagram(
     controls: &Controls,
-    rows: Signal<Vec<RowLine>>,
+    rows: Signal<Vec<Arc<RowLine>>>,
     seq_builder: SeqBuilder,
     compose: Compose,
     selected: Signal<Option<u64>>,
@@ -14025,13 +14116,13 @@ fn begin_sequence_diagram(
                 } else {
                     SeqCandidate {
                         id: row.id,
-                        method: row.method,
-                        host: row.host,
-                        path: row.path,
+                        method: row.method.clone(),
+                        host: row.host.clone(),
+                        path: row.path.clone(),
                         status: row.status,
                         failed: row.failed,
-                        elapsed: row.elapsed,
-                        comment: row.comment,
+                        elapsed: row.elapsed.clone(),
+                        comment: row.comment.clone(),
                         checked: true,
                     }
                 }
@@ -14051,7 +14142,7 @@ fn begin_sequence_diagram(
 
 fn begin_redact_preview(
     _controls: &Controls,
-    rows: Signal<Vec<RowLine>>,
+    rows: Signal<Vec<Arc<RowLine>>>,
     seq_builder: SeqBuilder,
     compose: Compose,
     selected: Signal<Option<u64>>,
@@ -14071,7 +14162,7 @@ fn begin_redact_preview(
 fn redact_preview_panel(
     seq_builder: SeqBuilder,
     controls: Arc<Controls>,
-    rows: Signal<Vec<RowLine>>,
+    rows: Signal<Vec<Arc<RowLine>>>,
     filter: Signal<String>,
 ) -> impl IntoElement {
     let toggle_controls = controls.clone();
@@ -14400,6 +14491,7 @@ fn refresh_seq_diagram(controls: &Controls, seq_builder: SeqBuilder) -> String {
     let mermaid = data.mermaid.clone();
     seq_builder.diagram.set(data);
     seq_builder.output.set(mermaid.clone());
+    crate::session::trim_memory();
     mermaid
 }
 
@@ -14641,12 +14733,8 @@ const SEQ_SWIMLANE_STEP_H: f32 = 42.0;
 
 fn seq_swimlane_view(seq_builder: SeqBuilder) -> impl IntoElement {
     const HEADER_H: f32 = 42.0;
-    let viewport_w = signal(0.0_f32);
-    let layout = computed(move || {
-        seq_builder
-            .diagram
-            .with(|d| swimlane_layout(d, viewport_w.get()))
-    });
+    let viewport_w = seq_builder.viewport_w;
+    let layout = seq_builder.layout;
 
     view()
         .w_full()
@@ -15031,7 +15119,7 @@ fn build_dep_flat_rows(d: &present::SequenceDiagramData) -> Vec<DepFlatRow> {
 
 fn seq_dependency_view(seq_builder: SeqBuilder) -> impl IntoElement {
     let langs = ui_langs();
-    let flat_rows = computed(move || seq_builder.diagram.with(build_dep_flat_rows));
+    let flat_rows = seq_builder.flat_rows;
     view()
         .w_full()
         .h(move || {
@@ -15550,7 +15638,7 @@ const SEQ_WF_ROW_H: f32 = 30.0;
 fn seq_waterfall_view(seq_builder: SeqBuilder) -> impl IntoElement {
     const WF_HEADER_H: f32 = 28.0;
     const WF_RULER_H: f32 = 22.0;
-    let track_w = signal(0.0_f32);
+    let track_w = seq_builder.track_w;
 
     view()
         .w_full()
@@ -16257,7 +16345,7 @@ fn sequence_diagram_panel(seq_builder: SeqBuilder, controls: Arc<Controls>) -> i
                         ),
                 )
                 .child(detail_button(tr("关闭", "Close"), move || {
-                    seq_builder.open.set(false);
+                    close_sequence_diagram(seq_builder);
                 })),
         )
         .child(
@@ -16592,20 +16680,90 @@ fn reset_compose(compose: Compose) {
     compose.status.set(String::new());
 }
 
+fn clear_shown(shown: Shown) {
+    shown.phase.set(Phase::Empty);
+    shown.method.set(String::new());
+    shown.url.set(String::new());
+    shown.protocol.set(String::new());
+    shown.rules.set(String::new());
+    shown.status.set(None);
+    shown.error.set(String::new());
+    shown.request_headers.set(Vec::new());
+    shown.response_headers.set(Vec::new());
+    shown.request_body.set(String::new());
+    shown.response_body.set(String::new());
+    shown.request_hex.set(Vec::new());
+    shown.response_hex.set(Vec::new());
+    shown.request_language.set(String::new());
+    shown.response_language.set(String::new());
+    shown.request_doc.set(None);
+    shown.response_doc.set(None);
+    shown.request_form.set(Vec::new());
+    shown.request_note.set(String::new());
+    shown.response_note.set(String::new());
+    shown.metrics.set(String::new());
+    shown.timing_bar.set(present::TimingBreakdown::default());
+    shown.query.set(Vec::new());
+    shown.preview.set(String::new());
+    shown.preview_w.set(0.0);
+    shown.preview_h.set(0.0);
+    shown.image_caption.set(String::new());
+    shown.messages.set(Vec::new());
+    shown.diff.set(String::new());
+    shown.diff_old.set(String::new());
+    shown.diff_new.set(String::new());
+    shown.pinned.set(false);
+    shown.comment.set(String::new());
+    shown.editing_comment.set(false);
+    shown.repeating.set(false);
+}
+
+/// Only hides the panels. The panel's views and memos are still mounted until
+/// the next frame, so clearing their data here would make them read signals
+/// that are being torn down. [`release_sequence_data`] frees the data later.
+fn close_sequence_diagram(seq_builder: SeqBuilder) {
+    seq_builder.open.set(false);
+    seq_builder.redact_open.set(false);
+}
+
+/// Frees the sequence-diagram data once both panels are closed. Runs from the
+/// periodic tick, after the closed panels have been unmounted.
+fn release_sequence_data(seq_builder: SeqBuilder) {
+    if seq_builder.open.get_untracked() || seq_builder.redact_open.get_untracked() {
+        return;
+    }
+    let has_data = seq_builder.items.with_untracked(|items| !items.is_empty())
+        || seq_builder
+            .diagram
+            .with_untracked(|d| !d.steps.is_empty() || !d.bars.is_empty());
+    if !has_data {
+        return;
+    }
+    seq_builder.hover_bar.set(None);
+    seq_builder.items.set(Vec::new());
+    seq_builder.output.set(String::new());
+    seq_builder
+        .diagram
+        .set(present::SequenceDiagramData::default());
+    seq_builder.redact_flow_id.set(None);
+    crate::session::trim_memory();
+}
+
 fn clear_captured(
     controls: &Controls,
     selected: Signal<Option<u64>>,
     baseline: Signal<Option<u64>>,
     compose: Compose,
     seq_builder: SeqBuilder,
+    shown: Shown,
 ) {
     controls.hub.clear_session();
     selected.set(None);
     baseline.set(None);
     reset_compose(compose);
-    seq_builder.open.set(false);
-    seq_builder.items.set(Vec::new());
-    seq_builder.output.set(String::new());
+    close_sequence_diagram(seq_builder);
+    clear_shown(shown);
+    crate::session::trim_memory();
 }
 
 fn clear_unpinned_captured(
@@ -16614,6 +16772,7 @@ fn clear_unpinned_captured(
     baseline: Signal<Option<u64>>,
     compose: Compose,
     seq_builder: SeqBuilder,
+    shown: Shown,
 ) {
     controls.hub.clear_unpinned();
     if let Some(id) = selected.get()
@@ -16623,6 +16782,7 @@ fn clear_unpinned_captured(
     {
         selected.set(None);
         reset_compose(compose);
+        clear_shown(shown);
     }
     if let Some(id) = baseline.get()
         && controls
@@ -16639,15 +16799,12 @@ fn clear_unpinned_captured(
             seq_builder.items.with(Vec::is_empty)
         });
         if remaining_empty {
-            seq_builder.open.set(false);
-            seq_builder.output.set(String::new());
-            seq_builder
-                .diagram
-                .set(present::SequenceDiagramData::default());
+            close_sequence_diagram(seq_builder);
         } else {
             refresh_seq_diagram(controls, seq_builder);
         }
     }
+    crate::session::trim_memory();
 }
 
 fn save_flow_comment(controls: &Controls, id: Option<u64>, shown: Shown) {
@@ -16689,7 +16846,7 @@ fn end_id(ids: &[u64], delta: i32) -> u64 {
 }
 
 fn step_selected(
-    rows: Signal<Vec<RowLine>>,
+    rows: Signal<Vec<Arc<RowLine>>>,
     selected: Signal<Option<u64>>,
     compose: Compose,
     delta: i32,
@@ -16809,9 +16966,13 @@ fn export_har_file(controls: Arc<Controls>, filter: &str) {
 }
 
 fn export_html_file(controls: Arc<Controls>, filter: &str, zh: bool) {
-    let flows = controls
-        .hub
-        .with_session(|session| session.flows_matching(filter));
+    let (matched, _) = controls.hub.matching_ids(filter);
+    let flows = controls.hub.with_session(|session| {
+        matched
+            .into_iter()
+            .filter_map(|(id, _)| session.hydrated(id))
+            .collect::<Vec<_>>()
+    });
     let redact = redact_options(&controls);
     let json = share::document_with_redact(&flows, SystemTime::now(), filter, &redact);
     let html = share::page(&json, "", zh);
