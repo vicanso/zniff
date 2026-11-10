@@ -142,14 +142,19 @@ make release
 make bundle
 ```
 
-Docker 镜像只跑服务器，不带 `app/.nsh/web`，所以页面是简易操作台：
+每日镜像是 [`vicanso/zniff-web:nightly`](https://hub.docker.com/r/vicanso/zniff-web)（linux/amd64 与 linux/arm64）。正式版标签还会发布 `vicanso/zniff-web:<version>` 和 `latest`。镜像里的页面是简易操作台。把 `make web-ui` 打出的目录挂进去，才会是共用界面：
 
 ```bash
-docker build -t zniff .
-docker run --rm -p 8080:8080 -p 8877:8877 zniff
+docker pull vicanso/zniff-web:nightly
+docker run --rm -p 8080:8080 -p 8877:8877 vicanso/zniff-web:nightly
+
+docker run --rm -p 8080:8080 -p 8877:8877 \
+  -e ZNIFF_WEB_ROOT=/web \
+  -v "$PWD/app/.nsh/web:/web:ro" \
+  vicanso/zniff-web:nightly
 ```
 
-入口是 `zniff --web --web-bind 0.0.0.0 --bind 0.0.0.0 --port 8877`。抓包端口仍要点「开始」才打开。不要把 `8080` 和 `8877` 暴露到公网：页面上能看到正文和 Cookie。
+本地构建用 `docker build -t zniff .`。入口是 `zniff --web --web-bind 0.0.0.0 --bind 0.0.0.0 --port 8877`。抓包端口仍要点「开始」才打开。不要把 `8080` 和 `8877` 暴露到公网：页面上能看到正文和 Cookie。推送需要 `DOCKER_HUB_USERNAME` 和 `DOCKER_HUB_ACCESS_TOKEN`；没有这两项时 CI 仍会构建镜像，只是不推送。
 
 关于各平台能力边界与已接受的设计取舍，请参考 [docs/known-issues.md](./docs/known-issues.md)。
 
