@@ -1,0 +1,145 @@
+# The web server image on Docker Hub (`vicanso/zniff-web`), for linux/amd64
+# and linux/arm64. Each architecture is built on a runner of its own, then
+# joined under one tag. nightly.yml calls this with channel `nightly`.
+# publish.yml calls it with the version tag (`v0.1.0` becomes `0.1.0`, and
+# a stable version is also `latest`). `secrets: inherit`:
+#   DOCKER_HUB_USERNAME       the account that pushes
+#   DOCKER_HUB_ACCESS_TOKEN   its access token, read and write
+# Without them, or with no channel, the image is built and not pushed.
+# `gh workflow run docker.yml --ref <branch>` tries the Dockerfile from any branch.
+name: Docker
+
+on:
+  workflow_call:
+    inputs:
+      channel:
+        description: Image channel, such as nightly or v0.1.0. Empty derives it from the ref.
+        type: string
+        default: ""
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Image channel, such as nightly or v0.1.0. Empty derives it from the ref.
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  # The server image, not the desktop app. Same split as vicanso/cyberapi-web.
+  IMAGE_NAME: vicanso/zniff-web
+
+jobs:
+  image:
+    name: image (${{ matrix.platform.tag }})
+    timeout-minutes: 120
+    runs-on: ${{ matrix.platform.runs-on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { arch: linux/amd64, tag: amd64, runs-on: ubuntu-24.04 }
+          - { arch: linux/arm64, tag: arm64, runs-on: ubuntu-24.04-arm }
+    outputs:
+      channel: ${{ steps.plan.outputs.channel }}
+      push: ${{ steps.plan.outputs.push }}
+    steps:
+      - name: free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+      - name: swap
+        # Release LTO links the binary in one unit. The peak is what kills a
+        # 16 GB runner, not the average.
+        run: |
+          sudo fallocate -l 16G /swapfile-docker
+          sudo chmod 600 /swapfile-docker
+          sudo mkswap /swapfile-docker
+          sudo swapon /swapfile-docker
+          free -h
+          df -h /
+      - uses: actions/checkout@v7
+      - name: plan
+        id: plan
+        env:
+          HAS_DOCKER_HUB: ${{ secrets.DOCKER_HUB_USERNAME != '' && secrets.DOCKER_HUB_ACCESS_TOKEN != '' }}
+        run: |
+          channel="${{ inputs.channel }}"
+          channel="${channel#v}"
+          if [ -z "$channel" ]; then
+            if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+              channel="${GITHUB_REF_NAME#v}"
+            elif [ "$GITHUB_REF" = "refs/heads/main" ]; then
+              channel="nightly"
+            fi
+          fi
+          push=false
+          if [ -n "$channel" ]; then
+            if [ "$HAS_DOCKER_HUB" = "true" ]; then
+              push=true
+            else
+              echo "::warning::DOCKER_HUB_USERNAME / DOCKER_HUB_ACCESS_TOKEN are not set — building the image without pushing it"
+            fi
+          fi
+          {
+            echo "channel=${channel:-dry-run}"
+            echo "push=$push"
+          } >> "$GITHUB_OUTPUT"
+          echo "channel: ${channel:-<none, dry run>}  push: $push"
+      - uses: docker/setup-buildx-action@v4
+      - name: sign in to Docker Hub
+        if: steps.plan.outputs.push == 'true'
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
+      - name: build and push
+        id: build
+        uses: docker/build-push-action@v7
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: false
+        with:
+          context: .
+          platforms: ${{ matrix.platform.arch }}
+          # Per architecture and per channel, so a nightly and a release
+          # running together never overwrite each other's halves.
+          tags: ${{ env.IMAGE_NAME }}:${{ steps.plan.outputs.channel }}-${{ matrix.platform.tag }}
+          push: ${{ steps.plan.outputs.push == 'true' }}
+          # Without the attestation each push is a plain image, which is what
+          # `imagetools create` joins below. With it, each push is already a
+          # manifest list, and the joined tag lists unknown/unknown entries.
+          provenance: false
+      - name: digest
+        run: echo "${{ steps.build.outputs.digest }}"
+
+  manifest:
+    name: one tag for both architectures
+    needs: image
+    if: needs.image.outputs.push == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
+      - name: join and push
+        env:
+          CHANNEL: ${{ needs.image.outputs.channel }}
+        run: |
+          # A release is also `latest`, unless it is a prerelease
+          # (`1.2.0-beta.1`). The nightly is only ever `nightly`.
+          tags=(-t "$IMAGE_NAME:$CHANNEL")
+          if [ "$CHANNEL" != nightly ] && [[ "$CHANNEL" != *-* ]]; then
+            tags+=(-t "$IMAGE_NAME:latest")
+          fi
+          docker buildx imagetools create "${tags[@]}" \
+            "$IMAGE_NAME:$CHANNEL-amd64" \
+            "$IMAGE_NAME:$CHANNEL-arm64"
+          docker buildx imagetools inspect "$IMAGE_NAME:$CHANNEL"

@@ -143,7 +143,7 @@ fn port_snapshot() -> HashMap<u16, String> {
     guard.map.clone()
 }
 
-#[cfg_attr(test, allow(dead_code))]
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
 fn local_endpoint_port(name: &str) -> Option<u16> {
     let local = name.split("->").next()?.trim();
     let port = local.rsplit(':').next()?.trim();

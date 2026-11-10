@@ -35,7 +35,7 @@ help:
 		'version-patch | version-minor | version-major' \
 		'         bump app/Cargo.toml, then prepend CHANGELOG.md' \
 		'tag      annotate v$(VERSION) (push it yourself)' \
-		'nightly  move and push the nightly tag to trigger a Nightly pre-release' \
+		'nightly  move and push the nightly tag; CI ships the pre-release and vicanso/zniff-web:nightly' \
 		'changelog  regenerate CHANGELOG.md from conventional commits' \
 		'' \
 		'Extra cargo arguments go in ARGS, for example: make test ARGS=--offline'

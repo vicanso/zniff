@@ -144,14 +144,19 @@ make release
 make bundle
 ```
 
-The Docker image runs the server only. It does not include `app/.nsh/web`, so the page is the small console:
+The daily image is [`vicanso/zniff-web:nightly`](https://hub.docker.com/r/vicanso/zniff-web) (linux/amd64 and linux/arm64). A stable tag also publishes `vicanso/zniff-web:<version>` and `latest`. The page in the image is the small console. Mount a `make web-ui` directory to serve the shared UI:
 
 ```bash
-docker build -t zniff .
-docker run --rm -p 8080:8080 -p 8877:8877 zniff
+docker pull vicanso/zniff-web:nightly
+docker run --rm -p 8080:8080 -p 8877:8877 vicanso/zniff-web:nightly
+
+docker run --rm -p 8080:8080 -p 8877:8877 \
+  -e ZNIFF_WEB_ROOT=/web \
+  -v "$PWD/app/.nsh/web:/web:ro" \
+  vicanso/zniff-web:nightly
 ```
 
-The entrypoint is `zniff --web --web-bind 0.0.0.0 --bind 0.0.0.0 --port 8877`. The capture port still opens only after **Start**. Keep `8080` and `8877` off the public internet: the page can show bodies and cookies.
+Build it locally with `docker build -t zniff .`. The entrypoint is `zniff --web --web-bind 0.0.0.0 --bind 0.0.0.0 --port 8877`. The capture port still opens only after **Start**. Keep `8080` and `8877` off the public internet: the page can show bodies and cookies. Publishing needs `DOCKER_HUB_USERNAME` and `DOCKER_HUB_ACCESS_TOKEN`; without them CI still builds the image and does not push it.
 
 See [docs/known-issues.md](./docs/known-issues.md) for documented platform boundaries and design trade-offs.
 

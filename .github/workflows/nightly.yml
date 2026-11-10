@@ -2,7 +2,8 @@ name: Nightly
 
 # Rolling nightly pre-release. Triggered locally via `make nightly` (pushes the
 # `nightly` tag), daily on schedule when `main` has new commits, or manually
-# via workflow_dispatch.
+# via workflow_dispatch. The same run publishes `vicanso/zniff-web:nightly`
+# (docker.yml) when Docker Hub credentials are set.
 
 on:
   push:
@@ -317,6 +318,17 @@ jobs:
         run: |
           gh release upload "$NIGHTLY_TAG" \
             "${{ env.APP_NAME }}-${{ matrix.name }}.tar.gz" --clobber
+
+  docker:
+    # `vicanso/zniff-web:nightly` (docker.yml). Built on the nightly tag as
+    # well as on the daily schedule; the channel is passed in so the tag ref
+    # is not mistaken for "no channel".
+    needs: prepare
+    if: needs.prepare.outputs.should_build == 'true'
+    uses: ./.github/workflows/docker.yml
+    with:
+      channel: nightly
+    secrets: inherit
 
   checksums:
     needs: [prepare, macos, build]

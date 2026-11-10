@@ -4,6 +4,8 @@ name: Publish
 # match it (v0.1.0 for version 0.1.0). macOS builds signed and notarized
 # DMGs wrapping zniff.app with icons/zniff.icns. Windows and Linux archives
 # contain the binary. The Linux archive also carries install-linux.sh.
+# The same tag publishes `vicanso/zniff-web:<version>` and, for a stable
+# version, `vicanso/zniff-web:latest` (docker.yml).
 
 on:
   push:
@@ -272,6 +274,14 @@ jobs:
         run: |
           gh release upload "$GITHUB_REF_NAME" \
             "${{ env.APP_NAME }}-${{ matrix.name }}.tar.gz" --clobber
+
+  docker:
+    needs: prepare
+    if: startsWith(github.ref, 'refs/tags/')
+    uses: ./.github/workflows/docker.yml
+    with:
+      channel: ${{ github.ref_name }}
+    secrets: inherit
 
   checksums:
     needs: [macos, build]
