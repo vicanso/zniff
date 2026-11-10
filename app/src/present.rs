@@ -406,6 +406,27 @@ pub fn parse_repeat_interval_ms(text: &str) -> u64 {
         .min(REPEAT_INTERVAL_MAX_MS)
 }
 
+/// Returns true if the message line label represents a WebSocket message.
+pub fn is_ws_message(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower.starts_with("客户端 ")
+        || lower.starts_with("client ")
+        || lower.starts_with("源站 ")
+        || lower.starts_with("origin ")
+        || lower.starts_with('↑')
+        || lower.starts_with('↓')
+}
+
+pub fn is_ws_client_message(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower.starts_with("客户端 ") || lower.starts_with("client ") || lower.starts_with('↑')
+}
+
+pub fn is_ws_origin_message(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower.starts_with("源站 ") || lower.starts_with("origin ") || lower.starts_with('↓')
+}
+
 /// Checks whether a WebSocket or SSE message row (`(name, value)`) matches the
 /// details message filter (`query`, `dir`: `0 = All`, `1 = Client ↑`, `2 = Origin ↓`,
 /// `kind`: `0 = All`, `1 = Text`, `2 = Binary`, `3 = Control (ping/pong/close)`).
@@ -413,9 +434,8 @@ pub fn message_matches_filter(name: &str, value: &str, query: &str, dir: u8, kin
     if name == "…" {
         return true;
     }
-    let name_lower = name.to_lowercase();
-    let is_client = name_lower.starts_with("客户端 ") || name_lower.starts_with("client ");
-    let is_origin = name_lower.starts_with("源站 ") || name_lower.starts_with("origin ");
+    let is_client = is_ws_client_message(name);
+    let is_origin = is_ws_origin_message(name);
     let is_ws = is_client || is_origin;
     match dir {
         1 if is_ws && !is_client => return false,
@@ -423,6 +443,7 @@ pub fn message_matches_filter(name: &str, value: &str, query: &str, dir: u8, kin
         _ => {}
     }
     if is_ws && kind != 0 {
+        let name_lower = name.to_lowercase();
         let is_text = name_lower.ends_with(" 文本") || name_lower.ends_with(" text");
         let is_binary = name_lower.ends_with(" 二进制") || name_lower.ends_with(" binary");
         let is_ctrl = name_lower.ends_with(" ping")
@@ -438,6 +459,7 @@ pub fn message_matches_filter(name: &str, value: &str, query: &str, dir: u8, kin
     }
     let needle = query.trim().to_lowercase();
     if !needle.is_empty() {
+        let name_lower = name.to_lowercase();
         let value_lower = value.to_lowercase();
         if !name_lower.contains(&needle) && !value_lower.contains(&needle) {
             return false;
@@ -562,27 +584,27 @@ pub fn rust_reqwest(flow: &Flow) -> String {
         "OPTIONS" => "reqwest::Method::OPTIONS".to_string(),
         _ => format!(
             "reqwest::Method::from_bytes({}.as_bytes())?",
-            js_string(&flow.method)
+            rust_string(&flow.method)
         ),
     };
     let mut lines = vec![
         "let client = reqwest::Client::new();".into(),
         format!(
             "let response = client\n    .request({method_expr}, {})",
-            js_string(&flow.url)
+            rust_string(&flow.url)
         ),
     ];
     for (name, value) in &headers {
         lines.push(format!(
             "    .header({}, {})",
-            js_string(name),
-            js_string(value)
+            rust_string(name),
+            rust_string(value)
         ));
     }
     if let Ok(text) = std::str::from_utf8(&flow.request_body)
         && !text.is_empty()
     {
-        lines.push(format!("    .body({})", js_string(text)));
+        lines.push(format!("    .body({})", rust_string(text)));
     }
     lines.push("    .send()\n    .await?;".into());
     lines.join("\n")
@@ -2180,6 +2202,10 @@ fn js_string(text: &str) -> String {
     serde_json::to_string(text).unwrap_or_else(|_| "\"\"".into())
 }
 
+pub fn rust_string(text: &str) -> String {
+    format!("{text:?}")
+}
+
 fn py_string(text: &str) -> String {
     format!(
         "'''{}'''",
@@ -2293,7 +2319,7 @@ impl RustStructGen {
                     }
                     seen_fields.push(ident.clone());
                     if needs_rename {
-                        fields.push_str(&format!("    #[serde(rename = {})]\n", js_string(key)));
+                        fields.push_str(&format!("    #[serde(rename = {})]\n", rust_string(key)));
                     }
                     fields.push_str(&format!("    pub {ident}: {ty},\n"));
                 }
@@ -2698,9 +2724,19 @@ fn format_seconds(ms: u128) -> String {
 
 fn format_count(bytes: u64) -> String {
     if bytes >= 1024 * 1024 {
-        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+        let mb = bytes as f64 / (1024.0 * 1024.0);
+        if mb >= 99.95 {
+            format!("{mb:.0} MB")
+        } else {
+            format!("{mb:.1} MB")
+        }
     } else if bytes >= 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
+        let kb = bytes as f64 / 1024.0;
+        if kb >= 99.95 {
+            format!("{kb:.0} KB")
+        } else {
+            format!("{kb:.1} KB")
+        }
     } else {
         format!("{bytes} B")
     }
@@ -4499,5 +4535,144 @@ Content-Type: image/png\r\n\r\n\
         assert!(rust_serde_struct("123").is_none());
 
         assert_eq!(hex_dump_raw(&[0x00, 0xab, 0xff]), "00 ab ff");
+    }
+
+    #[test]
+    fn ws_message_detection_and_direction_filtering() {
+        // Both Chinese and English labels are identified as WS messages
+        assert!(is_ws_message("客户端 文本"));
+        assert!(is_ws_message("client text"));
+        assert!(is_ws_message("源站 二进制"));
+        assert!(is_ws_message("origin binary"));
+        assert!(is_ws_message("↑ 客户端"));
+        assert!(is_ws_message("↓ origin"));
+
+        // Direction helpers
+        assert!(is_ws_client_message("客户端 文本"));
+        assert!(is_ws_client_message("client text"));
+        assert!(is_ws_client_message("↑ 客户端"));
+        assert!(!is_ws_client_message("源站 二进制"));
+        assert!(!is_ws_client_message("origin binary"));
+
+        assert!(is_ws_origin_message("源站 二进制"));
+        assert!(is_ws_origin_message("origin binary"));
+        assert!(is_ws_origin_message("↓ origin"));
+        assert!(!is_ws_origin_message("客户端 文本"));
+        assert!(!is_ws_origin_message("client text"));
+
+        // SSE events and truncated markers are NOT WS messages
+        assert!(!is_ws_message("message"));
+        assert!(!is_ws_message("ping_event"));
+        assert!(!is_ws_message("…"));
+
+        // Direction filtering with English and Chinese labels
+        assert!(message_matches_filter(
+            "client text",
+            "{\"cmd\":\"login\"}",
+            "",
+            1,
+            0
+        ));
+        assert!(!message_matches_filter(
+            "client text",
+            "{\"cmd\":\"login\"}",
+            "",
+            2,
+            0
+        ));
+        assert!(message_matches_filter("origin binary", "", "", 2, 2));
+        assert!(!message_matches_filter("origin binary", "", "", 1, 2));
+        assert!(message_matches_filter("客户端 文本", "hello", "", 1, 1));
+        assert!(!message_matches_filter("源站 文本", "hello", "", 1, 1));
+    }
+
+    #[test]
+    fn rust_string_escapes_all_ascii_control_characters() {
+        // 1. Single control character verification (0x00..=0x1F and 0x7F)
+        for b in 0u8..=0x1f {
+            let s = (b as char).to_string();
+            let lit = rust_string(&s);
+            assert!(lit.starts_with('"') && lit.ends_with('"'));
+            assert!(
+                !lit.contains(r"\b"),
+                "Byte 0x{:02x} must not emit \\b: {}",
+                b,
+                lit
+            );
+            assert!(
+                !lit.contains(r"\f"),
+                "Byte 0x{:02x} must not emit \\f: {}",
+                b,
+                lit
+            );
+            assert!(
+                !lit.contains(r"\u00"),
+                "Byte 0x{:02x} must not emit unbraced \\u00: {}",
+                b,
+                lit
+            );
+        }
+
+        // 2. Exact token assertions
+        assert_eq!(rust_string(""), "\"\"");
+        assert_eq!(rust_string("\0"), "\"\\0\"");
+        assert_eq!(rust_string("\x08"), "\"\\u{8}\"");
+        assert_eq!(rust_string("\x0c"), "\"\\u{c}\"");
+        assert_eq!(rust_string("\t"), "\"\\t\"");
+        assert_eq!(rust_string("\n"), "\"\\n\"");
+        assert_eq!(rust_string("\r"), "\"\\r\"");
+        assert_eq!(rust_string("\""), "\"\\\"\"");
+        assert_eq!(rust_string("\\"), "\"\\\\\"");
+        assert_eq!(rust_string("'"), "\"'\"");
+        assert_eq!(
+            rust_string("hello\x08world\x0c!"),
+            "\"hello\\u{8}world\\u{c}!\""
+        );
+        assert_eq!(rust_string("中文测试 🦀"), "\"中文测试 🦀\"");
+    }
+
+    #[test]
+    fn rust_reqwest_and_serde_struct_control_characters() {
+        let mut session = Session::default();
+        let id = session.open(FlowDraft {
+            protocol: Protocol::Http11,
+            method: "CUSTOM\x08".into(),
+            host: "api.example.com".into(),
+            path: "/v1/\x08\x0c".into(),
+            url: "https://api.example.com/v1/\x08\x0c".into(),
+            request_headers: vec![("X-Ctrl\x01".into(), "val\x08\x0c\r\n\t".into())],
+        });
+        session.append_body(
+            id,
+            crate::session::Direction::Request,
+            b"payload\x08\x0c\0end",
+        );
+        let flow = session.get(id).unwrap().clone();
+
+        let code = rust_reqwest(&flow);
+        assert!(code.contains("\"CUSTOM\\u{8}\""));
+        assert!(code.contains("\"https://api.example.com/v1/\\u{8}\\u{c}\""));
+        assert!(code.contains(".header(\"X-Ctrl\\u{1}\", \"val\\u{8}\\u{c}\\r\\n\\t\")"));
+        assert!(code.contains(".body(\"payload\\u{8}\\u{c}\\0end\")"));
+        assert!(!code.contains(r"\b"));
+        assert!(!code.contains(r"\f"));
+
+        let rust_struct = rust_serde_struct(r#"{"key\b1": 1, "key\f2": "val"}"#).unwrap();
+        assert!(rust_struct.contains(r#"#[serde(rename = "key\u{8}1")]"#));
+        assert!(rust_struct.contains(r#"#[serde(rename = "key\u{c}2")]"#));
+        assert!(!rust_struct.contains(r"\b"));
+        assert!(!rust_struct.contains(r"\f"));
+    }
+
+    #[test]
+    fn format_count_large_values_drop_decimal() {
+        assert_eq!(format_count(0), "0 B");
+        assert_eq!(format_count(1024), "1.0 KB");
+        assert_eq!(format_count(99 * 1024), "99.0 KB");
+        assert_eq!(format_count(100 * 1024), "100 KB");
+        assert_eq!(format_count(256 * 1024), "256 KB");
+        assert_eq!(format_count(1024 * 1024), "1.0 MB");
+        assert_eq!(format_count(99 * 1024 * 1024), "99.0 MB");
+        assert_eq!(format_count(100 * 1024 * 1024), "100 MB");
     }
 }
