@@ -46,7 +46,15 @@ fn main() -> impl std::process::Termination {
     result
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+#[cfg(target_arch = "wasm32")]
+fn main() {}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows",
+    target_arch = "wasm32"
+)))]
 fn main() {
     compile_error!("zniff 的桌面入口只在 macOS、Windows 和 Linux 上编译。");
 }

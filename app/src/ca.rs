@@ -59,6 +59,10 @@ pub fn data_dir() -> PathBuf {
 }
 
 impl Ca {
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     pub fn open_default() -> Result<Self> {
         Self::open(&data_dir())
     }
@@ -335,8 +339,15 @@ fn certs_from_pem(pem: &str) -> Result<Vec<CertificateDer<'static>>> {
 fn key_from_pem(pem: &str) -> Result<PrivateKeyDer<'static>> {
     let mut current = String::new();
     let mut kind: Option<&str> = None;
+    let mut has_encrypted_pkcs8 = false;
+    let mut has_legacy_encrypted = false;
     for line in pem.lines() {
         let trimmed = line.trim();
+        if trimmed == "-----BEGIN ENCRYPTED PRIVATE KEY-----"
+            || (trimmed.starts_with("-----BEGIN ") && trimmed.contains("ENCRYPTED PRIVATE KEY"))
+        {
+            has_encrypted_pkcs8 = true;
+        }
         if kind.is_none() {
             kind = match trimmed {
                 "-----BEGIN PRIVATE KEY-----" => Some("PKCS8"),
@@ -348,15 +359,27 @@ fn key_from_pem(pem: &str) -> Result<PrivateKeyDer<'static>> {
                 current.clear();
             }
         } else if trimmed.starts_with("-----END ") && trimmed.ends_with("PRIVATE KEY-----") {
+            if has_legacy_encrypted {
+                anyhow::bail!(
+                    "私钥已加密（Proc-Type: 4,ENCRYPTED），zniff 暂不支持加密私钥；请先解密后再配置（例如：openssl rsa -in encrypted.key -out decrypted.key）"
+                );
+            }
             let bytes = base64_decode::decode(&current).context("解析私钥 PEM Base64")?;
             return Ok(match kind.unwrap_or("PKCS8") {
                 "PKCS1" => PrivateKeyDer::Pkcs1(PrivatePkcs1KeyDer::from(bytes)),
                 "SEC1" => PrivateKeyDer::Sec1(PrivateSec1KeyDer::from(bytes)),
                 _ => PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(bytes)),
             });
+        } else if kind.is_some() && trimmed.starts_with("Proc-Type: 4,ENCRYPTED") {
+            has_legacy_encrypted = true;
         } else if !trimmed.starts_with('-') && !trimmed.is_empty() {
             current.push_str(trimmed);
         }
+    }
+    if has_encrypted_pkcs8 {
+        anyhow::bail!(
+            "私钥已加密（ENCRYPTED PRIVATE KEY），zniff 暂不支持加密私钥；请先解密后再配置（例如：openssl pkcs8 -in encrypted.key -out decrypted.key）"
+        );
     }
     anyhow::bail!("PEM 中未找到私钥块（PRIVATE KEY / RSA PRIVATE KEY / EC PRIVATE KEY）")
 }
@@ -1350,6 +1373,58 @@ Cert 0: zniff CA
         assert_eq!(
             linux_system_ca_command_for(LinuxDistroFamily::RedHat, "/tmp/ca.crt"),
             "sudo cp /tmp/ca.crt /etc/pki/ca-trust/source/anchors/zniff-ca.crt && sudo update-ca-trust"
+        );
+    }
+
+    #[test]
+    fn key_from_pem_detects_encrypted_pkcs8_key() {
+        let pem = "-----BEGIN ENCRYPTED PRIVATE KEY-----\n\
+                   MIGbMF8GCSqGSIb3DQEFDTBKMCkGCSqGSIb3DQEFDDAcBAi+...\n\
+                   -----END ENCRYPTED PRIVATE KEY-----\n";
+        let err = key_from_pem(pem).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("私钥已加密"), "expected encrypted hint: {msg}");
+        assert!(
+            msg.contains("ENCRYPTED PRIVATE KEY"),
+            "expected PKCS#8 hint: {msg}"
+        );
+        assert!(
+            msg.contains("openssl pkcs8 -in encrypted.key -out decrypted.key"),
+            "expected openssl remediation command: {msg}"
+        );
+    }
+
+    #[test]
+    fn key_from_pem_detects_legacy_openssl_encrypted_key() {
+        let pem = "-----BEGIN RSA PRIVATE KEY-----\n\
+                   Proc-Type: 4,ENCRYPTED\n\
+                   DEK-Info: DES-EDE3-CBC,1234567812345678\n\
+                   \n\
+                   AAAA\n\
+                   -----END RSA PRIVATE KEY-----\n";
+        let err = key_from_pem(pem).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("私钥已加密"), "expected encrypted hint: {msg}");
+        assert!(
+            msg.contains("Proc-Type: 4,ENCRYPTED"),
+            "expected legacy hint: {msg}"
+        );
+        assert!(
+            msg.contains("openssl rsa"),
+            "expected openssl rsa hint: {msg}"
+        );
+    }
+
+    #[test]
+    fn key_from_pem_reports_missing_key_block_when_only_cert_given() {
+        let pem = "-----BEGIN CERTIFICATE-----\n\
+                   MIIB...fakecert...\n\
+                   -----END CERTIFICATE-----\n";
+        let err = key_from_pem(pem).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("PEM 中未找到私钥块"),
+            "expected missing key block message: {msg}"
         );
     }
 }

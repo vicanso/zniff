@@ -3,7 +3,7 @@
 //! The browser does not install a CA and does not read the system trust store.
 //! The server process owns `ca.crt`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CaStatus {
@@ -25,6 +25,10 @@ pub struct Ca;
 impl Ca {
     pub fn unavailable() -> Self {
         Self
+    }
+
+    pub fn dir(&self) -> &Path {
+        Path::new("")
     }
 
     pub fn trust_status(&self) -> CaStatus {
