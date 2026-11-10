@@ -1163,6 +1163,9 @@ pub fn App() -> impl IntoElement {
     let lan_addrs = signal(Vec::<LanAddr>::new());
     let qr_path = signal(String::new());
     let controls = open_controls();
+    if let Some(err) = config::take_last_load_error() {
+        set_status(&controls, StatusMsg::ConfigBroken { err });
+    }
     let update_state = signal(lock_update_state(&controls));
     status.set(lock_status(&controls));
     ca_status.set(lock_ca_status(&controls));
@@ -1273,6 +1276,7 @@ pub fn App() -> impl IntoElement {
     // write inside `on_layout` can miss that text.
     let pane_px = Rc::new(Cell::new(0.0_f32));
     let pane_tick = pane_px.clone();
+    let seen_rules_rev = stored(controls_tick.hub.rules_revision());
     set_interval(Duration::from_millis(16), move || {
         let pending_toasts = {
             let mut q = controls_tick
@@ -1368,6 +1372,14 @@ pub fn App() -> impl IntoElement {
         let sys_proxy_now = lock_bool(&controls_tick.use_system_proxy);
         if use_system_proxy.get_untracked() != sys_proxy_now {
             use_system_proxy.set(sys_proxy_now);
+        }
+        let rules_rev_now = controls_tick.hub.rules_revision();
+        if rules_rev_now != seen_rules_rev.get() {
+            seen_rules_rev.replace(rules_rev_now);
+            let hub_rules = controls_tick.hub.rules_text();
+            if hub_rules != profile_tick.rules.get_untracked() {
+                profile_tick.rules.set(hub_rules);
+            }
         }
         let paused_now = controls_tick.hub.paused();
         let paused_len = controls_tick.hub.paused_queue_len();
@@ -7915,7 +7927,9 @@ fn size_cell(
                         .unwrap_or_default()
                 })
             })
+            .min_w(px(0.0))
             .number_of_lines(1)
+            .text_overflow(EllipsizeMode::Head)
             .text_size(px(12.0))
             .text_color(fg_muted()),
         )
@@ -9491,13 +9505,8 @@ fn messages_section(shown: Shown, folded: Signal<u8>) -> impl IntoElement {
     let search = shown.msg_search;
     let dir = shown.msg_dir;
     let kind = shown.msg_kind;
-    let has_ws_dirs = move || {
-        lines.with(|items| {
-            items
-                .iter()
-                .any(|line| line.name.starts_with('↑') || line.name.starts_with('↓'))
-        })
-    };
+    let has_ws_dirs =
+        move || lines.with(|items| items.iter().any(|line| present::is_ws_message(&line.name)));
     view()
         .rounded(px(10.0))
         .border_1()
@@ -19000,9 +19009,19 @@ fn crc32(data: &[u8]) -> u32 {
 
 fn format_bytes(bytes: usize) -> String {
     if bytes >= 1024 * 1024 {
-        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+        let mb = bytes as f64 / (1024.0 * 1024.0);
+        if mb >= 99.95 {
+            format!("{mb:.0} MB")
+        } else {
+            format!("{mb:.1} MB")
+        }
     } else if bytes >= 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
+        let kb = bytes as f64 / 1024.0;
+        if kb >= 99.95 {
+            format!("{kb:.0} KB")
+        } else {
+            format!("{kb:.1} KB")
+        }
     } else {
         format!("{bytes} B")
     }
@@ -19487,7 +19506,7 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
         );
         assert!(default_cols[0].fixed && default_cols[1].fixed && default_cols[2].fixed);
         let default_sum: f32 = default_cols.iter().map(|c| c.width.unwrap().0).sum();
-        assert_eq!(default_sum, crate::config::LIST_WIDTH_DEFAULT as f32);
+        assert_eq!(default_sum, 568.0);
 
         let all_shown = super::ListColumns {
             id: true,
@@ -20242,5 +20261,24 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
             super::toolbar_filter_conditions("", "", "", "", true, crate::i18n::Lang::Zh),
             ("全部流量 · 未设置过滤条件".to_string(), false)
         );
+    }
+
+    #[test]
+    fn format_bytes_avoids_clipping_for_large_values() {
+        assert_eq!(super::format_bytes(0), "0 B");
+        assert_eq!(super::format_bytes(512), "512 B");
+        assert_eq!(super::format_bytes(1024), "1.0 KB");
+        assert_eq!(super::format_bytes(2048), "2.0 KB");
+        assert_eq!(super::format_bytes(99 * 1024), "99.0 KB");
+        // Values >= 100 KB omit decimal .0 to prevent cell clipping
+        assert_eq!(super::format_bytes(100 * 1024), "100 KB");
+        assert_eq!(super::format_bytes(256 * 1024), "256 KB");
+        assert_eq!(super::format_bytes(1023 * 1024), "1023 KB");
+        // MB formatting
+        assert_eq!(super::format_bytes(1024 * 1024), "1.0 MB");
+        assert_eq!(super::format_bytes(12 * 1024 * 1024), "12.0 MB");
+        assert_eq!(super::format_bytes(99 * 1024 * 1024), "99.0 MB");
+        assert_eq!(super::format_bytes(100 * 1024 * 1024), "100 MB");
+        assert_eq!(super::format_bytes(256 * 1024 * 1024), "256 MB");
     }
 }

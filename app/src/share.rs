@@ -38,53 +38,76 @@ impl RedactOptions {
 
     pub fn is_sensitive_header(&self, name: &str) -> bool {
         let lower = name.trim().to_ascii_lowercase();
-        const DEFAULT_HEADERS: &[&str] = &[
+        let compact: String = lower.chars().filter(|&c| c != '-' && c != '_').collect();
+        const COMPACT_DEFAULT_HEADERS: &[&str] = &[
             "authorization",
-            "proxy-authorization",
+            "proxyauthorization",
             "cookie",
-            "set-cookie",
-            "x-api-key",
-            "x-auth-token",
-            "x-access-token",
-            "x-csrf-token",
-            "x-xsrf-token",
-            "api-key",
+            "setcookie",
+            "xapikey",
+            "xauthtoken",
+            "xaccesstoken",
+            "xcsrftoken",
+            "xxsrftoken",
             "apikey",
         ];
-        DEFAULT_HEADERS.contains(&lower.as_str())
-            || self.extra_fields.iter().any(|extra| extra == &lower)
+        COMPACT_DEFAULT_HEADERS.contains(&compact.as_str())
+            || self.extra_fields.iter().any(|extra| {
+                let extra_compact: String =
+                    extra.chars().filter(|&c| c != '-' && c != '_').collect();
+                extra == &lower || extra_compact == compact
+            })
     }
 
     pub fn is_sensitive_field(&self, name: &str) -> bool {
         let lower = name.trim().to_ascii_lowercase();
-        const DEFAULT_FIELDS: &[&str] = &[
+        let compact: String = lower.chars().filter(|&c| c != '-' && c != '_').collect();
+        const COMPACT_DEFAULT_FIELDS: &[&str] = &[
             "password",
             "passwd",
             "pass",
             "pwd",
             "secret",
-            "client_secret",
+            "clientsecret",
             "token",
-            "access_token",
-            "refresh_token",
-            "id_token",
-            "auth_token",
-            "api_key",
+            "accesstoken",
+            "refreshtoken",
+            "idtoken",
+            "authtoken",
             "apikey",
-            "private_key",
-            "session_id",
+            "privatekey",
             "sessionid",
             "sid",
+            "session",
             "jwt",
             "authorization",
+            "proxyauthorization",
             "credential",
             "credentials",
             "cvv",
+            "cvc",
             "ssn",
             "pin",
+            "cookie",
+            "cookies",
+            "setcookie",
+            "xapikey",
+            "xauthtoken",
+            "xaccesstoken",
+            "xcsrftoken",
+            "xxsrftoken",
+            "csrftoken",
+            "xsrftoken",
+            "csrf",
+            "xsrf",
         ];
-        DEFAULT_FIELDS.contains(&lower.as_str())
-            || self.extra_fields.iter().any(|extra| extra == &lower)
+        COMPACT_DEFAULT_FIELDS.contains(&compact.as_str())
+            || self.is_sensitive_header(name)
+            || self.extra_fields.iter().any(|extra| {
+                let extra_compact: String =
+                    extra.chars().filter(|&c| c != '-' && c != '_').collect();
+                extra == &lower || extra_compact == compact
+            })
     }
 }
 
@@ -571,15 +594,62 @@ fn redact_url_query(url_or_path: &str, opts: &RedactOptions) -> (String, usize) 
     (out, count)
 }
 
+fn percent_encode_component(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len() * 3);
+    for b in raw.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => {
+                use std::fmt::Write;
+                let _ = write!(out, "%{b:02X}");
+            }
+        }
+    }
+    out
+}
+
 fn redact_urlencoded_pairs(query: &str, opts: &RedactOptions) -> (String, usize) {
     let mut count = 0;
     let mut parts = Vec::new();
     for seg in query.split('&') {
         if let Some((k, v)) = seg.split_once('=') {
             let decoded_k = percent_decode_key(k);
-            if opts.is_sensitive_field(&decoded_k) && v != "[REDACTED]" {
+            if opts.is_sensitive_field(&decoded_k) && v != "[REDACTED]" && v != "%5BREDACTED%5D" {
                 parts.push(format!("{k}=[REDACTED]"));
                 count += 1;
+            } else if v.contains('?') {
+                let (new_v, v_count) = redact_url_query(v, opts);
+                if v_count > 0 {
+                    parts.push(format!("{k}={new_v}"));
+                    count += v_count;
+                } else {
+                    parts.push(seg.to_string());
+                }
+            } else if v.contains("%3F")
+                || v.contains("%3f")
+                || ((v.contains("%3D") || v.contains("%3d"))
+                    && (v.contains("%26")
+                        || percent_decode_key(v)
+                            .split_once('=')
+                            .is_some_and(|(sub_k, _)| {
+                                opts.is_sensitive_field(&percent_decode_key(sub_k))
+                            })))
+            {
+                let decoded_v = percent_decode_key(v);
+                let (new_decoded_v, v_count) = if decoded_v.contains('?') {
+                    redact_url_query(&decoded_v, opts)
+                } else {
+                    redact_urlencoded_pairs(&decoded_v, opts)
+                };
+                if v_count > 0 {
+                    let re_encoded = percent_encode_component(&new_decoded_v);
+                    parts.push(format!("{k}={re_encoded}"));
+                    count += v_count;
+                } else {
+                    parts.push(seg.to_string());
+                }
             } else {
                 parts.push(seg.to_string());
             }
@@ -655,25 +725,96 @@ fn redact_body_bytes(
 }
 
 fn redact_json_value(val: &mut serde_json::Value, opts: &RedactOptions) -> usize {
+    redact_json_value_depth(val, opts, 0)
+}
+
+fn redact_json_value_depth(
+    val: &mut serde_json::Value,
+    opts: &RedactOptions,
+    depth: usize,
+) -> usize {
+    if depth > 16 {
+        return 0;
+    }
     match val {
         serde_json::Value::Object(map) => {
             let mut count = 0;
             for (k, v) in map.iter_mut() {
                 if opts.is_sensitive_field(k) && !v.is_null() {
-                    *v = serde_json::Value::String("[REDACTED]".into());
-                    count += 1;
+                    if v.as_str() != Some("[REDACTED]") {
+                        *v = serde_json::Value::String("[REDACTED]".into());
+                        count += 1;
+                    }
                 } else {
-                    count += redact_json_value(v, opts);
+                    count += redact_json_value_depth(v, opts, depth);
                 }
             }
             count
         }
         serde_json::Value::Array(arr) => arr
             .iter_mut()
-            .map(|item| redact_json_value(item, opts))
+            .map(|item| redact_json_value_depth(item, opts, depth))
             .sum(),
+        serde_json::Value::String(s) => redact_string_value(s, opts, depth),
         _ => 0,
     }
+}
+
+fn redact_string_value(s: &mut String, opts: &RedactOptions, depth: usize) -> usize {
+    if s == "[REDACTED]" {
+        return 0;
+    }
+    let trimmed = s.trim();
+    // 1. Unpack stringified JSON if it starts with { or [
+    if ((trimmed.starts_with('{') && trimmed.ends_with('}'))
+        || (trimmed.starts_with('[') && trimmed.ends_with(']')))
+        && let Ok(mut nested) = serde_json::from_str::<serde_json::Value>(trimmed)
+    {
+        let count = redact_json_value_depth(&mut nested, opts, depth + 1);
+        if count > 0
+            && let Ok(serialized) = serde_json::to_string(&nested)
+        {
+            *s = serialized;
+            return count;
+        }
+        return 0;
+    }
+
+    // 2. Redact URL query parameters if it contains '?'
+    if s.contains('?') {
+        let (new_s, count) = redact_url_query(s, opts);
+        if count > 0 {
+            *s = new_s;
+        }
+        return count;
+    }
+
+    // 2b. Redact percent-encoded URL query parameters if it contains %3F or %3f
+    if s.contains("%3F") || s.contains("%3f") {
+        let decoded = percent_decode_key(s);
+        if decoded.contains('?') {
+            let (new_decoded, count) = redact_url_query(&decoded, opts);
+            if count > 0 {
+                *s = percent_encode_component(&new_decoded);
+            }
+            return count;
+        }
+    }
+
+    // 3. Redact standalone urlencoded query string (e.g. "token=xyz&secret=123" or single pair "password=123")
+    if s.contains('=')
+        && (s.contains('&')
+            || s.split_once('=')
+                .is_some_and(|(k, _)| opts.is_sensitive_field(&percent_decode_key(k))))
+    {
+        let (new_s, count) = redact_urlencoded_pairs(s, opts);
+        if count > 0 {
+            *s = new_s;
+            return count;
+        }
+    }
+
+    0
 }
 
 pub fn format_redact_preview(
@@ -1984,5 +2125,491 @@ mod tests {
             "comment={}",
             sanitized.comment
         );
+    }
+
+    #[test]
+    fn redact_json_cookie_casing_and_header_keys() {
+        let opts = RedactOptions::new(true, "");
+        let mut val: serde_json::Value = serde_json::from_str(
+            r#"{
+                "cookie": "sid=123",
+                "Cookie": "sid=456",
+                "COOKIE": "sid=789",
+                "set-cookie": "session=abc; Secure",
+                "Set-Cookie": "session=def; HttpOnly",
+                "set_cookie": "session=ghi",
+                "setCookie": "session=jkl",
+                "cookies": ["a", "b"],
+                "accessToken": "secret_tok",
+                "access-token": "secret_tok_2",
+                "clientSecret": "client_sec",
+                "x-api-key": "my_api_key",
+                "csrfToken": "csrf_val",
+                "username": "john_doe"
+            }"#,
+        )
+        .unwrap();
+
+        let count = redact_json_value(&mut val, &opts);
+        assert_eq!(count, 13);
+        assert_eq!(val["cookie"], "[REDACTED]");
+        assert_eq!(val["Cookie"], "[REDACTED]");
+        assert_eq!(val["COOKIE"], "[REDACTED]");
+        assert_eq!(val["set-cookie"], "[REDACTED]");
+        assert_eq!(val["Set-Cookie"], "[REDACTED]");
+        assert_eq!(val["set_cookie"], "[REDACTED]");
+        assert_eq!(val["setCookie"], "[REDACTED]");
+        assert_eq!(val["cookies"], "[REDACTED]");
+        assert_eq!(val["accessToken"], "[REDACTED]");
+        assert_eq!(val["access-token"], "[REDACTED]");
+        assert_eq!(val["clientSecret"], "[REDACTED]");
+        assert_eq!(val["x-api-key"], "[REDACTED]");
+        assert_eq!(val["csrfToken"], "[REDACTED]");
+        assert_eq!(val["username"], "john_doe");
+    }
+
+    #[test]
+    fn redact_json_url_query_secrets_and_nested_urls() {
+        let opts = RedactOptions::new(true, "");
+        let mut val: serde_json::Value = serde_json::from_str(
+            r#"{
+                "url": "https://api.example.com/oauth?token=xyz123&secret=abc456&client_id=my_app",
+                "path": "/v1/auth?access_token=secret_tok&user=alice",
+                "links": [
+                    "https://cdn.example.com/file?api_key=secretkey&download=1"
+                ],
+                "oauth_redirect": "https://auth.com/login?redirect=https%3A%2F%2Fapp.com%2Fcb%3Ftoken%3Dsecret_nested"
+            }"#,
+        )
+        .unwrap();
+
+        let count = redact_json_value(&mut val, &opts);
+        assert_eq!(count, 5);
+        assert_eq!(
+            val["url"],
+            "https://api.example.com/oauth?token=[REDACTED]&secret=[REDACTED]&client_id=my_app"
+        );
+        assert_eq!(val["path"], "/v1/auth?access_token=[REDACTED]&user=alice");
+        assert_eq!(
+            val["links"][0],
+            "https://cdn.example.com/file?api_key=[REDACTED]&download=1"
+        );
+        assert_eq!(
+            val["oauth_redirect"],
+            "https://auth.com/login?redirect=https%3A%2F%2Fapp.com%2Fcb%3Ftoken%3D%5BREDACTED%5D"
+        );
+    }
+
+    #[test]
+    fn redact_percent_encoded_nested_redirect_urls() {
+        let opts = RedactOptions::new(true, "");
+        let mut val: serde_json::Value = serde_json::from_str(
+            r#"{
+                "standard": "https://auth.com/login?redirect=https%3A%2F%2Fapp.com%2Fcb%3Fsecret%3Dnested_sec%26ok%3D1",
+                "lowercase_hex": "https://auth.com/login?redirect=https%3a%2f%2fapp.com%2fcb%3fsecret%3dnested_sec%26ok%3d1",
+                "multi_secrets": "https://auth.com/login?client_id=123&redirect=https%3A%2F%2Fapp.com%2Fcb%3Ftoken%3Dtok_nested%26password%3Dpass_nested%26user%3Dalice&state=xyz",
+                "with_fragment": "https://auth.com/login?redirect=https%3A%2F%2Fapp.com%2Fcb%3Fapi_key%3Dmykey%26step%3D2%23details#outer_frag",
+                "standalone_params": "https://api.com/proxy?forward=secret%3Dtopsecret%26client%3Dweb",
+                "relative_redirect": "https://app.com/login?next=%2Fdashboard%3Fapi_key%3Dmy_api_key%26tab%3D1"
+            }"#,
+        )
+        .unwrap();
+
+        let count = redact_json_value(&mut val, &opts);
+        assert_eq!(count, 7);
+        assert_eq!(
+            val["standard"],
+            "https://auth.com/login?redirect=https%3A%2F%2Fapp.com%2Fcb%3Fsecret%3D%5BREDACTED%5D%26ok%3D1"
+        );
+        assert_eq!(
+            val["lowercase_hex"],
+            "https://auth.com/login?redirect=https%3A%2F%2Fapp.com%2Fcb%3Fsecret%3D%5BREDACTED%5D%26ok%3D1"
+        );
+        assert_eq!(
+            val["multi_secrets"],
+            "https://auth.com/login?client_id=123&redirect=https%3A%2F%2Fapp.com%2Fcb%3Ftoken%3D%5BREDACTED%5D%26password%3D%5BREDACTED%5D%26user%3Dalice&state=xyz"
+        );
+        assert_eq!(
+            val["with_fragment"],
+            "https://auth.com/login?redirect=https%3A%2F%2Fapp.com%2Fcb%3Fapi_key%3D%5BREDACTED%5D%26step%3D2%23details#outer_frag"
+        );
+        assert_eq!(
+            val["standalone_params"],
+            "https://api.com/proxy?forward=secret%3D%5BREDACTED%5D%26client%3Dweb"
+        );
+        assert_eq!(
+            val["relative_redirect"],
+            "https://app.com/login?next=%2Fdashboard%3Fapi_key%3D%5BREDACTED%5D%26tab%3D1"
+        );
+
+        // Pass 2 Idempotency verification
+        let count2 = redact_json_value(&mut val, &opts);
+        assert_eq!(count2, 0);
+        assert_eq!(
+            val["standard"],
+            "https://auth.com/login?redirect=https%3A%2F%2Fapp.com%2Fcb%3Fsecret%3D%5BREDACTED%5D%26ok%3D1"
+        );
+        assert_eq!(
+            val["with_fragment"],
+            "https://auth.com/login?redirect=https%3A%2F%2Fapp.com%2Fcb%3Fapi_key%3D%5BREDACTED%5D%26step%3D2%23details#outer_frag"
+        );
+    }
+
+    #[test]
+    fn redact_json_stringified_nested_json() {
+        let opts = RedactOptions::new(true, "");
+        let mut val: serde_json::Value = serde_json::from_str(
+            r#"{
+                "event": "login",
+                "body": "{\"token\":\"abc12345\",\"password\":\"hunter2\",\"user\":\"alice\"}",
+                "nested": "{\"redirect\":\"https://service.internal/oauth?secret=nested_sec&ok=true\"}"
+            }"#,
+        )
+        .unwrap();
+
+        let count = redact_json_value(&mut val, &opts);
+        assert_eq!(count, 3);
+
+        // Unpack inner body and verify
+        let inner_body: serde_json::Value =
+            serde_json::from_str(val["body"].as_str().unwrap()).unwrap();
+        assert_eq!(inner_body["token"], "[REDACTED]");
+        assert_eq!(inner_body["password"], "[REDACTED]");
+        assert_eq!(inner_body["user"], "alice");
+
+        // Unpack inner nested url and verify
+        let inner_nested: serde_json::Value =
+            serde_json::from_str(val["nested"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            inner_nested["redirect"],
+            "https://service.internal/oauth?secret=[REDACTED]&ok=true"
+        );
+    }
+
+    #[test]
+    fn redact_json_malformed_strings_and_robustness() {
+        let opts = RedactOptions::new(true, "");
+        let mut val: serde_json::Value = serde_json::from_str(
+            r#"{
+                "broken_json": "{\"token\": incomplete",
+                "not_url": "How are you? I'm fine.",
+                "broken_url": "https://example.com/??==&token=xyz",
+                "empty": ""
+            }"#,
+        )
+        .unwrap();
+
+        // Must not panic
+        let count = redact_json_value(&mut val, &opts);
+        assert_eq!(val["broken_json"], "{\"token\": incomplete");
+        assert_eq!(val["not_url"], "How are you? I'm fine.");
+        assert_eq!(val["empty"], "");
+        assert!(
+            val["broken_url"]
+                .as_str()
+                .unwrap()
+                .contains("token=[REDACTED]")
+        );
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn redact_flow_idempotent() {
+        let mut session = crate::session::Session::default();
+        let id = session.open(crate::session::FlowDraft {
+            protocol: crate::session::Protocol::Http11,
+            method: "POST".into(),
+            host: "api.example.test".into(),
+            path: "/api?token=secret".into(),
+            url: "https://api.example.test/api?token=secret".into(),
+            request_headers: vec![("Cookie".into(), "sid=secret123".into())],
+        });
+        session.append_body(id, Direction::Request, br#"{"password":"secret"}"#);
+        session.set_response(id, 200, vec![], None);
+        session.mark_finished(id);
+
+        let flow = session.hydrated(id).unwrap();
+        let opts = RedactOptions::new(true, "");
+        let (sanitized1, report1) = redact_flow(&flow, &opts);
+        assert_eq!(report1.total_redacted(), 3);
+
+        // Second pass on already-redacted flow
+        let (sanitized2, report2) = redact_flow(&sanitized1, &opts);
+        assert_eq!(sanitized1.url, sanitized2.url);
+        assert_eq!(sanitized1.request_body, sanitized2.request_body);
+        assert_eq!(report2.total_redacted(), 0);
+    }
+
+    #[test]
+    fn redact_flow_and_json_idempotency_with_fragments_multi_pass() {
+        let mut session = crate::session::Session::default();
+        let target_url = "https://api.example.com:8443/auth/v2?user=alice&token=tok123&env=prod&cOoKiE=sess456#tab1?extra=ignored";
+        let target_path =
+            "/auth/v2?user=alice&token=tok123&env=prod&cOoKiE=sess456#tab1?extra=ignored";
+
+        let id = session.open(crate::session::FlowDraft {
+            protocol: crate::session::Protocol::Http11,
+            method: "POST".into(),
+            host: "api.example.com".into(),
+            path: target_path.into(),
+            url: target_url.into(),
+            request_headers: vec![
+                ("Cookie".into(), "sid=secret123; user=alice".into()),
+                ("Authorization".into(), "Bearer my_jwt_token".into()),
+            ],
+        });
+        session.append_body(
+            id,
+            Direction::Request,
+            br#"{
+                "callback": "https://api.example.com:8443/auth/v2?user=alice&token=tok123&env=prod&cOoKiE=sess456#tab1?extra=ignored",
+                "nested_endpoint": "https://service.internal/path?api_key=secretkey&page=1#heading?section=sec2",
+                "plain_query": "token=tok999&user=bob"
+            }"#,
+        );
+        session.set_response(id, 200, vec![], None);
+        session.mark_finished(id);
+
+        let flow = session.hydrated(id).unwrap();
+        let opts = RedactOptions::new(true, "");
+
+        // --- Pass 1: First redaction pass ---
+        let (pass1_flow, rep1) = redact_flow(&flow, &opts);
+        // Query params in URL & path (token + cOoKiE = 2 each; report counts URL query params = 2)
+        assert_eq!(rep1.redacted_query_params, 2);
+        // Headers: Cookie sid + Authorization = 2
+        assert_eq!(rep1.redacted_headers, 2);
+        // Body fields: callback (token + cOoKiE = 2), nested_endpoint (api_key = 1), plain_query (token = 1) -> 4
+        assert_eq!(rep1.redacted_body_fields, 4);
+        assert_eq!(rep1.total_redacted(), 8);
+
+        // Verify URL & Path: sensitive parameters redacted, fragments strictly preserved
+        assert_eq!(
+            pass1_flow.url,
+            "https://api.example.com:8443/auth/v2?user=alice&token=[REDACTED]&env=prod&cOoKiE=[REDACTED]#tab1?extra=ignored"
+        );
+        assert_eq!(
+            pass1_flow.path,
+            "/auth/v2?user=alice&token=[REDACTED]&env=prod&cOoKiE=[REDACTED]#tab1?extra=ignored"
+        );
+
+        // Verify JSON body
+        let parsed1: serde_json::Value = serde_json::from_slice(&pass1_flow.request_body).unwrap();
+        assert_eq!(
+            parsed1["callback"],
+            "https://api.example.com:8443/auth/v2?user=alice&token=[REDACTED]&env=prod&cOoKiE=[REDACTED]#tab1?extra=ignored"
+        );
+        assert_eq!(
+            parsed1["nested_endpoint"],
+            "https://service.internal/path?api_key=[REDACTED]&page=1#heading?section=sec2"
+        );
+        assert_eq!(parsed1["plain_query"], "token=[REDACTED]&user=bob");
+
+        // --- Pass 2: Redacting already-redacted flow ---
+        let (pass2_flow, rep2) = redact_flow(&pass1_flow, &opts);
+        assert_eq!(rep2.total_redacted(), 0, "Pass 2 must produce 0 redactions");
+        assert_eq!(rep2.redacted_query_params, 0);
+        assert_eq!(rep2.redacted_headers, 0);
+        assert_eq!(rep2.redacted_body_fields, 0);
+
+        // Exact byte-for-byte and string identity between Pass 1 and Pass 2
+        assert_eq!(pass2_flow.url, pass1_flow.url);
+        assert_eq!(pass2_flow.path, pass1_flow.path);
+        assert_eq!(pass2_flow.request_headers, pass1_flow.request_headers);
+        assert_eq!(pass2_flow.request_body, pass1_flow.request_body);
+
+        let parsed2: serde_json::Value = serde_json::from_slice(&pass2_flow.request_body).unwrap();
+        assert_eq!(parsed2["callback"], parsed1["callback"]);
+        assert!(
+            parsed2["callback"]
+                .as_str()
+                .unwrap()
+                .ends_with("#tab1?extra=ignored"),
+            "Fragment was destroyed on Pass 2!"
+        );
+
+        // --- Pass 3: Verification of stability across 3 passes ---
+        let (pass3_flow, rep3) = redact_flow(&pass2_flow, &opts);
+        assert_eq!(rep3.total_redacted(), 0, "Pass 3 must produce 0 redactions");
+        assert_eq!(pass3_flow.url, pass2_flow.url);
+        assert_eq!(pass3_flow.path, pass2_flow.path);
+        assert_eq!(pass3_flow.request_headers, pass2_flow.request_headers);
+        assert_eq!(pass3_flow.request_body, pass2_flow.request_body);
+    }
+
+    #[test]
+    fn redact_plain_unencoded_nested_urls_and_mixed_params() {
+        let opts = RedactOptions::new(true, "");
+        let mut val: serde_json::Value = serde_json::from_str(
+            r#"{
+                "single_nested": "https://auth.com/login?redirect=https://app.com/cb?token=secret",
+                "mixed_outer_inner": "https://auth.com/login?app_id=42&redirect=https://app.com/cb?token=secret&env=staging",
+                "nested_with_frag": "https://auth.com/login?redirect=https://app.com/cb?token=secret#section1?extra=ignored"
+            }"#,
+        )
+        .unwrap();
+
+        let count = redact_json_value(&mut val, &opts);
+        assert_eq!(count, 3);
+
+        // Verification of single nested URL
+        let single = val["single_nested"].as_str().unwrap().to_string();
+        assert!(!single.contains("secret"));
+        assert_eq!(
+            single,
+            "https://auth.com/login?redirect=https://app.com/cb?token=[REDACTED]"
+        );
+
+        // Verification of mixed outer and inner query parameters
+        let mixed = val["mixed_outer_inner"].as_str().unwrap().to_string();
+        assert!(!mixed.contains("secret"));
+        assert!(mixed.contains("app_id=42"));
+        assert!(mixed.contains("env=staging"));
+        assert_eq!(
+            mixed,
+            "https://auth.com/login?app_id=42&redirect=https://app.com/cb?token=[REDACTED]&env=staging"
+        );
+
+        // Verification of nested URL with fragment
+        let with_frag = val["nested_with_frag"].as_str().unwrap().to_string();
+        assert!(!with_frag.contains("secret"));
+        assert_eq!(
+            with_frag,
+            "https://auth.com/login?redirect=https://app.com/cb?token=[REDACTED]#section1?extra=ignored"
+        );
+
+        // Idempotency on Pass 2 and Pass 3
+        let count2 = redact_json_value(&mut val, &opts);
+        assert_eq!(count2, 0);
+        assert_eq!(val["single_nested"], single);
+        assert_eq!(val["mixed_outer_inner"], mixed);
+        assert_eq!(val["nested_with_frag"], with_frag);
+
+        let count3 = redact_json_value(&mut val, &opts);
+        assert_eq!(count3, 0);
+    }
+
+    #[test]
+    fn redact_query_param_permutations_and_edge_cases() {
+        let opts = RedactOptions::new(true, "");
+
+        // 1. Sensitive at start, middle, end
+        let (out1, c1) = redact_url_query("https://example.com/api?token=sec1&keep=1", &opts);
+        assert_eq!(c1, 1);
+        assert_eq!(out1, "https://example.com/api?token=[REDACTED]&keep=1");
+
+        let (out2, c2) = redact_url_query("https://example.com/api?keep=1&token=sec2", &opts);
+        assert_eq!(c2, 1);
+        assert_eq!(out2, "https://example.com/api?keep=1&token=[REDACTED]");
+
+        let (out3, c3) = redact_url_query("https://example.com/api?a=1&password=sec3&b=2", &opts);
+        assert_eq!(c3, 1);
+        assert_eq!(out3, "https://example.com/api?a=1&password=[REDACTED]&b=2");
+
+        // 2. Contiguous sensitive parameters
+        let (out4, c4) = redact_url_query(
+            "https://example.com/api?access_token=t1&refresh_token=t2&secret=s3",
+            &opts,
+        );
+        assert_eq!(c4, 3);
+        assert_eq!(
+            out4,
+            "https://example.com/api?access_token=[REDACTED]&refresh_token=[REDACTED]&secret=[REDACTED]"
+        );
+
+        // 3. Casing and delimiter variants in query string
+        let (out5, c5) = redact_url_query(
+            "https://example.com/api?X-Api-Key=k1&cOoKiE=c1&clientSecret=s1&session-id=sid1",
+            &opts,
+        );
+        assert_eq!(c5, 4);
+        assert_eq!(
+            out5,
+            "https://example.com/api?X-Api-Key=[REDACTED]&cOoKiE=[REDACTED]&clientSecret=[REDACTED]&session-id=[REDACTED]"
+        );
+
+        // 4. Empty value in sensitive parameter
+        let (out6, c6) = redact_url_query("https://example.com/api?token=&user=alice", &opts);
+        assert_eq!(c6, 1);
+        assert_eq!(out6, "https://example.com/api?token=[REDACTED]&user=alice");
+
+        // 5. Flag parameters without '='
+        let (out7, c7) =
+            redact_url_query("https://example.com/api?flag1&token=secret&flag2", &opts);
+        assert_eq!(c7, 1);
+        assert_eq!(out7, "https://example.com/api?flag1&token=[REDACTED]&flag2");
+
+        // 6. Duplicate keys
+        let (out8, c8) =
+            redact_url_query("https://example.com/api?token=s1&user=bob&token=s2", &opts);
+        assert_eq!(c8, 2);
+        assert_eq!(
+            out8,
+            "https://example.com/api?token=[REDACTED]&user=bob&token=[REDACTED]"
+        );
+
+        // 7. Percent-encoded sensitive key (%74%6f%6b%65%6e == "token")
+        let (out9, c9) = redact_url_query(
+            "https://example.com/api?%74%6f%6b%65%6e=secret&other=val",
+            &opts,
+        );
+        assert_eq!(c9, 1);
+        assert_eq!(
+            out9,
+            "https://example.com/api?%74%6f%6b%65%6e=[REDACTED]&other=val"
+        );
+
+        // Idempotency: redacting output again produces 0 count and exact same string
+        for out in [
+            &out1, &out2, &out3, &out4, &out5, &out6, &out7, &out8, &out9,
+        ] {
+            let (pass2, count2) = redact_url_query(out, &opts);
+            assert_eq!(count2, 0);
+            assert_eq!(&pass2, out);
+        }
+    }
+
+    #[test]
+    fn redact_form_urlencoded_request_body() {
+        let mut session = crate::session::Session::default();
+        let id = session.open(crate::session::FlowDraft {
+            protocol: crate::session::Protocol::Http11,
+            method: "POST".into(),
+            host: "auth.example.com".into(),
+            path: "/oauth/token".into(),
+            url: "https://auth.example.com/oauth/token".into(),
+            request_headers: vec![(
+                "Content-Type".into(),
+                "application/x-www-form-urlencoded; charset=utf-8".into(),
+            )],
+        });
+        session.append_body(
+            id,
+            Direction::Request,
+            b"grant_type=password&username=alice&password=my_secret_pw&client_secret=sec_val&refresh_token=rt_999&scope=read",
+        );
+        session.set_response(id, 200, vec![], None);
+        session.mark_finished(id);
+
+        let flow = session.hydrated(id).unwrap();
+        let opts = RedactOptions::new(true, "");
+
+        let (sanitized1, rep1) = redact_flow(&flow, &opts);
+        assert_eq!(rep1.redacted_body_fields, 3);
+        assert!(!rep1.unsanitizable_req_body);
+
+        let body_str = std::str::from_utf8(&sanitized1.request_body).unwrap();
+        assert!(!body_str.contains("my_secret_pw"));
+        assert!(!body_str.contains("sec_val"));
+        assert!(!body_str.contains("rt_999"));
+        assert_eq!(
+            body_str,
+            "grant_type=password&username=alice&password=[REDACTED]&client_secret=[REDACTED]&refresh_token=[REDACTED]&scope=read"
+        );
+
+        // Pass 2 idempotency
+        let (sanitized2, rep2) = redact_flow(&sanitized1, &opts);
+        assert_eq!(rep2.total_redacted(), 0);
+        assert_eq!(sanitized2.request_body, sanitized1.request_body);
     }
 }
