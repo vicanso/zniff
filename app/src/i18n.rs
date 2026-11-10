@@ -83,6 +83,9 @@ pub enum StatusMsg {
         name: PrefName,
         err: String,
     },
+    ConfigBroken {
+        err: String,
+    },
     InstallFailed(String),
     RemoveFailed(String),
     CopiedUrl,
@@ -307,6 +310,12 @@ impl StatusMsg {
                 };
                 format!("{name} {err}")
             }
+            Self::ConfigBroken { err } => match lang {
+                Lang::Zh => format!("配置文件格式错误，已使用默认配置（更改不会保存）：{err}"),
+                Lang::En => {
+                    format!("Config format error, using defaults (changes will not save): {err}")
+                }
+            },
             Self::InstallFailed(err) => {
                 format!("{} {err}", t(lang, "安装失败:", "Install failed:"))
             }
@@ -648,7 +657,8 @@ impl StatusMsg {
             | Self::IosSimNoneBooted
             | Self::IosSimFailed(_)
             | Self::UpdateCheckFailed(_)
-            | Self::UpdateFailed { .. } => Some(true),
+            | Self::UpdateFailed { .. }
+            | Self::ConfigBroken { .. } => Some(true),
             _ => None,
         }
     }
@@ -695,6 +705,7 @@ impl StatusMsg {
             | Self::IosSimFailed(_)
             | Self::UpdateCheckFailed(_)
             | Self::UpdateFailed { .. } => t(lang, "操作失败", "Action Failed"),
+            Self::ConfigBroken { .. } => t(lang, "配置错误", "Configuration Error"),
             _ if self.toast_kind() == Some(true) => t(lang, "操作提示", "Notice"),
             _ => t(lang, "操作成功", "Action Completed"),
         }
@@ -1127,5 +1138,21 @@ mod tests {
             StatusMsg::RelayAcceptNeedToken.text(Lang::En),
             "Fill in the relay token before accepting uploads"
         );
+    }
+
+    #[test]
+    fn test_config_broken_toast_formatting() {
+        let msg = StatusMsg::ConfigBroken {
+            err: "invalid TOML syntax at line 2 col 4".to_string(),
+        };
+        assert_eq!(msg.toast_kind(), Some(true));
+        assert_eq!(msg.toast_title(Lang::Zh), "配置错误");
+        assert_eq!(msg.toast_title(Lang::En), "Configuration Error");
+        let zh = msg.text(Lang::Zh);
+        assert!(zh.contains("配置文件格式错误"));
+        assert!(zh.contains("invalid TOML syntax at line 2 col 4"));
+        let en = msg.text(Lang::En);
+        assert!(en.contains("Config format error"));
+        assert!(en.contains("invalid TOML syntax at line 2 col 4"));
     }
 }

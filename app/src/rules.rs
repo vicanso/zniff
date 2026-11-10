@@ -59,6 +59,7 @@ pub enum Rule {
         host: String,
         path_prefix: String,
         delay: Duration,
+        op: Option<String>,
     },
     Header {
         host: String,
@@ -67,6 +68,7 @@ pub enum Rule {
         remove: bool,
         name: String,
         value: String,
+        op: Option<String>,
     },
     Query {
         host: String,
@@ -74,6 +76,7 @@ pub enum Rule {
         remove: bool,
         name: String,
         value: String,
+        op: Option<String>,
     },
     Cors {
         host: String,
@@ -86,6 +89,7 @@ pub enum Rule {
         response: bool,
         from: String,
         to: String,
+        op: Option<String>,
     },
     /// Set or remove a JSON property/element by JSON Pointer (`/a/b/0`) or dot/bracket path (`a.b[0]`).
     Json {
@@ -95,6 +99,7 @@ pub enum Rule {
         remove: bool,
         json_path: String,
         value: serde_json::Value,
+        op: Option<String>,
     },
     /// Bandwidth limit in bytes per second for download (`down_bps`) and/or upload (`up_bps`).
     Throttle {
@@ -168,6 +173,7 @@ pub enum Action {
     },
     MapRemote {
         url: String,
+        path_prefix: String,
     },
     BreakRequest,
     BreakResponse,
@@ -237,6 +243,11 @@ impl Rule {
             | Self::MapRemote { op, .. }
             | Self::Break { op, .. }
             | Self::BreakResponse { op, .. }
+            | Self::Delay { op, .. }
+            | Self::Header { op, .. }
+            | Self::Query { op, .. }
+            | Self::Replace { op, .. }
+            | Self::Json { op, .. }
             | Self::NoCache { op, .. }
             | Self::Block { op, .. } => op.as_deref(),
             _ => None,
@@ -555,8 +566,13 @@ pub fn effect_with_ops(rules: &[Rule], host: &str, path: &str, ops: &[String]) -
                     fallback: *fallback,
                 });
             }
-            Rule::MapRemote { url, .. } if effect.action.is_none() => {
-                effect.action = Some(Action::MapRemote { url: url.clone() });
+            Rule::MapRemote {
+                url, path_prefix, ..
+            } if effect.action.is_none() => {
+                effect.action = Some(Action::MapRemote {
+                    url: url.clone(),
+                    path_prefix: path_prefix.clone(),
+                });
             }
             Rule::Break { .. } if effect.action.is_none() => {
                 effect.action = Some(Action::BreakRequest);
@@ -620,17 +636,60 @@ fn cap_delay(delay: Duration) -> Duration {
     if delay > DELAY_CAP { DELAY_CAP } else { delay }
 }
 
+fn is_windows_path_start(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+    {
+        return true;
+    }
+    if bytes.starts_with(br"\\?\") {
+        return true;
+    }
+    if bytes.len() >= 3 && bytes[0] == b'\\' && bytes[1] == b'\\' && bytes[2] != b'\\' {
+        return true;
+    }
+    false
+}
+
+fn has_subsequent_closing_quote(rest: &str) -> bool {
+    let mut chars = rest.char_indices().peekable();
+    while let Some((idx, ch)) = chars.next() {
+        if ch == '\\' {
+            chars.next();
+        } else if ch == '"' {
+            let after = &rest[idx + '"'.len_utf8()..];
+            return after.is_empty() || after.starts_with(char::is_whitespace);
+        }
+    }
+    false
+}
+
 /// Strips a trailing `# ...` comment when `#` is outside `"..."` quotes.
 fn strip_rule_comment(line: &str) -> &str {
     let mut in_quotes = false;
     let mut escaped = false;
-    for (idx, ch) in line.char_indices() {
+    let mut quote_start = 0;
+    let chars: Vec<(usize, char)> = line.char_indices().collect();
+    for (i, &(idx, ch)) in chars.iter().enumerate() {
         if escaped {
             escaped = false;
             continue;
         }
         if in_quotes {
             if ch == '\\' {
+                if let Some(&(_, '"')) = chars.get(i + 1) {
+                    let rest = &line[idx + 2..];
+                    let at_boundary = rest.is_empty() || rest.starts_with(char::is_whitespace);
+                    if at_boundary
+                        && is_windows_path_start(&line[quote_start..])
+                        && !has_subsequent_closing_quote(rest)
+                    {
+                        continue;
+                    }
+                }
                 escaped = true;
             } else if ch == '"' {
                 in_quotes = false;
@@ -639,6 +698,7 @@ fn strip_rule_comment(line: &str) -> &str {
         }
         if ch == '"' {
             in_quotes = true;
+            quote_start = idx + 1;
         } else if ch == '#' {
             return &line[..idx];
         }
@@ -689,8 +749,9 @@ fn next_rule_token(input: &str) -> Option<(String, &str)> {
         return None;
     }
     if let Some(after_open) = trimmed.strip_prefix('"') {
+        let is_win_path = is_windows_path_start(after_open);
         let mut out = String::new();
-        let mut chars = after_open.char_indices();
+        let mut chars = after_open.char_indices().peekable();
         while let Some((idx, ch)) = chars.next() {
             match ch {
                 '"' => {
@@ -701,9 +762,34 @@ fn next_rule_token(input: &str) -> Option<(String, &str)> {
                     return Some((out, rest));
                 }
                 '\\' => {
+                    if out.is_empty()
+                        && after_open.starts_with(r"\\")
+                        && !after_open.starts_with(r"\\\\")
+                    {
+                        chars.next();
+                        out.push_str(r"\\");
+                        continue;
+                    }
+
                     let (_, esc) = chars.next()?;
                     match esc {
-                        '"' | '\\' => out.push(esc),
+                        '"' => {
+                            let esc_idx = idx + ch.len_utf8();
+                            let rest = &after_open[esc_idx + '"'.len_utf8()..];
+                            let at_boundary =
+                                rest.is_empty() || rest.starts_with(char::is_whitespace);
+                            if at_boundary && is_win_path {
+                                let closed = rest.is_empty()
+                                    || rest.trim_start().starts_with('"')
+                                    || !has_subsequent_closing_quote(rest);
+                                if closed {
+                                    out.push('\\');
+                                    return Some((out, rest));
+                                }
+                            }
+                            out.push('"');
+                        }
+                        '\\' => out.push('\\'),
                         other => {
                             out.push('\\');
                             out.push(other);
@@ -748,6 +834,25 @@ fn parse_op_opt(text: &str) -> Option<String> {
         return None;
     }
     Some(raw.to_string())
+}
+
+fn split_trailing_op(text: &str) -> Option<(&str, Option<String>)> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Some(("", None));
+    }
+    if let Some(last_space) = trimmed.rfind(char::is_whitespace) {
+        let candidate = &trimmed[last_space + 1..];
+        if let Some(op_str) = candidate
+            .strip_prefix("op=")
+            .or_else(|| candidate.strip_prefix("operation="))
+        {
+            let op = parse_op_opt(op_str)?;
+            let value_part = trimmed[..last_space].trim_end();
+            return Some((value_part, Some(op)));
+        }
+    }
+    Some((trimmed, None))
 }
 
 fn parse_line(line: &str) -> Option<Rule> {
@@ -872,13 +977,23 @@ fn parse_line(line: &str) -> Option<Rule> {
         }
         "delay" => {
             let tokens = rule_tokens(rest)?;
-            if tokens.len() != 1 {
+            if tokens.is_empty() || tokens.len() > 2 {
                 return None;
             }
+            let delay = parse_delay(&tokens[0])?;
+            let op = if tokens.len() == 2 {
+                let op_str = tokens[1]
+                    .strip_prefix("op=")
+                    .or_else(|| tokens[1].strip_prefix("operation="))?;
+                Some(parse_op_opt(op_str)?)
+            } else {
+                None
+            };
             Some(Rule::Delay {
                 host,
                 path_prefix,
-                delay: parse_delay(&tokens[0])?,
+                delay,
+                op,
             })
         }
         "throttle" => {
@@ -893,7 +1008,13 @@ fn parse_line(line: &str) -> Option<Rule> {
         }
         "cert" => {
             let tokens = rule_tokens(rest)?;
-            if tokens.is_empty() || tokens.len() > 2 || tokens[0].is_empty() {
+            if tokens.is_empty()
+                || tokens.len() > 2
+                || tokens[0].is_empty()
+                || tokens
+                    .iter()
+                    .any(|t| t.starts_with("op=") || t.starts_with("operation="))
+            {
                 return None;
             }
             let cert_path = PathBuf::from(&tokens[0]);
@@ -906,7 +1027,13 @@ fn parse_line(line: &str) -> Option<Rule> {
         }
         "client-cert" | "mtls" => {
             let tokens = rule_tokens(rest)?;
-            if tokens.is_empty() || tokens.len() > 2 || tokens[0].is_empty() {
+            if tokens.is_empty()
+                || tokens.len() > 2
+                || tokens[0].is_empty()
+                || tokens
+                    .iter()
+                    .any(|t| t.starts_with("op=") || t.starts_with("operation="))
+            {
                 return None;
             }
             let cert_path = PathBuf::from(&tokens[0]);
@@ -935,10 +1062,39 @@ fn parse_line(line: &str) -> Option<Rule> {
                 "set" | "add" => false,
                 _ => return None,
             };
-            let value = unquote_optional(rest)?;
-            if remove && !value.is_empty() {
-                return None;
-            }
+            let (value, rule_op) = if remove {
+                let rest = rest.trim();
+                let rule_op = if rest.is_empty() {
+                    None
+                } else {
+                    let op_str = rest
+                        .strip_prefix("op=")
+                        .or_else(|| rest.strip_prefix("operation="))?;
+                    Some(parse_op_opt(op_str)?)
+                };
+                (String::new(), rule_op)
+            } else {
+                let rest = rest.trim();
+                if rest.starts_with('"') {
+                    let (token, after_val) = next_rule_token(rest)?;
+                    let after_val = after_val.trim();
+                    let rule_op = if after_val.is_empty() {
+                        None
+                    } else {
+                        let op_str = after_val
+                            .strip_prefix("op=")
+                            .or_else(|| after_val.strip_prefix("operation="))?;
+                        Some(parse_op_opt(op_str)?)
+                    };
+                    (token, rule_op)
+                } else {
+                    let (val_str, rule_op) = split_trailing_op(rest)?;
+                    if val_str.is_empty() {
+                        return None;
+                    }
+                    (val_str.to_string(), rule_op)
+                }
+            };
             Some(Rule::Header {
                 host,
                 path_prefix,
@@ -946,6 +1102,7 @@ fn parse_line(line: &str) -> Option<Rule> {
                 remove,
                 name,
                 value,
+                op: rule_op,
             })
         }
         "query" => {
@@ -956,19 +1113,56 @@ fn parse_line(line: &str) -> Option<Rule> {
                 _ => return None,
             };
             let (first, rest) = next_rule_token(rest)?;
-            let (name, value) = if remove {
-                if !rest.trim().is_empty() || first.is_empty() {
+            let (name, value, rule_op) = if remove {
+                if first.is_empty() {
                     return None;
                 }
-                (first, String::new())
+                let rest = rest.trim();
+                let rule_op = if rest.is_empty() {
+                    None
+                } else {
+                    let op_str = rest
+                        .strip_prefix("op=")
+                        .or_else(|| rest.strip_prefix("operation="))?;
+                    Some(parse_op_opt(op_str)?)
+                };
+                (first, String::new(), rule_op)
             } else if let Some((k, v)) = first.split_once('=') {
-                if k.is_empty() || !rest.trim().is_empty() {
+                if k.is_empty() {
                     return None;
                 }
-                (k.to_string(), v.to_string())
+                let rest = rest.trim();
+                let rule_op = if rest.is_empty() {
+                    None
+                } else {
+                    let op_str = rest
+                        .strip_prefix("op=")
+                        .or_else(|| rest.strip_prefix("operation="))?;
+                    Some(parse_op_opt(op_str)?)
+                };
+                (k.to_string(), v.to_string(), rule_op)
             } else {
-                let value = unquote_optional(rest)?;
-                (first, value)
+                let rest = rest.trim();
+                let (val, rule_op) = if rest.starts_with('"') {
+                    let (token, after_val) = next_rule_token(rest)?;
+                    let after_val = after_val.trim();
+                    let rule_op = if after_val.is_empty() {
+                        None
+                    } else {
+                        let op_str = after_val
+                            .strip_prefix("op=")
+                            .or_else(|| after_val.strip_prefix("operation="))?;
+                        Some(parse_op_opt(op_str)?)
+                    };
+                    (token, rule_op)
+                } else {
+                    let (val_str, rule_op) = split_trailing_op(rest)?;
+                    if val_str.is_empty() {
+                        return None;
+                    }
+                    (val_str.to_string(), rule_op)
+                };
+                (first, val, rule_op)
             };
             if name.is_empty() {
                 return None;
@@ -979,6 +1173,7 @@ fn parse_line(line: &str) -> Option<Rule> {
                 remove,
                 name,
                 value,
+                op: rule_op,
             })
         }
         "cors" => {
@@ -1055,10 +1250,27 @@ fn parse_line(line: &str) -> Option<Rule> {
                 (from, "")
             };
             let from = unquote_optional(raw_from)?;
-            let to = unquote_optional(raw_to)?;
             if from.is_empty() {
                 return None;
             }
+            let raw_to = raw_to.trim();
+            let (to, rule_op) = if raw_to.starts_with('"') {
+                let (token, after_to) = next_rule_token(raw_to)?;
+                let after_to = after_to.trim();
+                let rule_op = if after_to.is_empty() {
+                    None
+                } else {
+                    let op_str = after_to
+                        .strip_prefix("op=")
+                        .or_else(|| after_to.strip_prefix("operation="))?;
+                    Some(parse_op_opt(op_str)?)
+                };
+                (token, rule_op)
+            } else {
+                let (val_str, rule_op) = split_trailing_op(raw_to)?;
+                let to = unquote_optional(val_str)?;
+                (to, rule_op)
+            };
             let response = match side.as_str() {
                 "res" | "response" => true,
                 "req" | "request" => false,
@@ -1070,6 +1282,7 @@ fn parse_line(line: &str) -> Option<Rule> {
                 response,
                 from,
                 to,
+                op: rule_op,
             })
         }
         "json" => {
@@ -1091,9 +1304,15 @@ fn parse_line(line: &str) -> Option<Rule> {
                 return None;
             }
             if remove {
-                if !rest.trim().is_empty() {
-                    return None;
-                }
+                let rest = rest.trim();
+                let rule_op = if rest.is_empty() {
+                    None
+                } else {
+                    let op_str = rest
+                        .strip_prefix("op=")
+                        .or_else(|| rest.strip_prefix("operation="))?;
+                    Some(parse_op_opt(op_str)?)
+                };
                 Some(Rule::Json {
                     host,
                     path_prefix,
@@ -1101,9 +1320,30 @@ fn parse_line(line: &str) -> Option<Rule> {
                     remove: true,
                     json_path,
                     value: serde_json::Value::Null,
+                    op: rule_op,
                 })
             } else {
-                let value = parse_json_rule_value(rest)?;
+                let rest = rest.trim();
+                let (value, rule_op) = if rest.starts_with('"') {
+                    let (token, after_val) = next_rule_token(rest)?;
+                    let after_val = after_val.trim();
+                    let rule_op = if after_val.is_empty() {
+                        None
+                    } else {
+                        let op_str = after_val
+                            .strip_prefix("op=")
+                            .or_else(|| after_val.strip_prefix("operation="))?;
+                        Some(parse_op_opt(op_str)?)
+                    };
+                    (serde_json::Value::String(token), rule_op)
+                } else {
+                    let (val_str, rule_op) = split_trailing_op(rest)?;
+                    if val_str.is_empty() {
+                        return None;
+                    }
+                    let value = parse_json_rule_value(val_str)?;
+                    (value, rule_op)
+                };
                 Some(Rule::Json {
                     host,
                     path_prefix,
@@ -1111,6 +1351,7 @@ fn parse_line(line: &str) -> Option<Rule> {
                     remove: false,
                     json_path,
                     value,
+                    op: rule_op,
                 })
             }
         }
@@ -1400,7 +1641,7 @@ fn json_remove_at(node: &mut serde_json::Value, segs: &[String]) {
     if rest.is_empty() {
         match node {
             serde_json::Value::Object(map) => {
-                map.remove(first);
+                map.shift_remove(first);
             }
             serde_json::Value::Array(arr) => {
                 if let Ok(idx) = first.parse::<usize>()
@@ -2009,10 +2250,7 @@ fn path_matches(prefix: &str, path: &str) -> bool {
                 return true;
             }
             let trimmed = p.trim_end_matches('/');
-            path == p
-                || path == trimmed
-                || path.starts_with(&format!("{trimmed}/"))
-                || path.starts_with(&p)
+            path == p || path == trimmed || path.starts_with(&format!("{trimmed}/"))
         })
 }
 
@@ -2179,7 +2417,7 @@ pub fn resolve_map_local_target(
     Ok(Some(canon_file))
 }
 
-fn matched_route_suffix<'a>(prefix: &str, clean_path: &'a str) -> &'a str {
+pub fn matched_route_suffix<'a>(prefix: &str, clean_path: &'a str) -> &'a str {
     let mut best_len: Option<usize> = None;
     for part in prefix
         .split(['|', ','])
@@ -2201,15 +2439,52 @@ fn matched_route_suffix<'a>(prefix: &str, clean_path: &'a str) -> &'a str {
             if best_len.is_none_or(|cur| len > cur) {
                 best_len = Some(len);
             }
-        } else if clean_path.starts_with(&p) {
-            let len = p.len();
-            if best_len.is_none_or(|cur| len > cur) {
-                best_len = Some(len);
-            }
         }
     }
     let cut = best_len.unwrap_or(0).min(clean_path.len());
     &clean_path[cut..]
+}
+
+pub fn map_remote_path(dest_url_path: &str, path_prefix: &str, req_path: &str) -> String {
+    let clean_req = req_path.split(['?', '#']).next().unwrap_or(req_path);
+    let req_query = req_path.split_once('?').map(|(_, q)| q);
+    let suffix = matched_route_suffix(path_prefix, clean_req);
+
+    let (dest_path, dest_query) = dest_url_path.split_once('?').unwrap_or((dest_url_path, ""));
+
+    let clean_dest = dest_path.trim_end_matches('/');
+    let combined_path = if suffix.is_empty() {
+        if clean_dest.is_empty() {
+            "/".to_string()
+        } else {
+            dest_path.to_string()
+        }
+    } else if suffix.starts_with('/') {
+        if clean_dest.is_empty() {
+            suffix.to_string()
+        } else {
+            format!("{clean_dest}{suffix}")
+        }
+    } else {
+        if clean_dest.is_empty() {
+            format!("/{suffix}")
+        } else {
+            format!("{clean_dest}/{suffix}")
+        }
+    };
+
+    let query_part = match (dest_query.is_empty(), req_query.filter(|q| !q.is_empty())) {
+        (true, None) => None,
+        (false, None) => Some(dest_query.to_string()),
+        (true, Some(rq)) => Some(rq.to_string()),
+        (false, Some(rq)) => Some(format!("{dest_query}&{rq}")),
+    };
+
+    if let Some(query) = query_part {
+        format!("{combined_path}?{query}")
+    } else {
+        combined_path
+    }
 }
 
 fn percent_decode_segment(input: &str) -> Option<String> {
@@ -2748,7 +3023,8 @@ break-res example.com/graphql op=anonymous
         assert_eq!(
             remote_eff.action,
             Some(Action::MapRemote {
-                url: "https://staging.test/graphql".to_string()
+                url: "https://staging.test/graphql".to_string(),
+                path_prefix: "/graphql".to_string(),
             })
         );
 
@@ -3068,6 +3344,396 @@ break-res example.com/graphql op=anonymous
         assert_eq!(
             append_quick_rule("", QuickRule::Block, "ads.example.com", true, "GetAd", "").unwrap(),
             "block ads.example.com drop op=GetAd\n"
+        );
+    }
+
+    #[test]
+    fn test_map_remote_path_joining_and_query_preservation() {
+        // 1. Subpath and query preservation
+        assert_eq!(
+            map_remote_path("/v2", "/api", "/api/users?id=1"),
+            "/v2/users?id=1"
+        );
+        // 2. Trailing slash on target
+        assert_eq!(
+            map_remote_path("/v2/", "/api", "/api/users?id=1"),
+            "/v2/users?id=1"
+        );
+        // 3. Root target path
+        assert_eq!(
+            map_remote_path("/", "/api", "/api/users?id=1"),
+            "/users?id=1"
+        );
+        // 4. Whole-domain map (prefix "/")
+        assert_eq!(
+            map_remote_path("/v2", "/", "/api/users?id=1"),
+            "/v2/api/users?id=1"
+        );
+        // 5. Trailing slash on prefix
+        assert_eq!(
+            map_remote_path("/v2", "/api/", "/api/users?id=1"),
+            "/v2/users?id=1"
+        );
+        // 6. Exact match without subpath
+        assert_eq!(map_remote_path("/v2", "/api", "/api"), "/v2");
+        // 7. Trailing slash on request
+        assert_eq!(map_remote_path("/v2", "/api", "/api/"), "/v2/");
+        // 8. Destination URL with existing query parameter
+        assert_eq!(
+            map_remote_path("/v2?dest=true", "/api", "/api/users?id=1"),
+            "/v2/users?dest=true&id=1"
+        );
+        // 9. Request without query
+        assert_eq!(map_remote_path("/v2", "/api", "/api/users"), "/v2/users");
+    }
+
+    #[test]
+    fn rule_path_prefix_does_not_match_across_segment_boundaries() {
+        let rules = parse_rules("break example.com/api\n");
+        assert_eq!(rules.len(), 1);
+
+        // Exact and subsegment matches
+        assert!(rules[0].matches("example.com", "/api"));
+        assert!(rules[0].matches("example.com", "/api/"));
+        assert!(rules[0].matches("example.com", "/api/users"));
+        assert!(rules[0].matches("example.com", "/api/users?query=1"));
+
+        // Boundary isolation: must NOT match across segment boundaries
+        assert!(!rules[0].matches("example.com", "/apix"));
+        assert!(!rules[0].matches("example.com", "/api-docs"));
+        assert!(!rules[0].matches("example.com", "/api2"));
+        assert!(!rules[0].matches("example.com", "/apix/users"));
+
+        // Trailing slash in prefix definition
+        let slash_rules = parse_rules("break example.com/api/\n");
+        assert!(slash_rules[0].matches("example.com", "/api"));
+        assert!(slash_rules[0].matches("example.com", "/api/"));
+        assert!(slash_rules[0].matches("example.com", "/api/users"));
+        assert!(!slash_rules[0].matches("example.com", "/apix"));
+        assert!(!slash_rules[0].matches("example.com", "/api-docs"));
+
+        // Multi-path OR prefix
+        let multi_rules = parse_rules("break example.com/api|/v1\n");
+        assert!(multi_rules[0].matches("example.com", "/api/users"));
+        assert!(multi_rules[0].matches("example.com", "/v1/auth"));
+        assert!(!multi_rules[0].matches("example.com", "/apix"));
+        assert!(!multi_rules[0].matches("example.com", "/v10"));
+    }
+
+    #[test]
+    fn op_parameter_extracts_cleanly_on_json_header_and_delay_rules() {
+        let rules = parse_rules(
+            "json 127.0.0.1/graphql res set /data/tagged 1 op=Other\n\
+             json 127.0.0.1/graphql res set /data/user {\"id\":1} op=GetUser\n\
+             json 127.0.0.1/graphql res del /data/secret op=GetCart\n\
+             header 127.0.0.1/graphql res set X-A b op=Foo\n\
+             header 127.0.0.1/graphql res set X-Title \"hello world\" op=Foo\n\
+             header 127.0.0.1/graphql req del Cookie op=NoAuth\n\
+             query 127.0.0.1/graphql set token=abc op=Foo\n\
+             query 127.0.0.1/graphql del secret op=Bar\n\
+             replace 127.0.0.1/graphql res a -> b op=Baz\n\
+             delay 127.0.0.1/graphql 500ms op=SlowQuery\n",
+        );
+        assert_eq!(rules.len(), 10);
+
+        // Verify op accessor
+        assert_eq!(rules[0].op(), Some("Other"));
+        assert_eq!(rules[1].op(), Some("GetUser"));
+        assert_eq!(rules[2].op(), Some("GetCart"));
+        assert_eq!(rules[3].op(), Some("Foo"));
+        assert_eq!(rules[4].op(), Some("Foo"));
+        assert_eq!(rules[5].op(), Some("NoAuth"));
+        assert_eq!(rules[6].op(), Some("Foo"));
+        assert_eq!(rules[7].op(), Some("Bar"));
+        assert_eq!(rules[8].op(), Some("Baz"));
+        assert_eq!(rules[9].op(), Some("SlowQuery"));
+
+        // Verify values were NOT polluted by op= string
+        match &rules[0] {
+            Rule::Json { value, .. } => assert_eq!(*value, serde_json::json!(1)),
+            _ => panic!("expected Json"),
+        }
+        match &rules[1] {
+            Rule::Json { value, .. } => assert_eq!(*value, serde_json::json!({"id": 1})),
+            _ => panic!("expected Json"),
+        }
+        match &rules[3] {
+            Rule::Header { value, .. } => assert_eq!(value, "b"),
+            _ => panic!("expected Header"),
+        }
+        match &rules[4] {
+            Rule::Header { value, .. } => assert_eq!(value, "hello world"),
+            _ => panic!("expected Header"),
+        }
+        match &rules[6] {
+            Rule::Query { name, value, .. } => {
+                assert_eq!(name, "token");
+                assert_eq!(value, "abc");
+            }
+            _ => panic!("expected Query"),
+        }
+        match &rules[8] {
+            Rule::Replace { from, to, .. } => {
+                assert_eq!(from, "a");
+                assert_eq!(to, "b");
+            }
+            _ => panic!("expected Replace"),
+        }
+
+        // Operation-scoped matching
+        let eff_other = effect_with_ops(&rules, "127.0.0.1", "/graphql", &["Other".to_string()]);
+        assert_eq!(eff_other.response_json_ops.len(), 1);
+
+        let eff_unmatched =
+            effect_with_ops(&rules, "127.0.0.1", "/graphql", &["Unrelated".to_string()]);
+        assert_eq!(eff_unmatched.response_json_ops.len(), 0);
+        assert_eq!(eff_unmatched.response_headers.len(), 0);
+        assert_eq!(eff_unmatched.delay, std::time::Duration::ZERO);
+
+        // Invalid syntax detection: trailing op= on unsupported rules or malformed op
+        assert_eq!(
+            invalid_rule_lines(
+                "cors example.com op=Other\n\
+                 header example.com res set X-A b op=\n\
+                 delay example.com 1s extra\n\
+                 cert example.com cert.pem op=Other\n"
+            ),
+            vec![1, 2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn quoted_windows_path_with_trailing_backslash_and_options() {
+        let rules = parse_rules(
+            "map-local example.com/assets \"C:\\mocks\\site\\\" fallback status=200\n\
+             map-local example.com/dist \"C:\\Program Files\\app\\\" fallback\n",
+        );
+        assert_eq!(rules.len(), 2);
+        let eff = effect(&rules, "example.com", "/assets/app.js");
+        assert_eq!(
+            eff.action,
+            Some(Action::MapLocal {
+                path_prefix: "/assets".to_string(),
+                file: Some(PathBuf::from("C:\\mocks\\site\\")),
+                status: 200,
+                fallback: true,
+            })
+        );
+        let eff2 = effect(&rules, "example.com", "/dist/index.html");
+        assert_eq!(
+            eff2.action,
+            Some(Action::MapLocal {
+                path_prefix: "/dist".to_string(),
+                file: Some(PathBuf::from("C:\\Program Files\\app\\")),
+                status: 200,
+                fallback: true,
+            })
+        );
+    }
+
+    #[test]
+    fn quoted_windows_path_with_trailing_backslash_and_comment() {
+        let rules =
+            parse_rules("map-local example.com/api \"C:\\mocks\\site\\\" # local directory mock\n");
+        assert_eq!(rules.len(), 1);
+        let eff = effect(&rules, "example.com", "/api/data");
+        assert_eq!(
+            eff.action,
+            Some(Action::MapLocal {
+                path_prefix: "/api".to_string(),
+                file: Some(PathBuf::from("C:\\mocks\\site\\")),
+                status: 200,
+                fallback: false,
+            })
+        );
+    }
+
+    #[test]
+    fn quoted_unc_prefix_preserved() {
+        let rules = parse_rules(
+            "map-local example.com/share \"\\\\server\\share\\data.json\"\n\
+             map-local example.com/dir \"\\\\server\\share\\mock\\\" fallback\n",
+        );
+        assert_eq!(rules.len(), 2);
+        let eff = effect(&rules, "example.com", "/share/data.json");
+        assert_eq!(
+            eff.action,
+            Some(Action::MapLocal {
+                path_prefix: "/share".to_string(),
+                file: Some(PathBuf::from("\\\\server\\share\\data.json")),
+                status: 200,
+                fallback: false,
+            })
+        );
+        let eff2 = effect(&rules, "example.com", "/dir/test.js");
+        assert_eq!(
+            eff2.action,
+            Some(Action::MapLocal {
+                path_prefix: "/dir".to_string(),
+                file: Some(PathBuf::from("\\\\server\\share\\mock\\")),
+                status: 200,
+                fallback: true,
+            })
+        );
+    }
+
+    #[test]
+    fn quoted_string_with_escaped_quotes_inside_still_works() {
+        let rules = parse_rules(
+            "replace example.com/api res \"say \\\"hello\\\"\" -> \"say \\\"world\\\"\"\n",
+        );
+        assert_eq!(rules.len(), 1);
+    }
+
+    #[test]
+    fn json_rewrite_preserves_object_key_order() {
+        let rules = parse_rules("json example.com/api res set /data/count 42\n");
+        let eff = effect(&rules, "example.com", "/api");
+        assert_eq!(eff.response_json_ops.len(), 1);
+
+        // Keys deliberately non-alphabetical: z, a, m, data, b
+        let original = br#"{"z":1,"a":2,"m":3,"data":{"count":0,"extra":true},"b":5}"#;
+        let rewritten = apply_json_ops(original, &eff.response_json_ops)
+            .expect("should succeed")
+            .expect("should be modified");
+        let text = std::str::from_utf8(&rewritten).unwrap();
+
+        // Verify key order is preserved, not alphabetically sorted (which would put "a" before "z")
+        assert_eq!(
+            text,
+            r#"{"z":1,"a":2,"m":3,"data":{"count":42,"extra":true},"b":5}"#
+        );
+    }
+
+    #[test]
+    fn escaped_quotes_with_colons_and_spaces_not_truncated() {
+        let cases = [
+            (
+                r#"replace example.com/api res "{\"name\": \"Alice\" }" -> "{}""#,
+                1,
+            ),
+            (
+                r#"replace example.com/api res "https://api.example.com/ \"v1\" legacy" -> "new""#,
+                1,
+            ),
+            (
+                r#"header example.com/api res set X-Custom "Error: \"Not Found\" code=404""#,
+                1,
+            ),
+            (
+                r#"query example.com/api set filter "category: \"books\" page=1""#,
+                1,
+            ),
+            (
+                r#"replace example.com/api res "path\to: \"sub\" folder" -> "out""#,
+                1,
+            ),
+            (
+                r#"json example.com/api res set /log "status: \"ok\" details""#,
+                1,
+            ),
+        ];
+        for (line, expected_count) in cases {
+            assert!(
+                invalid_rule_lines(line).is_empty(),
+                "line should have no syntax error: {line}"
+            );
+            let rules = parse_rules(line);
+            assert_eq!(rules.len(), expected_count, "failed for line: {line}");
+        }
+    }
+
+    #[test]
+    fn quoted_windows_path_with_fallback_and_status() {
+        let rules = parse_rules(r#"map-local example.com/api "C:\dir\" fallback status=200"#);
+        assert_eq!(rules.len(), 1);
+        let eff = effect(&rules, "example.com", "/api/foo");
+        assert_eq!(
+            eff.action,
+            Some(Action::MapLocal {
+                path_prefix: "/api".to_string(),
+                file: Some(PathBuf::from(r#"C:\dir\"#)),
+                status: 200,
+                fallback: true,
+            })
+        );
+    }
+
+    #[test]
+    fn json_rewrite_preserves_object_key_order_on_del() {
+        // 1. First key deletion: delete "z" from {"z":1, "b":2, "a":3, "m":4}
+        // swap_remove would put "m" first -> {"m":4, "b":2, "a":3}
+        // shift_remove must preserve relative order -> {"b":2, "a":3, "m":4}
+        let rules = parse_rules("json example.com/api res del /z\n");
+        let eff = effect(&rules, "example.com", "/api");
+        let original = br#"{"z":1,"b":2,"a":3,"m":4}"#;
+        let rewritten = apply_json_ops(original, &eff.response_json_ops)
+            .expect("should succeed")
+            .expect("should be modified");
+        assert_eq!(
+            std::str::from_utf8(&rewritten).unwrap(),
+            r#"{"b":2,"a":3,"m":4}"#
+        );
+
+        // 2. Middle key deletion: delete "b" from {"z":1, "b":2, "a":3, "m":4}
+        // swap_remove would swap "m" into "b"'s position -> {"z":1, "m":4, "a":3}
+        // shift_remove must preserve relative order -> {"z":1, "a":3, "m":4}
+        let rules = parse_rules("json example.com/api res del /b\n");
+        let eff = effect(&rules, "example.com", "/api");
+        let rewritten = apply_json_ops(original, &eff.response_json_ops)
+            .expect("should succeed")
+            .expect("should be modified");
+        assert_eq!(
+            std::str::from_utf8(&rewritten).unwrap(),
+            r#"{"z":1,"a":3,"m":4}"#
+        );
+
+        // 3. Middle key deletion (second middle key "a"): delete "a"
+        let rules = parse_rules("json example.com/api res del /a\n");
+        let eff = effect(&rules, "example.com", "/api");
+        let rewritten = apply_json_ops(original, &eff.response_json_ops)
+            .expect("should succeed")
+            .expect("should be modified");
+        assert_eq!(
+            std::str::from_utf8(&rewritten).unwrap(),
+            r#"{"z":1,"b":2,"m":4}"#
+        );
+
+        // 4. Last key deletion: delete "m" from {"z":1, "b":2, "a":3, "m":4}
+        let rules = parse_rules("json example.com/api res del /m\n");
+        let eff = effect(&rules, "example.com", "/api");
+        let rewritten = apply_json_ops(original, &eff.response_json_ops)
+            .expect("should succeed")
+            .expect("should be modified");
+        assert_eq!(
+            std::str::from_utf8(&rewritten).unwrap(),
+            r#"{"z":1,"b":2,"a":3}"#
+        );
+
+        // 5. Nested object key deletion: delete first key in nested object
+        let rules = parse_rules("json example.com/api res del /nested/first\n");
+        let eff = effect(&rules, "example.com", "/api");
+        let nested_original =
+            br#"{"top_z":1,"nested":{"first":10,"second":20,"third":30},"top_a":2}"#;
+        let rewritten = apply_json_ops(nested_original, &eff.response_json_ops)
+            .expect("should succeed")
+            .expect("should be modified");
+        assert_eq!(
+            std::str::from_utf8(&rewritten).unwrap(),
+            r#"{"top_z":1,"nested":{"second":20,"third":30},"top_a":2}"#
+        );
+
+        // 6. Multiple sequential deletions across different positions
+        let rules =
+            parse_rules("json example.com/api res del /k1\njson example.com/api res del /k3\n");
+        let eff = effect(&rules, "example.com", "/api");
+        let multi_original = br#"{"k0":0,"k1":1,"k2":2,"k3":3,"k4":4,"k5":5}"#;
+        let rewritten = apply_json_ops(multi_original, &eff.response_json_ops)
+            .expect("should succeed")
+            .expect("should be modified");
+        assert_eq!(
+            std::str::from_utf8(&rewritten).unwrap(),
+            r#"{"k0":0,"k2":2,"k4":4,"k5":5}"#
         );
     }
 }
