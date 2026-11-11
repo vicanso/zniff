@@ -28,8 +28,16 @@ fn main() -> impl std::process::Termination {
         zniff::shutdown_relay_push();
         previous(info);
     }));
+    let mut title_bar = nsh_core::desktop::TitleBarOptions::default();
+    title_bar.style = nsh_core::desktop::TitleBarStyle::Hidden;
+    title_bar.height = Some(nsh_core::geometry::px(42.0));
+    let mut attributes = nsh_core::desktop::WindowAttributes::default();
+    attributes.title_bar = Some(title_bar);
+    let mut options = nsh_core::desktop::MainWindowOptions::default();
+    options.attributes = attributes;
+    let root = platform::Root::of::<zniff::App>().main_window(options);
     let result = platform::run_app(
-        platform::AppSource::Rust(platform::Root::of::<zniff::App>()),
+        platform::AppSource::Rust(root),
         platform::AppOptions {
             title: "zniff".to_owned(),
             app_id: "dev.zniff.app".to_owned(),
