@@ -50,6 +50,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use std::time::{Duration, SystemTime};
 
+use nsh_base::data_table::ColumnFixed;
 use nsh_base::{
     Anchor, DataTable, DataTableApi, DataTableCell, DataTableClasses, DataTableColumn,
     DataTableColumnMove, DataTableContextMenu, DataTableEvent, DataTableHeaderCell, DataTablePress,
@@ -919,7 +920,7 @@ fn flow_table_columns(shown: ListColumns, widths: &HashMap<String, u32>) -> Vec<
             column.width = Some(px(width as f32));
             column.min_width = Some(px(limit.min as f32));
             column.max_width = Some(px(limit.max as f32));
-            column.fixed = fixed;
+            column.fixed = ColumnFixed::from(fixed);
             column.resizable = Some(true);
             column.movable = Some(true);
             column.selectable = Some(false);
@@ -22388,8 +22389,13 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
         let cols = super::flow_table_columns(shown, &widths);
         let keys: Vec<&str> = cols.iter().map(|column| column.key.as_ref()).collect();
         assert_eq!(keys, ["method", "path", "status", "gap", "elapsed"]);
-        assert!(cols[0].fixed && cols[1].fixed);
-        assert!(cols[2..].iter().all(|column| !column.fixed));
+        assert_eq!(cols[0].fixed, super::ColumnFixed::Left);
+        assert_eq!(cols[1].fixed, super::ColumnFixed::Left);
+        assert!(
+            cols[2..]
+                .iter()
+                .all(|column| column.fixed == super::ColumnFixed::None)
+        );
         assert_eq!(cols[0].width.unwrap().0, 76.0);
         assert_eq!(cols[1].width.unwrap().0, 400.0);
         assert_eq!(cols[1].min_width.unwrap().0, 80.0);
@@ -22404,7 +22410,12 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
         let cols = super::flow_table_columns(hidden_path, &widths);
         assert_eq!(cols[0].key.as_ref(), "method");
         assert!(cols.iter().all(|column| column.key.as_ref() != "path"));
-        assert_eq!(cols.iter().filter(|column| column.fixed).count(), 1);
+        assert_eq!(
+            cols.iter()
+                .filter(|column| column.fixed == super::ColumnFixed::Left)
+                .count(),
+            1
+        );
 
         let default_shown = super::ListColumns::from_config(&crate::config::Config::default());
         let default_cols =
@@ -22414,7 +22425,11 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
             default_keys,
             ["id", "method", "path", "status", "gap", "elapsed", "size"]
         );
-        assert!(default_cols[0].fixed && default_cols[1].fixed && default_cols[2].fixed);
+        assert!(
+            default_cols[..3]
+                .iter()
+                .all(|column| column.fixed == super::ColumnFixed::Left)
+        );
         let default_sum: f32 = default_cols.iter().map(|c| c.width.unwrap().0).sum();
         assert_eq!(default_sum, 568.0);
 

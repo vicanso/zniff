@@ -17,7 +17,7 @@ P0 到 P4 里点名的能力已经接上。下面是仍然接受的缺口，不�
 - macOS `security add-trusted-cert` 可能要用户点确认。`security find-certificate` 只说明证书在登录钥匙串里，不保证 SSL 信任策略已经生效。
 - 带密码的系统代理：`networksetup` 读不回密码，停止后可能恢复不完整。
 - 证书状态检测与移除：macOS 用 `security find-certificate` 与 `security delete-certificate`，Windows 用 `certutil -user -verifystore / -delstore Root`，Linux 用 NSS `certutil -d sql:$HOME/.pki/nssdb -L / -D`（仅针对 Chromium 系使用的 `~/.pki/nssdb`，不改系统级 `/etc/ssl/certs`）。移除时同时清理旧名 `Snoop CA`。
-- 窗口位置不记，窗口大小记住。nsh 0.4 的 `AppOptions` 提供初始 `size`，没有窗口坐标接口；`window()` 返回表面尺寸，改变后停半秒写入 `config.toml` 的 `window_width` / `window_height`（默认 `1200×760`），下次启动由 `app/src/main.rs` 传入 `AppOptions::size` 恢复。
+- 窗口位置不记，窗口大小记住。`AppOptions` 提供初始 `size`；`window()` 返回表面尺寸，改变后停半秒写入 `config.toml` 的 `window_width` / `window_height`（默认 `1200×760`），下次启动由 `app/src/main.rs` 传入 `AppOptions::size` 恢复。
 
 ## 代理行为
 
@@ -36,7 +36,7 @@ P0 到 P4 里点名的能力已经接上。下面是仍然接受的缺口，不�
 - 规则里 `map-local`、`map-remote`、`break`、`break-res`、`block` 是终点，按写下来的顺序第一条命中；`delay`、`throttle`、`cert`、`client-cert`（或 `mtls`）、`header`、`query`、`cors`、`no-cache`、`replace`、`json` 不占这条名额，匹配到的都会叠加上去，包括写在终点后面的行，且除 `cors`、`throttle`、`cert` 外的 11 种规则均支持可选 `op=<GraphQL操作名>` 条件（支持 `*` 通配与 `|` OR；明文 HTTP 与 HTTPS 均支持有界读取 `<= 1 MB` 请求体提取 GraphQL 操作名）。规则的域名段和 Path 前缀段均支持用 `|` 或 `,` 表示多个 OR（例如 `replace a.com|*.b.com/api|/v2 res ...`）。文件路径、匹配原文、替换目标、头值或查询参数含空格时用双引号 `"..."` 包裹。`replace 主机/路径 res 原文 -> 替换成` 改响应正文，`req` 改请求目标（path 和 query 连在一起）和请求正文。目标改完仍须以 `/` 开头，否则这一处不改；没有 body 也会改目标。`replace` 与 `json` 的正文改写支持带 `Content-Length <= 1 MB` 的报文，且当明确命中至少一条 `replace` 或 `json` 规则时也会对无 `Content-Length` 的 `chunked` 流式报文按需有界缓冲最多 1 MB：先按 `Content-Encoding` 解开，改写后去掉压缩头并重算 `Content-Length` 发明文；未命中改写规则的 chunked 流量仍零缓冲流式直通，对不上、不是 UTF-8（或非 JSON）或超过 1 MB 时照原样转发（超限跳过在备注记录原因）。同一条又命中响应断点时，这一轮不替换，断点仍看源站正文。顶栏「过滤」弹出层右栏里的规则框是带行号的编辑器，右上角会提示语法有误的行号。下面可以通过 14 项分段标签（替换、转发、文件[本地/回源]、延迟、断点、响应断点、改头、改参、跨域、限速、证书[MITM/mTLS]、JSON、禁缓存、阻断[状态码/断开]）快速追加一行，匹配行支持分别填写多域名 OR、多 Path 前缀 OR 以及可选 `GraphQL op`（在全部 11 种支持 `op=` 的规则标签上统一展示）。域名和 Path 都可以留空，留空写成 `*` 匹配全部。行右键「填入断点」写入 `break 主机路径`，查询串不放进去。改已有的哪一行仍没有单独的表单编辑器。`delay` 最长 30 秒。`map-local` 可写 `status=429`（省略时是 200，也可省略文件路径仅返回状态码与空正文），目标为本地目录时按匹配前缀后的相对路径解析静态资源并支持 `fallback` 回源。`header` 用 `req` 或 `res` 再写 `set` 或 `del`；`query` 支持 `set` 或 `del` URL 查询参数；`cors` 给响应补跨域头，`OPTIONS` 且没有终点规则时直接回 204，不拨源站。明文在拨号前应用，HTTPS 在源站连接打开后应用，WebSocket 和 `CONNECT` 跳过。Map Remote 换了主机就另开连接。请求断点和响应断点进入同一个最多 8 条的有界 FIFO 队列（`BREAK_QUEUE_CAP = 8`），队满时自动放行队首最旧的一条；队首默认等 60 秒（在编辑框内编辑时延长至 5 分钟），超时当放行，排在后面的不会先超时；点击断点条上的 `#id 请求/响应` 胶囊可将其提到队首并选中；点击断点「丢弃」直接关闭客户端连接或重置流（无状态码，记 `ERR · 断点丢弃`）。响应断点先缓冲 body，最多 1 MB；已经写明的 `Content-Length` 超过 1 MB 时不暂停，记「响应断点跳过」后照常转发；分块或未知长度读过 1 MB 时，这条响应记失败。请求断点放行时可改请求头和请求 body（Method 与 URL 只读展示）；响应断点放行时可改状态码、响应头和响应 body。重放不套规则和断点。顶栏「过滤」弹出层右栏顶部有「启用规则」和「启用断点」，默认都开，随配置写入 `config.toml` 与 `SavedProfile`。关掉规则后，Map、替换、延迟、头、CORS 和断点都不生效。只关掉断点时，其它规则仍生效，`break` 和 `break-res` 不再暂停。已经停住的那一条仍要等「放行」、丢弃或超时。两个开关有一个关掉时，顶栏「过滤」按钮用警告色。
 - 直通名单在 ClientHello 之后看 SNI，没有 SNI 就用 CONNECT 主机。支持空格、`,`、`;` 或 `|` 分隔多个域名 OR。`*.example.com` 匹配子域，不匹配顶点。`only:` 是白名单。`*` 全部直通。空名单全部解密。
 - `GET` 或 `HEAD` 的路径去掉 query 后是 `/zniff-ca.crt` 时直接返回根证书 PEM。直接访问 `/`，或路径是 `/zniff`，返回手机安装页。`Accept-Language` 首段不是 `zh` 时安装页是英文，空的或 `zh` 仍是中文。代理请求里的 `http://其他主机/` 仍转发出去。
-- 监听默认 `127.0.0.1:8877`。端口和局域网开关记在 `config.toml` 的 `listen_port`、`listen_all`，`0` 拒绝，绑不上就报错，不悄悄换端口。端口已被占用时说明多半是另一个 zniff 还在监听，并提示关掉它或改底栏端口。`listen_all` 打开后绑 `0.0.0.0`。监听地址是 `0.0.0.0` 之后，底栏「扫码」点开才显示安装页二维码。默认地址是访问公网的那张 IPv4；隧道和 `198.18.0.0/15` 让位给物理网卡。多张网卡可改选。文件导入导出与响应另存使用 `nsh 0.4` 的 `pick_paths` / `pick_save_path` 系统文件对话框。图片预览支持 png、jpeg、webp、gif、ico（ico 自动解包或转为 PNG 缓存供跨平台渲染），且响应已结束、非空、未截断。SVG 不预览。
+- 监听默认 `127.0.0.1:8877`。端口和局域网开关记在 `config.toml` 的 `listen_port`、`listen_all`，`0` 拒绝，绑不上就报错，不悄悄换端口。端口已被占用时说明多半是另一个 zniff 还在监听，并提示关掉它或改底栏端口。`listen_all` 打开后绑 `0.0.0.0`。监听地址是 `0.0.0.0` 之后，底栏「扫码」点开才显示安装页二维码。默认地址是访问公网的那张 IPv4；隧道和 `198.18.0.0/15` 让位给物理网卡。多张网卡可改选。文件导入导出与响应另存使用 `nsh 0.5` 的 `pick_paths` / `pick_save_path` 系统文件对话框。图片预览支持 png、jpeg、webp、gif、ico（ico 自动解包或转为 PNG 缓存供跨平台渲染），且响应已结束、非空、未截断。SVG 不预览。
 
 ## 已接上，不再当作待办
 
@@ -102,7 +102,7 @@ P0 到 P4 里点名的能力已经接上。下面是仍然接受的缺口，不�
 
 除上述已完成增强外，现有代码与文档中保留的未完成项及平台限制汇总如下：
 
-1. **窗口坐标位置未记忆**：窗口宽高已自动记忆恢复，但受限于 `nsh 0.4` 未暴露读取/设置窗口屏幕坐标（`x, y`）的公开接口，暂不记录窗口位置。
+1. **窗口坐标位置未记忆**：窗口宽高已自动记忆恢复（通过 `AppOptions::size`），暂不记录窗口屏幕坐标（`x, y`）。
 2. **已有规则行无独立表单回填编辑**：过滤面板右栏底部的 14 项分段标签用于快速追加新规则行，修改已有规则仍直接在上方带行号与语法校验的纯文本编辑器中编辑。
 3. **各平台系统代理能力边界**：
    - Linux 非 GNOME 环境无统一系统代理设置接口，开启「系统代理」后仅启动监听并在状态栏提示手动指向 `127.0.0.1:端口`。

@@ -32,7 +32,6 @@ fn main() -> impl std::process::Termination {
         platform::AppSource::Rust(platform::Root::of::<zniff::App>()),
         platform::AppOptions {
             title: "zniff".to_owned(),
-            #[cfg(any(target_os = "linux", target_os = "windows"))]
             app_id: "dev.zniff.app".to_owned(),
             size: zniff::initial_window_size(),
             ..Default::default()
