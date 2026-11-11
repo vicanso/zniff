@@ -56,6 +56,7 @@ pub struct Hub {
     rules_text: Mutex<String>,
     rules_rev: AtomicU64,
     upstream_text: Mutex<String>,
+    proxy_auth: Mutex<String>,
     rules_on: AtomicBool,
     breaks_on: AtomicBool,
     show_tunnels: AtomicBool,
@@ -75,6 +76,7 @@ impl Hub {
             rules_text: Mutex::new(String::new()),
             rules_rev: AtomicU64::new(0),
             upstream_text: Mutex::new(String::new()),
+            proxy_auth: Mutex::new(String::new()),
             rules_on: AtomicBool::new(true),
             breaks_on: AtomicBool::new(true),
             show_tunnels: AtomicBool::new(false),
@@ -109,6 +111,16 @@ impl Hub {
             .and_then(Value::as_bool)
         {
             self.relay_accept.store(accept, Ordering::Relaxed);
+        }
+        if let Some(auth) = value
+            .get("prefs")
+            .and_then(|prefs| prefs.get("proxy_auth"))
+            .and_then(Value::as_str)
+        {
+            *self
+                .proxy_auth
+                .lock()
+                .unwrap_or_else(|err| err.into_inner()) = auth.trim().to_string();
         }
     }
 
@@ -230,6 +242,22 @@ impl Hub {
             .lock()
             .unwrap_or_else(|err| err.into_inner()) = text.to_string();
         post_op(json!({"op": "set_upstream", "text": text}));
+    }
+
+    pub fn set_proxy_auth(&self, auth: &str) {
+        let trimmed = auth.trim().to_string();
+        *self
+            .proxy_auth
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = trimmed.clone();
+        post_op(json!({"op": "set_proxy_auth", "text": trimmed}));
+    }
+
+    pub fn proxy_auth_text(&self) -> String {
+        self.proxy_auth
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
     }
 
     pub fn set_relay_ingress(&self, accept: bool, token: &str) {

@@ -397,6 +397,7 @@ pub struct Hub {
     show_tunnel_failures: AtomicBool,
     upstream: Mutex<Option<Upstream>>,
     upstream_text: Mutex<String>,
+    proxy_auth: Mutex<String>,
     /// Idle plaintext origin sockets, used only on the proxy runtime.
     pool: tokio::sync::Mutex<PlainPoolMap>,
     /// Origin HTTP/2 senders. Each browser connection keeps its own lane.
@@ -461,6 +462,7 @@ pub(crate) fn spilled_flow_ids(document: &str) -> Vec<u64> {
 pub struct Upstream {
     pub host: String,
     pub port: u16,
+    pub auth_header: Option<String>,
 }
 
 struct BreakSlot {
@@ -519,6 +521,7 @@ impl Hub {
             show_tunnel_failures: AtomicBool::new(false),
             upstream: Mutex::new(None),
             upstream_text: Mutex::new(String::new()),
+            proxy_auth: Mutex::new(String::new()),
             pool: tokio::sync::Mutex::new(HashMap::new()),
             h2_pool: Mutex::new(HashMap::new()),
             h2_generation: AtomicU64::new(1),
@@ -951,6 +954,40 @@ impl Hub {
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .clone()
+    }
+
+    pub fn set_proxy_auth(&self, auth: &str) {
+        *self
+            .proxy_auth
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = auth.trim().to_string();
+    }
+
+    pub fn proxy_auth_text(&self) -> String {
+        self.proxy_auth
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+    }
+
+    fn proxy_auth_ok(&self, headers: &[(String, String)]) -> bool {
+        let expected_raw = self
+            .proxy_auth
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone();
+        if expected_raw.is_empty() {
+            return true;
+        }
+        let expected = if expected_raw.contains(':') {
+            expected_raw
+        } else {
+            format!("{expected_raw}:")
+        };
+        headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("proxy-authorization"))
+            .any(|(_, value)| verify_basic_proxy_auth(&expected, value))
     }
 
     fn skips_tls(&self, host: &str) -> bool {
@@ -1972,6 +2009,9 @@ async fn handle_conn_inner(mut socket: TcpStream, hub: Arc<Hub>) -> Result<()> {
         }
         None => {}
     }
+    if !hub.proxy_auth_ok(&head.headers) {
+        return write_proxy_auth_required(&mut socket, method.eq_ignore_ascii_case("HEAD")).await;
+    }
     if method.eq_ignore_ascii_case("CONNECT") {
         let (host, port) = split_host_port(&target, 443)?;
         socket
@@ -2876,18 +2916,24 @@ where
         inner: client,
     };
     let (method, host, port, path) = request_target(head)?;
+    let sanitized_headers: Vec<(String, String)> = head
+        .headers
+        .iter()
+        .filter(|(name, _)| !name.eq_ignore_ascii_case("proxy-authorization"))
+        .cloned()
+        .collect();
     let id = hub.open(FlowDraft {
         protocol: Protocol::Http11,
         method: method.clone(),
         host: host.clone(),
         path: path.clone(),
         url: format!("http://{}{path}", display_authority(&host, port, "http")),
-        request_headers: head.headers.clone(),
+        request_headers: sanitized_headers.clone(),
     });
     let mut host = host;
     let mut port = port;
     let mut path = path;
-    let mut headers = head.headers.clone();
+    let mut headers = sanitized_headers;
     let mut body_override: Option<Vec<u8>> = None;
     let mut request_taken = false;
     let mut request_recorded = false;
@@ -3283,7 +3329,8 @@ where
         });
         headers.push(("Content-Length".into(), body.len().to_string()));
     }
-    let target = if hub.upstream().is_some() {
+    let upstream = hub.upstream();
+    let target = if upstream.is_some() {
         format!("http://{}{path}", display_authority(&host, port, "http"))
     } else {
         path.clone()
@@ -3294,6 +3341,8 @@ where
     let mut connection_close = false;
     for (name, value) in &headers {
         if name.eq_ignore_ascii_case("proxy-connection")
+            || name.eq_ignore_ascii_case("proxy-authorization")
+            || name.eq_ignore_ascii_case("proxy-authenticate")
             || (body_override.is_some()
                 && (name.eq_ignore_ascii_case("content-length")
                     || name.eq_ignore_ascii_case("transfer-encoding")))
@@ -3319,6 +3368,9 @@ where
             "Host: {}\r\n",
             display_authority(&host, port, "http")
         ));
+    }
+    if let Some(auth) = upstream.as_ref().and_then(|u| u.auth_header.as_deref()) {
+        outbound.push_str(&format!("Proxy-Authorization: {auth}\r\n"));
     }
     if !has_connection {
         outbound.push_str("Connection: keep-alive\r\n");
@@ -3644,7 +3696,15 @@ async fn dial_timed(
             info.server_addr = peer.to_string();
         }
         if tunnel {
-            let req = format!("CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n");
+            let connect_authority = format!("{}:{port}", display_host(host));
+            let auth_line = upstream
+                .auth_header
+                .as_deref()
+                .map(|auth| format!("Proxy-Authorization: {auth}\r\n"))
+                .unwrap_or_default();
+            let req = format!(
+                "CONNECT {connect_authority} HTTP/1.1\r\nHost: {connect_authority}\r\n{auth_line}\r\n"
+            );
             stream.write_all(req.as_bytes()).await?;
             let (head, rest) = read_header_block(&mut stream).await?;
             let text = String::from_utf8_lossy(&head);
@@ -3687,13 +3747,103 @@ async fn dial_timed(
     Ok((stream, info))
 }
 
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    let mut diff = left.len() ^ right.len();
+    let max_len = left.len().max(right.len());
+    for idx in 0..max_len {
+        let a = left.get(idx).copied().unwrap_or(0);
+        let b = right.get(idx).copied().unwrap_or(0);
+        diff |= (a ^ b) as usize;
+    }
+    diff == 0
+}
+
+fn verify_basic_proxy_auth(expected_user_pass: &str, header_value: &str) -> bool {
+    let trimmed = header_value.trim();
+    let mut parts = trimmed.splitn(2, char::is_whitespace);
+    let Some(scheme) = parts.next() else {
+        return false;
+    };
+    if !scheme.eq_ignore_ascii_case("basic") {
+        return false;
+    }
+    let token = parts.next().unwrap_or("").trim();
+    if token.is_empty() || token.len() > 2048 {
+        return false;
+    }
+    let Some(decoded) = crate::session::base64_decode(token) else {
+        return false;
+    };
+    constant_time_eq(&decoded, expected_user_pass.as_bytes())
+}
+
+fn decode_percent_userinfo(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut idx = 0;
+    while idx < bytes.len() {
+        if bytes[idx] == b'%'
+            && idx + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (
+                (bytes[idx + 1] as char).to_digit(16),
+                (bytes[idx + 2] as char).to_digit(16),
+            )
+        {
+            out.push(((hi << 4) | lo) as u8);
+            idx += 3;
+            continue;
+        }
+        out.push(bytes[idx]);
+        idx += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 fn parse_upstream(text: &str) -> Option<Upstream> {
     let text = text.trim();
-    if text.is_empty() {
+    if text.is_empty() || text.chars().any(char::is_whitespace) {
         return None;
     }
-    let (host, port) = split_host_port(text, 80).ok()?;
-    Some(Upstream { host, port })
+    let rest = if text.len() >= 7 && text[..7].eq_ignore_ascii_case("http://") {
+        &text[7..]
+    } else if text.contains("://") {
+        return None;
+    } else {
+        text
+    };
+    let authority = rest.split('/').next().unwrap_or(rest);
+    if authority.is_empty() || authority.contains('?') || authority.contains('#') {
+        return None;
+    }
+    let (auth_header, host_port) = match authority.rsplit_once('@') {
+        Some((userinfo, hp)) => {
+            if userinfo.is_empty() {
+                (None, hp)
+            } else {
+                let (u, p) = userinfo.split_once(':').unwrap_or((userinfo, ""));
+                let creds = format!(
+                    "{}:{}",
+                    decode_percent_userinfo(u),
+                    decode_percent_userinfo(p)
+                );
+                let encoded = crate::session::base64_encode(creds.as_bytes());
+                (Some(format!("Basic {encoded}")), hp)
+            }
+        }
+        None => (None, authority),
+    };
+    if !host_port.starts_with('[') && host_port.matches(':').count() > 1 {
+        return None;
+    }
+    let (host, port) = split_host_port(host_port, 80).ok()?;
+    if host.is_empty() || port == 0 {
+        return None;
+    }
+    Some(Upstream {
+        host,
+        port,
+        auth_header,
+    })
 }
 
 fn client_cert_rules(rules: &[rules::Rule]) -> Vec<&rules::Rule> {
@@ -4832,6 +4982,22 @@ where
     }
 }
 
+async fn write_proxy_auth_required<S>(socket: &mut S, omit_body: bool) -> Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
+    const BODY: &[u8] = b"Proxy Authentication Required";
+    let head = format!(
+        "HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"zniff\"\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n",
+        BODY.len()
+    );
+    socket.write_all(head.as_bytes()).await?;
+    if !omit_body {
+        socket.write_all(BODY).await?;
+    }
+    Ok(())
+}
+
 async fn write_untracked<S>(
     socket: &mut S,
     status: u16,
@@ -5451,6 +5617,8 @@ where
     let mut has_host = false;
     for (name, value) in headers {
         if name.eq_ignore_ascii_case("proxy-connection")
+            || name.eq_ignore_ascii_case("proxy-authorization")
+            || name.eq_ignore_ascii_case("proxy-authenticate")
             || name.eq_ignore_ascii_case("content-length")
             || name.eq_ignore_ascii_case("transfer-encoding")
             || name.eq_ignore_ascii_case("connection")
@@ -5470,6 +5638,11 @@ where
             "Host: {}\r\n",
             display_authority(host, port, scheme)
         ));
+    }
+    if scheme == "http"
+        && let Some(auth) = hub.upstream().and_then(|u| u.auth_header)
+    {
+        outbound.push_str(&format!("Proxy-Authorization: {auth}\r\n"));
     }
     outbound.push_str(&format!(
         "Content-Length: {}\r\nConnection: close\r\n\r\n",
@@ -7510,7 +7683,9 @@ where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let authority = display_authority(host, port, scheme);
-    let target_uri = if hub.upstream().is_some() && scheme == "http" {
+    let upstream = hub.upstream();
+    let via_http_upstream = upstream.is_some() && scheme == "http";
+    let target_uri = if via_http_upstream {
         absolute_uri(scheme, &authority, path)?
     } else {
         let p = if path.is_empty() { "/" } else { path };
@@ -7523,6 +7698,14 @@ where
         .context("组装映射请求")?;
     *outbound.headers_mut() = headers.clone();
     strip_hop_by_hop(outbound.headers_mut(), websocket);
+    if via_http_upstream
+        && let Some(auth) = upstream.and_then(|u| u.auth_header)
+        && let Ok(val) = http::HeaderValue::from_str(&auth)
+    {
+        outbound
+            .headers_mut()
+            .insert(http::header::PROXY_AUTHORIZATION, val);
+    }
     if websocket {
         outbound
             .headers_mut()
@@ -13280,6 +13463,233 @@ mod tests {
         assert_eq!(res_json["state"], "done");
         assert_eq!(res_json["count"], 7);
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_upstream_supports_optional_scheme_and_basic_auth() {
+        assert_eq!(
+            parse_upstream("127.0.0.1:7890"),
+            Some(Upstream {
+                host: "127.0.0.1".into(),
+                port: 7890,
+                auth_header: None,
+            })
+        );
+        let expected_auth = format!(
+            "Basic {}",
+            crate::session::base64_encode(b"alice:p@ss:word")
+        );
+        assert_eq!(
+            parse_upstream("http://alice:p%40ss:word@127.0.0.1:7890/"),
+            Some(Upstream {
+                host: "127.0.0.1".into(),
+                port: 7890,
+                auth_header: Some(expected_auth.clone()),
+            })
+        );
+        assert_eq!(
+            parse_upstream("alice:p@ss:word@[::1]:7890"),
+            Some(Upstream {
+                host: "::1".into(),
+                port: 7890,
+                auth_header: Some(expected_auth),
+            })
+        );
+        assert_eq!(parse_upstream("socks5://127.0.0.1:1080"), None);
+        assert_eq!(parse_upstream(""), None);
+    }
+
+    #[tokio::test]
+    async fn proxy_auth_enforces_407_exempts_local_routes_and_chains_authenticated_upstream() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let dir = std::env::temp_dir().join(format!("zniff-proxy-auth-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+
+        // Plain HTTP origin that asserts client Proxy-Authorization was stripped.
+        let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        let seen_headers: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_clone = seen_headers.clone();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = origin.accept().await {
+                let Ok((head_bytes, _)) = read_header_block(&mut sock).await else {
+                    break;
+                };
+                seen_clone
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&head_bytes).into_owned());
+                let _ = sock
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                    )
+                    .await;
+            }
+        });
+
+        // HTTPS origin for CONNECT chaining test.
+        let (origin_ca, origin_leaf, leaf_key) = test_origin_cert();
+        let tls_server = origin_tls_config(
+            &origin_ca,
+            &origin_leaf,
+            &leaf_key,
+            vec![b"http/1.1".to_vec()],
+        );
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls_server));
+        let tls_origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let tls_origin_addr = tls_origin.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((sock, _)) = tls_origin.accept().await {
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    if let Ok(mut tls) = acceptor.accept(sock).await {
+                        let _ = read_header_block(&mut tls).await;
+                        let _ = tls
+                            .write_all(
+                                b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\ntls-ok",
+                            )
+                            .await;
+                    }
+                });
+            }
+        });
+
+        // Upstream proxy requiring Basic auth `upuser:up@pass`.
+        let mut upstream_hub = Hub::new(ca.clone()).unwrap();
+        upstream_hub.add_trust_anchor(origin_ca.der().clone());
+        upstream_hub.set_proxy_auth("upuser:up@pass");
+        let upstream_hub = Arc::new(upstream_hub);
+        let upstream_capture =
+            Capture::spawn(upstream_hub.clone(), "127.0.0.1:0".parse().unwrap()).unwrap();
+        let upstream_addr = upstream_capture.addr;
+
+        // Downstream proxy requiring Basic auth `client:s3cr3t` and chaining to authenticated upstream.
+        let mut hub = Hub::new(ca.clone()).unwrap();
+        hub.add_trust_anchor(origin_ca.der().clone());
+        hub.set_proxy_auth("client:s3cr3t");
+        hub.set_upstream(&format!("http://upuser:up%40pass@{upstream_addr}"));
+        let hub = Arc::new(hub);
+        let capture = Capture::spawn(hub.clone(), "127.0.0.1:0".parse().unwrap()).unwrap();
+        let proxy_addr = capture.addr;
+
+        // 1. Missing Proxy-Authorization -> 407, not recorded.
+        {
+            let mut s = TcpStream::connect(proxy_addr).await.unwrap();
+            let req = format!(
+                "GET http://{origin_addr}/denied HTTP/1.1\r\nHost: {origin_addr}\r\nConnection: close\r\n\r\n"
+            );
+            s.write_all(req.as_bytes()).await.unwrap();
+            let mut resp = Vec::new();
+            s.read_to_end(&mut resp).await.unwrap();
+            let text = String::from_utf8_lossy(&resp);
+            assert!(text.starts_with("HTTP/1.1 407"), "{text}");
+            assert!(
+                text.to_ascii_lowercase()
+                    .contains("proxy-authenticate: basic realm=\"zniff\""),
+                "{text}"
+            );
+        }
+
+        // 2. Wrong Proxy-Authorization on CONNECT -> 407.
+        {
+            let wrong = crate::session::base64_encode(b"client:wrong");
+            let mut s = TcpStream::connect(proxy_addr).await.unwrap();
+            let req = format!(
+                "CONNECT {tls_origin_addr} HTTP/1.1\r\nHost: {tls_origin_addr}\r\nProxy-Authorization: Basic {wrong}\r\n\r\n"
+            );
+            s.write_all(req.as_bytes()).await.unwrap();
+            let mut resp = Vec::new();
+            s.read_to_end(&mut resp).await.unwrap();
+            let text = String::from_utf8_lossy(&resp);
+            assert!(text.starts_with("HTTP/1.1 407"), "{text}");
+        }
+        assert_eq!(hub.with_session(|s| s.len()), 0);
+
+        // 3. Local routes (/zniff-ca.crt and /zniff) remain accessible without Proxy-Authorization.
+        for route in ["/zniff-ca.crt", "/zniff"] {
+            let mut s = TcpStream::connect(proxy_addr).await.unwrap();
+            let req =
+                format!("GET {route} HTTP/1.1\r\nHost: {proxy_addr}\r\nConnection: close\r\n\r\n");
+            s.write_all(req.as_bytes()).await.unwrap();
+            let mut resp = Vec::new();
+            s.read_to_end(&mut resp).await.unwrap();
+            let text = String::from_utf8_lossy(&resp);
+            assert!(text.starts_with("HTTP/1.1 200"), "{route} -> {text}");
+        }
+
+        // 4. Valid client Proxy-Authorization on plain HTTP -> 200 via authenticated upstream,
+        //    and neither client nor upstream Proxy-Authorization reaches origin or session headers.
+        let valid_client = crate::session::base64_encode(b"client:s3cr3t");
+        {
+            let mut s = TcpStream::connect(proxy_addr).await.unwrap();
+            let req = format!(
+                "GET http://{origin_addr}/authed HTTP/1.1\r\nHost: {origin_addr}\r\nProxy-Authorization: Basic {valid_client}\r\nConnection: close\r\n\r\n"
+            );
+            s.write_all(req.as_bytes()).await.unwrap();
+            let mut resp = Vec::new();
+            s.read_to_end(&mut resp).await.unwrap();
+            let text = String::from_utf8_lossy(&resp);
+            assert!(text.starts_with("HTTP/1.1 200"), "{text}");
+            assert!(text.ends_with("\r\n\r\nok"), "{text}");
+        }
+        let origin_req_head = seen_headers.lock().unwrap()[0].to_ascii_lowercase();
+        assert!(
+            !origin_req_head.contains("proxy-authorization"),
+            "origin must never receive Proxy-Authorization: {origin_req_head}"
+        );
+        let recorded = hub.with_session(|s| s.get(1).cloned()).unwrap();
+        assert!(
+            recorded
+                .request_headers
+                .iter()
+                .all(|(k, _)| !k.eq_ignore_ascii_case("proxy-authorization"))
+        );
+
+        // 5. Replay of plain HTTP flow also authenticates to upstream proxy.
+        let replayed_id = replay_once(hub.clone(), Some(recorded), ReplayOverride::default())
+            .await
+            .unwrap();
+        let replayed = hub.with_session(|s| s.get(replayed_id).cloned()).unwrap();
+        assert_eq!(replayed.status, Some(200));
+
+        // 6. Valid client Proxy-Authorization on HTTPS CONNECT -> 200 tunnel + MITM via authenticated upstream.
+        {
+            let mut s = TcpStream::connect(proxy_addr).await.unwrap();
+            let connect_req = format!(
+                "CONNECT {tls_origin_addr} HTTP/1.1\r\nHost: {tls_origin_addr}\r\nProxy-Authorization: Basic {valid_client}\r\n\r\n"
+            );
+            s.write_all(connect_req.as_bytes()).await.unwrap();
+            let (head, rest) = read_header_block(&mut s).await.unwrap();
+            let text = String::from_utf8_lossy(&head);
+            assert!(text.starts_with("HTTP/1.1 200"), "{text}");
+            assert!(rest.is_empty());
+
+            let mut roots = RootCertStore::empty();
+            roots.add(ca.cert_der()).unwrap();
+            let mut client_cfg = ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            client_cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
+            let connector = TlsConnector::from(Arc::new(client_cfg));
+            let mut tls = connector
+                .connect(server_name("127.0.0.1").unwrap(), s)
+                .await
+                .unwrap();
+            let inner_req = format!(
+                "GET /secure HTTP/1.1\r\nHost: {tls_origin_addr}\r\nConnection: close\r\n\r\n"
+            );
+            tls.write_all(inner_req.as_bytes()).await.unwrap();
+            let mut resp = Vec::new();
+            tls.read_to_end(&mut resp).await.unwrap();
+            let resp_text = String::from_utf8_lossy(&resp);
+            assert!(resp_text.starts_with("HTTP/1.1 200"), "{resp_text}");
+            assert!(resp_text.ends_with("\r\n\r\ntls-ok"), "{resp_text}");
+        }
+
+        capture.stop();
+        upstream_capture.stop();
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

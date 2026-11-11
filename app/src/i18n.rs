@@ -37,6 +37,7 @@ pub enum PrefName {
     Bypass,
     Rules,
     Upstream,
+    ProxyAuth,
     Port,
     Lan,
     List,
@@ -291,6 +292,9 @@ impl StatusMsg {
                     PrefName::Rules => t(lang, "规则没有记住:", "Rules were not saved:"),
                     PrefName::Upstream => {
                         t(lang, "上游代理没有记住:", "Upstream proxy was not saved:")
+                    }
+                    PrefName::ProxyAuth => {
+                        t(lang, "代理认证没有记住:", "Proxy auth was not saved:")
                     }
                     PrefName::Port => t(lang, "端口没有记住:", "Port was not saved:"),
                     PrefName::Lan => t(lang, "局域网开关没有记住:", "LAN switch was not saved:"),

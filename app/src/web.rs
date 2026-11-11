@@ -77,6 +77,8 @@ pub fn cli_settings(args: &[String], config_port: u16) -> std::result::Result<We
             index += 1;
             let next = args.get(index).ok_or_else(|| "缺少抓包地址".to_string())?;
             capture_bind = Some(parse_bind(next)?);
+        } else if arg == "--data-dir" || arg == "--proxy-auth" {
+            index += 1;
         }
         index += 1;
     }
@@ -121,6 +123,7 @@ pub fn run_cli(args: &[String], config_port: u16) -> i32 {
     hub.set_bypass(&loaded.bypass_hosts);
     hub.set_rules(&loaded.rules);
     hub.set_upstream(&loaded.upstream_proxy);
+    hub.set_proxy_auth(&crate::config::runtime_proxy_auth(&loaded.proxy_auth));
     hub.set_rules_enabled(loaded.rules_enabled);
     hub.set_breaks_enabled(loaded.breaks_enabled);
     hub.set_show_tunnel_failures(loaded.show_tunnel_failures);
@@ -367,6 +370,7 @@ struct PrefsBody {
     bypass: String,
     rules: String,
     upstream: String,
+    proxy_auth: String,
     rules_enabled: bool,
     breaks_enabled: bool,
     show_tunnels: bool,
@@ -630,6 +634,7 @@ fn state_of(slot: &Slot) -> StateBody {
             bypass: slot.hub.bypass_text(),
             rules: slot.hub.rules_text(),
             upstream: slot.hub.upstream_text(),
+            proxy_auth: slot.hub.proxy_auth_text(),
             rules_enabled: slot.hub.rules_enabled(),
             breaks_enabled: slot.hub.breaks_enabled(),
             show_tunnels: slot.hub.tunnel_failures_shown(),
@@ -1391,6 +1396,12 @@ fn sync_hub_op(slot: &mut Slot, op: &str, value: &Value) -> Reply {
             let text = json_text(value);
             slot.hub.set_upstream(&text);
             persist_slot_config(slot, |cfg| cfg.upstream_proxy = text);
+        }
+        "set_proxy_auth" => {
+            let text = json_text(value);
+            slot.hub.set_proxy_auth(&text);
+            let trimmed = text.trim().to_string();
+            persist_slot_config(slot, |cfg| cfg.proxy_auth = trimmed);
         }
         "set_relay_token" => {
             let text = json_text(value);
@@ -2510,6 +2521,44 @@ mod tests {
         )
         .await;
         assert_eq!(status, 404);
+
+        drop(server);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn web_hub_sets_and_exposes_proxy_auth() {
+        let dir = std::env::temp_dir().join(format!("zniff-web-auth-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+        let capture_port = reserve_port();
+        let server = WebServer::start(
+            "127.0.0.1:0".parse().unwrap(),
+            hub.clone(),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            capture_port,
+        )
+        .unwrap();
+        let web = server.addr();
+
+        let (status, _) = post(
+            web,
+            "/api/hub",
+            r#"{"op":"set_proxy_auth","text":"  admin:pass123  "}"#,
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(hub.proxy_auth_text(), "admin:pass123");
+
+        let (status, raw_state) = exchange(
+            web,
+            "GET /api/state HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert_eq!(status, 200);
+        let state: Value = serde_json::from_str(body_of(&raw_state)).unwrap();
+        assert_eq!(state["prefs"]["proxy_auth"], "admin:pass123");
 
         drop(server);
         let _ = std::fs::remove_dir_all(&dir);

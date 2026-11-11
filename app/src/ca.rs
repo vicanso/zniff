@@ -46,7 +46,31 @@ pub struct Ca {
     custom_certs: Mutex<Vec<CachedCustomCert>>,
 }
 
-pub fn data_dir() -> PathBuf {
+static DATA_DIR_OVERRIDE: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// Overrides [`data_dir`] for the current process (used by `--data-dir`).
+pub fn set_data_dir_override(dir: impl Into<PathBuf>) {
+    let path = dir.into();
+    if !path.as_os_str().is_empty() {
+        *DATA_DIR_OVERRIDE
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = Some(path);
+    }
+}
+
+fn resolve_custom_data_dir(override_dir: Option<&Path>, env_dir: Option<&str>) -> Option<PathBuf> {
+    if let Some(dir) = override_dir.filter(|p| !p.as_os_str().is_empty()) {
+        return Some(dir.to_path_buf());
+    }
+    let trimmed = env_dir?.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(trimmed))
+    }
+}
+
+fn default_platform_data_dir() -> PathBuf {
     #[cfg(target_os = "macos")]
     {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
@@ -67,6 +91,16 @@ pub fn data_dir() -> PathBuf {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
         PathBuf::from(home).join(".local/share/zniff")
     }
+}
+
+pub fn data_dir() -> PathBuf {
+    let override_dir = DATA_DIR_OVERRIDE
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .clone();
+    let env_dir = std::env::var("ZNIFF_DATA_DIR").ok();
+    resolve_custom_data_dir(override_dir.as_deref(), env_dir.as_deref())
+        .unwrap_or_else(default_platform_data_dir)
 }
 
 impl Ca {
@@ -1579,5 +1613,19 @@ Cert 0: zniff CA
         assert_ne!(chain1, chain2, "updated mtime must reload custom cert");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn custom_data_dir_prefers_cli_override_then_env() {
+        assert_eq!(
+            resolve_custom_data_dir(Some(Path::new("/cli/data")), Some("/env/data")),
+            Some(PathBuf::from("/cli/data"))
+        );
+        assert_eq!(
+            resolve_custom_data_dir(None, Some("  /data/zniff  ")),
+            Some(PathBuf::from("/data/zniff"))
+        );
+        assert_eq!(resolve_custom_data_dir(None, Some("   ")), None);
+        assert_eq!(resolve_custom_data_dir(Some(Path::new("")), None), None);
     }
 }

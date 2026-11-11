@@ -105,14 +105,17 @@ fn cli_info_output(args: &[String]) -> Option<String> {
                 "zniff {}\n",
                 "\n",
                 "Usage:\n",
-                "  zniff                                                       Open desktop window\n",
+                "  zniff [--data-dir <dir>] [--proxy-auth <user:pass>]         Open desktop window\n",
                 "  zniff --web [--web-bind <ip>] [--web-port <port>] [--bind <ip>] [-p|--port <port>]\n",
-                "  zniff --relay --token <secret> [--bind <ip>] [-p|--port <port>]\n",
-                "  zniff --mcp [-p|--port <port>]\n",
+                "              [--data-dir <dir>] [--proxy-auth <user:pass>]\n",
+                "  zniff --relay --token <secret> [--bind <ip>] [-p|--port <port>] [--data-dir <dir>]\n",
+                "  zniff --mcp [-p|--port <port>] [--data-dir <dir>]\n",
                 "\n",
                 "Options:\n",
-                "  -V, --version   Print version and exit\n",
-                "  -h, --help      Print help and exit"
+                "  --data-dir <dir>         Override CA & config directory (env: ZNIFF_DATA_DIR)\n",
+                "  --proxy-auth <user:pass> Require Basic auth on capture port (env: ZNIFF_PROXY_AUTH)\n",
+                "  -V, --version            Print version and exit\n",
+                "  -h, --help               Print help and exit"
             ),
             env!("CARGO_PKG_VERSION"),
         ));
@@ -123,6 +126,39 @@ fn cli_info_output(args: &[String]) -> Option<String> {
     None
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn apply_global_cli_flags(args: &[String]) -> std::result::Result<(), String> {
+    let mut idx = 0usize;
+    while idx < args.len() {
+        let arg = args[idx].as_str();
+        if let Some(rest) = arg.strip_prefix("--data-dir=") {
+            let trimmed = rest.trim();
+            if trimmed.is_empty() {
+                return Err("缺少数据目录路径 (--data-dir)".to_string());
+            }
+            ca::set_data_dir_override(trimmed);
+        } else if arg == "--data-dir" {
+            idx += 1;
+            let next = args
+                .get(idx)
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| "缺少数据目录路径 (--data-dir)".to_string())?;
+            ca::set_data_dir_override(next);
+        } else if let Some(rest) = arg.strip_prefix("--proxy-auth=") {
+            config::set_proxy_auth_override(rest);
+        } else if arg == "--proxy-auth" {
+            idx += 1;
+            let next = args
+                .get(idx)
+                .ok_or_else(|| "缺少代理认证参数 (--proxy-auth <user:pass>)".to_string())?;
+            config::set_proxy_auth_override(next);
+        }
+        idx += 1;
+    }
+    Ok(())
+}
+
 /// Headless modes exit before the desktop window. `--web` serves the operator
 /// console and leaves the capture port closed. `--relay` and `--mcp` are separate.
 #[cfg(not(target_arch = "wasm32"))]
@@ -131,6 +167,10 @@ pub fn maybe_run_cli_mode() -> Option<i32> {
     if let Some(info) = cli_info_output(&args) {
         println!("{info}");
         return Some(0);
+    }
+    if let Err(err) = apply_global_cli_flags(&args) {
+        eprintln!("{err}");
+        return Some(2);
     }
     let web = args.iter().any(|arg| arg == "--web");
     let relay_mode = args.iter().any(|arg| arg == "--relay");
@@ -164,6 +204,8 @@ pub fn maybe_run_cli_mode() -> Option<i32> {
             {
                 port = parsed;
             }
+            idx += 1;
+        } else if arg == "--data-dir" || arg == "--proxy-auth" {
             idx += 1;
         }
         idx += 1;
@@ -269,6 +311,7 @@ struct ProfileSignals {
     rules_on: Signal<bool>,
     breaks_on: Signal<bool>,
     show_tunnels: Signal<bool>,
+    proxy_auth: Signal<String>,
     relay_url: Signal<String>,
     relay_accept: Signal<bool>,
     list_width: Signal<f32>,
@@ -1205,6 +1248,7 @@ pub fn App() -> impl IntoElement {
     let bypass_text = signal(saved.bypass_hosts);
     let rules_text = signal(saved.rules);
     let upstream_text = signal(saved.upstream_proxy);
+    let proxy_auth_sig = signal(config::runtime_proxy_auth(&saved.proxy_auth));
     let relay_url_sig = signal(saved.relay_url);
     let relay_accept_sig = signal(saved.relay_accept);
     let profile_signals = ProfileSignals {
@@ -1218,6 +1262,7 @@ pub fn App() -> impl IntoElement {
         rules_on: signal(saved.rules_enabled),
         breaks_on: signal(saved.breaks_enabled),
         show_tunnels: signal(saved.show_tunnel_failures),
+        proxy_auth: proxy_auth_sig,
         relay_url: relay_url_sig,
         relay_accept: relay_accept_sig,
         list_width,
@@ -2602,6 +2647,8 @@ fn saved_filter_panel(profiles: ProfileSignals, controls: Arc<Controls>) -> impl
     let rules_save_controls = controls.clone();
     let rules_clear_controls = controls.clone();
     let upstream_controls = controls.clone();
+    let proxy_auth_text = profiles.proxy_auth;
+    let proxy_auth_controls = controls.clone();
     let relay_url_text = profiles.relay_url;
     let relay_token_text = signal(lock_string(&controls.relay_token));
     let relay_accept_on = profiles.relay_accept;
@@ -3041,7 +3088,10 @@ fn saved_filter_panel(profiles: ProfileSignals, controls: Arc<Controls>) -> impl
                             "Upstream Proxy",
                             side_input(
                                 upstream_text,
-                                tr("host:port，空着直连", "host:port, empty means direct"),
+                                tr(
+                                    "[user:pass@]host:port，空着直连",
+                                    "[user:pass@]host:port, empty = direct",
+                                ),
                                 28.0,
                                 false,
                                 move |text| {
@@ -3054,6 +3104,35 @@ fn saved_filter_panel(profiles: ProfileSignals, controls: Arc<Controls>) -> impl
                                             &upstream_controls,
                                             StatusMsg::PrefUnsaved {
                                                 name: PrefName::Upstream,
+                                                err: err.to_string(),
+                                            },
+                                        );
+                                    }
+                                },
+                            ),
+                        ))
+                        .child(config_field(
+                            "代理认证",
+                            "Proxy auth",
+                            side_input(
+                                proxy_auth_text,
+                                tr(
+                                    "user:pass，空着不校验",
+                                    "user:pass, empty disables auth",
+                                ),
+                                28.0,
+                                false,
+                                move |text| {
+                                    proxy_auth_text.set(text.to_string());
+                                    let stored = text.trim().to_string();
+                                    proxy_auth_controls.hub.set_proxy_auth(&stored);
+                                    if let Err(err) =
+                                        save_config(|config| config.proxy_auth = stored)
+                                    {
+                                        set_status(
+                                            &proxy_auth_controls,
+                                            StatusMsg::PrefUnsaved {
+                                                name: PrefName::ProxyAuth,
                                                 err: err.to_string(),
                                             },
                                         );
@@ -3210,6 +3289,33 @@ fn toolbar_active_profile_name(
     matched_saved_profile(saved, filter, bypass, rules, upstream)
 }
 
+fn redact_upstream_summary(upstream: &str) -> String {
+    let trimmed = upstream.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let without_scheme = trimmed
+        .strip_prefix("http://")
+        .or_else(|| trimmed.strip_prefix("HTTP://"))
+        .unwrap_or(trimmed);
+    let authority = without_scheme
+        .split_once('/')
+        .map(|(head, _)| head)
+        .unwrap_or(without_scheme);
+    if let Some((userinfo, host_port)) = authority.rsplit_once('@') {
+        let user = userinfo
+            .split_once(':')
+            .map(|(u, _)| u)
+            .unwrap_or(userinfo)
+            .trim();
+        if user.is_empty() {
+            return host_port.to_string();
+        }
+        return format!("{user}@{host_port}");
+    }
+    authority.to_string()
+}
+
 fn toolbar_filter_conditions(
     filter: &str,
     bypass: &str,
@@ -3233,7 +3339,7 @@ fn toolbar_filter_conditions(
     if !bypass.is_empty() {
         parts.push(format!("bypass:{bypass}"));
     }
-    let upstream = upstream.trim();
+    let upstream = redact_upstream_summary(upstream);
     if !upstream.is_empty() {
         parts.push(format!("upstream:{upstream}"));
     }
@@ -5423,7 +5529,7 @@ fn adaptive_filter_panel_width(window_w: f32, list_w: f32) -> f32 {
 const FILTER_PANEL_CHROME_CLEARANCE: f32 = 88.0;
 const FILTER_PANEL_DOCK_HEIGHT: f32 = 54.0;
 const FILTER_PANEL_IMPORT_EXTRA_HEIGHT: f32 = 182.0;
-const FILTER_PANEL_RIGHT_FIXED_HEIGHT: f32 = 562.0;
+const FILTER_PANEL_RIGHT_FIXED_HEIGHT: f32 = 620.0;
 
 fn adaptive_filter_panel_max_height(window_h: f32) -> f32 {
     if window_h.is_finite() && window_h > 0.0 {
@@ -15499,6 +15605,10 @@ fn seed_web_prefs(
         cfg.relay_accept = on;
         profiles.relay_accept.set(on);
     }
+    if let Some(auth) = prefs.get("proxy_auth").and_then(serde_json::Value::as_str) {
+        cfg.proxy_auth = auth.to_string();
+        profiles.proxy_auth.set(auth.to_string());
+    }
     if let Some(url) = prefs.get("relay_url").and_then(serde_json::Value::as_str) {
         cfg.relay_url = url.to_string();
         profiles.relay_url.set(url.to_string());
@@ -15916,7 +16026,12 @@ enum Snippet {
 fn copy_proxy_env(controls: &Controls) {
     let port = lock_port(&controls.listen_port);
     let cert = controls.hub.ca.cert_path();
-    set_clipboard(present::proxy_env_export(port, &cert.display().to_string()));
+    let auth = controls.hub.proxy_auth_text();
+    set_clipboard(present::proxy_env_export_with_auth(
+        port,
+        &cert.display().to_string(),
+        &auth,
+    ));
     set_status(controls, StatusMsg::CopiedEnv);
 }
 
@@ -21542,6 +21657,7 @@ fn apply_saved_prefs(hub: &Hub) {
     hub.set_bypass(&saved.bypass_hosts);
     hub.set_rules(&saved.rules);
     hub.set_upstream(&saved.upstream_proxy);
+    hub.set_proxy_auth(&config::runtime_proxy_auth(&saved.proxy_auth));
     hub.set_rules_enabled(saved.rules_enabled);
     hub.set_breaks_enabled(saved.breaks_enabled);
     hub.set_show_tunnel_failures(saved.show_tunnel_failures);
@@ -22325,9 +22441,9 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
         assert_eq!(super::adaptive_rules_editor_height(0.0), 105.0);
         assert_eq!(super::adaptive_rules_editor_height(520.0), 84.0);
         assert_eq!(super::adaptive_rules_editor_height(760.0), 84.0);
-        assert_eq!(super::adaptive_rules_editor_height(1018.0), 314.0);
+        assert_eq!(super::adaptive_rules_editor_height(1018.0), 256.0);
         assert_eq!(super::adaptive_rules_editor_height_for(760.0, true), 56.0);
-        assert_eq!(super::adaptive_rules_editor_height_for(1018.0, true), 132.0);
+        assert_eq!(super::adaptive_rules_editor_height_for(1018.0, true), 74.0);
         for window_h in [520.0, 640.0, 760.0, 900.0, 1018.0, 1440.0] {
             for import_open in [false, true] {
                 let panel_max = super::adaptive_filter_panel_max_height(window_h);
@@ -23186,6 +23302,17 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
             super::toolbar_filter_conditions("", "", "", "", true, crate::i18n::Lang::Zh),
             ("全部流量 · 未设置过滤条件".to_string(), false)
         );
+        assert_eq!(
+            super::toolbar_filter_conditions(
+                "",
+                "",
+                "",
+                "http://upuser:s3cr3t@127.0.0.1:7890",
+                true,
+                crate::i18n::Lang::Zh,
+            ),
+            ("upstream:upuser@127.0.0.1:7890".to_string(), true)
+        );
     }
 
     #[test]
@@ -23414,39 +23541,53 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
             }
         }
 
-        let prod_src = include_str!("lib.rs")
-            .split("\n#[cfg(test)]\nmod tests")
-            .next()
-            .expect("lib.rs production source before mod tests");
+        for raw_src in [
+            std::borrow::Cow::Borrowed(include_str!("lib.rs")),
+            std::borrow::Cow::Owned(
+                include_str!("lib.rs")
+                    .replace("\r\n", "\n")
+                    .replace('\n', "\r\n"),
+            ),
+        ] {
+            let normalized = raw_src.replace("\r\n", "\n");
+            let prod_src = normalized
+                .split("\n#[cfg(test)]\nmod tests")
+                .next()
+                .expect("lib.rs production source before mod tests");
+            assert!(
+                !prod_src.contains("fn auto_height_popover_scroll_containers_never_use_flex_1"),
+                "prod_src must exclude #[cfg(test)] mod tests on both LF and CRLF checkouts"
+            );
 
-        // In Taffy Flexbox, `.flex_1()` sets `flex-basis: 0px`. Putting `.flex_1()` on a
-        // vertical `scroll().w_full()` inside an auto-height `.max_h(...)` popover/menu/drawer
-        // collapses the scroll body to 0px height!
-        for (idx, _) in prod_src.match_indices("scroll()") {
-            let tail = &prod_src[idx..];
-            let head = tail.split(".child(").next().unwrap_or(tail);
-            if head.contains(".w_full()") || head.contains(".max_h(") {
-                assert!(
-                    !head.contains(".flex_1()"),
-                    "scroll() with .w_full()/.max_h() must never use .flex_1() (collapses to 0px in auto-height parent): {head}"
-                );
+            // In Taffy Flexbox, `.flex_1()` sets `flex-basis: 0px`. Putting `.flex_1()` on a
+            // vertical `scroll().w_full()` inside an auto-height `.max_h(...)` popover/menu/drawer
+            // collapses the scroll body to 0px height!
+            for (idx, _) in prod_src.match_indices("scroll()") {
+                let tail = &prod_src[idx..];
+                let head = tail.split(".child(").next().unwrap_or(tail);
+                if head.contains(".w_full()") || head.contains(".max_h(") {
+                    assert!(
+                        !head.contains(".flex_1()"),
+                        "scroll() with .w_full()/.max_h() must never use .flex_1() (collapses to 0px in auto-height parent): {head}"
+                    );
+                }
             }
-        }
 
-        let filter_panel_src = prod_src
-            .split("fn saved_filter_panel(")
-            .nth(1)
-            .and_then(|s| s.split("\nfn ").next())
-            .expect("saved_filter_panel source");
-        let filter_outer_and_scroll = filter_panel_src
-            .split("view()\n                        .w_full()\n                        .p_3()")
-            .next()
-            .unwrap_or(filter_panel_src);
-        assert!(
-            filter_outer_and_scroll.contains(".max_h(")
-                && !filter_outer_and_scroll.contains(".flex_1()"),
-            "saved_filter_panel outer auto-height view + scroll() must not use .flex_1()"
-        );
+            let filter_panel_src = prod_src
+                .split("fn saved_filter_panel(")
+                .nth(1)
+                .and_then(|s| s.split("\nfn ").next())
+                .expect("saved_filter_panel source");
+            let filter_outer_and_scroll = filter_panel_src
+                .split("view()\n                        .w_full()\n                        .p_3()")
+                .next()
+                .unwrap_or(filter_panel_src);
+            assert!(
+                filter_outer_and_scroll.contains(".max_h(")
+                    && !filter_outer_and_scroll.contains(".flex_1()"),
+                "saved_filter_panel outer auto-height view + scroll() must not use .flex_1()"
+            );
+        }
     }
 
     #[test]

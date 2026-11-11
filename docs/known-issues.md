@@ -21,7 +21,7 @@ P0 到 P4 里点名的能力已经接上。下面是仍然接受的缺口，不�
 
 ## 代理行为
 
-- 没配上游时，源站连接直连，不走系统代理。`config.toml` 里配了 `upstream_proxy`（`host:port`）后，明文用绝对形式，TLS 先对上游发 `CONNECT`。
+- 没配上游时，源站连接直连，不走系统代理。`config.toml` 里配了 `upstream_proxy`（`[http://][user:pass@]host:port`）后，明文用绝对形式，TLS 先对上游发 `CONNECT`（带 `user:pass@` 时自动注入上游 `Proxy-Authorization: Basic`）；机器级 `proxy_auth`（或 `--proxy-auth` / `ZNIFF_PROXY_AUTH`）非空时，抓包端口对代理流量要求 HTTP Basic 认证（未通过回 `407` 且不写入会话，转发前自动剥离客户端 `Proxy-Authorization`；`/zniff`、`/zniff-ca.crt`、`/s/{uuid}`、`/r/{uuid}` 与回环 `/mcp` 豁免）。数据目录支持通过 `--data-dir` 或 `ZNIFF_DATA_DIR` 覆盖（Docker 镜像默认 `/data`）。
 - 明文 HTTP 省略 `Connection` 时补 `Connection: keep-alive`。body 读完、双方都没要求关闭、状态不是 101 时才放回池。同一个键最多 4 条，键超过 32 就清空。HTTP/1 的 TLS 不进这个池。重放独立建连且不进池：HTTP/1.1 强制 `Connection: close`，源流为 `HTTP/2` 或独立构造 HTTPS 请求时宣告 `["h2", "http/1.1"]` ALPN 并按协商结果使用单次独立 HTTP/2 或 HTTP/1.1 连接发送。
 - HTTP/2 在一条客户端连接上复用源站连接，另外缓存最多 16 条发送端。空闲超过 45 秒就丢掉这条缓存，连接驱动结束时也删掉这一代。这条浏览器连接发现连接已关、空闲过久或发送失败时，会换一条新的源站连接；请求还没送出时再送一次。已经写进连接的请求不重试。
 - 源站 TLS 探测失败后会关掉那条探测连接，另开一条 TCP，再把缓冲的 ClientHello 放进去。探测失败的同一条 TCP 不能复用。

@@ -39,6 +39,34 @@ pub fn default_listen_port(dev: bool) -> u16 {
     if dev { DEV_DEFAULT_PORT } else { DEFAULT_PORT }
 }
 
+static PROXY_AUTH_OVERRIDE: Mutex<Option<String>> = Mutex::new(None);
+
+/// Overrides `proxy_auth` for the current process (used by `--proxy-auth`).
+pub fn set_proxy_auth_override(auth: impl Into<String>) {
+    *PROXY_AUTH_OVERRIDE
+        .lock()
+        .unwrap_or_else(|err| err.into_inner()) = Some(auth.into().trim().to_string());
+}
+
+pub fn resolve_proxy_auth(cli: Option<&str>, env: Option<&str>, saved: &str) -> String {
+    if let Some(cli) = cli {
+        return cli.trim().to_string();
+    }
+    if let Some(env) = env {
+        return env.trim().to_string();
+    }
+    saved.trim().to_string()
+}
+
+pub fn runtime_proxy_auth(saved: &str) -> String {
+    let cli = PROXY_AUTH_OVERRIDE
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .clone();
+    let env = std::env::var("ZNIFF_PROXY_AUTH").ok();
+    resolve_proxy_auth(cli.as_deref(), env.as_deref(), saved)
+}
+
 /// Left pane width when `config.toml` has no `list_width`.
 pub const LIST_WIDTH_DEFAULT: u32 = 660;
 pub const LIST_WIDTH_MIN: u32 = 280;
@@ -301,6 +329,9 @@ pub struct Config {
     pub relay_token: String,
     /// Accept relay uploads on the capture port. Off until the user turns it on.
     pub relay_accept: bool,
+    /// Optional HTTP Basic credential (`user:pass`) required on the capture port.
+    /// Belongs to this machine; omitted from saved profiles.
+    pub proxy_auth: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -386,6 +417,8 @@ struct RawConfig {
     relay_token: String,
     #[serde(default, skip_serializing_if = "is_false")]
     relay_accept: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    proxy_auth: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     saved_filters: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -543,6 +576,7 @@ impl From<RawConfig> for Config {
             relay_url: raw.relay_url,
             relay_token: raw.relay_token,
             relay_accept: raw.relay_accept,
+            proxy_auth: raw.proxy_auth,
         }
     }
 }
@@ -632,6 +666,7 @@ impl From<Config> for RawConfig {
             relay_url: config.relay_url,
             relay_token: config.relay_token,
             relay_accept: config.relay_accept,
+            proxy_auth: config.proxy_auth,
             saved_filters: config.saved_filters,
             saved_rules: config.saved_rules,
             saved_profiles: config.saved_profiles,
@@ -685,6 +720,7 @@ impl Default for Config {
             relay_url: String::new(),
             relay_token: String::new(),
             relay_accept: false,
+            proxy_auth: String::new(),
         }
     }
 }
@@ -1051,6 +1087,7 @@ fn normalize_for(mut config: Config, dev: bool) -> Config {
     config.column_order = normalize_column_order(&config.column_order);
     config.relay_url = config.relay_url.trim().to_string();
     config.relay_token = config.relay_token.trim().to_string();
+    config.proxy_auth = config.proxy_auth.trim().to_string();
     clamp_saved_filters(&mut config.saved_filters);
     clamp_saved_rules(&mut config.saved_rules);
     migrate_saved_profiles(&mut config);
@@ -1688,6 +1725,40 @@ mod tests {
         .unwrap();
         let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
         assert!(!text.contains("relay_"), "{text}");
+    }
+
+    #[test]
+    fn proxy_auth_persists_at_machine_level_and_resolves_overrides() {
+        let dir = Scratch::new();
+        fs::write(dir.path().join("config.toml"), "listen_port = 9\n").unwrap();
+        let config = load(dir.path());
+        assert_eq!(config.proxy_auth, "");
+        let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(!text.contains("proxy_auth"), "{text}");
+
+        update(dir.path(), |config| {
+            config.proxy_auth = "  alice:s3cr3t  ".into();
+        })
+        .unwrap();
+        let config = load(dir.path());
+        assert_eq!(config.proxy_auth, "alice:s3cr3t");
+        let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(text.contains("proxy_auth = \"alice:s3cr3t\""), "{text}");
+
+        update(dir.path(), |config| config.proxy_auth.clear()).unwrap();
+        let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(!text.contains("proxy_auth"), "{text}");
+
+        assert_eq!(
+            resolve_proxy_auth(Some("cli:pw"), Some("env:pw"), "cfg:pw"),
+            "cli:pw"
+        );
+        assert_eq!(
+            resolve_proxy_auth(None, Some("  env:pw  "), "cfg:pw"),
+            "env:pw"
+        );
+        assert_eq!(resolve_proxy_auth(None, Some(""), "cfg:pw"), "");
+        assert_eq!(resolve_proxy_auth(None, None, " cfg:pw "), "cfg:pw");
     }
 
     #[test]
