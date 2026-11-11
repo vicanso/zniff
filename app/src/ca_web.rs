@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum CaStatus {
     Trusted,
     InstalledUntrusted,
@@ -13,6 +14,7 @@ pub enum CaStatus {
 }
 
 impl CaStatus {
+    #[allow(dead_code)]
     pub fn is_installed(self) -> bool {
         !matches!(self, Self::NotInstalled)
     }
@@ -22,6 +24,7 @@ impl CaStatus {
 #[derive(Clone)]
 pub struct Ca;
 
+#[allow(dead_code)]
 impl Ca {
     pub fn unavailable() -> Self {
         Self

@@ -4,7 +4,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
-use crate::session::{ConnInfo, Flow, Protocol};
+use crate::session::{ConnInfo, Direction, Flow, Message, Protocol};
+
+const WS_MESSAGE_CAP: usize = 200;
+const WS_BYTE_CAP: usize = 256 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct Imported {
@@ -27,6 +30,12 @@ pub struct Imported {
     pub response_bytes: Option<u64>,
     pub comment: Option<String>,
     pub conn_info: ConnInfo,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub messages: Vec<Message>,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub messages_truncated: bool,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub message_times: Vec<Option<SystemTime>>,
 }
 
 #[cfg(test)]
@@ -48,7 +57,7 @@ pub fn export_har_with_redact(flows: &[Flow], redact: &crate::share::RedactOptio
     };
     let mut log = json!({
         "version": "1.2",
-        "creator": {"name": "zniff", "version": "0.1.0"},
+        "creator": {"name": "zniff", "version": env!("CARGO_PKG_VERSION")},
         "entries": entries,
     });
     if redact.enabled {
@@ -129,6 +138,28 @@ fn entry(flow: &Flow) -> Value {
     }
     if !flow.comment.is_empty() {
         obj["comment"] = json!(flow.comment);
+    }
+    if should_export_ws_messages(flow) {
+        let base_time = epoch_secs_ms(flow.response_at.unwrap_or(flow.started));
+        let ws_messages: Vec<Value> = flow
+            .messages
+            .iter()
+            .map(|msg| {
+                json!({
+                    "type": match msg.direction {
+                        Direction::Request => "send",
+                        Direction::Response => "receive",
+                    },
+                    "time": base_time,
+                    "opcode": ws_opcode_from_kind(&msg.kind),
+                    "data": msg.text,
+                })
+            })
+            .collect();
+        obj["_webSocketMessages"] = Value::Array(ws_messages);
+        if flow.messages_truncated {
+            obj["_webSocketMessagesTruncated"] = json!(true);
+        }
     }
     obj
 }
@@ -239,8 +270,20 @@ fn import_entry(entry: &Value) -> Option<Imported> {
         (Some(wait), None) => Some(wait),
         _ => None,
     });
+    let ws = import_ws_messages(entry);
+    let protocol = if status == Some(101) || is_ws_url(&url) || ws.has_entries {
+        Protocol::WebSocket
+    } else {
+        protocol_from(version)
+    };
+    let base_finished = total.map(|ms| started + Duration::from_millis(ms));
+    let finished_at = match (base_finished, ws.latest_time) {
+        (Some(fin), Some(last)) if last > fin => Some(last),
+        (None, Some(last)) if last >= started => Some(last),
+        (fin, _) => fin,
+    };
     Some(Imported {
-        protocol: protocol_from(version),
+        protocol,
         method: request
             .get("method")
             .and_then(|method| method.as_str())
@@ -263,7 +306,7 @@ fn import_entry(entry: &Value) -> Option<Imported> {
             .unwrap_or_default(),
         started,
         response_at: wait.map(|ms| started + Duration::from_millis(ms)),
-        finished_at: total.map(|ms| started + Duration::from_millis(ms)),
+        finished_at,
         request_bytes: non_negative_ms(request.get("bodySize")),
         response_bytes: response.and_then(|response| non_negative_ms(response.get("bodySize"))),
         comment: entry
@@ -281,7 +324,165 @@ fn import_entry(entry: &Value) -> Option<Imported> {
             tls_version,
             dialed_before_start,
         },
+        messages: ws.messages,
+        messages_truncated: ws.truncated,
+        message_times: ws.message_times,
     })
+}
+
+struct ImportedWs {
+    has_entries: bool,
+    messages: Vec<Message>,
+    message_times: Vec<Option<SystemTime>>,
+    truncated: bool,
+    latest_time: Option<SystemTime>,
+}
+
+fn import_ws_messages(entry: &Value) -> ImportedWs {
+    let explicit_truncated = entry
+        .get("_webSocketMessagesTruncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let Some(arr) = entry.get("_webSocketMessages").and_then(Value::as_array) else {
+        return ImportedWs {
+            has_entries: false,
+            messages: Vec::new(),
+            message_times: Vec::new(),
+            truncated: explicit_truncated,
+            latest_time: None,
+        };
+    };
+    let has_entries = !arr.is_empty();
+    let mut messages = Vec::with_capacity(arr.len().min(WS_MESSAGE_CAP));
+    let mut message_times = Vec::with_capacity(arr.len().min(WS_MESSAGE_CAP));
+    let mut truncated = explicit_truncated;
+    let mut used_bytes = 0usize;
+    let mut latest_time: Option<SystemTime> = None;
+
+    for item in arr {
+        let Some(obj) = item.as_object() else {
+            continue;
+        };
+        let msg_time = parse_ws_time(obj.get("time"));
+        if let Some(t) = msg_time {
+            latest_time = Some(latest_time.map_or(t, |prev| prev.max(t)));
+        }
+        if messages.len() >= WS_MESSAGE_CAP || used_bytes >= WS_BYTE_CAP {
+            truncated = true;
+            continue;
+        }
+        let direction = match obj.get("type").and_then(Value::as_str).unwrap_or("receive") {
+            s if s.eq_ignore_ascii_case("send") => Direction::Request,
+            _ => Direction::Response,
+        };
+        let opcode = obj.get("opcode").and_then(Value::as_u64).unwrap_or(1);
+        let kind = ws_kind_from_opcode(opcode).to_string();
+        let mut text = obj
+            .get("data")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let room = WS_BYTE_CAP - used_bytes;
+        if text.len() > room {
+            let end = text.floor_char_boundary(room);
+            text.truncate(end);
+            truncated = true;
+        }
+        used_bytes += text.len();
+        messages.push(Message {
+            direction,
+            kind,
+            text,
+        });
+        message_times.push(msg_time);
+    }
+
+    ImportedWs {
+        has_entries,
+        messages,
+        message_times,
+        truncated,
+        latest_time,
+    }
+}
+
+fn should_export_ws_messages(flow: &Flow) -> bool {
+    !flow.messages.is_empty()
+        && (flow.protocol == Protocol::WebSocket
+            || flow.status == Some(101)
+            || is_ws_url(&flow.url)
+            || flow
+                .messages
+                .iter()
+                .any(|m| m.direction == Direction::Request || is_ws_frame_kind(&m.kind)))
+}
+
+fn is_ws_url(url: &str) -> bool {
+    let trimmed = url.trim_start();
+    trimmed
+        .get(..5)
+        .is_some_and(|p| p.eq_ignore_ascii_case("ws://"))
+        || trimmed
+            .get(..6)
+            .is_some_and(|p| p.eq_ignore_ascii_case("wss://"))
+}
+
+fn is_ws_frame_kind(kind: &str) -> bool {
+    matches!(
+        kind.trim(),
+        "文本" | "二进制" | "关闭" | "Ping" | "Pong" | "续帧" | "帧"
+    ) || matches!(
+        kind.trim().to_ascii_lowercase().as_str(),
+        "text" | "binary" | "close" | "ping" | "pong" | "continuation" | "frame"
+    )
+}
+
+fn ws_opcode_from_kind(kind: &str) -> u8 {
+    match kind.trim() {
+        "文本" => 1,
+        "二进制" => 2,
+        "关闭" => 8,
+        "Ping" => 9,
+        "Pong" => 10,
+        other => match other.to_ascii_lowercase().as_str() {
+            "binary" => 2,
+            "close" => 8,
+            "ping" => 9,
+            "pong" => 10,
+            _ => 1,
+        },
+    }
+}
+
+fn ws_kind_from_opcode(opcode: u64) -> &'static str {
+    match opcode {
+        1 => "文本",
+        2 => "二进制",
+        8 => "关闭",
+        9 => "Ping",
+        10 => "Pong",
+        _ => "文本",
+    }
+}
+
+fn epoch_secs_ms(time: SystemTime) -> f64 {
+    let ms = time
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    (ms as f64) / 1000.0
+}
+
+fn parse_ws_time(value: Option<&Value>) -> Option<SystemTime> {
+    let secs = value?.as_f64()?;
+    if !secs.is_finite() || secs < 0.0 {
+        return None;
+    }
+    let millis = (secs * 1000.0).round();
+    if millis > u64::MAX as f64 {
+        return None;
+    }
+    Some(UNIX_EPOCH + Duration::from_millis(millis as u64))
 }
 
 fn non_negative_ms(value: Option<&Value>) -> Option<u64> {
@@ -341,13 +542,31 @@ fn body_from_content(content: &Value) -> Vec<u8> {
 
 fn split_url(url: &str) -> (String, String) {
     let rest = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
-    let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
-    let host = authority.split('@').next_back().unwrap_or(authority);
-    let host = host.split(':').next().unwrap_or(host);
-    let path = if path.is_empty() {
-        "/".to_string()
+    let (authority, path) = match (rest.find('/'), rest.find('?')) {
+        (Some(slash), Some(q)) if q < slash => (&rest[..q], format!("/{}", &rest[q..])),
+        (Some(slash), _) => {
+            let tail = &rest[slash + 1..];
+            let p = if tail.is_empty() {
+                "/".to_string()
+            } else {
+                format!("/{tail}")
+            };
+            (&rest[..slash], p)
+        }
+        (None, Some(q)) => (&rest[..q], format!("/{}", &rest[q..])),
+        (None, None) => (rest, "/".to_string()),
+    };
+    let host_port = authority
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(authority);
+    let host = if let Some(after_open) = host_port.strip_prefix('[') {
+        after_open
+            .split_once(']')
+            .map(|(ipv6, _)| ipv6)
+            .unwrap_or(host_port)
     } else {
-        format!("/{path}")
+        host_port.split(':').next().unwrap_or(host_port)
     };
     (host.to_string(), path)
 }
@@ -374,36 +593,103 @@ fn http_version(protocol: Protocol) -> &'static str {
 }
 
 fn iso_utc(time: SystemTime) -> String {
-    let secs = time
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0);
+    let duration = time.duration_since(UNIX_EPOCH).unwrap_or_default();
+    let secs = duration.as_secs();
+    let ms = duration.subsec_millis();
     let days = secs / 86_400;
     let time_of_day = secs % 86_400;
     let (year, month, day) = civil_from_days(days as i64);
     format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.000Z",
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{ms:03}Z",
         time_of_day / 3600,
         (time_of_day % 3600) / 60,
         time_of_day % 60
     )
 }
 
+fn parse_tz_offset_secs(tz: &str) -> Option<i64> {
+    if tz.is_empty() || tz.eq_ignore_ascii_case("Z") {
+        return Some(0);
+    }
+    let (sign, rest) = if let Some(r) = tz.strip_prefix('+') {
+        (1i64, r)
+    } else {
+        let r = tz.strip_prefix('-')?;
+        (-1i64, r)
+    };
+    let (hours, mins): (u64, u64) = if let Some((h, m)) = rest.split_once(':') {
+        if h.len() != 2 || m.len() != 2 {
+            return None;
+        }
+        (h.parse().ok()?, m.parse().ok()?)
+    } else if rest.len() == 4 {
+        (rest[..2].parse().ok()?, rest[2..].parse().ok()?)
+    } else if rest.len() == 2 {
+        (rest.parse().ok()?, 0)
+    } else {
+        return None;
+    };
+    if hours > 23 || mins > 59 {
+        return None;
+    }
+    Some(sign * (hours as i64 * 3600 + mins as i64 * 60))
+}
+
 fn parse_iso(text: &str) -> Option<SystemTime> {
-    let text = text.trim().trim_end_matches('Z');
-    let (date, time) = text.split_once('T')?;
-    let mut date = date.split('-');
-    let year: i64 = date.next()?.parse().ok()?;
-    let month: u32 = date.next()?.parse().ok()?;
-    let day: u32 = date.next()?.parse().ok()?;
-    let time = time.split('.').next().unwrap_or(time);
-    let mut clock = time.split(':');
+    let text = text.trim();
+    let sep = text.find(['T', 't', ' '])?;
+    let date = &text[..sep];
+    let rest = text[sep + 1..].trim();
+
+    let mut date_parts = date.split('-');
+    let year: i64 = date_parts.next()?.parse().ok()?;
+    let month: u32 = date_parts.next()?.parse().ok()?;
+    let day: u32 = date_parts.next()?.parse().ok()?;
+    if date_parts.next().is_some() {
+        return None;
+    }
+
+    let (clock_and_frac, offset_secs) =
+        if let Some(stripped) = rest.strip_suffix('Z').or_else(|| rest.strip_suffix('z')) {
+            (stripped, 0i64)
+        } else if let Some(tz_pos) = rest[1..].rfind(['+', '-']).map(|idx| idx + 1) {
+            let offset = parse_tz_offset_secs(&rest[tz_pos..])?;
+            (&rest[..tz_pos], offset)
+        } else {
+            (rest, 0i64)
+        };
+
+    let (clock_str, nanos) = match clock_and_frac.split_once(['.', ',']) {
+        Some((c, frac)) => {
+            if frac.is_empty() || !frac.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            let mut ns = 0u32;
+            let mut scale = 100_000_000u32;
+            for b in frac.bytes().take(9) {
+                ns += (b - b'0') as u32 * scale;
+                scale /= 10;
+            }
+            (c, ns)
+        }
+        None => (clock_and_frac, 0u32),
+    };
+
+    let mut clock = clock_str.split(':');
     let hour: u64 = clock.next()?.parse().ok()?;
     let minute: u64 = clock.next()?.parse().ok()?;
     let second: u64 = clock.next()?.parse().ok()?;
+    if clock.next().is_some() || hour > 23 || minute > 59 || second > 60 {
+        return None;
+    }
+
     let days = days_from_civil(year, month, day)?;
-    let secs = days as u64 * 86_400 + hour * 3600 + minute * 60 + second;
-    Some(UNIX_EPOCH + std::time::Duration::from_secs(secs))
+    let local_secs = days * 86_400 + (hour * 3600 + minute * 60 + second) as i64;
+    let utc_secs = local_secs.checked_sub(offset_secs)?;
+    if utc_secs < 0 {
+        return None;
+    }
+    Some(UNIX_EPOCH + Duration::new(utc_secs as u64, nanos))
 }
 
 fn civil_from_days(days: i64) -> (i32, u32, u32) {
@@ -477,31 +763,49 @@ fn b64_decode(text: &str) -> Vec<u8> {
             _ => None,
         }
     }
-    let bytes = text.as_bytes();
-    let mut out = Vec::new();
+    let clean: Vec<u8> = text
+        .bytes()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .collect();
+    let mut out = Vec::with_capacity(clean.len() * 3 / 4);
     let mut index = 0;
-    while index + 4 <= bytes.len() {
-        if bytes[index] == b'=' {
+    while index + 4 <= clean.len() {
+        if clean[index] == b'=' {
             break;
         }
-        let Some(a) = val(bytes[index]) else { break };
-        let Some(b) = val(bytes[index + 1]) else {
+        let Some(a) = val(clean[index]) else { break };
+        let Some(b) = val(clean[index + 1]) else {
             break;
         };
-        let c = val(bytes[index + 2]);
-        let d = val(bytes[index + 3]);
+        let c = val(clean[index + 2]);
+        let d = val(clean[index + 3]);
         let n = ((a as u32) << 18)
             | ((b as u32) << 12)
             | ((c.unwrap_or(0) as u32) << 6)
             | d.unwrap_or(0) as u32;
         out.push((n >> 16) as u8);
-        if bytes[index + 2] != b'=' {
+        if clean[index + 2] != b'=' {
+            let Some(_) = c else { break };
             out.push((n >> 8) as u8);
         }
-        if bytes[index + 3] != b'=' {
+        if clean[index + 3] != b'=' {
+            let Some(_) = d else { break };
             out.push(n as u8);
         }
         index += 4;
+    }
+    let rem = &clean[index..];
+    if rem.len() == 2 {
+        if let (Some(a), Some(b)) = (val(rem[0]), val(rem[1])) {
+            let n = ((a as u32) << 18) | ((b as u32) << 12);
+            out.push((n >> 16) as u8);
+        }
+    } else if rem.len() == 3
+        && let (Some(a), Some(b), Some(c)) = (val(rem[0]), val(rem[1]), val(rem[2]))
+    {
+        let n = ((a as u32) << 18) | ((b as u32) << 12) | ((c as u32) << 6);
+        out.push((n >> 16) as u8);
+        out.push((n >> 8) as u8);
     }
     out
 }
@@ -539,7 +843,8 @@ mod tests {
             None,
         );
         session.append_body(id, Direction::Response, br#"{"ok":true}"#);
-        let flow = session.get(id).unwrap().clone();
+        let mut flow = session.get(id).unwrap().clone();
+        flow.response_at = Some(flow.started);
         let har = export_har(&[flow]);
         let imported = import_har(&har);
         assert_eq!(imported.len(), 1);
@@ -640,5 +945,226 @@ mod tests {
         let imported = import_har(&har);
         assert_eq!(imported.len(), 1);
         assert_eq!(imported[0].conn_info, flow.conn_info);
+    }
+
+    #[test]
+    fn iso_utc_and_parse_iso_preserve_milliseconds_and_timezones() {
+        let ts = UNIX_EPOCH + Duration::from_millis(1_731_295_205_789);
+        let formatted = iso_utc(ts);
+        assert!(formatted.ends_with(".789Z"), "got {formatted}");
+        assert_eq!(parse_iso(&formatted), Some(ts));
+
+        // Same instant expressed in +08:00, -05:00, and +0530
+        let utc = parse_iso("2026-11-11T03:20:05.250Z").unwrap();
+        let cst = parse_iso("2026-11-11T11:20:05.25+08:00").unwrap();
+        let est = parse_iso("2026-11-10T22:20:05.250000-05:00").unwrap();
+        let ist = parse_iso("2026-11-11T08:50:05.250+0530").unwrap();
+        assert_eq!(cst, utc);
+        assert_eq!(est, utc);
+        assert_eq!(ist, utc);
+
+        let mut session = Session::default();
+        let id = session.open(FlowDraft {
+            protocol: Protocol::Http11,
+            method: "GET".into(),
+            host: "example.com".into(),
+            path: "/".into(),
+            url: "https://example.com/".into(),
+            request_headers: Vec::new(),
+        });
+        let mut flow = session.get(id).unwrap().clone();
+        flow.response_at = Some(flow.started);
+        let har = export_har(&[flow]);
+        assert_eq!(
+            har["log"]["creator"]["version"],
+            json!(env!("CARGO_PKG_VERSION"))
+        );
+    }
+
+    #[test]
+    fn b64_decode_skips_ascii_whitespace_and_split_url_handles_ipv6() {
+        let raw: Vec<u8> = (0u8..96).collect();
+        let encoded = b64(&raw);
+        let wrapped = format!(
+            "  {}\r\n\t{}\n {}  ",
+            &encoded[..40],
+            &encoded[40..80],
+            &encoded[80..]
+        );
+        assert_eq!(b64_decode(&wrapped), raw);
+
+        assert_eq!(
+            split_url("https://[::1]:8080/v1/items?a=1"),
+            ("::1".into(), "/v1/items?a=1".into())
+        );
+        assert_eq!(
+            split_url("http://user:pw@[2001:db8::1]:9090"),
+            ("2001:db8::1".into(), "/".into())
+        );
+        assert_eq!(
+            split_url("https://[fe80::1]?ping=1"),
+            ("fe80::1".into(), "/?ping=1".into())
+        );
+    }
+
+    #[test]
+    fn websocket_messages_round_trip_losslessly_across_all_opcodes() {
+        let mut session = Session::default();
+        let id = session.open(FlowDraft {
+            protocol: Protocol::WebSocket,
+            method: "GET".into(),
+            host: "ws.example.com".into(),
+            path: "/realtime".into(),
+            url: "wss://ws.example.com/realtime".into(),
+            request_headers: vec![
+                ("Upgrade".into(), "websocket".into()),
+                ("Connection".into(), "Upgrade".into()),
+            ],
+        });
+        session.set_response(
+            id,
+            101,
+            vec![("Upgrade".into(), "websocket".into())],
+            Some(Protocol::WebSocket),
+        );
+        session.add_message(id, Direction::Request, "文本", r#"{"sub":"ticker"}"#);
+        session.add_message(id, Direction::Response, "二进制", "deadbeef");
+        session.add_message(id, Direction::Request, "Ping", "hb");
+        session.add_message(id, Direction::Response, "Pong", "hb");
+        session.add_message(id, Direction::Response, "关闭", "1000 normal closure");
+
+        let mut flow = session.get(id).unwrap().clone();
+        let started_ms = UNIX_EPOCH + Duration::from_millis(1_731_295_200_125);
+        let response_ms = started_ms + Duration::from_millis(25);
+        flow.started = started_ms;
+        flow.response_at = Some(response_ms);
+        flow.finished_at = Some(started_ms + Duration::from_millis(900));
+
+        let har = export_har(std::slice::from_ref(&flow));
+        let ws_arr = har["log"]["entries"][0]["_webSocketMessages"]
+            .as_array()
+            .expect("_webSocketMessages emitted");
+        assert_eq!(ws_arr.len(), 5);
+        assert_eq!(ws_arr[0]["type"], json!("send"));
+        assert_eq!(ws_arr[0]["opcode"], json!(1));
+        assert_eq!(ws_arr[0]["data"], json!(r#"{"sub":"ticker"}"#));
+        assert_eq!(ws_arr[0]["time"], json!(1_731_295_200.15));
+        assert_eq!(ws_arr[1]["type"], json!("receive"));
+        assert_eq!(ws_arr[1]["opcode"], json!(2));
+        assert_eq!(ws_arr[2]["opcode"], json!(9));
+        assert_eq!(ws_arr[3]["opcode"], json!(10));
+        assert_eq!(ws_arr[4]["opcode"], json!(8));
+
+        let imported = import_har(&har);
+        assert_eq!(imported.len(), 1);
+        assert_eq!(imported[0].protocol, Protocol::WebSocket);
+        assert_eq!(imported[0].status, Some(101));
+        assert_eq!(imported[0].messages, flow.messages);
+        assert!(!imported[0].messages_truncated);
+        assert_eq!(imported[0].message_times, vec![Some(response_ms); 5]);
+    }
+
+    #[test]
+    fn import_chrome_devtools_websocket_har_caps_at_200_and_marks_ws_protocol() {
+        // 1. Chrome DevTools `_webSocketMessages` on a 101 entry + over-200 cap check
+        let mut raw_msgs = Vec::with_capacity(205);
+        for idx in 0..205u64 {
+            let opcode = match idx {
+                0 => 1,
+                1 => 2,
+                2 => 9,
+                3 => 10,
+                4 => 99, // unknown opcode falls back to "文本"
+                204 => 8,
+                _ => 1,
+            };
+            raw_msgs.push(json!({
+                "type": if idx % 2 == 0 { "send" } else { "receive" },
+                "time": 1_731_295_300.0 + (idx as f64) * 0.010,
+                "opcode": opcode,
+                "data": format!("frame-{idx}"),
+            }));
+        }
+        let chrome_har = json!({
+            "log": {
+                "version": "1.2",
+                "entries": [
+                    {
+                        "startedDateTime": "2024-11-11T03:21:40.000Z",
+                        "time": 5,
+                        "request": {
+                            "method": "GET",
+                            "url": "https://chat.example.com/socket",
+                            "httpVersion": "http/1.1",
+                            "headers": []
+                        },
+                        "response": {
+                            "status": 101,
+                            "statusText": "Switching Protocols",
+                            "httpVersion": "http/1.1",
+                            "headers": [],
+                            "content": { "size": 0, "mimeType": "x-unknown" }
+                        },
+                        "_webSocketMessages": raw_msgs
+                    },
+                    {
+                        "startedDateTime": "2024-11-11T03:21:41.000Z",
+                        "time": 2,
+                        "request": {
+                            "method": "GET",
+                            "url": "ws://local.example.com:9000/feed",
+                            "httpVersion": "HTTP/1.1",
+                            "headers": []
+                        },
+                        "response": {
+                            "status": 0,
+                            "statusText": "",
+                            "httpVersion": "HTTP/1.1",
+                            "headers": [],
+                            "content": { "size": 0, "mimeType": "" }
+                        }
+                    }
+                ]
+            }
+        });
+
+        let imported = import_har(&chrome_har);
+        assert_eq!(imported.len(), 2);
+
+        let first = &imported[0];
+        assert_eq!(first.protocol, Protocol::WebSocket);
+        assert_eq!(first.messages.len(), 200);
+        assert!(first.messages_truncated);
+        assert_eq!(
+            first.messages[0],
+            Message {
+                direction: Direction::Request,
+                kind: "文本".into(),
+                text: "frame-0".into(),
+            }
+        );
+        assert_eq!(
+            first.messages[1],
+            Message {
+                direction: Direction::Response,
+                kind: "二进制".into(),
+                text: "frame-1".into(),
+            }
+        );
+        assert_eq!(first.messages[2].kind, "Ping");
+        assert_eq!(first.messages[3].kind, "Pong");
+        assert_eq!(first.messages[4].kind, "文本");
+        assert_eq!(
+            first.message_times[1],
+            Some(UNIX_EPOCH + Duration::from_millis(1_731_295_300_010))
+        );
+        // Latest frame time (idx=204 -> +2040ms) extends finished_at past the 5ms handshake time
+        assert_eq!(
+            first.finished_at,
+            Some(UNIX_EPOCH + Duration::from_millis(1_731_295_302_040))
+        );
+
+        // Entry with `ws://` scheme and status 0 (no `_webSocketMessages` yet) is also marked WebSocket
+        assert_eq!(imported[1].protocol, Protocol::WebSocket);
     }
 }

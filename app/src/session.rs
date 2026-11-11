@@ -507,6 +507,8 @@ pub struct Flow {
     pub relay_remote_id: Option<u64>,
     /// Monotonic revision bumped whenever this flow is created or modified.
     pub rev: u64,
+    cached_server_rev: u64,
+    cached_detail_rev: Option<u64>,
     accounted: usize,
 }
 
@@ -773,19 +775,23 @@ pub struct FlowDraft {
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub struct CachedFlowView {
     pub id: u64,
+    pub rev: u64,
     pub protocol: Protocol,
     pub method: String,
     pub host: String,
     pub path: String,
     pub url: String,
     pub client_ip: String,
+    pub conn_info: ConnInfo,
     pub status: Option<u16>,
     pub error: Option<String>,
     pub started: SystemTime,
+    pub response_at: Option<SystemTime>,
     pub finished_at: Option<SystemTime>,
     pub request_bytes: u64,
     pub response_bytes: u64,
     pub pinned: bool,
+    pub rule_hit: String,
     pub comment: String,
     pub relay_source: Option<String>,
 }
@@ -795,13 +801,19 @@ pub struct CachedFlowView {
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub struct CachedFlowDetail {
     pub id: u64,
+    pub rev: u64,
     pub request_headers: Vec<(String, String)>,
     pub response_headers: Vec<(String, String)>,
     pub request_body: Vec<u8>,
     pub response_body: Vec<u8>,
     pub request_truncated: bool,
     pub response_truncated: bool,
+    pub request_encoding_error: Option<String>,
+    pub response_encoding_error: Option<String>,
+    pub request_expired: Option<usize>,
+    pub response_expired: Option<usize>,
     pub messages: Vec<Message>,
+    pub messages_truncated: bool,
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
@@ -842,25 +854,31 @@ fn blank_cached_flow(id: u64) -> Flow {
         relay_source: None,
         relay_remote_id: None,
         rev: 0,
+        cached_server_rev: 0,
+        cached_detail_rev: None,
         accounted: 0,
     }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 fn same_cached_view(flow: &Flow, row: &CachedFlowView) -> bool {
-    flow.protocol == row.protocol
+    flow.cached_server_rev == row.rev
+        && flow.protocol == row.protocol
         && flow.method == row.method
         && flow.host == row.host
         && flow.path == row.path
         && flow.url == row.url
         && flow.client_ip == row.client_ip
+        && flow.conn_info == row.conn_info
         && flow.status == row.status
         && flow.error == row.error
         && flow.started == row.started
+        && flow.response_at == row.response_at
         && flow.finished_at == row.finished_at
         && flow.request_bytes == row.request_bytes
         && flow.response_bytes == row.response_bytes
         && flow.pinned == row.pinned
+        && flow.rule_hit == row.rule_hit
         && flow.comment == row.comment
         && flow.relay_source == row.relay_source
 }
@@ -874,6 +892,7 @@ pub struct Session {
     dropped: u64,
     next_id: u64,
     next_rev: u64,
+    cached_total: Option<usize>,
 }
 
 impl Session {
@@ -938,6 +957,8 @@ impl Session {
             relay_source: None,
             relay_remote_id: None,
             rev,
+            cached_server_rev: 0,
+            cached_detail_rev: None,
             accounted: headers_size,
         };
         self.bytes += headers_size;
@@ -1066,6 +1087,15 @@ impl Session {
         }
     }
 
+    pub fn mark_messages_truncated(&mut self, id: u64) {
+        self.next_rev += 1;
+        let rev = self.next_rev;
+        if let Some(flow) = self.flows.get_mut(&id) {
+            flow.messages_truncated = true;
+            flow.rev = rev;
+        }
+    }
+
     pub fn replace_request(&mut self, id: u64, headers: Vec<(String, String)>, body: Vec<u8>) {
         self.next_rev += 1;
         let rev = self.next_rev;
@@ -1112,6 +1142,27 @@ impl Session {
         self.bytes = self.bytes.saturating_sub(old) + new_size;
         self.spill_flow_if_needed(id, crate::clock::now());
         self.evict(id);
+    }
+
+    pub fn clear_response(&mut self, id: u64) {
+        self.next_rev += 1;
+        let rev = self.next_rev;
+        let Some(flow) = self.flows.get_mut(&id) else {
+            return;
+        };
+        let old = headers_size(&flow.response_headers) + flow.response_body.len();
+        flow.status = None;
+        flow.response_at = None;
+        flow.response_headers.clear();
+        flow.response_body.clear();
+        flow.response_spill = None;
+        flow.response_expired = None;
+        flow.response_truncated = false;
+        flow.response_encoding_error = None;
+        flow.response_bytes = 0;
+        flow.rev = rev;
+        flow.accounted = flow.accounted.saturating_sub(old);
+        self.bytes = self.bytes.saturating_sub(old);
     }
 
     /// Drops every row that arrived from `source`, including pinned ones.
@@ -1395,9 +1446,9 @@ impl Session {
         self.spill_flow_if_needed(id, now);
     }
 
-    /// Marks `id` finished and detaches oversized bodies so the caller can `pwrite`
-    /// them without holding the session. [`Session::mark_finished_at`] still spills
-    /// inline; this path is for the proxy, where the write must not block other flows.
+    /// Marks `id` finished and prepares oversized bodies so the caller can `pwrite`
+    /// them without holding the session. Inline bodies remain readable in memory
+    /// until [`Session::commit_finish`] succeeds on an unpinned flow.
     pub fn begin_finish(&mut self, id: u64, now: SystemTime) -> FinishSpill {
         self.spill.gc(now);
         self.next_rev += 1;
@@ -1410,80 +1461,84 @@ impl Session {
         }
         let inline_cap = self.spill.inline_cap;
         let (request, response) = {
-            let Some(flow) = self.flows.get_mut(&id) else {
+            let Some(flow) = self.flows.get(&id) else {
                 return FinishSpill { writes: Vec::new() };
             };
             if flow.pinned {
                 return FinishSpill { writes: Vec::new() };
             }
             let request = (flow.request_spill.is_none() && flow.request_body.len() > inline_cap)
-                .then(|| std::mem::take(&mut flow.request_body));
+                .then(|| flow.request_body.clone());
             let response = (flow.response_spill.is_none() && flow.response_body.len() > inline_cap)
-                .then(|| std::mem::take(&mut flow.response_body));
+                .then(|| flow.response_body.clone());
             (request, response)
         };
         let mut writes = Vec::new();
-        if let Some(data) = request {
-            match self.spill.reserve(data.len(), now) {
-                Some(slot) => writes.push(SpillWrite::from_reserved(slot, data, true)),
-                None => {
-                    if let Some(flow) = self.flows.get_mut(&id) {
-                        flow.request_body = data;
-                    }
-                }
-            }
+        if let Some(data) = request
+            && let Some(slot) = self.spill.reserve(data.len(), now)
+        {
+            writes.push(SpillWrite::from_reserved(slot, data, true));
         }
-        if let Some(data) = response {
-            match self.spill.reserve(data.len(), now) {
-                Some(slot) => writes.push(SpillWrite::from_reserved(slot, data, false)),
-                None => {
-                    if let Some(flow) = self.flows.get_mut(&id) {
-                        flow.response_body = data;
-                    }
-                }
-            }
+        if let Some(data) = response
+            && let Some(slot) = self.spill.reserve(data.len(), now)
+        {
+            writes.push(SpillWrite::from_reserved(slot, data, false));
         }
         FinishSpill { writes }
     }
 
-    /// Attaches spill refs after the out-of-lock write. A flow evicted in between
-    /// already dropped `accounted` (which still included the detached body).
+    /// Attaches spill refs after the out-of-lock write and drops inline copies only
+    /// when the write succeeded and the flow was not pinned or rewritten in between.
     pub fn commit_finish(&mut self, id: u64, writes: Vec<(SpillWrite, bool)>) {
+        let can_attach = self.flows.get(&id).is_some_and(|flow| !flow.pinned);
         for (write, ok) in writes.iter().rev() {
-            if !ok {
+            let body_unchanged = self.flows.get(&id).is_some_and(|flow| {
+                if write.request {
+                    flow.request_spill.is_none() && flow.request_body == write.data
+                } else {
+                    flow.response_spill.is_none() && flow.response_body == write.data
+                }
+            });
+            if !*ok || !can_attach || !body_unchanged {
                 self.spill
                     .rewind_if_tail(write.segment_id, write.offset, write.len);
             }
         }
-        if !self.flows.contains_key(&id) {
+        if !can_attach {
             return;
         }
         for (write, ok) in writes {
+            if !ok {
+                continue;
+            }
             let freed = {
                 let Some(flow) = self.flows.get_mut(&id) else {
                     return;
                 };
-                if !ok {
-                    if write.request {
-                        flow.request_body = write.data;
-                    } else {
-                        flow.response_body = write.data;
-                    }
+                let unchanged = if write.request {
+                    flow.request_spill.is_none() && flow.request_body == write.data
+                } else {
+                    flow.response_spill.is_none() && flow.response_body == write.data
+                };
+                if !unchanged {
                     continue;
                 }
-                let freed = write.data.len();
                 let sref = SpillRef {
                     segment_id: write.segment_id,
                     offset: write.offset,
                     len: write.len,
                 };
-                if write.request {
-                    flow.request_body.clear();
+                let freed = if write.request {
+                    let len = flow.request_body.len();
+                    flow.request_body = Vec::new();
                     flow.request_spill = Some(sref);
+                    len
                 } else {
-                    flow.response_body.clear();
+                    let len = flow.response_body.len();
+                    flow.response_body = Vec::new();
                     flow.response_spill = Some(sref);
-                }
+                    len
+                };
                 flow.accounted = flow.accounted.saturating_sub(freed);
                 freed
             };
@@ -1617,6 +1672,7 @@ impl Session {
         self.spill.clear();
         self.bytes = 0;
         self.dropped = 0;
+        self.cached_total = None;
         trim_memory();
     }
 
@@ -1634,6 +1690,9 @@ impl Session {
         }
         self.bytes = self.flows.values().map(|flow| flow.accounted).sum();
         self.dropped = 0;
+        if let Some(total) = &mut self.cached_total {
+            *total = total.saturating_sub(removed);
+        }
         self.next_rev += 1;
         trim_memory();
         removed
@@ -1792,27 +1851,52 @@ impl Session {
                 self.next_rev += 1;
                 flow.rev = self.next_rev;
             }
+            flow.cached_server_rev = row.rev;
             flow.protocol = row.protocol;
             flow.method = row.method;
             flow.host = row.host;
             flow.path = row.path;
             flow.url = row.url;
             flow.client_ip = row.client_ip;
+            flow.conn_info = row.conn_info;
             flow.status = row.status;
             flow.error = row.error;
             flow.started = row.started;
+            flow.response_at = row.response_at;
             flow.finished_at = row.finished_at;
             flow.request_bytes = row.request_bytes;
             flow.response_bytes = row.response_bytes;
             flow.pinned = row.pinned;
+            flow.rule_hit = row.rule_hit;
             flow.comment = row.comment;
             flow.relay_source = row.relay_source;
             next.insert(flow.id, flow);
             order.push_back(row.id);
         }
+        if order != self.order {
+            self.next_rev += 1;
+        }
         self.flows = next;
         self.order = order;
         self.next_id = self.next_id.max(max_id.saturating_add(1));
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub fn set_cached_total(&mut self, total: Option<usize>) {
+        if self.cached_total != total {
+            self.cached_total = total;
+            self.next_rev += 1;
+        }
+    }
+
+    /// True when `id` is in the web cache and either has not loaded detail yet
+    /// or its server `rev` advanced since the last [`Session::fill_cached_detail`].
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub fn cached_needs_detail(&self, id: u64) -> bool {
+        self.flows.get(&id).is_some_and(|flow| {
+            flow.cached_detail_rev
+                .is_none_or(|detail_rev| detail_rev < flow.cached_server_rev)
+        })
     }
 
     /// Stores one detail payload. The same payload keeps the current revision.
@@ -1825,7 +1909,12 @@ impl Session {
             && flow.response_body == detail.response_body
             && flow.request_truncated == detail.request_truncated
             && flow.response_truncated == detail.response_truncated
-            && flow.messages == detail.messages;
+            && flow.request_encoding_error == detail.request_encoding_error
+            && flow.response_encoding_error == detail.response_encoding_error
+            && flow.request_expired == detail.request_expired
+            && flow.response_expired == detail.response_expired
+            && flow.messages == detail.messages
+            && flow.messages_truncated == detail.messages_truncated;
         if !same {
             self.next_rev += 1;
             flow.rev = self.next_rev;
@@ -1835,13 +1924,21 @@ impl Session {
             flow.response_body = detail.response_body;
             flow.request_truncated = detail.request_truncated;
             flow.response_truncated = detail.response_truncated;
+            flow.request_encoding_error = detail.request_encoding_error;
+            flow.response_encoding_error = detail.response_encoding_error;
+            flow.request_expired = detail.request_expired;
+            flow.response_expired = detail.response_expired;
             flow.messages = detail.messages;
+            flow.messages_truncated = detail.messages_truncated;
         }
+        let synced_rev = flow.cached_server_rev.max(detail.rev);
+        flow.cached_server_rev = synced_rev;
+        flow.cached_detail_rev = Some(synced_rev);
         Some(flow.rev)
     }
 
     pub fn len(&self) -> usize {
-        self.flows.len()
+        self.cached_total.unwrap_or(self.flows.len())
     }
 
     pub fn memory_bytes(&self) -> usize {
@@ -2049,6 +2146,92 @@ fn headers_size(headers: &[(String, String)]) -> usize {
     headers.iter().map(|(k, v)| k.len() + v.len()).sum()
 }
 
+const B64_ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+pub(crate) fn base64_encode(data: &[u8]) -> String {
+    if data.is_empty() {
+        return String::new();
+    }
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b0 = u32::from(chunk[0]);
+        let b1 = u32::from(chunk.get(1).copied().unwrap_or(0));
+        let b2 = u32::from(chunk.get(2).copied().unwrap_or(0));
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(B64_ALPHABET[((n >> 18) & 0x3f) as usize] as char);
+        out.push(B64_ALPHABET[((n >> 12) & 0x3f) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(B64_ALPHABET[((n >> 6) & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(B64_ALPHABET[(n & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+pub(crate) fn base64_decode(text: &str) -> Option<Vec<u8>> {
+    fn sextet(byte: u8) -> Option<u8> {
+        match byte {
+            b'A'..=b'Z' => Some(byte - b'A'),
+            b'a'..=b'z' => Some(byte - b'a' + 26),
+            b'0'..=b'9' => Some(byte - b'0' + 52),
+            b'+' | b'-' => Some(62),
+            b'/' | b'_' => Some(63),
+            _ => None,
+        }
+    }
+    let mut out = Vec::with_capacity(text.len() * 3 / 4);
+    let mut group = [0u8; 4];
+    let mut group_len = 0usize;
+    let mut saw_pad = false;
+    for byte in text.bytes() {
+        if byte.is_ascii_whitespace() {
+            continue;
+        }
+        if byte == b'=' {
+            saw_pad = true;
+            continue;
+        }
+        if saw_pad {
+            return None;
+        }
+        group[group_len] = sextet(byte)?;
+        group_len += 1;
+        if group_len == 4 {
+            let n = (u32::from(group[0]) << 18)
+                | (u32::from(group[1]) << 12)
+                | (u32::from(group[2]) << 6)
+                | u32::from(group[3]);
+            out.push(((n >> 16) & 0xff) as u8);
+            out.push(((n >> 8) & 0xff) as u8);
+            out.push((n & 0xff) as u8);
+            group_len = 0;
+        }
+    }
+    match group_len {
+        0 => {}
+        1 => return None,
+        2 => {
+            let n = (u32::from(group[0]) << 18) | (u32::from(group[1]) << 12);
+            out.push(((n >> 16) & 0xff) as u8);
+        }
+        3 => {
+            let n = (u32::from(group[0]) << 18)
+                | (u32::from(group[1]) << 12)
+                | (u32::from(group[2]) << 6);
+            out.push(((n >> 16) & 0xff) as u8);
+            out.push(((n >> 8) & 0xff) as u8);
+        }
+        _ => unreachable!(),
+    }
+    Some(out)
+}
+
 fn contains_ascii_ignore_case(haystack: &str, needle: &str) -> bool {
     contains_bytes_ascii_ignore_case(haystack.as_bytes(), needle.as_bytes())
 }
@@ -2103,20 +2286,36 @@ fn bytes_contain(bytes: &[u8], keyword: &str) -> bool {
     }
 }
 
+fn body_group_matches(req: &[u8], res: &[u8], messages: &[Message], group: &[String]) -> bool {
+    group.iter().any(|keyword| {
+        bytes_contain(req, keyword)
+            || bytes_contain(res, keyword)
+            || messages.iter().any(|msg| {
+                contains_ascii_ignore_case(&msg.text, keyword)
+                    || contains_ascii_ignore_case(&msg.kind, keyword)
+            })
+    })
+}
+
 fn body_groups_match(req: &[u8], res: &[u8], messages: &[Message], groups: &[Vec<String>]) -> bool {
     if groups.is_empty() {
         return true;
     }
-    groups.iter().all(|group| {
-        group.iter().any(|keyword| {
-            bytes_contain(req, keyword)
-                || bytes_contain(res, keyword)
-                || messages.iter().any(|msg| {
-                    contains_ascii_ignore_case(&msg.text, keyword)
-                        || contains_ascii_ignore_case(&msg.kind, keyword)
-                })
+    groups
+        .iter()
+        .all(|group| body_group_matches(req, res, messages, group))
+}
+
+fn content_type_matches(flow: &Flow, kinds: &[String]) -> bool {
+    flow.response_headers
+        .iter()
+        .chain(flow.request_headers.iter())
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+        .is_some_and(|(_, value)| {
+            kinds
+                .iter()
+                .any(|kind| contains_ascii_ignore_case(value, kind))
         })
-    })
 }
 
 fn header_contains(flow: &Flow, keyword: &str) -> bool {
@@ -2339,11 +2538,15 @@ impl FlowQuery {
     }
 
     fn needs_body(&self) -> bool {
-        self.stages.iter().any(|stage| !stage.bodies.is_empty())
+        self.stages
+            .iter()
+            .any(|stage| !stage.bodies.is_empty() || !stage.neg_bodies.is_empty())
     }
 
     fn needs_op(&self) -> bool {
-        self.stages.iter().any(|stage| !stage.ops.is_empty())
+        self.stages
+            .iter()
+            .any(|stage| !stage.ops.is_empty() || !stage.neg_ops.is_empty())
     }
 
     fn matches_meta(&self, flow: &Flow) -> bool {
@@ -2439,23 +2642,72 @@ impl FilterPlan {
     }
 }
 
+fn join_comma_or_tokens(normalized: &str) -> Vec<String> {
+    let mut tokens: Vec<String> = Vec::new();
+    let mut join_next = false;
+    for raw in normalized.split_whitespace() {
+        if raw == "," {
+            join_next = true;
+            continue;
+        }
+        if let Some(rest) = raw.strip_prefix(',') {
+            if let Some(last) = tokens.last_mut() {
+                last.push(',');
+                last.push_str(rest);
+            } else if !rest.is_empty() {
+                tokens.push(rest.to_string());
+            }
+            join_next = raw.ends_with(',');
+            continue;
+        }
+        if join_next {
+            if let Some(last) = tokens.last_mut() {
+                if !last.ends_with(',') {
+                    last.push(',');
+                }
+                last.push_str(raw);
+            } else {
+                tokens.push(raw.to_string());
+            }
+            join_next = raw.ends_with(',');
+            continue;
+        }
+        join_next = raw.ends_with(',');
+        tokens.push(raw.to_string());
+    }
+    tokens
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FlowStage {
     texts: Vec<Vec<String>>,
     hosts: Vec<String>,
+    neg_hosts: Vec<String>,
     client_ips: Vec<String>,
+    neg_client_ips: Vec<String>,
     path_prefixes: Vec<String>,
+    neg_path_prefixes: Vec<String>,
     excludes: Vec<String>,
     methods: Vec<String>,
+    neg_methods: Vec<String>,
     statuses: Vec<StatusMatch>,
+    neg_statuses: Vec<StatusMatch>,
     content_types: Vec<String>,
+    neg_content_types: Vec<String>,
     bodies: Vec<Vec<String>>,
+    neg_bodies: Vec<Vec<String>>,
     headers: Vec<Vec<String>>,
+    neg_headers: Vec<Vec<String>>,
     comments: Vec<Vec<String>>,
+    neg_comments: Vec<Vec<String>>,
     repeats: Vec<Vec<String>>,
+    neg_repeats: Vec<Vec<String>>,
     ops: Vec<Vec<String>>,
+    neg_ops: Vec<Vec<String>>,
     pinned_only: bool,
+    unpinned_only: bool,
     slow_only: bool,
+    neg_slow_only: bool,
 }
 
 impl FlowStage {
@@ -2464,21 +2716,34 @@ impl FlowStage {
         let mut query = Self {
             texts: Vec::new(),
             hosts: Vec::new(),
+            neg_hosts: Vec::new(),
             client_ips: Vec::new(),
+            neg_client_ips: Vec::new(),
             path_prefixes: Vec::new(),
+            neg_path_prefixes: Vec::new(),
             excludes: Vec::new(),
             methods: Vec::new(),
+            neg_methods: Vec::new(),
             statuses: Vec::new(),
+            neg_statuses: Vec::new(),
             content_types: Vec::new(),
+            neg_content_types: Vec::new(),
             bodies: Vec::new(),
+            neg_bodies: Vec::new(),
             headers: Vec::new(),
+            neg_headers: Vec::new(),
             comments: Vec::new(),
+            neg_comments: Vec::new(),
             repeats: Vec::new(),
+            neg_repeats: Vec::new(),
             ops: Vec::new(),
+            neg_ops: Vec::new(),
             pinned_only: false,
+            unpinned_only: false,
             slow_only: false,
+            neg_slow_only: false,
         };
-        for token in normalized.split_whitespace() {
+        for token in join_comma_or_tokens(&normalized) {
             let lower = token.to_ascii_lowercase();
             if lower == "pin:" {
                 query.pinned_only = true;
@@ -2492,9 +2757,111 @@ impl FlowStage {
                 query.excludes.extend(split_or_terms(keyword));
                 continue;
             }
-            if let Some(keyword) = lower.strip_prefix('-') {
-                if !keyword.is_empty() && !keyword.contains(':') {
-                    query.excludes.extend(split_or_terms(keyword));
+            if let Some(neg) = lower.strip_prefix('-') {
+                if neg.is_empty() {
+                    continue;
+                }
+                if neg == "pin:" {
+                    query.unpinned_only = true;
+                    continue;
+                }
+                if neg == "slow:" {
+                    query.neg_slow_only = true;
+                    continue;
+                }
+                if let Some(rest) = neg
+                    .strip_prefix("host:")
+                    .or_else(|| neg.strip_prefix("domain:"))
+                {
+                    query.neg_hosts.extend(split_or_terms(rest));
+                    continue;
+                }
+                if let Some(rest) = neg
+                    .strip_prefix("ip:")
+                    .or_else(|| neg.strip_prefix("client:"))
+                    .or_else(|| neg.strip_prefix("app:"))
+                    .or_else(|| neg.strip_prefix("proc:"))
+                {
+                    query.neg_client_ips.extend(split_or_terms(rest));
+                    continue;
+                }
+                if let Some(rest) = neg
+                    .strip_prefix("note:")
+                    .or_else(|| neg.strip_prefix("comment:"))
+                {
+                    query.neg_comments.push(split_or_terms(rest));
+                    continue;
+                }
+                if let Some(rest) = neg.strip_prefix("repeat:") {
+                    let raw_terms = split_or_terms(rest);
+                    if raw_terms.is_empty() {
+                        query.neg_repeats.push(Vec::new());
+                    } else {
+                        let group: Vec<String> = raw_terms
+                            .into_iter()
+                            .map(|term| term.trim_start_matches('#').to_string())
+                            .filter(|term| !term.is_empty())
+                            .collect();
+                        if !group.is_empty() {
+                            query.neg_repeats.push(group);
+                        }
+                    }
+                    continue;
+                }
+                if let Some(rest) = neg
+                    .strip_prefix("op:")
+                    .or_else(|| neg.strip_prefix("gql:"))
+                    .or_else(|| neg.strip_prefix("operation:"))
+                {
+                    query.neg_ops.push(split_or_terms(rest));
+                    continue;
+                }
+                if let Some(rest) = neg.strip_prefix("path:") {
+                    query.neg_path_prefixes.extend(split_or_terms(rest));
+                    continue;
+                }
+                if let Some(keyword) = neg.strip_prefix("body:") {
+                    let group = split_or_terms(keyword);
+                    if !group.is_empty() {
+                        query.neg_bodies.push(group);
+                    }
+                    continue;
+                }
+                if let Some(keyword) = neg.strip_prefix("header:") {
+                    let group = split_or_terms(keyword);
+                    if !group.is_empty() {
+                        query.neg_headers.push(group);
+                    }
+                    continue;
+                }
+                if let Some(kind) = neg
+                    .strip_prefix("type:")
+                    .or_else(|| neg.strip_prefix("ct:"))
+                {
+                    query.neg_content_types.extend(split_or_terms(kind));
+                    continue;
+                }
+                if let Some(rest) = neg.strip_prefix("method:") {
+                    for item in split_or_terms(rest) {
+                        let upper = item.to_ascii_uppercase();
+                        if !query.neg_methods.contains(&upper) {
+                            query.neg_methods.push(upper);
+                        }
+                    }
+                    continue;
+                }
+                if let Some(rest) = neg.strip_prefix("status:") {
+                    for item in split_or_terms(rest) {
+                        if let Some(status) = StatusMatch::parse(&item)
+                            && !query.neg_statuses.contains(&status)
+                        {
+                            query.neg_statuses.push(status);
+                        }
+                    }
+                    continue;
+                }
+                if !neg.contains(':') {
+                    query.excludes.extend(split_or_terms(neg));
                 }
                 continue;
             }
@@ -2625,7 +2992,13 @@ impl FlowStage {
         if self.pinned_only && !flow.pinned {
             return false;
         }
-        if self.slow_only && !is_slow(flow.started, flow.finished_at, crate::clock::now()) {
+        if self.unpinned_only && flow.pinned {
+            return false;
+        }
+        if (self.slow_only || self.neg_slow_only)
+            && let slow = is_slow(flow.started, flow.finished_at, crate::clock::now())
+            && ((self.slow_only && !slow) || (self.neg_slow_only && slow))
+        {
             return false;
         }
         if !self.methods.is_empty()
@@ -2636,28 +3009,37 @@ impl FlowStage {
         {
             return false;
         }
+        if self
+            .neg_methods
+            .iter()
+            .any(|method| flow.method.eq_ignore_ascii_case(method))
+        {
+            return false;
+        }
         if !self.statuses.is_empty() && !self.statuses.iter().any(|status| status.matches(flow)) {
             return false;
         }
-        if !self.content_types.is_empty() {
-            let header = flow
-                .response_headers
-                .iter()
-                .chain(flow.request_headers.iter())
-                .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
-                .map(|(_, value)| value);
-            if !header.is_some_and(|value| {
-                self.content_types
-                    .iter()
-                    .any(|kind| contains_ascii_ignore_case(value, kind))
-            }) {
-                return false;
-            }
+        if self.neg_statuses.iter().any(|status| status.matches(flow)) {
+            return false;
+        }
+        if !self.content_types.is_empty() && !content_type_matches(flow, &self.content_types) {
+            return false;
+        }
+        if !self.neg_content_types.is_empty() && content_type_matches(flow, &self.neg_content_types)
+        {
+            return false;
         }
         if !self
             .headers
             .iter()
             .all(|group| group.iter().any(|keyword| header_contains(flow, keyword)))
+        {
+            return false;
+        }
+        if self
+            .neg_headers
+            .iter()
+            .any(|group| group.iter().any(|keyword| header_contains(flow, keyword)))
         {
             return false;
         }
@@ -2675,6 +3057,18 @@ impl FlowStage {
         {
             return false;
         }
+        if self.neg_comments.iter().any(|group| {
+            if group.is_empty() {
+                !flow.comment.is_empty()
+            } else {
+                !flow.comment.is_empty()
+                    && group
+                        .iter()
+                        .any(|keyword| contains_ascii_ignore_case(&flow.comment, keyword))
+            }
+        }) {
+            return false;
+        }
         if !self.repeats.is_empty()
             && !self.repeats.iter().all(|group| {
                 if group.is_empty() {
@@ -2689,11 +3083,29 @@ impl FlowStage {
         {
             return false;
         }
+        if self.neg_repeats.iter().any(|group| {
+            if group.is_empty() {
+                contains_ascii_ignore_case(&flow.comment, "repeat:")
+            } else {
+                group.iter().any(|target| {
+                    u64_eq_digits(flow.id, target) || comment_has_repeat_id(&flow.comment, target)
+                })
+            }
+        }) {
+            return false;
+        }
         if !self.hosts.is_empty()
             && !self
                 .hosts
                 .iter()
                 .any(|pattern| host_matches(&flow.host, pattern))
+        {
+            return false;
+        }
+        if self
+            .neg_hosts
+            .iter()
+            .any(|pattern| host_matches(&flow.host, pattern))
         {
             return false;
         }
@@ -2705,11 +3117,25 @@ impl FlowStage {
         {
             return false;
         }
+        if self
+            .neg_client_ips
+            .iter()
+            .any(|ip| client_ip_matches(&flow.client_ip, ip))
+        {
+            return false;
+        }
         if !self.path_prefixes.is_empty()
             && !self
                 .path_prefixes
                 .iter()
                 .any(|prefix| path_prefix_matches(&flow.path, prefix))
+        {
+            return false;
+        }
+        if self
+            .neg_path_prefixes
+            .iter()
+            .any(|prefix| path_prefix_matches(&flow.path, prefix))
         {
             return false;
         }
@@ -2730,22 +3156,37 @@ impl FlowStage {
     }
 
     fn matches_payload(&self, path: &str, req: &[u8], res: &[u8], messages: &[Message]) -> bool {
-        if !self.ops.is_empty() {
+        if !self.ops.is_empty() || !self.neg_ops.is_empty() {
             let ops = crate::present::graphql_operations(path, req);
-            if ops.is_empty() {
-                return false;
-            }
-            if !self.ops.iter().all(|group| {
-                if group.is_empty() {
-                    !ops.is_empty()
-                } else {
-                    group.iter().any(|pat| crate::rules::op_matches(pat, &ops))
+            if !self.ops.is_empty() {
+                if ops.is_empty() {
+                    return false;
                 }
+                if !self.ops.iter().all(|group| {
+                    if group.is_empty() {
+                        !ops.is_empty()
+                    } else {
+                        group.iter().any(|pat| crate::rules::op_matches(pat, &ops))
+                    }
+                }) {
+                    return false;
+                }
+            }
+            if self.neg_ops.iter().any(|group| {
+                !ops.is_empty()
+                    && (group.is_empty()
+                        || group.iter().any(|pat| crate::rules::op_matches(pat, &ops)))
             }) {
                 return false;
             }
         }
-        body_groups_match(req, res, messages, &self.bodies)
+        if !body_groups_match(req, res, messages, &self.bodies) {
+            return false;
+        }
+        !self
+            .neg_bodies
+            .iter()
+            .any(|group| body_group_matches(req, res, messages, group))
     }
 }
 
@@ -3506,5 +3947,437 @@ mod tests {
         // Method and status combinations
         assert_eq!(session.ids_matching("POST 200"), vec![f1]);
         assert_eq!(session.ids_matching("GET 4xx"), vec![f2]);
+    }
+
+    #[test]
+    fn begin_finish_keeps_inline_body_readable_and_respects_concurrent_pin() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let mut session = Session::with_spill_limits(512, 64 * 1024, 4, Duration::from_secs(60));
+
+        // Case 1: concurrent read + filter during out-of-lock flush window sees full bodies,
+        // and commit_finish subsequently spills & frees inline memory.
+        let id = session.open(draft("race.test"));
+        let mut req = vec![b'q'; 1500];
+        req.extend_from_slice(b"-REQ_WINDOW");
+        let mut res = vec![b's'; 2200];
+        res.extend_from_slice(b"-RES_WINDOW");
+        session.append_body(id, Direction::Request, &req);
+        session.set_response(id, 200, Vec::new(), None);
+        session.append_body(id, Direction::Response, &res);
+        let mem_before = session.memory_bytes();
+
+        let pending = session.begin_finish(id, now);
+        // Before flush/commit: hydrated() and body: filter still see inline bytes!
+        let during = session.hydrated(id).unwrap();
+        assert_eq!(during.request_body, req);
+        assert_eq!(during.response_body, res);
+        assert_eq!(session.ids_matching("body:REQ_WINDOW"), vec![id]);
+        assert_eq!(session.ids_matching("body:RES_WINDOW"), vec![id]);
+
+        let written = pending.flush();
+        session.commit_finish(id, written);
+        assert!(session.get(id).unwrap().request_body.is_empty());
+        assert!(session.get(id).unwrap().response_body.is_empty());
+        assert!(session.get(id).unwrap().request_spill.is_some());
+        assert!(session.get(id).unwrap().response_spill.is_some());
+        assert!(session.memory_bytes() + req.len() + res.len() <= mem_before + 64);
+        let after = session.hydrated(id).unwrap();
+        assert_eq!(after.request_body, req);
+        assert_eq!(after.response_body, res);
+
+        // Case 2: pinning the flow between begin_finish and commit_finish keeps inline bytes
+        // in RAM and does NOT attach SpillRef.
+        let pinned_id = session.open(draft("pin-window.test"));
+        let pin_body = vec![0xabu8; 1800];
+        session.set_response(pinned_id, 200, Vec::new(), None);
+        session.append_body(pinned_id, Direction::Response, &pin_body);
+        let mem_pinned = session.memory_bytes();
+
+        let pending_pin = session.begin_finish(pinned_id, now);
+        assert!(session.set_pinned(pinned_id, true));
+        let written_pin = pending_pin.flush();
+        session.commit_finish(pinned_id, written_pin);
+
+        let raw_pinned = session.get(pinned_id).unwrap();
+        assert!(raw_pinned.pinned);
+        assert_eq!(raw_pinned.response_body, pin_body);
+        assert!(raw_pinned.response_spill.is_none());
+        assert_eq!(session.memory_bytes(), mem_pinned);
+    }
+
+    #[test]
+    fn cached_views_and_details_preserve_metadata_and_track_server_rev() {
+        let mut session = Session::default();
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_millis(1_000);
+        let t_res = t0 + Duration::from_millis(35);
+        let view_v1 = CachedFlowView {
+            id: 7,
+            rev: 10,
+            protocol: Protocol::WebSocket,
+            method: "GET".into(),
+            host: "ws.example.com".into(),
+            path: "/live".into(),
+            url: "wss://ws.example.com/live".into(),
+            client_ip: "127.0.0.1 (Browser)".into(),
+            conn_info: ConnInfo {
+                dns_ms: Some(4),
+                tcp_ms: Some(11),
+                tls_ms: Some(18),
+                reused: false,
+                server_addr: "93.184.216.34:443".into(),
+                tls_version: "TLSv1.3".into(),
+                dialed_before_start: true,
+            },
+            status: Some(101),
+            error: None,
+            started: t0,
+            response_at: Some(t_res),
+            finished_at: None,
+            request_bytes: 0,
+            response_bytes: 64,
+            pinned: false,
+            rule_hit: "header".into(),
+            comment: "stream".into(),
+            relay_source: None,
+        };
+        session.replace_cached_views(vec![view_v1.clone()]);
+        session.set_cached_total(Some(42));
+        assert_eq!(session.len(), 42);
+        assert!(session.cached_needs_detail(7));
+
+        session.fill_cached_detail(CachedFlowDetail {
+            id: 7,
+            rev: 10,
+            request_headers: vec![("Upgrade".into(), "websocket".into())],
+            response_headers: vec![("Upgrade".into(), "websocket".into())],
+            request_body: vec![0xff, 0x00, 0xfe],
+            response_body: vec![0x89, 0x50, 0x4e, 0x47],
+            request_truncated: false,
+            response_truncated: false,
+            request_encoding_error: Some("bad req gzip".into()),
+            response_encoding_error: Some("bad res br".into()),
+            request_expired: Some(32768),
+            response_expired: Some(65536),
+            messages: vec![Message {
+                direction: Direction::Response,
+                kind: "文本".into(),
+                text: "hello".into(),
+            }],
+            messages_truncated: true,
+        });
+        assert!(!session.cached_needs_detail(7));
+
+        let flow = session.get(7).unwrap();
+        assert_eq!(flow.rule_hit, "header");
+        assert_eq!(flow.response_at, Some(t_res));
+        assert_eq!(flow.conn_info.tls_version, "TLSv1.3");
+        assert_eq!(flow.request_body, vec![0xff, 0x00, 0xfe]);
+        assert_eq!(flow.response_body, vec![0x89, 0x50, 0x4e, 0x47]);
+        assert_eq!(flow.request_encoding_error.as_deref(), Some("bad req gzip"));
+        assert_eq!(flow.response_encoding_error.as_deref(), Some("bad res br"));
+        assert_eq!(flow.request_expired, Some(32768));
+        assert_eq!(flow.response_expired, Some(65536));
+        assert!(flow.messages_truncated);
+
+        // When server rev advances (e.g. new WS frame), cached_needs_detail becomes true again.
+        let rev_before = flow.rev;
+        let mut view_v2 = view_v1;
+        view_v2.rev = 11;
+        session.replace_cached_views(vec![view_v2]);
+        assert!(session.get(7).unwrap().rev > rev_before);
+        assert!(session.cached_needs_detail(7));
+    }
+
+    #[test]
+    fn base64_roundtrip_handles_binary_and_whitespace() {
+        for sample in [
+            &[][..],
+            &[0x00],
+            &[0xff, 0xfe],
+            &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff],
+        ] {
+            let encoded = base64_encode(sample);
+            assert_eq!(base64_decode(&encoded).as_deref(), Some(sample));
+        }
+        assert_eq!(
+            base64_decode("  aGVs\r\nbG8= \n").as_deref(),
+            Some(&b"hello"[..])
+        );
+        assert!(base64_decode("bad!char").is_none());
+    }
+
+    #[test]
+    fn negative_keyed_filter_tokens_and_or_groups_work() {
+        let mut session = Session::default();
+        let now = crate::clock::now();
+
+        let f1 = session.open(FlowDraft {
+            protocol: Protocol::Http2,
+            method: "POST".into(),
+            host: "api.alpha.com".into(),
+            path: "/graphql".into(),
+            url: "https://api.alpha.com/graphql".into(),
+            request_headers: vec![
+                ("Content-Type".into(), "application/json".into()),
+                ("X-Trace".into(), "trace-alpha".into()),
+            ],
+        });
+        session.set_client_ip(f1, "127.0.0.1 (Google Chrome)");
+        session.append_body(
+            f1,
+            Direction::Request,
+            br#"{"operationName":"IntrospectionQuery","query":"query IntrospectionQuery { __schema { queryType { name } } }"}"#,
+        );
+        session.set_response(
+            f1,
+            200,
+            vec![("Content-Type".into(), "application/json".into())],
+            None,
+        );
+        session.append_body(f1, Direction::Response, b"schema_payload_ok");
+        session.set_pinned(f1, true);
+        session.set_comment(f1, "noisy introspection");
+        session.mark_finished_at(f1, now + Duration::from_millis(80));
+
+        let f2 = session.open(FlowDraft {
+            protocol: Protocol::Http11,
+            method: "OPTIONS".into(),
+            host: "sub.beta.org".into(),
+            path: "/healthz/ping".into(),
+            url: "https://sub.beta.org/healthz/ping".into(),
+            request_headers: vec![("Origin".into(), "https://app.test".into())],
+        });
+        session.set_client_ip(f2, "10.0.0.8 (curl)");
+        session.set_response(
+            f2,
+            204,
+            vec![("Content-Type".into(), "text/plain".into())],
+            None,
+        );
+        session.set_comment(f2, "repeat:1 (1/2)");
+        session.mark_finished_at(f2, now + Duration::from_millis(1500));
+
+        let f3 = session.open(FlowDraft {
+            protocol: Protocol::Http2,
+            method: "GET".into(),
+            host: "cdn.gamma.net".into(),
+            path: "/static/logo.png".into(),
+            url: "https://cdn.gamma.net/static/logo.png".into(),
+            request_headers: vec![("Accept".into(), "image/png".into())],
+        });
+        session.set_client_ip(f3, "127.0.0.1 (Safari)");
+        session.set_response(
+            f3,
+            304,
+            vec![
+                ("Content-Type".into(), "image/png".into()),
+                ("Cache-Control".into(), "max-age=3600".into()),
+            ],
+            None,
+        );
+        session.mark_finished_at(f3, now + Duration::from_millis(40));
+
+        let f4 = session.open(FlowDraft {
+            protocol: Protocol::Http2,
+            method: "POST".into(),
+            host: "api.delta.io".into(),
+            path: "/graphql".into(),
+            url: "https://api.delta.io/graphql".into(),
+            request_headers: vec![("Content-Type".into(), "application/json".into())],
+        });
+        session.set_client_ip(f4, "192.168.1.9 (MyApp)");
+        session.append_body(
+            f4,
+            Direction::Request,
+            br#"{"operationName":"CheckoutOrder","query":"mutation CheckoutOrder { checkout { id } }"}"#,
+        );
+        session.set_error(f4, "断点丢弃");
+        session.add_message(f4, Direction::Response, "文本", "heartbeat_ping");
+
+        // -host: / -domain: with wildcard and `|` / `, ` OR
+        assert_eq!(
+            session.ids_matching("-host:api.alpha.com|*.beta.org"),
+            vec![f3, f4]
+        );
+        assert_eq!(
+            session.ids_matching("-domain:cdn.gamma.net, *.beta.org"),
+            vec![f1, f4]
+        );
+
+        // -path:
+        assert_eq!(session.ids_matching("-path:/healthz|/static"), vec![f1, f4]);
+
+        // -app: / -proc: / -ip: / -client:
+        assert_eq!(
+            session.ids_matching("-app:Google_Chrome|curl"),
+            vec![f3, f4]
+        );
+        assert_eq!(
+            session.ids_matching("-proc:safari -ip:10.0.0"),
+            vec![f1, f4]
+        );
+        assert_eq!(session.ids_matching("-client:myapp"), vec![f1, f2, f3]);
+
+        // -status: exact, class, err / fail / 失败
+        assert_eq!(session.ids_matching("-status:204|3xx|err"), vec![f1]);
+        assert_eq!(session.ids_matching("-status:fail,200"), vec![f2, f3]);
+        assert_eq!(session.ids_matching("-status:失败"), vec![f1, f2, f3]);
+
+        // -method:
+        assert_eq!(session.ids_matching("-method:OPTIONS|GET"), vec![f1, f4]);
+
+        // -type: / -ct:
+        assert_eq!(session.ids_matching("-type:image|plain"), vec![f1, f4]);
+        assert_eq!(session.ids_matching("-ct:json"), vec![f2, f3]);
+
+        // -op: / -gql: / -operation:
+        assert_eq!(
+            session.ids_matching("-op:IntrospectionQuery"),
+            vec![f2, f3, f4]
+        );
+        assert_eq!(session.ids_matching("op: -gql:Introspection*"), vec![f4]);
+        assert_eq!(session.ids_matching("-operation:"), vec![f2, f3]);
+
+        // -note: / -comment: and -repeat:
+        assert_eq!(session.ids_matching("-note:"), vec![f3, f4]);
+        assert_eq!(
+            session.ids_matching("-comment:introspection|repeat"),
+            vec![f3, f4]
+        );
+        assert_eq!(session.ids_matching("-repeat:"), vec![f1, f3, f4]);
+        assert_eq!(session.ids_matching("-repeat:1"), vec![f3, f4]);
+
+        // -pin: and -slow:
+        assert_eq!(session.ids_matching("-pin:"), vec![f2, f3, f4]);
+        assert_eq!(session.ids_matching("-slow:"), vec![f1, f3, f4]);
+
+        // -header: and -body:
+        assert_eq!(
+            session.ids_matching("-header:x-trace|cache-control"),
+            vec![f2, f4]
+        );
+        assert_eq!(
+            session.ids_matching("-body:schema_payload|heartbeat_ping"),
+            vec![f2, f3]
+        );
+
+        // Bare `-keyword` and `mute:` continue working identically alongside negative tokens.
+        assert_eq!(
+            session.ids_matching("-gamma mute:beta -status:err"),
+            vec![f1]
+        );
+    }
+
+    #[test]
+    fn plan_filter_handles_spilled_negative_body_and_op_predicates() {
+        let mut session = Session::with_spill_limits(512, 64 * 1024, 4, Duration::from_secs(60));
+
+        let make_gql_body = |op: &str, filler: u8| -> Vec<u8> {
+            let pad = String::from_utf8(vec![filler; 1200]).unwrap();
+            format!(
+                r#"{{"operationName":"{op}","query":"query {op} {{ viewer {{ id }} }}","variables":{{"pad":"{pad}"}}}}"#
+            )
+            .into_bytes()
+        };
+
+        let g1 = session.open(FlowDraft {
+            protocol: Protocol::Http2,
+            method: "POST".into(),
+            host: "gql.test".into(),
+            path: "/graphql".into(),
+            url: "https://gql.test/graphql".into(),
+            request_headers: vec![("Content-Type".into(), "application/json".into())],
+        });
+        session.append_body(
+            g1,
+            Direction::Request,
+            &make_gql_body("IntrospectionQuery", b'x'),
+        );
+        let mut res1 = vec![b'a'; 1200];
+        res1.extend_from_slice(b"-secret-token-alpha");
+        session.append_body(g1, Direction::Response, &res1);
+        session.mark_finished(g1);
+
+        let g2 = session.open(FlowDraft {
+            protocol: Protocol::Http2,
+            method: "POST".into(),
+            host: "gql.test".into(),
+            path: "/graphql".into(),
+            url: "https://gql.test/graphql".into(),
+            request_headers: vec![("Content-Type".into(), "application/json".into())],
+        });
+        session.append_body(g2, Direction::Request, &make_gql_body("GetOrders", b'y'));
+        let mut res2 = vec![b'b'; 1200];
+        res2.extend_from_slice(b"-order-list-ok");
+        session.append_body(g2, Direction::Response, &res2);
+        session.mark_finished(g2);
+
+        // Confirm both request and response bodies spilled to disk.
+        assert!(session.get(g1).unwrap().request_spill.is_some());
+        assert!(session.get(g1).unwrap().response_spill.is_some());
+        assert!(session.get(g2).unwrap().request_spill.is_some());
+        assert!(session.get(g2).unwrap().response_spill.is_some());
+
+        let ids_no_introspection: Vec<u64> = session
+            .plan_filter("-op:IntrospectionQuery")
+            .finish()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(ids_no_introspection, vec![g2]);
+        assert_eq!(
+            session.filtered_stats("-op:IntrospectionQuery").total_count,
+            1
+        );
+
+        let ids_no_secret: Vec<u64> = session
+            .plan_filter("-body:secret-token-alpha")
+            .finish()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(ids_no_secret, vec![g2]);
+        assert_eq!(
+            session
+                .filtered_stats("-body:secret-token-alpha")
+                .total_count,
+            1
+        );
+    }
+
+    #[test]
+    fn clear_response_marks_dropped_response_breakpoint_as_failed() {
+        let mut session = Session::default();
+        let id = session.open(draft("drop.test"));
+        session.set_client_ip(id, "127.0.0.1 (curl)");
+        session.set_response(
+            id,
+            200,
+            vec![("Content-Type".into(), "application/json".into())],
+            Some(Protocol::Http2),
+        );
+        session.append_body(id, Direction::Response, b"{\"ok\":true}");
+
+        // Simulate response breakpoint drop: clear response, set error, finish.
+        session.clear_response(id);
+        session.set_error(id, "断点丢弃");
+        session.mark_finished(id);
+
+        let flow = session.get(id).unwrap();
+        assert_eq!(flow.status, None);
+        assert_eq!(flow.error.as_deref(), Some("断点丢弃"));
+        assert!(flow.response_headers.is_empty());
+        assert!(flow.response_body.is_empty());
+
+        assert_eq!(session.ids_matching("失败"), vec![id]);
+        assert!(session.ids_matching("-status:err").is_empty());
+
+        let stats = session.filtered_stats("");
+        assert_eq!(stats.s2xx, 0);
+        assert_eq!(stats.failed, 1);
+
+        let facets = session.facets();
+        assert_eq!(facets.domains[0].error_count, 1);
+        assert_eq!(facets.apps[0].error_count, 1);
     }
 }

@@ -18,7 +18,9 @@ use bytes::Bytes;
 use http::{HeaderMap, HeaderName, Method, Request, Response, StatusCode, Uri, Version};
 use http_body::Body;
 use http_body::Frame;
-use http_body_util::{BodyExt, Full};
+use http_body_util::BodyExt;
+#[cfg(test)]
+use http_body_util::Full;
 use hyper::body::Incoming;
 use hyper::upgrade::Upgraded;
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -372,6 +374,8 @@ struct PooledH2 {
     first_used: Arc<AtomicBool>,
 }
 
+type PlainPoolMap = HashMap<(String, u16), Vec<(u64, TcpStream)>>;
+
 pub struct Hub {
     session: Mutex<Session>,
     generation: AtomicU64,
@@ -394,10 +398,11 @@ pub struct Hub {
     upstream: Mutex<Option<Upstream>>,
     upstream_text: Mutex<String>,
     /// Idle plaintext origin sockets, used only on the proxy runtime.
-    pool: tokio::sync::Mutex<HashMap<(String, u16), Vec<TcpStream>>>,
+    pool: tokio::sync::Mutex<PlainPoolMap>,
     /// Origin HTTP/2 senders. Each browser connection keeps its own lane.
     h2_pool: Mutex<HashMap<(String, u16), PooledH2>>,
     h2_generation: AtomicU64,
+    origin_epoch: AtomicU64,
     /// Test-only. The next send on a live browser connection dials again.
     #[cfg(test)]
     refresh_h2: AtomicBool,
@@ -517,6 +522,7 @@ impl Hub {
             pool: tokio::sync::Mutex::new(HashMap::new()),
             h2_pool: Mutex::new(HashMap::new()),
             h2_generation: AtomicU64::new(1),
+            origin_epoch: AtomicU64::new(1),
             #[cfg(test)]
             refresh_h2: AtomicBool::new(false),
             break_queue: Mutex::new(std::collections::VecDeque::new()),
@@ -846,8 +852,17 @@ impl Hub {
             .rules_text
             .lock()
             .unwrap_or_else(|err| err.into_inner()) = text.to_string();
-        *self.rules.lock().unwrap_or_else(|err| err.into_inner()) = rules::parse_rules(text);
+        let next_rules = rules::parse_rules(text);
+        let client_certs_changed = {
+            let mut guard = self.rules.lock().unwrap_or_else(|err| err.into_inner());
+            let changed = client_cert_rules(&guard) != client_cert_rules(&next_rules);
+            *guard = next_rules;
+            changed
+        };
         self.rules_rev.fetch_add(1, Ordering::Relaxed);
+        if client_certs_changed {
+            self.invalidate_origin_pools();
+        }
     }
 
     pub fn rules_revision(&self) -> u64 {
@@ -862,7 +877,18 @@ impl Hub {
     }
 
     pub fn set_rules_enabled(&self, enabled: bool) {
-        self.apply_rules.store(enabled, Ordering::Relaxed);
+        let prev = self.apply_rules.swap(enabled, Ordering::Relaxed);
+        if prev != enabled {
+            let has_client_certs = self
+                .rules
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .iter()
+                .any(|r| matches!(r, rules::Rule::ClientCert { .. }));
+            if has_client_certs {
+                self.invalidate_origin_pools();
+            }
+        }
     }
 
     pub fn rules_enabled(&self) -> bool {
@@ -890,7 +916,27 @@ impl Hub {
             .upstream_text
             .lock()
             .unwrap_or_else(|err| err.into_inner()) = text.to_string();
-        *self.upstream.lock().unwrap_or_else(|err| err.into_inner()) = parse_upstream(text);
+        let next = parse_upstream(text);
+        let changed = {
+            let mut guard = self.upstream.lock().unwrap_or_else(|err| err.into_inner());
+            let changed = *guard != next;
+            *guard = next;
+            changed
+        };
+        if changed {
+            self.invalidate_origin_pools();
+        }
+    }
+
+    fn invalidate_origin_pools(&self) {
+        self.origin_epoch.fetch_add(1, Ordering::AcqRel);
+        self.h2_pool
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clear();
+        if let Ok(mut pool) = self.pool.try_lock() {
+            pool.clear();
+        }
     }
 
     pub fn upstream_text(&self) -> String {
@@ -1344,9 +1390,13 @@ impl Hub {
     }
 
     async fn take_idle(&self, key: (String, u16)) -> Option<TcpStream> {
+        let current_epoch = self.origin_epoch.load(Ordering::Acquire);
         let mut pool = self.pool.lock().await;
         let slots = pool.get_mut(&key)?;
-        while let Some(stream) = slots.pop() {
+        while let Some((epoch, stream)) = slots.pop() {
+            if epoch != current_epoch {
+                continue;
+            }
             let mut probe = [0u8; 1];
             match stream.try_read(&mut probe) {
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => return Some(stream),
@@ -1364,6 +1414,7 @@ impl Hub {
         ) {
             return;
         }
+        let epoch = self.origin_epoch.load(Ordering::Acquire);
         let mut pool = self.pool.lock().await;
         if pool.len() >= 32 && !pool.contains_key(&key) {
             pool.clear();
@@ -1372,7 +1423,7 @@ impl Hub {
         if slots.len() >= 4 {
             slots.remove(0);
         }
-        slots.push(stream);
+        slots.push((epoch, stream));
     }
 
     #[cfg(test)]
@@ -1482,6 +1533,11 @@ impl Hub {
         self.touch();
     }
 
+    fn clear_response(&self, id: u64) {
+        self.with_session(|session| session.clear_response(id));
+        self.touch();
+    }
+
     fn set_conn_info(&self, id: u64, conn_info: crate::session::ConnInfo) {
         self.with_session(|session| session.set_conn_info(id, conn_info));
         self.touch();
@@ -1582,6 +1638,12 @@ impl Hub {
                 }
                 if !item.conn_info.is_empty() {
                     session.set_conn_info(id, item.conn_info);
+                }
+                for msg in item.messages {
+                    session.add_message(id, msg.direction, msg.kind, msg.text);
+                }
+                if item.messages_truncated {
+                    session.mark_messages_truncated(id);
                 }
             });
             self.touch();
@@ -1897,12 +1959,14 @@ async fn handle_conn_inner(mut socket: TcpStream, hub: Arc<Hub>) -> Result<()> {
             return write_untracked(&mut socket, 204, "No Content", "image/x-icon", b"").await;
         }
         None if self_target => {
-            return write_untracked(
+            return write_untracked_encoded_for_method(
                 &mut socket,
                 404,
                 "Not Found",
                 "text/plain; charset=utf-8",
+                None,
                 b"Not Found",
+                method.eq_ignore_ascii_case("HEAD"),
             )
             .await;
         }
@@ -2206,7 +2270,6 @@ where
 {
     let (sender, connection) = hyper::client::conn::http1::Builder::new()
         .preserve_header_case(true)
-        .title_case_headers(true)
         .handshake::<_, RecordingBody<Incoming>>(TokioIo::new(origin))
         .await
         .context("上游 HTTP/1.1")?;
@@ -2247,11 +2310,13 @@ where
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<H1Job>();
     let host_for_worker = host.clone();
     let hub_for_worker = hub.clone();
+    let initial_epoch = hub.origin_epoch.load(Ordering::Acquire);
     tokio::spawn(async move {
         let mut sender = sender;
         let mut conn_info = conn_info;
         let mut first = true;
         let mut broken = false;
+        let mut lane_epoch = initial_epoch;
         while let Some(job) = rx.recv().await {
             let result = async {
                 let mut pending = Some(job.req);
@@ -2259,13 +2324,19 @@ where
                     let Some(req) = pending.take() else {
                         break;
                     };
-                    if broken || sender.is_closed() || sender.ready().await.is_err() {
+                    let epoch_now = hub_for_worker.origin_epoch.load(Ordering::Acquire);
+                    if broken
+                        || lane_epoch != epoch_now
+                        || sender.is_closed()
+                        || sender.ready().await.is_err()
+                    {
                         let (next_sender, next_info) =
                             dial_h1(&host_for_worker, port, &hub_for_worker).await?;
                         sender = next_sender;
                         conn_info = next_info;
                         first = true;
                         broken = false;
+                        lane_epoch = hub_for_worker.origin_epoch.load(Ordering::Acquire);
                         sender.ready().await.context("上游 HTTP/1.1 未就绪")?;
                     }
                     let info = if first {
@@ -2322,7 +2393,6 @@ where
     });
     hyper::server::conn::http1::Builder::new()
         .preserve_header_case(true)
-        .title_case_headers(true)
         .serve_connection(TokioIo::new(client), service)
         .with_upgrades()
         .await
@@ -2475,6 +2545,7 @@ where
             last_ok: Instant::now(),
             broken: false,
             generation,
+            origin_epoch: hub.origin_epoch.load(Ordering::Acquire),
             conn_info,
             first_used,
         })),
@@ -2799,6 +2870,11 @@ async fn plain_http<S>(client: &mut S, head: &Head, hub: Arc<Hub>) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    let mut client = Prefixed {
+        prefix: Vec::new(),
+        pos: 0,
+        inner: client,
+    };
     let (method, host, port, path) = request_target(head)?;
     let id = hub.open(FlowDraft {
         protocol: Protocol::Http11,
@@ -2815,6 +2891,7 @@ where
     let mut body_override: Option<Vec<u8>> = None;
     let mut request_taken = false;
     let mut request_recorded = false;
+    let mut request_overflowed = false;
     let mut break_overrode_body = false;
     let mut strip_request_encoding = false;
     let has_expect = header_has_expect_100_continue(&head.headers);
@@ -2823,24 +2900,45 @@ where
         rules::Effect::default()
     } else {
         let mut ops = crate::present::graphql_operations(&path, &[]);
-        if !has_expect
-            && hub.has_op_rules(&host, &path)
-            && let Some(len) = content_length(&head.headers)
-            && len <= crate::session::BODY_CAP
-            && len > 0
-        {
-            let raw = read_exact(client, len).await?;
-            request_taken = true;
-            let req_encoding = header_value(&head.headers, "content-encoding");
-            note_decoded(&hub, id, Direction::Request, &raw, req_encoding.as_deref());
-            request_recorded = true;
-            let decoded = hub.with_session(|s| {
-                s.get(id)
-                    .map(|f| f.request_body.clone())
-                    .unwrap_or_default()
-            });
-            ops = crate::present::graphql_operations(&path, &decoded);
-            body_override = Some(raw);
+        if !has_expect && hub.has_op_rules(&host, &path) {
+            if let Some(len) = content_length(&head.headers) {
+                if len <= crate::session::BODY_CAP && len > 0 {
+                    let raw = read_exact(&mut client, len).await?;
+                    request_taken = true;
+                    let req_encoding = header_value(&head.headers, "content-encoding");
+                    note_decoded(&hub, id, Direction::Request, &raw, req_encoding.as_deref());
+                    request_recorded = true;
+                    let decoded = hub.with_session(|s| {
+                        s.get(id)
+                            .map(|f| f.request_body.clone())
+                            .unwrap_or_default()
+                    });
+                    ops = crate::present::graphql_operations(&path, &decoded);
+                    body_override = Some(raw);
+                } else if len > crate::session::BODY_CAP {
+                    request_overflowed = true;
+                }
+            } else if is_chunked(&head.headers) {
+                match read_chunked_limited(&mut client, crate::session::BODY_CAP).await? {
+                    LimitedRead::Whole(raw) => {
+                        request_taken = true;
+                        let req_encoding = header_value(&head.headers, "content-encoding");
+                        note_decoded(&hub, id, Direction::Request, &raw, req_encoding.as_deref());
+                        request_recorded = true;
+                        let decoded = hub.with_session(|s| {
+                            s.get(id)
+                                .map(|f| f.request_body.clone())
+                                .unwrap_or_default()
+                        });
+                        ops = crate::present::graphql_operations(&path, &decoded);
+                        body_override = Some(raw);
+                    }
+                    LimitedRead::Overflow { wire_prefix } => {
+                        client.rewind(wire_prefix);
+                        request_overflowed = true;
+                    }
+                }
+            }
         }
         hub.note_rules_with_ops(id, &host, &path, &ops);
         hub.plan_with_ops(&host, &path, &ops)
@@ -2864,14 +2962,15 @@ where
     let break_response = matches!(plan.action, Some(Action::BreakResponse));
     if cors && method.eq_ignore_ascii_case("OPTIONS") && plan.action.is_none() {
         if !request_taken {
-            let _ = drain_request(client, &headers, &hub, id).await;
+            let _ = drain_request(&mut client, &headers, &hub, id).await;
         }
         let mut resp_headers = Vec::new();
         rules::ensure_cors(&mut resp_headers);
         rules::apply_header_ops(&mut resp_headers, &response_ops);
-        write_static(client, &hub, id, 204, "No Content", &resp_headers, &[]).await?;
+        write_static(&mut client, &hub, id, 204, "No Content", &resp_headers, &[]).await?;
         return Ok(());
     }
+    let mut scheme = "http";
     match &plan.action {
         Some(Action::MapLocal {
             path_prefix,
@@ -2881,10 +2980,10 @@ where
         }) => match rules::resolve_map_local_target(file.as_deref(), path_prefix, &path) {
             Ok(resolved) => {
                 if !request_taken {
-                    let _ = drain_request(client, &headers, &hub, id).await;
+                    let _ = drain_request(&mut client, &headers, &hub, id).await;
                 }
                 return write_mapped_file(
-                    client,
+                    &mut client,
                     &hub,
                     id,
                     resolved.as_deref(),
@@ -2900,12 +2999,12 @@ where
             }
             Err(err) => {
                 if !request_taken {
-                    let _ = drain_request(client, &headers, &hub, id).await;
+                    let _ = drain_request(&mut client, &headers, &hub, id).await;
                 }
                 let body = err.message();
                 hub.set_error(id, body.clone());
                 write_static(
-                    client,
+                    &mut client,
                     &hub,
                     id,
                     502,
@@ -2920,11 +3019,12 @@ where
         Some(Action::BreakRequest) => {
             let decision = hub.wait_break(id, BreakSide::Request).await;
             if decision.drop {
-                hub.set_error(id, "断点丢弃");
-                if !request_taken {
-                    let _ = drain_request(client, &headers, &hub, id).await;
+                if !request_taken && !has_expect {
+                    let _ = drain_request(&mut client, &headers, &hub, id).await;
                 }
-                write_static(client, &hub, id, 204, "No Content", &[], &[]).await?;
+                hub.set_error(id, "断点丢弃");
+                hub.mark_finished(id);
+                let _ = client.shutdown().await;
                 return Ok(());
             }
             if let Some(next) = decision.headers {
@@ -2944,15 +3044,20 @@ where
         }
         Some(Action::MapRemote { url, path_prefix }) => {
             if let Some((next_scheme, next_host, next_port, next_path)) = parse_http_url(url) {
+                scheme = if next_scheme == "https" {
+                    "https"
+                } else {
+                    "http"
+                };
                 host = next_host;
                 port = next_port;
                 path = rules::map_remote_path(&next_path, path_prefix, &path);
-                let authority = display_authority(&host, port, next_scheme);
+                let authority = display_authority(&host, port, scheme);
                 hub.retarget(
                     id,
                     host.clone(),
                     path.clone(),
-                    format!("{next_scheme}://{authority}{path}"),
+                    format!("{scheme}://{authority}{path}"),
                 );
                 if let Some(pos) = headers
                     .iter()
@@ -2968,32 +3073,12 @@ where
                         .unwrap_or_default()
                 });
                 hub.replace_request(id, headers.clone(), existing);
-                if next_scheme == "https" {
-                    if !request_taken {
-                        let _ = drain_request(client, &headers, &hub, id).await;
-                    }
-                    let body = body_override.unwrap_or_default();
-                    return exchange_tls(
-                        client,
-                        &hub,
-                        id,
-                        &method,
-                        &host,
-                        port,
-                        &path,
-                        &headers,
-                        &body,
-                        throttle_up_bps,
-                        throttle_down_bps,
-                    )
-                    .await;
-                }
             }
         }
         Some(Action::BreakResponse) | None => {}
         Some(Action::Block { drop_conn, status }) => {
             if !request_taken {
-                let _ = drain_request(client, &headers, &hub, id).await;
+                let _ = drain_request(&mut client, &headers, &hub, id).await;
             }
             if *drop_conn {
                 hub.set_error(id, "规则阻断 (连接已断开)");
@@ -3007,7 +3092,7 @@ where
             }
             rules::apply_header_ops(&mut resp_headers, &response_ops);
             write_static(
-                client,
+                &mut client,
                 &hub,
                 id,
                 *status,
@@ -3025,7 +3110,10 @@ where
             id,
             host.clone(),
             path.clone(),
-            format!("http://{}{path}", display_authority(&host, port, "http")),
+            format!(
+                "{scheme}://{}{path}",
+                display_authority(&host, port, scheme)
+            ),
         );
     }
     if let Some(next) = rules::replace_target(&path, &plan.request_replaces) {
@@ -3034,7 +3122,10 @@ where
             id,
             host.clone(),
             path.clone(),
-            format!("http://{}{path}", display_authority(&host, port, "http")),
+            format!(
+                "{scheme}://{}{path}",
+                display_authority(&host, port, scheme)
+            ),
         );
     }
     if !break_overrode_body
@@ -3047,16 +3138,10 @@ where
                     "[json rule skipped: request body withheld by Expect: 100-continue]",
                 );
             }
-        } else if let Some(len) = content_length(&head.headers)
-            && len <= crate::session::BODY_CAP
-        {
-            if len > 0 {
-                let raw = if let Some(taken) = body_override.take() {
-                    taken
-                } else {
-                    request_taken = true;
-                    read_exact(client, len).await?
-                };
+        } else if request_overflowed {
+            hub.append_comment(id, "[rule skipped: body > 1MB]");
+        } else if let Some(raw) = body_override.take() {
+            if !raw.is_empty() {
                 let encoding = header_value(&head.headers, "content-encoding");
                 if let Some(next) = rewrite_body(
                     &hub,
@@ -3071,13 +3156,100 @@ where
                 } else {
                     body_override = Some(raw);
                 }
+            } else {
+                body_override = Some(raw);
             }
-        } else if !plan.request_json_ops.is_empty() {
-            hub.append_comment(
-                id,
-                "[json rule skipped: unsupported or unbuffered request body]",
-            );
+        } else if let Some(len) = content_length(&head.headers) {
+            if len > crate::session::BODY_CAP {
+                hub.append_comment(id, "[rule skipped: body > 1MB]");
+            } else if len > 0 {
+                request_taken = true;
+                let raw = read_exact(&mut client, len).await?;
+                let encoding = header_value(&head.headers, "content-encoding");
+                if let Some(next) = rewrite_body(
+                    &hub,
+                    id,
+                    &raw,
+                    encoding.as_deref(),
+                    &plan.request_replaces,
+                    &plan.request_json_ops,
+                ) {
+                    strip_request_encoding = true;
+                    body_override = Some(next);
+                } else {
+                    note_decoded(&hub, id, Direction::Request, &raw, encoding.as_deref());
+                    request_recorded = true;
+                    body_override = Some(raw);
+                }
+            }
+        } else if is_chunked(&head.headers) {
+            match read_chunked_limited(&mut client, crate::session::BODY_CAP).await? {
+                LimitedRead::Whole(raw) => {
+                    request_taken = true;
+                    let encoding = header_value(&head.headers, "content-encoding");
+                    if !raw.is_empty()
+                        && let Some(next) = rewrite_body(
+                            &hub,
+                            id,
+                            &raw,
+                            encoding.as_deref(),
+                            &plan.request_replaces,
+                            &plan.request_json_ops,
+                        )
+                    {
+                        strip_request_encoding = true;
+                        body_override = Some(next);
+                    } else {
+                        if !raw.is_empty() {
+                            note_decoded(&hub, id, Direction::Request, &raw, encoding.as_deref());
+                        }
+                        request_recorded = true;
+                        body_override = Some(raw);
+                    }
+                }
+                LimitedRead::Overflow { wire_prefix } => {
+                    client.rewind(wire_prefix);
+                    hub.append_comment(id, "[rule skipped: body > 1MB]");
+                }
+            }
         }
+    }
+    if scheme == "https" {
+        let body = if let Some(body) = body_override {
+            headers.retain(|(name, _)| {
+                !name.eq_ignore_ascii_case("transfer-encoding")
+                    && !(strip_request_encoding && name.eq_ignore_ascii_case("content-encoding"))
+                    && !name.eq_ignore_ascii_case("content-length")
+            });
+            headers.push(("Content-Length".into(), body.len().to_string()));
+            if strip_request_encoding || break_overrode_body || !request_recorded {
+                hub.replace_request(id, headers.clone(), body.clone());
+            }
+            if !request_taken {
+                let _ = discard_request(&mut client, &head.headers).await;
+            }
+            body
+        } else if !request_taken {
+            read_client_request_body(&mut client, &head.headers, has_expect, &hub, id).await?
+        } else {
+            Vec::new()
+        };
+        return exchange_tls(
+            &mut client,
+            &hub,
+            id,
+            &method,
+            &host,
+            port,
+            &path,
+            &headers,
+            &body,
+            &plan,
+            break_response,
+            throttle_up_bps,
+            throttle_down_bps,
+        )
+        .await;
     }
     let pool_key = pool_key(&host, port, &hub);
     let (mut origin, mut conn_info) = match hub.take_idle(pool_key.clone()).await {
@@ -3103,6 +3275,14 @@ where
             })??,
     };
     origin.set_nodelay(true).ok();
+    if let Some(body) = &body_override {
+        headers.retain(|(name, _)| {
+            !name.eq_ignore_ascii_case("transfer-encoding")
+                && !(strip_request_encoding && name.eq_ignore_ascii_case("content-encoding"))
+                && !name.eq_ignore_ascii_case("content-length")
+        });
+        headers.push(("Content-Length".into(), body.len().to_string()));
+    }
     let target = if hub.upstream().is_some() {
         format!("http://{}{path}", display_authority(&host, port, "http"))
     } else {
@@ -3114,7 +3294,9 @@ where
     let mut connection_close = false;
     for (name, value) in &headers {
         if name.eq_ignore_ascii_case("proxy-connection")
-            || (body_override.is_some() && name.eq_ignore_ascii_case("content-length"))
+            || (body_override.is_some()
+                && (name.eq_ignore_ascii_case("content-length")
+                    || name.eq_ignore_ascii_case("transfer-encoding")))
             || (strip_request_encoding && name.eq_ignore_ascii_case("content-encoding"))
             || (websocket && name.eq_ignore_ascii_case("sec-websocket-extensions"))
         {
@@ -3163,11 +3345,11 @@ where
             hub.replace_request(id, headers.clone(), body.clone());
         }
         if !request_taken {
-            let _ = discard_request(client, &head.headers).await;
+            let _ = discard_request(&mut client, &head.headers).await;
         }
     } else if !has_expect {
         copy_message_body(
-            client,
+            &mut client,
             &mut origin,
             &head.headers,
             &hub,
@@ -3175,6 +3357,7 @@ where
             Direction::Request,
             encoding.clone(),
             throttle_up_bps,
+            false,
         )
         .await?;
         request_body_copied = true;
@@ -3191,7 +3374,7 @@ where
         client.write_all(&resp_bytes).await?;
         if has_expect && status == 100 && !request_body_copied && body_override.is_none() {
             copy_message_body(
-                client,
+                &mut client,
                 &mut origin,
                 &head.headers,
                 &hub,
@@ -3199,6 +3382,7 @@ where
                 Direction::Request,
                 encoding.clone(),
                 throttle_up_bps,
+                false,
             )
             .await?;
             request_body_copied = true;
@@ -3234,11 +3418,12 @@ where
         if !resp_rest.is_empty() {
             client.write_all(&resp_rest).await?;
         }
-        let copied = copy_with_messages(client, &mut origin, &hub, id, &resp_rest).await;
+        let copied = copy_with_messages(&mut client, &mut origin, &hub, id, &resp_rest).await;
         hub.mark_finished(id);
         copied?;
         return Ok(());
     }
+    let no_resp_body = response_has_no_body(&method, status);
     let mut origin = Prefixed {
         prefix: resp_rest,
         pos: 0,
@@ -3246,28 +3431,56 @@ where
     };
     if !websocket
         && !break_response
+        && !no_resp_body
         && (!plan.response_replaces.is_empty() || !plan.response_json_ops.is_empty())
     {
-        if let Some(len) = content_length(&resp_headers)
-            && len <= crate::session::BODY_CAP
-        {
-            let raw = read_exact(&mut origin, len).await?;
+        let buffered_resp = if let Some(len) = content_length(&resp_headers) {
+            if len > crate::session::BODY_CAP {
+                hub.append_comment(id, "[rule skipped: body > 1MB]");
+                None
+            } else {
+                Some(read_exact(&mut origin, len).await?)
+            }
+        } else if is_chunked(&resp_headers) {
+            match read_chunked_limited(&mut origin, crate::session::BODY_CAP).await? {
+                LimitedRead::Whole(raw) => Some(raw),
+                LimitedRead::Overflow { wire_prefix } => {
+                    origin.rewind(wire_prefix);
+                    hub.append_comment(id, "[rule skipped: body > 1MB]");
+                    None
+                }
+            }
+        } else {
+            match read_eof_limited(&mut origin, crate::session::BODY_CAP).await? {
+                LimitedRead::Whole(raw) => Some(raw),
+                LimitedRead::Overflow { wire_prefix } => {
+                    origin.rewind(wire_prefix);
+                    hub.append_comment(id, "[rule skipped: body > 1MB]");
+                    None
+                }
+            }
+        };
+        if let Some(raw) = buffered_resp {
             let encoding = header_value(&resp_headers, "content-encoding");
-            if let Some(next) = rewrite_body(
-                &hub,
-                id,
-                &raw,
-                encoding.as_deref(),
-                &plan.response_replaces,
-                &plan.response_json_ops,
-            ) {
+            if !raw.is_empty()
+                && let Some(next) = rewrite_body(
+                    &hub,
+                    id,
+                    &raw,
+                    encoding.as_deref(),
+                    &plan.response_replaces,
+                    &plan.response_json_ops,
+                )
+            {
                 resp_headers.retain(|(name, _)| {
                     !name.eq_ignore_ascii_case("content-encoding")
                         && !name.eq_ignore_ascii_case("transfer-encoding")
+                        && !name.eq_ignore_ascii_case("content-length")
                 });
+                resp_headers.push(("Content-Length".into(), next.len().to_string()));
                 hub.replace_response(id, status, resp_headers.clone(), next.clone());
                 write_bytes(
-                    client,
+                    &mut client,
                     status,
                     &reason,
                     &resp_headers,
@@ -3278,30 +3491,46 @@ where
                 hub.mark_finished(id);
                 return Ok(());
             }
-            let head = render_response_head(status, &reason, &resp_headers);
-            client.write_all(head.as_bytes()).await?;
-            write_all_throttled(client, &raw, throttle_down_bps).await?;
+            resp_headers.retain(|(name, _)| {
+                !name.eq_ignore_ascii_case("transfer-encoding")
+                    && !name.eq_ignore_ascii_case("content-length")
+            });
+            resp_headers.push(("Content-Length".into(), raw.len().to_string()));
+            hub.replace_response_head(id, status, resp_headers.clone());
+            write_bytes(
+                &mut client,
+                status,
+                &reason,
+                &resp_headers,
+                &raw,
+                throttle_down_bps,
+            )
+            .await?;
             note_decoded(&hub, id, Direction::Response, &raw, encoding.as_deref());
             hub.mark_finished(id);
             return Ok(());
-        } else if !plan.response_json_ops.is_empty() {
-            hub.append_comment(
-                id,
-                "[json rule skipped: unsupported or unbuffered response body]",
-            );
         }
     }
     if break_response {
-        match read_capped_body(&mut origin, &resp_headers, crate::session::BODY_CAP).await {
+        match read_capped_body(
+            &mut origin,
+            &resp_headers,
+            crate::session::BODY_CAP,
+            no_resp_body,
+        )
+        .await
+        {
             Ok(Some(body)) => {
                 let encoding = header_value(&resp_headers, "content-encoding");
-                note_decoded(&hub, id, Direction::Response, &body, encoding.as_deref());
+                if !body.is_empty() {
+                    note_decoded(&hub, id, Direction::Response, &body, encoding.as_deref());
+                }
                 let decision = hub.wait_break(id, BreakSide::Response).await;
                 if decision.drop {
+                    hub.clear_response(id);
                     hub.set_error(id, "断点丢弃");
-                    hub.replace_response(id, 204, Vec::new(), Vec::new());
-                    write_bytes(client, 204, "No Content", &[], &[], None).await?;
                     hub.mark_finished(id);
+                    let _ = client.shutdown().await;
                     return Ok(());
                 }
                 let mut next_headers = decision.headers.unwrap_or(resp_headers);
@@ -3320,7 +3549,7 @@ where
                     hub.replace_response_head(id, status, next_headers.clone());
                 }
                 write_bytes(
-                    client,
+                    &mut client,
                     status,
                     reason,
                     &next_headers,
@@ -3338,7 +3567,7 @@ where
                 let text = format!("响应断点读 body 失败: {err}");
                 hub.set_error(id, text.clone());
                 write_static(
-                    client,
+                    &mut client,
                     &hub,
                     id,
                     502,
@@ -3358,13 +3587,14 @@ where
     let encoding = header_value(&resp_headers, "content-encoding");
     let reusable = copy_message_body(
         &mut origin,
-        client,
+        &mut client,
         &resp_headers,
         &hub,
         id,
         Direction::Response,
         encoding,
         throttle_down_bps,
+        no_resp_body,
     )
     .await?;
     hub.mark_finished(id);
@@ -3466,6 +3696,62 @@ fn parse_upstream(text: &str) -> Option<Upstream> {
     Some(Upstream { host, port })
 }
 
+fn client_cert_rules(rules: &[rules::Rule]) -> Vec<&rules::Rule> {
+    rules
+        .iter()
+        .filter(|r| matches!(r, rules::Rule::ClientCert { .. }))
+        .collect()
+}
+
+async fn read_client_request_body<S>(
+    client: &mut S,
+    headers: &[(String, String)],
+    has_expect: bool,
+    hub: &Hub,
+    id: u64,
+) -> Result<Vec<u8>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let req_encoding = header_value(headers, "content-encoding");
+    if let Some(len) = content_length(headers) {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        if has_expect {
+            client.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").await?;
+        }
+        let raw = read_exact(client, len).await?;
+        note_decoded(hub, id, Direction::Request, &raw, req_encoding.as_deref());
+        return Ok(raw);
+    }
+    if is_chunked(headers) {
+        if has_expect {
+            client.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").await?;
+        }
+        let mut out = Vec::new();
+        loop {
+            let size_line = read_line(client).await?;
+            let text = String::from_utf8_lossy(&size_line);
+            let size =
+                usize::from_str_radix(text.trim().split(';').next().unwrap_or("0").trim(), 16)
+                    .unwrap_or(0);
+            if size == 0 {
+                let _ = read_line(client).await?;
+                break;
+            }
+            if out.len().saturating_add(size) > 64 * 1024 * 1024 {
+                anyhow::bail!("映射请求分块 body 超过 64 MB");
+            }
+            out.extend(read_exact(client, size).await?);
+            let _ = read_exact(client, 2).await?;
+        }
+        note_decoded(hub, id, Direction::Request, &out, req_encoding.as_deref());
+        return Ok(out);
+    }
+    Ok(Vec::new())
+}
+
 async fn drain_request<S>(
     client: &mut S,
     headers: &[(String, String)],
@@ -3489,6 +3775,7 @@ where
         Direction::Request,
         encoding,
         None,
+        false,
     )
     .await?;
     Ok(())
@@ -3639,6 +3926,35 @@ async fn write_static_throttled<S>(
 where
     S: AsyncWrite + Unpin,
 {
+    write_static_for_method(
+        client,
+        hub,
+        id,
+        status,
+        reason,
+        headers,
+        body,
+        throttle_bps,
+        false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn write_static_for_method<S>(
+    client: &mut S,
+    hub: &Hub,
+    id: u64,
+    status: u16,
+    reason: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+    throttle_bps: Option<u64>,
+    omit_body: bool,
+) -> Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
     let mut head = format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n",
         body.len()
@@ -3654,7 +3970,9 @@ where
     }
     head.push_str("\r\n");
     client.write_all(head.as_bytes()).await?;
-    write_all_throttled(client, body, throttle_bps).await?;
+    if !omit_body {
+        write_all_throttled(client, body, throttle_bps).await?;
+    }
     let mut recorded = headers.to_vec();
     if !recorded
         .iter()
@@ -3663,7 +3981,9 @@ where
         recorded.push(("Content-Length".into(), body.len().to_string()));
     }
     hub.set_response(id, status, recorded, None);
-    hub.append_body(id, Direction::Response, body);
+    if !omit_body && !body.is_empty() {
+        hub.append_body(id, Direction::Response, body);
+    }
     hub.mark_finished(id);
     Ok(())
 }
@@ -3679,11 +3999,13 @@ async fn exchange_tls<S>(
     path: &str,
     headers: &[(String, String)],
     body: &[u8],
+    plan: &rules::Effect,
+    break_response: bool,
     throttle_up_bps: Option<u64>,
     throttle_down_bps: Option<u64>,
 ) -> Result<()>
 where
-    S: AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin,
 {
     let (mut origin, _, conn_info) =
         connect_origin(host, port, &[b"http/1.1".to_vec()], hub).await?;
@@ -3693,6 +4015,7 @@ where
     for (name, value) in headers {
         if name.eq_ignore_ascii_case("proxy-connection")
             || name.eq_ignore_ascii_case("content-length")
+            || name.eq_ignore_ascii_case("transfer-encoding")
         {
             continue;
         }
@@ -3716,30 +4039,204 @@ where
     ));
     origin.write_all(outbound.as_bytes()).await?;
     write_all_throttled(&mut origin, body, throttle_up_bps).await?;
-    let (resp_bytes, resp_rest) = read_header_block(&mut origin).await?;
-    client.write_all(&resp_bytes).await?;
-    let resp = parse_head(&resp_bytes)?;
-    let status = resp
-        .start
-        .split_whitespace()
-        .nth(1)
-        .and_then(|code| code.parse().ok())
-        .unwrap_or(0);
-    hub.set_response(id, status, resp.headers.clone(), None);
+    let (mut resp_bytes, mut resp_rest) = read_header_block(&mut origin).await?;
+    let mut resp = parse_head(&resp_bytes)?;
+    let (mut status, mut reason) = status_and_reason(&resp.start);
+    let mut interim_count = 0;
+    while (100..=199).contains(&status) && status != 101 {
+        interim_count += 1;
+        if interim_count > 16 {
+            anyhow::bail!("过多 1xx 中间响应");
+        }
+        client.write_all(&resp_bytes).await?;
+        let (next_bytes, next_rest) = read_header_block_prefixed(&mut origin, resp_rest).await?;
+        resp_bytes = next_bytes;
+        resp_rest = next_rest;
+        resp = parse_head(&resp_bytes)?;
+        let (s, r) = status_and_reason(&resp.start);
+        status = s;
+        reason = r;
+    }
+    let mut resp_headers = resp.headers.clone();
+    rules::apply_header_ops(&mut resp_headers, &plan.response_headers);
+    if plan.cors {
+        rules::ensure_cors(&mut resp_headers);
+    }
+    hub.set_response(id, status, resp_headers.clone(), None);
+    let no_resp_body = response_has_no_body(method, status);
     let mut origin = Prefixed {
         prefix: resp_rest,
         pos: 0,
         inner: origin,
     };
+    if !break_response
+        && !no_resp_body
+        && (!plan.response_replaces.is_empty() || !plan.response_json_ops.is_empty())
+    {
+        let buffered_resp = if let Some(len) = content_length(&resp_headers) {
+            if len > crate::session::BODY_CAP {
+                hub.append_comment(id, "[rule skipped: body > 1MB]");
+                None
+            } else {
+                Some(read_exact(&mut origin, len).await?)
+            }
+        } else if is_chunked(&resp_headers) {
+            match read_chunked_limited(&mut origin, crate::session::BODY_CAP).await? {
+                LimitedRead::Whole(raw) => Some(raw),
+                LimitedRead::Overflow { wire_prefix } => {
+                    origin.rewind(wire_prefix);
+                    hub.append_comment(id, "[rule skipped: body > 1MB]");
+                    None
+                }
+            }
+        } else {
+            match read_eof_limited(&mut origin, crate::session::BODY_CAP).await? {
+                LimitedRead::Whole(raw) => Some(raw),
+                LimitedRead::Overflow { wire_prefix } => {
+                    origin.rewind(wire_prefix);
+                    hub.append_comment(id, "[rule skipped: body > 1MB]");
+                    None
+                }
+            }
+        };
+        if let Some(raw) = buffered_resp {
+            let encoding = header_value(&resp_headers, "content-encoding");
+            if !raw.is_empty()
+                && let Some(next) = rewrite_body(
+                    hub,
+                    id,
+                    &raw,
+                    encoding.as_deref(),
+                    &plan.response_replaces,
+                    &plan.response_json_ops,
+                )
+            {
+                resp_headers.retain(|(name, _)| {
+                    !name.eq_ignore_ascii_case("content-encoding")
+                        && !name.eq_ignore_ascii_case("transfer-encoding")
+                        && !name.eq_ignore_ascii_case("content-length")
+                });
+                resp_headers.push(("Content-Length".into(), next.len().to_string()));
+                hub.replace_response(id, status, resp_headers.clone(), next.clone());
+                write_bytes(
+                    client,
+                    status,
+                    &reason,
+                    &resp_headers,
+                    &next,
+                    throttle_down_bps,
+                )
+                .await?;
+                hub.mark_finished(id);
+                return Ok(());
+            }
+            resp_headers.retain(|(name, _)| {
+                !name.eq_ignore_ascii_case("transfer-encoding")
+                    && !name.eq_ignore_ascii_case("content-length")
+            });
+            resp_headers.push(("Content-Length".into(), raw.len().to_string()));
+            hub.replace_response_head(id, status, resp_headers.clone());
+            write_bytes(
+                client,
+                status,
+                &reason,
+                &resp_headers,
+                &raw,
+                throttle_down_bps,
+            )
+            .await?;
+            note_decoded(hub, id, Direction::Response, &raw, encoding.as_deref());
+            hub.mark_finished(id);
+            return Ok(());
+        }
+    }
+    if break_response {
+        match read_capped_body(
+            &mut origin,
+            &resp_headers,
+            crate::session::BODY_CAP,
+            no_resp_body,
+        )
+        .await
+        {
+            Ok(Some(resp_body)) => {
+                let encoding = header_value(&resp_headers, "content-encoding");
+                if !resp_body.is_empty() {
+                    note_decoded(
+                        hub,
+                        id,
+                        Direction::Response,
+                        &resp_body,
+                        encoding.as_deref(),
+                    );
+                }
+                let decision = hub.wait_break(id, BreakSide::Response).await;
+                if decision.drop {
+                    hub.clear_response(id);
+                    hub.set_error(id, "断点丢弃");
+                    hub.mark_finished(id);
+                    let _ = client.shutdown().await;
+                    return Ok(());
+                }
+                let mut next_headers = decision.headers.unwrap_or(resp_headers);
+                let replaced_body = decision.body.is_some();
+                let next_body = decision.body.unwrap_or(resp_body);
+                if replaced_body {
+                    next_headers.retain(|(name, _)| !name.eq_ignore_ascii_case("content-encoding"));
+                }
+                if let Some(code) = decision.status {
+                    status = code;
+                }
+                let reason = reason_phrase(status);
+                if replaced_body {
+                    hub.replace_response(id, status, next_headers.clone(), next_body.clone());
+                } else {
+                    hub.replace_response_head(id, status, next_headers.clone());
+                }
+                write_bytes(
+                    client,
+                    status,
+                    reason,
+                    &next_headers,
+                    &next_body,
+                    throttle_down_bps,
+                )
+                .await?;
+                hub.mark_finished(id);
+                return Ok(());
+            }
+            Ok(None) => {
+                hub.set_error(id, "响应断点跳过，body 超过 1 MB");
+            }
+            Err(err) => {
+                let text = format!("响应断点读 body 失败: {err}");
+                hub.set_error(id, text.clone());
+                write_static(
+                    client,
+                    hub,
+                    id,
+                    502,
+                    "Bad Gateway",
+                    &[("Content-Type".into(), "text/plain".into())],
+                    text.as_bytes(),
+                )
+                .await?;
+                return Ok(());
+            }
+        }
+    }
+    let head = render_response_head(status, &reason, &resp_headers);
+    client.write_all(head.as_bytes()).await?;
     let _ = copy_message_body(
         &mut origin,
         client,
-        &resp.headers,
+        &resp_headers,
         hub,
         id,
         Direction::Response,
-        header_value(&resp.headers, "content-encoding"),
+        header_value(&resp_headers, "content-encoding"),
         throttle_down_bps,
+        no_resp_body,
     )
     .await?;
     hub.mark_finished(id);
@@ -3974,7 +4471,7 @@ async fn serve_mcp(
     };
     let body = match timeout(
         IO_TIMEOUT,
-        read_capped_body(&mut reader, &head.headers, crate::session::BODY_CAP),
+        read_capped_body(&mut reader, &head.headers, crate::session::BODY_CAP, false),
     )
     .await
     {
@@ -4233,6 +4730,7 @@ async fn serve_share<S>(
 where
     S: AsyncWrite + Unpin,
 {
+    let is_head = head_method(head).eq_ignore_ascii_case("HEAD");
     let zh = crate::share::prefers_zh(header_value(&head.headers, "accept-language").as_deref());
     match kind {
         crate::share::SharePath::Data { since } => {
@@ -4241,12 +4739,14 @@ where
                 .or_else(|| hub.inbound_document(id))
             else {
                 let body = crate::share::expired_page(zh);
-                return write_untracked(
+                return write_untracked_encoded_for_method(
                     socket,
                     404,
                     "Not Found",
                     "text/html; charset=utf-8",
+                    None,
                     body.as_bytes(),
+                    is_head,
                 )
                 .await;
             };
@@ -4260,13 +4760,14 @@ where
             } else {
                 (None, raw)
             };
-            write_untracked_encoded(
+            write_untracked_encoded_for_method(
                 socket,
                 200,
                 "OK",
                 "application/json; charset=utf-8",
                 encoding,
                 &body,
+                is_head,
             )
             .await
         }
@@ -4276,16 +4777,27 @@ where
                 .map(String::into_bytes)
                 .or_else(|| hub.inbound_body(id, flow_id));
             let Some(json) = stored else {
-                return write_untracked(
+                return write_untracked_encoded_for_method(
                     socket,
                     404,
                     "Not Found",
                     "application/json; charset=utf-8",
+                    None,
                     b"{}",
+                    is_head,
                 )
                 .await;
             };
-            write_untracked(socket, 200, "OK", "application/json; charset=utf-8", &json).await
+            write_untracked_encoded_for_method(
+                socket,
+                200,
+                "OK",
+                "application/json; charset=utf-8",
+                None,
+                &json,
+                is_head,
+            )
+            .await
         }
         crate::share::SharePath::Page => {
             let Some(json) = hub
@@ -4293,23 +4805,27 @@ where
                 .or_else(|| hub.inbound_document(id))
             else {
                 let body = crate::share::expired_page(zh);
-                return write_untracked(
+                return write_untracked_encoded_for_method(
                     socket,
                     404,
                     "Not Found",
                     "text/html; charset=utf-8",
+                    None,
                     body.as_bytes(),
+                    is_head,
                 )
                 .await;
             };
             let live = format!("/s/{id}/flows.json");
             let body = crate::share::page(&json, &live, zh);
-            write_untracked(
+            write_untracked_encoded_for_method(
                 socket,
                 200,
                 "OK",
                 "text/html; charset=utf-8",
+                None,
                 body.as_bytes(),
+                is_head,
             )
             .await
         }
@@ -4326,16 +4842,18 @@ async fn write_untracked<S>(
 where
     S: AsyncWrite + Unpin,
 {
-    write_untracked_encoded(socket, status, reason, content_type, None, body).await
+    write_untracked_encoded_for_method(socket, status, reason, content_type, None, body, false)
+        .await
 }
 
-async fn write_untracked_encoded<S>(
+async fn write_untracked_encoded_for_method<S>(
     socket: &mut S,
     status: u16,
     reason: &str,
     content_type: &str,
     content_encoding: Option<&str>,
     body: &[u8],
+    omit_body: bool,
 ) -> Result<()>
 where
     S: AsyncWrite + Unpin,
@@ -4349,8 +4867,18 @@ where
         body.len()
     );
     socket.write_all(head.as_bytes()).await?;
-    socket.write_all(body).await?;
+    if !omit_body {
+        socket.write_all(body).await?;
+    }
     Ok(())
+}
+
+fn head_method(head: &Head) -> String {
+    head.start
+        .split_whitespace()
+        .next()
+        .unwrap_or("GET")
+        .to_string()
 }
 
 fn accepts_gzip(header: Option<&str>) -> bool {
@@ -4489,10 +5017,12 @@ async fn serve_install_page<S>(socket: &mut S, hub: &Hub, head: &Head) -> Result
 where
     S: AsyncWrite + Unpin,
 {
+    let method = head_method(head);
+    let is_head = method.eq_ignore_ascii_case("HEAD");
     let host = header_value(&head.headers, "host").unwrap_or_else(|| "zniff".into());
     let id = hub.open(FlowDraft {
         protocol: Protocol::Http11,
-        method: "GET".into(),
+        method,
         host: host.clone(),
         path: "/zniff".into(),
         url: format!("http://{host}/zniff"),
@@ -4500,7 +5030,7 @@ where
     });
     let body =
         install_page_for(header_value(&head.headers, "accept-language").as_deref()).as_bytes();
-    write_static(
+    write_static_for_method(
         socket,
         hub,
         id,
@@ -4508,6 +5038,8 @@ where
         "OK",
         &[("Content-Type".into(), "text/html; charset=utf-8".into())],
         body,
+        None,
+        is_head,
     )
     .await
 }
@@ -4516,17 +5048,19 @@ async fn serve_ca_cert<S>(socket: &mut S, hub: &Hub, head: &Head) -> Result<()>
 where
     S: AsyncWrite + Unpin,
 {
+    let method = head_method(head);
+    let is_head = method.eq_ignore_ascii_case("HEAD");
     let pem = std::fs::read(hub.ca.cert_path()).unwrap_or_default();
     let host = header_value(&head.headers, "host").unwrap_or_else(|| "zniff".into());
     let id = hub.open(FlowDraft {
         protocol: Protocol::Http11,
-        method: "GET".into(),
+        method,
         host: host.clone(),
         path: "/zniff-ca.crt".into(),
         url: format!("http://{host}/zniff-ca.crt"),
         request_headers: head.headers.clone(),
     });
-    write_static(
+    write_static_for_method(
         socket,
         hub,
         id,
@@ -4534,6 +5068,8 @@ where
         "OK",
         &[("Content-Type".into(), "application/x-x509-ca-cert".into())],
         &pem,
+        None,
+        is_head,
     )
     .await
 }
@@ -4696,9 +5232,17 @@ async fn replay_once_attempt(
     {
         hub.with_session(|session| session.set_client_ip(id, flow.client_ip.clone()));
     }
+    let prefer_h2 = url_overridden
+        || matches!(
+            source.as_ref().map(|flow| flow.protocol),
+            None | Some(Protocol::Http2)
+        );
     hub.replace_request(id, headers.clone(), body.clone());
     let sent = if scheme == "https" {
-        replay_tls(&hub, id, &method, &host, port, &path, &headers, &body).await
+        replay_tls(
+            &hub, id, &method, &host, port, &path, &headers, &body, prefer_h2,
+        )
+        .await
     } else {
         replay_http(&hub, id, &method, &host, port, &path, &headers, &body).await
     };
@@ -4753,13 +5297,138 @@ async fn replay_tls(
     path: &str,
     headers: &[(String, String)],
     body: &[u8],
+    prefer_h2: bool,
 ) -> Result<()> {
-    let (origin, _, conn_info) = connect_origin(host, port, &[b"http/1.1".to_vec()], hub).await?;
+    let alpn: &[Vec<u8>] = if prefer_h2 {
+        &[b"h2".to_vec(), b"http/1.1".to_vec()]
+    } else {
+        &[b"http/1.1".to_vec()]
+    };
+    let (origin, selected, conn_info) = connect_origin(host, port, alpn, hub).await?;
     hub.set_conn_info(id, conn_info);
+    if selected == b"h2" {
+        return replay_h2(hub, id, origin, method, host, port, path, headers, body).await;
+    }
     write_replay(
         hub, id, origin, method, host, port, "https", path, headers, body,
     )
     .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn replay_h2<S>(
+    hub: &Hub,
+    id: u64,
+    origin: S,
+    method: &str,
+    host: &str,
+    port: u16,
+    path: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    hub.mark_protocol(id, Protocol::Http2);
+    let (mut sender, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+        .handshake::<_, RecordingBody<Incoming>>(TokioIo::new(origin))
+        .await
+        .context("上游 HTTP/2")?;
+    tokio::spawn(async move {
+        if let Err(err) = connection.await {
+            log::debug!("重放 HTTP/2 连接结束: {err}");
+        }
+    });
+    let req_method = Method::from_bytes(method.as_bytes()).context("重放 HTTP 方法无效")?;
+    let authority = headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("host") || k.eq_ignore_ascii_case(":authority"))
+        .map(|(_, v)| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| display_authority(host, port, "https"));
+    let uri = absolute_uri("https", &authority, path)?;
+    let mut header_map = HeaderMap::new();
+    let mut had_content_length = false;
+    for (name, value) in headers {
+        if name.starts_with(':') || name.eq_ignore_ascii_case("host") {
+            continue;
+        }
+        if name.eq_ignore_ascii_case("content-length") {
+            had_content_length = true;
+            continue;
+        }
+        if name.eq_ignore_ascii_case("connection")
+            || name.eq_ignore_ascii_case("proxy-connection")
+            || name.eq_ignore_ascii_case("keep-alive")
+            || name.eq_ignore_ascii_case("transfer-encoding")
+            || name.eq_ignore_ascii_case("upgrade")
+            || name.eq_ignore_ascii_case("proxy-authenticate")
+            || name.eq_ignore_ascii_case("proxy-authorization")
+            || (name.eq_ignore_ascii_case("te") && !value.trim().eq_ignore_ascii_case("trailers"))
+        {
+            continue;
+        }
+        let Ok(hname) = HeaderName::from_bytes(name.as_bytes()) else {
+            continue;
+        };
+        let Ok(hval) = http::HeaderValue::from_bytes(value.as_bytes()) else {
+            continue;
+        };
+        header_map.append(hname, hval);
+    }
+    if (!body.is_empty() || had_content_length)
+        && let Ok(val) = http::HeaderValue::from_str(&body.len().to_string())
+    {
+        header_map.insert(http::header::CONTENT_LENGTH, val);
+    }
+    let mut outbound = Request::builder()
+        .version(Version::HTTP_2)
+        .method(req_method)
+        .uri(uri)
+        .body(RecordingBody::from_bytes(Bytes::copy_from_slice(body)))
+        .context("组装上游 URI")?;
+    *outbound.headers_mut() = header_map;
+    if !body.is_empty() {
+        hub.add_transfer(id, Direction::Request, body.len() as u64);
+    }
+    sender.ready().await.context("HTTP/2 上游")?;
+    let response = timeout(IO_TIMEOUT, sender.send_request(outbound))
+        .await
+        .context("连接源站超时")?
+        .context("HTTP/2 上游")?;
+    let status = response.status().as_u16();
+    let resp_headers = header_pairs(response.headers());
+    let resp_encoding = header_value(&resp_headers, "content-encoding");
+    hub.set_response(id, status, resp_headers, Some(Protocol::Http2));
+    if !response_has_no_body(method, status) {
+        let mut resp_body = response.into_body();
+        let mut decoder = Decoder::from_header(resp_encoding.as_deref());
+        if let Some(error) = decoder.error() {
+            hub.set_encoding_error(id, Direction::Response, error.to_string());
+        }
+        while let Some(frame) = resp_body.frame().await {
+            let frame = frame.context("读取响应体")?;
+            if let Ok(data) = frame.into_data()
+                && !data.is_empty()
+            {
+                let decoded = decoder.push(&data);
+                let error = decoder.error().map(|err| err.to_string());
+                hub.record_chunk(
+                    id,
+                    Direction::Response,
+                    data.len() as u64,
+                    &decoded,
+                    error.as_deref(),
+                );
+            }
+        }
+        let tail = decoder.finish();
+        let error = decoder.error().map(|err| err.to_string());
+        hub.record_chunk(id, Direction::Response, 0, &tail, error.as_deref());
+    }
+    hub.mark_finished(id);
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4811,14 +5480,21 @@ where
     if !body.is_empty() {
         hub.add_transfer(id, Direction::Request, body.len() as u64);
     }
-    let (resp_bytes, resp_rest) = read_header_block(&mut origin).await?;
-    let resp = parse_head(&resp_bytes)?;
-    let status = resp
-        .start
-        .split_whitespace()
-        .nth(1)
-        .and_then(|code| code.parse().ok())
-        .unwrap_or(0);
+    let (mut resp_bytes, mut resp_rest) = read_header_block(&mut origin).await?;
+    let mut resp = parse_head(&resp_bytes)?;
+    let (mut status, _) = status_and_reason(&resp.start);
+    let mut interim_count = 0;
+    while (100..=199).contains(&status) && status != 101 {
+        interim_count += 1;
+        if interim_count > 16 {
+            anyhow::bail!("过多 1xx 中间响应");
+        }
+        let (next_bytes, next_rest) = read_header_block_prefixed(&mut origin, resp_rest).await?;
+        resp_bytes = next_bytes;
+        resp_rest = next_rest;
+        resp = parse_head(&resp_bytes)?;
+        status = status_and_reason(&resp.start).0;
+    }
     hub.set_response(id, status, resp.headers.clone(), None);
     let mut origin = Prefixed {
         prefix: resp_rest,
@@ -4835,6 +5511,7 @@ where
         Direction::Response,
         header_value(&resp.headers, "content-encoding"),
         None,
+        response_has_no_body(method, status),
     )
     .await?;
     hub.mark_finished(id);
@@ -4902,6 +5579,10 @@ where
     Ok(())
 }
 
+fn response_has_no_body(method: &str, status: u16) -> bool {
+    method.eq_ignore_ascii_case("HEAD") || matches!(status, 100..=199 | 204 | 304)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn copy_message_body<R, W>(
     from: &mut R,
@@ -4912,11 +5593,15 @@ async fn copy_message_body<R, W>(
     direction: Direction,
     encoding: Option<String>,
     throttle_bps: Option<u64>,
+    no_body: bool,
 ) -> Result<bool>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
+    if no_body {
+        return Ok(true);
+    }
     let mut decoder = Decoder::from_header(encoding.as_deref());
     if let Some(error) = decoder.error() {
         hub.set_encoding_error(id, direction, error.to_string());
@@ -5079,10 +5764,14 @@ async fn read_capped_body<R>(
     reader: &mut R,
     headers: &[(String, String)],
     cap: usize,
+    no_body: bool,
 ) -> Result<Option<Vec<u8>>>
 where
     R: AsyncRead + Unpin,
 {
+    if no_body {
+        return Ok(Some(Vec::new()));
+    }
     if let Some(length) = content_length(headers) {
         if length > cap {
             return Ok(None);
@@ -5315,10 +6004,74 @@ async fn read_exact<R: AsyncRead + Unpin>(reader: &mut R, len: usize) -> Result<
     Ok(buf)
 }
 
+enum LimitedRead {
+    Whole(Vec<u8>),
+    Overflow { wire_prefix: Vec<u8> },
+}
+
+async fn read_chunked_limited<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    cap: usize,
+) -> Result<LimitedRead> {
+    let mut payload = Vec::new();
+    let mut wire = Vec::new();
+    loop {
+        let size_line = read_line(reader).await?;
+        wire.extend_from_slice(&size_line);
+        let text = String::from_utf8_lossy(&size_line);
+        let size_text = text.trim().split(';').next().unwrap_or("0").trim();
+        let size = usize::from_str_radix(size_text, 16).map_err(|_| anyhow!("非法分块长度"))?;
+        if size == 0 {
+            loop {
+                let trailer = read_line(reader).await?;
+                wire.extend_from_slice(&trailer);
+                if trailer == b"\r\n" || trailer == b"\n" || trailer.is_empty() {
+                    break;
+                }
+            }
+            return Ok(LimitedRead::Whole(payload));
+        }
+        if payload.len().saturating_add(size) > cap {
+            return Ok(LimitedRead::Overflow { wire_prefix: wire });
+        }
+        let chunk = read_exact(reader, size).await?;
+        wire.extend_from_slice(&chunk);
+        payload.extend_from_slice(&chunk);
+        let crlf = read_exact(reader, 2).await?;
+        wire.extend_from_slice(&crlf);
+    }
+}
+
+async fn read_eof_limited<R: AsyncRead + Unpin>(reader: &mut R, cap: usize) -> Result<LimitedRead> {
+    let mut buf = Vec::new();
+    let mut scratch = vec![0u8; 8 * 1024];
+    loop {
+        let n = reader.read(&mut scratch).await?;
+        if n == 0 {
+            return Ok(LimitedRead::Whole(buf));
+        }
+        if buf.len().saturating_add(n) > cap {
+            buf.extend_from_slice(&scratch[..n]);
+            return Ok(LimitedRead::Overflow { wire_prefix: buf });
+        }
+        buf.extend_from_slice(&scratch[..n]);
+    }
+}
+
 struct Prefixed<S> {
     prefix: Vec<u8>,
     pos: usize,
     inner: S,
+}
+
+impl<S> Prefixed<S> {
+    fn rewind(&mut self, mut wire_prefix: Vec<u8>) {
+        if self.pos < self.prefix.len() {
+            wire_prefix.extend_from_slice(&self.prefix[self.pos..]);
+        }
+        self.prefix = wire_prefix;
+        self.pos = 0;
+    }
 }
 
 impl Prefixed<TcpStream> {
@@ -5527,6 +6280,24 @@ impl<B> RecordingBody<B> {
         body
     }
 
+    /// Yields `prefix` first, then `inner`, feeding both through the same
+    /// streaming `Decoder` when a rule-buffered stream exceeded `BODY_CAP`.
+    fn stream_with_prefix(
+        prefix: Bytes,
+        inner: B,
+        hub: Arc<Hub>,
+        id: u64,
+        direction: Direction,
+        encoding: Option<&str>,
+    ) -> Self {
+        let mut body = Self::new(inner, hub, id, direction, encoding);
+        if !prefix.is_empty() {
+            body.record_bytes(&prefix);
+            body.once = Some(prefix);
+        }
+        body
+    }
+
     fn record_bytes(&mut self, bytes: &[u8]) {
         let Some(record) = self.record.as_mut() else {
             return;
@@ -5718,6 +6489,7 @@ struct LaneInner {
     last_ok: Instant,
     broken: bool,
     generation: u64,
+    origin_epoch: u64,
     conn_info: crate::session::ConnInfo,
     first_used: Arc<AtomicBool>,
 }
@@ -5751,7 +6523,9 @@ impl HttpSender for H2Lane {
                 let key = (host.clone(), port);
                 let (mut sender, generation, conn_info, first_used) = {
                     let mut guard = lane.lock().await;
+                    let epoch_now = hub.origin_epoch.load(Ordering::Acquire);
                     let stale = guard.broken
+                        || guard.origin_epoch != epoch_now
                         || guard.sender.is_closed()
                         || guard.last_ok.elapsed() > H2_IDLE;
                     #[cfg(test)]
@@ -5763,6 +6537,7 @@ impl HttpSender for H2Lane {
                             Ok((next, generation, conn_info, first_used)) => {
                                 guard.sender = next;
                                 guard.generation = generation;
+                                guard.origin_epoch = hub.origin_epoch.load(Ordering::Acquire);
                                 guard.conn_info = conn_info;
                                 guard.first_used = first_used;
                                 guard.broken = false;
@@ -5860,12 +6635,15 @@ async fn forward_request(
         url: format!("{scheme}://{authority}{path}"),
         request_headers: header_pairs(&parts.headers),
     });
+    let req_method = parts.method.clone();
     let mut body_override: Option<Vec<u8>> = None;
     let mut request_prefixed: Option<Bytes> = None;
+    let mut request_prefix_recorded = true;
     let mut request_recorded = false;
     let mut break_overrode_body = false;
     let mut strip_request_encoding = false;
     let mut headers_replaced = false;
+    let mut mapped_remote = false;
     let mut break_response = false;
     let mut response_ops = Vec::new();
     let mut response_replaces = Vec::new();
@@ -5984,11 +6762,12 @@ async fn forward_request(
             Some(Action::BreakRequest) => {
                 let decision = hub.wait_break(id, BreakSide::Request).await;
                 if decision.drop {
-                    hub.set_error(id, "断点丢弃");
                     if let Some(left) = incoming.take() {
-                        drain_incoming(left).await?;
+                        let _ = record_request_bytes(&hub, id, left, encoding.as_deref()).await;
                     }
-                    return empty_status(&hub, id, StatusCode::NO_CONTENT);
+                    hub.set_error(id, "断点丢弃");
+                    hub.mark_finished(id);
+                    anyhow::bail!("断点丢弃");
                 }
                 if let Some(next) = decision.headers {
                     replace_header_map(&mut parts.headers, &next);
@@ -6023,28 +6802,10 @@ async fn forward_request(
                                 .unwrap_or_default()
                         });
                         hub.replace_request(id, pairs, existing);
+                        headers_replaced = true;
                     }
                     if !same {
-                        let raw = if let Some(b) = body_override.take() {
-                            Bytes::from(b)
-                        } else if let Some(left) = incoming.take() {
-                            record_request_bytes(&hub, id, left, encoding.as_deref()).await?
-                        } else {
-                            Bytes::new()
-                        };
-                        return fetch_remote(
-                            &hub,
-                            id,
-                            parts.method.clone(),
-                            &scheme,
-                            &host,
-                            port,
-                            &path,
-                            &parts.headers,
-                            raw,
-                        )
-                        .await
-                        .map(|res| res.map(|b| b.with_throttle(throttle_down_bps)));
+                        mapped_remote = true;
                     }
                 }
             }
@@ -6096,42 +6857,76 @@ async fn forward_request(
                 .get(http::header::CONTENT_LENGTH)
                 .and_then(|value| value.to_str().ok())
                 .and_then(|text| text.parse::<usize>().ok());
-            if body_override.is_some() || known.is_some_and(|len| len <= crate::session::BODY_CAP) {
-                let raw = if let Some(taken) = body_override.take() {
-                    Bytes::from(taken)
-                } else {
-                    request_recorded = true;
-                    record_request_bytes(
+            if let Some(taken) = body_override.take() {
+                if !taken.is_empty()
+                    && let Some(next) = rewrite_body(
                         &hub,
                         id,
-                        incoming.take().expect("request body"),
+                        &taken,
                         encoding.as_deref(),
+                        &plan.request_replaces,
+                        &plan.request_json_ops,
                     )
-                    .await?
-                };
-                if let Some(next) = rewrite_body(
-                    &hub,
-                    id,
-                    &raw,
-                    encoding.as_deref(),
-                    &plan.request_replaces,
-                    &plan.request_json_ops,
-                ) {
+                {
                     strip_request_encoding = true;
                     body_override = Some(next);
                 } else {
-                    body_override = Some(raw.to_vec());
+                    body_override = Some(taken);
                 }
-            } else if !plan.request_json_ops.is_empty() {
-                hub.append_comment(
-                    id,
-                    "[json rule skipped: unsupported or unbuffered request body]",
-                );
+            } else if request_prefixed.is_some()
+                || known.is_some_and(|len| len > crate::session::BODY_CAP)
+            {
+                hub.append_comment(id, "[rule skipped: body > 1MB]");
+            } else if incoming.as_ref().is_some_and(|b| !b.is_end_stream()) && known != Some(0) {
+                match take_limited(
+                    incoming.take().expect("request body"),
+                    crate::session::BODY_CAP,
+                )
+                .await?
+                {
+                    Take::Whole(raw) => {
+                        if !raw.is_empty()
+                            && let Some(next) = rewrite_body(
+                                &hub,
+                                id,
+                                &raw,
+                                encoding.as_deref(),
+                                &plan.request_replaces,
+                                &plan.request_json_ops,
+                            )
+                        {
+                            strip_request_encoding = true;
+                            body_override = Some(next);
+                        } else {
+                            note_decoded(&hub, id, Direction::Request, &raw, encoding.as_deref());
+                            request_recorded = true;
+                            body_override = Some(raw.to_vec());
+                        }
+                    }
+                    Take::Overflow { prefix, rest } => {
+                        hub.append_comment(id, "[rule skipped: body > 1MB]");
+                        request_prefixed = Some(prefix);
+                        request_prefix_recorded = false;
+                        incoming = Some(rest);
+                    }
+                }
             }
         }
     }
+    if mapped_remote
+        && body_override.is_none()
+        && request_prefixed.is_none()
+        && !websocket
+        && !parts.headers.contains_key(http::header::CONTENT_LENGTH)
+        && let Some(left) = incoming.take()
+    {
+        let raw = record_request_bytes(&hub, id, left, encoding.as_deref()).await?;
+        request_recorded = true;
+        body_override = Some(raw.to_vec());
+    }
     let outbound_body = if let Some(bytes) = body_override {
         parts.headers.remove(http::header::CONTENT_LENGTH);
+        parts.headers.remove(http::header::TRANSFER_ENCODING);
         if strip_request_encoding {
             parts.headers.remove(http::header::CONTENT_ENCODING);
         }
@@ -6161,15 +6956,26 @@ async fn forward_request(
             });
             hub.replace_request(id, header_pairs(&parts.headers), existing);
         }
-        RecordingBody::prefixed(
-            prefix,
-            incoming.take().expect("request body"),
-            hub.clone(),
-            id,
-            Direction::Request,
-            encoding.as_deref(),
-        )
-        .with_throttle(throttle_up_bps)
+        let body = if request_prefix_recorded {
+            RecordingBody::prefixed(
+                prefix,
+                incoming.take().expect("request body"),
+                hub.clone(),
+                id,
+                Direction::Request,
+                encoding.as_deref(),
+            )
+        } else {
+            RecordingBody::stream_with_prefix(
+                prefix,
+                incoming.take().expect("request body"),
+                hub.clone(),
+                id,
+                Direction::Request,
+                encoding.as_deref(),
+            )
+        };
+        body.with_throttle(throttle_up_bps)
     } else if websocket {
         RecordingBody::passthrough(incoming.take().expect("request body"))
     } else {
@@ -6185,20 +6991,36 @@ async fn forward_request(
         )
         .with_throttle(throttle_up_bps)
     };
-    parts.version = match protocol {
-        Protocol::Http2 => Version::HTTP_2,
-        _ => Version::HTTP_11,
+    let send_result = if mapped_remote {
+        fetch_remote(
+            &hub,
+            req_method.clone(),
+            &scheme,
+            &host,
+            port,
+            &path,
+            &parts.headers,
+            outbound_body,
+            websocket,
+        )
+        .await
+    } else {
+        parts.version = match protocol {
+            Protocol::Http2 => Version::HTTP_2,
+            _ => Version::HTTP_11,
+        };
+        let authority = display_authority(&host, port, &scheme);
+        parts.uri = absolute_uri(&scheme, &authority, &path)?;
+        strip_hop_by_hop(&mut parts.headers, websocket);
+        if websocket {
+            parts
+                .headers
+                .remove(HeaderName::from_static("sec-websocket-extensions"));
+        }
+        let outbound = Request::from_parts(parts, outbound_body);
+        sender.send(outbound).await
     };
-    let authority = display_authority(&host, port, &scheme);
-    parts.uri = absolute_uri(&scheme, &authority, &path)?;
-    strip_hop_by_hop(&mut parts.headers, websocket);
-    if websocket {
-        parts
-            .headers
-            .remove(HeaderName::from_static("sec-websocket-extensions"));
-    }
-    let outbound = Request::from_parts(parts, outbound_body);
-    let mut response = match sender.send(outbound).await {
+    let mut response = match send_result {
         Ok((response, conn_info)) => {
             hub.set_conn_info(id, conn_info);
             response
@@ -6230,7 +7052,7 @@ async fn forward_request(
         parts
             .headers
             .remove(HeaderName::from_static("sec-websocket-extensions"));
-    } else {
+    } else if !response_ops.is_empty() || cors {
         let mut pairs = header_pairs(&parts.headers);
         rules::apply_header_ops(&mut pairs, &response_ops);
         if cors {
@@ -6238,8 +7060,10 @@ async fn forward_request(
         }
         replace_header_map(&mut parts.headers, &pairs);
     }
+    let no_resp_body = response_has_no_body(req_method.as_str(), parts.status.as_u16());
     if !websocket
         && !break_response
+        && !no_resp_body
         && (!response_replaces.is_empty() || !response_json_ops.is_empty())
     {
         let known = parts
@@ -6247,57 +7071,80 @@ async fn forward_request(
             .get(http::header::CONTENT_LENGTH)
             .and_then(|value| value.to_str().ok())
             .and_then(|text| text.parse::<usize>().ok());
-        if known.is_some_and(|len| len <= crate::session::BODY_CAP) {
-            let collected = body
-                .collect()
-                .await
-                .map_err(|err| anyhow!("读取响应体: {err}"))?;
-            let raw = collected.to_bytes();
-            if let Some(next) = rewrite_body(
-                &hub,
-                id,
-                &raw,
-                resp_encoding.as_deref(),
-                &response_replaces,
-                &response_json_ops,
-            ) {
-                parts.headers.remove(http::header::CONTENT_ENCODING);
-                parts.headers.remove(http::header::CONTENT_LENGTH);
-                if let Ok(value) = http::HeaderValue::from_str(&next.len().to_string()) {
-                    parts.headers.insert(http::header::CONTENT_LENGTH, value);
+        if known.is_some_and(|len| len > crate::session::BODY_CAP) {
+            hub.append_comment(id, "[rule skipped: body > 1MB]");
+        } else if !body.is_end_stream() && known != Some(0) {
+            match take_limited(body, crate::session::BODY_CAP).await? {
+                Take::Whole(raw) => {
+                    if !raw.is_empty()
+                        && let Some(next) = rewrite_body(
+                            &hub,
+                            id,
+                            &raw,
+                            resp_encoding.as_deref(),
+                            &response_replaces,
+                            &response_json_ops,
+                        )
+                    {
+                        parts.headers.remove(http::header::CONTENT_ENCODING);
+                        parts.headers.remove(http::header::TRANSFER_ENCODING);
+                        parts.headers.remove(http::header::CONTENT_LENGTH);
+                        if let Ok(value) = http::HeaderValue::from_str(&next.len().to_string()) {
+                            parts.headers.insert(http::header::CONTENT_LENGTH, value);
+                        }
+                        return synthetic_headers(
+                            &hub,
+                            id,
+                            parts.status,
+                            header_pairs(&parts.headers),
+                            next,
+                        )
+                        .map(|res| res.map(|b| b.with_throttle(throttle_down_bps)));
+                    }
+                    parts.headers.remove(http::header::TRANSFER_ENCODING);
+                    parts.headers.remove(http::header::CONTENT_LENGTH);
+                    if let Ok(value) = http::HeaderValue::from_str(&raw.len().to_string()) {
+                        parts.headers.insert(http::header::CONTENT_LENGTH, value);
+                    }
+                    hub.set_response(
+                        id,
+                        parts.status.as_u16(),
+                        header_pairs(&parts.headers),
+                        None,
+                    );
+                    note_decoded(
+                        &hub,
+                        id,
+                        Direction::Response,
+                        &raw,
+                        resp_encoding.as_deref(),
+                    );
+                    hub.mark_finished(id);
+                    return Ok(Response::from_parts(
+                        parts,
+                        RecordingBody::from_bytes(raw).with_throttle(throttle_down_bps),
+                    ));
                 }
-                return synthetic_headers(
-                    &hub,
-                    id,
-                    parts.status,
-                    header_pairs(&parts.headers),
-                    next,
-                )
-                .map(|res| res.map(|b| b.with_throttle(throttle_down_bps)));
+                Take::Overflow { prefix, rest } => {
+                    hub.append_comment(id, "[rule skipped: body > 1MB]");
+                    hub.set_response(
+                        id,
+                        parts.status.as_u16(),
+                        header_pairs(&parts.headers),
+                        None,
+                    );
+                    let body = RecordingBody::stream_with_prefix(
+                        prefix,
+                        rest,
+                        hub,
+                        id,
+                        Direction::Response,
+                        resp_encoding.as_deref(),
+                    )
+                    .with_throttle(throttle_down_bps);
+                    return Ok(Response::from_parts(parts, body));
+                }
             }
-            hub.set_response(
-                id,
-                parts.status.as_u16(),
-                header_pairs(&parts.headers),
-                None,
-            );
-            note_decoded(
-                &hub,
-                id,
-                Direction::Response,
-                &raw,
-                resp_encoding.as_deref(),
-            );
-            hub.mark_finished(id);
-            return Ok(Response::from_parts(
-                parts,
-                RecordingBody::from_bytes(raw).with_throttle(throttle_down_bps),
-            ));
-        } else if !response_json_ops.is_empty() {
-            hub.append_comment(
-                id,
-                "[json rule skipped: unsupported or unbuffered response body]",
-            );
         }
     }
     if break_response && !websocket {
@@ -6374,10 +7221,10 @@ async fn hold_hyper_response(
             );
             let decision = hub.wait_break(id, BreakSide::Response).await;
             if decision.drop {
+                hub.clear_response(id);
                 hub.set_error(id, "断点丢弃");
-                hub.replace_response(id, 204, Vec::new(), Vec::new());
                 hub.mark_finished(id);
-                return response_from_headers(204, &[], &[]);
+                anyhow::bail!("断点丢弃");
             }
             let status = decision.status.unwrap_or(parts.status.as_u16());
             let mut headers = decision
@@ -6577,14 +7424,6 @@ fn mapped_file_response(
     }
 }
 
-fn empty_status(
-    hub: &Arc<Hub>,
-    id: u64,
-    status: StatusCode,
-) -> Result<Response<RecordingBody<Incoming>>> {
-    synthetic_response(hub, id, status, "text/plain", Vec::new())
-}
-
 fn synthetic_response(
     hub: &Arc<Hub>,
     id: u64,
@@ -6628,29 +7467,29 @@ fn replace_header_map(headers: &mut HeaderMap, pairs: &[(String, String)]) {
 #[allow(clippy::too_many_arguments)]
 async fn fetch_remote(
     hub: &Arc<Hub>,
-    id: u64,
     method: Method,
     scheme: &str,
     host: &str,
     port: u16,
     path: &str,
     headers: &HeaderMap,
-    body: Bytes,
-) -> Result<Response<RecordingBody<Incoming>>> {
+    body: RecordingBody<Incoming>,
+    websocket: bool,
+) -> Result<(Response<Incoming>, crate::session::ConnInfo)> {
     if scheme == "https" {
         let (tls, _, conn_info) = connect_origin(host, port, &[b"http/1.1".to_vec()], hub).await?;
-        hub.set_conn_info(id, conn_info);
-        fetch_on(
-            tls, hub, id, method, scheme, host, port, path, headers, body,
+        let resp = fetch_on(
+            tls, hub, method, scheme, host, port, path, headers, body, websocket,
         )
-        .await
+        .await?;
+        Ok((resp, conn_info))
     } else {
         let (tcp, conn_info) = dial_timed(host, port, hub, false).await?;
-        hub.set_conn_info(id, conn_info);
-        fetch_on(
-            tcp, hub, id, method, scheme, host, port, path, headers, body,
+        let resp = fetch_on(
+            tcp, hub, method, scheme, host, port, path, headers, body, websocket,
         )
-        .await
+        .await?;
+        Ok((resp, conn_info))
     }
 }
 
@@ -6658,15 +7497,15 @@ async fn fetch_remote(
 async fn fetch_on<IO>(
     io: IO,
     hub: &Arc<Hub>,
-    id: u64,
     method: Method,
     scheme: &str,
     host: &str,
     port: u16,
     path: &str,
     headers: &HeaderMap,
-    body: Bytes,
-) -> Result<Response<RecordingBody<Incoming>>>
+    body: RecordingBody<Incoming>,
+    websocket: bool,
+) -> Result<Response<Incoming>>
 where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -6680,50 +7519,33 @@ where
     let mut outbound = Request::builder()
         .method(method)
         .uri(target_uri)
-        .body(Full::new(body.clone()))
+        .body(body)
         .context("组装映射请求")?;
     *outbound.headers_mut() = headers.clone();
-    strip_hop_by_hop(outbound.headers_mut(), false);
-    outbound.headers_mut().remove(http::header::CONTENT_LENGTH);
-    outbound.headers_mut().insert(
-        http::header::CONTENT_LENGTH,
-        http::HeaderValue::from_str(&body.len().to_string())
-            .unwrap_or(http::HeaderValue::from_static("0")),
-    );
+    strip_hop_by_hop(outbound.headers_mut(), websocket);
+    if websocket {
+        outbound
+            .headers_mut()
+            .remove(HeaderName::from_static("sec-websocket-extensions"));
+    } else {
+        outbound.headers_mut().insert(
+            http::header::CONNECTION,
+            http::HeaderValue::from_static("close"),
+        );
+    }
     if let Ok(value) = http::HeaderValue::from_str(&authority) {
         outbound.headers_mut().insert(http::header::HOST, value);
     }
     let (mut sender, connection) = hyper::client::conn::http1::Builder::new()
         .preserve_header_case(true)
-        .title_case_headers(true)
-        .handshake::<_, Full<Bytes>>(TokioIo::new(io))
+        .handshake::<_, RecordingBody<Incoming>>(TokioIo::new(io))
         .await
         .context("映射连接")?;
     tokio::spawn(async move {
-        let _ = connection.await;
+        let _ = connection.with_upgrades().await;
     });
     sender.ready().await.context("映射连接未就绪")?;
-    let response = sender.send_request(outbound).await.context("映射请求")?;
-    let encoding = response
-        .headers()
-        .get(http::header::CONTENT_ENCODING)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_string);
-    let (parts, resp_body) = response.into_parts();
-    hub.set_response(
-        id,
-        parts.status.as_u16(),
-        header_pairs(&parts.headers),
-        None,
-    );
-    let body = RecordingBody::new(
-        resp_body,
-        hub.clone(),
-        id,
-        Direction::Response,
-        encoding.as_deref(),
-    );
-    Ok(Response::from_parts(parts, body))
+    sender.send_request(outbound).await.context("映射请求")
 }
 
 fn is_websocket(req: &Request<Incoming>) -> bool {
@@ -8743,19 +9565,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn breakpoint_drop_returns_204() {
+    async fn breakpoint_drop_closes_client_connection_and_marks_failed() {
         let dir = std::env::temp_dir().join(format!("zniff-break-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let ca = Arc::new(Ca::open(&dir).unwrap());
         let hub = Arc::new(Hub::new(ca).unwrap());
-        hub.set_rules("break 127.0.0.1/hold");
+        let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = origin.accept().await {
+                let _ = read_header_block(&mut sock).await;
+                let _ = sock
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}",
+                    )
+                    .await;
+            }
+        });
+        hub.set_rules("break 127.0.0.1/hold\nbreak-res 127.0.0.1/hold-res");
         let proxy = listen().await.unwrap();
         let proxy_addr = proxy.local_addr().unwrap();
-        let hub_serve = hub.clone();
-        tokio::spawn(async move {
-            let (socket, _) = proxy.accept().await.unwrap();
-            let _ = handle_conn(socket, hub_serve).await;
-        });
+        serve_proxy(proxy, hub.clone());
+
+        // 1. Request breakpoint drop
         let mut client = TcpStream::connect(proxy_addr).await.unwrap();
         client
             .write_all(b"GET http://127.0.0.1:9/hold HTTP/1.1\r\nHost: 127.0.0.1:9\r\n\r\n")
@@ -8781,17 +9613,71 @@ mod tests {
             }
         });
         let mut resp = Vec::new();
-        timeout(Duration::from_secs(5), client.read_to_end(&mut resp))
+        let _ = timeout(Duration::from_secs(5), client.read_to_end(&mut resp))
             .await
-            .unwrap()
             .unwrap();
         waiter.await.unwrap();
-        let text = String::from_utf8_lossy(&resp);
-        assert!(text.contains("204"), "{text}");
-        let flow = hub
-            .with_session(|session| session.get(1).cloned())
-            .expect("flow");
-        assert_eq!(flow.error.as_deref(), Some("断点丢弃"));
+        assert!(
+            resp.is_empty(),
+            "dropped request breakpoint must not write HTTP 204: {:?}",
+            String::from_utf8_lossy(&resp)
+        );
+
+        // 2. Response breakpoint drop (origin returned 200 OK, drop clears status -> None)
+        let mut client2 = TcpStream::connect(proxy_addr).await.unwrap();
+        client2
+            .write_all(
+                format!(
+                    "GET http://{origin_addr}/hold-res HTTP/1.1\r\nHost: {origin_addr}\r\nConnection: close\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let hub_wait2 = hub.clone();
+        let waiter2 = tokio::spawn(async move {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                if hub_wait2.paused_id() == Some(2) {
+                    hub_wait2.resolve_break(BreakDecision {
+                        drop: true,
+                        headers: None,
+                        body: None,
+                        status: None,
+                    });
+                    return;
+                }
+                if std::time::Instant::now() > deadline {
+                    panic!("响应断点没有暂停");
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        let mut resp2 = Vec::new();
+        let _ = timeout(Duration::from_secs(5), client2.read_to_end(&mut resp2))
+            .await
+            .unwrap();
+        waiter2.await.unwrap();
+        assert!(
+            resp2.is_empty(),
+            "dropped response breakpoint must not write HTTP 204: {:?}",
+            String::from_utf8_lossy(&resp2)
+        );
+
+        hub.with_session(|session| {
+            for fid in [1u64, 2u64] {
+                let flow = session.get(fid).expect("flow");
+                assert_eq!(flow.status, None);
+                assert_eq!(flow.error.as_deref(), Some("断点丢弃"));
+                assert!(flow.finished_at.is_some());
+            }
+            assert_eq!(session.ids_matching("失败"), vec![1, 2]);
+            let stats = session.filtered_stats("");
+            assert_eq!(stats.s2xx, 0);
+            assert_eq!(stats.failed, 2);
+            let facets = session.facets();
+            assert_eq!(facets.domains[0].error_count, 2);
+        });
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -10213,7 +11099,7 @@ mod tests {
         let text = String::from_utf8_lossy(&resp);
         assert!(text.contains("continued"), "{text}");
         let origin_text = seen.lock().unwrap().clone();
-        assert!(origin_text.contains("X-Edit: yes"), "{origin_text}");
+        assert!(origin_text.contains("x-edit: yes"), "{origin_text}");
         assert!(origin_text.contains("Content-Length: 6"), "{origin_text}");
         assert!(origin_text.ends_with("abcdef"), "{origin_text}");
         assert!(!origin_text.contains("original"), "{origin_text}");
@@ -10280,15 +11166,22 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         });
-        let (status, body) = h2_get(&ca, proxy_addr, origin_addr, "/hold").await;
+        let mut sender = h2_client(&ca, proxy_addr, origin_addr).await;
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/hold")
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+        let res = sender.send_request(req).await;
         waiter.await.unwrap();
-        assert_eq!(status, StatusCode::NO_CONTENT);
-        assert!(body.is_empty());
+        assert!(res.is_err(), "expected H2 stream reset on breakpoint drop");
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
         let flow = hub
             .with_session(|session| session.flows().into_iter().next())
             .unwrap();
+        assert_eq!(flow.status, None);
         assert_eq!(flow.error.as_deref(), Some("断点丢弃"));
+        assert!(flow.finished_at.is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -11489,6 +12382,903 @@ mod tests {
         let body2 = res2.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&body2[..], b"h1-origin-2");
         assert_eq!(accepts.load(Ordering::SeqCst), 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn map_remote_http_and_https_preserve_post_body_and_apply_req_res_rules() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let dir =
+            std::env::temp_dir().join(format!("zniff-map-remote-post-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let (origin_ca, origin_leaf, leaf_key) = test_origin_cert();
+        let mut hub = Hub::new(ca.clone()).unwrap();
+        hub.add_trust_anchor(origin_ca.der().clone());
+
+        let server = origin_tls_config(
+            &origin_ca,
+            &origin_leaf,
+            &leaf_key,
+            vec![b"http/1.1".to_vec()],
+        );
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server));
+        let tls_origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let tls_addr = tls_origin.local_addr().unwrap();
+        let seen = Arc::new(Mutex::new(Vec::<(String, Vec<u8>)>::new()));
+        let seen_bg = seen.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((sock, _)) = tls_origin.accept().await else {
+                    break;
+                };
+                let acceptor = acceptor.clone();
+                let seen_bg = seen_bg.clone();
+                tokio::spawn(async move {
+                    let mut tls = acceptor.accept(sock).await.unwrap();
+                    let (head_bytes, mut rest) = read_header_block(&mut tls).await.unwrap();
+                    let head = parse_head(&head_bytes).unwrap();
+                    let len = content_length(&head.headers).unwrap_or(0);
+                    while rest.len() < len {
+                        let mut chunk = vec![0u8; len - rest.len()];
+                        let n = tls.read(&mut chunk).await.unwrap();
+                        if n == 0 {
+                            break;
+                        }
+                        rest.extend_from_slice(&chunk[..n]);
+                    }
+                    seen_bg
+                        .lock()
+                        .unwrap()
+                        .push((head.start.clone(), rest[..len].to_vec()));
+
+                    // Send 103 Early Hints before final 200 OK JSON
+                    tls.write_all(
+                        b"HTTP/1.1 103 Early Hints\r\nLink: </app.js>; rel=preload\r\n\r\n",
+                    )
+                    .await
+                    .unwrap();
+                    let resp_body = br#"{"ok":false,"src":"origin"}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        resp_body.len()
+                    );
+                    tls.write_all(resp.as_bytes()).await.unwrap();
+                    tls.write_all(resp_body).await.unwrap();
+                    let _ = tls.shutdown().await;
+                });
+            }
+        });
+
+        hub.set_rules(&format!(
+            "map-remote api.example.test/v1 https://{tls_addr}/mapped\n\
+             query api.example.test set env prod\n\
+             json api.example.test req set /msg \"from-rule\"\n\
+             header api.example.test res set X-Mapped-Res applied\n\
+             cors api.example.test\n\
+             json api.example.test res set /ok true\n\
+             map-remote 127.0.0.1/v2 https://{tls_addr}/mapped2\n\
+             query 127.0.0.1/v2 set env h2\n\
+             json 127.0.0.1/v2 req set /msg \"from-h2\"\n\
+             header 127.0.0.1/v2 res set X-Mapped-Res h2-ok\n\
+             json 127.0.0.1/v2 res set /ok true\n"
+        ));
+        let hub = Arc::new(hub);
+
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        serve_proxy(proxy, hub.clone());
+
+        // 1. Plain HTTP -> HTTPS map-remote with POST JSON body
+        let payload = br#"{"msg":"orig","keep":1}"#;
+        let req = format!(
+            "POST http://api.example.test/v1/submit HTTP/1.1\r\nHost: api.example.test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            payload.len()
+        );
+        let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+        client.write_all(req.as_bytes()).await.unwrap();
+        client.write_all(payload).await.unwrap();
+        let mut raw_resp = Vec::new();
+        client.read_to_end(&mut raw_resp).await.unwrap();
+        let text = String::from_utf8_lossy(&raw_resp);
+        assert!(text.contains("HTTP/1.1 200 OK"), "{text}");
+        assert!(
+            text.to_ascii_lowercase().contains("x-mapped-res: applied"),
+            "{text}"
+        );
+        assert!(
+            text.to_ascii_lowercase()
+                .contains("access-control-allow-origin: *"),
+            "{text}"
+        );
+        assert!(text.ends_with(r#"{"ok":true,"src":"origin"}"#), "{text}");
+
+        // 2. HTTPS -> HTTPS cross-port map-remote (`fetch_remote`) with POST JSON body
+        let dummy_server =
+            origin_tls_config(&origin_ca, &origin_leaf, &leaf_key, vec![b"h2".to_vec()]);
+        let (dummy_addr, _) = spawn_h2_origin(dummy_server).await;
+        let mut h2_sender = h2_client(&ca, proxy_addr, dummy_addr).await;
+        let h2_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v2/items")
+            .header("content-type", "application/json")
+            .body(Full::new(Bytes::from_static(br#"{"msg":"h2-orig"}"#)))
+            .unwrap();
+        let h2_res = h2_sender.send_request(h2_req).await.unwrap();
+        assert_eq!(h2_res.status(), StatusCode::OK);
+        assert_eq!(
+            h2_res
+                .headers()
+                .get("x-mapped-res")
+                .and_then(|v| v.to_str().ok()),
+            Some("h2-ok")
+        );
+        let h2_body = h2_res.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&h2_body[..], br#"{"ok":true,"src":"origin"}"#);
+
+        let captured = seen.lock().unwrap().clone();
+        assert_eq!(captured.len(), 2);
+        assert_eq!(captured[0].0, "POST /mapped/submit?env=prod HTTP/1.1");
+        assert_eq!(captured[0].1, br#"{"msg":"from-rule","keep":1}"#);
+        assert_eq!(captured[1].0, "POST /mapped2/items?env=h2 HTTP/1.1");
+        assert_eq!(captured[1].1, br#"{"msg":"from-h2"}"#);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn head_and_204_without_content_length_do_not_hang_keep_alive_and_replay_skips_103() {
+        let dir = std::env::temp_dir().join(format!("zniff-no-body-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+
+        let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        let accepts = Arc::new(AtomicU64::new(0));
+        let accepts_bg = accepts.clone();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = origin.accept().await {
+                let conn_num = accepts_bg.fetch_add(1, Ordering::SeqCst) + 1;
+                tokio::spawn(async move {
+                    loop {
+                        let Ok((head_bytes, _)) = read_header_block(&mut sock).await else {
+                            break;
+                        };
+                        let Ok(head) = parse_head(&head_bytes) else {
+                            break;
+                        };
+                        if head.start.starts_with("HEAD /doc ") {
+                            // Non-zero Content-Length on HEAD, zero body bytes, keep socket open!
+                            sock.write_all(
+                                b"HTTP/1.1 200 OK\r\nContent-Length: 9999\r\nKeep-Alive: timeout=5\r\n\r\n",
+                            )
+                            .await
+                            .unwrap();
+                        } else if head.start.starts_with("GET /empty ") {
+                            // 204 with NO Content-Length header, keep socket open!
+                            sock.write_all(b"HTTP/1.1 204 No Content\r\n\r\n")
+                                .await
+                                .unwrap();
+                        } else if head.start.starts_with("GET /hint ") {
+                            sock.write_all(
+                                b"HTTP/1.1 103 Early Hints\r\nLink: </s.css>; rel=preload\r\n\r\n\
+                                  HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nhinted",
+                            )
+                            .await
+                            .unwrap();
+                            break;
+                        } else {
+                            let body = format!("conn-{conn_num}");
+                            let reply = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                                body.len()
+                            );
+                            sock.write_all(reply.as_bytes()).await.unwrap();
+                        }
+                    }
+                });
+            }
+        });
+
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        serve_proxy(proxy, hub.clone());
+
+        // 1. HEAD with Content-Length: 9999 returns immediately without waiting for 9999 bytes
+        let mut s1 = TcpStream::connect(proxy_addr).await.unwrap();
+        s1.write_all(
+            format!("HEAD http://{origin_addr}/doc HTTP/1.1\r\nHost: {origin_addr}\r\n\r\n")
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
+        let (h1, r1) = timeout(Duration::from_secs(2), read_header_block(&mut s1))
+            .await
+            .expect("HEAD must not hang")
+            .unwrap();
+        assert!(String::from_utf8_lossy(&h1).starts_with("HTTP/1.1 200 OK"));
+        assert!(r1.is_empty());
+
+        // 2. 204 without Content-Length returns immediately and parks origin socket for reuse
+        let mut s2 = TcpStream::connect(proxy_addr).await.unwrap();
+        s2.write_all(
+            format!("GET http://{origin_addr}/empty HTTP/1.1\r\nHost: {origin_addr}\r\n\r\n")
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
+        let (h2, r2) = timeout(Duration::from_secs(2), read_header_block(&mut s2))
+            .await
+            .expect("204 without Content-Length must not hang")
+            .unwrap();
+        assert!(String::from_utf8_lossy(&h2).starts_with("HTTP/1.1 204"));
+        assert!(r2.is_empty());
+
+        // 3. Follow-up GET reuses the same parked origin TCP socket (conn-1)
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let mut s3 = TcpStream::connect(proxy_addr).await.unwrap();
+        s3.write_all(
+            format!("GET http://{origin_addr}/after HTTP/1.1\r\nHost: {origin_addr}\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
+        let (_, mut r3) = timeout(Duration::from_secs(2), read_header_block(&mut s3))
+            .await
+            .unwrap()
+            .unwrap();
+        while r3.len() < 6 {
+            let mut tmp = [0u8; 16];
+            let n = s3.read(&mut tmp).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            r3.extend_from_slice(&tmp[..n]);
+        }
+        assert_eq!(&r3[..], b"conn-1");
+        assert_eq!(accepts.load(Ordering::SeqCst), 1);
+
+        // 4. replay_once skips 103 Early Hints and records 200 + final body
+        let replay_id = timeout(
+            Duration::from_secs(2),
+            replay_once(
+                hub.clone(),
+                None,
+                ReplayOverride {
+                    method: Some("GET".into()),
+                    url: Some(format!("http://{origin_addr}/hint")),
+                    headers: Some(Vec::new()),
+                    body: Some(Vec::new()),
+                },
+            ),
+        )
+        .await
+        .expect("replay must not hang")
+        .unwrap();
+        let replayed = hub.with_session(|s| s.get(replay_id).cloned()).unwrap();
+        assert_eq!(replayed.status, Some(200));
+        assert_eq!(replayed.response_body, b"hinted");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn switching_upstream_invalidates_pools_and_https_h1_preserves_header_case() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let dir = std::env::temp_dir().join(format!("zniff-pool-inval-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let (origin_ca, origin_leaf, leaf_key) = test_origin_cert();
+        let mut hub = Hub::new(ca.clone()).unwrap();
+        hub.add_trust_anchor(origin_ca.der().clone());
+        let hub = Arc::new(hub);
+
+        // Part A: H2 origin + dynamic upstream CONNECT proxy
+        let h2_server =
+            origin_tls_config(&origin_ca, &origin_leaf, &leaf_key, vec![b"h2".to_vec()]);
+        let (h2_origin_addr, _origin_accepts) = spawn_h2_origin(h2_server).await;
+
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        let upstream_hits = Arc::new(AtomicU64::new(0));
+        let upstream_hits_bg = upstream_hits.clone();
+        tokio::spawn(async move {
+            while let Ok((mut client_sock, _)) = upstream.accept().await {
+                upstream_hits_bg.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let (head_bytes, _) = read_header_block(&mut client_sock).await.unwrap();
+                    let head = parse_head(&head_bytes).unwrap();
+                    let target = head.start.split_whitespace().nth(1).unwrap();
+                    let mut out = TcpStream::connect(target).await.unwrap();
+                    client_sock
+                        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                        .await
+                        .unwrap();
+                    let _ = tokio::io::copy_bidirectional(&mut client_sock, &mut out).await;
+                });
+            }
+        });
+
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        serve_proxy(proxy, hub.clone());
+
+        let mut sender = h2_client(&ca, proxy_addr, h2_origin_addr).await;
+        let (st1, _) = h2_send(&mut sender, "/direct").await;
+        assert_eq!(st1, StatusCode::OK);
+        assert_eq!(upstream_hits.load(Ordering::SeqCst), 0);
+
+        // Dynamically switch upstream proxy while `sender` (`H2Lane`) and `h2_pool` are live!
+        hub.set_upstream(&upstream_addr.to_string());
+        let (st2, _) = h2_send(&mut sender, "/via-upstream").await;
+        assert_eq!(st2, StatusCode::OK);
+        assert_eq!(
+            upstream_hits.load(Ordering::SeqCst),
+            1,
+            "live H2 lane must redial through the new upstream proxy immediately"
+        );
+        hub.set_upstream("");
+
+        // Part B: HTTPS HTTP/1.1 preserves non-Title-Case response headers (e.g. ETag, x-custom-ID)
+        let h1_server = origin_tls_config(
+            &origin_ca,
+            &origin_leaf,
+            &leaf_key,
+            vec![b"http/1.1".to_vec()],
+        );
+        let h1_acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(h1_server));
+        let h1_origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let h1_origin_addr = h1_origin.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (sock, _) = h1_origin.accept().await.unwrap();
+            let mut tls = h1_acceptor.accept(sock).await.unwrap();
+            let _ = read_header_block(&mut tls).await.unwrap();
+            tls.write_all(
+                b"HTTP/1.1 200 OK\r\nETag: \"v1\"\r\nx-custom-ID: 42\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi",
+            )
+            .await
+            .unwrap();
+            let _ = tls.shutdown().await;
+        });
+
+        let mut tls_client =
+            connect_mitm(proxy_addr, h1_origin_addr, &ca, vec![b"http/1.1".to_vec()]).await;
+        tls_client
+            .write_all(b"GET /case HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let (raw_head, _) = read_header_block(&mut tls_client).await.unwrap();
+        let head_str = String::from_utf8_lossy(&raw_head);
+        assert!(head_str.contains("ETag: \"v1\"\r\n"), "{head_str}");
+        assert!(head_str.contains("x-custom-ID: 42\r\n"), "{head_str}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn head_local_routes_preserve_method_and_omit_wire_body() {
+        let dir = std::env::temp_dir().join(format!("zniff-head-local-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+        let (share_id, _) = hub.begin_share(Duration::from_secs(60), "");
+
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        serve_proxy(proxy, hub.clone());
+
+        for path in [
+            "/zniff".to_string(),
+            "/zniff-ca.crt".to_string(),
+            format!("/s/{share_id}"),
+        ] {
+            let mut sock = TcpStream::connect(proxy_addr).await.unwrap();
+            let req = format!(
+                "HEAD {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+                proxy_addr.port()
+            );
+            sock.write_all(req.as_bytes()).await.unwrap();
+            let mut raw = Vec::new();
+            timeout(Duration::from_secs(2), sock.read_to_end(&mut raw))
+                .await
+                .unwrap()
+                .unwrap();
+            let split = raw
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+                .expect("header terminator")
+                + 4;
+            let head = parse_head(&raw[..split]).unwrap();
+            assert!(
+                head.start.starts_with("HTTP/1.1 200 OK"),
+                "unexpected status for {path}: {}",
+                head.start
+            );
+            let declared_len = content_length(&head.headers).expect("Content-Length present");
+            assert!(
+                declared_len > 0,
+                "Content-Length should reflect resource size for {path}"
+            );
+            assert!(
+                raw[split..].is_empty(),
+                "HEAD {path} must not write response body bytes on the wire (got {} bytes)",
+                raw[split..].len()
+            );
+        }
+
+        let flows = hub.with_session(|s| s.flows());
+        assert_eq!(flows.len(), 2);
+        assert_eq!(flows[0].method, "HEAD");
+        assert_eq!(flows[0].path, "/zniff");
+        assert!(flows[0].response_body.is_empty());
+        assert_eq!(flows[1].method, "HEAD");
+        assert_eq!(flows[1].path, "/zniff-ca.crt");
+        assert!(flows[1].response_body.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn replay_batch_and_compose_support_pure_h2_origin_without_pooling() {
+        use std::io::Write as _;
+
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let dir = std::env::temp_dir().join(format!("zniff-h2-replay-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let (origin_ca, origin_leaf, leaf_key) = test_origin_cert();
+        let mut hub = Hub::new(ca.clone()).unwrap();
+        hub.add_trust_anchor(origin_ca.der().clone());
+        let hub = Arc::new(hub);
+
+        // Pure h2-only TLS origin returning gzipped JSON body
+        let server = origin_tls_config(&origin_ca, &origin_leaf, &leaf_key, vec![b"h2".to_vec()]);
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server));
+        let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        let hits = Arc::new(AtomicU64::new(0));
+        let hits_bg = hits.clone();
+        tokio::spawn(async move {
+            while let Ok((sock, _)) = origin.accept().await {
+                let acceptor = acceptor.clone();
+                let hits_bg = hits_bg.clone();
+                tokio::spawn(async move {
+                    let Ok(tls) = acceptor.accept(sock).await else {
+                        return;
+                    };
+                    assert_eq!(tls.get_ref().1.alpn_protocol(), Some(b"h2".as_slice()));
+                    let service = hyper::service::service_fn(move |req: Request<Incoming>| {
+                        let hits_bg = hits_bg.clone();
+                        async move {
+                            let n = hits_bg.fetch_add(1, Ordering::SeqCst) + 1;
+                            let method = req.method().to_string();
+                            let pq = req
+                                .uri()
+                                .path_and_query()
+                                .map(|p| p.as_str().to_string())
+                                .unwrap_or_default();
+                            let req_bytes = req.into_body().collect().await.unwrap().to_bytes();
+                            let plain = serde_json::json!({
+                                "hit": n,
+                                "method": method,
+                                "path": pq,
+                                "req": String::from_utf8_lossy(&req_bytes),
+                            })
+                            .to_string();
+                            let mut gz = flate2::write::GzEncoder::new(
+                                Vec::new(),
+                                flate2::Compression::fast(),
+                            );
+                            gz.write_all(plain.as_bytes()).unwrap();
+                            let compressed = gz.finish().unwrap();
+                            let resp = Response::builder()
+                                .status(StatusCode::CREATED)
+                                .header("content-type", "application/json")
+                                .header("content-encoding", "gzip")
+                                .header("x-origin-proto", "h2")
+                                .body(Full::new(Bytes::from(compressed)))
+                                .unwrap();
+                            Ok::<_, std::convert::Infallible>(resp)
+                        }
+                    });
+                    let _ = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+                        .serve_connection(TokioIo::new(tls), service)
+                        .await;
+                });
+            }
+        });
+
+        // 1. Standalone composed HTTPS POST (`source.is_none()`) against pure-h2 origin
+        let (tx_comp, rx_comp) = tokio::sync::oneshot::channel();
+        hub.send_composed_later(
+            ReplayOverride {
+                method: Some("POST".into()),
+                url: Some(format!(
+                    "https://127.0.0.1:{}/v2/compose",
+                    origin_addr.port()
+                )),
+                headers: Some(vec![("Content-Type".into(), "application/json".into())]),
+                body: Some(br#"{"compose":1}"#.to_vec()),
+            },
+            move |res| {
+                let _ = tx_comp.send(res);
+            },
+        );
+        let composed_id = timeout(Duration::from_secs(5), rx_comp)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let composed = hub
+            .with_session(|s| s.hydrated(composed_id))
+            .expect("composed flow");
+        assert_eq!(composed.protocol, Protocol::Http2);
+        assert_eq!(composed.status, Some(201));
+        assert!(composed.response_at.is_some());
+        assert!(composed.finished_at.is_some());
+        assert!(!composed.conn_info.server_addr.is_empty());
+        assert!(!composed.conn_info.tls_version.is_empty());
+        assert!(composed.conn_info.tcp_ms.is_some());
+        assert!(composed.conn_info.tls_ms.is_some());
+        let composed_body = String::from_utf8(composed.response_body.clone()).unwrap();
+        assert!(
+            composed_body.contains(r#""path":"/v2/compose""#),
+            "{composed_body}"
+        );
+        assert!(
+            composed_body.contains(r#"\"compose\":1"#),
+            "{composed_body}"
+        );
+
+        // 2. Single replay of that Protocol::Http2 flow (`replay_later`)
+        let (tx_rep, rx_rep) = tokio::sync::oneshot::channel();
+        hub.replay_later(composed_id, ReplayOverride::default(), move |res| {
+            let _ = tx_rep.send(res);
+        });
+        let replay_id = timeout(Duration::from_secs(5), rx_rep)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let replayed = hub
+            .with_session(|s| s.hydrated(replay_id))
+            .expect("replayed flow");
+        assert_eq!(replayed.protocol, Protocol::Http2);
+        assert_eq!(replayed.status, Some(201));
+        assert!(
+            replayed
+                .response_headers
+                .iter()
+                .any(|(k, v)| k.eq_ignore_ascii_case("x-origin-proto") && v == "h2")
+        );
+
+        // 3. Batch replay of that Protocol::Http2 flow (`replay_batch_later`)
+        let (tx_batch, rx_batch) = tokio::sync::oneshot::channel();
+        hub.replay_batch_later(
+            composed_id,
+            2,
+            2,
+            0,
+            ReplayOverride::default(),
+            move |res| {
+                let _ = tx_batch.send(res);
+            },
+        );
+        let batch_ids = timeout(Duration::from_secs(5), rx_batch)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(batch_ids.len(), 2);
+        for bid in batch_ids {
+            let bflow = hub.with_session(|s| s.hydrated(bid)).unwrap();
+            assert_eq!(bflow.protocol, Protocol::Http2);
+            assert_eq!(bflow.status, Some(201));
+        }
+
+        // Verify single-use H2 handshakes NEVER entered `h2_pool`
+        assert!(
+            hub.h2_pool.lock().unwrap().is_empty(),
+            "replay H2 connections must not enter h2_pool"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 4);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn chunked_plain_http_op_replace_json_and_overflow_passthrough_roundtrip() {
+        use std::io::Write as _;
+
+        let dir = std::env::temp_dir().join(format!("zniff-chunked-rules-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+
+        type CapturedReq = (Vec<(String, String)>, Vec<u8>);
+        let seen_reqs: Arc<Mutex<Vec<CapturedReq>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_bg = seen_reqs.clone();
+        let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = origin.accept().await {
+                let seen_bg = seen_bg.clone();
+                tokio::spawn(async move {
+                    let Ok((head_bytes, rest)) = read_header_block(&mut sock).await else {
+                        return;
+                    };
+                    let head = parse_head(&head_bytes).unwrap();
+                    let mut reader = Prefixed {
+                        prefix: rest,
+                        pos: 0,
+                        inner: &mut sock,
+                    };
+                    let body = if let Some(len) = content_length(&head.headers) {
+                        read_exact(&mut reader, len).await.unwrap()
+                    } else if is_chunked(&head.headers) {
+                        let mut out = Vec::new();
+                        loop {
+                            let line = read_line(&mut reader).await.unwrap();
+                            let n = usize::from_str_radix(
+                                String::from_utf8_lossy(&line)
+                                    .trim()
+                                    .split(';')
+                                    .next()
+                                    .unwrap(),
+                                16,
+                            )
+                            .unwrap();
+                            if n == 0 {
+                                let _ = read_line(&mut reader).await.unwrap();
+                                break;
+                            }
+                            out.extend(read_exact(&mut reader, n).await.unwrap());
+                            let _ = read_exact(&mut reader, 2).await.unwrap();
+                        }
+                        out
+                    } else {
+                        Vec::new()
+                    };
+                    seen_bg.lock().unwrap().push((head.headers.clone(), body));
+
+                    if head.start.contains("/big") {
+                        // Stream > 1MB chunked response back
+                        sock.write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+                        )
+                        .await
+                        .unwrap();
+                        let chunk_payload = vec![b'z'; 64 * 1024];
+                        let header_line = format!("{:x}\r\n", chunk_payload.len());
+                        // 17 * 64KB > 1MB (16 * 64KB)
+                        for _ in 0..17 {
+                            sock.write_all(header_line.as_bytes()).await.unwrap();
+                            sock.write_all(&chunk_payload).await.unwrap();
+                            sock.write_all(b"\r\n").await.unwrap();
+                        }
+                        sock.write_all(b"0\r\n\r\n").await.unwrap();
+                    } else {
+                        // Return gzipped chunked JSON response
+                        let resp_plain = br#"{"status":"draft","ok":false}"#;
+                        let mut gz =
+                            flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+                        gz.write_all(resp_plain).unwrap();
+                        let gz_bytes = gz.finish().unwrap();
+                        let mid = gz_bytes.len() / 2;
+                        let part1 = &gz_bytes[..mid];
+                        let part2 = &gz_bytes[mid..];
+                        sock.write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+                        )
+                        .await
+                        .unwrap();
+                        sock.write_all(format!("{:x}\r\n", part1.len()).as_bytes())
+                            .await
+                            .unwrap();
+                        sock.write_all(part1).await.unwrap();
+                        sock.write_all(b"\r\n").await.unwrap();
+                        sock.write_all(format!("{:x}\r\n", part2.len()).as_bytes())
+                            .await
+                            .unwrap();
+                        sock.write_all(part2).await.unwrap();
+                        sock.write_all(b"\r\n0\r\n\r\n").await.unwrap();
+                    }
+                });
+            }
+        });
+
+        hub.set_rules(
+            "json 127.0.0.1/graphql req set /variables/qty 99 op=MutateCart\n\
+             replace 127.0.0.1/graphql req old-sku -> new-sku\n\
+             replace 127.0.0.1/graphql res draft -> published\n\
+             json 127.0.0.1/graphql res set /ok true\n\
+             json 127.0.0.1/big req set /touch 1\n\
+             json 127.0.0.1/big res set /touch 1\n",
+        );
+
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        serve_proxy(proxy, hub.clone());
+
+        // Case 1: Chunked <= 1MB GraphQL request matching `op=MutateCart` + `replace` + `json` on both req & gzipped chunked res
+        let gql_part1 = br#"{"operationName":"MutateCart","variables":{"sku":"old-sku","qty":1},"#;
+        let gql_part2 = br#""query":"mutation MutateCart { updateCart }"}"#;
+        let mut client1 = TcpStream::connect(proxy_addr).await.unwrap();
+        client1
+            .write_all(
+                format!(
+                    "POST http://{origin_addr}/graphql HTTP/1.1\r\nHost: {origin_addr}\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        client1
+            .write_all(format!("{:x}\r\n", gql_part1.len()).as_bytes())
+            .await
+            .unwrap();
+        client1.write_all(gql_part1).await.unwrap();
+        client1.write_all(b"\r\n").await.unwrap();
+        client1
+            .write_all(format!("{:x}\r\n", gql_part2.len()).as_bytes())
+            .await
+            .unwrap();
+        client1.write_all(gql_part2).await.unwrap();
+        client1.write_all(b"\r\n0\r\n\r\n").await.unwrap();
+
+        let mut raw_resp1 = Vec::new();
+        client1.read_to_end(&mut raw_resp1).await.unwrap();
+        let split1 = raw_resp1.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+        let resp_head1 = parse_head(&raw_resp1[..split1]).unwrap();
+        assert!(header_value(&resp_head1.headers, "transfer-encoding").is_none());
+        assert!(header_value(&resp_head1.headers, "content-encoding").is_none());
+        let resp_json1: serde_json::Value = serde_json::from_slice(&raw_resp1[split1..]).unwrap();
+        assert_eq!(resp_json1["status"], "published");
+        assert_eq!(resp_json1["ok"], true);
+        assert_eq!(
+            content_length(&resp_head1.headers),
+            Some(raw_resp1[split1..].len())
+        );
+
+        let (seen_headers1, seen_body1) = seen_reqs.lock().unwrap()[0].clone();
+        assert!(header_value(&seen_headers1, "transfer-encoding").is_none());
+        assert_eq!(content_length(&seen_headers1), Some(seen_body1.len()));
+        let seen_json1: serde_json::Value = serde_json::from_slice(&seen_body1).unwrap();
+        assert_eq!(seen_json1["variables"]["sku"], "new-sku");
+        assert_eq!(seen_json1["variables"]["qty"], 99);
+
+        // Case 2: Chunked > 1MB request & > 1MB response stream unmodified and record `[rule skipped: body > 1MB]`
+        let mut client2 = TcpStream::connect(proxy_addr).await.unwrap();
+        client2
+            .write_all(
+                format!(
+                    "POST http://{origin_addr}/big HTTP/1.1\r\nHost: {origin_addr}\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let req_chunk = vec![b'x'; 64 * 1024];
+        let req_hdr = format!("{:x}\r\n", req_chunk.len());
+        for _ in 0..17 {
+            client2.write_all(req_hdr.as_bytes()).await.unwrap();
+            client2.write_all(&req_chunk).await.unwrap();
+            client2.write_all(b"\r\n").await.unwrap();
+        }
+        client2.write_all(b"0\r\n\r\n").await.unwrap();
+
+        let mut raw_resp2 = Vec::new();
+        client2.read_to_end(&mut raw_resp2).await.unwrap();
+        // Verify full > 1MB response arrived intact on client
+        assert!(raw_resp2.len() > 17 * 64 * 1024);
+
+        // Verify full > 1MB request arrived intact on origin
+        let (_, seen_body2) = seen_reqs.lock().unwrap()[1].clone();
+        assert_eq!(seen_body2.len(), 17 * 64 * 1024);
+
+        let big_flow = hub.with_session(|s| s.get(2).cloned()).unwrap();
+        assert!(
+            big_flow.comment.contains("[rule skipped: body > 1MB]"),
+            "expected >1MB skip note, got: {}",
+            big_flow.comment
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn https_h2_streaming_without_content_length_applies_replace_and_json_rules() {
+        struct ChunksBody(std::collections::VecDeque<Bytes>);
+        impl Body for ChunksBody {
+            type Data = Bytes;
+            type Error = std::convert::Infallible;
+            fn poll_frame(
+                mut self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+            ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+                Poll::Ready(self.0.pop_front().map(|b| Ok(Frame::data(b))))
+            }
+        }
+
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let dir = std::env::temp_dir().join(format!("zniff-h2-stream-json-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let (origin_ca, origin_leaf, leaf_key) = test_origin_cert();
+        let mut hub = Hub::new(ca.clone()).unwrap();
+        hub.add_trust_anchor(origin_ca.der().clone());
+        hub.set_rules(
+            "replace 127.0.0.1/stream req alpha -> beta\n\
+             json 127.0.0.1/stream req set /patched true\n\
+             replace 127.0.0.1/stream res pending -> done\n\
+             json 127.0.0.1/stream res set /count 7\n",
+        );
+        let hub = Arc::new(hub);
+
+        let server = origin_tls_config(&origin_ca, &origin_leaf, &leaf_key, vec![b"h2".to_vec()]);
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server));
+        let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (sock, _) = origin.accept().await.unwrap();
+            let tls = acceptor.accept(sock).await.unwrap();
+            let service = hyper::service::service_fn(move |req: Request<Incoming>| async move {
+                let req_bytes = req.into_body().collect().await.unwrap().to_bytes();
+                let req_json: serde_json::Value = serde_json::from_slice(&req_bytes).unwrap();
+                assert_eq!(req_json["tag"], "beta");
+                assert_eq!(req_json["patched"], true);
+                let res_chunks = std::collections::VecDeque::from([
+                    Bytes::from_static(br#"{"state":"pending","#),
+                    Bytes::from_static(br#""count":0}"#),
+                ]);
+                Ok::<_, std::convert::Infallible>(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .header("content-type", "application/json")
+                        .body(ChunksBody(res_chunks))
+                        .unwrap(),
+                )
+            });
+            let _ = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+                .serve_connection(TokioIo::new(tls), service)
+                .await;
+        });
+
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        serve_one(proxy, hub.clone());
+
+        let tls = connect_mitm(proxy_addr, origin_addr, &ca, vec![b"h2".to_vec()]).await;
+        let (mut sender, connection) =
+            hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+                .handshake::<_, ChunksBody>(TokioIo::new(tls))
+                .await
+                .unwrap();
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        let req_chunks = std::collections::VecDeque::from([
+            Bytes::from_static(br#"{"tag":"alpha","#),
+            Bytes::from_static(br#""patched":false}"#),
+        ]);
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/stream")
+            .header("content-type", "application/json")
+            .body(ChunksBody(req_chunks))
+            .unwrap();
+        let res = timeout(Duration::from_secs(5), sender.send_request(req))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let res_bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let res_json: serde_json::Value = serde_json::from_slice(&res_bytes).unwrap();
+        assert_eq!(res_json["state"], "done");
+        assert_eq!(res_json["count"], 7);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

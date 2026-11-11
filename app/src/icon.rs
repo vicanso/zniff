@@ -47,7 +47,7 @@ fn draw(kind: Glyph, paint: Hsla, size: f32) -> Painter {
     let mut painter = Painter::new()
         .translate(1.0, 1.0)
         .scale(scale, scale)
-        .line_width(1.8 / scale)
+        .line_width(1.65)
         .line_cap(LineCap::Round)
         .line_join(LineJoin::Round)
         .stroke_color(paint)
@@ -65,12 +65,15 @@ fn draw(kind: Glyph, paint: Hsla, size: f32) -> Painter {
         Glyph::ChevronUp => painter.stroke_svg("M4 9.8 L8 5.8 L12 9.8"),
         Glyph::ChevronRight => painter.stroke_svg("M6.2 4 L10.2 8 L6.2 12"),
         Glyph::Sliders => painter
-            .stroke_svg("M2.4 4.4 H13.6")
-            .stroke_svg("M2.4 8 H13.6")
-            .stroke_svg("M2.4 11.6 H13.6")
-            .fill_svg("M5.2 4.4 m-1.35 0 a1.35 1.35 0 1 0 2.7 0 a1.35 1.35 0 1 0 -2.7 0")
-            .fill_svg("M10.4 8 m-1.35 0 a1.35 1.35 0 1 0 2.7 0 a1.35 1.35 0 1 0 -2.7 0")
-            .fill_svg("M6.6 11.6 m-1.35 0 a1.35 1.35 0 1 0 2.7 0 a1.35 1.35 0 1 0 -2.7 0"),
+            .stroke_svg("M2.2 4.4 H3.4")
+            .stroke_svg("M7.8 4.4 H13.8")
+            .stroke_svg("M2.2 8 H8.2")
+            .stroke_svg("M12.6 8 H13.8")
+            .stroke_svg("M2.2 11.6 H4.4")
+            .stroke_svg("M8.8 11.6 H13.8")
+            .fill_svg("M5.6 4.4 m-1.8 0 a1.8 1.8 0 1 0 3.6 0 a1.8 1.8 0 1 0 -3.6 0")
+            .fill_svg("M10.4 8 m-1.8 0 a1.8 1.8 0 1 0 3.6 0 a1.8 1.8 0 1 0 -3.6 0")
+            .fill_svg("M6.6 11.6 m-1.8 0 a1.8 1.8 0 1 0 3.6 0 a1.8 1.8 0 1 0 -3.6 0"),
         Glyph::Download => painter
             .stroke_svg("M8 2.4 V9.2")
             .stroke_svg("M5 6.6 L8 9.8 L11 6.6")
@@ -102,9 +105,9 @@ fn draw(kind: Glyph, paint: Hsla, size: f32) -> Painter {
             .stroke_svg("M2.8 2.8 V5.6 H5.6")
             .stroke_svg("M8 5.4 V8.2 L10 9.4"),
         Glyph::Alert => painter
-            .stroke_svg("M8 2.2 L14.5 13.8 H1.5 Z")
-            .stroke_svg("M8 6.5 V9.5")
-            .fill_svg("M8 12.1 m-0.8 0 a0.8 0.8 0 1 0 1.6 0 a0.8 0.8 0 1 0 -1.6 0"),
+            .stroke_svg("M8 2.4 L13.8 13.4 H2.2 Z")
+            .stroke_svg("M8 6.4 V9.4")
+            .fill_svg("M8 11.6 m-0.85 0 a0.85 0.85 0 1 0 1.7 0 a0.85 0.85 0 1 0 -1.7 0"),
     };
     painter
 }

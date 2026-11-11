@@ -47,14 +47,26 @@ pub async fn read_client_hello<R: AsyncRead + Unpin>(reader: &mut R) -> std::io:
             raw.extend_from_slice(&header);
             return Ok(ReadHello::NotTls { raw });
         }
-        let mut fragment = vec![0u8; record_len];
-        if let Err(err) = reader.read_exact(&mut fragment).await {
-            raw.extend_from_slice(&header);
-            raw.extend_from_slice(&fragment);
-            if err.kind() == std::io::ErrorKind::UnexpectedEof {
+        let mut fragment = Vec::with_capacity(record_len);
+        match reader
+            .take(record_len as u64)
+            .read_to_end(&mut fragment)
+            .await
+        {
+            Ok(n) if n < record_len => {
+                raw.extend_from_slice(&header);
+                raw.extend_from_slice(&fragment);
                 return Ok(ReadHello::NotTls { raw });
             }
-            return Err(err);
+            Ok(_) => {}
+            Err(err) => {
+                raw.extend_from_slice(&header);
+                raw.extend_from_slice(&fragment);
+                if err.kind() == std::io::ErrorKind::UnexpectedEof {
+                    return Ok(ReadHello::NotTls { raw });
+                }
+                return Err(err);
+            }
         }
         raw.extend_from_slice(&header);
         raw.extend_from_slice(&fragment);
@@ -143,17 +155,32 @@ fn parse_client_hello_body(body: &[u8]) -> Option<(Option<String>, Vec<Vec<u8>>)
 }
 
 fn parse_sni(data: &[u8]) -> Option<String> {
-    if data.len() < 5 {
+    if data.len() < 2 {
         return None;
     }
     let list_len = u16::from_be_bytes([data[0], data[1]]) as usize;
-    if data.len() < 2 + list_len || data[2] != 0x00 {
+    let end = 2usize.checked_add(list_len)?;
+    if data.len() < end {
         return None;
     }
-    let name_len = u16::from_be_bytes([data[3], data[4]]) as usize;
-    let name = data.get(5..5 + name_len)?;
-    let text = String::from_utf8(name.to_vec()).ok()?;
-    if text.is_empty() { None } else { Some(text) }
+    let mut i = 2;
+    while i + 3 <= end {
+        let name_type = data[i];
+        let name_len = u16::from_be_bytes([data[i + 1], data[i + 2]]) as usize;
+        i += 3;
+        if i + name_len > end {
+            return None;
+        }
+        let name = &data[i..i + name_len];
+        i += name_len;
+        if name_type == 0x00 {
+            let text = std::str::from_utf8(name).ok()?.trim_end_matches('.');
+            if !text.is_empty() {
+                return Some(text.to_string());
+            }
+        }
+    }
+    None
 }
 
 fn parse_alpn(data: &[u8]) -> Vec<Vec<u8>> {
@@ -262,6 +289,40 @@ mod tests {
             ReadHello::NotTls { raw: got } => assert_eq!(&got[..4], b"GET "),
             ReadHello::Hello(_) => panic!("expected not tls"),
         }
+    }
+
+    #[test]
+    fn short_0x16_non_tls_packet_preserves_exact_bytes_without_zero_padding() {
+        // Starts with 0x16 and declares record_len = 0x1234 (4660 bytes),
+        // but only sends 8 bytes total before EOF.
+        let packet = vec![0x16, 0x03, 0x01, 0x12, 0x34, 0xaa, 0xbb, 0xcc];
+        match futures_block(&packet) {
+            ReadHello::NotTls { raw } => assert_eq!(raw, packet),
+            ReadHello::Hello(_) => panic!("expected NotTls"),
+        }
+    }
+
+    #[test]
+    fn sni_iterates_entries_and_strips_trailing_dot() {
+        let fqdn_raw = craft_client_hello(Some("api.example.com."), &[b"http/1.1"]);
+        match futures_block(&fqdn_raw) {
+            ReadHello::Hello(hello) => assert_eq!(hello.sni.as_deref(), Some("api.example.com")),
+            ReadHello::NotTls { .. } => panic!("expected hello"),
+        }
+
+        // ServerNameList with an unknown name_type (0x01) entry followed by host_name (0x00).
+        let mut sni_list = Vec::new();
+        sni_list.push(0x01);
+        sni_list.extend_from_slice(&3u16.to_be_bytes());
+        sni_list.extend_from_slice(b"foo");
+        sni_list.push(0x00);
+        let host = b"second.example.org.";
+        sni_list.extend_from_slice(&(host.len() as u16).to_be_bytes());
+        sni_list.extend_from_slice(host);
+        let mut sni_ext = Vec::new();
+        sni_ext.extend_from_slice(&(sni_list.len() as u16).to_be_bytes());
+        sni_ext.extend_from_slice(&sni_list);
+        assert_eq!(parse_sni(&sni_ext).as_deref(), Some("second.example.org"));
     }
 
     fn futures_block(bytes: &[u8]) -> ReadHello {

@@ -193,34 +193,62 @@ fn resolve_redirect(base: &ParsedUrl, location: &str) -> String {
     }
 }
 
-fn configured_upstream_proxy() -> Option<(String, u16)> {
-    let cfg = config::load(&ca::data_dir());
-    let raw = cfg.upstream_proxy.trim();
+fn parse_upstream_proxy(raw: &str, listen_port: u16) -> Option<(String, u16)> {
+    let raw = raw.trim();
     if raw.is_empty() {
         return None;
     }
-    let rest = raw
-        .strip_prefix("http://")
-        .or_else(|| raw.strip_prefix("https://"))
-        .unwrap_or(raw);
+    let rest = if raw.len() >= 7 && raw[..7].eq_ignore_ascii_case("http://") {
+        &raw[7..]
+    } else if raw.len() >= 8 && raw[..8].eq_ignore_ascii_case("https://") {
+        &raw[8..]
+    } else {
+        raw
+    };
     let authority = rest.split('/').next().unwrap_or(rest);
-    let (host, port_str) = authority.rsplit_once(':')?;
+    let host_port = authority
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(authority);
+    let (host, port_str) = if let Some(after_open) = host_port.strip_prefix('[') {
+        let (ipv6, after_close) = after_open.split_once(']')?;
+        let port_str = after_close.strip_prefix(':')?;
+        (ipv6, port_str)
+    } else {
+        let (h, p) = host_port.rsplit_once(':')?;
+        if h.contains(':') {
+            return None;
+        }
+        (h, p)
+    };
     let port = port_str.parse::<u16>().ok()?;
     if port == 0 || host.is_empty() {
         return None;
     }
     // Never loop through zniff's own listening port.
-    if (host == "127.0.0.1" || host.eq_ignore_ascii_case("localhost")) && port == cfg.listen_port {
+    if (host == "127.0.0.1" || host == "::1" || host.eq_ignore_ascii_case("localhost"))
+        && port == listen_port
+    {
         return None;
     }
     Some((host.to_string(), port))
 }
 
+fn configured_upstream_proxy() -> Option<(String, u16)> {
+    let cfg = config::load_mode(&ca::data_dir(), config::is_dev_mode());
+    parse_upstream_proxy(&cfg.upstream_proxy, cfg.listen_port)
+}
+
 async fn open_tcp_to(host: &str, port: u16) -> Result<TcpStream, String> {
     if let Some((proxy_host, proxy_port)) = configured_upstream_proxy() {
+        let proxy_label = if proxy_host.contains(':') {
+            format!("[{proxy_host}]:{proxy_port}")
+        } else {
+            format!("{proxy_host}:{proxy_port}")
+        };
         let mut stream = TcpStream::connect((proxy_host.as_str(), proxy_port))
             .await
-            .map_err(|e| format!("upstream proxy {proxy_host}:{proxy_port}: {e}"))?;
+            .map_err(|e| format!("upstream proxy {proxy_label}: {e}"))?;
         let _ = stream.set_nodelay(true);
         let connect_req = format!(
             "CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\nProxy-Connection: Keep-Alive\r\n\r\n"
@@ -452,43 +480,55 @@ pub fn download(tag: &str, mut on_progress: impl FnMut(u64, u64)) -> Result<Path
     let path = env::temp_dir().join(format!("{tag}-{asset}"));
     fs::write(&path, &bytes).map_err(|e| e.to_string())?;
 
-    match fetch_checksum(tag, asset) {
-        Some(expected) => {
-            let Some(got) = file_sha256(&path) else {
-                let _ = fs::remove_file(&path);
-                return Err("could not verify the download (could not hash it)".into());
-            };
-            if !got.eq_ignore_ascii_case(&expected) {
-                let _ = fs::remove_file(&path);
-                return Err(format!("checksum mismatch: expected {expected}, got {got}"));
-            }
-        }
-        None if cfg!(not(target_os = "macos")) => {
-            let _ = fs::remove_file(&path);
-            return Err(
-                "the release carries no SHA256SUMS; not installing unverified bytes".into(),
-            );
-        }
-        None => {}
-    }
+    let checksums = fetch_checksums_text(tag);
+    verify_downloaded_asset(&path, asset, checksums.as_deref())?;
 
     Ok(path)
 }
 
-fn fetch_checksum(tag: &str, asset: &str) -> Option<String> {
+fn fetch_checksums_text(tag: &str) -> Option<String> {
     let bytes = fetch_asset_bytes(tag, CHECKSUMS_NAME, |_, _| {}).ok()?;
-    let text = String::from_utf8(bytes).ok()?;
-    parse_checksum_line(&text, asset)
+    String::from_utf8(bytes).ok()
+}
+
+fn verify_downloaded_asset(
+    path: &Path,
+    asset: &str,
+    checksums_text: Option<&str>,
+) -> Result<(), String> {
+    let Some(text) = checksums_text else {
+        let _ = fs::remove_file(path);
+        return Err("the release carries no SHA256SUMS; not installing unverified bytes".into());
+    };
+    let Some(expected) = parse_checksum_line(text, asset) else {
+        let _ = fs::remove_file(path);
+        return Err(format!(
+            "SHA256SUMS has no SHA-256 entry for {asset}; not installing unverified bytes"
+        ));
+    };
+    let Some(got) = file_sha256(path) else {
+        let _ = fs::remove_file(path);
+        return Err("could not verify the download (could not hash it)".into());
+    };
+    if !got.eq_ignore_ascii_case(&expected) {
+        let _ = fs::remove_file(path);
+        return Err(format!("checksum mismatch: expected {expected}, got {got}"));
+    }
+    Ok(())
 }
 
 fn parse_checksum_line(text: &str, asset: &str) -> Option<String> {
-    text.lines()
-        .find(|line| {
-            let trimmed = line.trim_end();
-            trimmed.ends_with(&format!(" {asset}")) || trimmed.ends_with(&format!(" *{asset}"))
-        })
-        .and_then(|line| line.split_whitespace().next())
-        .map(str::to_string)
+    text.lines().find_map(|line| {
+        let trimmed = line.trim();
+        let (hash, rest) = trimmed.split_once(char::is_whitespace)?;
+        if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        let name = rest.trim_start();
+        let name = name.strip_prefix('*').unwrap_or(name);
+        let name = name.strip_prefix("./").unwrap_or(name);
+        (name == asset).then(|| hash.to_string())
+    })
 }
 
 fn file_sha256(path: &Path) -> Option<String> {
@@ -566,6 +606,9 @@ fn install_over(target: &Path, dmg: &Path) -> Result<(), String> {
     let volume = attach(dmg)?;
     let result = replace_bundle(target, &volume);
     detach(&volume);
+    if result.is_ok() {
+        let _ = fs::remove_file(dmg);
+    }
     result
 }
 
@@ -668,8 +711,42 @@ pub fn relaunch() {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn sweep_previous_bundles_in(temp_dir: &Path, current_pid: u32) {
+    let Ok(entries) = fs::read_dir(temp_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name_str) = name.to_str() else {
+            continue;
+        };
+        let Some(mid) = name_str
+            .strip_prefix("zniff-previous-")
+            .and_then(|s| s.strip_suffix(".app"))
+        else {
+            continue;
+        };
+        let (pid_str, _stamp) = match mid.split_once('-') {
+            Some(pair) => pair,
+            None => continue,
+        };
+        let Ok(pid) = pid_str.parse::<u32>() else {
+            continue;
+        };
+        if pid == current_pid {
+            continue;
+        }
+        let path = entry.path();
+        if fs::remove_dir_all(&path).is_ok() {
+            log::info!("stale previous app bundle {} removed", path.display());
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 pub fn sweep_installer_mounts() {
+    sweep_previous_bundles_in(&env::temp_dir(), process::id());
     let running = env::current_exe().ok();
     let Ok(volumes) = fs::read_dir("/Volumes") else {
         return;
@@ -1421,6 +1498,10 @@ mod tests {
             !Path::new("/Volumes").join(volname).exists(),
             "the volume must be detached"
         );
+        assert!(
+            !dmg.exists(),
+            "downloaded dmg must be removed after successful in-place install"
+        );
         let parked = asides();
         assert!(
             parked
@@ -1568,6 +1649,126 @@ mod tests {
             resolve_redirect(&base, "/login"),
             "https://github.com/login"
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_downloaded_asset_requires_sha256sums_and_matching_entry_on_all_platforms() {
+        let dir = env::temp_dir().join(format!("zniff-verify-sums-{}", process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let payload = b"macos-dmg-installer-bytes";
+        let dmg = dir.join("v0.2.0-zniff-aarch64.dmg");
+
+        // 1. Missing SHA256SUMS -> rejected and downloaded asset removed (including on macOS)
+        fs::write(&dmg, payload).unwrap();
+        let err_none = verify_downloaded_asset(&dmg, "zniff-aarch64.dmg", None).unwrap_err();
+        assert!(
+            err_none.contains("no SHA256SUMS"),
+            "unexpected error: {err_none}"
+        );
+        assert!(
+            !dmg.exists(),
+            "unverified download must be deleted when SHA256SUMS is missing"
+        );
+
+        // 2. SHA256SUMS present, but missing an entry for the downloaded macOS asset -> rejected & removed
+        fs::write(&dmg, payload).unwrap();
+        let other_hash = file_sha256(&dmg).unwrap();
+        let sums_missing_asset = format!("{other_hash}  zniff-linux-x86_64.tar.gz\n");
+        let err_missing_entry =
+            verify_downloaded_asset(&dmg, "zniff-aarch64.dmg", Some(&sums_missing_asset))
+                .unwrap_err();
+        assert!(
+            err_missing_entry.contains("zniff-aarch64.dmg"),
+            "unexpected error: {err_missing_entry}"
+        );
+        assert!(
+            !dmg.exists(),
+            "unverified download must be deleted when asset entry is absent"
+        );
+
+        // 3. SHA256SUMS present with wrong SHA-256 -> rejected & removed
+        fs::write(&dmg, payload).unwrap();
+        let wrong_sums = format!("{}  zniff-aarch64.dmg\n", "0".repeat(64));
+        let err_mismatch =
+            verify_downloaded_asset(&dmg, "zniff-aarch64.dmg", Some(&wrong_sums)).unwrap_err();
+        assert!(
+            err_mismatch.contains("checksum mismatch"),
+            "unexpected error: {err_mismatch}"
+        );
+        assert!(
+            !dmg.exists(),
+            "tampered download must be deleted on checksum mismatch"
+        );
+
+        // 4. Matching SHA-256 (case-insensitive hex and `*`/`./` filename prefixes) -> accepted & kept
+        fs::write(&dmg, payload).unwrap();
+        let expected_upper = other_hash.to_ascii_uppercase();
+        let valid_sums = format!(
+            "{}  zniff-x86_64.dmg\n{expected_upper} *zniff-aarch64.dmg\n",
+            "a".repeat(64)
+        );
+        verify_downloaded_asset(&dmg, "zniff-aarch64.dmg", Some(&valid_sums))
+            .expect("matching SHA256SUMS entry must pass");
+        assert!(dmg.exists(), "verified download must remain on disk");
+
+        let dot_slash_sums = format!("{other_hash}  ./zniff-aarch64.dmg\n");
+        verify_downloaded_asset(&dmg, "zniff-aarch64.dmg", Some(&dot_slash_sums))
+            .expect("./asset form must also pass");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_upstream_proxy_strips_ipv6_brackets_and_guards_self_loop() {
+        assert_eq!(
+            parse_upstream_proxy("http://127.0.0.1:7890", 8878),
+            Some(("127.0.0.1".into(), 7890))
+        );
+        assert_eq!(
+            parse_upstream_proxy("http://[::1]:7890/", 8878),
+            Some(("::1".into(), 7890))
+        );
+        assert_eq!(
+            parse_upstream_proxy("[2001:db8::1]:8080", 8877),
+            Some(("2001:db8::1".into(), 8080))
+        );
+        // Self-loop guards for both prod (8877) and dev (8878) listen ports across IPv4/IPv6/localhost
+        assert_eq!(parse_upstream_proxy("127.0.0.1:8878", 8878), None);
+        assert_eq!(parse_upstream_proxy("http://localhost:8877", 8877), None);
+        assert_eq!(parse_upstream_proxy("http://[::1]:8878", 8878), None);
+        assert_eq!(parse_upstream_proxy("2001:db8::1:8080", 8877), None);
+    }
+
+    #[test]
+    fn sweep_previous_bundles_removes_other_pids_and_keeps_current_pid() {
+        let dir = env::temp_dir().join(format!("zniff-sweep-prev-{}", process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let cur_pid = 4242u32;
+        let current_bundle = dir.join(format!("zniff-previous-{cur_pid}-1700000001.app"));
+        let stale_bundle = dir.join("zniff-previous-99999-1700000000.app");
+        let unrelated_dir = dir.join("other-folder.app");
+
+        fs::create_dir_all(current_bundle.join("Contents/MacOS")).unwrap();
+        fs::create_dir_all(stale_bundle.join("Contents/MacOS")).unwrap();
+        fs::create_dir_all(&unrelated_dir).unwrap();
+
+        sweep_previous_bundles_in(&dir, cur_pid);
+
+        assert!(
+            !stale_bundle.exists(),
+            "other-PID previous bundle must be removed"
+        );
+        assert!(
+            current_bundle.exists(),
+            "current-PID previous bundle must stay"
+        );
+        assert!(unrelated_dir.exists(), "unrelated .app directory must stay");
+
         let _ = fs::remove_dir_all(&dir);
     }
 }

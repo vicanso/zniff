@@ -24,6 +24,16 @@ const CA_NAME: &str = "zniff CA";
 const LEGACY_CA_NAME: &str = "Snoop CA";
 
 const MAX_CACHED_LEAVES: usize = 256;
+const MAX_CACHED_CUSTOM_CERTS: usize = 64;
+
+struct CachedCustomCert {
+    cert_path: PathBuf,
+    key_path: Option<PathBuf>,
+    cert_mtime: std::time::SystemTime,
+    key_mtime: Option<std::time::SystemTime>,
+    certs: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
+}
 
 pub struct Ca {
     dir: PathBuf,
@@ -33,6 +43,7 @@ pub struct Ca {
     ca_der: CertificateDer<'static>,
     session_storage: Arc<dyn rustls::server::StoresServerSessions>,
     leaves: Mutex<Vec<(String, ServerConfig)>>,
+    custom_certs: Mutex<Vec<CachedCustomCert>>,
 }
 
 pub fn data_dir() -> PathBuf {
@@ -111,6 +122,7 @@ impl Ca {
             ca_der,
             session_storage: rustls::server::ServerSessionMemoryCache::new(64),
             leaves: Mutex::new(Vec::new()),
+            custom_certs: Mutex::new(Vec::new()),
         })
     }
 
@@ -149,7 +161,7 @@ impl Ca {
             }
         };
         if let Some((cert_path, key_path)) = effective_custom {
-            let (certs, key) = load_custom_cert_pair(cert_path, key_path)?;
+            let (certs, key) = self.load_cached_custom_cert_pair(cert_path, key_path)?;
             let mut config = ServerConfig::builder()
                 .with_no_client_auth()
                 .with_single_cert(certs, key)
@@ -191,9 +203,59 @@ impl Ca {
         let Some((cert_path, key_path)) = effective_custom else {
             return Ok(None);
         };
-        let (certs, key) = load_custom_cert_pair(cert_path, key_path)
+        let (certs, key) = self
+            .load_cached_custom_cert_pair(cert_path, key_path)
             .with_context(|| format!("读取客户端证书 {}", cert_path.display()))?;
         Ok(Some((certs, key)))
+    }
+
+    fn load_cached_custom_cert_pair(
+        &self,
+        cert_path: &Path,
+        key_path: Option<&Path>,
+    ) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
+        let cert_mtime = fs::metadata(cert_path).and_then(|m| m.modified()).ok();
+        let key_mtime = key_path.map(|kp| fs::metadata(kp).and_then(|m| m.modified()).ok());
+        if let Some(c_mtime) = cert_mtime
+            && key_mtime.is_none_or(|m| m.is_some())
+        {
+            let flat_key_mtime = key_mtime.flatten();
+            {
+                let mut guard = self
+                    .custom_certs
+                    .lock()
+                    .unwrap_or_else(|err| err.into_inner());
+                if let Some(pos) = guard.iter().position(|entry| {
+                    entry.cert_path == cert_path
+                        && entry.key_path.as_deref() == key_path
+                        && entry.cert_mtime == c_mtime
+                        && entry.key_mtime == flat_key_mtime
+                }) {
+                    let entry = guard.remove(pos);
+                    let out = (entry.certs.clone(), entry.key.clone_key());
+                    guard.push(entry);
+                    return Ok(out);
+                }
+            }
+            let (certs, key) = load_custom_cert_pair(cert_path, key_path)?;
+            let mut guard = self
+                .custom_certs
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            while guard.len() >= MAX_CACHED_CUSTOM_CERTS {
+                guard.remove(0);
+            }
+            guard.push(CachedCustomCert {
+                cert_path: cert_path.to_path_buf(),
+                key_path: key_path.map(Path::to_path_buf),
+                cert_mtime: c_mtime,
+                key_mtime: flat_key_mtime,
+                certs: certs.clone(),
+                key: key.clone_key(),
+            });
+            return Ok((certs, key));
+        }
+        load_custom_cert_pair(cert_path, key_path)
     }
 
     fn dir_custom_cert_in(&self, subdir: &str, host: &str) -> Option<(PathBuf, Option<PathBuf>)> {
@@ -201,7 +263,7 @@ impl Ca {
         if !certs_dir.is_dir() {
             return None;
         }
-        let lower = host.trim().to_ascii_lowercase();
+        let lower = normalize_ca_host(host);
         if lower.is_empty() {
             return None;
         }
@@ -231,18 +293,24 @@ impl Ca {
     }
 
     fn leaf_config(&self, host: &str) -> Result<ServerConfig> {
+        let normalized = normalize_ca_host(host);
+        let target = if normalized.is_empty() {
+            host.trim()
+        } else {
+            normalized.as_str()
+        };
         let mut guard = self.leaves.lock().unwrap_or_else(|err| err.into_inner());
-        if let Some(pos) = guard.iter().position(|(name, _)| name == host) {
+        if let Some(pos) = guard.iter().position(|(name, _)| name == target) {
             let entry = guard.remove(pos);
             let cfg = entry.1.clone();
             guard.push(entry);
             return Ok(cfg);
         }
-        let cfg = self.sign_leaf_config(host)?;
+        let cfg = self.sign_leaf_config(target)?;
         while guard.len() >= MAX_CACHED_LEAVES {
             guard.remove(0);
         }
-        guard.push((host.to_string(), cfg.clone()));
+        guard.push((target.to_string(), cfg.clone()));
         Ok(cfg)
     }
 
@@ -250,7 +318,7 @@ impl Ca {
         let leaf_key = KeyPair::generate()?;
         let mut params = CertificateParams::default();
         let mut name = DistinguishedName::new();
-        let common = if host.len() > 64 { &host[..64] } else { host };
+        let common = &host[..host.floor_char_boundary(64)];
         name.push(DnType::CommonName, common);
         params.distinguished_name = name;
         params.subject_alt_names = vec![san_for(host)?];
@@ -270,6 +338,13 @@ impl Ca {
         config.session_storage = Arc::clone(&self.session_storage);
         Ok(config)
     }
+}
+
+fn normalize_ca_host(host: &str) -> String {
+    host.trim()
+        .trim_matches(|ch| ch == '[' || ch == ']')
+        .trim_end_matches('.')
+        .to_ascii_lowercase()
 }
 
 fn san_for(host: &str) -> Result<SanType> {
@@ -1426,5 +1501,83 @@ Cert 0: zniff CA
             msg.contains("PEM 中未找到私钥块"),
             "expected missing key block message: {msg}"
         );
+    }
+
+    #[test]
+    fn host_normalization_utf8_cn_truncation_and_custom_cert_mtime_cache() {
+        let dir = std::env::temp_dir().join(format!(
+            "zniff-ca-norm-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let ca = Ca::open(&dir).unwrap();
+
+        // Trailing dot, uppercase, and bracketed IPv6 normalize to the same leaf cache entry.
+        let _ = ca.server_config("Example.COM.", b"http/1.1").unwrap();
+        let _ = ca.server_config("example.com", b"http/1.1").unwrap();
+        assert_eq!(ca.leaves.lock().unwrap().len(), 1);
+        let _ = ca.server_config("[::1]", b"http/1.1").unwrap();
+        assert_eq!(ca.leaves.lock().unwrap().len(), 2);
+
+        // > 64 byte multi-byte UTF-8 hostname must not panic at non-char boundary (index 64).
+        // 22 * 3 bytes = 66 bytes ("测" is 3 bytes in UTF-8, so byte 64 is inside a character).
+        let utf8_host = "测".repeat(22);
+        assert_eq!(utf8_host.len(), 66);
+        assert!(!utf8_host.is_char_boundary(64));
+        // `san_for` rejects raw non-ASCII DNS names, while CommonName truncation runs before `san_for` without panicking.
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = ca.sign_leaf_config(&utf8_host);
+        }));
+        assert!(
+            res.is_ok(),
+            "sign_leaf_config must not panic on UTF-8 boundary"
+        );
+
+        // Custom cert cache hits on unchanged mtime and reloads when cert/key file changes.
+        let k1 = KeyPair::generate().unwrap();
+        let c1 = CertificateParams::new(vec!["custom.example.com".to_string()])
+            .unwrap()
+            .self_signed(&k1)
+            .unwrap();
+        let pem_path = dir.join("custom.pem");
+        fs::write(&pem_path, format!("{}\n{}", c1.pem(), k1.serialize_pem())).unwrap();
+
+        let (chain1, _) = ca
+            .client_identity_for_host("custom.example.com", Some((&pem_path, None)))
+            .unwrap()
+            .unwrap();
+        let (chain1_cached, _) = ca
+            .client_identity_for_host("custom.example.com", Some((&pem_path, None)))
+            .unwrap()
+            .unwrap();
+        assert_eq!(chain1, chain1_cached);
+        assert_eq!(ca.custom_certs.lock().unwrap().len(), 1);
+
+        // Replace PEM on disk and bump mtime so cache invalidates cleanly.
+        let k2 = KeyPair::generate().unwrap();
+        let c2 = CertificateParams::new(vec!["custom.example.com".to_string()])
+            .unwrap()
+            .self_signed(&k2)
+            .unwrap();
+        // Force a distinct modification timestamp without sleeping long.
+        let future_time = std::time::SystemTime::now() + std::time::Duration::from_secs(2);
+        let file = fs::File::create(&pem_path).unwrap();
+        {
+            let mut writer = std::io::BufWriter::new(&file);
+            write!(writer, "{}\n{}", c2.pem(), k2.serialize_pem()).unwrap();
+        }
+        file.set_times(fs::FileTimes::new().set_modified(future_time))
+            .unwrap();
+
+        let (chain2, _) = ca
+            .client_identity_for_host("custom.example.com", Some((&pem_path, None)))
+            .unwrap()
+            .unwrap();
+        assert_ne!(chain1, chain2, "updated mtime must reload custom cert");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
