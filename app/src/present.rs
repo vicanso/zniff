@@ -175,13 +175,28 @@ fn is_hex_cap_note(line: &str) -> bool {
     line.starts_with("十六进制只显示前 ") || line.starts_with("Hex shows the first ")
 }
 
-/// Pixel size of a PNG, JPEG, GIF, or WebP body. Unknown bytes are skipped.
+/// Pixel size of a PNG, JPEG, GIF, WebP, or ICO body. Unknown bytes are skipped.
 pub fn image_pixel_size(bytes: &[u8]) -> Option<(u32, u32)> {
     png_size(bytes)
         .or_else(|| gif_size(bytes))
         .or_else(|| webp_size(bytes))
         .or_else(|| jpeg_size(bytes))
+        .or_else(|| ico_size(bytes))
         .filter(|&(w, h)| w > 0 && h > 0 && w <= 32_768 && h <= 32_768)
+}
+
+pub fn sniff_raster_extension(bytes: &[u8]) -> Option<&'static str> {
+    if png_size(bytes).is_some() {
+        Some("png")
+    } else if gif_size(bytes).is_some() {
+        Some("gif")
+    } else if webp_size(bytes).is_some() {
+        Some("webp")
+    } else if jpeg_size(bytes).is_some() {
+        Some("jpg")
+    } else {
+        None
+    }
 }
 
 /// Display size. A small icon stays at its own pixels. A larger picture
@@ -278,20 +293,335 @@ fn jpeg_size(bytes: &[u8]) -> Option<(u32, u32)> {
 }
 
 pub fn image_extension(content_type: &str) -> Option<&'static str> {
-    let kind = content_type.to_ascii_lowercase();
-    if kind.contains("png") {
+    let base = content_type
+        .split(';')
+        .next()
+        .unwrap_or(content_type)
+        .trim()
+        .to_ascii_lowercase();
+    if base.contains("png") {
         Some("png")
-    } else if kind.contains("jpeg") || kind.contains("jpg") {
+    } else if base.contains("jpeg") || base.contains("jpg") {
         Some("jpg")
-    } else if kind.contains("webp") {
+    } else if base.contains("webp") {
         Some("webp")
-    } else if kind.contains("gif") {
+    } else if base.contains("gif") {
         Some("gif")
-    } else if kind.contains("svg") {
+    } else if base.contains("svg") {
         Some("svg")
+    } else if base.contains("x-icon")
+        || base.contains("vnd.microsoft.icon")
+        || matches!(base.as_str(), "image/ico" | "image/icon")
+    {
+        Some("ico")
     } else {
         None
     }
+}
+
+fn ico_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    best_ico_entry(bytes).map(|entry| (entry.width, entry.height))
+}
+
+/// Converts a Windows `.ico` body (or raw PNG bytes served as `image/x-icon`)
+/// into a standard PNG buffer so every platform's `image` view can render it.
+pub fn ico_to_png(bytes: &[u8]) -> Option<Vec<u8>> {
+    if png_size(bytes).is_some() {
+        return Some(bytes.to_vec());
+    }
+    let entry = best_ico_entry(bytes)?;
+    if png_size(entry.data).is_some() {
+        return Some(entry.data.to_vec());
+    }
+    let (width, height, rgba) = decode_ico_dib(&entry)?;
+    png_rgba(width, height, &rgba)
+}
+
+struct IcoEntry<'a> {
+    width: u32,
+    height: u32,
+    bpp: u16,
+    dir_height: u32,
+    data: &'a [u8],
+}
+
+fn best_ico_entry(bytes: &[u8]) -> Option<IcoEntry<'_>> {
+    if bytes.len() < 6 || bytes[0..2] != [0, 0] {
+        return None;
+    }
+    if u16::from_le_bytes([bytes[2], bytes[3]]) != 1 {
+        return None;
+    }
+    let count = u16::from_le_bytes([bytes[4], bytes[5]]) as usize;
+    if count == 0 || count > 256 || 6usize.checked_add(count * 16)? > bytes.len() {
+        return None;
+    }
+    let mut best: Option<IcoEntry<'_>> = None;
+    for idx in 0..count {
+        let base = 6 + idx * 16;
+        let dir_w = if bytes[base] == 0 {
+            256
+        } else {
+            u32::from(bytes[base])
+        };
+        let dir_h = if bytes[base + 1] == 0 {
+            256
+        } else {
+            u32::from(bytes[base + 1])
+        };
+        let size = u32::from_le_bytes(bytes[base + 8..base + 12].try_into().ok()?) as usize;
+        let offset = u32::from_le_bytes(bytes[base + 12..base + 16].try_into().ok()?) as usize;
+        if size == 0 || offset.checked_add(size).is_none_or(|end| end > bytes.len()) {
+            continue;
+        }
+        let data = &bytes[offset..offset + size];
+        let Some((width, height, bpp)) = ico_entry_meta(dir_w, dir_h, data) else {
+            continue;
+        };
+        let replace = match &best {
+            None => true,
+            Some(cur) => {
+                (u64::from(width) * u64::from(height), bpp)
+                    > (u64::from(cur.width) * u64::from(cur.height), cur.bpp)
+            }
+        };
+        if replace {
+            best = Some(IcoEntry {
+                width,
+                height,
+                bpp,
+                dir_height: dir_h,
+                data,
+            });
+        }
+    }
+    best
+}
+
+fn ico_entry_meta(_dir_w: u32, dir_h: u32, data: &[u8]) -> Option<(u32, u32, u16)> {
+    if let Some((w, h)) = png_size(data) {
+        if w > 0 && h > 0 && w <= 1024 && h <= 1024 {
+            return Some((w, h, 32));
+        }
+        return None;
+    }
+    let dib = parse_ico_dib_header(dir_h, data)?;
+    Some((dib.width, dib.height, dib.bpp))
+}
+
+struct DibHeader {
+    header_size: usize,
+    width: u32,
+    height: u32,
+    top_down: bool,
+    bpp: u16,
+    palette_colors: usize,
+    xor_offset: usize,
+    xor_stride: usize,
+    xor_len: usize,
+}
+
+fn parse_ico_dib_header(dir_h: u32, data: &[u8]) -> Option<DibHeader> {
+    if data.len() < 40 {
+        return None;
+    }
+    let header_size = u32::from_le_bytes(data[0..4].try_into().ok()?) as usize;
+    if !(40..=data.len()).contains(&header_size) {
+        return None;
+    }
+    let raw_w = i32::from_le_bytes(data[4..8].try_into().ok()?);
+    let raw_h = i32::from_le_bytes(data[8..12].try_into().ok()?);
+    if raw_w <= 0 || raw_w > 1024 || raw_h == 0 || raw_h == i32::MIN {
+        return None;
+    }
+    let width = raw_w as u32;
+    let abs_h = raw_h.unsigned_abs();
+    let height = if abs_h == dir_h { dir_h } else { abs_h / 2 };
+    if height == 0 || height > 1024 {
+        return None;
+    }
+    let bpp = u16::from_le_bytes(data[14..16].try_into().ok()?);
+    if !matches!(bpp, 1 | 4 | 8 | 16 | 24 | 32) {
+        return None;
+    }
+    let compression = u32::from_le_bytes(data[16..20].try_into().ok()?);
+    if compression != 0 {
+        return None;
+    }
+    let clr_used = u32::from_le_bytes(data[32..36].try_into().ok()?) as usize;
+    let palette_colors = if bpp <= 8 {
+        let max_colors = 1usize << bpp;
+        if clr_used == 0 {
+            max_colors
+        } else {
+            clr_used.min(max_colors)
+        }
+    } else {
+        clr_used.min(256)
+    };
+    let xor_offset = header_size.checked_add(palette_colors * 4)?;
+    let xor_stride = (width as usize * bpp as usize).div_ceil(32) * 4;
+    let xor_len = xor_stride.checked_mul(height as usize)?;
+    if xor_offset.checked_add(xor_len)? > data.len() {
+        return None;
+    }
+    Some(DibHeader {
+        header_size,
+        width,
+        height,
+        top_down: raw_h < 0,
+        bpp,
+        palette_colors,
+        xor_offset,
+        xor_stride,
+        xor_len,
+    })
+}
+
+fn decode_ico_dib(entry: &IcoEntry<'_>) -> Option<(u32, u32, Vec<u8>)> {
+    let data = entry.data;
+    let dib = parse_ico_dib_header(entry.dir_height, data)?;
+    let w = dib.width as usize;
+    let h = dib.height as usize;
+    let palette = &data[dib.header_size..dib.xor_offset];
+    let xor_data = &data[dib.xor_offset..dib.xor_offset + dib.xor_len];
+    let and_offset = dib.xor_offset + dib.xor_len;
+    let and_stride = w.div_ceil(32) * 4;
+    let and_data = and_stride
+        .checked_mul(h)
+        .and_then(|len| and_offset.checked_add(len))
+        .and_then(|end| data.get(and_offset..end));
+
+    let mut rgba = Vec::with_capacity(w * h * 4);
+    let mut any_alpha = false;
+    for y in 0..h {
+        let src_y = if dib.top_down { y } else { h - 1 - y };
+        let row = &xor_data[src_y * dib.xor_stride..(src_y + 1) * dib.xor_stride];
+        let and_row = and_data.map(|m| &m[src_y * and_stride..(src_y + 1) * and_stride]);
+        for x in 0..w {
+            let masked = and_row.is_some_and(|mr| (mr[x / 8] >> (7 - (x % 8))) & 1 != 0);
+            let mask_alpha = if masked { 0 } else { 255 };
+            let (r, g, b, a) = match dib.bpp {
+                32 => {
+                    let p = x * 4;
+                    let a = row[p + 3];
+                    if a != 0 {
+                        any_alpha = true;
+                    }
+                    (row[p + 2], row[p + 1], row[p], a)
+                }
+                24 => {
+                    let p = x * 3;
+                    (row[p + 2], row[p + 1], row[p], mask_alpha)
+                }
+                16 => {
+                    let v = u16::from_le_bytes([row[x * 2], row[x * 2 + 1]]);
+                    let r = (((v >> 10) & 0x1f) * 255 / 31) as u8;
+                    let g = (((v >> 5) & 0x1f) * 255 / 31) as u8;
+                    let b = ((v & 0x1f) * 255 / 31) as u8;
+                    (r, g, b, mask_alpha)
+                }
+                8 => {
+                    let (r, g, b) = palette_rgb(palette, dib.palette_colors, row[x] as usize);
+                    (r, g, b, mask_alpha)
+                }
+                4 => {
+                    let byte = row[x / 2];
+                    let idx = if x % 2 == 0 {
+                        (byte >> 4) & 0x0f
+                    } else {
+                        byte & 0x0f
+                    } as usize;
+                    let (r, g, b) = palette_rgb(palette, dib.palette_colors, idx);
+                    (r, g, b, mask_alpha)
+                }
+                1 => {
+                    let idx = ((row[x / 8] >> (7 - (x % 8))) & 1) as usize;
+                    let (r, g, b) = palette_rgb(palette, dib.palette_colors, idx);
+                    (r, g, b, mask_alpha)
+                }
+                _ => return None,
+            };
+            rgba.extend_from_slice(&[r, g, b, a]);
+        }
+    }
+    if dib.bpp == 32 && !any_alpha {
+        if let Some(mask) = and_data {
+            for y in 0..h {
+                let src_y = if dib.top_down { y } else { h - 1 - y };
+                let and_row = &mask[src_y * and_stride..(src_y + 1) * and_stride];
+                for x in 0..w {
+                    let masked = (and_row[x / 8] >> (7 - (x % 8))) & 1 != 0;
+                    rgba[(y * w + x) * 4 + 3] = if masked { 0 } else { 255 };
+                }
+            }
+        } else {
+            for px in rgba.as_chunks_mut::<4>().0 {
+                px[3] = 255;
+            }
+        }
+    }
+    Some((dib.width, dib.height, rgba))
+}
+
+fn palette_rgb(palette: &[u8], colors: usize, idx: usize) -> (u8, u8, u8) {
+    if idx < colors {
+        let p = idx * 4;
+        (palette[p + 2], palette[p + 1], palette[p])
+    } else {
+        (0, 0, 0)
+    }
+}
+
+fn png_rgba(width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> {
+    use std::io::Write;
+    let row_bytes = width as usize * 4;
+    if rgba.len() != row_bytes * height as usize {
+        return None;
+    }
+    let mut raw = Vec::with_capacity((row_bytes + 1) * height as usize);
+    for row in rgba.chunks_exact(row_bytes) {
+        raw.push(0);
+        raw.extend_from_slice(row);
+    }
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder.write_all(&raw).ok()?;
+    let zlib_data = encoder.finish().ok()?;
+
+    let mut ihdr = Vec::with_capacity(13);
+    ihdr.extend_from_slice(&width.to_be_bytes());
+    ihdr.extend_from_slice(&height.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
+    let mut out = Vec::with_capacity(64 + zlib_data.len());
+    out.extend_from_slice(b"\x89PNG\r\n\x1a\n");
+    out.extend_from_slice(&png_chunk(b"IHDR", &ihdr));
+    out.extend_from_slice(&png_chunk(b"IDAT", &zlib_data));
+    out.extend_from_slice(&png_chunk(b"IEND", &[]));
+    Some(out)
+}
+
+pub(crate) fn png_chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+    let mut body = Vec::with_capacity(4 + data.len());
+    body.extend_from_slice(kind);
+    body.extend_from_slice(data);
+    let crc = crc32(&body);
+    let mut out = Vec::with_capacity(8 + body.len());
+    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    out.extend_from_slice(&body);
+    out.extend_from_slice(&crc.to_be_bytes());
+    out
+}
+
+pub(crate) fn crc32(data: &[u8]) -> u32 {
+    let mut crc = 0xffff_ffffu32;
+    for byte in data {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+        }
+    }
+    !crc
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -696,9 +1026,10 @@ pub struct CurlRequest {
     pub body: String,
 }
 
-/// Parses a single curl command. Supports `-X`, `-H`, `--url`, and
-/// `--data` / `--data-raw` / `--data-binary` / `-d`, with quotes.
-/// A body without `-X` becomes POST. Unknown flags are ignored.
+/// Parses a single curl command. Supports `-X`/`--request`, `-H`/`--header`,
+/// `--url`, `-I`/`--head`, `-G`/`--get`, `--json`, `--data-urlencode`, and
+/// `-d`/`--data`/`--data-raw`/`--data-binary`/`--data-ascii` (joining multiple
+/// data flags with `&`), with shell quotes and continuations. Unknown flags are ignored.
 pub fn parse_curl(text: &str) -> Option<CurlRequest> {
     let tokens = shell_tokens(text);
     if tokens.is_empty() {
@@ -711,8 +1042,10 @@ pub fn parse_curl(text: &str) -> Option<CurlRequest> {
     let mut method = String::new();
     let mut url = String::new();
     let mut headers = Vec::new();
-    let mut body = String::new();
-    let mut saw_body = false;
+    let mut data_parts: Vec<String> = Vec::new();
+    let mut saw_json = false;
+    let mut saw_head = false;
+    let mut saw_get = false;
     while index < tokens.len() {
         let token = tokens[index].as_str();
         let (flag, inline) = split_flag(token);
@@ -731,9 +1064,18 @@ pub fn parse_curl(text: &str) -> Option<CurlRequest> {
                 headers.push((name.trim().to_string(), value.trim().to_string()));
             }
             "-d" | "--data" | "--data-raw" | "--data-binary" | "--data-ascii" => {
-                body = arg(&mut index)?;
-                saw_body = true;
+                data_parts.push(arg(&mut index)?);
             }
+            "--data-urlencode" => {
+                let raw = arg(&mut index)?;
+                data_parts.push(encode_curl_data_urlencode(&raw));
+            }
+            "--json" => {
+                data_parts.push(arg(&mut index)?);
+                saw_json = true;
+            }
+            "-I" | "--head" => saw_head = true,
+            "-G" | "--get" => saw_get = true,
             "--url" => url = arg(&mut index)?,
             "-A" | "--user-agent" => {
                 headers.push(("User-Agent".into(), arg(&mut index)?));
@@ -744,10 +1086,27 @@ pub fn parse_curl(text: &str) -> Option<CurlRequest> {
             "-b" | "--cookie" => {
                 headers.push(("Cookie".into(), arg(&mut index)?));
             }
-            "-u" | "--user" | "-x" | "--proxy" => {
+            "-u" | "--user" | "-x" | "--proxy" | "-o" | "--output" | "-m" | "--max-time"
+            | "--connect-timeout" | "-w" | "--write-out" => {
                 let _ = arg(&mut index)?;
             }
-            other if other.starts_with('-') => {}
+            other if other.starts_with('-') => {
+                if !other.starts_with("--")
+                    && other[1..].chars().all(|c| {
+                        matches!(
+                            c,
+                            's' | 'S' | 'L' | 'k' | 'v' | 'i' | 'f' | 'N' | '4' | '6' | 'I' | 'G'
+                        )
+                    })
+                {
+                    if other.contains('I') {
+                        saw_head = true;
+                    }
+                    if other.contains('G') {
+                        saw_get = true;
+                    }
+                }
+            }
             other if url.is_empty() => url = other.to_string(),
             _ => {}
         }
@@ -756,8 +1115,36 @@ pub fn parse_curl(text: &str) -> Option<CurlRequest> {
     if url.is_empty() {
         return None;
     }
+    if saw_json {
+        if !headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+        {
+            headers.push(("Content-Type".into(), "application/json".into()));
+        }
+        if !headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("accept"))
+        {
+            headers.push(("Accept".into(), "application/json".into()));
+        }
+    }
+    let saw_body = !data_parts.is_empty();
+    let joined_data = data_parts.join("&");
+    let body = if saw_get {
+        if !joined_data.is_empty() {
+            url = append_query_to_url(&url, &joined_data);
+        }
+        String::new()
+    } else {
+        joined_data
+    };
     if method.is_empty() {
-        method = if saw_body {
+        method = if saw_head {
+            "HEAD".into()
+        } else if saw_get {
+            "GET".into()
+        } else if saw_body {
             "POST".into()
         } else {
             "GET".into()
@@ -769,6 +1156,50 @@ pub fn parse_curl(text: &str) -> Option<CurlRequest> {
         headers,
         body,
     })
+}
+
+fn encode_curl_data_urlencode(raw: &str) -> String {
+    if let Some(rest) = raw.strip_prefix('=') {
+        percent_encode_curl_component(rest)
+    } else if let Some((name, content)) = raw.split_once('=') {
+        format!("{name}={}", percent_encode_curl_component(content))
+    } else {
+        percent_encode_curl_component(raw)
+    }
+}
+
+fn percent_encode_curl_component(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
+fn append_query_to_url(url: &str, query: &str) -> String {
+    let (base, frag) = match url.split_once('#') {
+        Some((b, f)) => (b, Some(f)),
+        None => (url, None),
+    };
+    let mut out = String::with_capacity(url.len() + query.len() + 1);
+    out.push_str(base);
+    if base.contains('?') {
+        if !base.ends_with('?') && !base.ends_with('&') {
+            out.push('&');
+        }
+    } else {
+        out.push('?');
+    }
+    out.push_str(query);
+    if let Some(f) = frag {
+        out.push('#');
+        out.push_str(f);
+    }
+    out
 }
 
 /// Extra readable text for a header value: JWT payload, a unix time, or
@@ -2207,10 +2638,24 @@ pub fn rust_string(text: &str) -> String {
 }
 
 fn py_string(text: &str) -> String {
-    format!(
-        "'''{}'''",
-        text.replace('\\', "\\\\").replace("'''", "\\'\\'\\'")
-    )
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for ch in text.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 || c == '\x7f' => {
+                use std::fmt::Write;
+                let _ = write!(out, "\\x{:02x}", c as u32);
+            }
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
 }
 
 #[derive(Default)]
@@ -2276,7 +2721,13 @@ fn pascal(key: &str) -> String {
             upper = true;
         }
     }
-    if out.is_empty() { "Value".into() } else { out }
+    if out.is_empty() {
+        "Value".into()
+    } else if out.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
+        format!("N{out}")
+    } else {
+        out
+    }
 }
 
 fn ts_key(key: &str) -> String {
@@ -2351,7 +2802,37 @@ impl RustStructGen {
     }
 
     fn fresh(&mut self, name: &str) -> String {
-        let base = if name.is_empty() { "Value" } else { name };
+        const RESERVED_TYPES: &[&str] = &[
+            "String",
+            "Vec",
+            "Option",
+            "Result",
+            "Box",
+            "Serialize",
+            "Deserialize",
+            "Self",
+            "Copy",
+            "Clone",
+            "Debug",
+            "Default",
+            "Drop",
+            "Send",
+            "Sync",
+            "Sized",
+            "ToOwned",
+            "ToString",
+            "Fn",
+            "FnMut",
+            "FnOnce",
+        ];
+        let raw_base = if name.is_empty() { "Value" } else { name };
+        let base_owned;
+        let base = if RESERVED_TYPES.contains(&raw_base) {
+            base_owned = format!("{raw_base}Value");
+            base_owned.as_str()
+        } else {
+            raw_base
+        };
         let mut candidate = base.to_string();
         let mut n = 2;
         while self.used.iter().any(|used| used == &candidate) {
@@ -2411,35 +2892,168 @@ fn rust_field_ident(key: &str) -> (String, bool) {
     (ident, rename_needed)
 }
 
+fn decode_ansi_c_segment(rest: &str) -> (String, usize) {
+    let bytes = rest.as_bytes();
+    let mut out: Vec<u8> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let ch = rest[i..].chars().next().unwrap_or('\0');
+        let ch_len = ch.len_utf8();
+        if ch == '\'' {
+            return (String::from_utf8_lossy(&out).into_owned(), i + 1);
+        }
+        if ch != '\\' {
+            out.extend_from_slice(&bytes[i..i + ch_len]);
+            i += ch_len;
+            continue;
+        }
+        i += 1;
+        if i >= bytes.len() {
+            out.push(b'\\');
+            break;
+        }
+        let esc = rest[i..].chars().next().unwrap_or('\0');
+        let esc_len = esc.len_utf8();
+        i += esc_len;
+        match esc {
+            'a' => out.push(0x07),
+            'b' => out.push(0x08),
+            'e' | 'E' => out.push(0x1b),
+            'f' => out.push(0x0c),
+            'n' => out.push(b'\n'),
+            'r' => out.push(b'\r'),
+            't' => out.push(b'\t'),
+            'v' => out.push(0x0b),
+            '\\' => out.push(b'\\'),
+            '\'' => out.push(b'\''),
+            '"' => out.push(b'"'),
+            '?' => out.push(b'?'),
+            'x' => {
+                let mut hex_len = 0;
+                while hex_len < 2
+                    && i + hex_len < bytes.len()
+                    && bytes[i + hex_len].is_ascii_hexdigit()
+                {
+                    hex_len += 1;
+                }
+                if hex_len > 0
+                    && let Ok(val) = u8::from_str_radix(&rest[i..i + hex_len], 16)
+                {
+                    out.push(val);
+                    i += hex_len;
+                } else {
+                    out.extend_from_slice(b"\\x");
+                }
+            }
+            'u' | 'U' => {
+                let max_digits = if esc == 'u' { 4 } else { 8 };
+                let mut hex_len = 0;
+                while hex_len < max_digits
+                    && i + hex_len < bytes.len()
+                    && bytes[i + hex_len].is_ascii_hexdigit()
+                {
+                    hex_len += 1;
+                }
+                if hex_len > 0
+                    && let Ok(code) = u32::from_str_radix(&rest[i..i + hex_len], 16)
+                    && let Some(decoded) = char::from_u32(code)
+                {
+                    let mut buf = [0u8; 4];
+                    out.extend_from_slice(decoded.encode_utf8(&mut buf).as_bytes());
+                    i += hex_len;
+                } else {
+                    out.push(b'\\');
+                    out.push(esc as u8);
+                }
+            }
+            '0'..='7' => {
+                let mut oct = (esc as u8 - b'0') as u32;
+                let mut count = 1;
+                while count < 3 && i < bytes.len() && matches!(bytes[i], b'0'..=b'7') {
+                    oct = oct * 8 + (bytes[i] - b'0') as u32;
+                    i += 1;
+                    count += 1;
+                }
+                out.push((oct & 0xff) as u8);
+            }
+            other => {
+                out.push(b'\\');
+                let mut buf = [0u8; 4];
+                out.extend_from_slice(other.encode_utf8(&mut buf).as_bytes());
+            }
+        }
+    }
+    (String::from_utf8_lossy(&out).into_owned(), bytes.len())
+}
+
 fn shell_tokens(input: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
-    let mut chars = input.chars().peekable();
+    let mut in_token = false;
     let mut quote: Option<char> = None;
-    while let Some(ch) = chars.next() {
+    let mut i = 0;
+    while i < input.len() {
+        let rest = &input[i..];
+        let ch = rest.chars().next().unwrap_or('\0');
+        let ch_len = ch.len_utf8();
         if let Some(mark) = quote {
+            i += ch_len;
             if ch == mark {
                 quote = None;
             } else if ch == '\\' && mark == '"' {
-                if let Some(next) = chars.next() {
+                let after = &input[i..];
+                if after.starts_with("\r\n") {
+                    i += 2;
+                } else if after.starts_with('\n') {
+                    i += 1;
+                } else if let Some(next) = after.chars().next() {
                     current.push(next);
+                    i += next.len_utf8();
                 }
             } else {
                 current.push(ch);
             }
             continue;
         }
+        if rest.starts_with("$'") {
+            i += 2;
+            in_token = true;
+            let (decoded, consumed) = decode_ansi_c_segment(&input[i..]);
+            current.push_str(&decoded);
+            i += consumed;
+            continue;
+        }
+        i += ch_len;
         match ch {
-            '\'' | '"' => quote = Some(ch),
-            ch if ch.is_whitespace() => {
-                if !current.is_empty() {
-                    tokens.push(std::mem::take(&mut current));
+            '\'' | '"' => {
+                in_token = true;
+                quote = Some(ch);
+            }
+            '\\' => {
+                let after = &input[i..];
+                if after.starts_with("\r\n") {
+                    i += 2;
+                } else if after.starts_with('\n') {
+                    i += 1;
+                } else if let Some(next) = after.chars().next() {
+                    in_token = true;
+                    current.push(next);
+                    i += next.len_utf8();
                 }
             }
-            _ => current.push(ch),
+            c if c.is_whitespace() => {
+                if in_token {
+                    tokens.push(std::mem::take(&mut current));
+                    in_token = false;
+                }
+            }
+            _ => {
+                in_token = true;
+                current.push(ch);
+            }
         }
     }
-    if !current.is_empty() {
+    if in_token {
         tokens.push(current);
     }
     tokens
@@ -2447,16 +3061,22 @@ fn shell_tokens(input: &str) -> Vec<String> {
 
 fn split_flag(token: &str) -> (&str, Option<&str>) {
     const FLAGS: &[&str] = &[
+        "--connect-timeout",
+        "--data-urlencode",
         "--data-binary",
         "--data-raw",
         "--data-ascii",
+        "--user-agent",
+        "--write-out",
+        "--max-time",
         "--request",
         "--header",
-        "--user-agent",
         "--referer",
         "--cookie",
+        "--output",
         "--proxy",
         "--data",
+        "--json",
         "--url",
         "--user",
         "-X",
@@ -2467,6 +3087,9 @@ fn split_flag(token: &str) -> (&str, Option<&str>) {
         "-b",
         "-u",
         "-x",
+        "-o",
+        "-m",
+        "-w",
     ];
     for flag in FLAGS {
         if token == *flag {
@@ -3928,6 +4551,118 @@ mod tests {
     }
 
     #[test]
+    fn ico_preview_extracts_png_and_decodes_dib_entries() {
+        use std::io::Read;
+
+        assert_eq!(image_extension("image/x-icon"), Some("ico"));
+        assert_eq!(image_extension("image/vnd.microsoft.icon"), Some("ico"));
+        assert_eq!(image_extension("image/ico; charset=binary"), Some("ico"));
+        assert_eq!(image_extension("application/json"), None);
+
+        // 1. Multi-entry ICO: 1x1 24-bit DIB + 2x2 32-bit BGRA DIB (picks 2x2)
+        let mut dib_1x1 = Vec::new();
+        dib_1x1.extend_from_slice(&40u32.to_le_bytes());
+        dib_1x1.extend_from_slice(&1i32.to_le_bytes());
+        dib_1x1.extend_from_slice(&2i32.to_le_bytes());
+        dib_1x1.extend_from_slice(&1u16.to_le_bytes());
+        dib_1x1.extend_from_slice(&24u16.to_le_bytes());
+        dib_1x1.extend_from_slice(&[0u8; 24]);
+        dib_1x1.extend_from_slice(&[0x11, 0x22, 0x33, 0x00]); // padded 24-bit row
+        dib_1x1.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // AND mask row
+
+        let mut dib_2x2 = Vec::new();
+        dib_2x2.extend_from_slice(&40u32.to_le_bytes());
+        dib_2x2.extend_from_slice(&2i32.to_le_bytes());
+        dib_2x2.extend_from_slice(&4i32.to_le_bytes()); // height * 2
+        dib_2x2.extend_from_slice(&1u16.to_le_bytes());
+        dib_2x2.extend_from_slice(&32u16.to_le_bytes());
+        dib_2x2.extend_from_slice(&[0u8; 24]);
+        // Bottom row (y = 1): blue opaque, green semi-transparent
+        dib_2x2.extend_from_slice(&[255, 0, 0, 255, 0, 255, 0, 128]);
+        // Top row (y = 0): red opaque, transparent
+        dib_2x2.extend_from_slice(&[0, 0, 255, 255, 0, 0, 0, 0]);
+        dib_2x2.extend_from_slice(&[0u8; 8]); // AND mask (2 rows * 4 bytes)
+
+        let off1 = 6 + 32;
+        let off2 = off1 + dib_1x1.len();
+        let mut ico = Vec::new();
+        ico.extend_from_slice(&[0, 0, 1, 0, 2, 0]);
+        // Entry 1: 1x1
+        ico.extend_from_slice(&[1, 1, 0, 0, 1, 0, 24, 0]);
+        ico.extend_from_slice(&(dib_1x1.len() as u32).to_le_bytes());
+        ico.extend_from_slice(&(off1 as u32).to_le_bytes());
+        // Entry 2: 2x2
+        ico.extend_from_slice(&[2, 2, 0, 0, 1, 0, 32, 0]);
+        ico.extend_from_slice(&(dib_2x2.len() as u32).to_le_bytes());
+        ico.extend_from_slice(&(off2 as u32).to_le_bytes());
+        ico.extend_from_slice(&dib_1x1);
+        ico.extend_from_slice(&dib_2x2);
+
+        assert_eq!(image_pixel_size(&ico), Some((2, 2)));
+        let png = ico_to_png(&ico).expect("valid 2x2 PNG from ICO");
+        assert_eq!(image_pixel_size(&png), Some((2, 2)));
+        // Verify IDAT decompresses to top-down RGBA rows
+        let idat_pos = png.windows(4).position(|w| w == b"IDAT").unwrap();
+        let idat_len = u32::from_be_bytes(png[idat_pos - 4..idat_pos].try_into().unwrap()) as usize;
+        let mut raw = Vec::new();
+        flate2::read::ZlibDecoder::new(&png[idat_pos + 4..idat_pos + 4 + idat_len])
+            .read_to_end(&mut raw)
+            .unwrap();
+        assert_eq!(
+            raw,
+            vec![
+                0, 255, 0, 0, 255, 0, 0, 0, 0, // top row: red opaque, transparent
+                0, 0, 0, 255, 255, 0, 255, 0, 128, // bottom row: blue opaque, green 128
+            ]
+        );
+
+        // 2. Legacy 32-bit BGR0 ICO where alpha channel is all zero and AND mask controls shape
+        let mut bgr0 = Vec::new();
+        bgr0.extend_from_slice(&40u32.to_le_bytes());
+        bgr0.extend_from_slice(&2i32.to_le_bytes());
+        bgr0.extend_from_slice(&2i32.to_le_bytes()); // 2x1 -> height*2 = 2
+        bgr0.extend_from_slice(&1u16.to_le_bytes());
+        bgr0.extend_from_slice(&32u16.to_le_bytes());
+        bgr0.extend_from_slice(&[0u8; 24]);
+        bgr0.extend_from_slice(&[0x10, 0x20, 0x30, 0, 0x40, 0x50, 0x60, 0]);
+        bgr0.extend_from_slice(&[0b0100_0000, 0, 0, 0]); // x=0 opaque (0), x=1 transparent (1)
+        let mut ico_bgr0 = Vec::new();
+        ico_bgr0.extend_from_slice(&[0, 0, 1, 0, 1, 0]);
+        ico_bgr0.extend_from_slice(&[2, 1, 0, 0, 1, 0, 32, 0]);
+        ico_bgr0.extend_from_slice(&(bgr0.len() as u32).to_le_bytes());
+        ico_bgr0.extend_from_slice(&22u32.to_le_bytes());
+        ico_bgr0.extend_from_slice(&bgr0);
+        let png_bgr0 = ico_to_png(&ico_bgr0).expect("valid BGR0 ICO");
+        let idat_pos = png_bgr0.windows(4).position(|w| w == b"IDAT").unwrap();
+        let idat_len =
+            u32::from_be_bytes(png_bgr0[idat_pos - 4..idat_pos].try_into().unwrap()) as usize;
+        let mut raw_bgr0 = Vec::new();
+        flate2::read::ZlibDecoder::new(&png_bgr0[idat_pos + 4..idat_pos + 4 + idat_len])
+            .read_to_end(&mut raw_bgr0)
+            .unwrap();
+        assert_eq!(
+            raw_bgr0,
+            vec![0, 0x30, 0x20, 0x10, 255, 0x60, 0x50, 0x40, 0]
+        );
+
+        // 3. Embedded 256x256 PNG inside ICO (directory width/height 0 == 256)
+        let embedded = png_rgba(256, 256, &vec![0u8; 256 * 256 * 4]).unwrap();
+        let mut ico_png = Vec::new();
+        ico_png.extend_from_slice(&[0, 0, 1, 0, 1, 0]);
+        ico_png.extend_from_slice(&[0, 0, 0, 0, 1, 0, 32, 0]);
+        ico_png.extend_from_slice(&(embedded.len() as u32).to_le_bytes());
+        ico_png.extend_from_slice(&22u32.to_le_bytes());
+        ico_png.extend_from_slice(&embedded);
+        assert_eq!(image_pixel_size(&ico_png), Some((256, 256)));
+        assert_eq!(preview_box(256, 256), (200, 200));
+        assert_eq!(ico_to_png(&ico_png).as_deref(), Some(embedded.as_slice()));
+
+        // 4. Truncated / invalid bytes return None
+        assert_eq!(image_pixel_size(b"\x00\x00\x01\x00\x01\x00truncated"), None);
+        assert_eq!(ico_to_png(b"not an icon"), None);
+    }
+
+    #[test]
     fn editor_language_follows_the_content_type() {
         assert_eq!(
             editor_language(Some("application/json; charset=utf-8"), "{\"a\":1}"),
@@ -4029,7 +4764,7 @@ mod tests {
         assert!(!fetch.contains("Host"));
         let python = python_requests(&flow);
         assert!(python.contains("import requests"));
-        assert!(python.contains("'''POST'''"));
+        assert!(python.contains("\"POST\","));
         let env = proxy_env_export(8877, "/tmp/zniff/ca.crt");
         assert!(env.contains("export https_proxy=http://127.0.0.1:8877"));
         assert!(env.contains("export ALL_PROXY=http://127.0.0.1:8877"));
@@ -4674,5 +5409,173 @@ Content-Type: image/png\r\n\r\n\
         assert_eq!(format_count(1024 * 1024), "1.0 MB");
         assert_eq!(format_count(99 * 1024 * 1024), "99.0 MB");
         assert_eq!(format_count(100 * 1024 * 1024), "100 MB");
+    }
+
+    #[test]
+    fn py_string_escapes_trailing_quotes_crlf_and_control_chars() {
+        assert_eq!(py_string("ends-with-'"), r#""ends-with-'""#);
+        assert_eq!(py_string("triple ''' quotes"), r#""triple ''' quotes""#);
+        assert_eq!(
+            py_string("line1\r\nline2\t\"\\"),
+            r#""line1\r\nline2\t\"\\""#
+        );
+        assert_eq!(py_string("nul\0and7\x07\x7f"), r#""nul\x00and7\x07\x7f""#);
+    }
+
+    #[test]
+    fn codegen_handles_digit_leading_keys_and_avoids_rust_prelude_shadowing() {
+        let sample = r#"{
+            "1st_stage": {"ok": true},
+            "string": {"label": "hi"},
+            "vec": [{"n": 1}],
+            "option": {"flag": null},
+            "result": {"code": 200},
+            "box": {"size": 4}
+        }"#;
+        let ts = typescript_interface(sample).unwrap();
+        assert!(ts.contains("export interface N1stStage {"), "{ts}");
+        assert!(ts.contains("\"1st_stage\": N1stStage;"), "{ts}");
+
+        let rs = rust_serde_struct(sample).unwrap();
+        assert!(rs.contains("pub struct N1stStage {"), "{rs}");
+        assert!(rs.contains("pub struct StringValue {"), "{rs}");
+        assert!(rs.contains("pub struct VecValue {"), "{rs}");
+        assert!(rs.contains("pub struct OptionValue {"), "{rs}");
+        assert!(rs.contains("pub struct ResultValue {"), "{rs}");
+        assert!(rs.contains("pub struct BoxValue {"), "{rs}");
+        assert!(!rs.contains("pub struct String {"), "{rs}");
+        assert!(!rs.contains("pub struct Vec {"), "{rs}");
+        assert!(!rs.contains("pub struct Option {"), "{rs}");
+    }
+
+    #[test]
+    fn parse_curl_handles_line_continuations_ansi_c_quotes_and_non_request_flags() {
+        // Multi-line cURL with both \\\n and \\\r\n continuations and '\'' single-quote escape
+        let multiline = concat!(
+            "curl -X POST 'https://api.example.com/it'\\''s' \\\n",
+            "  -o /tmp/out.json --connect-timeout 5 \\\r\n",
+            "  -m 10 --write-out '%{http_code}' \\\n",
+            "  -H 'Content-Type: application/json' \\\r\n",
+            "  --data-raw '{\"ok\":true}'"
+        );
+        let req = parse_curl(multiline).unwrap();
+        assert_eq!(req.method, "POST");
+        assert_eq!(req.url, "https://api.example.com/it's");
+        assert_eq!(
+            req.headers,
+            vec![("Content-Type".into(), "application/json".into())]
+        );
+        assert_eq!(req.body, "{\"ok\":true}");
+
+        // Chrome DevTools "Copy as cURL (bash)" ANSI-C $'...' quoting + unquoted \x escapes
+        let chrome_curl = r#"curl https://api.example.com/search\?q=1\&p=2 -H $'X-Note: it\'s\tok' --data-raw $'line1\r\n\xe4\xb8\xad\u6587' --output=/tmp/ignored.bin --max-time=30"#;
+        let req2 = parse_curl(chrome_curl).unwrap();
+        assert_eq!(req2.method, "POST");
+        assert_eq!(req2.url, "https://api.example.com/search?q=1&p=2");
+        assert_eq!(req2.headers, vec![("X-Note".into(), "it's\tok".into())]);
+        assert_eq!(req2.body, "line1\r\n中文");
+    }
+
+    #[test]
+    fn parse_curl_supports_json_head_multi_data_urlencode_and_get() {
+        // 1. --json <data> and --json=<data>: POST default + Content-Type & Accept defaults
+        let json_req =
+            parse_curl(r#"curl --json '{"name":"zniff","v":1}' https://api.example.com/v1/apps"#)
+                .unwrap();
+        assert_eq!(json_req.method, "POST");
+        assert_eq!(json_req.url, "https://api.example.com/v1/apps");
+        assert_eq!(json_req.body, r#"{"name":"zniff","v":1}"#);
+        assert_eq!(
+            json_req.headers,
+            vec![
+                ("Content-Type".into(), "application/json".into()),
+                ("Accept".into(), "application/json".into()),
+            ]
+        );
+
+        // --json=<data> with explicit -X PATCH and case-insensitive pre-existing headers (even after --json)
+        let json_override = parse_curl(
+            r#"curl --json='{"patched":true}' -X PATCH -H 'content-type: application/merge-patch+json' -H 'ACCEPT: application/problem+json' https://api.example.com/v1/apps/1"#,
+        )
+        .unwrap();
+        assert_eq!(json_override.method, "PATCH");
+        assert_eq!(json_override.body, r#"{"patched":true}"#);
+        assert_eq!(
+            json_override.headers,
+            vec![
+                ("content-type".into(), "application/merge-patch+json".into()),
+                ("ACCEPT".into(), "application/problem+json".into()),
+            ]
+        );
+
+        // 2. -I / --head (and combined -sI) + -X override
+        let head_short = parse_curl("curl -I https://example.com/healthz").unwrap();
+        assert_eq!(head_short.method, "HEAD");
+        assert_eq!(head_short.url, "https://example.com/healthz");
+        assert!(head_short.body.is_empty());
+
+        let head_long = parse_curl("curl --head https://example.com/healthz").unwrap();
+        assert_eq!(head_long.method, "HEAD");
+
+        let head_combined = parse_curl("curl -sIL https://example.com/healthz").unwrap();
+        assert_eq!(head_combined.method, "HEAD");
+
+        let head_explicit = parse_curl("curl -I -X GET https://example.com/healthz").unwrap();
+        assert_eq!(head_explicit.method, "GET");
+
+        // 3. Multiple -d / --data* flags joined with `&`, while single segment stays verbatim
+        let multi_d = parse_curl(
+            "curl https://example.com/form -d 'a=1' --data 'b=2' --data-raw 'c=3' --data-binary 'd=4' --data-ascii 'e=5'",
+        )
+        .unwrap();
+        assert_eq!(multi_d.method, "POST");
+        assert_eq!(multi_d.body, "a=1&b=2&c=3&d=4&e=5");
+
+        let single_d = parse_curl("curl https://example.com/raw -d 'plain-body-no-amp'").unwrap();
+        assert_eq!(single_d.method, "POST");
+        assert_eq!(single_d.body, "plain-body-no-amp");
+
+        // 4. --data-urlencode (name=content, =content, bare content, and inline --data-urlencode=...)
+        let urlencoded = parse_curl(
+            "curl https://example.com/submit --data-urlencode 'q=hello world & 100%' --data-urlencode '=raw=val' --data-urlencode='bare text' -d 'ok=1'",
+        )
+        .unwrap();
+        assert_eq!(urlencoded.method, "POST");
+        assert_eq!(
+            urlencoded.body,
+            "q=hello%20world%20%26%20100%25&raw%3Dval&bare%20text&ok=1"
+        );
+
+        // 5. -G / --get moves data to URL query (? or &), preserves #fragment, clears body, defaults to GET (unless -X)
+        let get_fresh = parse_curl(
+            "curl -G https://api.example.com/search#results -d 'page=2' --data-urlencode 'tag=a&b'",
+        )
+        .unwrap();
+        assert_eq!(get_fresh.method, "GET");
+        assert_eq!(
+            get_fresh.url,
+            "https://api.example.com/search?page=2&tag=a%26b#results"
+        );
+        assert!(get_fresh.body.is_empty());
+
+        let get_existing_q = parse_curl(
+            "curl --get 'https://api.example.com/search?lang=zh' -d 'limit=20' -d 'sort=desc'",
+        )
+        .unwrap();
+        assert_eq!(get_existing_q.method, "GET");
+        assert_eq!(
+            get_existing_q.url,
+            "https://api.example.com/search?lang=zh&limit=20&sort=desc"
+        );
+        assert!(get_existing_q.body.is_empty());
+
+        let get_explicit_post =
+            parse_curl("curl -G -X POST https://api.example.com/search -d 'dry_run=1'").unwrap();
+        assert_eq!(get_explicit_post.method, "POST");
+        assert_eq!(
+            get_explicit_post.url,
+            "https://api.example.com/search?dry_run=1"
+        );
+        assert!(get_explicit_post.body.is_empty());
     }
 }

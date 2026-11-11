@@ -27,7 +27,7 @@ const BODY_CAP: usize = 8 * 1024;
 /// Rules, HAR, and replay bodies. The small cap still applies to capture and clear.
 const HUB_BODY_CAP: usize = 1024 * 1024;
 const LIST_CAP: usize = 400;
-const PREVIEW_CAP: usize = 32 * 1024;
+const PREVIEW_CAP: usize = 256 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct WebSettings {
@@ -115,33 +115,30 @@ pub fn run_cli(args: &[String], config_port: u16) -> i32 {
     // The server process applies saved rules. It does not write `capturing`
     // and it does not change the system proxy. Tests call `WebServer::start`
     // directly and do not load this file.
-    let loaded = crate::config::load_mode(&crate::ca::data_dir(), crate::config::is_dev_mode());
+    let dev_mode = crate::config::is_dev_mode();
+    let data_dir = crate::ca::data_dir();
+    let loaded = crate::config::load_mode(&data_dir, dev_mode);
     hub.set_bypass(&loaded.bypass_hosts);
     hub.set_rules(&loaded.rules);
     hub.set_upstream(&loaded.upstream_proxy);
+    hub.set_rules_enabled(loaded.rules_enabled);
+    hub.set_breaks_enabled(loaded.breaks_enabled);
     hub.set_show_tunnel_failures(loaded.show_tunnel_failures);
     hub.set_relay_ingress(loaded.relay_accept, &loaded.relay_token);
+    let prefs = WebPrefs::from_loaded(&loaded, data_dir, dev_mode);
     let web_root = packaged_web_root();
     match &web_root {
         Some(dir) => println!("界面目录 {}", dir.display()),
         None => eprintln!("没有共用界面，这次是简易操作台。在仓库根目录运行 make web-ui。"),
     }
-    let started = if let Some(dir) = web_root {
-        WebServer::start_with(
-            settings.web_addr(),
-            hub,
-            settings.capture_bind,
-            settings.capture_port,
-            Some(dir),
-        )
-    } else {
-        WebServer::start(
-            settings.web_addr(),
-            hub,
-            settings.capture_bind,
-            settings.capture_port,
-        )
-    };
+    let started = WebServer::start_with_prefs(
+        settings.web_addr(),
+        hub,
+        settings.capture_bind,
+        settings.capture_port,
+        web_root,
+        prefs,
+    );
     let server = match started {
         Ok(server) => server,
         Err(err) => {
@@ -170,6 +167,7 @@ pub struct WebServer {
 }
 
 impl WebServer {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn start(
         web_bind: SocketAddr,
         hub: Arc<Hub>,
@@ -179,12 +177,31 @@ impl WebServer {
         Self::start_with(web_bind, hub, capture_ip, capture_port, None)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn start_with(
         web_bind: SocketAddr,
         hub: Arc<Hub>,
         capture_ip: IpAddr,
         capture_port: u16,
         web_root: Option<PathBuf>,
+    ) -> Result<Self> {
+        Self::start_with_prefs(
+            web_bind,
+            hub,
+            capture_ip,
+            capture_port,
+            web_root,
+            WebPrefs::default(),
+        )
+    }
+
+    fn start_with_prefs(
+        web_bind: SocketAddr,
+        hub: Arc<Hub>,
+        capture_ip: IpAddr,
+        capture_port: u16,
+        web_root: Option<PathBuf>,
+        prefs: WebPrefs,
     ) -> Result<Self> {
         if capture_port == 0 {
             return Err(std::io::Error::new(
@@ -226,6 +243,7 @@ impl WebServer {
                         error: String::new(),
                         relay_push: None,
                         web_root,
+                        prefs,
                     }));
                     loop {
                         if flag.load(Ordering::Relaxed) {
@@ -280,6 +298,37 @@ impl Drop for WebServer {
     }
 }
 
+#[derive(Clone, Default)]
+struct WebPrefs {
+    config_dir: Option<PathBuf>,
+    dev_mode: bool,
+    active_profile: String,
+    filter: String,
+    saved_profiles: Vec<crate::config::SavedProfile>,
+    profile_history: Vec<crate::config::SavedProfile>,
+    redact_export: bool,
+    redact_strict: bool,
+    redact_fields: String,
+    relay_url: String,
+}
+
+impl WebPrefs {
+    fn from_loaded(loaded: &crate::config::Config, config_dir: PathBuf, dev_mode: bool) -> Self {
+        Self {
+            config_dir: Some(config_dir),
+            dev_mode,
+            active_profile: loaded.active_profile.clone(),
+            filter: loaded.filter.clone(),
+            saved_profiles: loaded.saved_profiles.clone(),
+            profile_history: loaded.profile_history.clone(),
+            redact_export: loaded.redact_export,
+            redact_strict: loaded.redact_strict,
+            redact_fields: loaded.redact_fields.clone(),
+            relay_url: loaded.relay_url.clone(),
+        }
+    }
+}
+
 struct Slot {
     hub: Arc<Hub>,
     capture: Option<Capture>,
@@ -289,6 +338,7 @@ struct Slot {
     relay_push: Option<crate::relay::PushHandle>,
     /// Packaged nsh page. `None` keeps the small HTML console.
     web_root: Option<PathBuf>,
+    prefs: WebPrefs,
 }
 
 #[derive(Serialize)]
@@ -321,6 +371,14 @@ struct PrefsBody {
     breaks_enabled: bool,
     show_tunnels: bool,
     relay_accept: bool,
+    relay_url: String,
+    active_profile: String,
+    filter: String,
+    saved_profiles: Vec<crate::config::SavedProfile>,
+    profile_history: Vec<crate::config::SavedProfile>,
+    redact_export: bool,
+    redact_strict: bool,
+    redact_fields: String,
 }
 
 struct Head {
@@ -332,17 +390,22 @@ struct Head {
 struct Reply {
     status: u16,
     reason: &'static str,
-    content_type: &'static str,
+    content_type: std::borrow::Cow<'static, str>,
+    attachment: Option<String>,
     body: Vec<u8>,
 }
 
 async fn serve_one(mut socket: TcpStream, slot: Arc<Mutex<Slot>>) -> Result<()> {
     let (head_bytes, rest) = read_header(&mut socket).await?;
-    let reply = match parse_head(&head_bytes) {
-        Ok(head) => route(&mut socket, &head, &rest, &slot).await,
-        Err(_) => text(400, "Bad Request", "bad request"),
+    let (is_head, reply) = match parse_head(&head_bytes) {
+        Ok(head) => {
+            let is_head = head.method.eq_ignore_ascii_case("HEAD");
+            let reply = route(&mut socket, &head, &rest, &slot).await;
+            (is_head, reply)
+        }
+        Err(_) => (false, text(400, "Bad Request", "bad request")),
     };
-    let bytes = encode(&reply);
+    let bytes = encode(&reply, is_head);
     let _ = tokio::time::timeout(IO_TIMEOUT, socket.write_all(&bytes)).await;
     Ok(())
 }
@@ -367,15 +430,58 @@ async fn route(socket: &mut TcpStream, head: &Head, rest: &[u8], slot: &Mutex<Sl
         }
         if path == "/api/flows" {
             let filter = query_value(&head.target, "filter");
-            return json_reply(200, "OK", &flow_list(&lock(slot).hub, &filter));
+            let hub = Arc::clone(&lock(slot).hub);
+            return json_reply(200, "OK", &flow_list(&hub, &filter));
         }
-        if let Some(id) = path.strip_prefix("/api/flows/")
-            && let Ok(id) = id.parse::<u64>()
-        {
-            return match flow_detail(&lock(slot).hub, id) {
-                Some(value) => json_reply(200, "OK", &value),
-                None => json_reply(404, "Not Found", &json!({"error": "not found"})),
+        if path == "/api/export.har" {
+            let filter = query_value(&head.target, "filter");
+            let (hub, redact) = {
+                let guard = lock(slot);
+                (
+                    Arc::clone(&guard.hub),
+                    redact_options_for_target(&guard.prefs, &head.target),
+                )
             };
+            return export_har_reply(&hub, &filter, &redact);
+        }
+        if path == "/api/export.html" {
+            let filter = query_value(&head.target, "filter");
+            let zh_override = query_value(&head.target, "zh");
+            let lang_override = query_value(&head.target, "lang");
+            let zh = match (zh_override.as_str(), lang_override.as_str()) {
+                ("1" | "true", _) | (_, "zh") => true,
+                ("0" | "false", _) | (_, "en") => false,
+                _ => prefers_zh(header(head, "accept-language")),
+            };
+            let (hub, redact) = {
+                let guard = lock(slot);
+                (
+                    Arc::clone(&guard.hub),
+                    redact_options_for_target(&guard.prefs, &head.target),
+                )
+            };
+            return export_html_reply(&hub, &filter, &redact, zh);
+        }
+        if let Some(rest_flow) = path.strip_prefix("/api/flows/") {
+            if let Some(id_str) = rest_flow.strip_suffix("/body")
+                && let Ok(id) = id_str.parse::<u64>()
+            {
+                let (hub, redact) = {
+                    let guard = lock(slot);
+                    (
+                        Arc::clone(&guard.hub),
+                        redact_options_for_target(&guard.prefs, &head.target),
+                    )
+                };
+                return flow_body_reply(&hub, id, &redact);
+            }
+            if let Ok(id) = rest_flow.parse::<u64>() {
+                let hub = Arc::clone(&lock(slot).hub);
+                return match flow_detail(&hub, id) {
+                    Some(value) => json_reply(200, "OK", &value),
+                    None => json_reply(404, "Not Found", &json!({"error": "not found"})),
+                };
+            }
         }
         if let Some(file) = static_reply(path, web_root.as_deref()) {
             return file;
@@ -528,6 +634,14 @@ fn state_of(slot: &Slot) -> StateBody {
             breaks_enabled: slot.hub.breaks_enabled(),
             show_tunnels: slot.hub.tunnel_failures_shown(),
             relay_accept: slot.hub.relay_accepts(),
+            relay_url: slot.prefs.relay_url.clone(),
+            active_profile: slot.prefs.active_profile.clone(),
+            filter: slot.prefs.filter.clone(),
+            saved_profiles: slot.prefs.saved_profiles.clone(),
+            profile_history: slot.prefs.profile_history.clone(),
+            redact_export: slot.prefs.redact_export,
+            redact_strict: slot.prefs.redact_strict,
+            redact_fields: slot.prefs.redact_fields.clone(),
         },
     }
 }
@@ -551,18 +665,32 @@ fn flow_list(hub: &Hub, filter: &str) -> Value {
     // `finish` reads spilled bodies and must not run under the session lock.
     let plan = hub.with_session(|session| session.plan_filter(filter));
     let matched = plan.finish();
-    let rows = hub.with_session(|session| {
-        matched
+    let (session_total, rows) = hub.with_session(|session| {
+        let rows = matched
             .into_iter()
             .filter_map(|(id, _)| session.get(id).map(flow_summary))
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        (session.len(), rows)
     });
     let total = rows.len();
     let start = total.saturating_sub(LIST_CAP);
     json!({
         "total": total,
+        "session_total": session_total,
         "omitted": start,
         "flows": &rows[start..],
+    })
+}
+
+fn conn_info_json(conn: &session::ConnInfo) -> Value {
+    json!({
+        "dns_ms": conn.dns_ms,
+        "tcp_ms": conn.tcp_ms,
+        "tls_ms": conn.tls_ms,
+        "reused": conn.reused,
+        "server_addr": conn.server_addr,
+        "tls_version": conn.tls_version,
+        "dialed_before_start": conn.dialed_before_start,
     })
 }
 
@@ -576,14 +704,17 @@ fn flow_summary(flow: &Flow) -> Value {
         "error": flow.error,
         "protocol": flow.protocol.label(),
         "client_ip": flow.client_ip,
+        "conn_info": conn_info_json(&flow.conn_info),
         "response_bytes": flow.response_bytes,
         "relay": flow.relay_source.as_deref().map(session::relay_short).unwrap_or_default(),
         "rev": flow.rev,
         "relay_source": flow.relay_source,
         "url": flow.url,
         "pinned": flow.pinned,
+        "rule_hit": flow.rule_hit,
         "comment": flow.comment,
         "started_ms": unix_millis(flow.started),
+        "response_ms": flow.response_at.map(unix_millis),
         "finished_ms": flow.finished_at.map(unix_millis),
         "request_bytes": flow.request_bytes,
     })
@@ -598,10 +729,13 @@ fn unix_millis(time: SystemTime) -> u64 {
 fn flow_detail(hub: &Hub, id: u64) -> Option<Value> {
     hub.with_session(|session| {
         let flow = session.hydrated(id)?;
-        let (request_body, request_truncated, request_binary) = preview(&flow.request_body);
-        let (response_body, response_truncated, response_binary) = preview(&flow.response_body);
+        let (request_body, request_body_b64, request_truncated, request_binary) =
+            preview(&flow.request_body);
+        let (response_body, response_body_b64, response_truncated, response_binary) =
+            preview(&flow.response_body);
         Some(json!({
             "id": flow.id,
+            "rev": flow.rev,
             "method": flow.method,
             "url": flow.url,
             "host": flow.host,
@@ -610,15 +744,23 @@ fn flow_detail(hub: &Hub, id: u64) -> Option<Value> {
             "error": flow.error,
             "protocol": flow.protocol.label(),
             "client_ip": flow.client_ip,
+            "conn_info": conn_info_json(&flow.conn_info),
+            "rule_hit": flow.rule_hit,
             "relay": flow.relay_source.as_deref().map(session::relay_short).unwrap_or_default(),
             "request_headers": pairs(&flow.request_headers),
             "response_headers": pairs(&flow.response_headers),
             "request_body": request_body,
+            "request_body_b64": request_body_b64,
             "request_truncated": request_truncated || flow.request_truncated,
             "request_binary": request_binary,
+            "request_encoding_error": flow.request_encoding_error,
+            "request_expired": flow.request_expired,
             "response_body": response_body,
+            "response_body_b64": response_body_b64,
             "response_truncated": response_truncated || flow.response_truncated,
             "response_binary": response_binary,
+            "response_encoding_error": flow.response_encoding_error,
+            "response_expired": flow.response_expired,
             "messages_truncated": flow.messages_truncated,
             "messages": flow.messages.iter().map(|message| json!({
                 "direction": match message.direction {
@@ -632,6 +774,131 @@ fn flow_detail(hub: &Hub, id: u64) -> Option<Value> {
     })
 }
 
+fn redact_options_for_target(prefs: &WebPrefs, target: &str) -> crate::share::RedactOptions {
+    let enabled = match query_value_opt(target, "redact").as_deref() {
+        Some("1" | "true") => true,
+        Some("0" | "false") => false,
+        _ => prefs.redact_export,
+    };
+    let strict_override = match query_value_opt(target, "redact_strict").as_deref() {
+        Some("1" | "true") => Some(true),
+        Some("0" | "false") => Some(false),
+        _ => None,
+    };
+    let fields =
+        query_value_opt(target, "redact_fields").unwrap_or_else(|| prefs.redact_fields.clone());
+    let mut opts = crate::share::RedactOptions::new(enabled, &fields);
+    if let Some(strict) = strict_override {
+        opts.strict = strict;
+    } else if prefs.redact_strict {
+        opts.strict = true;
+    }
+    opts
+}
+
+fn body_extension_for_mime(content_type: &str) -> &'static str {
+    let mime = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    match mime.as_str() {
+        "application/json" | "text/json" => "json",
+        "text/html" | "application/xhtml+xml" => "html",
+        "application/xml" | "text/xml" => "xml",
+        "text/plain" | "text/event-stream" => "txt",
+        "text/csv" => "csv",
+        "text/css" => "css",
+        "text/javascript" | "application/javascript" | "application/x-javascript" => "js",
+        "image/png" => "png",
+        "image/jpeg" | "image/jpg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "image/svg+xml" => "svg",
+        "image/x-icon" | "image/vnd.microsoft.icon" => "ico",
+        "application/pdf" => "pdf",
+        "application/wasm" => "wasm",
+        "application/zip" => "zip",
+        _ if mime.ends_with("+json") => "json",
+        _ if mime.ends_with("+xml") => "xml",
+        _ if mime.starts_with("text/") => "txt",
+        _ => "bin",
+    }
+}
+
+fn flow_body_reply(hub: &Hub, id: u64, redact: &crate::share::RedactOptions) -> Reply {
+    let Some(mut flow) = hub.with_session(|session| session.hydrated(id)) else {
+        return json_reply(404, "Not Found", &json!({"error": "not found"}));
+    };
+    if redact.enabled {
+        let (sanitized, _) = crate::share::redact_flow(&flow, redact);
+        flow = sanitized;
+    }
+    let raw_ct = crate::present::content_type(&flow.response_headers)
+        .unwrap_or("")
+        .replace(['\r', '\n'], "")
+        .trim()
+        .to_string();
+    let content_type = if raw_ct.is_empty() {
+        std::borrow::Cow::Borrowed("application/octet-stream")
+    } else {
+        std::borrow::Cow::Owned(raw_ct)
+    };
+    let ext = body_extension_for_mime(&content_type);
+    Reply {
+        status: 200,
+        reason: "OK",
+        content_type,
+        attachment: Some(format!("flow-{id}.{ext}")),
+        body: flow.response_body,
+    }
+}
+
+fn export_har_reply(hub: &Hub, filter: &str, redact: &crate::share::RedactOptions) -> Reply {
+    let value = hub.export_har_matching_with_redact(filter, redact);
+    let body = serde_json::to_vec_pretty(&value).unwrap_or_else(|_| b"{}".to_vec());
+    let secs = crate::clock::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    Reply {
+        status: 200,
+        reason: "OK",
+        content_type: std::borrow::Cow::Borrowed("application/json; charset=utf-8"),
+        attachment: Some(format!("zniff-{secs}.har")),
+        body,
+    }
+}
+
+fn export_html_reply(
+    hub: &Hub,
+    filter: &str,
+    redact: &crate::share::RedactOptions,
+    zh: bool,
+) -> Reply {
+    let (matched, _) = hub.matching_ids(filter);
+    let flows = hub.with_session(|session| {
+        matched
+            .into_iter()
+            .filter_map(|(id, _)| session.hydrated(id))
+            .collect::<Vec<_>>()
+    });
+    let doc = crate::share::document_with_redact(&flows, crate::clock::now(), filter, redact);
+    let page_html = crate::share::page(&doc, "", zh);
+    let secs = crate::clock::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    Reply {
+        status: 200,
+        reason: "OK",
+        content_type: std::borrow::Cow::Borrowed("text/html; charset=utf-8"),
+        attachment: Some(format!("zniff-{secs}.html")),
+        body: page_html.into_bytes(),
+    }
+}
+
 fn pairs(headers: &[(String, String)]) -> Value {
     Value::Array(
         headers
@@ -641,19 +908,31 @@ fn pairs(headers: &[(String, String)]) -> Value {
     )
 }
 
-fn preview(bytes: &[u8]) -> (String, bool, bool) {
+fn preview(bytes: &[u8]) -> (String, Option<String>, bool, bool) {
     let truncated = bytes.len() > PREVIEW_CAP;
     let slice = if truncated {
         &bytes[..PREVIEW_CAP]
     } else {
         bytes
     };
-    let binary = std::str::from_utf8(slice).is_err();
-    (
-        String::from_utf8_lossy(slice).into_owned(),
-        truncated,
-        binary,
-    )
+    match std::str::from_utf8(slice) {
+        Ok(valid) => (valid.to_string(), None, truncated, false),
+        Err(err) if truncated && err.error_len().is_none() => {
+            let valid = &slice[..err.valid_up_to()];
+            (
+                String::from_utf8_lossy(valid).into_owned(),
+                None,
+                true,
+                false,
+            )
+        }
+        Err(_) => (
+            String::from_utf8_lossy(slice).into_owned(),
+            Some(session::base64_encode(slice)),
+            truncated,
+            true,
+        ),
+    }
 }
 
 fn page(zh: bool) -> String {
@@ -793,7 +1072,8 @@ fn html(status: u16, reason: &'static str, body: Vec<u8>) -> Reply {
     Reply {
         status,
         reason,
-        content_type: "text/html; charset=utf-8",
+        content_type: std::borrow::Cow::Borrowed("text/html; charset=utf-8"),
+        attachment: None,
         body,
     }
 }
@@ -802,7 +1082,8 @@ fn text(status: u16, reason: &'static str, message: &str) -> Reply {
     Reply {
         status,
         reason,
-        content_type: "text/plain; charset=utf-8",
+        content_type: std::borrow::Cow::Borrowed("text/plain; charset=utf-8"),
+        attachment: None,
         body: message.as_bytes().to_vec(),
     }
 }
@@ -811,21 +1092,29 @@ fn json_reply(status: u16, reason: &'static str, value: &Value) -> Reply {
     Reply {
         status,
         reason,
-        content_type: "application/json; charset=utf-8",
+        content_type: std::borrow::Cow::Borrowed("application/json; charset=utf-8"),
+        attachment: None,
         body: serde_json::to_vec(value).unwrap_or_else(|_| b"{}".to_vec()),
     }
 }
 
-fn encode(reply: &Reply) -> Vec<u8> {
+fn encode(reply: &Reply, is_head: bool) -> Vec<u8> {
+    let disposition = reply
+        .attachment
+        .as_deref()
+        .map(|name| format!("Content-Disposition: attachment; filename=\"{name}\"\r\n"))
+        .unwrap_or_default();
     let head = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {len}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\n{disposition}Content-Length: {len}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n",
         status = reply.status,
         reason = reply.reason,
         content_type = reply.content_type,
         len = reply.body.len(),
     );
     let mut bytes = head.into_bytes();
-    bytes.extend_from_slice(&reply.body);
+    if !is_head {
+        bytes.extend_from_slice(&reply.body);
+    }
     bytes
 }
 
@@ -836,17 +1125,22 @@ fn header<'a>(head: &'a Head, name: &str) -> Option<&'a str> {
         .map(|(_, value)| value.as_str())
 }
 
-fn query_value(target: &str, key: &str) -> String {
-    let Some(query) = target.split_once('?').map(|(_, query)| query) else {
-        return String::new();
-    };
+fn query_value_opt(target: &str, key: &str) -> Option<String> {
+    let query = target.split_once('?').map(|(_, query)| query)?;
     for pair in query.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
         let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
         if name == key {
-            return decode(value);
+            return Some(decode(value));
         }
     }
-    String::new()
+    None
+}
+
+fn query_value(target: &str, key: &str) -> String {
+    query_value_opt(target, key).unwrap_or_default()
 }
 
 fn decode(value: &str) -> String {
@@ -1033,7 +1327,8 @@ fn static_reply(path: &str, root: Option<&Path>) -> Option<Reply> {
     Some(Reply {
         status: 200,
         reason: "OK",
-        content_type: static_mime(&full_canon),
+        content_type: std::borrow::Cow::Borrowed(static_mime(&full_canon)),
+        attachment: None,
         body: bytes,
     })
 }
@@ -1074,36 +1369,187 @@ async fn hub_dispatch(slot: &Mutex<Slot>, head: &Head, value: Value) -> Reply {
     sync_hub_op(&mut guard, &op, &value)
 }
 
+fn persist_slot_config(slot: &Slot, change: impl FnOnce(&mut crate::config::Config)) {
+    if let Some(dir) = &slot.prefs.config_dir {
+        let _ = crate::config::update_mode(dir, slot.prefs.dev_mode, change);
+    }
+}
+
 fn sync_hub_op(slot: &mut Slot, op: &str, value: &Value) -> Reply {
-    let hub = &slot.hub;
     match op {
-        "set_bypass" => hub.set_bypass(&json_text(value)),
-        "set_rules" => hub.set_rules(&json_text(value)),
-        "set_upstream" => hub.set_upstream(&json_text(value)),
-        "set_relay_token" => hub.set_relay_token(&json_text(value)),
+        "set_bypass" => {
+            let text = json_text(value);
+            slot.hub.set_bypass(&text);
+            persist_slot_config(slot, |cfg| cfg.bypass_hosts = text);
+        }
+        "set_rules" => {
+            let text = json_text(value);
+            slot.hub.set_rules(&text);
+            persist_slot_config(slot, |cfg| cfg.rules = text);
+        }
+        "set_upstream" => {
+            let text = json_text(value);
+            slot.hub.set_upstream(&text);
+            persist_slot_config(slot, |cfg| cfg.upstream_proxy = text);
+        }
+        "set_relay_token" => {
+            let text = json_text(value);
+            slot.hub.set_relay_token(&text);
+            let trimmed = text.trim().to_string();
+            persist_slot_config(slot, |cfg| cfg.relay_token = trimmed);
+        }
+        "set_relay_url" => {
+            let text = json_text(value).trim().to_string();
+            slot.prefs.relay_url = text.clone();
+            persist_slot_config(slot, |cfg| cfg.relay_url = text);
+        }
+        "set_filter" => {
+            let text = json_text(value);
+            slot.prefs.filter = text.clone();
+            persist_slot_config(slot, |cfg| cfg.filter = text);
+        }
+        "set_active_profile" => {
+            let name = json_text(value).trim().to_string();
+            slot.prefs.active_profile = name.clone();
+            persist_slot_config(slot, |cfg| cfg.active_profile = name);
+        }
+        "select_profile" => {
+            let name = value
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| json_text(value));
+            let trimmed = name.trim();
+            if let Some(found) = slot
+                .prefs
+                .saved_profiles
+                .iter()
+                .find(|item| item.name.eq_ignore_ascii_case(trimmed))
+                .cloned()
+            {
+                slot.prefs.active_profile = found.name.clone();
+                slot.prefs.filter = found.filter.clone();
+                slot.hub.set_bypass(&found.bypass_hosts);
+                slot.hub.set_rules(&found.rules);
+                slot.hub.set_upstream(&found.upstream_proxy);
+                slot.hub.set_rules_enabled(found.rules_enabled);
+                slot.hub.set_breaks_enabled(found.breaks_enabled);
+                slot.hub
+                    .set_show_tunnel_failures(found.show_tunnel_failures);
+                persist_slot_config(slot, |cfg| {
+                    cfg.active_profile = found.name;
+                    cfg.filter = found.filter;
+                    cfg.bypass_hosts = found.bypass_hosts;
+                    cfg.rules = found.rules;
+                    cfg.upstream_proxy = found.upstream_proxy;
+                    cfg.rules_enabled = found.rules_enabled;
+                    cfg.breaks_enabled = found.breaks_enabled;
+                    cfg.show_tunnel_failures = found.show_tunnel_failures;
+                });
+            } else if trimmed.is_empty() {
+                slot.prefs.active_profile.clear();
+                persist_slot_config(slot, |cfg| cfg.active_profile.clear());
+            } else {
+                return json_reply(404, "Not Found", &json!({"error": "profile not found"}));
+            }
+        }
+        "delete_profile" => {
+            let name = value
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| json_text(value));
+            let trimmed = name.trim();
+            slot.prefs
+                .saved_profiles
+                .retain(|item| !item.name.eq_ignore_ascii_case(trimmed));
+            if slot.prefs.active_profile.eq_ignore_ascii_case(trimmed) {
+                slot.prefs.active_profile.clear();
+            }
+            let saved_next = slot.prefs.saved_profiles.clone();
+            let active_next = slot.prefs.active_profile.clone();
+            persist_slot_config(slot, |cfg| {
+                cfg.saved_profiles = saved_next;
+                cfg.active_profile = active_next;
+            });
+        }
+        "sync_profiles" => {
+            if let Some(raw_saved) = value.get("saved_profiles")
+                && let Ok(mut saved) =
+                    serde_json::from_value::<Vec<crate::config::SavedProfile>>(raw_saved.clone())
+            {
+                saved.truncate(16);
+                slot.prefs.saved_profiles = saved;
+            }
+            if let Some(raw_hist) = value.get("profile_history")
+                && let Ok(mut hist) =
+                    serde_json::from_value::<Vec<crate::config::SavedProfile>>(raw_hist.clone())
+            {
+                hist.truncate(10);
+                slot.prefs.profile_history = hist;
+            }
+            if let Some(active) = value.get("active_profile").and_then(Value::as_str) {
+                slot.prefs.active_profile = active.trim().to_string();
+            }
+            let saved_next = slot.prefs.saved_profiles.clone();
+            let hist_next = slot.prefs.profile_history.clone();
+            let active_next = slot.prefs.active_profile.clone();
+            persist_slot_config(slot, |cfg| {
+                cfg.saved_profiles = saved_next;
+                cfg.profile_history = hist_next;
+                cfg.active_profile = active_next;
+            });
+        }
+        "set_redact" => {
+            if let Some(on) = json_flag(value) {
+                slot.prefs.redact_export = on;
+            }
+            if let Some(strict) = value.get("strict").and_then(Value::as_bool) {
+                slot.prefs.redact_strict = strict;
+            }
+            if let Some(fields) = value
+                .get("fields")
+                .or_else(|| value.get("text"))
+                .and_then(Value::as_str)
+            {
+                slot.prefs.redact_fields = fields.to_string();
+            }
+            let on = slot.prefs.redact_export;
+            let strict = slot.prefs.redact_strict;
+            let fields = slot.prefs.redact_fields.clone();
+            persist_slot_config(slot, |cfg| {
+                cfg.redact_export = on;
+                cfg.redact_strict = strict;
+                cfg.redact_fields = fields;
+            });
+        }
         "set_rules_enabled" => {
             let Some(on) = json_flag(value) else {
                 return json_reply(400, "Bad Request", &json!({"error": "need on"}));
             };
-            hub.set_rules_enabled(on);
+            slot.hub.set_rules_enabled(on);
+            persist_slot_config(slot, |cfg| cfg.rules_enabled = on);
         }
         "set_breaks_enabled" => {
             let Some(on) = json_flag(value) else {
                 return json_reply(400, "Bad Request", &json!({"error": "need on"}));
             };
-            hub.set_breaks_enabled(on);
+            slot.hub.set_breaks_enabled(on);
+            persist_slot_config(slot, |cfg| cfg.breaks_enabled = on);
         }
         "set_show_tunnel_failures" => {
             let Some(on) = json_flag(value) else {
                 return json_reply(400, "Bad Request", &json!({"error": "need on"}));
             };
-            hub.set_show_tunnel_failures(on);
+            slot.hub.set_show_tunnel_failures(on);
+            persist_slot_config(slot, |cfg| cfg.show_tunnel_failures = on);
         }
         "set_relay_accept" => {
             let Some(on) = json_flag(value) else {
                 return json_reply(400, "Bad Request", &json!({"error": "need on"}));
             };
-            hub.set_relay_accept(on);
+            slot.hub.set_relay_accept(on);
+            persist_slot_config(slot, |cfg| cfg.relay_accept = on);
         }
         "set_pinned" => {
             let Some(id) = json_id(value) else {
@@ -1112,26 +1558,23 @@ fn sync_hub_op(slot: &mut Slot, op: &str, value: &Value) -> Reply {
             let Some(on) = json_flag(value) else {
                 return json_reply(400, "Bad Request", &json!({"error": "need on"}));
             };
-            hub.set_pinned(id, on);
+            slot.hub.set_pinned(id, on);
         }
         "set_comment" => {
             let Some(id) = json_id(value) else {
                 return json_reply(400, "Bad Request", &json!({"error": "need id"}));
             };
-            hub.set_comment(id, json_text(value));
+            slot.hub.set_comment(id, json_text(value));
         }
-        "clear" => hub.clear_session(),
+        "clear" => slot.hub.clear_session(),
         "clear_unpinned" => {
-            hub.clear_unpinned();
+            slot.hub.clear_unpinned();
         }
         "resolve_break" => {
-            hub.resolve_break(BreakDecision {
+            slot.hub.resolve_break(BreakDecision {
                 drop: value.get("drop").and_then(Value::as_bool).unwrap_or(false),
                 headers: json_headers(value.get("headers")),
-                body: value
-                    .get("body")
-                    .and_then(Value::as_str)
-                    .map(|text| text.as_bytes().to_vec()),
+                body: json_body(value),
                 status: value
                     .get("status")
                     .and_then(Value::as_u64)
@@ -1139,24 +1582,24 @@ fn sync_hub_op(slot: &mut Slot, op: &str, value: &Value) -> Reply {
             });
         }
         "resolve_all_breaks" => {
-            hub.resolve_all_breaks();
+            slot.hub.resolve_all_breaks();
         }
         "promote_break" => {
             let Some(id) = json_id(value) else {
                 return json_reply(400, "Bad Request", &json!({"error": "need id"}));
             };
-            hub.promote_break(id);
+            slot.hub.promote_break(id);
         }
-        "touch_break" => hub.touch_break(),
+        "touch_break" => slot.hub.touch_break(),
         "end_share" => {
             if let Some(handle) = slot.relay_push.take() {
                 handle.stop();
             }
-            hub.end_share();
+            slot.hub.end_share();
         }
         "import_har" => {
             let document = value.get("value").unwrap_or(&Value::Null);
-            hub.import_har(document);
+            slot.hub.import_har(document);
         }
         _ => return json_reply(400, "Bad Request", &json!({"error": "unknown op"})),
     }
@@ -1173,16 +1616,21 @@ fn begin_share_op(slot: &mut Slot, head: &Head, value: &Value) -> Reply {
         .unwrap_or(15)
         .clamp(1, 480);
     let filter = value.get("filter").and_then(Value::as_str).unwrap_or("");
+    let strict = value
+        .get("redact_strict")
+        .and_then(Value::as_bool)
+        .unwrap_or(slot.prefs.redact_strict);
     let redact = crate::share::RedactOptions::new(
         value
             .get("redact")
             .and_then(Value::as_bool)
-            .unwrap_or(false),
+            .unwrap_or(slot.prefs.redact_export),
         value
             .get("redact_fields")
             .and_then(Value::as_str)
-            .unwrap_or(""),
-    );
+            .unwrap_or(&slot.prefs.redact_fields),
+    )
+    .with_strict(strict);
     let relay_url = value.get("relay_url").and_then(Value::as_str).unwrap_or("");
     let relay_token = value
         .get("relay_token")
@@ -1308,11 +1756,20 @@ fn override_from(value: &Value) -> ReplayOverride {
             .filter(|text| !text.is_empty())
             .map(str::to_string),
         headers: json_headers(value.get("headers")),
-        body: value
-            .get("body")
-            .and_then(Value::as_str)
-            .map(|text| text.as_bytes().to_vec()),
+        body: json_body(value),
     }
+}
+
+fn json_body(value: &Value) -> Option<Vec<u8>> {
+    if let Some(b64) = value.get("body_b64").and_then(Value::as_str)
+        && let Some(bytes) = session::base64_decode(b64)
+    {
+        return Some(bytes);
+    }
+    value
+        .get("body")
+        .and_then(Value::as_str)
+        .map(|text| text.as_bytes().to_vec())
 }
 
 fn json_text(value: &Value) -> String {
@@ -1717,6 +2174,344 @@ mod tests {
         assert_eq!(status, 400, "{unknown}");
         drop(server);
         assert!(refused(capture).await);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn binary_bodies_metadata_exports_and_profile_prefs_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("zniff-web-parity-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+
+        let raw_req = vec![0x00, 0xff, 0x89, b'R', b'E', b'Q'];
+        let raw_res = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0x00];
+        let flow_id = hub.with_session(|session| {
+            let id = session.open(session::FlowDraft {
+                protocol: Protocol::Http2,
+                method: "POST".into(),
+                host: "img.example.test".into(),
+                path: "/icon.png".into(),
+                url: "https://img.example.test/icon.png".into(),
+                request_headers: vec![("Content-Type".into(), "application/octet-stream".into())],
+            });
+            session.set_conn_info(
+                id,
+                session::ConnInfo {
+                    dns_ms: Some(3),
+                    tcp_ms: Some(9),
+                    tls_ms: Some(14),
+                    reused: false,
+                    server_addr: "93.184.216.34:443".into(),
+                    tls_version: "TLSv1.3".into(),
+                    dialed_before_start: true,
+                },
+            );
+            session.set_rule_hit(id, "header");
+            session.append_body(id, Direction::Request, &raw_req);
+            session.set_response(
+                id,
+                200,
+                vec![("Content-Type".into(), "image/png".into())],
+                Some(Protocol::Http2),
+            );
+            session.append_body(id, Direction::Response, &raw_res);
+            session.set_encoding_error(id, Direction::Response, "trailing garbage");
+            session.mark_finished(id);
+            let other = session.open(session::FlowDraft {
+                protocol: Protocol::Http11,
+                method: "GET".into(),
+                host: "other.example.test".into(),
+                path: "/ping".into(),
+                url: "http://other.example.test/ping".into(),
+                request_headers: vec![("Authorization".into(), "Bearer top-secret".into())],
+            });
+            session.set_response(other, 204, Vec::new(), None);
+            session.mark_finished(other);
+            id
+        });
+
+        let initial_cfg = crate::config::Config::default_for(false);
+        let prefs = WebPrefs::from_loaded(&initial_cfg, dir.clone(), false);
+        let server = WebServer::start_with_prefs(
+            "127.0.0.1:0".parse().unwrap(),
+            hub.clone(),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            reserve_port(),
+            None,
+            prefs,
+        )
+        .unwrap();
+        let web = server.addr();
+
+        // Filtered `/api/flows` returns matched `total = 1` AND full `session_total = 2`,
+        // plus `rule_hit`, `response_ms`, and `conn_info`.
+        let (status, list_raw) = exchange(
+            web,
+            "GET /api/flows?filter=host:img.example.test HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert_eq!(status, 200, "{list_raw}");
+        let listed: Value = serde_json::from_str(body_of(&list_raw)).unwrap();
+        assert_eq!(listed["total"], 1);
+        assert_eq!(listed["session_total"], 2);
+        assert_eq!(listed["flows"][0]["rule_hit"], "header");
+        assert!(listed["flows"][0]["response_ms"].as_u64().is_some());
+        assert_eq!(listed["flows"][0]["conn_info"]["tls_version"], "TLSv1.3");
+        assert_eq!(listed["flows"][0]["conn_info"]["dns_ms"], 3);
+
+        // `/api/flows/{id}` preserves exact binary bytes via base64 and surfaces encoding error.
+        let (status, detail_raw) = exchange(
+            web,
+            &format!(
+                "GET /api/flows/{flow_id} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+            ),
+        )
+        .await;
+        assert_eq!(status, 200, "{detail_raw}");
+        let detail: Value = serde_json::from_str(body_of(&detail_raw)).unwrap();
+        assert_eq!(detail["request_binary"], true);
+        assert_eq!(detail["response_binary"], true);
+        assert_eq!(
+            session::base64_decode(detail["request_body_b64"].as_str().unwrap()).unwrap(),
+            raw_req
+        );
+        assert_eq!(
+            session::base64_decode(detail["response_body_b64"].as_str().unwrap()).unwrap(),
+            raw_res
+        );
+        assert_eq!(detail["response_encoding_error"], "trailing garbage");
+
+        // `override_from` decodes binary `body_b64` losslessly.
+        let b64_payload = session::base64_encode(&raw_res);
+        let parsed_override = override_from(&json!({
+            "method": "POST",
+            "url": "http://127.0.0.1:9/bin",
+            "body_b64": b64_payload,
+        }));
+        assert_eq!(parsed_override.body.as_deref(), Some(raw_res.as_slice()));
+
+        // Profile sync, select, redact, and HAR/HTML export endpoints.
+        let sync_req = json!({
+            "op": "sync_profiles",
+            "active_profile": "Staging",
+            "saved_profiles": [{
+                "name": "Staging",
+                "filter": "host:img.example.test",
+                "bypass_hosts": "internal.local",
+                "rules": "delay img.example.test / 5ms",
+                "upstream_proxy": "",
+                "rules_enabled": true,
+                "breaks_enabled": false,
+                "show_tunnel_failures": true
+            }]
+        })
+        .to_string();
+        let (status, _) = post(web, "/api/hub", &sync_req).await;
+        assert_eq!(status, 200);
+        let (status, selected_state) = post(
+            web,
+            "/api/hub",
+            r#"{"op":"select_profile","name":"staging"}"#,
+        )
+        .await;
+        assert_eq!(status, 200, "{selected_state}");
+        let state_json: Value = serde_json::from_str(body_of(&selected_state)).unwrap();
+        assert_eq!(state_json["prefs"]["active_profile"], "Staging");
+        assert_eq!(state_json["prefs"]["filter"], "host:img.example.test");
+        assert_eq!(state_json["prefs"]["breaks_enabled"], false);
+        assert_eq!(state_json["prefs"]["show_tunnels"], true);
+
+        let (status, _) = post(
+            web,
+            "/api/hub",
+            r#"{"op":"set_redact","on":true,"fields":"x-extra"}"#,
+        )
+        .await;
+        assert_eq!(status, 200);
+
+        let persisted = crate::config::load_mode(&dir, false);
+        assert_eq!(persisted.active_profile, "Staging");
+        assert_eq!(persisted.saved_profiles.len(), 1);
+        assert!(persisted.redact_export);
+
+        let (status, har_resp) = exchange(
+            web,
+            "GET /api/export.har HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert!(!har_resp.contains("top-secret"), "{har_resp}");
+        assert!(har_resp.contains("\"entries\""), "{har_resp}");
+
+        let (status, html_resp) = exchange(
+            web,
+            "GET /api/export.html?zh=0 HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert!(!html_resp.contains("top-secret"), "{html_resp}");
+
+        drop(server);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn flow_body_download_reads_spilled_bytes_and_respects_redaction() {
+        let dir = std::env::temp_dir().join(format!(
+            "zniff-web-body-{}-{}",
+            std::process::id(),
+            crate::clock::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+        // > 16 KB so `mark_finished` spills the unpinned response body to disk.
+        let large_padding = "x".repeat(20 * 1024);
+        let json_payload =
+            format!(r#"{{"access_token":"tok_download_123","pad":"{large_padding}"}}"#);
+        let bin_payload: Vec<u8> = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0xff];
+
+        let (json_id, bin_id) = hub.with_session(|session| {
+            let j_id = session.open(session::FlowDraft {
+                protocol: Protocol::Http11,
+                method: "GET".into(),
+                host: "api.example.test".into(),
+                path: "/v1/token".into(),
+                url: "https://api.example.test/v1/token".into(),
+                request_headers: Vec::new(),
+            });
+            session.set_response(
+                j_id,
+                200,
+                vec![(
+                    "Content-Type".into(),
+                    "application/json; charset=utf-8".into(),
+                )],
+                None,
+            );
+            session.append_body(j_id, Direction::Response, json_payload.as_bytes());
+            session.mark_finished(j_id);
+
+            let b_id = session.open(session::FlowDraft {
+                protocol: Protocol::Http11,
+                method: "GET".into(),
+                host: "cdn.example.test".into(),
+                path: "/logo".into(),
+                url: "https://cdn.example.test/logo".into(),
+                request_headers: Vec::new(),
+            });
+            session.set_response(b_id, 200, Vec::new(), None);
+            session.append_body(b_id, Direction::Response, &bin_payload);
+            session.mark_finished(b_id);
+            (j_id, b_id)
+        });
+
+        let initial_cfg = crate::config::Config::default_for(false);
+        let prefs = WebPrefs::from_loaded(&initial_cfg, dir.clone(), false);
+        let server = WebServer::start_with_prefs(
+            "127.0.0.1:0".parse().unwrap(),
+            hub,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            reserve_port(),
+            None,
+            prefs,
+        )
+        .unwrap();
+        let web = server.addr();
+
+        // 1. Spilled JSON body downloads intact with Content-Type and .json filename when redaction is off.
+        let (status, resp_raw) = exchange(
+            web,
+            &format!(
+                "GET /api/flows/{json_id}/body HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+            ),
+        )
+        .await;
+        assert_eq!(status, 200, "{resp_raw}");
+        assert!(
+            resp_raw.contains("Content-Type: application/json; charset=utf-8\r\n"),
+            "{resp_raw}"
+        );
+        assert!(
+            resp_raw.contains(&format!(
+                "Content-Disposition: attachment; filename=\"flow-{json_id}.json\"\r\n"
+            )),
+            "{resp_raw}"
+        );
+        assert_eq!(body_of(&resp_raw), json_payload);
+
+        // 2. Binary body without Content-Type falls back to application/octet-stream + .bin.
+        let mut sock = TcpStream::connect(web).await.unwrap();
+        sock.write_all(
+            format!(
+                "GET /api/flows/{bin_id}/body HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+        let mut raw_bytes = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), sock.read_to_end(&mut raw_bytes))
+            .await
+            .unwrap()
+            .unwrap();
+        let sep = header_end(&raw_bytes).unwrap();
+        let head_str = std::str::from_utf8(&raw_bytes[..sep]).unwrap();
+        assert!(head_str.contains("Content-Type: application/octet-stream\r\n"));
+        assert!(head_str.contains(&format!(
+            "Content-Disposition: attachment; filename=\"flow-{bin_id}.bin\"\r\n"
+        )));
+        assert_eq!(&raw_bytes[sep..], bin_payload.as_slice());
+
+        // 3. Enabling redact_export + redact_strict sanitizes JSON and masks binary bodies.
+        let (status, _) = post(
+            web,
+            "/api/hub",
+            r#"{"op":"set_redact","on":true,"strict":true,"fields":""}"#,
+        )
+        .await;
+        assert_eq!(status, 200);
+
+        let (status, redacted_json_resp) = exchange(
+            web,
+            &format!(
+                "GET /api/flows/{json_id}/body HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+            ),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert!(!body_of(&redacted_json_resp).contains("tok_download_123"));
+        assert!(body_of(&redacted_json_resp).contains("[REDACTED]"));
+
+        let (status, strict_bin_resp) = exchange(
+            web,
+            &format!(
+                "GET /api/flows/{bin_id}/body HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+            ),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(
+            body_of(&strict_bin_resp).as_bytes(),
+            crate::share::STRICT_REDACTED_BODY
+        );
+
+        // 4. Unknown flow returns 404.
+        let (status, _) = exchange(
+            web,
+            "GET /api/flows/999999/body HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert_eq!(status, 404);
+
+        drop(server);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

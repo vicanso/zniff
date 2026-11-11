@@ -5,7 +5,7 @@
 
 use std::io::Write;
 
-use flate2::write::{DeflateDecoder, GzDecoder};
+use flate2::write::{DeflateDecoder, GzDecoder, ZlibDecoder};
 
 use crate::session::BODY_CAP;
 
@@ -18,12 +18,63 @@ pub struct Decoder {
     finished: bool,
 }
 
+#[derive(Debug)]
+struct CappedBuf {
+    buf: Vec<u8>,
+    limit: usize,
+    hit_limit: bool,
+}
+
+impl CappedBuf {
+    fn new(limit: usize) -> Self {
+        Self {
+            buf: Vec::new(),
+            limit,
+            hit_limit: false,
+        }
+    }
+
+    fn set_limit(&mut self, limit: usize) {
+        self.limit = limit;
+    }
+
+    fn take(&mut self) -> (Vec<u8>, bool) {
+        let hit = self.hit_limit;
+        self.hit_limit = false;
+        (std::mem::take(&mut self.buf), hit)
+    }
+}
+
+impl Write for CappedBuf {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        let room = self.limit.saturating_sub(self.buf.len());
+        if room > 0 {
+            let n = data.len().min(room);
+            self.buf.extend_from_slice(&data[..n]);
+        }
+        if data.len() > room {
+            self.hit_limit = true;
+        }
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+enum DeflateInner {
+    Sniff(Vec<u8>),
+    Zlib(ZlibDecoder<CappedBuf>),
+    Raw(DeflateDecoder<CappedBuf>),
+}
+
 enum Layer {
     Identity,
-    Gzip(GzDecoder<Vec<u8>>),
-    Deflate(DeflateDecoder<Vec<u8>>),
-    Brotli(Box<brotli::DecompressorWriter<Vec<u8>>>),
-    Zstd(zstd::stream::write::Decoder<'static, Vec<u8>>),
+    Gzip(GzDecoder<CappedBuf>),
+    Deflate(DeflateInner),
+    Brotli(Box<brotli::DecompressorWriter<CappedBuf>>),
+    Zstd(zstd::stream::write::Decoder<'static, CappedBuf>),
 }
 
 impl std::fmt::Debug for Layer {
@@ -38,6 +89,10 @@ impl std::fmt::Debug for Layer {
     }
 }
 
+fn is_zlib_header(b0: u8, b1: u8) -> bool {
+    (b0 & 0x0f) == 8 && (b0 >> 4) <= 7 && u16::from_be_bytes([b0, b1]).is_multiple_of(31)
+}
+
 impl Decoder {
     pub fn from_header(header: Option<&str>) -> Self {
         let codings = header
@@ -50,13 +105,17 @@ impl Decoder {
         let mut layers = Vec::new();
         for coding in codings.into_iter().rev() {
             match coding.to_ascii_lowercase().as_str() {
-                "gzip" | "x-gzip" => layers.push(Layer::Gzip(GzDecoder::new(Vec::new()))),
-                "deflate" => layers.push(Layer::Deflate(DeflateDecoder::new(Vec::new()))),
+                "gzip" | "x-gzip" => {
+                    layers.push(Layer::Gzip(GzDecoder::new(CappedBuf::new(BODY_CAP))))
+                }
+                "deflate" => {
+                    layers.push(Layer::Deflate(DeflateInner::Sniff(Vec::with_capacity(2))))
+                }
                 "br" => layers.push(Layer::Brotli(Box::new(brotli::DecompressorWriter::new(
-                    Vec::new(),
+                    CappedBuf::new(BODY_CAP),
                     4096,
                 )))),
-                "zstd" => match zstd::stream::write::Decoder::new(Vec::new()) {
+                "zstd" => match zstd::stream::write::Decoder::new(CappedBuf::new(BODY_CAP)) {
                     Ok(decoder) => layers.push(Layer::Zstd(decoder)),
                     Err(err) => {
                         return Self::failed(format!("zstd 解码器不可用: {err}"));
@@ -115,7 +174,11 @@ impl Decoder {
     }
 
     pub fn finish(&mut self) -> Vec<u8> {
-        if self.finished {
+        if self.finished || self.truncated || self.emitted >= BODY_CAP {
+            self.finished = true;
+            if self.emitted >= BODY_CAP {
+                self.truncated = true;
+            }
             return Vec::new();
         }
         self.finished = true;
@@ -129,21 +192,24 @@ impl Decoder {
     }
 
     fn pump(&mut self, input: &[u8], finish: bool) -> Result<Vec<u8>, String> {
+        let room = BODY_CAP.saturating_sub(self.emitted);
         let mut current = input.to_vec();
         let last = self.layers.len().saturating_sub(1);
+        let mut final_hit_limit = false;
         for (index, layer) in self.layers.iter_mut().enumerate() {
-            let end = finish && index == last;
-            current = layer.consume(&current, finish)?;
-            if end {
-                break;
+            let is_last = index == last;
+            let layer_limit = if is_last { room } else { BODY_CAP + 64 * 1024 };
+            let (out, hit_limit) = layer.consume(&current, finish, layer_limit)?;
+            current = out;
+            if is_last && hit_limit {
+                final_hit_limit = true;
             }
         }
-        // Intermediate layers must flush on finish too. `finish` is applied
-        // to every layer so gzip trailers are consumed before the next layer.
-        if finish && self.layers.len() > 1 {
-            // `consume(..., finish)` already ran for each layer above.
+        let out = self.take(current)?;
+        if final_hit_limit {
+            self.truncated = true;
         }
-        self.take(current)
+        Ok(out)
     }
 
     fn take(&mut self, mut bytes: Vec<u8>) -> Result<Vec<u8>, String> {
@@ -162,74 +228,121 @@ impl Decoder {
 }
 
 impl Layer {
-    fn consume(&mut self, input: &[u8], finish: bool) -> Result<Vec<u8>, String> {
+    fn consume(
+        &mut self,
+        input: &[u8],
+        finish: bool,
+        limit: usize,
+    ) -> Result<(Vec<u8>, bool), String> {
         match self {
-            Self::Identity => Ok(input.to_vec()),
-            Self::Gzip(decoder) => write_new(decoder, input, finish),
-            Self::Deflate(decoder) => write_new(decoder, input, finish),
-            Self::Brotli(decoder) => write_new(decoder.as_mut(), input, finish),
-            Self::Zstd(decoder) => write_new(decoder, input, finish),
+            Self::Identity => {
+                if input.len() > limit {
+                    Ok((input[..limit].to_vec(), true))
+                } else {
+                    Ok((input.to_vec(), false))
+                }
+            }
+            Self::Gzip(decoder) => {
+                decoder.get_mut().set_limit(limit);
+                if !input.is_empty() {
+                    decoder
+                        .write_all(input)
+                        .map_err(|err| format!("解压失败: {err}"))?;
+                }
+                if finish && !decoder.get_ref().hit_limit {
+                    decoder
+                        .try_finish()
+                        .map_err(|err| format!("解压失败: {err}"))?;
+                }
+                Ok(decoder.get_mut().take())
+            }
+            Self::Deflate(inner) => consume_deflate(inner, input, finish, limit),
+            Self::Brotli(decoder) => {
+                decoder.get_mut().set_limit(limit);
+                if !input.is_empty() {
+                    decoder
+                        .write_all(input)
+                        .map_err(|err| format!("解压失败: {err}"))?;
+                }
+                if finish && !decoder.get_ref().hit_limit {
+                    decoder.flush().map_err(|err| format!("解压失败: {err}"))?;
+                    decoder.close().map_err(|err| format!("解压失败: {err}"))?;
+                }
+                Ok(decoder.get_mut().take())
+            }
+            Self::Zstd(decoder) => {
+                decoder.get_mut().set_limit(limit);
+                if !input.is_empty() {
+                    decoder
+                        .write_all(input)
+                        .map_err(|err| format!("解压失败: {err}"))?;
+                }
+                if finish && !decoder.get_ref().hit_limit {
+                    decoder
+                        .do_finish()
+                        .map_err(|err| format!("解压失败: {err}"))?;
+                }
+                Ok(decoder.get_mut().take())
+            }
         }
     }
 }
 
-fn write_new<W: Write + OutputBuf>(
-    decoder: &mut W,
+fn consume_deflate(
+    inner: &mut DeflateInner,
     input: &[u8],
     finish: bool,
-) -> Result<Vec<u8>, String> {
-    let before = decoder.output_len();
-    if !input.is_empty() {
-        decoder
-            .write_all(input)
-            .map_err(|err| format!("解压失败: {err}"))?;
-    }
-    if finish {
-        decoder.flush().ok();
-        // GzDecoder finishes on drop; try finish if the type supports it via flush.
-    }
-    let output = decoder.output_buf();
-    Ok(output.get(before..).unwrap_or_default().to_vec())
-}
-
-trait OutputBuf {
-    fn output_len(&self) -> usize;
-    fn output_buf(&self) -> &[u8];
-}
-
-impl OutputBuf for GzDecoder<Vec<u8>> {
-    fn output_len(&self) -> usize {
-        self.get_ref().len()
-    }
-    fn output_buf(&self) -> &[u8] {
-        self.get_ref()
-    }
-}
-
-impl OutputBuf for DeflateDecoder<Vec<u8>> {
-    fn output_len(&self) -> usize {
-        self.get_ref().len()
-    }
-    fn output_buf(&self) -> &[u8] {
-        self.get_ref()
-    }
-}
-
-impl OutputBuf for brotli::DecompressorWriter<Vec<u8>> {
-    fn output_len(&self) -> usize {
-        self.get_ref().len()
-    }
-    fn output_buf(&self) -> &[u8] {
-        self.get_ref()
-    }
-}
-
-impl OutputBuf for zstd::stream::write::Decoder<'static, Vec<u8>> {
-    fn output_len(&self) -> usize {
-        self.get_ref().len()
-    }
-    fn output_buf(&self) -> &[u8] {
-        self.get_ref()
+    limit: usize,
+) -> Result<(Vec<u8>, bool), String> {
+    let pending = if let DeflateInner::Sniff(head) = inner {
+        let need = 2usize.saturating_sub(head.len());
+        let take_n = input.len().min(need);
+        head.extend_from_slice(&input[..take_n]);
+        if head.len() < 2 && !finish {
+            return Ok((Vec::new(), false));
+        }
+        let mut combined = std::mem::take(head);
+        combined.extend_from_slice(&input[take_n..]);
+        if combined.len() >= 2 && is_zlib_header(combined[0], combined[1]) {
+            *inner = DeflateInner::Zlib(ZlibDecoder::new(CappedBuf::new(limit)));
+        } else {
+            *inner = DeflateInner::Raw(DeflateDecoder::new(CappedBuf::new(limit)));
+        }
+        Some(combined)
+    } else {
+        None
+    };
+    let to_write = pending.as_deref().unwrap_or(input);
+    match inner {
+        DeflateInner::Sniff(_) => unreachable!(),
+        DeflateInner::Zlib(decoder) => {
+            decoder.get_mut().set_limit(limit);
+            if !to_write.is_empty() {
+                decoder
+                    .write_all(to_write)
+                    .map_err(|err| format!("解压失败: {err}"))?;
+            }
+            if finish && !decoder.get_ref().hit_limit {
+                decoder
+                    .try_finish()
+                    .map_err(|err| format!("解压失败: {err}"))?;
+            }
+            Ok(decoder.get_mut().take())
+        }
+        DeflateInner::Raw(decoder) => {
+            decoder.get_mut().set_limit(limit);
+            if !to_write.is_empty() {
+                decoder
+                    .write_all(to_write)
+                    .map_err(|err| format!("解压失败: {err}"))?;
+            }
+            if finish && !decoder.get_ref().hit_limit {
+                decoder
+                    .try_finish()
+                    .map_err(|err| format!("解压失败: {err}"))?;
+            }
+            Ok(decoder.get_mut().take())
+        }
     }
 }
 
@@ -237,7 +350,7 @@ impl OutputBuf for zstd::stream::write::Decoder<'static, Vec<u8>> {
 mod tests {
     use super::*;
     use flate2::Compression;
-    use flate2::write::GzEncoder;
+    use flate2::write::{DeflateEncoder, GzEncoder, ZlibEncoder};
     use std::io::Write;
 
     #[test]
@@ -250,6 +363,107 @@ mod tests {
         let mut out = decoder.push(&compressed);
         out.extend(decoder.finish());
         assert_eq!(out, plain);
+        assert!(decoder.error().is_none());
+    }
+
+    #[test]
+    fn deflate_handles_both_zlib_rfc1950_and_raw_rfc1951() {
+        let plain = b"hello standard zlib and raw deflate!".to_vec();
+
+        // RFC 1950 zlib-wrapped deflate (standard HTTP Content-Encoding: deflate)
+        let mut zlib_enc = ZlibEncoder::new(Vec::new(), Compression::default());
+        zlib_enc.write_all(&plain).unwrap();
+        let zlib_bytes = zlib_enc.finish().unwrap();
+
+        let mut dec = Decoder::from_header(Some("deflate"));
+        let mut out = dec.push(&zlib_bytes[..1]);
+        out.extend(dec.push(&zlib_bytes[1..]));
+        out.extend(dec.finish());
+        assert_eq!(out, plain);
+        assert!(dec.error().is_none());
+
+        // Raw RFC 1951 deflate
+        let mut raw_enc = DeflateEncoder::new(Vec::new(), Compression::default());
+        raw_enc.write_all(&plain).unwrap();
+        let raw_bytes = raw_enc.finish().unwrap();
+
+        let mut dec_raw = Decoder::from_header(Some("deflate"));
+        let mut out_raw = dec_raw.push(&raw_bytes[..1]);
+        out_raw.extend(dec_raw.push(&raw_bytes[1..]));
+        out_raw.extend(dec_raw.finish());
+        assert_eq!(out_raw, plain);
+        assert!(dec_raw.error().is_none());
+    }
+
+    #[test]
+    fn brotli_zstd_and_multilayer_decode() {
+        let plain = b"multi-layer compression payload\n".repeat(32);
+
+        // Standalone zstd
+        let zstd_bytes = zstd::stream::encode_all(plain.as_slice(), 1).unwrap();
+        let mut zdec = Decoder::from_header(Some("zstd"));
+        let mut zout = zdec.push(&zstd_bytes);
+        zout.extend(zdec.finish());
+        assert_eq!(zout, plain);
+        assert!(zdec.error().is_none());
+
+        // Multi-layer: gzip first, then brotli ("gzip, br")
+        let mut gz = GzEncoder::new(Vec::new(), Compression::default());
+        gz.write_all(&plain).unwrap();
+        let gz_bytes = gz.finish().unwrap();
+        let mut br_bytes = Vec::new();
+        {
+            let mut br = brotli::CompressorWriter::new(&mut br_bytes, 4096, 5, 22);
+            br.write_all(&gz_bytes).unwrap();
+        }
+        let mut mdec = Decoder::from_header(Some("gzip, br"));
+        let mut mout = mdec.push(&br_bytes);
+        mout.extend(mdec.finish());
+        assert_eq!(mout, plain);
+        assert!(mdec.error().is_none());
+    }
+
+    #[test]
+    fn truncated_compressed_streams_report_error_on_finish() {
+        let plain = b"payload that gets cut off mid-stream".repeat(16);
+
+        let mut gz = GzEncoder::new(Vec::new(), Compression::default());
+        gz.write_all(&plain).unwrap();
+        let gz_bytes = gz.finish().unwrap();
+        let mut dec = Decoder::from_header(Some("gzip"));
+        let _ = dec.push(&gz_bytes[..gz_bytes.len() - 4]);
+        let _ = dec.finish();
+        assert!(dec.error().is_some(), "truncated gzip must report error");
+
+        let mut br_bytes = Vec::new();
+        {
+            let mut br = brotli::CompressorWriter::new(&mut br_bytes, 4096, 5, 22);
+            br.write_all(&plain).unwrap();
+        }
+        let mut bdec = Decoder::from_header(Some("br"));
+        let _ = bdec.push(&br_bytes[..br_bytes.len() / 2]);
+        let _ = bdec.finish();
+        assert!(bdec.error().is_some(), "truncated brotli must report error");
+
+        let zstd_bytes = zstd::stream::encode_all(plain.as_slice(), 1).unwrap();
+        let mut zdec = Decoder::from_header(Some("zstd"));
+        let _ = zdec.push(&zstd_bytes[..zstd_bytes.len() / 2]);
+        let _ = zdec.finish();
+        assert!(zdec.error().is_some(), "truncated zstd must report error");
+    }
+
+    #[test]
+    fn single_chunk_compression_bomb_stays_capped_without_error() {
+        let huge = vec![b'x'; BODY_CAP * 4];
+        let mut gz = GzEncoder::new(Vec::new(), Compression::fast());
+        gz.write_all(&huge).unwrap();
+        let bomb = gz.finish().unwrap();
+
+        let mut decoder = Decoder::from_header(Some("gzip"));
+        let mut out = decoder.push(&bomb);
+        out.extend(decoder.finish());
+        assert_eq!(out.len(), BODY_CAP);
+        assert!(decoder.truncated());
         assert!(decoder.error().is_none());
     }
 

@@ -40,7 +40,7 @@ pub fn default_listen_port(dev: bool) -> u16 {
 }
 
 /// Left pane width when `config.toml` has no `list_width`.
-pub const LIST_WIDTH_DEFAULT: u32 = 560;
+pub const LIST_WIDTH_DEFAULT: u32 = 660;
 pub const LIST_WIDTH_MIN: u32 = 280;
 pub const LIST_WIDTH_MAX: u32 = 1100;
 
@@ -235,111 +235,410 @@ pub fn merge_imported_profiles(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "RawConfig", into = "RawConfig")]
 pub struct Config {
-    #[serde(default)]
     pub listen_port: u16,
-    #[serde(default)]
     pub listen_all: bool,
-    #[serde(default)]
     pub use_system_proxy: bool,
     /// `None` follows the system locale. Only `zh` and `en` are stored.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
-    #[serde(default)]
+    /// Name of the active entry in `saved_profiles`, or empty when using an unnamed setup.
+    pub active_profile: String,
     pub bypass_hosts: String,
-    #[serde(default)]
     pub rules: String,
-    #[serde(default)]
     pub upstream_proxy: String,
+    pub rules_enabled: bool,
+    pub breaks_enabled: bool,
     /// On unless the file says otherwise, so an older `config.toml` keeps today's list.
-    #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub show_id: bool,
-    #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub show_method: bool,
-    #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub show_status: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
     pub show_protocol: bool,
-    #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub show_path: bool,
-    #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub show_gap: bool,
     /// On unless the file says otherwise. Time from the request to the full response.
-    #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub show_elapsed: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
     pub show_host: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
     pub show_client_ip: bool,
-    #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub show_size: bool,
     /// False shows only `flow.path` in the Path column; true shows `flow.url`.
-    #[serde(default, skip_serializing_if = "is_false")]
     pub show_full_url: bool,
     /// Where to ellipsize overflowing Path/URL and Host cells (`head`, `middle`, `tail`).
-    #[serde(default, skip_serializing_if = "ListEllipsize::is_default")]
     pub ellipsize: ListEllipsize,
+    pub list_width: u32,
+    pub window_width: u32,
+    pub window_height: u32,
+    /// Pretty is the body default unless the file says otherwise.
+    pub default_pretty: bool,
+    /// Origin TLS probe failures stay out of the list unless this is on.
+    pub show_tunnel_failures: bool,
+    /// Restored into the filter box on the next launch.
+    pub filter: String,
+    /// The last window was capturing. The next launch presses Start itself.
+    pub capturing: bool,
+    /// Filters the user saved on purpose. Newest first.
+    pub saved_filters: Vec<String>,
+    /// Named rule presets the user saved on purpose. Newest first.
+    pub saved_rules: Vec<SavedRuleSet>,
+    /// Filter, bypass, rules, and upstream saved as one preset. Newest first.
+    pub saved_profiles: Vec<SavedProfile>,
+    /// Recent setup snapshots (up to 10, newest first) for recovering previous versions.
+    pub profile_history: Vec<SavedProfile>,
+    /// Dragged list-column widths, in points, keyed by `method`, `path`, and the rest.
+    pub column_widths: HashMap<String, u32>,
+    /// Custom list-column order when reordered from [`DEFAULT_COLUMN_ORDER`].
+    pub column_order: Vec<String>,
+    /// Sanitize sensitive headers, query params, and JSON/form fields on HAR/HTML export and live share.
+    pub redact_export: bool,
+    /// When `redact_export` is enabled, replace binary or unstructured bodies with a placeholder instead of exporting raw bytes.
+    pub redact_strict: bool,
+    /// Extra comma-separated sensitive header or field names to redact on export/share.
+    pub redact_fields: String,
+    /// Base URL of a `zniff --relay` process, such as `http://10.0.0.1:8877`.
+    /// Empty keeps the share link on this computer.
+    pub relay_url: String,
+    /// Bearer token sent with share uploads. The relay process expects the same value.
+    pub relay_token: String,
+    /// Accept relay uploads on the capture port. Off until the user turns it on.
+    pub relay_accept: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RawConfig {
+    #[serde(default)]
+    listen_port: u16,
+    #[serde(default)]
+    listen_all: bool,
+    #[serde(default)]
+    use_system_proxy: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    language: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    active_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bypass_hosts: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rules: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    upstream_proxy: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rules_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    breaks_enabled: Option<bool>,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    show_id: bool,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    show_method: bool,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    show_status: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    show_protocol: bool,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    show_path: bool,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    show_gap: bool,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    show_elapsed: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    show_host: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    show_client_ip: bool,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    show_size: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    show_full_url: bool,
+    #[serde(default, skip_serializing_if = "ListEllipsize::is_default")]
+    ellipsize: ListEllipsize,
     #[serde(
         default = "default_list_width",
         skip_serializing_if = "is_default_list_width"
     )]
-    pub list_width: u32,
+    list_width: u32,
     #[serde(
         default = "default_window_width",
         skip_serializing_if = "is_default_window_width"
     )]
-    pub window_width: u32,
+    window_width: u32,
     #[serde(
         default = "default_window_height",
         skip_serializing_if = "is_default_window_height"
     )]
-    pub window_height: u32,
-    /// Pretty is the body default unless the file says otherwise.
+    window_height: u32,
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
-    pub default_pretty: bool,
-    /// Origin TLS probe failures stay out of the list unless this is on.
+    default_pretty: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    show_tunnel_failures: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    filter: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
-    pub show_tunnel_failures: bool,
-    /// Restored into the filter box on the next launch.
+    capturing: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    column_order: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    redact_export: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    redact_strict: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub filter: String,
-    /// The last window was capturing. The next launch presses Start itself.
+    redact_fields: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    relay_url: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    relay_token: String,
     #[serde(default, skip_serializing_if = "is_false")]
-    pub capturing: bool,
-    /// Filters the user saved on purpose. Newest first.
+    relay_accept: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub saved_filters: Vec<String>,
-    /// Named rule presets the user saved on purpose. Newest first.
+    saved_filters: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub saved_rules: Vec<SavedRuleSet>,
-    /// Filter, bypass, rules, and upstream saved as one preset. Newest first.
+    saved_rules: Vec<SavedRuleSet>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub saved_profiles: Vec<SavedProfile>,
-    /// Recent setup snapshots (up to 10, newest first) for recovering previous versions.
+    saved_profiles: Vec<SavedProfile>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub profile_history: Vec<SavedProfile>,
-    /// Dragged list-column widths, in points, keyed by `method`, `path`, and the rest.
+    profile_history: Vec<SavedProfile>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub column_widths: HashMap<String, u32>,
-    /// Custom list-column order when reordered from [`DEFAULT_COLUMN_ORDER`].
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub column_order: Vec<String>,
-    /// Sanitize sensitive headers, query params, and JSON/form fields on HAR/HTML export and live share.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub redact_export: bool,
-    /// Extra comma-separated sensitive header or field names to redact on export/share.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub redact_fields: String,
-    /// Base URL of a `zniff --relay` process, such as `http://10.0.0.1:8877`.
-    /// Empty keeps the share link on this computer.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub relay_url: String,
-    /// Bearer token sent with share uploads. The relay process expects the same value.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub relay_token: String,
-    /// Accept relay uploads on the capture port. Off until the user turns it on.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub relay_accept: bool,
+    column_widths: HashMap<String, u32>,
+}
+
+impl From<RawConfig> for Config {
+    fn from(raw: RawConfig) -> Self {
+        let mut saved_filters = raw.saved_filters;
+        let mut saved_rules = raw.saved_rules;
+        let mut saved_profiles = raw.saved_profiles;
+        let mut profile_history = raw.profile_history;
+        clamp_saved_filters(&mut saved_filters);
+        clamp_saved_rules(&mut saved_rules);
+        migrate_saved_profiles_from(&saved_filters, &saved_rules, &mut saved_profiles);
+        clamp_profile_history(&mut profile_history);
+
+        let explicit_active = raw
+            .active_profile
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty());
+
+        let (
+            active_profile,
+            filter,
+            bypass_hosts,
+            rules,
+            upstream_proxy,
+            rules_enabled,
+            breaks_enabled,
+            show_tunnel_failures,
+        ) = if let Some(preset) = explicit_active.and_then(|name| {
+            saved_profiles
+                .iter()
+                .find(|item| item.name.eq_ignore_ascii_case(name))
+        }) {
+            (
+                preset.name.clone(),
+                raw.filter.unwrap_or_else(|| preset.filter.clone()),
+                raw.bypass_hosts
+                    .unwrap_or_else(|| preset.bypass_hosts.clone()),
+                raw.rules.unwrap_or_else(|| preset.rules.clone()),
+                raw.upstream_proxy
+                    .unwrap_or_else(|| preset.upstream_proxy.clone()),
+                raw.rules_enabled.unwrap_or(preset.rules_enabled),
+                raw.breaks_enabled.unwrap_or(preset.breaks_enabled),
+                raw.show_tunnel_failures
+                    .unwrap_or(preset.show_tunnel_failures),
+            )
+        } else {
+            let filter = raw.filter.unwrap_or_default();
+            let bypass_hosts = raw.bypass_hosts.unwrap_or_default();
+            let rules = raw.rules.unwrap_or_default();
+            let upstream_proxy = raw.upstream_proxy.unwrap_or_default();
+            let mut rules_enabled = raw.rules_enabled.unwrap_or(true);
+            let mut breaks_enabled = raw.breaks_enabled.unwrap_or(true);
+            let show_tunnel_failures = raw.show_tunnel_failures.unwrap_or(false);
+            let has_setup_content = !filter.trim().is_empty()
+                || !bypass_hosts.trim().is_empty()
+                || !rules.trim().is_empty()
+                || !upstream_proxy.trim().is_empty();
+            let inferred_active = if raw.active_profile.is_none() && has_setup_content {
+                let probe = SavedProfile {
+                    name: String::new(),
+                    filter: filter.clone(),
+                    bypass_hosts: bypass_hosts.clone(),
+                    rules: rules.clone(),
+                    upstream_proxy: upstream_proxy.clone(),
+                    rules_enabled,
+                    breaks_enabled,
+                    show_tunnel_failures,
+                };
+                if let Some(preset) = saved_profiles
+                    .iter()
+                    .find(|item| same_profile_content(item, &probe))
+                {
+                    preset.name.clone()
+                } else if raw.rules_enabled.is_none()
+                    && raw.breaks_enabled.is_none()
+                    && let Some(preset) = saved_profiles.iter().find(|item| {
+                        item.filter.trim() == filter.trim()
+                            && item.bypass_hosts.trim() == bypass_hosts.trim()
+                            && item.rules.trim() == rules.trim()
+                            && item.upstream_proxy.trim() == upstream_proxy.trim()
+                            && item.show_tunnel_failures == show_tunnel_failures
+                    })
+                {
+                    rules_enabled = preset.rules_enabled;
+                    breaks_enabled = preset.breaks_enabled;
+                    preset.name.clone()
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
+            (
+                inferred_active,
+                filter,
+                bypass_hosts,
+                rules,
+                upstream_proxy,
+                rules_enabled,
+                breaks_enabled,
+                show_tunnel_failures,
+            )
+        };
+
+        Self {
+            listen_port: raw.listen_port,
+            listen_all: raw.listen_all,
+            use_system_proxy: raw.use_system_proxy,
+            language: raw.language,
+            active_profile,
+            bypass_hosts,
+            rules,
+            upstream_proxy,
+            rules_enabled,
+            breaks_enabled,
+            show_id: raw.show_id,
+            show_method: raw.show_method,
+            show_status: raw.show_status,
+            show_protocol: raw.show_protocol,
+            show_path: raw.show_path,
+            show_gap: raw.show_gap,
+            show_elapsed: raw.show_elapsed,
+            show_host: raw.show_host,
+            show_client_ip: raw.show_client_ip,
+            show_size: raw.show_size,
+            show_full_url: raw.show_full_url,
+            ellipsize: raw.ellipsize,
+            list_width: raw.list_width,
+            window_width: raw.window_width,
+            window_height: raw.window_height,
+            default_pretty: raw.default_pretty,
+            show_tunnel_failures,
+            filter,
+            capturing: raw.capturing,
+            saved_filters,
+            saved_rules,
+            saved_profiles,
+            profile_history,
+            column_widths: raw.column_widths,
+            column_order: raw.column_order,
+            redact_export: raw.redact_export,
+            redact_strict: raw.redact_strict,
+            redact_fields: raw.redact_fields,
+            relay_url: raw.relay_url,
+            relay_token: raw.relay_token,
+            relay_accept: raw.relay_accept,
+        }
+    }
+}
+
+impl From<Config> for RawConfig {
+    fn from(config: Config) -> Self {
+        let active_name = config.active_profile.trim();
+        let matched = (!active_name.is_empty())
+            .then(|| {
+                config
+                    .saved_profiles
+                    .iter()
+                    .find(|item| item.name.eq_ignore_ascii_case(active_name))
+            })
+            .flatten();
+
+        let (
+            active_profile,
+            filter,
+            bypass_hosts,
+            rules,
+            upstream_proxy,
+            rules_enabled,
+            breaks_enabled,
+            show_tunnel_failures,
+        ) = if let Some(preset) = matched {
+            (
+                Some(preset.name.clone()),
+                (config.filter.trim() != preset.filter.trim()).then(|| config.filter.clone()),
+                (config.bypass_hosts.trim() != preset.bypass_hosts.trim())
+                    .then(|| config.bypass_hosts.clone()),
+                (config.rules.trim() != preset.rules.trim()).then(|| config.rules.clone()),
+                (config.upstream_proxy.trim() != preset.upstream_proxy.trim())
+                    .then(|| config.upstream_proxy.clone()),
+                (config.rules_enabled != preset.rules_enabled).then_some(config.rules_enabled),
+                (config.breaks_enabled != preset.breaks_enabled).then_some(config.breaks_enabled),
+                (config.show_tunnel_failures != preset.show_tunnel_failures)
+                    .then_some(config.show_tunnel_failures),
+            )
+        } else {
+            (
+                None,
+                (!config.filter.is_empty()).then_some(config.filter),
+                (!config.bypass_hosts.is_empty()).then_some(config.bypass_hosts),
+                (!config.rules.is_empty()).then_some(config.rules),
+                (!config.upstream_proxy.is_empty()).then_some(config.upstream_proxy),
+                (!config.rules_enabled).then_some(false),
+                (!config.breaks_enabled).then_some(false),
+                config.show_tunnel_failures.then_some(true),
+            )
+        };
+
+        Self {
+            listen_port: config.listen_port,
+            listen_all: config.listen_all,
+            use_system_proxy: config.use_system_proxy,
+            language: config.language,
+            active_profile,
+            bypass_hosts,
+            rules,
+            upstream_proxy,
+            rules_enabled,
+            breaks_enabled,
+            show_id: config.show_id,
+            show_method: config.show_method,
+            show_status: config.show_status,
+            show_protocol: config.show_protocol,
+            show_path: config.show_path,
+            show_gap: config.show_gap,
+            show_elapsed: config.show_elapsed,
+            show_host: config.show_host,
+            show_client_ip: config.show_client_ip,
+            show_size: config.show_size,
+            show_full_url: config.show_full_url,
+            ellipsize: config.ellipsize,
+            list_width: config.list_width,
+            window_width: config.window_width,
+            window_height: config.window_height,
+            default_pretty: config.default_pretty,
+            show_tunnel_failures,
+            filter,
+            capturing: config.capturing,
+            column_order: config.column_order,
+            redact_export: config.redact_export,
+            redact_strict: config.redact_strict,
+            redact_fields: config.redact_fields,
+            relay_url: config.relay_url,
+            relay_token: config.relay_token,
+            relay_accept: config.relay_accept,
+            saved_filters: config.saved_filters,
+            saved_rules: config.saved_rules,
+            saved_profiles: config.saved_profiles,
+            profile_history: config.profile_history,
+            column_widths: config.column_widths,
+        }
+    }
 }
 
 impl Default for Config {
@@ -349,9 +648,12 @@ impl Default for Config {
             listen_all: false,
             use_system_proxy: false,
             language: None,
+            active_profile: String::new(),
             bypass_hosts: String::new(),
             rules: String::new(),
             upstream_proxy: String::new(),
+            rules_enabled: true,
+            breaks_enabled: true,
             show_id: true,
             show_method: true,
             show_status: true,
@@ -378,6 +680,7 @@ impl Default for Config {
             column_widths: HashMap::new(),
             column_order: Vec::new(),
             redact_export: false,
+            redact_strict: false,
             redact_fields: String::new(),
             relay_url: String::new(),
             relay_token: String::new(),
@@ -579,7 +882,10 @@ fn lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 enum Read {
-    Ready(Box<Config>),
+    Ready {
+        config: Box<Config>,
+        migrated_active: bool,
+    },
     Missing,
     Broken(std::io::Error),
 }
@@ -604,6 +910,7 @@ pub fn take_last_load_error() -> Option<String> {
         .take()
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn load(dir: &Path) -> Config {
     load_mode(dir, false)
 }
@@ -611,7 +918,13 @@ pub fn load(dir: &Path) -> Config {
 pub fn load_mode_ext(dir: &Path, dev: bool) -> (Config, Option<String>) {
     let _guard = lock();
     match read_config(dir, dev) {
-        Read::Ready(config) => {
+        Read::Ready {
+            config,
+            migrated_active,
+        } => {
+            if migrated_active {
+                let _ = store_unlocked(dir, dev, &config);
+            }
             *LAST_LOAD_ERROR.lock().unwrap_or_else(|e| e.into_inner()) = None;
             (*config, None)
         }
@@ -653,7 +966,7 @@ pub fn update(dir: &Path, change: impl FnOnce(&mut Config)) -> Result<()> {
 pub fn update_mode(dir: &Path, dev: bool, change: impl FnOnce(&mut Config)) -> Result<()> {
     let _guard = lock();
     let mut config = match read_config(dir, dev) {
-        Read::Ready(config) => *config,
+        Read::Ready { config, .. } => *config,
         Read::Missing if dev => Config::default_for(true),
         Read::Missing => migrate_legacy(dir),
         Read::Broken(err) => return Err(err),
@@ -671,8 +984,16 @@ pub fn update_mode(dir: &Path, dev: bool, change: impl FnOnce(&mut Config)) -> R
 fn read_config(dir: &Path, dev: bool) -> Read {
     let path = dir.join(config_file_name(dev));
     match fs::read_to_string(&path) {
-        Ok(text) => match toml::from_str::<Config>(&text) {
-            Ok(config) => Read::Ready(Box::new(normalize_for(config, dev))),
+        Ok(text) => match toml::from_str::<RawConfig>(&text) {
+            Ok(raw) => {
+                let had_active = raw.active_profile.is_some();
+                let config = normalize_for(Config::from(raw), dev);
+                let migrated_active = !had_active && !config.active_profile.is_empty();
+                Read::Ready {
+                    config: Box::new(config),
+                    migrated_active,
+                }
+            }
             Err(err) => Read::Broken(std::io::Error::new(ErrorKind::InvalidData, err)),
         },
         Err(err) if err.kind() == ErrorKind::NotFound => Read::Missing,
@@ -734,22 +1055,45 @@ fn normalize_for(mut config: Config, dev: bool) -> Config {
     clamp_saved_rules(&mut config.saved_rules);
     migrate_saved_profiles(&mut config);
     clamp_profile_history(&mut config.profile_history);
+    let active = config.active_profile.trim();
+    config.active_profile = if active.is_empty() {
+        String::new()
+    } else {
+        config
+            .saved_profiles
+            .iter()
+            .find(|preset| preset.name.eq_ignore_ascii_case(active))
+            .map(|preset| preset.name.clone())
+            .unwrap_or_default()
+    };
     config
 }
 
 fn migrate_saved_profiles(config: &mut Config) {
-    if !config.saved_profiles.is_empty() {
-        clamp_saved_profiles(&mut config.saved_profiles);
+    migrate_saved_profiles_from(
+        &config.saved_filters,
+        &config.saved_rules,
+        &mut config.saved_profiles,
+    );
+}
+
+fn migrate_saved_profiles_from(
+    saved_filters: &[String],
+    saved_rules: &[SavedRuleSet],
+    saved_profiles: &mut Vec<SavedProfile>,
+) {
+    if !saved_profiles.is_empty() {
+        clamp_saved_profiles(saved_profiles);
         return;
     }
-    for entry in &config.saved_filters {
+    for entry in saved_filters {
         let (name, expr) = entry.split_once('\t').unwrap_or(("", entry));
         let expr = expr.trim();
         if expr.is_empty() {
             continue;
         }
         let name = name.trim();
-        config.saved_profiles.push(SavedProfile {
+        saved_profiles.push(SavedProfile {
             name: if name.is_empty() {
                 expr.chars().take(28).collect()
             } else {
@@ -764,13 +1108,13 @@ fn migrate_saved_profiles(config: &mut Config) {
             show_tunnel_failures: false,
         });
     }
-    for rule in &config.saved_rules {
+    for rule in saved_rules {
         let rules = rule.rules.trim();
         if rules.is_empty() {
             continue;
         }
         let name = rule.name.trim();
-        config.saved_profiles.push(SavedProfile {
+        saved_profiles.push(SavedProfile {
             name: if name.is_empty() {
                 rules.lines().next().unwrap_or("规则").trim().to_string()
             } else {
@@ -785,7 +1129,7 @@ fn migrate_saved_profiles(config: &mut Config) {
             show_tunnel_failures: false,
         });
     }
-    clamp_saved_profiles(&mut config.saved_profiles);
+    clamp_saved_profiles(saved_profiles);
 }
 
 const SAVED_PROFILE_CAP: usize = 16;
@@ -845,16 +1189,14 @@ fn clamp_saved_profiles(items: &mut Vec<SavedProfile>) {
     let mut kept = Vec::new();
     for item in items.drain(..) {
         let name = item.name.trim().to_string();
-        if item.filter.trim().is_empty()
-            && item.bypass_hosts.trim().is_empty()
-            && item.rules.trim().is_empty()
-            && item.upstream_proxy.trim().is_empty()
-        {
-            continue;
-        }
-        if kept
-            .iter()
-            .any(|existing: &SavedProfile| existing.name.eq_ignore_ascii_case(&name))
+        let filter = item.filter.trim().to_string();
+        let bypass_hosts = item.bypass_hosts.trim().to_string();
+        let rules = item.rules.trim().to_string();
+        let upstream_proxy = item.upstream_proxy.trim().to_string();
+        if filter.is_empty()
+            && bypass_hosts.is_empty()
+            && rules.is_empty()
+            && upstream_proxy.is_empty()
         {
             continue;
         }
@@ -863,7 +1205,22 @@ fn clamp_saved_profiles(items: &mut Vec<SavedProfile>) {
         } else {
             name
         };
-        kept.push(SavedProfile { name, ..item });
+        if kept
+            .iter()
+            .any(|existing: &SavedProfile| existing.name.eq_ignore_ascii_case(&name))
+        {
+            continue;
+        }
+        kept.push(SavedProfile {
+            name,
+            filter,
+            bypass_hosts,
+            rules,
+            upstream_proxy,
+            rules_enabled: item.rules_enabled,
+            breaks_enabled: item.breaks_enabled,
+            show_tunnel_failures: item.show_tunnel_failures,
+        });
         if kept.len() == SAVED_PROFILE_CAP {
             break;
         }
@@ -1498,5 +1855,305 @@ mod tests {
         assert_eq!(config.listen_port, 8899);
         assert!(err.is_none());
         assert!(last_load_error().is_none());
+    }
+
+    #[test]
+    fn active_profile_omits_duplicate_top_level_setup_fields_and_restores_preset() {
+        let dir = Scratch::new();
+        let test_profile = SavedProfile {
+            name: "test".into(),
+            filter: "host:test.gf.com.cn path:/finance-api".into(),
+            bypass_hosts: String::new(),
+            rules: "replace */configs req supportCrypto=true -> supportCrypto=false".into(),
+            upstream_proxy: String::new(),
+            rules_enabled: false,
+            breaks_enabled: false,
+            show_tunnel_failures: true,
+        };
+        let google_profile = SavedProfile {
+            name: "google".into(),
+            filter: String::new(),
+            bypass_hosts: "google.com".into(),
+            rules: String::new(),
+            upstream_proxy: String::new(),
+            rules_enabled: true,
+            breaks_enabled: true,
+            show_tunnel_failures: false,
+        };
+        update(dir.path(), |config| {
+            config.saved_profiles = vec![test_profile.clone(), google_profile];
+            config.active_profile = "TEST".into();
+            config.filter = test_profile.filter.clone();
+            config.bypass_hosts = test_profile.bypass_hosts.clone();
+            config.rules = test_profile.rules.clone();
+            config.upstream_proxy = test_profile.upstream_proxy.clone();
+            config.rules_enabled = test_profile.rules_enabled;
+            config.breaks_enabled = test_profile.breaks_enabled;
+            config.show_tunnel_failures = test_profile.show_tunnel_failures;
+            config.column_widths.insert("path".into(), 280);
+            config.relay_accept = true;
+        })
+        .unwrap();
+
+        let raw_toml = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        let before_tables = raw_toml.split("[[").next().unwrap();
+        assert!(
+            before_tables.contains("active_profile = \"test\""),
+            "{raw_toml}"
+        );
+        assert!(!before_tables.contains("\nfilter ="), "{raw_toml}");
+        assert!(!before_tables.contains("\nrules ="), "{raw_toml}");
+        assert!(!before_tables.contains("bypass_hosts"), "{raw_toml}");
+        assert!(!before_tables.contains("upstream_proxy"), "{raw_toml}");
+        assert!(!before_tables.contains("rules_enabled"), "{raw_toml}");
+        assert!(!before_tables.contains("breaks_enabled"), "{raw_toml}");
+        assert!(
+            !before_tables.contains("show_tunnel_failures"),
+            "{raw_toml}"
+        );
+
+        let reloaded = load(dir.path());
+        assert_eq!(reloaded.active_profile, "test");
+        assert_eq!(reloaded.filter, test_profile.filter);
+        assert_eq!(reloaded.rules, test_profile.rules);
+        assert!(reloaded.bypass_hosts.is_empty());
+        assert!(reloaded.upstream_proxy.is_empty());
+        assert!(!reloaded.rules_enabled);
+        assert!(!reloaded.breaks_enabled);
+        assert!(reloaded.show_tunnel_failures);
+        assert!(reloaded.relay_accept);
+        assert_eq!(reloaded.column_widths.get("path").copied(), Some(280));
+    }
+
+    #[test]
+    fn active_profile_persists_only_unsaved_overrides_including_empty_clear() {
+        let dir = Scratch::new();
+        let preset = SavedProfile {
+            name: "test".into(),
+            filter: "host:api.example.com".into(),
+            bypass_hosts: String::new(),
+            rules: "delay api.example.com/* 100ms".into(),
+            upstream_proxy: String::new(),
+            rules_enabled: true,
+            breaks_enabled: true,
+            show_tunnel_failures: false,
+        };
+        update(dir.path(), |config| {
+            config.saved_profiles = vec![preset.clone()];
+            config.active_profile = "test".into();
+            config.filter = preset.filter.clone();
+            config.rules = preset.rules.clone();
+        })
+        .unwrap();
+
+        // User temporarily clears `filter` without clicking Save yet.
+        update(dir.path(), |config| {
+            config.filter.clear();
+            config.breaks_enabled = false;
+        })
+        .unwrap();
+
+        let raw_toml = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        let before_tables = raw_toml.split("[[").next().unwrap();
+        assert!(
+            before_tables.contains("active_profile = \"test\""),
+            "{raw_toml}"
+        );
+        assert!(before_tables.contains("filter = \"\""), "{raw_toml}");
+        assert!(
+            before_tables.contains("breaks_enabled = false"),
+            "{raw_toml}"
+        );
+        assert!(!before_tables.contains("\nrules ="), "{raw_toml}");
+
+        let draft_loaded = load(dir.path());
+        assert_eq!(draft_loaded.active_profile, "test");
+        assert_eq!(draft_loaded.filter, "");
+        assert_eq!(draft_loaded.rules, preset.rules);
+        assert!(!draft_loaded.breaks_enabled);
+
+        // User clicks Save to commit the changes into `test`.
+        update(dir.path(), |config| {
+            config.saved_profiles[0].filter.clear();
+            config.saved_profiles[0].breaks_enabled = false;
+        })
+        .unwrap();
+
+        let saved_toml = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        let saved_top = saved_toml.split("[[").next().unwrap();
+        assert!(
+            saved_top.contains("active_profile = \"test\""),
+            "{saved_toml}"
+        );
+        assert!(!saved_top.contains("filter ="), "{saved_toml}");
+        assert!(!saved_top.contains("breaks_enabled ="), "{saved_toml}");
+    }
+
+    #[test]
+    fn legacy_config_with_matching_saved_profile_migrates_to_active_profile() {
+        let dir = Scratch::new();
+        let legacy = r#"listen_port = 8877
+listen_all = true
+use_system_proxy = false
+language = "zh"
+bypass_hosts = ""
+rules = "replace */finance-api/online-hall-v2/configs req supportCrypto=true -> supportCrypto=false"
+upstream_proxy = ""
+window_width = 1845
+window_height = 1018
+filter = "host:test.gf.com.cn|t1.gf.com.cn path:/finance-api/online-hall|/super|/gfhall"
+capturing = true
+
+[[saved_profiles]]
+name = "test"
+filter = "host:test.gf.com.cn|t1.gf.com.cn path:/finance-api/online-hall|/super|/gfhall"
+rules = "replace */finance-api/online-hall-v2/configs req supportCrypto=true -> supportCrypto=false"
+
+[[saved_profiles]]
+name = "google"
+bypass_hosts = "google.com"
+
+[column_widths]
+method = 73
+path = 280
+"#;
+        fs::write(dir.path().join("config.toml"), legacy).unwrap();
+
+        let config = load(dir.path());
+        assert_eq!(config.active_profile, "test");
+        assert_eq!(
+            config.filter,
+            "host:test.gf.com.cn|t1.gf.com.cn path:/finance-api/online-hall|/super|/gfhall"
+        );
+        assert_eq!(
+            config.rules,
+            "replace */finance-api/online-hall-v2/configs req supportCrypto=true -> supportCrypto=false"
+        );
+
+        let migrated_toml = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        let top = migrated_toml.split("[[").next().unwrap();
+        assert!(top.contains("active_profile = \"test\""), "{migrated_toml}");
+        assert!(!top.contains("\nrules ="), "{migrated_toml}");
+        assert!(!top.contains("\nfilter ="), "{migrated_toml}");
+        assert!(!top.contains("bypass_hosts"), "{migrated_toml}");
+        assert!(!top.contains("upstream_proxy"), "{migrated_toml}");
+    }
+
+    #[test]
+    fn deleting_active_profile_clears_reference_and_keeps_live_setup() {
+        let dir = Scratch::new();
+        let preset = SavedProfile {
+            name: "test".into(),
+            filter: "host:a.test".into(),
+            bypass_hosts: String::new(),
+            rules: "break a.test /api".into(),
+            upstream_proxy: String::new(),
+            rules_enabled: true,
+            breaks_enabled: true,
+            show_tunnel_failures: false,
+        };
+        update(dir.path(), |config| {
+            config.saved_profiles = vec![preset.clone()];
+            config.active_profile = "test".into();
+            config.filter = preset.filter.clone();
+            config.rules = preset.rules.clone();
+        })
+        .unwrap();
+
+        update(dir.path(), |config| {
+            config.saved_profiles.clear();
+        })
+        .unwrap();
+
+        let raw_toml = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(!raw_toml.contains("active_profile"), "{raw_toml}");
+        assert!(raw_toml.contains("filter = \"host:a.test\""), "{raw_toml}");
+        assert!(
+            raw_toml.contains("rules = \"break a.test /api\""),
+            "{raw_toml}"
+        );
+
+        let reloaded = load(dir.path());
+        assert!(reloaded.active_profile.is_empty());
+        assert_eq!(reloaded.filter, "host:a.test");
+        assert_eq!(reloaded.rules, "break a.test /api");
+    }
+
+    #[test]
+    fn clamp_saved_profiles_trims_fields_and_deduplicates_default_name() {
+        let dir = Scratch::new();
+        update(dir.path(), |config| {
+            config.saved_profiles = vec![
+                SavedProfile {
+                    name: "   ".into(),
+                    filter: "  host:first.test  ".into(),
+                    bypass_hosts: "  a.internal  ".into(),
+                    rules: "  cors first.test  ".into(),
+                    upstream_proxy: "  127.0.0.1:7890  ".into(),
+                    rules_enabled: true,
+                    breaks_enabled: true,
+                    show_tunnel_failures: false,
+                },
+                SavedProfile {
+                    name: String::new(),
+                    filter: "host:duplicate-empty-name.test".into(),
+                    bypass_hosts: String::new(),
+                    rules: String::new(),
+                    upstream_proxy: String::new(),
+                    rules_enabled: true,
+                    breaks_enabled: true,
+                    show_tunnel_failures: false,
+                },
+                SavedProfile {
+                    name: "配置".into(),
+                    filter: "host:explicit-default-name.test".into(),
+                    bypass_hosts: String::new(),
+                    rules: String::new(),
+                    upstream_proxy: String::new(),
+                    rules_enabled: true,
+                    breaks_enabled: true,
+                    show_tunnel_failures: false,
+                },
+            ];
+        })
+        .unwrap();
+
+        let reloaded = load(dir.path());
+        assert_eq!(reloaded.saved_profiles.len(), 1);
+        let p = &reloaded.saved_profiles[0];
+        assert_eq!(p.name, "配置");
+        assert_eq!(p.filter, "host:first.test");
+        assert_eq!(p.bypass_hosts, "a.internal");
+        assert_eq!(p.rules, "cors first.test");
+        assert_eq!(p.upstream_proxy, "127.0.0.1:7890");
+    }
+
+    #[test]
+    fn redact_strict_persists_when_true_and_omits_default_false() {
+        let dir = Scratch::new();
+        assert!(!load(dir.path()).redact_strict);
+
+        update(dir.path(), |config| {
+            config.redact_export = true;
+            config.redact_strict = true;
+            config.redact_fields = "phone, id_card".into();
+        })
+        .unwrap();
+
+        let raw_toml = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(raw_toml.contains("redact_strict = true"), "{raw_toml}");
+
+        let reloaded = load(dir.path());
+        assert!(reloaded.redact_export);
+        assert!(reloaded.redact_strict);
+        assert_eq!(reloaded.redact_fields, "phone, id_card");
+
+        update(dir.path(), |config| {
+            config.redact_strict = false;
+        })
+        .unwrap();
+        let raw_toml = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(!raw_toml.contains("redact_strict"), "{raw_toml}");
+        assert!(!load(dir.path()).redact_strict);
     }
 }

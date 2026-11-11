@@ -236,16 +236,119 @@ fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn is_empty_pac_url(url: &str) -> bool {
+    let trimmed = url.trim();
+    trimmed.is_empty() || trimmed.eq_ignore_ascii_case("(null)")
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn endpoint_restore_commands(
+    service: &str,
+    set: &str,
+    state: &str,
+    endpoint: &Endpoint,
+) -> Vec<Vec<String>> {
+    if !endpoint.enabled && endpoint.server.is_empty() {
+        return vec![vec![
+            state.to_string(),
+            service.to_string(),
+            "off".to_string(),
+        ]];
+    }
+    let server = if endpoint.server.is_empty() {
+        "0.0.0.0"
+    } else {
+        &endpoint.server
+    };
+    let port = if endpoint.port == 0 {
+        "0".to_string()
+    } else {
+        endpoint.port.to_string()
+    };
+    vec![
+        vec![
+            set.to_string(),
+            service.to_string(),
+            server.to_string(),
+            port,
+            "off".to_string(),
+            String::new(),
+            String::new(),
+        ],
+        vec![
+            state.to_string(),
+            service.to_string(),
+            if endpoint.enabled { "on" } else { "off" }.to_string(),
+        ],
+    ]
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_service_restore_commands(service: &MacService) -> Vec<Vec<String>> {
+    let mut cmds = Vec::new();
+    cmds.extend(endpoint_restore_commands(
+        &service.name,
+        "-setwebproxy",
+        "-setwebproxystate",
+        &service.web,
+    ));
+    cmds.extend(endpoint_restore_commands(
+        &service.name,
+        "-setsecurewebproxy",
+        "-setsecurewebproxystate",
+        &service.secure,
+    ));
+    cmds.extend(endpoint_restore_commands(
+        &service.name,
+        "-setsocksfirewallproxy",
+        "-setsocksfirewallproxystate",
+        &service.socks,
+    ));
+    if is_empty_pac_url(&service.pac_url) {
+        cmds.push(vec![
+            "-setautoproxystate".to_string(),
+            service.name.clone(),
+            "off".to_string(),
+        ]);
+    } else {
+        cmds.push(vec![
+            "-setautoproxyurl".to_string(),
+            service.name.clone(),
+            service.pac_url.trim().to_string(),
+        ]);
+        cmds.push(vec![
+            "-setautoproxystate".to_string(),
+            service.name.clone(),
+            if service.pac_enabled { "on" } else { "off" }.to_string(),
+        ]);
+    }
+    let mut bypass = vec!["-setproxybypassdomains".to_string(), service.name.clone()];
+    if service.bypass.is_empty() {
+        bypass.push("Empty".into());
+    } else {
+        bypass.extend(service.bypass.iter().cloned());
+    }
+    cmds.push(bypass);
+    cmds
+}
+
 #[cfg(target_os = "macos")]
 fn capture_macos() -> Result<Vec<MacService>> {
     let mut services = Vec::new();
     for name in enabled_services()? {
+        let raw_pac = read_field(&name, "-getautoproxyurl", "URL").unwrap_or_default();
+        let pac_url = if is_empty_pac_url(&raw_pac) {
+            String::new()
+        } else {
+            raw_pac
+        };
         services.push(MacService {
             web: read_endpoint(&name, "-getwebproxy")?,
             secure: read_endpoint(&name, "-getsecurewebproxy")?,
             socks: read_endpoint(&name, "-getsocksfirewallproxy")?,
             pac_enabled: read_flag(&name, "-getautoproxyurl", "Enabled")?,
-            pac_url: read_field(&name, "-getautoproxyurl", "URL").unwrap_or_default(),
+            pac_url,
             bypass: read_bypass(&name)?,
             name,
         });
@@ -291,60 +394,11 @@ fn enable_macos(port: u16, services: &[MacService]) -> Result<()> {
 #[cfg(target_os = "macos")]
 fn restore_macos(services: &[MacService]) -> Result<()> {
     for service in services {
-        write_endpoint(
-            &service.name,
-            "-setwebproxy",
-            "-setwebproxystate",
-            &service.web,
-        )?;
-        write_endpoint(
-            &service.name,
-            "-setsecurewebproxy",
-            "-setsecurewebproxystate",
-            &service.secure,
-        )?;
-        write_endpoint(
-            &service.name,
-            "-setsocksfirewallproxy",
-            "-setsocksfirewallproxystate",
-            &service.socks,
-        )?;
-        if service.pac_url.is_empty() {
-            run_setup(&["-setautoproxystate", &service.name, "off"])?;
-        } else {
-            run_setup(&["-setautoproxyurl", &service.name, &service.pac_url])?;
-            run_setup(&[
-                "-setautoproxystate",
-                &service.name,
-                if service.pac_enabled { "on" } else { "off" },
-            ])?;
+        for cmd in macos_service_restore_commands(service) {
+            let refs: Vec<&str> = cmd.iter().map(String::as_str).collect();
+            run_setup(&refs)?;
         }
-        let mut args = vec!["-setproxybypassdomains".to_string(), service.name.clone()];
-        if service.bypass.is_empty() {
-            args.push("Empty".into());
-        } else {
-            args.extend(service.bypass.iter().cloned());
-        }
-        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        run_setup(&refs)?;
     }
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn write_endpoint(service: &str, set: &str, state: &str, endpoint: &Endpoint) -> Result<()> {
-    let server = if endpoint.server.is_empty() {
-        "0.0.0.0"
-    } else {
-        &endpoint.server
-    };
-    let port = if endpoint.port == 0 {
-        "0".to_string()
-    } else {
-        endpoint.port.to_string()
-    };
-    run_setup(&[set, service, server, &port, "off", "", ""])?;
-    run_setup(&[state, service, if endpoint.enabled { "on" } else { "off" }])?;
     Ok(())
 }
 
@@ -695,5 +749,67 @@ mod tests {
         assert!(read_snapshot_in_mode(&dir, false).unwrap().unwrap().active);
         assert!(!read_snapshot_in_mode(&dir, true).unwrap().unwrap().active);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn macos_restore_ignores_null_pac_and_skips_bogus_zero_endpoint() {
+        assert!(is_empty_pac_url(""));
+        assert!(is_empty_pac_url("(null)"));
+        assert!(is_empty_pac_url(" (NULL) "));
+        assert!(!is_empty_pac_url("https://example.com/proxy.pac"));
+
+        let svc = MacService {
+            name: "Wi-Fi".to_string(),
+            web: Endpoint {
+                enabled: false,
+                server: String::new(),
+                port: 0,
+            },
+            secure: Endpoint {
+                enabled: false,
+                server: "127.0.0.1".to_string(),
+                port: 7890,
+            },
+            socks: Endpoint {
+                enabled: false,
+                server: String::new(),
+                port: 0,
+            },
+            pac_enabled: false,
+            pac_url: "(null)".to_string(),
+            bypass: vec!["*.local".to_string()],
+        };
+        let cmds = macos_service_restore_commands(&svc);
+        // Empty disabled web & socks must NOT write `0.0.0.0 0`.
+        assert!(
+            !cmds.iter().any(|c| c.iter().any(|arg| arg == "0.0.0.0")),
+            "unexpected 0.0.0.0 command: {cmds:?}"
+        );
+        // `(null)` PAC URL must NOT invoke `-setautoproxyurl`.
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| c.first().is_some_and(|a| a == "-setautoproxyurl")),
+            "unexpected -setautoproxyurl for (null): {cmds:?}"
+        );
+        assert!(cmds.contains(&vec![
+            "-setwebproxystate".to_string(),
+            "Wi-Fi".to_string(),
+            "off".to_string()
+        ]));
+        assert!(cmds.contains(&vec![
+            "-setsecurewebproxy".to_string(),
+            "Wi-Fi".to_string(),
+            "127.0.0.1".to_string(),
+            "7890".to_string(),
+            "off".to_string(),
+            String::new(),
+            String::new(),
+        ]));
+        assert!(cmds.contains(&vec![
+            "-setautoproxystate".to_string(),
+            "Wi-Fi".to_string(),
+            "off".to_string()
+        ]));
     }
 }

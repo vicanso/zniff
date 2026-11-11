@@ -13,7 +13,9 @@ use anyhow::anyhow;
 use serde_json::{Value, json};
 
 use crate::ca::Ca;
-use crate::session::{CachedFlowDetail, CachedFlowView, Direction, Message, Protocol, Session};
+use crate::session::{
+    CachedFlowDetail, CachedFlowView, ConnInfo, Direction, Message, Protocol, Session,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BreakSide {
@@ -98,14 +100,34 @@ impl Hub {
                 .unwrap_or_else(|err| err.into_inner()) =
                 queue.iter().filter_map(parse_paused).collect();
         }
+        if let Some(flows) = value.get("flows").and_then(Value::as_u64) {
+            self.with_session(|session| session.set_cached_total(Some(flows as usize)));
+        }
+        if let Some(accept) = value
+            .get("prefs")
+            .and_then(|prefs| prefs.get("relay_accept"))
+            .and_then(Value::as_bool)
+        {
+            self.relay_accept.store(accept, Ordering::Relaxed);
+        }
     }
 
     pub fn apply_flows(&self, value: &Value) {
         let Some(flows) = value.get("flows").and_then(Value::as_array) else {
             return;
         };
+        let session_total = value
+            .get("session_total")
+            .or_else(|| value.get("total"))
+            .and_then(Value::as_u64)
+            .map(|count| count as usize);
         let rows = flows.iter().filter_map(parse_view).collect::<Vec<_>>();
-        self.with_session(|session| session.replace_cached_views(rows));
+        self.with_session(|session| {
+            session.replace_cached_views(rows);
+            if let Some(total) = session_total {
+                session.set_cached_total(Some(total));
+            }
+        });
         self.bump();
     }
 
@@ -270,12 +292,14 @@ impl Hub {
         queue.remove(0);
         drop(queue);
         self.bump();
+        let (body_utf8, body_b64) = encode_body_fields(decision.body.as_deref());
         post_op(json!({
             "op": "resolve_break",
             "drop": decision.drop,
             "status": decision.status,
             "headers": decision.headers,
-            "body": decision.body.as_deref().map(String::from_utf8_lossy).map(|text| text.into_owned()),
+            "body": body_utf8,
+            "body_b64": body_b64,
         }));
         true
     }
@@ -345,6 +369,7 @@ impl Hub {
         post_op(json!({"op": "end_share"}));
     }
 
+    #[allow(dead_code)]
     pub fn export_har_matching_with_redact(
         &self,
         filter: &str,
@@ -360,6 +385,7 @@ impl Hub {
         crate::har::export_har_with_redact(&flows, redact)
     }
 
+    #[allow(dead_code)]
     pub fn import_har(&self, value: &Value) -> usize {
         let count = crate::har::import_har(value).len();
         post_op(json!({"op": "import_har", "value": value}));
@@ -374,13 +400,15 @@ impl Hub {
             on_done(Err(err));
             return;
         }
+        let (body_utf8, body_b64) = encode_body_fields(edit.body.as_deref());
         let body = json!({
             "op": "replay",
             "id": id,
             "method": edit.method,
             "url": edit.url,
             "headers": edit.headers,
-            "body": edit.body.as_deref().and_then(|bytes| String::from_utf8(bytes.to_vec()).ok()),
+            "body": body_utf8,
+            "body_b64": body_b64,
         });
         spawn_result(body, on_done);
     }
@@ -400,6 +428,7 @@ impl Hub {
             on_done(Err(err));
             return;
         }
+        let (body_utf8, body_b64) = encode_body_fields(edit.body.as_deref());
         let body = json!({
             "op": "replay_batch",
             "id": id,
@@ -409,7 +438,8 @@ impl Hub {
             "method": edit.method,
             "url": edit.url,
             "headers": edit.headers,
-            "body": edit.body.as_deref().and_then(|bytes| String::from_utf8(bytes.to_vec()).ok()),
+            "body": body_utf8,
+            "body_b64": body_b64,
         });
         spawn_batch(body, on_done);
     }
@@ -418,12 +448,14 @@ impl Hub {
     where
         F: FnOnce(anyhow::Result<u64>) + Send + 'static,
     {
+        let (body_utf8, body_b64) = encode_body_fields(edit.body.as_deref());
         let body = json!({
             "op": "send_composed",
             "method": edit.method,
             "url": edit.url,
             "headers": edit.headers,
-            "body": edit.body.as_deref().and_then(|bytes| String::from_utf8(bytes.to_vec()).ok()),
+            "body": body_utf8,
+            "body_b64": body_b64,
         });
         spawn_result(body, on_done);
     }
@@ -447,6 +479,52 @@ impl Hub {
 
     fn bump(&self) {
         self.generation.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn encode_body_fields(bytes: Option<&[u8]>) -> (Option<String>, Option<String>) {
+    let Some(bytes) = bytes else {
+        return (None, None);
+    };
+    let utf8 = std::str::from_utf8(bytes).ok().map(str::to_string);
+    let b64 = Some(crate::session::base64_encode(bytes));
+    (utf8, b64)
+}
+
+pub fn sync_web_config_diff(before: &crate::config::Config, after: &crate::config::Config) {
+    if before.saved_profiles != after.saved_profiles
+        || before.profile_history != after.profile_history
+        || before.active_profile != after.active_profile
+    {
+        post_op(json!({
+            "op": "sync_profiles",
+            "saved_profiles": after.saved_profiles,
+            "profile_history": after.profile_history,
+            "active_profile": after.active_profile,
+        }));
+    }
+    if before.filter != after.filter {
+        post_op(json!({
+            "op": "set_filter",
+            "text": after.filter,
+        }));
+    }
+    if before.redact_export != after.redact_export
+        || before.redact_strict != after.redact_strict
+        || before.redact_fields != after.redact_fields
+    {
+        post_op(json!({
+            "op": "set_redact",
+            "on": after.redact_export,
+            "strict": after.redact_strict,
+            "fields": after.redact_fields,
+        }));
+    }
+    if before.relay_url != after.relay_url {
+        post_op(json!({
+            "op": "set_relay_url",
+            "text": after.relay_url,
+        }));
     }
 }
 
@@ -532,15 +610,35 @@ fn parse_paused(value: &Value) -> Option<(u64, BreakSide)> {
     Some((id, side))
 }
 
+fn parse_conn_info(value: Option<&Value>) -> ConnInfo {
+    let Some(obj) = value else {
+        return ConnInfo::default();
+    };
+    ConnInfo {
+        dns_ms: obj.get("dns_ms").and_then(Value::as_u64),
+        tcp_ms: obj.get("tcp_ms").and_then(Value::as_u64),
+        tls_ms: obj.get("tls_ms").and_then(Value::as_u64),
+        reused: obj.get("reused").and_then(Value::as_bool).unwrap_or(false),
+        server_addr: text_field(obj, "server_addr"),
+        tls_version: text_field(obj, "tls_version"),
+        dialed_before_start: obj
+            .get("dialed_before_start")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    }
+}
+
 fn parse_view(value: &Value) -> Option<CachedFlowView> {
     Some(CachedFlowView {
         id: value.get("id").and_then(Value::as_u64)?,
+        rev: value.get("rev").and_then(Value::as_u64).unwrap_or(0),
         protocol: Protocol::from_label(value.get("protocol").and_then(Value::as_str).unwrap_or("")),
         method: text_field(value, "method"),
         host: text_field(value, "host"),
         path: text_field(value, "path"),
         url: text_field(value, "url"),
         client_ip: text_field(value, "client_ip"),
+        conn_info: parse_conn_info(value.get("conn_info")),
         status: value
             .get("status")
             .and_then(Value::as_u64)
@@ -550,6 +648,10 @@ fn parse_view(value: &Value) -> Option<CachedFlowView> {
             .and_then(Value::as_str)
             .map(str::to_string),
         started: millis_time(value.get("started_ms").and_then(Value::as_u64).unwrap_or(0)),
+        response_at: value
+            .get("response_ms")
+            .and_then(Value::as_u64)
+            .map(millis_time),
         finished_at: value
             .get("finished_ms")
             .and_then(Value::as_u64)
@@ -566,6 +668,7 @@ fn parse_view(value: &Value) -> Option<CachedFlowView> {
             .get("pinned")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        rule_hit: text_field(value, "rule_hit"),
         comment: text_field(value, "comment"),
         relay_source: value
             .get("relay_source")
@@ -575,13 +678,23 @@ fn parse_view(value: &Value) -> Option<CachedFlowView> {
     })
 }
 
+fn body_field(value: &Value, text_key: &str, b64_key: &str) -> Vec<u8> {
+    if let Some(b64) = value.get(b64_key).and_then(Value::as_str)
+        && let Some(bytes) = crate::session::base64_decode(b64)
+    {
+        return bytes;
+    }
+    text_field(value, text_key).into_bytes()
+}
+
 fn parse_detail(value: &Value) -> Option<CachedFlowDetail> {
     Some(CachedFlowDetail {
         id: value.get("id").and_then(Value::as_u64)?,
+        rev: value.get("rev").and_then(Value::as_u64).unwrap_or(0),
         request_headers: pairs(value.get("request_headers")),
         response_headers: pairs(value.get("response_headers")),
-        request_body: text_field(value, "request_body").into_bytes(),
-        response_body: text_field(value, "response_body").into_bytes(),
+        request_body: body_field(value, "request_body", "request_body_b64"),
+        response_body: body_field(value, "response_body", "response_body_b64"),
         request_truncated: value
             .get("request_truncated")
             .and_then(Value::as_bool)
@@ -590,11 +703,31 @@ fn parse_detail(value: &Value) -> Option<CachedFlowDetail> {
             .get("response_truncated")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        request_encoding_error: value
+            .get("request_encoding_error")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        response_encoding_error: value
+            .get("response_encoding_error")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        request_expired: value
+            .get("request_expired")
+            .and_then(Value::as_u64)
+            .map(|len| len as usize),
+        response_expired: value
+            .get("response_expired")
+            .and_then(Value::as_u64)
+            .map(|len| len as usize),
         messages: value
             .get("messages")
             .and_then(Value::as_array)
             .map(|items| items.iter().filter_map(parse_message).collect())
             .unwrap_or_default(),
+        messages_truncated: value
+            .get("messages_truncated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     })
 }
 

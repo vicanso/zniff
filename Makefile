@@ -7,7 +7,7 @@ MANIFEST := app/Cargo.toml
 CARGO_FLAGS := --manifest-path $(MANIFEST)
 VERSION := $(shell sed -n 's/^version = "\([^"]*\)"/\1/p' $(MANIFEST) | head -1)
 
-.PHONY: all help build dev debug run web web-ui fmt lint test check release bundle clean \
+.PHONY: all help build dev debug run web web-ui fmt lint test check check-wasm release bundle clean \
 	bloat udeps version version-patch version-minor version-major tag nightly changelog
 
 # --- develop ---------------------------------------------------------------
@@ -24,7 +24,8 @@ help:
 		'web-ui   rebuild the shared page with nsh 0.4' \
 		'fmt      cargo fmt' \
 		'lint     clippy, warnings denied' \
-		'check    type-check every target' \
+		'check    type-check every target (plus wasm32 when installed)' \
+		'check-wasm  type-check the shared wasm32 UI library' \
 		'test     run the library and binary tests' \
 		'release  compile the release binary' \
 		'bundle   release binary wrapped as zniff.app with icons/zniff.icns' \
@@ -71,7 +72,9 @@ web-ui:
 	mv $(CURDIR)/app/.nsh/web-pkg/zniff $(WEB_DIR)
 
 web:
-	@test -f $(WEB_DIR)/index.html || $(MAKE) web-ui
+	@if [ ! -f $(WEB_DIR)/index.html ] || find $(CURDIR)/app/src $(CURDIR)/app/Cargo.toml -newer $(WEB_DIR)/index.html -print -quit 2>/dev/null | grep -q .; then \
+		$(MAKE) web-ui; \
+	fi
 	ZNIFF_DEV=1 ZNIFF_WEB_ROOT=$(WEB_DIR) $(CARGO) run $(CARGO_FLAGS) -- --web $(ARGS)
 
 build:
@@ -85,8 +88,13 @@ fmt:
 lint:
 	$(CARGO) clippy $(CARGO_FLAGS) --all-targets $(ARGS) -- --deny=warnings
 
-check:
+check: check-wasm
 	$(CARGO) check $(CARGO_FLAGS) --all-targets $(ARGS)
+
+check-wasm:
+	@if [ -d "$$(rustc --print target-libdir --target wasm32-unknown-unknown 2>/dev/null)" ]; then \
+		RUSTFLAGS="-D warnings" $(CARGO) check $(CARGO_FLAGS) --lib --target wasm32-unknown-unknown $(ARGS); \
+	fi
 
 test:
 	$(CARGO) test $(CARGO_FLAGS) --workspace $(ARGS)

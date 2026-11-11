@@ -23,6 +23,8 @@
 //!
 //! `delay` is capped at 30s. A response break buffers at most 1 MB.
 
+#![cfg_attr(target_arch = "wasm32", allow(dead_code))]
+
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -1445,19 +1447,18 @@ fn decode_query_component(input: &str) -> String {
 }
 
 fn encode_query_component(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    for byte in input.bytes() {
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(bytes.len());
+    for (idx, &byte) in bytes.iter().enumerate() {
         match byte {
-            b'A'..=b'Z'
-            | b'a'..=b'z'
-            | b'0'..=b'9'
-            | b'-'
-            | b'_'
-            | b'.'
-            | b'~'
-            | b':'
-            | b'/'
-            | b'%' => out.push(byte as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b':' | b'/' => {
+                out.push(byte as char)
+            }
+            b'%' if bytes.get(idx + 1).is_some_and(|b| b.is_ascii_hexdigit())
+                && bytes.get(idx + 2).is_some_and(|b| b.is_ascii_hexdigit()) =>
+            {
+                out.push('%');
+            }
             _ => out.push_str(&format!("%{byte:02X}")),
         }
     }
@@ -1708,6 +1709,10 @@ impl QuickRule {
             Self::Block => ("阻断", "Block"),
         }
     }
+
+    pub const fn supports_graphql_op(self) -> bool {
+        !matches!(self, Self::Cors | Self::Throttle | Self::Cert)
+    }
 }
 
 /// Counts 1-based line numbers whose rule syntax could not be parsed.
@@ -1783,15 +1788,56 @@ pub fn append_quick_rule(
     from: &str,
     to: &str,
 ) -> Option<String> {
+    append_quick_rule_with_op(rules, kind, pattern, response, from, to, "")
+}
+
+pub fn append_quick_rule_with_op(
+    existing: &str,
+    kind: QuickRule,
+    pattern: &str,
+    response: bool,
+    from: &str,
+    to: &str,
+    op: &str,
+) -> Option<String> {
     let pattern = pattern.trim();
     if pattern.is_empty() || pattern.contains(char::is_whitespace) {
         return None;
     }
     let from = from.trim();
     let to = to.trim();
+    let op_trimmed = op.trim();
+    let explicit_op = if op_trimmed.is_empty() {
+        None
+    } else {
+        if !kind.supports_graphql_op() {
+            return None;
+        }
+        Some(parse_op_opt(op_trimmed)?)
+    };
+
     let line = match kind {
         QuickRule::Replace => {
-            return append_replace_line(rules, pattern, response, from, to);
+            if let Some(op_val) = explicit_op {
+                if from.is_empty()
+                    || from.contains("->")
+                    || pattern.contains('\n')
+                    || from.contains('\n')
+                    || to.contains('\n')
+                {
+                    return None;
+                }
+                let side = if response { "res" } else { "req" };
+                let quoted_from = quote_rule_token(from);
+                let rhs = if to.is_empty() {
+                    "\"\"".to_string()
+                } else {
+                    quote_rule_token(to)
+                };
+                format!("replace {pattern} {side} {quoted_from} -> {rhs} op={op_val}")
+            } else {
+                return append_replace_line(existing, pattern, response, from, to);
+            }
         }
         QuickRule::Json => {
             if from.is_empty()
@@ -1802,11 +1848,16 @@ pub fn append_quick_rule(
                 return None;
             }
             let side = if response { "res" } else { "req" };
-            if to.is_empty() {
+            let mut base = if to.is_empty() {
                 format!("json {pattern} {side} del {from}")
             } else {
                 format!("json {pattern} {side} set {from} {to}")
+            };
+            if let Some(op_val) = explicit_op {
+                base.push_str(&format!(" op={op_val}"));
+                parse_line(&base)?;
             }
+            base
         }
         QuickRule::Remote => {
             if !(from.starts_with("http://") || from.starts_with("https://"))
@@ -1814,11 +1865,21 @@ pub fn append_quick_rule(
             {
                 return None;
             }
-            if to.is_empty() {
-                format!("map-remote {pattern} {from}")
-            } else {
-                let op = parse_op_opt(to)?;
-                format!("map-remote {pattern} {from} op={op}")
+            let resolved_op = match (explicit_op, to.is_empty()) {
+                (Some(op_val), true) => Some(op_val),
+                (Some(op_val), false) => {
+                    let legacy = parse_op_opt(to)?;
+                    if legacy != op_val {
+                        return None;
+                    }
+                    Some(op_val)
+                }
+                (None, true) => None,
+                (None, false) => Some(parse_op_opt(to)?),
+            };
+            match resolved_op {
+                Some(op_val) => format!("map-remote {pattern} {from} op={op_val}"),
+                None => format!("map-remote {pattern} {from}"),
             }
         }
         QuickRule::Local => {
@@ -1830,7 +1891,7 @@ pub fn append_quick_rule(
             } else {
                 Some(parse_status_opt(to)?)
             };
-            if from.is_empty() {
+            let mut base = if from.is_empty() {
                 let code = status_from_to?;
                 format!("map-local {pattern} status={code}")
             } else if status_from_to.is_none()
@@ -1844,14 +1905,21 @@ pub fn append_quick_rule(
                     Some(code) => format!("map-local {pattern} {quoted} status={code}{fb}"),
                     None => format!("map-local {pattern} {quoted}{fb}"),
                 }
+            };
+            if let Some(op_val) = explicit_op {
+                base.push_str(&format!(" op={op_val}"));
             }
+            base
         }
         QuickRule::Delay => {
             if from.is_empty() || from.contains(char::is_whitespace) || parse_delay(from).is_none()
             {
                 return None;
             }
-            format!("delay {pattern} {from}")
+            match explicit_op {
+                Some(op_val) => format!("delay {pattern} {from} op={op_val}"),
+                None => format!("delay {pattern} {from}"),
+            }
         }
         QuickRule::Throttle => {
             let spec = if to.is_empty() {
@@ -1868,19 +1936,39 @@ pub fn append_quick_rule(
             format!("throttle {pattern} {}", tokens.join(" "))
         }
         QuickRule::Break => {
-            if from.is_empty() {
-                format!("break {pattern}")
-            } else {
-                let op = parse_op_opt(from)?;
-                format!("break {pattern} op={op}")
+            let resolved_op = match (explicit_op, from.is_empty()) {
+                (Some(op_val), true) => Some(op_val),
+                (Some(op_val), false) => {
+                    let legacy = parse_op_opt(from)?;
+                    if legacy != op_val {
+                        return None;
+                    }
+                    Some(op_val)
+                }
+                (None, true) => None,
+                (None, false) => Some(parse_op_opt(from)?),
+            };
+            match resolved_op {
+                Some(op_val) => format!("break {pattern} op={op_val}"),
+                None => format!("break {pattern}"),
             }
         }
         QuickRule::BreakRes => {
-            if from.is_empty() {
-                format!("break-res {pattern}")
-            } else {
-                let op = parse_op_opt(from)?;
-                format!("break-res {pattern} op={op}")
+            let resolved_op = match (explicit_op, from.is_empty()) {
+                (Some(op_val), true) => Some(op_val),
+                (Some(op_val), false) => {
+                    let legacy = parse_op_opt(from)?;
+                    if legacy != op_val {
+                        return None;
+                    }
+                    Some(op_val)
+                }
+                (None, true) => None,
+                (None, false) => Some(parse_op_opt(from)?),
+            };
+            match resolved_op {
+                Some(op_val) => format!("break-res {pattern} op={op_val}"),
+                None => format!("break-res {pattern}"),
             }
         }
         QuickRule::Header => {
@@ -1889,10 +1977,14 @@ pub fn append_quick_rule(
                 return None;
             }
             let side = if response { "res" } else { "req" };
-            if to.is_empty() {
-                format!("header {pattern} {side} del {from}")
-            } else {
-                format!("header {pattern} {side} set {from} {to}")
+            match (to.is_empty(), explicit_op) {
+                (true, None) => format!("header {pattern} {side} del {from}"),
+                (true, Some(op_val)) => format!("header {pattern} {side} del {from} op={op_val}"),
+                (false, None) => format!("header {pattern} {side} set {from} {to}"),
+                (false, Some(op_val)) => {
+                    let quoted_to = quote_rule_token(to);
+                    format!("header {pattern} {side} set {from} {quoted_to} op={op_val}")
+                }
             }
         }
         QuickRule::Query => {
@@ -1903,20 +1995,34 @@ pub fn append_quick_rule(
             {
                 return None;
             }
-            if to.is_empty() {
+            let mut base = if to.is_empty() {
                 format!("query {pattern} del {from}")
             } else {
                 let quoted_to = quote_rule_token(to);
                 format!("query {pattern} set {from} {quoted_to}")
+            };
+            if let Some(op_val) = explicit_op {
+                base.push_str(&format!(" op={op_val}"));
             }
+            base
         }
         QuickRule::Cors => format!("cors {pattern}"),
         QuickRule::NoCache => {
-            if from.is_empty() {
-                format!("no-cache {pattern}")
-            } else {
-                let op = parse_op_opt(from)?;
-                format!("no-cache {pattern} op={op}")
+            let resolved_op = match (explicit_op, from.is_empty()) {
+                (Some(op_val), true) => Some(op_val),
+                (Some(op_val), false) => {
+                    let legacy = parse_op_opt(from)?;
+                    if legacy != op_val {
+                        return None;
+                    }
+                    Some(op_val)
+                }
+                (None, true) => None,
+                (None, false) => Some(parse_op_opt(from)?),
+            };
+            match resolved_op {
+                Some(op_val) => format!("no-cache {pattern} op={op_val}"),
+                None => format!("no-cache {pattern}"),
             }
         }
         QuickRule::Block => {
@@ -1925,16 +2031,26 @@ pub fn append_quick_rule(
                 || from.eq_ignore_ascii_case("reset")
                 || from.eq_ignore_ascii_case("abort");
             if is_drop {
-                let op_raw = if response {
+                let legacy_raw = if response {
                     if !from.is_empty() { from } else { to }
                 } else {
                     to
                 };
-                if op_raw.is_empty() {
-                    format!("block {pattern} drop")
-                } else {
-                    let op = parse_op_opt(op_raw)?;
-                    format!("block {pattern} drop op={op}")
+                let resolved_op = match (explicit_op, legacy_raw.is_empty()) {
+                    (Some(op_val), true) => Some(op_val),
+                    (Some(op_val), false) => {
+                        let legacy = parse_op_opt(legacy_raw)?;
+                        if legacy != op_val {
+                            return None;
+                        }
+                        Some(op_val)
+                    }
+                    (None, true) => None,
+                    (None, false) => Some(parse_op_opt(legacy_raw)?),
+                };
+                match resolved_op {
+                    Some(op_val) => format!("block {pattern} drop op={op_val}"),
+                    None => format!("block {pattern} drop"),
                 }
             } else {
                 let status = if from.is_empty() {
@@ -1942,10 +2058,17 @@ pub fn append_quick_rule(
                 } else {
                     Some(parse_status_opt(from)?)
                 };
-                let op = if to.is_empty() {
-                    None
-                } else {
-                    Some(parse_op_opt(to)?)
+                let resolved_op = match (explicit_op, to.is_empty()) {
+                    (Some(op_val), true) => Some(op_val),
+                    (Some(op_val), false) => {
+                        let legacy = parse_op_opt(to)?;
+                        if legacy != op_val {
+                            return None;
+                        }
+                        Some(op_val)
+                    }
+                    (None, true) => None,
+                    (None, false) => Some(parse_op_opt(to)?),
                 };
                 let mut line = format!("block {pattern}");
                 if let Some(code) = status
@@ -1953,8 +2076,8 @@ pub fn append_quick_rule(
                 {
                     line.push_str(&format!(" status={code}"));
                 }
-                if let Some(op) = op {
-                    line.push_str(&format!(" op={op}"));
+                if let Some(op_val) = resolved_op {
+                    line.push_str(&format!(" op={op_val}"));
                 }
                 line
             }
@@ -1974,7 +2097,7 @@ pub fn append_quick_rule(
             }
         }
     };
-    push_line(rules, &line)
+    push_line(existing, &line)
 }
 
 fn push_line(rules: &str, line: &str) -> Option<String> {
@@ -3734,6 +3857,137 @@ break-res example.com/graphql op=anonymous
         assert_eq!(
             std::str::from_utf8(&rewritten).unwrap(),
             r#"{"k0":0,"k2":2,"k4":4,"k5":5}"#
+        );
+    }
+
+    #[test]
+    fn query_set_encodes_bare_percent_while_preserving_existing_hex_escapes() {
+        let rules = parse_rules(
+            "query example.com set discount \"50%\"\n\
+             query example.com set path \"a%2Fb%\"\n",
+        );
+        let eff = effect(&rules, "example.com", "/checkout");
+        let rewritten = apply_query_ops("/checkout", &eff.query_ops).expect("query rewritten");
+        assert_eq!(rewritten, "/checkout?discount=50%25&path=a%2Fb%25");
+    }
+
+    #[test]
+    fn append_quick_rule_with_op_supports_all_eleven_op_capable_kinds_and_rejects_rest() {
+        let mut acc = String::new();
+        let cases: &[(QuickRule, bool, &str, &str, &str)] = &[
+            (QuickRule::Replace, true, "old val", "new val", "GetUser"),
+            (QuickRule::Replace, false, "drop_me", "", "op=Mutate*"),
+            (
+                QuickRule::Remote,
+                false,
+                "http://127.0.0.1:4000",
+                "",
+                "GetUser|GetOrg",
+            ),
+            (QuickRule::Local, false, "/tmp/mock.json", "201", "GetUser"),
+            (
+                QuickRule::Local,
+                true,
+                "/tmp/fallback.json",
+                "",
+                "GetProfile",
+            ),
+            (QuickRule::Delay, false, "350ms", "", "SlowQuery*"),
+            (QuickRule::Break, false, "", "", "UpdateCart"),
+            (QuickRule::BreakRes, false, "", "", "Checkout"),
+            (QuickRule::Header, false, "X-Env", "staging west", "GetUser"),
+            (QuickRule::Header, true, "X-Debug", "", "GetUser"),
+            (QuickRule::Query, false, "trace", "1", "GetUser"),
+            (QuickRule::Query, false, "legacy", "", "GetUser"),
+            (QuickRule::Json, true, "/data/role", "\"admin\"", "GetUser"),
+            (QuickRule::Json, false, "/variables/debug", "", "GetUser"),
+            (QuickRule::NoCache, false, "", "", "GetFeed"),
+            (QuickRule::Block, false, "429", "", "RateTest"),
+            (QuickRule::Block, true, "", "", "AbortOp"),
+        ];
+
+        for &(kind, response, from, to, op) in cases {
+            acc = append_quick_rule_with_op(&acc, kind, "api.test/graphql", response, from, to, op)
+                .unwrap_or_else(|| panic!("expected Some for {kind:?}"));
+        }
+
+        assert!(
+            invalid_rule_lines(&acc).is_empty(),
+            "generated invalid lines: {:?}\n{acc}",
+            invalid_rule_lines(&acc)
+        );
+        let parsed = parse_rules(&acc);
+        assert_eq!(parsed.len(), cases.len());
+
+        // Non-matching GraphQL op should not match any of the op-scoped rules.
+        let miss = effect_with_ops(
+            &parsed,
+            "api.test",
+            "/graphql",
+            &[String::from("UnrelatedOp")],
+        );
+        assert!(miss.action.is_none());
+        assert!(miss.delay.is_zero());
+        assert!(miss.request_headers.is_empty());
+        assert!(miss.response_headers.is_empty());
+        assert!(miss.query_ops.is_empty());
+        assert!(miss.request_json_ops.is_empty());
+        assert!(miss.response_json_ops.is_empty());
+        assert!(miss.response_replaces.is_empty());
+        assert!(miss.request_replaces.is_empty());
+
+        // Matching GraphQL op activates op-scoped rules cleanly.
+        let hit = effect_with_ops(&parsed, "api.test", "/graphql", &[String::from("GetUser")]);
+        assert_eq!(hit.response_replaces.len(), 1);
+        assert_eq!(
+            hit.response_replaces[0],
+            ("old val".into(), "new val".into())
+        );
+        assert_eq!(hit.request_headers.len(), 1);
+        assert_eq!(hit.response_headers.len(), 1);
+        assert_eq!(hit.query_ops.len(), 2);
+        assert_eq!(hit.response_json_ops.len(), 1);
+        assert_eq!(hit.request_json_ops.len(), 1);
+
+        let slow_hit = effect_with_ops(
+            &parsed,
+            "api.test",
+            "/graphql",
+            &[String::from("SlowQueryList")],
+        );
+        assert_eq!(slow_hit.delay, Duration::from_millis(350));
+
+        // Empty replacement (`to == ""`) with `op=` parses `to` as empty string, not `"op=..."`.
+        let mut_hit = effect_with_ops(
+            &parsed,
+            "api.test",
+            "/graphql",
+            &[String::from("MutateItem")],
+        );
+        assert_eq!(
+            mut_hit.request_replaces,
+            vec![("drop_me".into(), String::new())]
+        );
+
+        // Non-op kinds reject non-empty `op`.
+        assert!(
+            append_quick_rule_with_op("", QuickRule::Cors, "*", false, "", "", "GetUser").is_none()
+        );
+        assert!(
+            append_quick_rule_with_op("", QuickRule::Throttle, "*", false, "3g", "", "GetUser")
+                .is_none()
+        );
+        assert!(
+            append_quick_rule_with_op(
+                "",
+                QuickRule::Cert,
+                "a.test",
+                false,
+                "/tmp/a.pem",
+                "",
+                "GetUser"
+            )
+            .is_none()
         );
     }
 }
