@@ -21,7 +21,7 @@ The UI (`App`) and the capture layer (`Hub` plus TLS, HTTP/2, and rules) are wri
 
 `make web` serves the shared page at `http://127.0.0.1:8080`. The page is the operator UI. Capture runs in the `zniff --web` process, and only for clients that set that process as their HTTP proxy. The capture port (dev config `listen_port`, otherwise `8877`) stays closed until **Start**. `zniff --web` does not change the system proxy and does not follow the desktop `capturing` flag.
 
-`make web-ui` rebuilds that page with nsh 0.4 into `app/.nsh/web`. After a UI change, run it again and reload the browser. The installed `nsh` may be 0.2; packaging needs 0.4 and must not replace `~/.nsh`. Library tests still use the small console and do not load `app/.nsh/web`.
+`make web-ui` rebuilds that page with nsh 0.5 into `app/.nsh/web`. After a UI change, run it again and reload the browser. The installed `nsh` may be 0.2; packaging needs 0.5 and must not replace `~/.nsh`. Library tests still use the small console and do not load `app/.nsh/web`.
 
 A relay is optional and off by default. With a relay URL and token, a live share is pushed to that host about once a second. `zniff --relay --token <secret>` only stores and serves `/s/{id}`. Another zniff can accept the same uploads on its capture port when **Receive relay** is on. Those rows can be viewed, filtered, copied, and starred. Replay stays on the machine that captured them.
 
@@ -123,7 +123,7 @@ make dev
 # Shared UI at http://127.0.0.1:8080. Capture stays closed until Start
 make web
 
-# Rebuild app/.nsh/web after a UI change (nsh 0.4)
+# Rebuild app/.nsh/web after a UI change (nsh 0.5)
 make web-ui
 
 # Extra flags, for example another web port
