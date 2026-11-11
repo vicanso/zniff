@@ -1107,6 +1107,15 @@ enum CopyPart {
 /// The root view: a flow list and the selected flow.
 #[component]
 pub fn App() -> impl IntoElement {
+    #[cfg(all(not(target_arch = "wasm32"), target_os = "macos"))]
+    {
+        let mut bar = nsh_core::desktop::TitleBarOptions::default();
+        bar.style = nsh_core::desktop::TitleBarStyle::Hidden;
+        bar.height = Some(px(42.0));
+        let mut attributes = nsh_core::desktop::WindowAttributes::default();
+        attributes.title_bar = Some(bar);
+        nsh_core::element::desktop::main_window().set(attributes);
+    }
     let langs = signal(load_lang_pref());
     provide_context(langs);
     let status = signal(StatusMsg::Idle);
@@ -2006,7 +2015,7 @@ pub fn App() -> impl IntoElement {
                     .inset_0()
                     .flex_col()
                     .items_center()
-                    .pt(px(62.0))
+                    .pt(px(54.0))
                     .pointer_events(PointerEvents::None)
                     .child(
                         toast_stack()
@@ -2188,13 +2197,24 @@ fn toolbar(
     let deselect_controls = import_controls.clone();
     #[cfg(not(target_arch = "wasm32"))]
     let update_controls = import_controls.clone();
+    const TOOLBAR_H: f32 = 42.0;
     let bar = view()
+        .window_drag(true)
         .flex_row()
         .items_center()
         .gap_2()
-        .pl(px(LIST_INSET))
+        .pl(move || {
+            #[cfg(all(not(target_arch = "wasm32"), target_os = "macos"))]
+            {
+                let left = nsh_core::element::desktop::title_bar().left.0;
+                if left > 0.0 {
+                    return px(left + 6.0);
+                }
+            }
+            px(LIST_INSET)
+        })
         .pr_3()
-        .h(px(50.0))
+        .h(px(TOOLBAR_H))
         .bg(bg_chrome())
         .border_b_1()
         .border_b_color(border_strong())
@@ -2206,9 +2226,9 @@ fn toolbar(
                 .pr_1()
                 .child(
                     view()
-                        .w(px(22.0))
-                        .h(px(22.0))
-                        .rounded(px(6.0))
+                        .w(px(20.0))
+                        .h(px(20.0))
+                        .rounded(px(5.5))
                         .bg(accent_blue())
                         .items_center()
                         .justify_center()
@@ -2221,7 +2241,7 @@ fn toolbar(
                 )
                 .child(
                     text("zniff")
-                        .text_size(px(15.5))
+                        .text_size(px(14.5))
                         .font_weight(FontWeight::BOLD)
                         .text_color(fg_primary()),
                 ),
@@ -2285,10 +2305,11 @@ fn toolbar(
                     move || {
                         let deselect_controls = deselect_controls.clone();
                         view()
+                            .window_drag(false)
                             .h(px(22.0))
                             .max_w(px(184.0))
+                            .min_w(px(0.0))
                             .rounded(px(5.0))
-                            .flex_shrink_0()
                             .overflow_hidden()
                             .flex_row()
                             .items_center()
@@ -2462,6 +2483,7 @@ fn toolbar_text_button(
     on_press: impl Fn() + 'static,
 ) -> impl IntoElement {
     view()
+        .window_drag(false)
         .h(px(CONTROL_H))
         .px_3()
         .flex_shrink_0()
@@ -2504,6 +2526,7 @@ fn saved_filter_menu(profiles: ProfileSignals, controls: Arc<Controls>) -> impl 
         .margin(px(10.0))
         .trigger(
             view()
+                .window_drag(false)
                 .h(px(CONTROL_H))
                 .px_3()
                 .flex_shrink_0()
@@ -5526,7 +5549,7 @@ fn adaptive_filter_panel_width(window_w: f32, list_w: f32) -> f32 {
     }
 }
 
-const FILTER_PANEL_CHROME_CLEARANCE: f32 = 88.0;
+const FILTER_PANEL_CHROME_CLEARANCE: f32 = 80.0;
 const FILTER_PANEL_DOCK_HEIGHT: f32 = 54.0;
 const FILTER_PANEL_IMPORT_EXTRA_HEIGHT: f32 = 182.0;
 const FILTER_PANEL_RIGHT_FIXED_HEIGHT: f32 = 620.0;
@@ -13084,6 +13107,7 @@ fn flow_count_badge(
     on_press: impl Fn() + 'static,
 ) -> impl IntoElement {
     view()
+        .window_drag(false)
         .h(px(CONTROL_H))
         .px_2p5()
         .flex_shrink_0()
@@ -13119,6 +13143,7 @@ fn more_trigger(
     let dot_update = update_state;
     let is_tinted = move || open.get() || proxy_on.get();
     view()
+        .window_drag(false)
         .h(px(CONTROL_H))
         .px_2p5()
         .gap_1p5()
@@ -13502,6 +13527,7 @@ fn toolbar_update_pill(
             let controls_press = controls.clone();
             let langs = ui_langs();
             view()
+                .window_drag(false)
                 .h(px(CONTROL_H))
                 .px_2p5()
                 .gap_1p5()
@@ -14111,6 +14137,7 @@ fn primary_button(
     let danger_hover = danger.clone();
     let icon_state = danger;
     view()
+        .window_drag(false)
         .h(px(CONTROL_H))
         .px_3p5()
         .gap_1p5()
@@ -22441,9 +22468,9 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
         assert_eq!(super::adaptive_rules_editor_height(0.0), 105.0);
         assert_eq!(super::adaptive_rules_editor_height(520.0), 84.0);
         assert_eq!(super::adaptive_rules_editor_height(760.0), 84.0);
-        assert_eq!(super::adaptive_rules_editor_height(1018.0), 256.0);
+        assert_eq!(super::adaptive_rules_editor_height(1018.0), 264.0);
         assert_eq!(super::adaptive_rules_editor_height_for(760.0, true), 56.0);
-        assert_eq!(super::adaptive_rules_editor_height_for(1018.0, true), 74.0);
+        assert_eq!(super::adaptive_rules_editor_height_for(1018.0, true), 82.0);
         for window_h in [520.0, 640.0, 760.0, 900.0, 1018.0, 1440.0] {
             for import_open in [false, true] {
                 let panel_max = super::adaptive_filter_panel_max_height(window_h);
@@ -22453,9 +22480,9 @@ XDG_DOCUMENTS_DIR=\"$HOME/Documents\"
                 } else {
                     0.0
                 };
-                // Top toolbar (46) + popover offset (6) + panel_max + bottom status bar (26) <= window_h
+                // Top toolbar (42) + popover offset (6) + panel_max + bottom status bar (26) <= window_h
                 assert!(
-                    52.0 + panel_max + 26.0 <= window_h,
+                    48.0 + panel_max + 26.0 <= window_h,
                     "filter panel overflows window_h={window_h}: panel_max={panel_max}"
                 );
                 assert!(
