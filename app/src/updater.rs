@@ -193,7 +193,32 @@ fn resolve_redirect(base: &ParsedUrl, location: &str) -> String {
     }
 }
 
-fn parse_upstream_proxy(raw: &str, listen_port: u16) -> Option<(String, u16)> {
+fn decode_userinfo(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut idx = 0;
+    while idx < bytes.len() {
+        if bytes[idx] == b'%'
+            && idx + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (
+                (bytes[idx + 1] as char).to_digit(16),
+                (bytes[idx + 2] as char).to_digit(16),
+            )
+        {
+            out.push(((hi << 4) | lo) as u8);
+            idx += 3;
+            continue;
+        }
+        out.push(bytes[idx]);
+        idx += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn parse_upstream_proxy_with_auth(
+    raw: &str,
+    listen_port: u16,
+) -> Option<(String, u16, Option<String>)> {
     let raw = raw.trim();
     if raw.is_empty() {
         return None;
@@ -206,10 +231,22 @@ fn parse_upstream_proxy(raw: &str, listen_port: u16) -> Option<(String, u16)> {
         raw
     };
     let authority = rest.split('/').next().unwrap_or(rest);
-    let host_port = authority
-        .rsplit_once('@')
-        .map(|(_, h)| h)
-        .unwrap_or(authority);
+    let (auth_header, host_port) = match authority.rsplit_once('@') {
+        Some((userinfo, h)) => {
+            let auth = if userinfo.is_empty() {
+                None
+            } else {
+                let (u, p) = userinfo.split_once(':').unwrap_or((userinfo, ""));
+                let creds = format!("{}:{}", decode_userinfo(u), decode_userinfo(p));
+                Some(format!(
+                    "Basic {}",
+                    crate::session::base64_encode(creds.as_bytes())
+                ))
+            };
+            (auth, h)
+        }
+        None => (None, authority),
+    };
     let (host, port_str) = if let Some(after_open) = host_port.strip_prefix('[') {
         let (ipv6, after_close) = after_open.split_once(']')?;
         let port_str = after_close.strip_prefix(':')?;
@@ -231,16 +268,21 @@ fn parse_upstream_proxy(raw: &str, listen_port: u16) -> Option<(String, u16)> {
     {
         return None;
     }
-    Some((host.to_string(), port))
+    Some((host.to_string(), port, auth_header))
 }
 
-fn configured_upstream_proxy() -> Option<(String, u16)> {
+#[cfg(test)]
+fn parse_upstream_proxy(raw: &str, listen_port: u16) -> Option<(String, u16)> {
+    parse_upstream_proxy_with_auth(raw, listen_port).map(|(h, p, _)| (h, p))
+}
+
+fn configured_upstream_proxy() -> Option<(String, u16, Option<String>)> {
     let cfg = config::load_mode(&ca::data_dir(), config::is_dev_mode());
-    parse_upstream_proxy(&cfg.upstream_proxy, cfg.listen_port)
+    parse_upstream_proxy_with_auth(&cfg.upstream_proxy, cfg.listen_port)
 }
 
 async fn open_tcp_to(host: &str, port: u16) -> Result<TcpStream, String> {
-    if let Some((proxy_host, proxy_port)) = configured_upstream_proxy() {
+    if let Some((proxy_host, proxy_port, proxy_auth)) = configured_upstream_proxy() {
         let proxy_label = if proxy_host.contains(':') {
             format!("[{proxy_host}]:{proxy_port}")
         } else {
@@ -250,8 +292,12 @@ async fn open_tcp_to(host: &str, port: u16) -> Result<TcpStream, String> {
             .await
             .map_err(|e| format!("upstream proxy {proxy_label}: {e}"))?;
         let _ = stream.set_nodelay(true);
+        let auth_line = proxy_auth
+            .as_deref()
+            .map(|auth| format!("Proxy-Authorization: {auth}\r\n"))
+            .unwrap_or_default();
         let connect_req = format!(
-            "CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\nProxy-Connection: Keep-Alive\r\n\r\n"
+            "CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n{auth_line}Proxy-Connection: Keep-Alive\r\n\r\n"
         );
         stream
             .write_all(connect_req.as_bytes())
@@ -1740,6 +1786,17 @@ mod tests {
         assert_eq!(parse_upstream_proxy("http://localhost:8877", 8877), None);
         assert_eq!(parse_upstream_proxy("http://[::1]:8878", 8878), None);
         assert_eq!(parse_upstream_proxy("2001:db8::1:8080", 8877), None);
+        assert_eq!(
+            parse_upstream_proxy_with_auth("http://alice:p%40ss@127.0.0.1:7890", 8878),
+            Some((
+                "127.0.0.1".into(),
+                7890,
+                Some(format!(
+                    "Basic {}",
+                    crate::session::base64_encode(b"alice:p@ss")
+                ))
+            ))
+        );
     }
 
     #[test]

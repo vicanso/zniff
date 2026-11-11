@@ -144,15 +144,17 @@ make release
 make bundle
 ```
 
-The daily image is [`vicanso/zniff-web:nightly`](https://hub.docker.com/r/vicanso/zniff-web) (linux/amd64 and linux/arm64). A stable tag also publishes `vicanso/zniff-web:<version>` and `latest`. The page in the image is the small console. Mount a `make web-ui` directory to serve the shared UI:
+The daily image is [`vicanso/zniff-web:nightly`](https://hub.docker.com/r/vicanso/zniff-web) (linux/amd64 and linux/arm64). A stable tag also publishes `vicanso/zniff-web:<version>` and `latest`. The page in the image is the small console. Mount a `make web-ui` directory to `/web` for the shared UI, and mount `/data` (`ZNIFF_DATA_DIR=/data` in the image) to reuse the generated `ca.crt`/`ca.key` and `config.toml` across container restarts (optional `--proxy-auth` / `ZNIFF_PROXY_AUTH` requires HTTP Basic auth on port `8877`):
 
 ```bash
 docker pull vicanso/zniff-web:nightly
-docker run --rm -p 8080:8080 -p 8877:8877 vicanso/zniff-web:nightly
+docker run --rm -p 8080:8080 -p 8877:8877 -v "$PWD/zniff-data:/data" vicanso/zniff-web:nightly
 
 docker run --rm -p 8080:8080 -p 8877:8877 \
   -e ZNIFF_WEB_ROOT=/web \
+  -e ZNIFF_PROXY_AUTH=user:pass \
   -v "$PWD/app/.nsh/web:/web:ro" \
+  -v "$PWD/zniff-data:/data" \
   vicanso/zniff-web:nightly
 ```
 

@@ -5,11 +5,13 @@
 # address as their HTTP proxy. This image does not change the system proxy.
 #
 # The page baked into the image is the small console. To serve the shared
-# UI, mount a directory from `make web-ui`:
+# UI and persist the generated root CA (`ca.crt` / `ca.key`) and `config.toml`
+# across container restarts, mount `/web` and `/data`:
 #
 #   docker run --rm -p 8080:8080 -p 8877:8877 \
 #     -e ZNIFF_WEB_ROOT=/web \
 #     -v "$PWD/app/.nsh/web:/web:ro" \
+#     -v "$PWD/zniff-data:/data" \
 #     vicanso/zniff-web:nightly
 #
 # Daily and release images are published by .github/workflows/docker.yml.
@@ -41,9 +43,14 @@ FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates libgtk-4-1 \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --create-home --uid 1000 --user-group zniff
+    && useradd --create-home --uid 1000 --user-group zniff \
+    && mkdir -p /data \
+    && chown zniff:zniff /data
 
 COPY --from=build /zniff /usr/local/bin/zniff
+
+ENV ZNIFF_DATA_DIR=/data
+VOLUME ["/data"]
 
 USER zniff
 WORKDIR /home/zniff

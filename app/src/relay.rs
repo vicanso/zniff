@@ -167,6 +167,8 @@ pub fn cli_settings(
             index += 1;
             let next = args.get(index).ok_or_else(|| "缺少监听地址".to_string())?;
             bind = Some(parse_bind(next)?);
+        } else if arg == "--data-dir" || arg == "--proxy-auth" {
+            index += 1;
         }
         index += 1;
     }

@@ -20,7 +20,11 @@ pub fn curl_command(flow: &Flow) -> String {
         shell_quote(&flow.url)
     );
     for (name, value) in &flow.request_headers {
-        if name.eq_ignore_ascii_case("content-length") || name.eq_ignore_ascii_case("host") {
+        if name.eq_ignore_ascii_case("content-length")
+            || name.eq_ignore_ascii_case("host")
+            || name.eq_ignore_ascii_case("proxy-connection")
+            || name.eq_ignore_ascii_case("proxy-authorization")
+        {
             continue;
         }
         command.push_str(" -H ");
@@ -802,9 +806,36 @@ pub fn bytes(bytes: usize) -> String {
     format_count(bytes as u64)
 }
 
+fn encode_userinfo_component(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for &byte in raw.as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
 /// Shell exports so curl, Node, Python, Git, Cargo, Deno, and JVM tools trust this proxy.
+#[cfg(test)]
 pub fn proxy_env(port: u16, cert_path: &str) -> String {
-    let proxy = format!("http://127.0.0.1:{port}");
+    proxy_env_with_auth(port, cert_path, "")
+}
+
+pub fn proxy_env_with_auth(port: u16, cert_path: &str, proxy_auth: &str) -> String {
+    let trimmed_auth = proxy_auth.trim();
+    let proxy = if trimmed_auth.is_empty() {
+        format!("http://127.0.0.1:{port}")
+    } else {
+        let (user, pass) = trimmed_auth.split_once(':').unwrap_or((trimmed_auth, ""));
+        format!(
+            "http://{}:{}@127.0.0.1:{port}",
+            encode_userinfo_component(user),
+            encode_userinfo_component(pass)
+        )
+    };
     let cert = shell_quote(cert_path);
     let java_opts = shell_quote(&format!(
         "-Dhttp.proxyHost=127.0.0.1 -Dhttp.proxyPort={port} -Dhttps.proxyHost=127.0.0.1 -Dhttps.proxyPort={port}"
@@ -828,8 +859,13 @@ pub fn proxy_env(port: u16, cert_path: &str) -> String {
     .join("\n")
 }
 
+#[cfg(test)]
 pub fn proxy_env_export(port: u16, cert_path: &str) -> String {
     proxy_env(port, cert_path)
+}
+
+pub fn proxy_env_export_with_auth(port: u16, cert_path: &str, proxy_auth: &str) -> String {
+    proxy_env_with_auth(port, cert_path, proxy_auth)
 }
 
 pub fn fetch_snippet(flow: &Flow) -> String {
@@ -2624,6 +2660,7 @@ fn copy_headers(headers: &[(String, String)]) -> Vec<(String, String)> {
                 && !name.eq_ignore_ascii_case("content-length")
                 && !name.eq_ignore_ascii_case("connection")
                 && !name.eq_ignore_ascii_case("proxy-connection")
+                && !name.eq_ignore_ascii_case("proxy-authorization")
         })
         .cloned()
         .collect()
@@ -4774,6 +4811,9 @@ mod tests {
         assert!(env.contains(
             "export JAVA_TOOL_OPTIONS='-Dhttp.proxyHost=127.0.0.1 -Dhttp.proxyPort=8877 -Dhttps.proxyHost=127.0.0.1 -Dhttps.proxyPort=8877'"
         ));
+        let auth_env = proxy_env_export_with_auth(8877, "/tmp/zniff/ca.crt", "alice:p@ss:1");
+        assert!(auth_env.contains("export https_proxy=http://alice:p%40ss%3A1@127.0.0.1:8877"));
+        assert!(auth_env.contains("export ALL_PROXY=http://alice:p%40ss%3A1@127.0.0.1:8877"));
         assert_eq!(parse_repeat_count(""), 5);
         assert_eq!(parse_repeat_count("0"), 1);
         assert_eq!(parse_repeat_count("12"), 12);

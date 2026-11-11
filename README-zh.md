@@ -142,15 +142,17 @@ make release
 make bundle
 ```
 
-每日镜像是 [`vicanso/zniff-web:nightly`](https://hub.docker.com/r/vicanso/zniff-web)（linux/amd64 与 linux/arm64）。正式版标签还会发布 `vicanso/zniff-web:<version>` 和 `latest`。镜像里的页面是简易操作台。把 `make web-ui` 打出的目录挂进去，才会是共用界面：
+每日镜像是 [`vicanso/zniff-web:nightly`](https://hub.docker.com/r/vicanso/zniff-web)（linux/amd64 与 linux/arm64）。正式版标签还会发布 `vicanso/zniff-web:<version>` 和 `latest`。镜像里的页面是简易操作台。把 `make web-ui` 打出的目录挂到 `/web` 启用共用界面，把宿主机目录挂到 `/data`（镜像内默认 `ZNIFF_DATA_DIR=/data`）即可在容器重启后复用生成的根证书 `ca.crt`/`ca.key` 与 `config.toml`（可选 `ZNIFF_PROXY_AUTH` 或 `--proxy-auth` 为抓包端口开启 HTTP Basic 认证）：
 
 ```bash
 docker pull vicanso/zniff-web:nightly
-docker run --rm -p 8080:8080 -p 8877:8877 vicanso/zniff-web:nightly
+docker run --rm -p 8080:8080 -p 8877:8877 -v "$PWD/zniff-data:/data" vicanso/zniff-web:nightly
 
 docker run --rm -p 8080:8080 -p 8877:8877 \
   -e ZNIFF_WEB_ROOT=/web \
+  -e ZNIFF_PROXY_AUTH=user:pass \
   -v "$PWD/app/.nsh/web:/web:ro" \
+  -v "$PWD/zniff-data:/data" \
   vicanso/zniff-web:nightly
 ```
 
