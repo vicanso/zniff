@@ -1,19 +1,27 @@
 #!/usr/bin/env bash
 # scripts/capture-screenshots.sh
-# Automates operational screenshot capture of zniff on macOS.
+# Automates operational screenshot capture of zniff on macOS at strictly uniform 1920x1080 Full HD (16:9).
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+DOCS_SCREENSHOT_DIR="$REPO_ROOT/docs/screenshots"
 SCREENSHOT_DIR="$REPO_ROOT/screenshots"
 TEST_DATA_DIR="/tmp/zniff-screenshot-run"
+RAW_DIR="/tmp/zniff-screenshot-raw"
 MOCK_SERVER_PORT=19876
-PROXY_PORT=8878
+PROXY_PORT=18878
 
+mkdir -p "$DOCS_SCREENSHOT_DIR"
 mkdir -p "$SCREENSHOT_DIR"
+mkdir -p "$RAW_DIR"
 rm -rf "$TEST_DATA_DIR"
 mkdir -p "$TEST_DATA_DIR"
+
+# Prevent display sleep during automated capture
+caffeinate -u -t 120 &
+CAFFEINATE_PID=$!
 
 # Query initial macOS dark mode state
 ORIGINAL_DARK_MODE=$(osascript -e 'tell application "System Events" to tell appearance preferences to get dark mode' 2>/dev/null || echo "true")
@@ -21,6 +29,12 @@ echo "==> Initial system Dark Mode: $ORIGINAL_DARK_MODE"
 
 cleanup() {
     echo "==> Cleaning up background processes..."
+    if [ -n "${BREAK_PID1:-}" ] && kill -0 "$BREAK_PID1" 2>/dev/null; then
+        kill "$BREAK_PID1" 2>/dev/null || true
+    fi
+    if [ -n "${BREAK_PID2:-}" ] && kill -0 "$BREAK_PID2" 2>/dev/null; then
+        kill "$BREAK_PID2" 2>/dev/null || true
+    fi
     if [ -n "${ZNIFF_PID:-}" ] && kill -0 "$ZNIFF_PID" 2>/dev/null; then
         kill "$ZNIFF_PID" 2>/dev/null || true
         wait "$ZNIFF_PID" 2>/dev/null || true
@@ -29,9 +43,12 @@ cleanup() {
         kill "$MOCK_PID" 2>/dev/null || true
         wait "$MOCK_PID" 2>/dev/null || true
     fi
+    if [ -n "${CAFFEINATE_PID:-}" ] && kill -0 "$CAFFEINATE_PID" 2>/dev/null; then
+        kill "$CAFFEINATE_PID" 2>/dev/null || true
+    fi
     echo "==> Restoring system Dark Mode to: $ORIGINAL_DARK_MODE"
     osascript -e "tell application \"System Events\" to tell appearance preferences to set dark mode to $ORIGINAL_DARK_MODE" 2>/dev/null || true
-    rm -rf "$TEST_DATA_DIR"
+    rm -rf "$TEST_DATA_DIR" "$RAW_DIR"
     echo "==> Cleanup complete."
 }
 trap cleanup EXIT INT TERM
@@ -44,13 +61,14 @@ set_dark_mode() {
 
 get_wid() {
     local pid="$1"
-    swift -e "import CoreGraphics; import Foundation
+    swift -e 'import CoreGraphics; import Foundation
+guard CommandLine.arguments.count > 1, let pid = Int(CommandLine.arguments[1]) else { exit(0) }
 let opts = CGWindowListOption(arrayLiteral: .excludeDesktopElements, .optionOnScreenOnly)
 if let list = CGWindowListCopyWindowInfo(opts, kCGNullWindowID) as? [[String: Any]] {
-    for w in list where (w[kCGWindowOwnerPID as String] as? Int) == $pid {
+    for w in list where (w[kCGWindowOwnerPID as String] as? Int) == pid {
         if let id = w[kCGWindowNumber as String] as? Int { print(id); break }
     }
-}"
+}' "$pid"
 }
 
 click_win() {
@@ -58,15 +76,19 @@ click_win() {
     local rel_x="$2"
     local rel_y="$3"
     osascript -e 'tell application "System Events" to tell process "zniff" to set frontmost to true' 2>/dev/null || true
-    sleep 0.2
-    swift -e "import CoreGraphics; import Foundation
+    sleep 0.1
+    swift -e 'import CoreGraphics; import Foundation
+guard CommandLine.arguments.count > 3,
+      let pid = Int(CommandLine.arguments[1]),
+      let relX = Double(CommandLine.arguments[2]),
+      let relY = Double(CommandLine.arguments[3]) else { exit(0) }
 let opts = CGWindowListOption(arrayLiteral: .excludeDesktopElements, .optionOnScreenOnly)
 if let list = CGWindowListCopyWindowInfo(opts, kCGNullWindowID) as? [[String: Any]] {
-    for w in list where (w[kCGWindowOwnerPID as String] as? Int) == $pid {
+    for w in list where (w[kCGWindowOwnerPID as String] as? Int) == pid {
         if let bounds = w[kCGWindowBounds as String] as? [String: Any],
-           let x = bounds[\"X\"] as? Double,
-           let y = bounds[\"Y\"] as? Double {
-            let clickPt = CGPoint(x: x + Double($rel_x), y: y + Double($rel_y))
+           let x = bounds["X"] as? Double,
+           let y = bounds["Y"] as? Double {
+            let clickPt = CGPoint(x: x + relX, y: y + relY)
             if let down = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: clickPt, mouseButton: .left),
                let up = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: clickPt, mouseButton: .left) {
                 down.post(tap: .cghidEventTap)
@@ -76,8 +98,45 @@ if let list = CGWindowListCopyWindowInfo(opts, kCGNullWindowID) as? [[String: An
             break
         }
     }
-}"
+}' "$pid" "$rel_x" "$rel_y"
     sleep 0.6
+}
+
+right_click_win() {
+    local pid="$1"
+    local rel_x="$2"
+    local rel_y="$3"
+    osascript -e 'tell application "System Events" to tell process "zniff" to set frontmost to true' 2>/dev/null || true
+    sleep 0.1
+    swift -e 'import CoreGraphics; import Foundation
+guard CommandLine.arguments.count > 3,
+      let pid = Int(CommandLine.arguments[1]),
+      let relX = Double(CommandLine.arguments[2]),
+      let relY = Double(CommandLine.arguments[3]) else { exit(0) }
+let opts = CGWindowListOption(arrayLiteral: .excludeDesktopElements, .optionOnScreenOnly)
+if let list = CGWindowListCopyWindowInfo(opts, kCGNullWindowID) as? [[String: Any]] {
+    for w in list where (w[kCGWindowOwnerPID as String] as? Int) == pid {
+        if let bounds = w[kCGWindowBounds as String] as? [String: Any],
+           let x = bounds["X"] as? Double,
+           let y = bounds["Y"] as? Double {
+            let clickPt = CGPoint(x: x + relX, y: y + relY)
+            if let down = CGEvent(mouseEventSource: nil, mouseType: .rightMouseDown, mouseCursorPosition: clickPt, mouseButton: .right),
+               let up = CGEvent(mouseEventSource: nil, mouseType: .rightMouseUp, mouseCursorPosition: clickPt, mouseButton: .right) {
+                down.post(tap: .cghidEventTap)
+                usleep(50000)
+                up.post(tap: .cghidEventTap)
+            }
+            break
+        }
+    }
+}' "$pid" "$rel_x" "$rel_y"
+    sleep 0.6
+}
+
+key_press() {
+    local code="$1"
+    osascript -e "tell application \"System Events\" to key code $code" 2>/dev/null || true
+    sleep 0.4
 }
 
 # 1. Start mock backend HTTP server
@@ -99,15 +158,32 @@ class MockHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
         elif self.path == '/api/v1/metrics':
-            body = b'# HELP http_requests_total Total requests\nhttp_requests_total{status=\"200\"} 1420\n'
+            self.send_response(304)
+            self.send_header('Content-Type', 'text/plain')
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+        elif self.path == '/api/v1/telemetry':
+            proto = (
+                b'\x08\x96\x01'
+                b'\x12\x05zniff'
+                b'\x1a\x1btelemetry.v1.ClusterStatus'
+                b'\x20\xea\x0f'
+            )
             self.send_response(200)
-            self.send_header('Content-Type', 'text/plain; charset=utf-8')
+            self.send_header('Content-Type', 'application/x-protobuf')
+            self.send_header('Content-Length', str(len(proto)))
+            self.end_headers()
+            self.wfile.write(proto)
+        elif self.path == '/api/v1/billing':
+            body = json.dumps({'error': 'InternalServerError', 'message': 'Database connection pool exhausted', 'code': 50012}).encode('utf-8')
+            self.send_response(500)
+            self.send_header('Content-Type', 'application/json')
             self.send_header('Content-Length', str(len(body)))
             self.end_headers()
             self.wfile.write(body)
-        elif self.path == '/api/v1/error':
-            body = json.dumps({'error': 'InternalServerError', 'message': 'Database connection pool exhausted'}).encode('utf-8')
-            self.send_response(500)
+        elif '/api/v1/breakpoint' in self.path:
+            body = json.dumps({'status': 'intercepted', 'path': self.path}).encode('utf-8')
+            self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Content-Length', str(len(body)))
             self.end_headers()
@@ -122,11 +198,17 @@ class MockHandler(http.server.BaseHTTPRequestHandler):
         if self.path == '/api/graphql':
             body = json.dumps({
                 'data': {
-                    'getUser': {
+                    'user': {
                         'id': 'usr_9482',
-                        'name': 'Antigravity Lead',
-                        'permissions': ['capture', 'decrypt', 'replay'],
-                        'status': 'ACTIVE'
+                        'name': 'Antigravity Engineer',
+                        'email': 'engineer@zniff.app',
+                        'role': 'admin',
+                        'permissions': ['traffic:capture', 'traffic:replay', 'rules:write'],
+                        'profile': {
+                            'avatar': 'https://zniff.app/avatars/9482.png',
+                            'bio': 'Building high-performance network tools in Rust',
+                            'timezone': 'Asia/Shanghai'
+                        }
                     }
                 }
             }, indent=2).encode('utf-8')
@@ -136,8 +218,15 @@ class MockHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
         elif self.path == '/api/v1/orders':
-            body = json.dumps({'orderId': 'ord_88219', 'status': 'created'}).encode('utf-8')
+            body = json.dumps({'orderId': 'ord_88219', 'status': 'created', 'total': 128.50}).encode('utf-8')
             self.send_response(201)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif '/api/v1/breakpoint' in self.path:
+            body = json.dumps({'status': 'intercepted', 'path': self.path}).encode('utf-8')
+            self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Content-Length', str(len(body)))
             self.end_headers()
@@ -145,6 +234,18 @@ class MockHandler(http.server.BaseHTTPRequestHandler):
         else:
             self.send_response(200)
             self.end_headers()
+
+    def do_PUT(self):
+        body = json.dumps({'id': 101, 'name': 'Alice Chen', 'role': 'superadmin', 'updated': True}).encode('utf-8')
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_DELETE(self):
+        self.send_response(204)
+        self.end_headers()
 
     def log_message(self, format, *args):
         pass
@@ -156,27 +257,39 @@ with socketserver.TCPServer(('127.0.0.1', $MOCK_SERVER_PORT), MockHandler) as ht
 MOCK_PID=$!
 sleep 0.5
 
-# 2. Write initial config.dev.toml with capturing=true
+# 2. Write initial config.dev.toml with capturing=true, 1280x720 window, and breakpoint rule
 cat << EOF > "$TEST_DATA_DIR/config.dev.toml"
 listen_port = $PROXY_PORT
 capturing = true
-window_width = 1200
-window_height = 760
+window_width = 1280
+window_height = 720
 filter = ""
 saved_profiles = []
+rules = """
+break */api/v1/breakpoint
+"""
 EOF
 
-# Ensure binary is built
-echo "==> Building zniff binary..."
-cargo build --manifest-path "$REPO_ROOT/app/Cargo.toml"
+# Find zniff binary
+TARGET_BIN=""
+if [ -x "/Users/tree/cargo-target/debug/zniff" ]; then
+    TARGET_BIN="/Users/tree/cargo-target/debug/zniff"
+elif [ -x "$REPO_ROOT/target/debug/zniff" ]; then
+    TARGET_BIN="$REPO_ROOT/target/debug/zniff"
+else
+    echo "==> Building zniff binary..."
+    cargo build --manifest-path "$REPO_ROOT/app/Cargo.toml"
+    TARGET_BIN="$(cargo metadata --manifest-path "$REPO_ROOT/app/Cargo.toml" --format-version 1 | grep -o '"target_directory":"[^"]*"' | cut -d'"' -f4)/debug/zniff"
+fi
 
-echo "==> Launching zniff desktop app..."
-ZNIFF_DEV=1 /Users/tree/cargo-target/debug/zniff --data-dir "$TEST_DATA_DIR" &
+echo "==> Launching zniff desktop app with binary $TARGET_BIN..."
+set_dark_mode true
+ZNIFF_DEV=1 "$TARGET_BIN" --data-dir "$TEST_DATA_DIR" &
 ZNIFF_PID=$!
 
 echo "==> Waiting for zniff window to appear..."
 WID=""
-for _ in {1..20}; do
+for _ in {1..30}; do
     WID=$(get_wid "$ZNIFF_PID")
     if [ -n "$WID" ]; then
         break
@@ -190,127 +303,257 @@ if [ -z "$WID" ]; then
 fi
 echo "==> Detected zniff window ID: $WID"
 
+# Ensure frontmost and size 1280x720
+osascript -e 'tell application "System Events" to tell process "zniff" to set size of window 1 to {1280, 720}' 2>/dev/null || true
 osascript -e 'tell application "System Events" to tell process "zniff" to set frontmost to true' 2>/dev/null || true
 sleep 1.0
 
-# -------------------------------------------------------------
-# 01_initial_launch_dark.png
-# -------------------------------------------------------------
-echo "==> Capturing 01_initial_launch_dark.png..."
-set_dark_mode true
-/usr/sbin/screencapture -x -l "$WID" "$SCREENSHOT_DIR/01_initial_launch_dark.png"
+capture_uniform_screenshot() {
+    local scene_name="$1"
+    local raw_path="$RAW_DIR/raw_${scene_name}"
+    local docs_path="$DOCS_SCREENSHOT_DIR/${scene_name}"
+    local mirror_path="$SCREENSHOT_DIR/${scene_name}"
+
+    echo "==> Capturing $scene_name (shadowless 1280x720 canvas)..."
+    /usr/sbin/screencapture -x -l "$WID" -o "$raw_path"
+    sips -z 1080 1920 "$raw_path" --out "$docs_path" >/dev/null
+    cp -f "$docs_path" "$mirror_path"
+    echo "    Saved: $docs_path (1920x1080)"
+}
 
 # -------------------------------------------------------------
-# 02_initial_launch_light.png
-# -------------------------------------------------------------
-echo "==> Capturing 02_initial_launch_light.png..."
-set_dark_mode false
-/usr/sbin/screencapture -x -l "$WID" "$SCREENSHOT_DIR/02_initial_launch_light.png"
-set_dark_mode true
-
-# -------------------------------------------------------------
-# Inject mock traffic
+# Inject rich mock traffic flows
 # -------------------------------------------------------------
 echo "==> Injecting rich mock traffic flows..."
-# Flow 1: Users JSON
-curl -s -x http://127.0.0.1:$PROXY_PORT http://127.0.0.1:$MOCK_SERVER_PORT/api/v1/users > /dev/null
-# Flow 2: GraphQL query
-curl -s -x http://127.0.0.1:$PROXY_PORT -X POST http://127.0.0.1:$MOCK_SERVER_PORT/api/graphql \
-  -H "Content-Type: application/json" \
-  -d '{"operationName":"GetUser","query":"query GetUser { user { id name email } }"}' > /dev/null
-# Flow 3: CA install page (HTML)
-curl -s -x http://127.0.0.1:$PROXY_PORT http://127.0.0.1:$PROXY_PORT/zniff > /dev/null
-# Flow 4: Metrics (Plaintext)
-curl -s -x http://127.0.0.1:$PROXY_PORT http://127.0.0.1:$MOCK_SERVER_PORT/api/v1/metrics > /dev/null
-# Flow 5: Order creation (201 Created)
-curl -s -x http://127.0.0.1:$PROXY_PORT -X POST http://127.0.0.1:$MOCK_SERVER_PORT/api/v1/orders \
-  -H "Content-Type: application/json" \
-  -d '{"items":["item_a","item_b"],"total":88.5}' > /dev/null
-# Flow 6: Server error (500)
-curl -s -x http://127.0.0.1:$PROXY_PORT http://127.0.0.1:$MOCK_SERVER_PORT/api/v1/error > /dev/null || true
-# Flow 7: Unreachable origin (ERR tunnel failure)
-curl -s -x http://127.0.0.1:$PROXY_PORT http://127.0.0.1:19999/unreachable > /dev/null || true
+PROXY="http://127.0.0.1:$PROXY_PORT"
+MOCK="http://127.0.0.1:$MOCK_SERVER_PORT"
 
-sleep 1.2
+# Flow 1: Users JSON (GET 200)
+curl -s -x "$PROXY" "$MOCK/api/v1/users" > /dev/null
+# Flow 2: Orders JSON (POST 201)
+curl -s -x "$PROXY" -X POST "$MOCK/api/v1/orders" -H "Content-Type: application/json" -d '{"items":["zniff-pro"],"total":128.50}' > /dev/null
+# Flow 3: Update User (PUT 200)
+curl -s -x "$PROXY" -X PUT "$MOCK/api/v1/users/101" -H "Content-Type: application/json" -d '{"role":"superadmin"}' > /dev/null
+# Flow 4: Session Delete (DELETE 204)
+curl -s -x "$PROXY" -X DELETE "$MOCK/api/v1/sessions/current" > /dev/null
+# Flow 5: GraphQL Query (POST 200)
+GQL_PAYLOAD='{"operationName":"GetUserProfile","query":"query GetUserProfile($id: ID!) {\n  user(id: $id) {\n    id\n    name\n    email\n    role\n    permissions\n    profile {\n      avatar\n      bio\n      timezone\n    }\n  }\n}","variables":{"id":"usr_9482"}}'
+curl -s -x "$PROXY" -X POST "$MOCK/api/graphql" -H "Content-Type: application/json" -d "$GQL_PAYLOAD" > /dev/null
+# Flow 6: Plaintext Metrics (GET 304)
+curl -s -x "$PROXY" "$MOCK/api/v1/metrics" > /dev/null
+# Flow 7: Protobuf Telemetry (GET 200)
+curl -s -x "$PROXY" "$MOCK/api/v1/telemetry" > /dev/null
+# Flow 8: Server Billing Error (GET 500)
+curl -s -x "$PROXY" "$MOCK/api/v1/billing" > /dev/null || true
+# Flow 9: Tunnel Failure (ERR)
+curl -s -x "$PROXY" "http://127.0.0.1:19999/unreachable/service" > /dev/null || true
+# Flow 10: AI-Native MCP tools list (POST /mcp 200)
+MCP_REQ='{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+curl -s -x "$PROXY" -X POST "http://127.0.0.1:$PROXY_PORT/mcp" -H "Content-Type: application/json" -d "$MCP_REQ" > /dev/null
+
+sleep 1.5
 
 # -------------------------------------------------------------
-# 03_active_traffic_table.png
+# Scene 01: 01_traffic_table_dual_pane.png
 # -------------------------------------------------------------
-echo "==> Capturing 03_active_traffic_table.png..."
-/usr/sbin/screencapture -x -l "$WID" "$SCREENSHOT_DIR/03_active_traffic_table.png"
+echo "==> Preparing Scene 01: Main Dual-Pane Traffic Table..."
+key_press 53 # Escape ensures no row selected and no popover open
+sleep 0.6
+capture_uniform_screenshot "01_traffic_table_dual_pane.png"
 
 # -------------------------------------------------------------
-# 04_search_filtering_and_facets.png
+# Scene 02: 02_detail_json_graphql.png
 # -------------------------------------------------------------
-echo "==> Capturing 04_search_filtering_and_facets.png..."
-# Open facets drawer (Icon 1 at x=602, y=62)
-click_win "$ZNIFF_PID" 602 62
+echo "==> Preparing Scene 02: Deep Inspection JSON & GraphQL..."
+# Row 5 (GraphQL at y=261)
+click_win "$ZNIFF_PID" 200 261
+sleep 0.8
+capture_uniform_screenshot "02_detail_json_graphql.png"
+
+# -------------------------------------------------------------
+# Scene 03: 03_detail_protobuf_hex.png
+# -------------------------------------------------------------
+echo "==> Preparing Scene 03: Protobuf / gRPC & Hex View..."
+# Row 7 (Telemetry at y=329)
+click_win "$ZNIFF_PID" 200 329
+sleep 0.8
+capture_uniform_screenshot "03_detail_protobuf_hex.png"
+
+# -------------------------------------------------------------
+# Scene 04: 04_baseline_diff_view.png
+# -------------------------------------------------------------
+echo "==> Preparing Scene 04: Line-by-Line Baseline Diff View..."
+# Right click Row 1 to open context menu
+right_click_win "$ZNIFF_PID" 200 125
 sleep 0.5
-/usr/sbin/screencapture -x -l "$WID" "$SCREENSHOT_DIR/04_search_filtering_and_facets.png"
-# Close facets drawer
-click_win "$ZNIFF_PID" 602 62
-sleep 0.4
+# Click '基准' (Baseline) at relative y=300
+click_win "$ZNIFF_PID" 260 300
+sleep 0.6
+# Left click Row 3 to trigger diff against Row 1
+click_win "$ZNIFF_PID" 200 193
+sleep 0.8
+capture_uniform_screenshot "04_baseline_diff_view.png"
 
-# -------------------------------------------------------------
-# 05_detail_inspector_overview.png
-# -------------------------------------------------------------
-echo "==> Capturing 05_detail_inspector_overview.png..."
-# Select row 2 (GraphQL flow at y=164)
-click_win "$ZNIFF_PID" 200 164
+# Clear baseline
+right_click_win "$ZNIFF_PID" 200 125
 sleep 0.5
-/usr/sbin/screencapture -x -l "$WID" "$SCREENSHOT_DIR/05_detail_inspector_overview.png"
-
-# -------------------------------------------------------------
-# 06_detail_body_and_headers.png
-# -------------------------------------------------------------
-echo "==> Capturing 06_detail_body_and_headers.png..."
-# Select row 1 (Users JSON flow at y=130)
-click_win "$ZNIFF_PID" 200 130
+click_win "$ZNIFF_PID" 260 300
 sleep 0.5
-/usr/sbin/screencapture -x -l "$WID" "$SCREENSHOT_DIR/06_detail_body_and_headers.png"
 
 # -------------------------------------------------------------
-# 07_rule_management_popup.png
+# Scene 05: 05_filter_rules_popup.png
 # -------------------------------------------------------------
-echo "==> Capturing 07_rule_management_popup.png..."
-# Click Filters button in toolbar (x=985, y=21)
+echo "==> Preparing Scene 05: Filter & Rules Management Popover..."
+# Click '过滤' in toolbar (x=985, y=21)
 click_win "$ZNIFF_PID" 985 21
 sleep 0.8
-/usr/sbin/screencapture -x -l "$WID" "$SCREENSHOT_DIR/07_rule_management_popup.png"
-# Close popup with Escape
-osascript -e 'tell application "System Events" to key code 53' 2>/dev/null || true
+capture_uniform_screenshot "05_filter_rules_popup.png"
+# Close popover with Escape
+key_press 53
 sleep 0.5
 
 # -------------------------------------------------------------
-# 08_sequence_diagram_preview.png
+# Scene 06: 06_breakpoint_intercept_queue.png
 # -------------------------------------------------------------
-echo "==> Capturing 08_sequence_diagram_preview.png..."
-# Deselect row to return to Summary view: click "Summary" button at (x=840, y=21)
-click_win "$ZNIFF_PID" 840 21
+echo "==> Preparing Scene 06: Breakpoint Interception & Concurrency Queue..."
+# Send two background requests that will pause on breakpoint
+curl -s -x "$PROXY" "$MOCK/api/v1/breakpoint/user-auth" >/dev/null &
+BREAK_PID1=$!
+sleep 0.3
+curl -s -x "$PROXY" "$MOCK/api/v1/breakpoint/payment-checkout" >/dev/null &
+BREAK_PID2=$!
+sleep 1.2
+capture_uniform_screenshot "06_breakpoint_intercept_queue.png"
+
+# Resume/drop breakpoints by continuing or killing
+kill "$BREAK_PID1" "$BREAK_PID2" 2>/dev/null || true
+key_press 53
 sleep 0.5
-# Click "Sequence diagram" button in summary card (x=1110, y=74)
-click_win "$ZNIFF_PID" 1110 74
-sleep 0.8
-/usr/sbin/screencapture -x -l "$WID" "$SCREENSHOT_DIR/08_sequence_diagram_preview.png"
-# Close modal with Escape
-osascript -e 'tell application "System Events" to key code 53' 2>/dev/null || true
+
+# -------------------------------------------------------------
+# Scene 07: 07_sequence_diagram_waterfall.png
+# -------------------------------------------------------------
+echo "==> Preparing Scene 07: Multi-View Sequence & Waterfall Preview..."
+# Click More menu in toolbar (x=1150, y=21)
+click_win "$ZNIFF_PID" 1150 21
+sleep 0.5
+# Click '生成时序图' (x=1150, y=164)
+click_win "$ZNIFF_PID" 1150 164
+sleep 1.0
+capture_uniform_screenshot "07_sequence_diagram_waterfall.png"
+# Close dialog with Escape
+key_press 53
 sleep 0.5
 
 # -------------------------------------------------------------
-# 09_window_resizing_compact.png
+# Scene 08: 08_mobile_qr_cert_console.png
 # -------------------------------------------------------------
-echo "==> Capturing 09_window_resizing_compact.png..."
-osascript -e 'tell application "System Events" to tell process "zniff" to set size of window 1 to {800, 600}' 2>/dev/null || true
+echo "==> Preparing Scene 08: Mobile QR Code & CA Trust Management..."
+# Click More menu in toolbar (x=1150, y=21)
+click_win "$ZNIFF_PID" 1150 21
 sleep 0.8
-/usr/sbin/screencapture -x -l "$WID" "$SCREENSHOT_DIR/09_window_resizing_compact.png"
+capture_uniform_screenshot "08_mobile_qr_cert_console.png"
+# Close menu with Escape
+key_press 53
+sleep 0.5
 
 # -------------------------------------------------------------
-# 10_window_resizing_wide.png
+# Scene 09: 09_mcp_ai_integration.png
 # -------------------------------------------------------------
-echo "==> Capturing 10_window_resizing_wide.png..."
-osascript -e 'tell application "System Events" to tell process "zniff" to set size of window 1 to {1440, 800}' 2>/dev/null || true
+echo "==> Preparing Scene 09: AI-Native MCP Server Integration..."
+# Select MCP flow row (latest row at y=431)
+click_win "$ZNIFF_PID" 200 431
 sleep 0.8
-/usr/sbin/screencapture -x -l "$WID" "$SCREENSHOT_DIR/10_window_resizing_wide.png"
+# Copy MCP config from More menu to display status notification
+click_win "$ZNIFF_PID" 1150 21 # More menu
+sleep 0.5
+click_win "$ZNIFF_PID" 1230 325 # MCP pill in Copy Config
+sleep 0.6
+capture_uniform_screenshot "09_mcp_ai_integration.png"
 
-echo "==> All 10 screenshots captured successfully in $SCREENSHOT_DIR:"
-ls -lh "$SCREENSHOT_DIR"/*.png
+# -------------------------------------------------------------
+# Scene 10: 10_theme_light_contrast.png
+# -------------------------------------------------------------
+echo "==> Preparing Scene 10: Adaptive Light Mode & High-Contrast Layout..."
+set_dark_mode false
+sleep 1.0
+key_press 53 # Escape to summary view
+sleep 0.5
+capture_uniform_screenshot "10_theme_light_contrast.png"
+set_dark_mode true
+sleep 0.5
+
+# -------------------------------------------------------------
+# Clean up old outdated non-uniform screenshots in docs/screenshots
+# -------------------------------------------------------------
+echo "==> Pruning any legacy non-uniform files in $DOCS_SCREENSHOT_DIR..."
+for f in "$DOCS_SCREENSHOT_DIR"/*.png; do
+    fname="$(basename "$f")"
+    case "$fname" in
+        01_traffic_table_dual_pane.png|\
+        02_detail_json_graphql.png|\
+        03_detail_protobuf_hex.png|\
+        04_baseline_diff_view.png|\
+        05_filter_rules_popup.png|\
+        06_breakpoint_intercept_queue.png|\
+        07_sequence_diagram_waterfall.png|\
+        08_mobile_qr_cert_console.png|\
+        09_mcp_ai_integration.png|\
+        10_theme_light_contrast.png)
+            # Retain current 10 scenes
+            ;;
+        *)
+            rm -f "$f"
+            ;;
+    esac
+done
+
+echo "==> Pruning any legacy non-uniform files in $SCREENSHOT_DIR..."
+for f in "$SCREENSHOT_DIR"/*.png; do
+    fname="$(basename "$f")"
+    case "$fname" in
+        01_traffic_table_dual_pane.png|\
+        02_detail_json_graphql.png|\
+        03_detail_protobuf_hex.png|\
+        04_baseline_diff_view.png|\
+        05_filter_rules_popup.png|\
+        06_breakpoint_intercept_queue.png|\
+        07_sequence_diagram_waterfall.png|\
+        08_mobile_qr_cert_console.png|\
+        09_mcp_ai_integration.png|\
+        10_theme_light_contrast.png)
+            # Retain current 10 scenes
+            ;;
+        *)
+            rm -f "$f"
+            ;;
+    esac
+done
+
+# -------------------------------------------------------------
+# Verify Requirement R2: Strict Uniform Resolution (1920x1080)
+# -------------------------------------------------------------
+echo "==> Verifying Requirement R2: Dimensions across all screenshots..."
+for dir in "$DOCS_SCREENSHOT_DIR" "$SCREENSHOT_DIR"; do
+    echo "Checking directory: $dir"
+    for img in "$dir"/*.png; do
+        w=$(sips -g pixelWidth "$img" | awk '/pixelWidth/ {print $2}')
+        h=$(sips -g pixelHeight "$img" | awk '/pixelHeight/ {print $2}')
+        if [ "$w" != "1920" ] || [ "$h" != "1080" ]; then
+            echo "ERROR: Image $img has dimension ${w}x${h}, expected 1920x1080!"
+            exit 1
+        fi
+        echo "  [PASS] $(basename "$img"): ${w}x${h}"
+    done
+done
+
+# -------------------------------------------------------------
+# Verify Video Generation Readiness via ffmpeg
+# -------------------------------------------------------------
+echo "==> Verifying video compilation via ffmpeg..."
+TEST_VIDEO="/tmp/zniff_showcase_preview.mp4"
+rm -f "$TEST_VIDEO"
+ffmpeg -y -framerate 1 -pattern_type glob -i "$DOCS_SCREENSHOT_DIR/*.png" -c:v libx264 -pix_fmt yuv420p "$TEST_VIDEO"
+echo "==> Video generated successfully at $TEST_VIDEO ($(ls -lh "$TEST_VIDEO" | awk '{print $5}'))"
+
+echo "==> Screenshot capture pipeline completed successfully! All 10 scenes verified at 1920x1080."

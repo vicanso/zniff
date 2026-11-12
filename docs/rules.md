@@ -2,7 +2,7 @@
 
 English | [简体中文](./rules-zh.md)
 
-This guide covers where **zniff** stores its configuration files, how to use the traffic filter syntax, TLS bypass lists, all 9 traffic modification & breakpoint rules, upstream proxy chaining, and saved setups (`.toml` presets).
+This guide covers where **zniff** stores its configuration files, how to use the traffic filter syntax, TLS bypass lists, all 14 traffic modification & breakpoint rules, GraphQL operation matching, upstream proxy chaining, and saved setups (`.toml` presets).
 
 ---
 
@@ -103,17 +103,17 @@ The editor validates rule syntax in real time (highlighting any 1-based line num
 
 ### 4.2 Execution Model: Terminal vs. Modifier Rules
 
-`zniff` supports 9 rule types divided into two categories:
+`zniff` supports 14 rule types divided into two categories:
 
-1. **Terminal Rules**: `map-local`, `map-remote`, `break`, `break-res`
-   - Determine how the request is fulfilled or paused.
+1. **Terminal Rules**: `map-local`, `map-remote`, `break`, `break-res`, `block`
+   - Determine how the request is fulfilled, paused, or terminated.
    - **First match wins** in top-to-bottom text order; subsequent terminal rules are ignored for that flow.
-2. **Modifier Rules**: `replace`, `delay`, `header`, `query`, `cors`
+2. **Modifier Rules**: `replace`, `json`, `delay`, `throttle`, `header`, `query`, `cors`, `no-cache`, `cert`
    - **Stackable and non-terminal**. Every matching modifier rule is applied in order, even if it appears after the winning terminal rule.
 
 ---
 
-### 4.3 All 9 Rule Types & Examples
+### 4.3 All 14 Rule Types & Examples
 
 #### ① `map-local` — Serve a Local File or Status-Only Mock Response
 
@@ -323,6 +323,135 @@ cors api.example.com
 
 # Enable CORS for all hosts
 cors *
+```
+
+---
+
+#### ⑩ `block` — Block Traffic with Status Code or Connection Drop/Reset
+
+Interceps matching requests at the proxy level without contacting the origin:
+- Return a specific HTTP status code (e.g., `status=403`, `status=500`), with an optional response body.
+- Or drop/reset the connection immediately using `drop` or `reset` (recorded with status `规则阻断 (连接已断开)`).
+
+**Syntax:**
+```text
+block <pattern> [status=<code-100..599>] [drop|reset]
+```
+
+**Examples:**
+```text
+# Return HTTP 403 Forbidden to tracking domains
+block telemetry.example.com status=403
+
+# Immediately sever connections to ad servers
+block ads.example.com drop
+```
+
+---
+
+#### ⑪ `json` — Modify or Delete JSON Fields by JSON Pointer or Dot Path
+
+Modifies or removes fields within JSON request or response bodies (up to `1 MB`) on the fly, preserving key ordering:
+- Use standard JSON Pointer (`/path/to/field`) or dot notation (`path.to.field`).
+- Use `set` with a JSON literal (`true`, `false`, `null`, `123`, `"value"`, `{"a":1}`) or `del` to remove.
+
+**Syntax:**
+```text
+json <pattern> req|res set <pointer-or-dot-path> <json-value>
+json <pattern> req|res del <pointer-or-dot-path>
+```
+
+**Examples:**
+```text
+# Grant VIP status in user profile response
+json api.example.com/v1/profile res set /data/is_vip true
+
+# Delete tracking field from request payload
+json api.example.com/events req del /metadata/device_fingerprint
+```
+
+---
+
+#### ⑫ `throttle` — Bandwidth Throttling & Network Simulation
+
+Simulates real-world poor network conditions using 4 KB chunked streaming delays:
+- Presets: `2g` (50 kbps, 500ms RTT), `3g` (750 kbps, 100ms RTT), `4g` (4 Mbps, 20ms RTT).
+- Or directional custom rates: `down=<rate>` and `up=<rate>` (e.g., `down=256k up=64k`).
+
+**Syntax:**
+```text
+throttle <pattern> <preset|down=<rate> up=<rate>>
+```
+
+**Examples:**
+```text
+# Simulate 3G mobile network on mobile API endpoints
+throttle api.example.com/mobile 3g
+
+# Limit media downloads to 500 KB/s
+throttle cdn.example.com/video down=500k
+```
+
+---
+
+#### ⑬ `no-cache` — Strip Conditional Caching Headers & Force Fresh Responses
+
+Forces clients and servers to bypass HTTP caching:
+- Strips `If-Modified-Since` and `If-None-Match` from requests before forwarding to prevent `304 Not Modified`.
+- Injects `Cache-Control: no-cache, no-store, must-revalidate` and `Pragma: no-cache` into responses.
+
+**Syntax:**
+```text
+no-cache <pattern>
+```
+
+**Examples:**
+```text
+# Disable caching for static assets during frontend development
+no-cache static.example.com/assets
+```
+
+---
+
+#### ⑭ `cert` / `client-cert` — Mount Custom Domain Certificate or Upstream mTLS
+
+Provides fine-grained TLS certificate control:
+- Mount custom server certificates for specific domains instead of generating leaf certificates with the local root CA.
+- Or inject upstream client certificates (`client-cert` or `mtls`) for origins requiring two-way mutual TLS (mTLS) authentication.
+
+**Syntax:**
+```text
+cert <pattern> <cert-path> <key-path>
+```
+
+**Examples:**
+```text
+# Provide custom company wildcard cert for internal services
+cert *.internal.corp /etc/ssl/internal.crt /etc/ssl/internal.key
+
+# Authenticate against upstream banking API using client mTLS certificate
+cert secure.bank.com/api ./certs/client.pem ./certs/client.key
+```
+
+---
+
+### 4.4 GraphQL Operation Matching (`op=<GraphQL-Operation>`)
+
+11 of the 14 rule types (`map-local`, `map-remote`, `break`, `break-res`, `block`, `replace`, `json`, `delay`, `header`, `query`, `no-cache`) support narrowing their scope by GraphQL operation name:
+- Append `op=<name>` to the rule.
+- Matches against explicit `operationName`, inferred named queries/mutations/subscriptions, or `anonymous`.
+- Supports `*` wildcards and `|` OR unions.
+
+**Examples:**
+```text
+# Mock only the 'GetUserInfo' GraphQL query
+map-local api.example.com/graphql ./mocks/user.json op=GetUserInfo
+
+# Inject a 3s delay specifically on mutation operations starting with 'Submit*'
+delay api.example.com/graphql 3000ms op=Submit*
+
+# Set breakpoint on Checkout or Payment operations
+break api.example.com/graphql op=Checkout|Payment
 ```
 
 ---
