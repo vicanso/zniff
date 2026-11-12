@@ -2,14 +2,17 @@
 
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "desktop", target_os = "linux"))]
 use nsh_platform_linux as platform;
-#[cfg(target_os = "macos")]
+#[cfg(all(feature = "desktop", target_os = "macos"))]
 use nsh_platform_macos as platform;
-#[cfg(target_os = "windows")]
+#[cfg(all(feature = "desktop", target_os = "windows"))]
 use nsh_platform_windows as platform;
 
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[cfg(all(
+    feature = "desktop",
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
 fn main() -> impl std::process::Termination {
     if let Some(code) = zniff::maybe_run_cli_mode() {
         std::process::exit(code);
@@ -53,15 +56,27 @@ fn main() -> impl std::process::Termination {
     result
 }
 
+#[cfg(all(not(feature = "desktop"), not(target_arch = "wasm32")))]
+fn main() {
+    if let Some(code) = zniff::maybe_run_cli_mode() {
+        std::process::exit(code);
+    }
+    eprintln!("当前二进制为无界面构建 (--no-default-features)，请指定 --web、--relay 或 --mcp");
+    std::process::exit(2);
+}
+
 #[cfg(target_arch = "wasm32")]
 fn main() {}
 
-#[cfg(not(any(
-    target_os = "linux",
-    target_os = "macos",
-    target_os = "windows",
-    target_arch = "wasm32"
-)))]
+#[cfg(all(
+    feature = "desktop",
+    not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "windows",
+        target_arch = "wasm32"
+    ))
+))]
 fn main() {
     compile_error!("zniff 的桌面入口只在 macOS、Windows 和 Linux 上编译。");
 }

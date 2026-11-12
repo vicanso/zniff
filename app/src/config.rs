@@ -329,6 +329,12 @@ pub struct Config {
     pub relay_token: String,
     /// Accept relay uploads on the capture port. Off until the user turns it on.
     pub relay_accept: bool,
+    /// HTTP Basic `user:pass` that `zniff --relay` asks viewers for. Empty keeps
+    /// share pages open. `--view-auth` and `ZNIFF_RELAY_VIEW_AUTH` override it.
+    pub relay_view_auth: String,
+    /// HTTP Basic `user:pass` for the `zniff --web` console. Empty keeps it open.
+    /// `--web-auth` and `ZNIFF_WEB_AUTH` override it.
+    pub web_auth: String,
     /// Optional HTTP Basic credential (`user:pass`) required on the capture port.
     /// Belongs to this machine; omitted from saved profiles.
     pub proxy_auth: String,
@@ -417,6 +423,10 @@ struct RawConfig {
     relay_token: String,
     #[serde(default, skip_serializing_if = "is_false")]
     relay_accept: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    relay_view_auth: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    web_auth: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     proxy_auth: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -576,6 +586,8 @@ impl From<RawConfig> for Config {
             relay_url: raw.relay_url,
             relay_token: raw.relay_token,
             relay_accept: raw.relay_accept,
+            relay_view_auth: raw.relay_view_auth,
+            web_auth: raw.web_auth,
             proxy_auth: raw.proxy_auth,
         }
     }
@@ -666,6 +678,8 @@ impl From<Config> for RawConfig {
             relay_url: config.relay_url,
             relay_token: config.relay_token,
             relay_accept: config.relay_accept,
+            relay_view_auth: config.relay_view_auth,
+            web_auth: config.web_auth,
             proxy_auth: config.proxy_auth,
             saved_filters: config.saved_filters,
             saved_rules: config.saved_rules,
@@ -720,6 +734,8 @@ impl Default for Config {
             relay_url: String::new(),
             relay_token: String::new(),
             relay_accept: false,
+            relay_view_auth: String::new(),
+            web_auth: String::new(),
             proxy_auth: String::new(),
         }
     }
@@ -1120,6 +1136,8 @@ fn normalize_for(mut config: Config, dev: bool) -> Config {
     config.column_order = normalize_column_order(&config.column_order);
     config.relay_url = config.relay_url.trim().to_string();
     config.relay_token = config.relay_token.trim().to_string();
+    config.relay_view_auth = config.relay_view_auth.trim().to_string();
+    config.web_auth = config.web_auth.trim().to_string();
     config.proxy_auth = config.proxy_auth.trim().to_string();
     clamp_saved_filters(&mut config.saved_filters);
     clamp_saved_rules(&mut config.saved_rules);

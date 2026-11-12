@@ -25,6 +25,11 @@ pub(crate) const SLOT_CAP: usize = 32;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 const PUSH_TICK: Duration = Duration::from_millis(100);
 const PUSH_TICKS: u32 = 10;
+/// Wait before answering a viewer with a missing or wrong credential.
+const VIEW_DENY_DELAY: Duration = Duration::from_millis(300);
+const VIEW_CHALLENGE: &str = "WWW-Authenticate: Basic realm=\"zniff relay\", charset=\"UTF-8\"\r\n";
+/// Viewer credential for `zniff --relay` when `--view-auth` is absent.
+pub const VIEW_AUTH_ENV: &str = "ZNIFF_RELAY_VIEW_AUTH";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RelayBase {
@@ -127,6 +132,8 @@ pub struct CliSettings {
     pub bind: IpAddr,
     pub port: u16,
     pub token: String,
+    /// `--view-auth` as typed. [`resolve_view_auth`] adds env and config.
+    pub view_auth: Option<String>,
 }
 
 impl CliSettings {
@@ -146,6 +153,7 @@ pub fn cli_settings(
     let mut port = None;
     let mut token = None;
     let mut bind = None;
+    let mut view_auth = None;
     let mut index = 0;
     while index < args.len() {
         let arg = args[index].as_str();
@@ -167,6 +175,14 @@ pub fn cli_settings(
             index += 1;
             let next = args.get(index).ok_or_else(|| "缺少监听地址".to_string())?;
             bind = Some(parse_bind(next)?);
+        } else if let Some(rest) = arg.strip_prefix("--view-auth=") {
+            view_auth = Some(rest.to_string());
+        } else if arg == "--view-auth" {
+            index += 1;
+            let next = args
+                .get(index)
+                .ok_or_else(|| "缺少观看认证 (--view-auth <user:pass>)".to_string())?;
+            view_auth = Some((*next).clone());
         } else if arg == "--data-dir" || arg == "--proxy-auth" {
             index += 1;
         }
@@ -188,10 +204,67 @@ pub fn cli_settings(
         bind: bind.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
         port,
         token,
+        view_auth,
     })
 }
 
-pub fn run_cli(args: &[String], config_port: u16, config_token: &str) -> i32 {
+/// Picks the viewer credential: `--view-auth`, then [`VIEW_AUTH_ENV`], then
+/// `relay_view_auth` in `config.toml`. Blank values fall through. The result is
+/// empty (pages stay open) or a checked `user:pass`.
+pub fn resolve_view_auth(
+    cli: Option<&str>,
+    env: Option<&str>,
+    saved: &str,
+) -> Result<String, String> {
+    resolve_basic_credential(cli, env, saved, "--view-auth")
+}
+
+/// Shared by `--view-auth` and `--web-auth`: first non-blank of command line,
+/// environment, config. Empty means "no check"; anything else must be a
+/// `user:pass` with a non-empty user and no control characters.
+pub fn resolve_basic_credential(
+    cli: Option<&str>,
+    env: Option<&str>,
+    saved: &str,
+    flag: &str,
+) -> Result<String, String> {
+    let picked = [cli, env, Some(saved)]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .unwrap_or("");
+    if picked.is_empty() {
+        return Ok(String::new());
+    }
+    let valid = picked
+        .split_once(':')
+        .is_some_and(|(user, _)| !user.is_empty())
+        && !picked.chars().any(char::is_control);
+    if valid {
+        Ok(picked.to_string())
+    } else {
+        Err(format!("{flag} 的格式应为 user:pass，用户名不能为空"))
+    }
+}
+
+/// Startup line about viewer auth, shared by `--relay` and `--web --relay`.
+pub fn print_view_auth_notice(view_auth: &str) {
+    if view_auth.is_empty() {
+        println!("未设置观看认证 (--view-auth / {VIEW_AUTH_ENV})，拿到链接即可查看分享页");
+    } else {
+        println!(
+            "分享页需要 HTTP Basic 观看认证。Basic 在 HTTP 上是明文，公网部署请在前面加 HTTPS 反向代理"
+        );
+    }
+}
+
+pub fn run_cli(
+    args: &[String],
+    config_port: u16,
+    config_token: &str,
+    config_view_auth: &str,
+) -> i32 {
     let settings = match cli_settings(args, config_port, config_token) {
         Ok(settings) => settings,
         Err(message) => {
@@ -199,7 +272,19 @@ pub fn run_cli(args: &[String], config_port: u16, config_token: &str) -> i32 {
             return 2;
         }
     };
-    let relay = match Relay::start(settings.addr(), &settings.token) {
+    let env_view_auth = std::env::var(VIEW_AUTH_ENV).ok();
+    let view_auth = match resolve_view_auth(
+        settings.view_auth.as_deref(),
+        env_view_auth.as_deref(),
+        config_view_auth,
+    ) {
+        Ok(view_auth) => view_auth,
+        Err(message) => {
+            eprintln!("{message}");
+            return 2;
+        }
+    };
+    let relay = match Relay::start_with_view_auth(settings.addr(), &settings.token, &view_auth) {
         Ok(relay) => relay,
         Err(err) => {
             eprintln!("zniff relay 没有绑上 {}: {err}", settings.addr());
@@ -207,6 +292,7 @@ pub fn run_cli(args: &[String], config_port: u16, config_token: &str) -> i32 {
         }
     };
     println!("zniff relay listening on http://{}", relay.addr());
+    print_view_auth_notice(&view_auth);
     if let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -226,7 +312,19 @@ pub struct Relay {
 }
 
 impl Relay {
+    #[cfg(test)]
     pub fn start(bind: SocketAddr, token: &str) -> std::io::Result<Self> {
+        Self::start_with_view_auth(bind, token, "")
+    }
+
+    /// Same as [`Relay::start`], but `GET`/`HEAD` need HTTP Basic `view_auth`
+    /// when it is not empty. Uploads and deletes still use the bearer token.
+    pub fn start_with_view_auth(
+        bind: SocketAddr,
+        token: &str,
+        view_auth: &str,
+    ) -> std::io::Result<Self> {
+        let view_auth = view_auth.to_string();
         let listener = std::net::TcpListener::bind(bind)?;
         listener.set_nonblocking(true)?;
         let addr = listener.local_addr()?;
@@ -256,6 +354,7 @@ impl Relay {
                     };
                     let state = Arc::new(Mutex::new(State {
                         token,
+                        view_auth,
                         slots: HashMap::new(),
                     }));
                     loop {
@@ -495,6 +594,8 @@ async fn delete_share(base: &RelayBase, token: &str, id: &str) -> Result<(), Pus
 
 struct State {
     token: String,
+    /// `user:pass` viewers must send as HTTP Basic. Empty leaves pages open.
+    view_auth: String,
     slots: HashMap<String, Slot>,
 }
 
@@ -515,6 +616,8 @@ struct Reply {
     reason: &'static str,
     content_type: &'static str,
     encoding: Option<&'static str>,
+    /// Adds `WWW-Authenticate: Basic` so the browser shows its sign-in box.
+    challenge: bool,
     body: Vec<u8>,
 }
 
@@ -582,6 +685,10 @@ async fn dispatch(socket: &mut TcpStream, head: &Head, rest: &[u8], state: &Mute
         };
     }
     if method.eq_ignore_ascii_case("GET") || method.eq_ignore_ascii_case("HEAD") {
+        if !viewer_authorized(state, head) {
+            tokio::time::sleep(VIEW_DENY_DELAY).await;
+            return view_challenge();
+        }
         return match kind {
             crate::share::SharePath::Page => get_page(state, &id, zh),
             crate::share::SharePath::Data { .. } => {
@@ -693,6 +800,7 @@ fn get_page(state: &Mutex<State>, id: &str, zh: bool) -> Reply {
         reason: "OK",
         content_type: "text/html; charset=utf-8",
         encoding: None,
+        challenge: false,
         body: html.into_bytes(),
     }
 }
@@ -715,6 +823,7 @@ fn get_flows(state: &Mutex<State>, id: &str, zh: bool, accept_encoding: Option<&
             reason: "OK",
             content_type: "application/json; charset=utf-8",
             encoding: Some("gzip"),
+            challenge: false,
             body: packed,
         };
     }
@@ -723,6 +832,7 @@ fn get_flows(state: &Mutex<State>, id: &str, zh: bool, accept_encoding: Option<&
         reason: "OK",
         content_type: "application/json; charset=utf-8",
         encoding: None,
+        challenge: false,
         body: bytes,
     }
 }
@@ -742,6 +852,7 @@ fn get_body(state: &Mutex<State>, id: &str, flow_id: u64) -> Reply {
             reason: "OK",
             content_type: "application/json; charset=utf-8",
             encoding: None,
+            challenge: false,
             body,
         },
         None => Reply {
@@ -749,6 +860,7 @@ fn get_body(state: &Mutex<State>, id: &str, flow_id: u64) -> Reply {
             reason: "Not Found",
             content_type: "application/json; charset=utf-8",
             encoding: None,
+            challenge: false,
             body: b"{}".to_vec(),
         },
     }
@@ -828,6 +940,30 @@ fn authorized(state: &Mutex<State>, head: &Head) -> bool {
     bearer_ok(&expected, header(head, "authorization"))
 }
 
+/// Open when no viewer credential is set. Otherwise the request must carry
+/// `Authorization: Basic` for exactly that `user:pass`.
+fn viewer_authorized(state: &Mutex<State>, head: &Head) -> bool {
+    let expected = lock(state).view_auth.clone();
+    if expected.is_empty() {
+        return true;
+    }
+    head.headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+        .any(|(_, value)| crate::proxy::verify_basic_auth(&expected, value))
+}
+
+fn view_challenge() -> Reply {
+    Reply {
+        status: 401,
+        reason: "Unauthorized",
+        content_type: "text/plain; charset=utf-8",
+        encoding: None,
+        challenge: true,
+        body: b"authentication required".to_vec(),
+    }
+}
+
 fn tokens_equal(expected: &str, header_value: &str) -> bool {
     if expected.is_empty() {
         return false;
@@ -865,6 +1001,7 @@ fn expired(zh: bool) -> Reply {
         reason: "Not Found",
         content_type: "text/html; charset=utf-8",
         encoding: None,
+        challenge: false,
         body: crate::share::expired_page(zh).into_bytes(),
     }
 }
@@ -875,6 +1012,7 @@ fn plain(status: u16, reason: &'static str, message: &str) -> Reply {
         reason,
         content_type: "text/plain; charset=utf-8",
         encoding: None,
+        challenge: false,
         body: message.as_bytes().to_vec(),
     }
 }
@@ -884,8 +1022,9 @@ fn encode(reply: &Reply) -> Vec<u8> {
         Some(value) => format!("Content-Encoding: {value}\r\n"),
         None => String::new(),
     };
+    let challenge = if reply.challenge { VIEW_CHALLENGE } else { "" };
     let head = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\n{encoding}Content-Length: {len}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\n{encoding}{challenge}Content-Length: {len}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n",
         status = reply.status,
         reason = reply.reason,
         content_type = reply.content_type,
@@ -1358,6 +1497,128 @@ mod tests {
             {"id":5,"request_body_spilled":false,"response_body_spilled":false}
         ]}"#;
         assert_eq!(crate::proxy::spilled_flow_ids(json), vec![3, 4]);
+    }
+
+    #[test]
+    fn view_auth_flag_env_and_config_resolve_in_order() {
+        let settings = cli_settings(
+            &["--relay".into(), "--view-auth".into(), "ann:pw".into()],
+            8877,
+            "t",
+        )
+        .unwrap();
+        assert_eq!(settings.view_auth.as_deref(), Some("ann:pw"));
+        let inline =
+            cli_settings(&["--relay".into(), "--view-auth=bo:pw".into()], 8877, "t").unwrap();
+        assert_eq!(inline.view_auth.as_deref(), Some("bo:pw"));
+        assert!(cli_settings(&["--relay".into(), "--view-auth".into()], 8877, "t").is_err());
+        assert_eq!(
+            cli_settings(&["--relay".into()], 8877, "t")
+                .unwrap()
+                .view_auth,
+            None
+        );
+
+        assert_eq!(
+            resolve_view_auth(Some("cli:1"), Some("env:2"), "cfg:3").unwrap(),
+            "cli:1"
+        );
+        assert_eq!(
+            resolve_view_auth(None, Some(" env:2 "), "cfg:3").unwrap(),
+            "env:2"
+        );
+        assert_eq!(
+            resolve_view_auth(Some(""), Some(""), "cfg:3").unwrap(),
+            "cfg:3"
+        );
+        assert_eq!(resolve_view_auth(None, None, "").unwrap(), "");
+        assert_eq!(resolve_view_auth(None, None, "u:").unwrap(), "u:");
+        assert_eq!(
+            resolve_view_auth(None, None, "u:p:with colon").unwrap(),
+            "u:p:with colon"
+        );
+        assert!(resolve_view_auth(Some("nocolon"), None, "").is_err());
+        assert!(resolve_view_auth(Some(":pw"), None, "").is_err());
+        assert!(resolve_view_auth(Some("u:p\nx"), None, "").is_err());
+    }
+
+    #[tokio::test]
+    async fn view_auth_guards_pages_but_not_uploads() {
+        let relay =
+            Relay::start_with_view_auth("127.0.0.1:0".parse().unwrap(), "up-token", "ann:s3cr3t")
+                .unwrap();
+        let addr = relay.addr();
+        let id = sample_id(7);
+        let document = flows_json("guarded.example", future_expires(600), false);
+        let put = |auth: &str| {
+            format!(
+                "PUT /s/{id}/flows.json HTTP/1.1\r\nHost: {addr}\r\nAuthorization: {auth}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{document}",
+                document.len()
+            )
+        };
+        let good = format!("Basic {}", crate::session::base64_encode(b"ann:s3cr3t"));
+        let wrong = format!("Basic {}", crate::session::base64_encode(b"ann:nope"));
+
+        let (status, _, _) = raw_exchange(addr, &put(&good)).await;
+        assert_eq!(status, 401, "viewer credential must not upload");
+        let (status, _, _) = raw_exchange(addr, &put("Bearer up-token")).await;
+        assert_eq!(status, 204);
+        let flow_body = r#"{"id":1}"#;
+        let body_put = format!(
+            "PUT /s/{id}/flows/1.json HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer up-token\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{flow_body}",
+            flow_body.len()
+        );
+        assert_eq!(raw_exchange(addr, &body_put).await.0, 204);
+
+        let paths = [
+            format!("/s/{id}"),
+            format!("/s/{id}/flows.json"),
+            format!("/s/{id}/flows/1.json"),
+            format!("/s/{}", sample_id(8)),
+        ];
+        for path in &paths {
+            for auth in ["", &wrong, "Bearer up-token"] {
+                let header = if auth.is_empty() {
+                    String::new()
+                } else {
+                    format!("Authorization: {auth}\r\n")
+                };
+                let started = std::time::Instant::now();
+                let (status, head, _) = raw_exchange(
+                    addr,
+                    &format!(
+                        "GET {path} HTTP/1.1\r\nHost: {addr}\r\n{header}Connection: close\r\n\r\n"
+                    ),
+                )
+                .await;
+                assert_eq!(status, 401, "{path} with {auth:?}");
+                assert!(
+                    head.contains("WWW-Authenticate: Basic realm=\"zniff relay\""),
+                    "{head}"
+                );
+                assert!(started.elapsed() >= Duration::from_millis(250));
+            }
+        }
+
+        let get = |path: &str| {
+            format!(
+                "GET {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: {good}\r\nConnection: close\r\n\r\n"
+            )
+        };
+        let (status, head, body) = raw_exchange(addr, &get(&paths[0])).await;
+        assert_eq!(status, 200);
+        assert!(!head.contains("WWW-Authenticate"), "{head}");
+        assert!(String::from_utf8_lossy(&body).contains(&format!("/s/{id}/flows.json")));
+        let (status, _, body) = raw_exchange(addr, &get(&paths[1])).await;
+        assert_eq!(status, 200);
+        assert!(String::from_utf8_lossy(&body).contains("guarded.example"));
+        assert_eq!(raw_exchange(addr, &get(&paths[2])).await.0, 200);
+        assert_eq!(raw_exchange(addr, &get(&paths[3])).await.0, 404);
+
+        let delete = format!(
+            "DELETE /s/{id} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: {good}\r\nConnection: close\r\n\r\n"
+        );
+        assert_eq!(raw_exchange(addr, &delete).await.0, 401);
     }
 
     #[tokio::test]

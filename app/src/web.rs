@@ -29,12 +29,40 @@ const HUB_BODY_CAP: usize = 1024 * 1024;
 const LIST_CAP: usize = 400;
 const PREVIEW_CAP: usize = 256 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
+/// Default relay port for `zniff --web --relay`.
+pub const RELAY_DEFAULT_PORT: u16 = 8879;
+/// Console credential when `--web-auth` is absent.
+pub const WEB_AUTH_ENV: &str = "ZNIFF_WEB_AUTH";
+/// Wait before answering a console request with a missing or wrong credential.
+const AUTH_DENY_DELAY: Duration = Duration::from_millis(300);
 
 pub struct WebSettings {
     pub web_bind: IpAddr,
     pub web_port: u16,
     pub capture_bind: IpAddr,
     pub capture_port: u16,
+    /// `--no-capture`: the console may never open the capture port.
+    pub no_capture: bool,
+    /// `--web-auth` as typed. [`crate::relay::resolve_basic_credential`] adds env and config.
+    pub web_auth: Option<String>,
+    /// Present with `--relay`: a relay listener in the same process.
+    pub relay: Option<RelayListen>,
+}
+
+/// Relay listener started next to the console by `zniff --web --relay`.
+pub struct RelayListen {
+    pub bind: IpAddr,
+    pub port: u16,
+    /// `--token` as typed. Falls back to `relay_token` in `config.toml`.
+    pub token: Option<String>,
+    /// `--view-auth` as typed.
+    pub view_auth: Option<String>,
+}
+
+impl RelayListen {
+    pub fn addr(&self) -> SocketAddr {
+        SocketAddr::new(self.bind, self.port)
+    }
 }
 
 impl WebSettings {
@@ -44,12 +72,20 @@ impl WebSettings {
 }
 
 /// `--web` flags. `config_port` is the capture port when `--port` is omitted.
-/// Parsing does not open either socket.
+/// Parsing does not open any socket. `--relay` adds a relay listener on
+/// `--relay-port` (default 8879); the three ports must differ.
 pub fn cli_settings(args: &[String], config_port: u16) -> std::result::Result<WebSettings, String> {
     let mut web_port = None;
     let mut web_bind = None;
     let mut capture_port = None;
     let mut capture_bind = None;
+    let mut no_capture = false;
+    let mut web_auth = None;
+    let mut relay = false;
+    let mut relay_port = None;
+    let mut relay_bind = None;
+    let mut token = None;
+    let mut view_auth = None;
     let mut index = 0;
     while index < args.len() {
         let arg = args[index].as_str();
@@ -77,16 +113,82 @@ pub fn cli_settings(args: &[String], config_port: u16) -> std::result::Result<We
             index += 1;
             let next = args.get(index).ok_or_else(|| "缺少抓包地址".to_string())?;
             capture_bind = Some(parse_bind(next)?);
+        } else if arg == "--relay" {
+            relay = true;
+        } else if arg == "--no-capture" {
+            no_capture = true;
+        } else if let Some(rest) = arg.strip_prefix("--relay-port=") {
+            relay_port = Some(parse_port(rest)?);
+        } else if arg == "--relay-port" {
+            index += 1;
+            let next = args.get(index).ok_or_else(|| "缺少中继端口".to_string())?;
+            relay_port = Some(parse_port(next)?);
+        } else if let Some(rest) = arg.strip_prefix("--relay-bind=") {
+            relay_bind = Some(parse_bind(rest)?);
+        } else if arg == "--relay-bind" {
+            index += 1;
+            let next = args.get(index).ok_or_else(|| "缺少中继地址".to_string())?;
+            relay_bind = Some(parse_bind(next)?);
+        } else if let Some(rest) = arg.strip_prefix("--token=") {
+            token = Some(rest.to_string());
+        } else if arg == "--token" {
+            index += 1;
+            let next = args.get(index).ok_or_else(|| "缺少中转密钥".to_string())?;
+            token = Some(next.clone());
+        } else if let Some(rest) = arg.strip_prefix("--view-auth=") {
+            view_auth = Some(rest.to_string());
+        } else if arg == "--view-auth" {
+            index += 1;
+            let next = args
+                .get(index)
+                .ok_or_else(|| "缺少观看认证 (--view-auth <user:pass>)".to_string())?;
+            view_auth = Some(next.clone());
+        } else if let Some(rest) = arg.strip_prefix("--web-auth=") {
+            web_auth = Some(rest.to_string());
+        } else if arg == "--web-auth" {
+            index += 1;
+            let next = args
+                .get(index)
+                .ok_or_else(|| "缺少操作台认证 (--web-auth <user:pass>)".to_string())?;
+            web_auth = Some(next.clone());
         } else if arg == "--data-dir" || arg == "--proxy-auth" {
             index += 1;
         }
         index += 1;
     }
+    let web_port = web_port.unwrap_or(WEB_DEFAULT_PORT);
+    let capture_port = capture_port.unwrap_or(config_port);
+    if !relay && (relay_port.is_some() || relay_bind.is_some() || view_auth.is_some()) {
+        return Err("--relay-port、--relay-bind、--view-auth 要和 --relay 一起用".to_string());
+    }
+    if no_capture && !relay {
+        return Err("--no-capture 只用于中继：zniff --web --relay --no-capture".to_string());
+    }
+    if web_port == capture_port {
+        return Err(format!("网页端口和抓包端口都是 {web_port}，请换一个"));
+    }
+    let relay = relay.then(|| RelayListen {
+        bind: relay_bind.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
+        port: relay_port.unwrap_or(RELAY_DEFAULT_PORT),
+        token,
+        view_auth,
+    });
+    if let Some(relay) = &relay {
+        if relay.port == web_port {
+            return Err(format!("中继端口和网页端口都是 {web_port}，请换一个"));
+        }
+        if relay.port == capture_port {
+            return Err(format!("中继端口和抓包端口都是 {capture_port}，请换一个"));
+        }
+    }
     Ok(WebSettings {
         web_bind: web_bind.unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST)),
-        web_port: web_port.unwrap_or(WEB_DEFAULT_PORT),
+        web_port,
         capture_bind: capture_bind.unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST)),
-        capture_port: capture_port.unwrap_or(config_port),
+        capture_port,
+        no_capture,
+        web_auth,
+        relay,
     })
 }
 
@@ -135,7 +237,29 @@ pub fn run_cli(args: &[String], config_port: u16) -> i32 {
     hub.set_breaks_enabled(loaded.breaks_enabled);
     hub.set_show_tunnel_failures(loaded.show_tunnel_failures);
     hub.set_relay_ingress(loaded.relay_accept, &loaded.relay_token);
-    let prefs = WebPrefs::from_loaded(&loaded, data_dir, dev_mode);
+    let env_web_auth = std::env::var(WEB_AUTH_ENV).ok();
+    let web_auth = match crate::relay::resolve_basic_credential(
+        settings.web_auth.as_deref(),
+        env_web_auth.as_deref(),
+        &loaded.web_auth,
+        "--web-auth",
+    ) {
+        Ok(web_auth) => web_auth,
+        Err(message) => {
+            eprintln!("{message}");
+            return 2;
+        }
+    };
+    let relay = match &settings.relay {
+        Some(listen) => match start_relay(listen, &loaded) {
+            Ok(relay) => Some(relay),
+            Err(code) => return code,
+        },
+        None => None,
+    };
+    let mut prefs = WebPrefs::from_loaded(&loaded, data_dir, dev_mode);
+    prefs.web_auth = web_auth.clone();
+    prefs.no_capture = settings.no_capture;
     let web_root = packaged_web_root();
     match &web_root {
         Some(dir) => println!("界面目录 {}", dir.display()),
@@ -157,7 +281,23 @@ pub fn run_cli(args: &[String], config_port: u16) -> i32 {
         }
     };
     println!("zniff web listening on http://{}", server.addr());
-    println!("抓包端口 {} 在页面里开始之后才打开", settings.capture_port);
+    if settings.no_capture {
+        println!("只做中继 (--no-capture)：这个进程不会打开抓包端口");
+    } else {
+        println!("抓包端口 {} 在页面里开始之后才打开", settings.capture_port);
+    }
+    if web_auth.is_empty() {
+        if !settings.web_bind.is_loopback() {
+            eprintln!(
+                "警告：操作台绑在 {} 但没有设置 --web-auth / {WEB_AUTH_ENV}，能连上这个端口的人都能看抓到的正文、改规则和重放",
+                settings.web_addr()
+            );
+        }
+    } else {
+        println!(
+            "操作台需要 HTTP Basic 认证。Basic 在 HTTP 上是明文，公网部署请在前面加 HTTPS 反向代理"
+        );
+    }
     if let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -167,7 +307,46 @@ pub fn run_cli(args: &[String], config_port: u16) -> i32 {
         });
     }
     drop(server);
+    drop(relay);
     0
+}
+
+/// Starts the `--web --relay` listener. Errors are printed; the `Err` value is
+/// the exit code.
+fn start_relay(
+    listen: &RelayListen,
+    loaded: &crate::config::Config,
+) -> std::result::Result<crate::relay::Relay, i32> {
+    let token = crate::relay::usable_token(
+        listen
+            .token
+            .as_deref()
+            .unwrap_or(loaded.relay_token.as_str()),
+    );
+    if token.is_empty() {
+        eprintln!(
+            "需要中转密钥。用法: zniff --web --relay --token <secret> [--relay-port N] [--view-auth <user:pass>]"
+        );
+        return Err(2);
+    }
+    let env_view_auth = std::env::var(crate::relay::VIEW_AUTH_ENV).ok();
+    let view_auth = crate::relay::resolve_view_auth(
+        listen.view_auth.as_deref(),
+        env_view_auth.as_deref(),
+        &loaded.relay_view_auth,
+    )
+    .map_err(|message| {
+        eprintln!("{message}");
+        2
+    })?;
+    let relay = crate::relay::Relay::start_with_view_auth(listen.addr(), &token, &view_auth)
+        .map_err(|err| {
+            eprintln!("zniff relay 没有绑上 {}: {err}", listen.addr());
+            1
+        })?;
+    println!("zniff relay listening on http://{}", relay.addr());
+    crate::relay::print_view_auth_notice(&view_auth);
+    Ok(relay)
 }
 
 pub struct WebServer {
@@ -320,6 +499,10 @@ struct WebPrefs {
     redact_strict: bool,
     redact_fields: String,
     relay_url: String,
+    /// `user:pass` every console request must send as HTTP Basic. Empty: open.
+    web_auth: String,
+    /// Refuse to start capture (`--web --relay --no-capture`).
+    no_capture: bool,
 }
 
 impl WebPrefs {
@@ -335,6 +518,8 @@ impl WebPrefs {
             redact_strict: loaded.redact_strict,
             redact_fields: loaded.redact_fields.clone(),
             relay_url: loaded.relay_url.clone(),
+            web_auth: String::new(),
+            no_capture: false,
         }
     }
 }
@@ -413,6 +598,11 @@ struct Reply {
 async fn serve_one(mut socket: TcpStream, slot: Arc<Mutex<Slot>>) -> Result<()> {
     let (head_bytes, rest) = read_header(&mut socket).await?;
     let (is_head, reply) = match parse_head(&head_bytes) {
+        Ok(head) if !console_authorized(&slot, &head) => {
+            tokio::time::sleep(AUTH_DENY_DELAY).await;
+            let _ = tokio::time::timeout(IO_TIMEOUT, socket.write_all(CONSOLE_CHALLENGE)).await;
+            return Ok(());
+        }
         Ok(head) => {
             let is_head = head.method.eq_ignore_ascii_case("HEAD");
             let reply = route(&mut socket, &head, &rest, &slot).await;
@@ -423,6 +613,21 @@ async fn serve_one(mut socket: TcpStream, slot: Arc<Mutex<Slot>>) -> Result<()> 
     let bytes = encode(&reply, is_head);
     let _ = tokio::time::timeout(IO_TIMEOUT, socket.write_all(&bytes)).await;
     Ok(())
+}
+
+const CONSOLE_CHALLENGE: &[u8] = b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"zniff web\", charset=\"UTF-8\"\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 23\r\nConnection: close\r\nCache-Control: no-store\r\n\r\nauthentication required";
+
+/// Open when `--web-auth` is not set. Otherwise every request, pages and
+/// `/api` alike, must carry `Authorization: Basic` for that `user:pass`.
+fn console_authorized(slot: &Mutex<Slot>, head: &Head) -> bool {
+    let expected = lock(slot).prefs.web_auth.clone();
+    if expected.is_empty() {
+        return true;
+    }
+    head.headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+        .any(|(_, value)| crate::proxy::verify_basic_auth(&expected, value))
 }
 
 async fn route(socket: &mut TcpStream, head: &Head, rest: &[u8], slot: &Mutex<Slot>) -> Reply {
@@ -537,6 +742,7 @@ async fn route(socket: &mut TcpStream, head: &Head, rest: &[u8], slot: &Mutex<Sl
             let reason = match status {
                 200 => "OK",
                 400 => "Bad Request",
+                403 => "Forbidden",
                 _ => "Conflict",
             };
             return json_reply(status, reason, &value);
@@ -564,6 +770,10 @@ fn set_capture(
     port: Option<u16>,
 ) -> (u16, StateBody) {
     if on {
+        if slot.prefs.no_capture {
+            slot.error = "这个进程只做中继 (--no-capture)，不能开始抓包".to_string();
+            return (403, state_of(slot));
+        }
         if slot.capture.is_some() {
             // Already listening. A new address applies on the next start.
             slot.error.clear();
@@ -1925,6 +2135,212 @@ mod tests {
         assert_eq!(docker.capture_port, 8877);
         assert!(cli_settings(&args(&["--web", "--port", "0"]), 8877).is_err());
         assert!(cli_settings(&args(&["--web", "--web-port", "0"]), 8877).is_err());
+    }
+
+    #[test]
+    fn web_relay_flags_pick_modes_and_refuse_clashing_ports() {
+        let plain = cli_settings(&args(&["--web"]), 8877).unwrap();
+        assert!(plain.relay.is_none());
+        assert!(!plain.no_capture);
+        assert_eq!(plain.web_auth, None);
+
+        let both = cli_settings(
+            &args(&["--web", "--relay", "--token", "t1", "--web-auth=op:pw"]),
+            8877,
+        )
+        .unwrap();
+        let relay = both.relay.as_ref().unwrap();
+        assert_eq!(relay.port, RELAY_DEFAULT_PORT);
+        assert_eq!(relay.bind, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        assert_eq!(relay.token.as_deref(), Some("t1"));
+        assert_eq!(relay.view_auth, None);
+        assert_eq!(both.web_auth.as_deref(), Some("op:pw"));
+        assert!(!both.no_capture);
+
+        let only = cli_settings(
+            &args(&[
+                "--web",
+                "--relay",
+                "--no-capture",
+                "--relay-port",
+                "9100",
+                "--relay-bind=127.0.0.1",
+                "--view-auth",
+                "v:pw",
+            ]),
+            8877,
+        )
+        .unwrap();
+        assert!(only.no_capture);
+        let relay = only.relay.as_ref().unwrap();
+        assert_eq!(
+            relay.addr(),
+            "127.0.0.1:9100".parse::<SocketAddr>().unwrap()
+        );
+        assert_eq!(relay.view_auth.as_deref(), Some("v:pw"));
+
+        let refused = [
+            &["--web", "--no-capture"][..],
+            &["--web", "--relay-port", "9100"][..],
+            &["--web", "--view-auth", "v:pw"][..],
+            &["--web", "--web-port", "8877"][..],
+            &["--web", "--relay", "--relay-port", "8080"][..],
+            &["--web", "--relay", "--relay-port", "8877"][..],
+            &["--web", "--relay", "--relay-port", "0"][..],
+            &["--web", "--web-auth"][..],
+        ];
+        for flags in refused {
+            assert!(cli_settings(&args(flags), 8877).is_err(), "{flags:?}");
+        }
+    }
+
+    #[test]
+    fn web_relay_listener_needs_a_token_and_honours_view_auth() {
+        let mut loaded = crate::config::Config::default();
+        let listen = |token: Option<&str>, view: Option<&str>| RelayListen {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            port: 0,
+            token: token.map(str::to_string),
+            view_auth: view.map(str::to_string),
+        };
+        assert_eq!(start_relay(&listen(None, None), &loaded).err(), Some(2));
+        assert_eq!(
+            start_relay(&listen(Some("a b"), None), &loaded).err(),
+            Some(2)
+        );
+        assert_eq!(
+            start_relay(&listen(Some("t"), Some("nocolon")), &loaded).err(),
+            Some(2)
+        );
+        loaded.relay_token = "from-config".into();
+        assert!(start_relay(&listen(None, Some("v:pw")), &loaded).is_ok());
+    }
+
+    #[tokio::test]
+    async fn web_relay_mode_serves_shares_behind_view_auth() {
+        let loaded = crate::config::Config::default();
+        let relay = start_relay(
+            &RelayListen {
+                bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                port: 0,
+                token: Some("up".into()),
+                view_auth: Some("v:pw".into()),
+            },
+            &loaded,
+        )
+        .unwrap();
+        let addr = relay.addr();
+        let id = "0000000a-1111-4111-8111-111111111111";
+        let expires = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 600;
+        let document = format!(
+            r#"{{"expires":{expires},"filter":"","omitted":0,"rev":1,"incremental":false,"ids":[1],"flows":[{{"id":1,"host":"web-relay.example","request_body_spilled":false,"response_body_spilled":false}}]}}"#
+        );
+        let (status, _) = exchange(
+            addr,
+            &format!(
+                "PUT /s/{id}/flows.json HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer up\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{document}",
+                document.len()
+            ),
+        )
+        .await;
+        assert_eq!(status, 204);
+        let (status, open) = exchange(
+            addr,
+            &format!("GET /s/{id}/flows.json HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"),
+        )
+        .await;
+        assert_eq!(status, 401);
+        assert!(open.contains("WWW-Authenticate: Basic"), "{open}");
+        let basic = crate::session::base64_encode(b"v:pw");
+        let (status, body) = exchange(
+            addr,
+            &format!(
+                "GET /s/{id}/flows.json HTTP/1.1\r\nHost: x\r\nAuthorization: Basic {basic}\r\nConnection: close\r\n\r\n"
+            ),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert!(body.contains("web-relay.example"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn console_auth_and_no_capture_guard_the_web_port() {
+        let dir = std::env::temp_dir().join(format!("zniff-web-auth-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+        let capture_port = reserve_port();
+        let prefs = WebPrefs {
+            web_auth: "op:s3cr3t".into(),
+            no_capture: true,
+            ..WebPrefs::default()
+        };
+        let server = WebServer::start_with_prefs(
+            "127.0.0.1:0".parse().unwrap(),
+            hub,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            capture_port,
+            None,
+            prefs,
+        )
+        .unwrap();
+        let web = server.addr();
+        let good = format!("Basic {}", crate::session::base64_encode(b"op:s3cr3t"));
+        let wrong = format!("Basic {}", crate::session::base64_encode(b"op:nope"));
+        for path in ["/", "/api/state", "/api/flows", "/index.wasm"] {
+            for auth in ["", wrong.as_str(), "Bearer op:s3cr3t"] {
+                let header = if auth.is_empty() {
+                    String::new()
+                } else {
+                    format!("Authorization: {auth}\r\n")
+                };
+                let started = std::time::Instant::now();
+                let (status, reply) = exchange(
+                    web,
+                    &format!("GET {path} HTTP/1.1\r\nHost: x\r\n{header}Connection: close\r\n\r\n"),
+                )
+                .await;
+                assert_eq!(status, 401, "{path} {auth:?}");
+                assert!(
+                    reply.contains("WWW-Authenticate: Basic realm=\"zniff web\""),
+                    "{reply}"
+                );
+                assert!(started.elapsed() >= Duration::from_millis(250));
+            }
+        }
+        let body = r#"{"on":true}"#;
+        let unauth = format!(
+            "POST /api/capture HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        assert_eq!(exchange(web, &unauth).await.0, 401);
+
+        let (status, page) = exchange(
+            web,
+            &format!(
+                "GET / HTTP/1.1\r\nHost: x\r\nAuthorization: {good}\r\nConnection: close\r\n\r\n"
+            ),
+        )
+        .await;
+        assert_eq!(status, 200, "{page}");
+        let start = format!(
+            "POST /api/capture HTTP/1.1\r\nHost: x\r\nAuthorization: {good}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let (status, reply) = exchange(web, &start).await;
+        assert_eq!(status, 403, "{reply}");
+        assert!(body_of(&reply).contains("--no-capture"), "{reply}");
+        assert!(body_of(&reply).contains("\"capturing\":false"), "{reply}");
+        assert!(
+            std::net::TcpStream::connect((Ipv4Addr::LOCALHOST, capture_port)).is_err(),
+            "capture port must stay closed"
+        );
+        drop(server);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -15,14 +15,23 @@ pub(crate) fn cli_info_output(args: &[String]) -> Option<String> {
                 "\n",
                 "Usage:\n",
                 "  zniff [--data-dir <dir>] [--proxy-auth <user:pass>]         Open desktop window\n",
-                "  zniff --web [--web-bind <ip>] [--web-port <port>] [--bind <ip>] [-p|--port <port>]\n",
-                "              [--data-dir <dir>] [--proxy-auth <user:pass>]\n",
-                "  zniff --relay --token <secret> [--bind <ip>] [-p|--port <port>] [--data-dir <dir>]\n",
+                "  zniff --web [--web-bind <ip>] [--web-port <port>] [--web-auth <user:pass>]\n",
+                "              [--bind <ip>] [-p|--port <port>] [--data-dir <dir>] [--proxy-auth <user:pass>]\n",
+                "              [--relay --token <secret> [--relay-bind <ip>] [--relay-port <port>]\n",
+                "               [--view-auth <user:pass>] [--no-capture]]\n",
+                "  zniff --relay --token <secret> [--view-auth <user:pass>] [--bind <ip>] [-p|--port <port>]\n",
+                "              [--data-dir <dir>]\n",
                 "  zniff --mcp [-p|--port <port>] [--data-dir <dir>]\n",
                 "\n",
                 "Options:\n",
                 "  --data-dir <dir>         Override CA & config directory (env: ZNIFF_DATA_DIR)\n",
                 "  --proxy-auth <user:pass> Require Basic auth on capture port (env: ZNIFF_PROXY_AUTH)\n",
+                "  --web-auth <user:pass>   Require Basic auth on the --web console\n",
+                "                           (env: ZNIFF_WEB_AUTH, config: web_auth)\n",
+                "  --relay-port <port>      Relay port next to --web (default 8879, bind 0.0.0.0)\n",
+                "  --no-capture             With --web --relay: never open the capture port\n",
+                "  --view-auth <user:pass>  Require Basic auth to view relay share pages\n",
+                "                           (env: ZNIFF_RELAY_VIEW_AUTH, config: relay_view_auth)\n",
                 "  -V, --version            Print version and exit\n",
                 "  -h, --help               Print help and exit"
             ),
@@ -84,8 +93,12 @@ pub fn maybe_run_cli_mode() -> Option<i32> {
     let web = args.iter().any(|arg| arg == "--web");
     let relay_mode = args.iter().any(|arg| arg == "--relay");
     let mcp = args.iter().any(|arg| arg == "--mcp");
-    if web && (relay_mode || mcp) {
-        eprintln!("zniff --web 不能和 --relay 或 --mcp 一起用");
+    if args.iter().any(|arg| arg == "--no-capture") && !web {
+        eprintln!("--no-capture 只用于 zniff --web --relay");
+        return Some(2);
+    }
+    if mcp && (web || relay_mode) {
+        eprintln!("zniff --mcp 不能和 --web 或 --relay 一起用");
         return Some(2);
     }
     if web {
@@ -94,7 +107,12 @@ pub fn maybe_run_cli_mode() -> Option<i32> {
     }
     if relay_mode {
         let saved = saved_config();
-        return Some(relay::run_cli(&args, saved.listen_port, &saved.relay_token));
+        return Some(relay::run_cli(
+            &args,
+            saved.listen_port,
+            &saved.relay_token,
+            &saved.relay_view_auth,
+        ));
     }
     if !mcp {
         return None;
