@@ -4330,6 +4330,7 @@ pub struct TimingBreakdown {
     pub reused: bool,
     pub server_addr: String,
     pub tls_version: String,
+    pub client_cert: String,
 }
 
 impl TimingBreakdown {
@@ -4342,6 +4343,7 @@ impl TimingBreakdown {
             || self.reused
             || !self.server_addr.is_empty()
             || !self.tls_version.is_empty()
+            || !self.client_cert.is_empty()
     }
 
     pub fn has_phases(&self) -> bool {
@@ -4386,6 +4388,7 @@ pub fn flow_timing_breakdown(flow: &Flow) -> TimingBreakdown {
         reused: conn.reused,
         server_addr: conn.server_addr.clone(),
         tls_version: conn.tls_version.clone(),
+        client_cert: conn.client_cert.clone(),
     }
 }
 
@@ -4429,6 +4432,7 @@ mod tests {
             reused: false,
             server_addr: "93.184.216.34:443".into(),
             tls_version: "TLS 1.3".into(),
+            client_cert: String::new(),
             dialed_before_start: false,
         };
         f.response_at = Some(f.started + std::time::Duration::from_millis(100));

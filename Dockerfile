@@ -21,7 +21,7 @@
 FROM rust:1.99.1-bookworm AS build
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends pkg-config libgtk-4-dev ca-certificates \
+    && apt-get install -y --no-install-recommends pkg-config libgtk-4-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 ENV CARGO_NET_RETRY=10 \
@@ -41,7 +41,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 FROM debian:bookworm-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates libgtk-4-1 \
+    && apt-get install -y --no-install-recommends ca-certificates libgtk-4-1 libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 1000 --user-group zniff \
     && mkdir -p /data \

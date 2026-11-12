@@ -130,6 +130,9 @@ fn entry(flow: &Flow) -> Value {
     if !flow.conn_info.tls_version.is_empty() {
         obj["_tlsVersion"] = json!(flow.conn_info.tls_version);
     }
+    if !flow.conn_info.client_cert.is_empty() {
+        obj["_clientCert"] = json!(flow.conn_info.client_cert);
+    }
     if flow.conn_info.reused {
         obj["_reusedConnection"] = json!(true);
     }
@@ -257,6 +260,13 @@ fn import_entry(entry: &Value) -> Option<Imported> {
         .filter(|s| !s.is_empty())
         .unwrap_or_default()
         .to_string();
+    let client_cert = entry
+        .get("_clientCert")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default()
+        .to_string();
     let reused = entry
         .get("_reusedConnection")
         .and_then(Value::as_bool)
@@ -322,6 +332,7 @@ fn import_entry(entry: &Value) -> Option<Imported> {
             reused,
             server_addr,
             tls_version,
+            client_cert,
             dialed_before_start,
         },
         messages: ws.messages,
@@ -930,6 +941,7 @@ mod tests {
                 reused: false,
                 server_addr: "93.184.216.34:443".into(),
                 tls_version: "TLS 1.3".into(),
+                client_cert: "/certs/client.pem".into(),
                 dialed_before_start: true,
             },
         );

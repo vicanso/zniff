@@ -34,10 +34,12 @@ pub fn t(lang: Lang, zh: &'static str, en: &'static str) -> &'static str {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrefName {
+    Filter,
     Bypass,
     Rules,
     Upstream,
     ProxyAuth,
+    Profiles,
     Port,
     Lan,
     List,
@@ -45,6 +47,9 @@ pub enum PrefName {
     Tunnel,
     Capture,
     Relay,
+    Redact,
+    Language,
+    Window,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,6 +92,10 @@ pub enum StatusMsg {
     ConfigBroken {
         err: String,
     },
+    ConfigReset {
+        backup: String,
+    },
+    CopiedConfigPath(String),
     InstallFailed(String),
     RemoveFailed(String),
     CopiedUrl,
@@ -288,6 +297,7 @@ impl StatusMsg {
             }
             Self::PrefUnsaved { name, err } => {
                 let name = match name {
+                    PrefName::Filter => t(lang, "过滤条件没有记住:", "Filter was not saved:"),
                     PrefName::Bypass => t(lang, "直通名单没有记住:", "Bypass list was not saved:"),
                     PrefName::Rules => t(lang, "规则没有记住:", "Rules were not saved:"),
                     PrefName::Upstream => {
@@ -295,6 +305,9 @@ impl StatusMsg {
                     }
                     PrefName::ProxyAuth => {
                         t(lang, "代理认证没有记住:", "Proxy auth was not saved:")
+                    }
+                    PrefName::Profiles => {
+                        t(lang, "预设配置没有记住:", "Saved setups were not saved:")
                     }
                     PrefName::Port => t(lang, "端口没有记住:", "Port was not saved:"),
                     PrefName::Lan => t(lang, "局域网开关没有记住:", "LAN switch was not saved:"),
@@ -311,6 +324,15 @@ impl StatusMsg {
                     PrefName::Relay => {
                         t(lang, "中转设置没有记住:", "Relay settings were not saved:")
                     }
+                    PrefName::Redact => t(
+                        lang,
+                        "脱敏设置没有记住:",
+                        "Redaction settings were not saved:",
+                    ),
+                    PrefName::Language => {
+                        t(lang, "界面语言没有记住:", "Language setting was not saved:")
+                    }
+                    PrefName::Window => t(lang, "窗口尺寸没有记住:", "Window size was not saved:"),
                 };
                 format!("{name} {err}")
             }
@@ -319,6 +341,14 @@ impl StatusMsg {
                 Lang::En => {
                     format!("Config format error, using defaults (changes will not save): {err}")
                 }
+            },
+            Self::ConfigReset { backup } => match lang {
+                Lang::Zh => format!("已备份原配置至 {backup} 并重置为当前配置"),
+                Lang::En => format!("Backed up broken config to {backup} and reset configuration"),
+            },
+            Self::CopiedConfigPath(path) => match lang {
+                Lang::Zh => format!("已复制配置文件路径 · {path}"),
+                Lang::En => format!("Copied config file path · {path}"),
             },
             Self::InstallFailed(err) => {
                 format!("{} {err}", t(lang, "安装失败:", "Install failed:"))
@@ -633,11 +663,16 @@ impl StatusMsg {
             | Self::Replayed(_)
             | Self::Repeated { .. }
             | Self::IosSimInstalled { .. }
+            | Self::ConfigReset { .. }
+            | Self::CopiedConfigPath(_)
             | Self::UpdateUpToDate(_)
             | Self::UpdateAvailable(_) => Some(false),
             Self::ExportFailed(_)
             | Self::ImportFailed(_)
             | Self::SaveFailed(_)
+            | Self::PrefUnsaved { .. }
+            | Self::PortUnsaved { .. }
+            | Self::ProxyOptionUnsaved(_)
             | Self::ReplayFailed(_)
             | Self::InstallFailed(_)
             | Self::RemoveFailed(_)
@@ -694,8 +729,13 @@ impl StatusMsg {
             | Self::CopiedMermaidMarkdown
             | Self::SequenceGenerated { .. }
             | Self::CopiedLinuxCaCmd(_)
+            | Self::CopiedConfigPath(_)
             | Self::Shared { .. }
             | Self::RelayConnected(_) => t(lang, "已复制到剪贴板", "Copied to Clipboard"),
+            Self::ConfigReset { .. } => t(lang, "配置已重置", "Config Reset"),
+            Self::PrefUnsaved { .. } | Self::PortUnsaved { .. } | Self::ProxyOptionUnsaved(_) => {
+                t(lang, "保存失败", "Save Failed")
+            }
             Self::Replayed(_) | Self::Repeated { .. } => t(lang, "重放已发送", "Replay Sent"),
             Self::UpdateUpToDate(_) | Self::UpdateAvailable(_) => {
                 t(lang, "检查更新", "Update Check")
@@ -808,6 +848,21 @@ pub fn localize_error(lang: Lang, text: &str) -> String {
     if let Some(translated) = localize_attached_guess(text) {
         return translated;
     }
+    const CLIENT_CERT_PREFIX: &[(&str, &str)] = &[
+        (
+            "客户端证书加载失败: ",
+            "Failed to load client certificate: ",
+        ),
+        (
+            "客户端证书加载失败，已改为隧道: ",
+            "Failed to load client certificate, tunneled instead: ",
+        ),
+    ];
+    for (zh, en) in CLIENT_CERT_PREFIX {
+        if let Some(rest) = text.strip_prefix(zh) {
+            return format!("{en}{}", localize_client_cert_chain(rest));
+        }
+    }
     const PREFIX: &[(&str, &str)] = &[
         ("读取 ClientHello 失败: ", "Failed to read ClientHello: "),
         (
@@ -827,6 +882,70 @@ pub fn localize_error(lang: Lang, text: &str) -> String {
         }
     }
     text.to_string()
+}
+
+fn localize_client_cert_chain(chain: &str) -> String {
+    let normalized = chain
+        .replace(
+            "私钥已加密（ENCRYPTED PRIVATE KEY），zniff 暂不支持加密私钥；请先解密后再配置（例如：openssl pkcs8 -in encrypted.key -out decrypted.key）",
+            "private key is encrypted (ENCRYPTED PRIVATE KEY), which zniff does not support; decrypt it first (e.g. openssl pkcs8 -in encrypted.key -out decrypted.key)",
+        )
+        .replace(
+            "私钥已加密（Proc-Type: 4,ENCRYPTED），zniff 暂不支持加密私钥；请先解密后再配置（例如：openssl rsa -in encrypted.key -out decrypted.key）",
+            "private key is encrypted (Proc-Type: 4,ENCRYPTED), which zniff does not support; decrypt it first (e.g. openssl rsa -in encrypted.key -out decrypted.key)",
+        );
+    normalized
+        .split(": ")
+        .map(localize_client_cert_segment)
+        .collect::<Vec<_>>()
+        .join(": ")
+}
+
+fn localize_client_cert_segment(seg: &str) -> String {
+    if let Some(rest) = seg.strip_prefix("加载源站 mTLS 客户端证书 (") {
+        return format!("loading origin mTLS client certificate ({rest}");
+    }
+    if let Some(rest) = seg.strip_prefix("配置源站 mTLS 客户端证书 (") {
+        return format!("configuring origin mTLS client certificate ({rest}");
+    }
+    if let Some(rest) = seg.strip_prefix("读取客户端证书 ") {
+        if let Some((cert_p, key_part)) = rest.split_once("（私钥 ")
+            && let Some(key_p) = key_part.strip_suffix('）')
+        {
+            return format!("reading client certificate {cert_p} (key {key_p})");
+        }
+        return format!("reading client certificate {rest}");
+    }
+    if let Some(rest) = seg.strip_prefix("读取证书文件 ") {
+        return format!("reading certificate file {rest}");
+    }
+    if let Some(rest) = seg.strip_prefix("解析证书链 ") {
+        return format!("parsing certificate chain {rest}");
+    }
+    if let Some(rest) = seg.strip_prefix("证书文件 ")
+        && let Some(path) = rest.strip_suffix(" 中未找到 CERTIFICATE")
+    {
+        return format!("no CERTIFICATE block found in {path}");
+    }
+    if let Some(rest) = seg.strip_prefix("读取私钥文件 ") {
+        return format!("reading private key file {rest}");
+    }
+    if let Some(rest) = seg.strip_prefix("解析私钥 ") {
+        return format!("parsing private key {rest}");
+    }
+    if let Some(rest) = seg.strip_prefix("解析合并 PEM 私钥 ") {
+        return format!("parsing combined PEM private key {rest}");
+    }
+    match seg {
+        "PEM 中未找到 CERTIFICATE 块" => "no CERTIFICATE block found in PEM".to_string(),
+        "解析证书 PEM Base64" => "invalid Base64 in certificate PEM".to_string(),
+        "解析私钥 PEM Base64" => "invalid Base64 in private key PEM".to_string(),
+        "CA PEM 里有非法字符" => "invalid character in PEM Base64".to_string(),
+        "PEM 中未找到私钥块（PRIVATE KEY / RSA PRIVATE KEY / EC PRIVATE KEY）" => {
+            "no private key block found in PEM (expected PRIVATE KEY / RSA PRIVATE KEY / EC PRIVATE KEY)".to_string()
+        }
+        _ => seg.to_string(),
+    }
 }
 
 /// `步骤名。猜测：原因`. Certificate guesses are already in the exact table.
@@ -1158,5 +1277,64 @@ mod tests {
         let en = msg.text(Lang::En);
         assert!(en.contains("Config format error"));
         assert!(en.contains("invalid TOML syntax at line 2 col 4"));
+    }
+
+    #[test]
+    fn localize_error_translates_client_cert_errors_and_save_failure_toasts() {
+        let cases = [
+            "客户端证书加载失败: 加载源站 mTLS 客户端证书 (client.badssl.com): 读取客户端证书 /tmp/c.pem: 解析合并 PEM 私钥 /tmp/c.pem: 私钥已加密（ENCRYPTED PRIVATE KEY），zniff 暂不支持加密私钥；请先解密后再配置（例如：openssl pkcs8 -in encrypted.key -out decrypted.key）",
+            "客户端证书加载失败: 加载源站 mTLS 客户端证书 (client.badssl.com): 读取客户端证书 /tmp/c.crt（私钥 /tmp/c.key）: 解析私钥 /tmp/c.key: 私钥已加密（Proc-Type: 4,ENCRYPTED），zniff 暂不支持加密私钥；请先解密后再配置（例如：openssl rsa -in encrypted.key -out decrypted.key）",
+            "客户端证书加载失败: 加载源站 mTLS 客户端证书 (client.badssl.com): 读取客户端证书 /tmp/c.pem: 解析合并 PEM 私钥 /tmp/c.pem: PEM 中未找到私钥块（PRIVATE KEY / RSA PRIVATE KEY / EC PRIVATE KEY）",
+            "客户端证书加载失败: 加载源站 mTLS 客户端证书 (client.badssl.com): 读取客户端证书 /tmp/c.crt: 证书文件 /tmp/c.crt 中未找到 CERTIFICATE",
+            "客户端证书加载失败: 配置源站 mTLS 客户端证书 (mtls.example.com, cert=/tmp/a.crt, key=/tmp/b.key): invalid peer certificate: KeyMismatch",
+            "客户端证书加载失败，已改为隧道: 配置源站 mTLS 客户端证书 (mtls.example.com, pem=/tmp/a.pem): invalid peer certificate: KeyMismatch",
+        ];
+        for raw in cases {
+            let en = localize_error(Lang::En, raw);
+            assert!(
+                en.starts_with("Failed to load client certificate"),
+                "unexpected translation: {en}"
+            );
+            assert!(
+                !en.chars().any(|ch| ('\u{4e00}'..='\u{9fff}').contains(&ch)),
+                "Chinese characters leaked into English error: {en}"
+            );
+            assert_eq!(localize_error(Lang::Zh, raw), raw);
+        }
+
+        let pref_unsaved = StatusMsg::PrefUnsaved {
+            name: PrefName::Filter,
+            err: "config.toml 格式错误".into(),
+        };
+        assert_eq!(pref_unsaved.toast_kind(), Some(true));
+        assert!(
+            pref_unsaved
+                .text(Lang::En)
+                .contains("Filter was not saved:")
+        );
+
+        let port_unsaved = StatusMsg::PortUnsaved {
+            base: Box::new(StatusMsg::Listening {
+                port: 8877,
+                via_system_proxy: false,
+            }),
+            err: "read-only".into(),
+        };
+        assert_eq!(port_unsaved.toast_kind(), Some(true));
+        assert_eq!(
+            StatusMsg::ProxyOptionUnsaved("perm".into()).toast_kind(),
+            Some(true)
+        );
+        assert_eq!(
+            StatusMsg::ConfigReset {
+                backup: "/tmp/config.toml.broken".into()
+            }
+            .toast_kind(),
+            Some(false)
+        );
+        assert_eq!(
+            StatusMsg::CopiedConfigPath("/tmp/config.toml".into()).toast_kind(),
+            Some(false)
+        );
     }
 }

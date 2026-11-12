@@ -430,6 +430,8 @@ pub struct ConnInfo {
     pub reused: bool,
     pub server_addr: String,
     pub tls_version: String,
+    /// Client certificate path presented to the origin during mTLS, if any.
+    pub client_cert: String,
     /// True when DNS/TCP/TLS happened before `flow.started` (e.g. initial request on `mitm_connect` or HAR import).
     pub dialed_before_start: bool,
 }
@@ -443,6 +445,7 @@ impl ConnInfo {
             reused: true,
             server_addr: self.server_addr.clone(),
             tls_version: self.tls_version.clone(),
+            client_cert: self.client_cert.clone(),
             dialed_before_start: false,
         }
     }
@@ -454,6 +457,7 @@ impl ConnInfo {
             && !self.reused
             && self.server_addr.is_empty()
             && self.tls_version.is_empty()
+            && self.client_cert.is_empty()
     }
 }
 
@@ -981,6 +985,15 @@ impl Session {
         self.next_rev += 1;
         let rev = self.next_rev;
         if let Some(flow) = self.flows.get_mut(&id) {
+            if !conn_info.client_cert.is_empty()
+                && !flow.rule_hit.split_whitespace().any(|t| t == "client-cert")
+            {
+                if flow.rule_hit.is_empty() {
+                    flow.rule_hit = "client-cert".to_string();
+                } else {
+                    flow.rule_hit.push_str(" client-cert");
+                }
+            }
             flow.conn_info = conn_info;
             flow.rev = rev;
         }
@@ -4026,6 +4039,7 @@ mod tests {
                 reused: false,
                 server_addr: "93.184.216.34:443".into(),
                 tls_version: "TLSv1.3".into(),
+                client_cert: String::new(),
                 dialed_before_start: true,
             },
             status: Some(101),

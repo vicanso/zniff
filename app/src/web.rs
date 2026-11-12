@@ -119,7 +119,14 @@ pub fn run_cli(args: &[String], config_port: u16) -> i32 {
     // directly and do not load this file.
     let dev_mode = crate::config::is_dev_mode();
     let data_dir = crate::ca::data_dir();
-    let loaded = crate::config::load_mode(&data_dir, dev_mode);
+    let (loaded, config_err) = crate::config::load_mode_ext(&data_dir, dev_mode);
+    if let Some(err) = &config_err {
+        let cfg_path = crate::config::config_path_for(&data_dir, dev_mode);
+        eprintln!(
+            "zniff web: 配置文件 {} 格式错误，已使用默认配置（原文件已保留）: {err}",
+            cfg_path.display()
+        );
+    }
     hub.set_bypass(&loaded.bypass_hosts);
     hub.set_rules(&loaded.rules);
     hub.set_upstream(&loaded.upstream_proxy);
@@ -383,6 +390,10 @@ struct PrefsBody {
     redact_export: bool,
     redact_strict: bool,
     redact_fields: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    config_error: Option<String>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    config_path: String,
 }
 
 struct Head {
@@ -647,6 +658,21 @@ fn state_of(slot: &Slot) -> StateBody {
             redact_export: slot.prefs.redact_export,
             redact_strict: slot.prefs.redact_strict,
             redact_fields: slot.prefs.redact_fields.clone(),
+            config_error: slot
+                .prefs
+                .config_dir
+                .as_ref()
+                .and_then(|_| crate::config::last_load_error()),
+            config_path: slot
+                .prefs
+                .config_dir
+                .as_ref()
+                .map(|dir| {
+                    crate::config::config_path_for(dir, slot.prefs.dev_mode)
+                        .display()
+                        .to_string()
+                })
+                .unwrap_or_default(),
         },
     }
 }
@@ -695,6 +721,7 @@ fn conn_info_json(conn: &session::ConnInfo) -> Value {
         "reused": conn.reused,
         "server_addr": conn.server_addr,
         "tls_version": conn.tls_version,
+        "client_cert": conn.client_cert,
         "dialed_before_start": conn.dialed_before_start,
     })
 }
@@ -1562,6 +1589,45 @@ fn sync_hub_op(slot: &mut Slot, op: &str, value: &Value) -> Reply {
             slot.hub.set_relay_accept(on);
             persist_slot_config(slot, |cfg| cfg.relay_accept = on);
         }
+        "reset_broken_config" => {
+            if let Some(dir) = &slot.prefs.config_dir {
+                let mut current = crate::config::Config::default_for(slot.prefs.dev_mode);
+                current.listen_port = slot.capture_port;
+                current.listen_all = slot.capture_ip.is_unspecified();
+                current.bypass_hosts = slot.hub.bypass_text();
+                current.rules = slot.hub.rules_text();
+                current.upstream_proxy = slot.hub.upstream_text();
+                current.proxy_auth = slot.hub.proxy_auth_text();
+                current.rules_enabled = slot.hub.rules_enabled();
+                current.breaks_enabled = slot.hub.breaks_enabled();
+                current.show_tunnel_failures = slot.hub.tunnel_failures_shown();
+                current.relay_accept = slot.hub.relay_accepts();
+                current.relay_url = slot.prefs.relay_url.clone();
+                current.active_profile = slot.prefs.active_profile.clone();
+                current.filter = slot.prefs.filter.clone();
+                current.saved_profiles = slot.prefs.saved_profiles.clone();
+                current.profile_history = slot.prefs.profile_history.clone();
+                current.redact_export = slot.prefs.redact_export;
+                current.redact_strict = slot.prefs.redact_strict;
+                current.redact_fields = slot.prefs.redact_fields.clone();
+                match crate::config::backup_and_reset_mode(dir, slot.prefs.dev_mode, &current) {
+                    Ok(backup) => {
+                        return json_reply(
+                            200,
+                            "OK",
+                            &json!({"ok": true, "backup": backup.display().to_string()}),
+                        );
+                    }
+                    Err(err) => {
+                        return json_reply(
+                            500,
+                            "Internal Server Error",
+                            &json!({"error": err.to_string()}),
+                        );
+                    }
+                }
+            }
+        }
         "set_pinned" => {
             let Some(id) = json_id(value) else {
                 return json_reply(400, "Bad Request", &json!({"error": "need id"}));
@@ -2216,6 +2282,7 @@ mod tests {
                     reused: false,
                     server_addr: "93.184.216.34:443".into(),
                     tls_version: "TLSv1.3".into(),
+                    client_cert: String::new(),
                     dialed_before_start: true,
                 },
             );

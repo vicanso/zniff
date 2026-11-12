@@ -38,12 +38,13 @@ jobs:
             os: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - name: GTK 4
-        # nsh's Linux backend links GTK 4. It does not use gtk4-layer-shell.
+      - name: GTK 4 & GStreamer
+        # nsh 0.5's Linux backend links GTK 4 and GStreamer (gstreamer-1.0,
+        # gstreamer-base-1.0, gstreamer-app-1.0, gstreamer-audio-1.0).
         if: matrix.name == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends pkg-config libgtk-4-dev
+          sudo apt-get install -y --no-install-recommends pkg-config libgtk-4-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
