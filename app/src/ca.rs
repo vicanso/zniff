@@ -103,6 +103,13 @@ pub fn data_dir() -> PathBuf {
         .unwrap_or_else(default_platform_data_dir)
 }
 
+pub struct ClientIdentity {
+    pub certs: Vec<CertificateDer<'static>>,
+    pub key: PrivateKeyDer<'static>,
+    pub cert_path: PathBuf,
+    pub key_path: Option<PathBuf>,
+}
+
 impl Ca {
     pub fn dir(&self) -> &Path {
         &self.dir
@@ -223,7 +230,7 @@ impl Ca {
         &self,
         host: &str,
         custom: Option<(&Path, Option<&Path>)>,
-    ) -> Result<Option<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>> {
+    ) -> Result<Option<ClientIdentity>> {
         let dir_found;
         let effective_custom = match custom {
             Some(pair) => Some(pair),
@@ -239,8 +246,20 @@ impl Ca {
         };
         let (certs, key) = self
             .load_cached_custom_cert_pair(cert_path, key_path)
-            .with_context(|| format!("读取客户端证书 {}", cert_path.display()))?;
-        Ok(Some((certs, key)))
+            .with_context(|| match key_path {
+                Some(kp) => format!(
+                    "读取客户端证书 {}（私钥 {}）",
+                    cert_path.display(),
+                    kp.display()
+                ),
+                None => format!("读取客户端证书 {}", cert_path.display()),
+            })?;
+        Ok(Some(ClientIdentity {
+            certs,
+            key,
+            cert_path: cert_path.to_path_buf(),
+            key_path: key_path.map(Path::to_path_buf),
+        }))
     }
 
     fn load_cached_custom_cert_pair(
@@ -1579,15 +1598,16 @@ Cert 0: zniff CA
         let pem_path = dir.join("custom.pem");
         fs::write(&pem_path, format!("{}\n{}", c1.pem(), k1.serialize_pem())).unwrap();
 
-        let (chain1, _) = ca
+        let id1 = ca
             .client_identity_for_host("custom.example.com", Some((&pem_path, None)))
             .unwrap()
             .unwrap();
-        let (chain1_cached, _) = ca
+        let id1_cached = ca
             .client_identity_for_host("custom.example.com", Some((&pem_path, None)))
             .unwrap()
             .unwrap();
-        assert_eq!(chain1, chain1_cached);
+        assert_eq!(id1.certs, id1_cached.certs);
+        assert_eq!(id1.cert_path, pem_path);
         assert_eq!(ca.custom_certs.lock().unwrap().len(), 1);
 
         // Replace PEM on disk and bump mtime so cache invalidates cleanly.
@@ -1606,11 +1626,14 @@ Cert 0: zniff CA
         file.set_times(fs::FileTimes::new().set_modified(future_time))
             .unwrap();
 
-        let (chain2, _) = ca
+        let id2 = ca
             .client_identity_for_host("custom.example.com", Some((&pem_path, None)))
             .unwrap()
             .unwrap();
-        assert_ne!(chain1, chain2, "updated mtime must reload custom cert");
+        assert_ne!(
+            id1.certs, id2.certs,
+            "updated mtime must reload custom cert"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

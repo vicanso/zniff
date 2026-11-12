@@ -939,6 +939,7 @@ pub fn last_load_error() -> Option<String> {
         .clone()
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn take_last_load_error() -> Option<String> {
     LAST_LOAD_ERROR
         .lock()
@@ -999,13 +1000,45 @@ pub fn update(dir: &Path, change: impl FnOnce(&mut Config)) -> Result<()> {
     update_mode(dir, false, change)
 }
 
+pub fn config_path_for(dir: &Path, dev: bool) -> std::path::PathBuf {
+    dir.join(config_file_name(dev))
+}
+
+pub fn backup_and_reset_mode(
+    dir: &Path,
+    dev: bool,
+    current: &Config,
+) -> Result<std::path::PathBuf> {
+    let _guard = lock();
+    let path = dir.join(config_file_name(dev));
+    let base_name = config_file_name(dev);
+    let mut backup = dir.join(format!("{base_name}.broken"));
+    if backup.exists() {
+        let secs = crate::clock::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        backup = dir.join(format!("{base_name}.broken.{secs}"));
+    }
+    if path.exists() {
+        fs::copy(&path, &backup)?;
+    }
+    let normalized = normalize_for(current.clone(), dev);
+    store_unlocked(dir, dev, &normalized)?;
+    *LAST_LOAD_ERROR.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    Ok(backup)
+}
+
 pub fn update_mode(dir: &Path, dev: bool, change: impl FnOnce(&mut Config)) -> Result<()> {
     let _guard = lock();
     let mut config = match read_config(dir, dev) {
         Read::Ready { config, .. } => *config,
         Read::Missing if dev => Config::default_for(true),
         Read::Missing => migrate_legacy(dir),
-        Read::Broken(err) => return Err(err),
+        Read::Broken(err) => {
+            *LAST_LOAD_ERROR.lock().unwrap_or_else(|e| e.into_inner()) = Some(err.to_string());
+            return Err(err);
+        }
     };
     change(&mut config);
     config = normalize_for(config, dev);
@@ -2226,5 +2259,41 @@ path = 280
         let raw_toml = fs::read_to_string(dir.path().join("config.toml")).unwrap();
         assert!(!raw_toml.contains("redact_strict"), "{raw_toml}");
         assert!(!load(dir.path()).redact_strict);
+    }
+
+    #[test]
+    fn backup_and_reset_preserves_broken_toml_and_clears_load_error() {
+        let dir = Scratch::new();
+        let broken_body = "listen_port = \"not-a-port\"\n# keep user notes\n";
+        fs::write(dir.path().join("config.toml"), broken_body).unwrap();
+
+        let (cfg, broken_err) = load_mode_ext(dir.path(), false);
+        assert_eq!(cfg.listen_port, 8877);
+        assert!(broken_err.is_some());
+        assert!(last_load_error().is_some());
+
+        // Subsequent saves fail loudly without clobbering the user's broken file
+        let err = update_mode(dir.path(), false, |c| c.filter = "host:api.test".into())
+            .expect_err("broken config must refuse silent overwrite");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("config.toml")).unwrap(),
+            broken_body
+        );
+
+        // Backup & reset moves the broken file to config.toml.broken and restores saving
+        let mut reset_cfg = Config::default_for(false);
+        reset_cfg.filter = "host:recovered.test".into();
+        let backup = backup_and_reset_mode(dir.path(), false, &reset_cfg).unwrap();
+        assert_eq!(backup, dir.path().join("config.toml.broken"));
+        assert_eq!(fs::read_to_string(&backup).unwrap(), broken_body);
+        assert!(last_load_error().is_none());
+
+        let reloaded = load_mode(dir.path(), false);
+        assert_eq!(reloaded.filter, "host:recovered.test");
+
+        // Subsequent saves succeed again
+        update_mode(dir.path(), false, |c| c.listen_port = 9090).unwrap();
+        assert_eq!(load_mode(dir.path(), false).listen_port, 9090);
     }
 }

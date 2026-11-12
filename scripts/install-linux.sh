@@ -230,13 +230,13 @@ distro_packages() {
     fi
     case " $id $like " in
         *" arch "*|*" archlinux "*)
-            echo "sudo pacman -S --needed gtk4" ;;
+            echo "sudo pacman -S --needed gtk4 gst-plugins-base-libs" ;;
         *" debian "*|*" ubuntu "*)
-            echo "sudo apt install libgtk-4-1" ;;
+            echo "sudo apt install libgtk-4-1 libgstreamer1.0-0 libgstreamer-plugins-base1.0-0" ;;
         *" fedora "*|*" rhel "*|*" centos "*)
-            echo "sudo dnf install gtk4" ;;
+            echo "sudo dnf install gtk4 gstreamer1-plugins-base" ;;
         *" suse "*|*" opensuse "*)
-            echo "sudo zypper install libgtk-4-1" ;;
+            echo "sudo zypper install libgtk-4-1 libgstreamer-1_0-0 gstreamer-plugins-base" ;;
         *)
             echo "" ;;
     esac

@@ -18,6 +18,22 @@ use crate::session::{FilteredStats, SessionFacets};
 const DEFAULT_PROTOCOL_VERSION: &str = "2024-11-05";
 const BODY_PREVIEW_CAP: usize = 32 * 1024;
 
+fn mcp_lang() -> crate::i18n::Lang {
+    for key in ["LC_ALL", "LC_MESSAGES", "LANG"] {
+        if let Ok(val) = std::env::var(key) {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                return crate::i18n::lang_from_tag(trimmed);
+            }
+        }
+    }
+    crate::i18n::Lang::En
+}
+
+fn mcp_localize_error(err: &str) -> String {
+    crate::i18n::localize_error(mcp_lang(), err)
+}
+
 pub fn mcp_config_json(port: u16) -> String {
     serde_json::to_string_pretty(&json!({
         "mcpServers": {
@@ -302,7 +318,7 @@ fn tool_list_flows(hub: &Hub, args: &Value) -> Value {
                     "path": f.path,
                     "protocol": f.protocol.label(),
                     "status": f.status,
-                    "error": f.error,
+                    "error": f.error.as_deref().map(mcp_localize_error),
                     "client_ip": f.client_ip,
                     "elapsed_ms": f.elapsed_ms(),
                     "request_bytes": f.req_bytes(),
@@ -320,6 +336,7 @@ fn tool_list_flows(hub: &Hub, args: &Value) -> Value {
                         "reused": tb.reused,
                         "server_addr": tb.server_addr,
                         "tls_version": tb.tls_version,
+                        "client_cert": if tb.client_cert.is_empty() { Value::Null } else { Value::String(tb.client_cert) },
                     }
                 })
             })
@@ -379,7 +396,7 @@ fn tool_get_flow_detail(hub: &Hub, args: &Value) -> Value {
         "path": flow.path,
         "client_ip": flow.client_ip,
         "status": flow.status,
-        "error": flow.error,
+        "error": flow.error.as_deref().map(mcp_localize_error),
         "elapsed_ms": flow.elapsed_ms(),
         "request_bytes": flow.req_bytes(),
         "response_bytes": flow.res_bytes(),
@@ -399,6 +416,7 @@ fn tool_get_flow_detail(hub: &Hub, args: &Value) -> Value {
             "reused": tb.reused,
             "server_addr": tb.server_addr,
             "tls_version": tb.tls_version,
+            "client_cert": if tb.client_cert.is_empty() { Value::Null } else { Value::String(tb.client_cert) },
         },
         "request_headers": flow.request_headers,
         "request_body": req_body,
@@ -1169,5 +1187,27 @@ client-cert mtls.example.com ./client.crt ./client.key";
             .collect();
         assert!(names.contains(&"get_session_summary"));
         assert!(names.contains(&"annotate_flow"));
+
+        // English MCP error localization & client_cert timing metadata
+        assert_eq!(
+            crate::i18n::localize_error(
+                crate::i18n::Lang::En,
+                "客户端证书加载失败: 读取客户端证书 /tmp/a.crt: 证书文件 /tmp/a.crt 中未找到 CERTIFICATE",
+            ),
+            "Failed to load client certificate: reading client certificate /tmp/a.crt: no CERTIFICATE block found in /tmp/a.crt"
+        );
+        let _ = mcp_localize_error(
+            "客户端证书加载失败: 读取客户端证书 /tmp/a.crt: 证书文件 /tmp/a.crt 中未找到 CERTIFICATE",
+        );
+        hub.with_session(|s| {
+            let info = crate::session::ConnInfo {
+                client_cert: "/tmp/mtls-client.pem".into(),
+                ..Default::default()
+            };
+            s.set_conn_info(id1, info);
+        });
+        let detail = parse_tool_payload(&tool_get_flow_detail(&hub, &json!({ "id": id1 })));
+        assert_eq!(detail["timing"]["client_cert"], "/tmp/mtls-client.pem");
+        assert_eq!(detail["rule_hit"], "client-cert");
     }
 }

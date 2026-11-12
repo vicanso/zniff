@@ -385,6 +385,8 @@ struct ShareConnInfo {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     tls_version: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
+    client_cert: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     server_addr: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dns_ms: Option<u64>,
@@ -1748,6 +1750,7 @@ fn share_conn_info(flow: &Flow) -> Option<ShareConnInfo> {
     Some(ShareConnInfo {
         reused,
         tls_version: tb.tls_version,
+        client_cert: tb.client_cert,
         server_addr: tb.server_addr,
         dns_ms: tb.dns_ms,
         tcp_ms: tb.tcp_ms,
@@ -4893,6 +4896,10 @@ function renderDetail(flow, visibleFlows) {
     const connMeta = [];
     if (ci.reused != null) connMeta.push(`<span class="proto-badge">${esc(ci.reused ? tr("复用连接", "Reused") : tr("新建连接", "New conn"))}</span>`);
     if (ci.tls_version) connMeta.push(`<span class="proto-badge mono">${esc(ci.tls_version)}</span>`);
+    if (ci.client_cert) {
+      const certBase = String(ci.client_cert).split(/[\\/]/).pop() || ci.client_cert;
+      connMeta.push(`<span class="proto-badge mono" title="${esc(ci.client_cert)}">mTLS ${esc(certBase)}</span>`);
+    }
     if (ci.server_addr) connMeta.push(`<span class="mono muted-cell">${esc(ci.server_addr)}</span>`);
 
     const phases = [
@@ -6210,6 +6217,7 @@ api_key=sec_key_1&lang=zh\r\n\
                 reused: false,
                 server_addr: "93.184.216.34:443".into(),
                 tls_version: "TLSv1.3".into(),
+                client_cert: String::new(),
                 dialed_before_start: false,
             },
         );

@@ -649,6 +649,7 @@ fn parse_conn_info(value: Option<&Value>) -> ConnInfo {
         reused: obj.get("reused").and_then(Value::as_bool).unwrap_or(false),
         server_addr: text_field(obj, "server_addr"),
         tls_version: text_field(obj, "tls_version"),
+        client_cert: text_field(obj, "client_cert"),
         dialed_before_start: obj
             .get("dialed_before_start")
             .and_then(Value::as_bool)

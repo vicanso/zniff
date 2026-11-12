@@ -1062,7 +1062,11 @@ impl Hub {
         self.ca.has_client_cert_in_dir(host)
     }
 
-    fn client_config_for_host(&self, host: &str, alpn: &[Vec<u8>]) -> Result<ClientConfig> {
+    fn client_config_for_host(
+        &self,
+        host: &str,
+        alpn: &[Vec<u8>],
+    ) -> Result<(ClientConfig, Option<String>)> {
         let rule_cert = if self.apply_rules.load(Ordering::Relaxed) {
             let rules = self
                 .rules
@@ -1080,19 +1084,30 @@ impl Hub {
             .ca
             .client_identity_for_host(host, custom_ref)
             .with_context(|| format!("加载源站 mTLS 客户端证书 ({host})"))?;
+        let mut presented_cert = None;
         let mut config = match identity {
-            Some((certs, key)) => {
+            Some(id) => {
+                let cert_display = id.cert_path.display().to_string();
+                let key_display = id.key_path.as_ref().map(|p| p.display().to_string());
                 let mut cfg = ClientConfig::builder()
                     .with_root_certificates(self.roots.clone())
-                    .with_client_auth_cert(certs, key)
-                    .with_context(|| format!("配置源站 mTLS 客户端证书 ({host})"))?;
+                    .with_client_auth_cert(id.certs, id.key)
+                    .with_context(|| match &key_display {
+                        Some(kp) => format!(
+                            "配置源站 mTLS 客户端证书 ({host}, cert={cert_display}, key={kp})"
+                        ),
+                        None => {
+                            format!("配置源站 mTLS 客户端证书 ({host}, pem={cert_display})")
+                        }
+                    })?;
                 cfg.resumption = self.default_client_config.resumption.clone();
+                presented_cert = Some(cert_display);
                 cfg
             }
             None => self.default_client_config.clone(),
         };
         config.alpn_protocols = alpn.to_vec();
-        Ok(config)
+        Ok((config, presented_cert))
     }
 
     #[cfg(test)]
@@ -2083,6 +2098,9 @@ where
     } else {
         hello.alpn.clone()
     };
+    if let Err(err) = hub.client_config_for_host(&sni_host, &alpn) {
+        return fail_client_cert_connect(client, hello.raw, &sni_host, port, &alpn, err, hub).await;
+    }
     match timeout(IO_TIMEOUT, connect_origin(&sni_host, port, &alpn, &hub)).await {
         Ok(Ok((origin, selected, mut conn_info))) => {
             conn_info.dialed_before_start = true;
@@ -2134,11 +2152,14 @@ async fn connect_origin(
     Vec<u8>,
     crate::session::ConnInfo,
 )> {
+    let (config, presented_cert) = hub.client_config_for_host(host, alpn)?;
     let (tcp, mut info) = timeout(IO_TIMEOUT, dial_timed(host, port, hub, true))
         .await
         .context("连接源站超时")??;
     tcp.set_nodelay(true).ok();
-    let config = hub.client_config_for_host(host, alpn)?;
+    if let Some(cert_path) = presented_cert {
+        info.client_cert = cert_path;
+    }
     let connector = TlsConnector::from(Arc::new(config));
     let name = server_name(host)?;
     let tls_start = Instant::now();
@@ -2156,6 +2177,136 @@ async fn connect_origin(
         .map(|proto| proto.to_vec())
         .unwrap_or_else(|| b"http/1.1".to_vec());
     Ok((tls, selected, info))
+}
+
+async fn fail_client_cert_connect<S>(
+    client: S,
+    client_hello: Vec<u8>,
+    host: &str,
+    port: u16,
+    alpn: &[Vec<u8>],
+    err: anyhow::Error,
+    hub: Arc<Hub>,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let reason = client_cert_load_reason(&err);
+    let selected = if alpn.iter().any(|proto| proto == b"h2") {
+        b"h2".to_vec()
+    } else {
+        b"http/1.1".to_vec()
+    };
+    let protocol = if selected == b"h2" {
+        Protocol::Http2
+    } else {
+        Protocol::Http11
+    };
+    let config = match hub.server_config_for_host(host, &selected) {
+        Ok(cfg) => cfg,
+        Err(_) => {
+            record_note(&hub, host, port, protocol, reason.clone());
+            return Err(anyhow!(reason));
+        }
+    };
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+    let rewound = Prefixed {
+        prefix: client_hello,
+        pos: 0,
+        inner: client,
+    };
+    let client_tls = match timeout(IO_TIMEOUT, acceptor.accept(rewound)).await {
+        Ok(Ok(tls)) => tls,
+        Ok(Err(_)) | Err(_) => {
+            record_note(&hub, host, port, protocol, reason.clone());
+            return Err(anyhow!(reason));
+        }
+    };
+    let served = Arc::new(AtomicBool::new(false));
+    let served_svc = served.clone();
+    let host_owned = host.to_string();
+    let reason_svc = reason.clone();
+    let hub_svc = hub.clone();
+    let client_ctx = current_client_ctx();
+    let service = hyper::service::service_fn(move |req: Request<Incoming>| {
+        let served = served_svc.clone();
+        let hub = hub_svc.clone();
+        let host = host_owned.clone();
+        let reason = reason_svc.clone();
+        let client_ctx = client_ctx.clone();
+        async move {
+            served.store(true, Ordering::Relaxed);
+            let fut = async move {
+                let encoding = req
+                    .headers()
+                    .get(http::header::CONTENT_ENCODING)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_string);
+                let (parts, body) = req.into_parts();
+                let path = parts
+                    .uri
+                    .path_and_query()
+                    .map(|p| p.as_str().to_string())
+                    .unwrap_or_else(|| "/".into());
+                let authority = display_authority(&host, port, "https");
+                let id = hub.open(FlowDraft {
+                    protocol,
+                    method: parts.method.to_string(),
+                    host: host.clone(),
+                    path: path.clone(),
+                    url: format!("https://{authority}{path}"),
+                    request_headers: header_pairs(&parts.headers),
+                });
+                let _ = record_request_bytes(&hub, id, body, encoding.as_deref()).await;
+                hub.note_rules_with_ops(id, &host, &path, &[]);
+                if hub.ca.has_client_cert_in_dir(&host) {
+                    hub.with_session(|session| {
+                        if let Some(flow) = session.get(id)
+                            && !flow.rule_hit.split_whitespace().any(|t| t == "client-cert")
+                        {
+                            let next = if flow.rule_hit.is_empty() {
+                                "client-cert".to_string()
+                            } else {
+                                format!("{} client-cert", flow.rule_hit)
+                            };
+                            session.set_rule_hit(id, next);
+                        }
+                    });
+                }
+                hub.set_error(id, reason.clone());
+                let body_msg = format!("zniff: {reason}\n");
+                synthetic_response(
+                    &hub,
+                    id,
+                    StatusCode::BAD_GATEWAY,
+                    "text/plain; charset=utf-8",
+                    body_msg.into_bytes(),
+                )
+            };
+            let res = if let Some(ctx) = client_ctx {
+                CLIENT_CTX.scope(ctx, fut).await
+            } else {
+                fut.await
+            };
+            res.map_err(|e| io::Error::other(e.to_string()))
+        }
+    });
+    let serve_res = if selected == b"h2" {
+        hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+            .serve_connection(TokioIo::new(client_tls), service)
+            .await
+            .map_err(|e| anyhow!(e))
+    } else {
+        hyper::server::conn::http1::Builder::new()
+            .preserve_header_case(true)
+            .serve_connection(TokioIo::new(client_tls), service)
+            .await
+            .map_err(|e| anyhow!(e))
+    };
+    if !served.load(Ordering::Relaxed) {
+        record_note(&hub, host, port, protocol, reason);
+    }
+    serve_res
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2636,11 +2787,15 @@ fn is_client_cert_error(err: &anyhow::Error) -> bool {
     })
 }
 
+fn client_cert_load_reason(err: &anyhow::Error) -> String {
+    format!("客户端证书加载失败: {err:#}")
+}
+
 /// Short reason for a probe that never reached ServerHello. `{err}` alone is
 /// only the `context("源站 TLS")` label, so the list would repeat that label.
 fn origin_tls_reason(err: &anyhow::Error) -> String {
     if is_client_cert_error(err) {
-        return format!("客户端证书加载失败，已改为隧道: {err:#}");
+        return client_cert_load_reason(err);
     }
     if let Some(tls) = rustls_error(err) {
         return match tls {
@@ -7938,7 +8093,7 @@ mod tests {
 
         let reason = super::origin_tls_reason(&err);
         assert!(
-            reason.starts_with("客户端证书加载失败，已改为隧道: "),
+            reason.starts_with("客户端证书加载失败: "),
             "must have client cert failure prefix: {reason}"
         );
         assert!(
@@ -7968,16 +8123,21 @@ mod tests {
 
         // 2. Client auth key mismatch preservation
         let mismatch = rustls::Error::InconsistentKeys(rustls::InconsistentKeys::Unknown);
-        let err =
-            anyhow::Error::from(mismatch).context("配置源站 mTLS 客户端证书 (client.badssl.com)");
+        let err = anyhow::Error::from(mismatch).context(
+            "配置源站 mTLS 客户端证书 (client.badssl.com, cert=/var/certs/badssl.crt, key=/var/certs/badssl.key)",
+        );
         let reason = super::origin_tls_reason(&err);
         assert!(
-            reason.starts_with("客户端证书加载失败，已改为隧道: "),
+            reason.starts_with("客户端证书加载失败: "),
             "must have client cert failure prefix: {reason}"
         );
         assert!(
             reason.contains("client.badssl.com"),
             "must preserve host: {reason}"
+        );
+        assert!(
+            reason.contains("/var/certs/badssl.crt") && reason.contains("/var/certs/badssl.key"),
+            "must preserve cert and key paths on KeyMismatch: {reason}"
         );
         assert!(
             reason.contains("KeyMismatch") || reason.contains("keys may not be consistent"),
@@ -7999,7 +8159,7 @@ mod tests {
             .context("加载源站 mTLS 客户端证书 (api.internal.net)");
         let reason = super::origin_tls_reason(&err);
         assert!(
-            reason.starts_with("客户端证书加载失败，已改为隧道: "),
+            reason.starts_with("客户端证书加载失败: "),
             "must have client cert failure prefix: {reason}"
         );
         assert!(
@@ -8039,8 +8199,9 @@ mod tests {
         let err = res.unwrap_err();
         let reason = super::origin_tls_reason(&err);
 
-        assert!(reason.starts_with("客户端证书加载失败，已改为隧道: "));
+        assert!(reason.starts_with("客户端证书加载失败: "));
         assert!(reason.contains("mtls.badssl.com"));
+        assert!(reason.contains("mtls.badssl.com.crt"));
         assert!(reason.contains("mtls.badssl.com.key"));
         assert!(reason.contains("ENCRYPTED PRIVATE KEY"));
         assert!(reason.contains("openssl pkcs8 -in encrypted.key -out decrypted.key"));
@@ -12237,6 +12398,156 @@ mod tests {
             .with_session(|session| session.flows().into_iter().next())
             .unwrap();
         assert_eq!(flow.rule_hit, "client-cert");
+        assert_eq!(
+            flow.conn_info.client_cert,
+            client_cert_path.display().to_string()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn https_mtls_broken_or_mismatched_client_cert_fails_closed_with_502_and_paths() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let dir =
+            std::env::temp_dir().join(format!("zniff-mtls-failclosed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+
+        let cert_a_key = rcgen::KeyPair::generate().unwrap();
+        let cert_a = rcgen::CertificateParams::default()
+            .self_signed(&cert_a_key)
+            .unwrap();
+        let wrong_key = rcgen::KeyPair::generate().unwrap();
+
+        let cert_path = dir.join("client-a.crt");
+        let wrong_key_path = dir.join("wrong-b.key");
+        std::fs::write(&cert_path, cert_a.pem()).unwrap();
+        std::fs::write(&wrong_key_path, wrong_key.serialize_pem()).unwrap();
+
+        let hub = Hub::new(ca.clone()).unwrap();
+        hub.set_rules(&format!(
+            "client-cert 127.0.0.1 {} {}",
+            cert_path.display(),
+            wrong_key_path.display()
+        ));
+        let hub = Arc::new(hub);
+
+        // Origin listener that must NEVER receive a fail-open tunnel connection
+        let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        let origin_accepts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let accepts_bg = origin_accepts.clone();
+        tokio::spawn(async move {
+            if origin.accept().await.is_ok() {
+                accepts_bg.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        serve_proxy(proxy, hub.clone());
+
+        // 1. KeyMismatch via `client-cert` rule returns 502 Bad Gateway over H2 without dialing origin
+        let (status, body) = h2_get(&ca, proxy_addr, origin_addr, "/secure-api").await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        let body_text = String::from_utf8_lossy(&body);
+        assert!(body_text.contains("客户端证书加载失败:"), "{body_text}");
+        assert!(
+            body_text.contains(&cert_path.display().to_string()),
+            "{body_text}"
+        );
+        assert!(
+            body_text.contains(&wrong_key_path.display().to_string()),
+            "{body_text}"
+        );
+        assert!(!body_text.contains("已改为隧道"), "{body_text}");
+        assert_eq!(origin_accepts.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        let flows = hub.with_session(|session| session.flows());
+        assert_eq!(flows.len(), 1);
+        assert_eq!(flows[0].status, Some(502));
+        assert_eq!(flows[0].rule_hit, "client-cert");
+        let err_msg = flows[0].error.as_deref().unwrap_or_default();
+        assert!(err_msg.starts_with("客户端证书加载失败:"), "{err_msg}");
+        assert!(err_msg.contains("cert="), "{err_msg}");
+        assert!(err_msg.contains("key="), "{err_msg}");
+        assert!(!err_msg.contains("已改为隧道"), "{err_msg}");
+
+        // 2. Encrypted PEM in `<data_dir>/client-certs/127.0.0.1.pem` also fails closed with 502
+        hub.set_rules("");
+        let cert_dir = dir.join("client-certs");
+        std::fs::create_dir_all(&cert_dir).unwrap();
+        let enc_pem = cert_dir.join("127.0.0.1.pem");
+        std::fs::write(
+            &enc_pem,
+            format!(
+                "{}-----BEGIN ENCRYPTED PRIVATE KEY-----\nZm9v\n-----END ENCRYPTED PRIVATE KEY-----\n",
+                cert_a.pem()
+            ),
+        )
+        .unwrap();
+
+        let (status2, body2) = h2_get(&ca, proxy_addr, origin_addr, "/dir-cert").await;
+        assert_eq!(status2, StatusCode::BAD_GATEWAY);
+        let body2_text = String::from_utf8_lossy(&body2);
+        assert!(body2_text.contains("ENCRYPTED PRIVATE KEY"), "{body2_text}");
+        assert_eq!(origin_accepts.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        let flows = hub.with_session(|session| session.flows());
+        assert_eq!(flows.len(), 2);
+        assert_eq!(flows[1].status, Some(502));
+        assert_eq!(flows[1].rule_hit, "client-cert");
+
+        // 3. Valid directory-discovered client cert records `conn_info.client_cert` and `rule_hit`
+        // even when the origin returns HTTP 400.
+        std::fs::write(
+            &enc_pem,
+            format!("{}{}", cert_a.pem(), cert_a_key.serialize_pem()),
+        )
+        .unwrap();
+        let (origin_ca, origin_leaf, leaf_key) = test_origin_cert();
+        let mut hub2 = Hub::new(ca.clone()).unwrap();
+        hub2.add_trust_anchor(origin_ca.der().clone());
+        let hub2 = Arc::new(hub2);
+
+        let cert_der = rustls::pki_types::CertificateDer::from(origin_leaf.der().to_vec());
+        let key_der = rustls::pki_types::PrivateKeyDer::Pkcs8(
+            rustls::pki_types::PrivatePkcs8KeyDer::from(leaf_key.serialize_der()),
+        );
+        let mut server_cfg = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert_der], key_der)
+            .unwrap();
+        server_cfg.alpn_protocols = vec![b"h2".to_vec()];
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_cfg));
+        let origin400 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin400_addr = origin400.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (sock, _) = origin400.accept().await.unwrap();
+            let tls = acceptor.accept(sock).await.unwrap();
+            let service = hyper::service::service_fn(move |_req: Request<Incoming>| async move {
+                let mut res = Response::new(http_body_util::Full::new(Bytes::from_static(
+                    b"No required SSL certificate was sent",
+                )));
+                *res.status_mut() = StatusCode::BAD_REQUEST;
+                Ok::<_, std::convert::Infallible>(res)
+            });
+            let _ = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+                .serve_connection(TokioIo::new(tls), service)
+                .await;
+        });
+
+        let proxy2 = listen().await.unwrap();
+        let proxy2_addr = proxy2.local_addr().unwrap();
+        serve_one(proxy2, hub2.clone());
+        let (status3, _) = h2_get(&ca, proxy2_addr, origin400_addr, "/badssl").await;
+        assert_eq!(status3, StatusCode::BAD_REQUEST);
+        let flow3 = hub2
+            .with_session(|session| session.flows().into_iter().next())
+            .unwrap();
+        assert_eq!(flow3.rule_hit, "client-cert");
+        assert_eq!(flow3.conn_info.client_cert, enc_pem.display().to_string());
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
