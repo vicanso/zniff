@@ -987,7 +987,7 @@ impl Hub {
         headers
             .iter()
             .filter(|(name, _)| name.eq_ignore_ascii_case("proxy-authorization"))
-            .any(|(_, value)| verify_basic_proxy_auth(&expected, value))
+            .any(|(_, value)| verify_basic_auth(&expected, value))
     }
 
     fn skips_tls(&self, host: &str) -> bool {
@@ -3913,7 +3913,7 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     diff == 0
 }
 
-fn verify_basic_proxy_auth(expected_user_pass: &str, header_value: &str) -> bool {
+pub(crate) fn verify_basic_auth(expected_user_pass: &str, header_value: &str) -> bool {
     let trimmed = header_value.trim();
     let mut parts = trimmed.splitn(2, char::is_whitespace);
     let Some(scheme) = parts.next() else {

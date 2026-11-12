@@ -25,6 +25,25 @@ The UI (`App`) and the capture layer (`Hub` plus TLS, HTTP/2, and rules) are wri
 
 A relay is optional and off by default. With a relay URL and token, a live share is pushed to that host about once a second. `zniff --relay --token <secret>` only stores and serves `/s/{id}`. Another zniff can accept the same uploads on its capture port when **Receive relay** is on. Those rows can be viewed, filtered, copied, and starred. Replay stays on the machine that captured them.
 
+The web server can host the relay as well, on its own port:
+
+| Command | Capture | Relay |
+| --- | --- | --- |
+| `zniff --web` | after **Start** | — |
+| `zniff --web --relay --token <secret>` | after **Start** | port `8879` (`--relay-port`, `--relay-bind`, default `0.0.0.0`) |
+| `zniff --web --relay --token <secret> --no-capture` | never; starting returns `403` | port `8879` |
+
+Each port checks its own credential, and none of them works on another port:
+
+| Port | Check | Source |
+| --- | --- | --- |
+| Console (`8080`) | HTTP Basic on every request, when set | `--web-auth <user:pass>` › `ZNIFF_WEB_AUTH` › `web_auth` in `config.toml` |
+| Relay upload / delete | `Authorization: Bearer <token>`, required | `--token` › `relay_token` |
+| Relay share pages | HTTP Basic, when set | `--view-auth <user:pass>` › `ZNIFF_RELAY_VIEW_AUTH` › `relay_view_auth` |
+| Capture (`8877`) | `Proxy-Authorization`, when set | `--proxy-auth` › `ZNIFF_PROXY_AUTH` › `proxy_auth` |
+
+A wrong or missing credential gets `401` after about 300 ms. `--view-auth` works the same with the standalone `zniff --relay`. The desktop app still sends only the relay URL and token; give viewers the view password yourself. Basic auth is plain text over HTTP, so put an HTTPS reverse proxy in front of anything public.
+
 ---
 
 ## Features
@@ -158,7 +177,7 @@ docker run --rm -p 8080:8080 -p 8877:8877 \
   vicanso/zniff-web:nightly
 ```
 
-Build it locally with `docker build -t zniff .`. The entrypoint is `zniff --web --web-bind 0.0.0.0 --bind 0.0.0.0 --port 8877`. The capture port still opens only after **Start**. Keep `8080` and `8877` off the public internet: the page can show bodies and cookies. Publishing needs `DOCKER_HUB_USERNAME` and `DOCKER_HUB_ACCESS_TOKEN`; without them CI still builds the image and does not push it.
+Build it locally with `docker build -t zniff .`. The entrypoint is `zniff --web --web-bind 0.0.0.0 --bind 0.0.0.0 --port 8877`. The capture port still opens only after **Start**. Keep `8080` and `8877` off the public internet: the page can show bodies and cookies. If the console must be reachable, set `ZNIFF_WEB_AUTH=user:pass`; without it the server prints a warning when the console is bound to a non-loopback address. The image also exposes `8879` for `--relay`, extra `docker run` arguments are appended to the entrypoint, for example `docker run -p 8080:8080 -p 8879:8879 -e ZNIFF_WEB_AUTH=op:pw <image> --relay --token <secret> --no-capture`. Publishing needs `DOCKER_HUB_USERNAME` and `DOCKER_HUB_ACCESS_TOKEN`; without them CI still builds the image and does not push it.
 
 See [docs/known-issues.md](./docs/known-issues.md) for documented platform boundaries and design trade-offs.
 

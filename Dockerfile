@@ -15,14 +15,11 @@
 #     vicanso/zniff-web:nightly
 #
 # Daily and release images are published by .github/workflows/docker.yml.
-# The binary is the desktop build, so it links GTK even though --web never
-# opens a window. The toolchain matches the GitHub workflows (1.99.1).
+# Built with `--no-default-features` so `nsh-platform-linux` (GTK / GStreamer)
+# is not linked into the headless server binary. The toolchain matches the
+# GitHub workflows (1.99.1).
 
-FROM rust:1.99.1-bookworm AS build
-
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends pkg-config libgtk-4-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+FROM rust:1.99.1-trixie AS build
 
 ENV CARGO_NET_RETRY=10 \
     CARGO_HTTP_TIMEOUT=120 \
@@ -35,13 +32,13 @@ WORKDIR /src/app
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/src/app/target,sharing=locked \
-    cargo build --release --locked \
+    cargo build --release --locked --no-default-features \
     && cp target/release/zniff /zniff
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates libgtk-4-1 libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 \
+    && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 1000 --user-group zniff \
     && mkdir -p /data \
@@ -56,4 +53,6 @@ USER zniff
 WORKDIR /home/zniff
 EXPOSE 8080
 EXPOSE 8877
+# Relay port for `zniff --web --relay` (see README).
+EXPOSE 8879
 ENTRYPOINT ["zniff", "--web", "--web-bind", "0.0.0.0", "--bind", "0.0.0.0", "--port", "8877"]

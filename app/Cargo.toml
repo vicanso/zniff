@@ -6,6 +6,14 @@ publish = false
 
 [workspace]
 
+[features]
+default = ["desktop"]
+desktop = [
+    "dep:nsh-platform-linux",
+    "dep:nsh-platform-macos",
+    "dep:nsh-platform-windows",
+]
+
 [dependencies]
 nsh-core = "0.5.0"
 nsh-base = "0.5.0"
@@ -40,13 +48,13 @@ ring = "0.17.14"
 libc = "0.2.191"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-nsh-platform-linux = { version = "0.5.0", default-features = false }
+nsh-platform-linux = { version = "0.5.0", default-features = false, optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-nsh-platform-macos = { version = "0.5.0", default-features = false }
+nsh-platform-macos = { version = "0.5.0", default-features = false, optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-nsh-platform-windows = { version = "0.5.0", default-features = false }
+nsh-platform-windows = { version = "0.5.0", default-features = false, optional = true }
 winreg = "0.55.0"
 windows-sys = { version = "0.59.0", features = [
     "Win32_Foundation",

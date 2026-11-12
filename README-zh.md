@@ -25,6 +25,25 @@
 
 中继默认关闭。填了中继地址和密钥后，实时分享大约每秒推到那台主机。`zniff --relay --token <secret>` 只保存并提供 `/s/{id}`，自己不抓包。另一台 zniff 打开「接收中继」后，可以在自己的抓包端口上接收同样的上传。这些行可以查看、过滤、复制和星标。重放留在当初抓到流量的那台机器上。
 
+`zniff --web` 也可以在同一个进程里另开一个端口做中继：
+
+| 命令 | 抓包 | 中继 |
+| --- | --- | --- |
+| `zniff --web` | 点「开始」后 | 无 |
+| `zniff --web --relay --token <secret>` | 点「开始」后 | 端口 `8879`（`--relay-port`、`--relay-bind`，默认 `0.0.0.0`） |
+| `zniff --web --relay --token <secret> --no-capture` | 不抓包，开始时返回 `403` | 端口 `8879` |
+
+每个端口各查各的凭据，互不通用：
+
+| 端口 | 校验 | 来源 |
+| --- | --- | --- |
+| 操作台（`8080`） | 设置后每个请求都要 HTTP Basic | `--web-auth <user:pass>` › `ZNIFF_WEB_AUTH` › `config.toml` 的 `web_auth` |
+| 中继上传和删除 | `Authorization: Bearer <密钥>`，必填 | `--token` › `relay_token` |
+| 中继分享页 | 设置后要 HTTP Basic | `--view-auth <user:pass>` › `ZNIFF_RELAY_VIEW_AUTH` › `relay_view_auth` |
+| 抓包（`8877`） | 设置后要 `Proxy-Authorization` | `--proxy-auth` › `ZNIFF_PROXY_AUTH` › `proxy_auth` |
+
+凭据不对或没带时，约 300 ms 后回 `401`。独立的 `zniff --relay` 同样支持 `--view-auth`。桌面版仍只发中继地址和密钥，观看口令请另外告诉对方。HTTP 上的 Basic 是明文，对公网开放时请在前面加 HTTPS 反代。
+
 ---
 
 ## 核心特性
@@ -156,7 +175,7 @@ docker run --rm -p 8080:8080 -p 8877:8877 \
   vicanso/zniff-web:nightly
 ```
 
-本地构建用 `docker build -t zniff .`。入口是 `zniff --web --web-bind 0.0.0.0 --bind 0.0.0.0 --port 8877`。抓包端口仍要点「开始」才打开。不要把 `8080` 和 `8877` 暴露到公网：页面上能看到正文和 Cookie。推送需要 `DOCKER_HUB_USERNAME` 和 `DOCKER_HUB_ACCESS_TOKEN`；没有这两项时 CI 仍会构建镜像，只是不推送。
+本地构建用 `docker build -t zniff .`。入口是 `zniff --web --web-bind 0.0.0.0 --bind 0.0.0.0 --port 8877`。抓包端口仍要点「开始」才打开。不要把 `8080` 和 `8877` 暴露到公网：页面上能看到正文和 Cookie。操作台必须对外时，设置 `ZNIFF_WEB_AUTH=user:pass`；没设置又绑在非回环地址时，启动会打印警告。镜像同时暴露 `8879` 给 `--relay` 用，`docker run` 后面的参数会接在入口命令后面，例如 `docker run -p 8080:8080 -p 8879:8879 -e ZNIFF_WEB_AUTH=op:pw <镜像> --relay --token <secret> --no-capture`。推送需要 `DOCKER_HUB_USERNAME` 和 `DOCKER_HUB_ACCESS_TOKEN`；没有这两项时 CI 仍会构建镜像，只是不推送。
 
 关于各平台能力边界与已接受的设计取舍，请参考 [docs/known-issues.md](./docs/known-issues.md)。
 
