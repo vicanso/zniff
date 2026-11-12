@@ -2,7 +2,7 @@
 
 [English](./rules.md) | 简体中文
 
-本文档详细说明 **zniff** 的配置文件目录、流量过滤语法、TLS 直通名单（Bypass）、9 种转发与改写规则（Rules）、上游代理以及命名配置预设（Saved Setups）的使用方法与示例。
+本文档详细说明 **zniff** 的配置文件目录、流量过滤语法、TLS 直通名单（Bypass）、14 种转发与改写规则（Rules）、GraphQL 操作名精准匹配、上游代理以及命名配置预设（Saved Setups）的使用方法与示例。
 
 ---
 
@@ -103,17 +103,17 @@ only: api.example.com *.dev.internal
 
 ### 4.2 规则优先级：终点规则 vs 叠加修饰规则
 
-`zniff` 的 9 种规则分为两类：
+`zniff` 的 14 种规则分为两类：
 
-1. **终点规则（Terminal Rules）**：`map-local`、`map-remote`、`break`、`break-res`
-   - 决定请求的最终去向或断点暂停行为。
+1. **终点规则（Terminal Rules）**：`map-local`、`map-remote`、`break`、`break-res`、`block`
+   - 决定请求的最终去向、阻断或断点暂停行为。
    - **按从上到下的文本顺序，只有第一条命中的终点规则生效**，后续其他终点规则会被忽略。
-2. **叠加修饰规则（Modifier Rules）**：`replace`、`delay`、`header`、`query`、`cors`
+2. **叠加修饰规则（Modifier Rules）**：`replace`、`json`、`delay`、`throttle`、`header`、`query`、`cors`、`no-cache`、`cert`
    - **不占用终点规则名额**。所有命中的修饰规则都会按顺序叠加生效（即使写在命中的终点规则之后也会生效）。
 
 ---
 
-### 4.3 九种规则语法与实战示例
+### 4.3 十四种规则语法与实战示例
 
 #### ① `map-local` — 本地文件映射 / 纯状态码空响应（Mock 响应）
 
@@ -325,6 +325,134 @@ cors api.example.com
 
 # 为所有流量开启跨域支持
 cors *
+```
+
+---
+
+#### ⑩ `block` — 规则阻断与物理断开连接
+
+在代理层直接拦截匹配流量，无需连接后端源站：
+- 支持返回指定状态码（如 `status=403`、`status=500`），亦可附带自定义响应正文。
+- 或使用 `drop` / `reset` 立即切断底层 TCP 连接或重置流（流量列表中记为 `规则阻断 (连接已断开)`）。
+
+**语法：**
+```text
+block <pattern> [status=<状态码-100..599>] [drop|reset]
+```
+
+**示例：**
+```text
+# 拦截统计与遥测请求，直接返回 403 Forbidden
+block telemetry.example.com status=403
+
+# 对广告追踪域名直接切断连接
+block ads.example.com drop
+```
+
+---
+
+#### ⑪ `json` — 按 JSON 指针或点分路径改写/删除字段
+
+直接在内存中改写 JSON 请求或响应正文（单条上限 `1 MB`），严格保持原有字段键序：
+- 支持标准 JSON Pointer 语法（`/path/to/field`）或点分路径（`path.to.field`）。
+- 支持 `set` 设置任意合法 JSON 字面量（`true`、`false`、`null`、数字、字符串、嵌套对象或数组），或用 `del` 删除指定字段。
+
+**语法：**
+```text
+json <pattern> req|res set <JSON指针或点分路径> <JSON值>
+json <pattern> req|res del <JSON指针或点分路径>
+```
+
+**示例：**
+```text
+# 修改用户信息接口，将 is_vip 置为 true
+json api.example.com/v1/profile res set /data/is_vip true
+
+# 删除上报事件中的敏感指纹字段
+json api.example.com/events req del /metadata/device_fingerprint
+```
+
+---
+
+#### ⑫ `throttle` — 弱网模拟与带宽限速
+
+模拟各种弱网带宽环境，采用 4 KB 分片平滑流式限速：
+- 预设网络模式：`2g`（50 kbps，500ms RTT）、`3g`（750 kbps，100ms RTT）、`4g`（4 Mbps，20ms RTT）。
+- 或自定义方向速率：`down=<下行速率>` 与 `up=<上行速率>`（如 `down=500k up=100k`）。
+
+**语法：**
+```text
+throttle <pattern> <预设名|down=<速率> up=<速率>>
+```
+
+**示例：**
+```text
+# 模拟 3G 移动网络测试慢网加载状态
+throttle api.example.com/mobile 3g
+
+# 限制静态大视频资源下载速度至 500 KB/s
+throttle cdn.example.com/video down=500k
+```
+
+---
+
+#### ⑬ `no-cache` — 剥离条件缓存头并强制无缓存
+
+强制客户端与源站绕过 HTTP 缓存：
+- 转发前自动剥离请求头中的 `If-Modified-Since` 与 `If-None-Match`，彻底避免源站返回 `304 Not Modified`。
+- 响应返回时强制注入 `Cache-Control: no-cache, no-store, must-revalidate` 与 `Pragma: no-cache`。
+
+**语法：**
+```text
+no-cache <pattern>
+```
+
+**示例：**
+```text
+# 前端联调时强制静态资源不走缓存
+no-cache static.example.com/assets
+```
+
+---
+
+#### ⑭ `cert` / `client-cert` — 自定义域名证书或上游双向认证 (mTLS)
+
+提供细粒度的 TLS 证书接管与客户端认证：
+- 为特定私有域名挂载真实证书与私钥，无需依赖本地根 CA 动态签发叶子证书。
+- 或为需要 mTLS 双向认证的上游企业服务注入客户端证书与私钥。
+
+**语法：**
+```text
+cert <pattern> <证书文件路径> <私钥文件路径>
+```
+
+**示例：**
+```text
+# 为公司内部泛域名挂载真实自签或内网证书
+cert *.internal.corp /etc/ssl/internal.crt /etc/ssl/internal.key
+
+# 对接上游金融专线 API 时注入客户端 mTLS 证书
+cert secure.bank.com/api ./certs/client.pem ./certs/client.key
+```
+
+---
+
+### 4.4 GraphQL 操作名匹配（`op=<GraphQL操作名>`）
+
+14 种规则中有 11 种规则（`map-local`、`map-remote`、`break`、`break-res`、`block`、`replace`、`json`、`delay`、`header`、`query`、`no-cache`）支持追加 `op=<操作名>` 精准限定作用范围：
+- 自动提取显式 `operationName` 或从查询语句推断的命名操作（如 `query GetUser`）。
+- 支持通配符 `*` 与多操作名逻辑或 `|`。
+
+**示例：**
+```text
+# 仅针对 'GetUserProfile' 操作应用本地 Mock 数据
+map-local api.example.com/graphql ./mocks/profile.json op=GetUserProfile
+
+# 对所有以 'Submit*' 开头的 Mutation 注入 3 秒延迟
+delay api.example.com/graphql 3000ms op=Submit*
+
+# 仅对订单结算相关操作进入断点队列
+break api.example.com/graphql op=Checkout|Payment
 ```
 
 ---
