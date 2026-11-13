@@ -56,9 +56,7 @@ pub fn normalize_prefix(raw: &str, flag: &str) -> Result<String, String> {
     if trimmed.contains('?')
         || trimmed.contains('#')
         || trimmed.contains('\\')
-        || trimmed
-            .chars()
-            .any(|c| c.is_whitespace() || c.is_control())
+        || trimmed.chars().any(|c| c.is_whitespace() || c.is_control())
     {
         return Err(format!("{flag} 路径前缀格式无效"));
     }
@@ -398,18 +396,14 @@ pub fn run_cli(
             return 2;
         }
     };
-    let relay = match Relay::start_with_options(
-        settings.addr(),
-        &settings.token,
-        &view_auth,
-        &prefix,
-    ) {
-        Ok(relay) => relay,
-        Err(err) => {
-            eprintln!("zniff relay 没有绑上 {}: {err}", settings.addr());
-            return 1;
-        }
-    };
+    let relay =
+        match Relay::start_with_options(settings.addr(), &settings.token, &view_auth, &prefix) {
+            Ok(relay) => relay,
+            Err(err) => {
+                eprintln!("zniff relay 没有绑上 {}: {err}", settings.addr());
+                return 1;
+            }
+        };
     println!("zniff relay listening on http://{}{}", relay.addr(), prefix);
     print_view_auth_notice(&view_auth);
     if let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
@@ -2160,9 +2154,16 @@ mod tests {
         };
         let mut last_rev = None;
         let mut pushed_bodies = HashSet::new();
-        push_export(&base, "tok", &id, &export, &mut last_rev, &mut pushed_bodies)
-            .await
-            .unwrap();
+        push_export(
+            &base,
+            "tok",
+            &id,
+            &export,
+            &mut last_rev,
+            &mut pushed_bodies,
+        )
+        .await
+        .unwrap();
 
         for path in ["/health", "/zniff-relay/health"] {
             let (status, _, body) = raw_exchange(
@@ -2196,9 +2197,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, 200);
-        assert!(
-            String::from_utf8_lossy(&json_body).contains("prefixed.example")
-        );
+        assert!(String::from_utf8_lossy(&json_body).contains("prefixed.example"));
 
         let (status, _, _) = raw_exchange(
             addr,

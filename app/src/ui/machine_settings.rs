@@ -21,10 +21,7 @@ pub(crate) fn machine_settings_modal(
             let backdrop = view()
                 .absolute()
                 .inset_0()
-                .bg(AdaptiveColor::new(
-                    rgba(0x0F172A5C),
-                    rgba(0x0000008F),
-                ))
+                .bg(AdaptiveColor::new(rgba(0x0F172A5C), rgba(0x0000008F)))
                 .on_press(move || profiles.machine_settings_open.set(false));
 
             let header = view()
@@ -258,10 +255,7 @@ pub(crate) fn machine_settings_modal(
                         .active(|s| s.opacity(0.8))
                         .cursor(Cursor::Pointer)
                         .on_press(move || profiles.machine_settings_open.set(false))
-                        .child(
-                            control_text(tr("完成", "Done"))
-                                .text_color(accent_blue_text()),
-                        ),
+                        .child(control_text(tr("完成", "Done")).text_color(accent_blue_text())),
                 );
 
             let card = view()

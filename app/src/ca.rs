@@ -1810,10 +1810,7 @@ Cert 0: zniff CA
     fn format_ca_common_name_includes_short_host_and_falls_back() {
         assert_eq!(format_ca_common_name(None), "zniff CA");
         assert_eq!(format_ca_common_name(Some("   ")), "zniff CA");
-        assert_eq!(
-            format_ca_common_name(Some("omarchy")),
-            "zniff CA (omarchy)"
-        );
+        assert_eq!(format_ca_common_name(Some("omarchy")), "zniff CA (omarchy)");
         assert_eq!(
             format_ca_common_name(Some("MacBook-Pro.local.")),
             "zniff CA (MacBook-Pro)"
@@ -1848,12 +1845,8 @@ Cert 0: zniff CA
         name.push(DnType::CommonName, "zniff CA");
         params.distinguished_name = name;
         let legacy_cert = params.self_signed(&legacy_key).unwrap();
-        let legacy_ca = Ca::from_pem(
-            dir.clone(),
-            legacy_cert.pem(),
-            legacy_key.serialize_pem(),
-        )
-        .unwrap();
+        let legacy_ca =
+            Ca::from_pem(dir.clone(), legacy_cert.pem(), legacy_key.serialize_pem()).unwrap();
         assert_eq!(legacy_ca.ca_name(), "zniff CA");
 
         let _ = fs::remove_dir_all(&dir);

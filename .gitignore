@@ -24,5 +24,4 @@ rustc-ice-*.txt
 #.idea/
 
 .agents
-docs/screenshots
 /screenshots

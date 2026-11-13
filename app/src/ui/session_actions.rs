@@ -475,8 +475,7 @@ pub(crate) fn begin_share(
     .into_bytes();
     let controls = Arc::clone(controls);
     spawn(async move {
-        let request =
-            HttpRequest::post("api/hub", body).header("content-type", "application/json");
+        let request = HttpRequest::post("api/hub", body).header("content-type", "application/json");
         let Ok(response) = fetch(request).await else {
             set_status(&controls, StatusMsg::RelayPushFailed("没有连上".into()));
             return;

@@ -66,7 +66,7 @@ make dev
 make web
 ```
 
-提交代码前必须先执行并通过 `make fmt`（`cargo fmt`）、`make lint`（`cargo clippy --all-targets -- --deny=warnings`）和 `make test`。
+每次修改 Rust 代码后，必须执行一次 `make fmt`（`cargo fmt`）与 `make lint`（`cargo clippy --all-targets -- --deny=warnings`）并确保通过；提交代码前必须先执行并通过 `make fmt`、`make lint` 和 `make test`。
 
 `make dev` 会打开窗口。测试绑 `127.0.0.1:0`，不要在测试里调用 `networksetup`、`security` 或改系统代理。
 
