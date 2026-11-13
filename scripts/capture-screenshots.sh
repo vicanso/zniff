@@ -584,15 +584,148 @@ for dir in "$DOCS_SCREENSHOT_DIR" "$SCREENSHOT_DIR"; do
 done
 
 # -------------------------------------------------------------
-# Transcode real-time recording to 1920x1080 MP4 via ffmpeg
+# Generate 1920x1080 bilingual intro card and transcode video
 # -------------------------------------------------------------
-echo "==> Transcoding real-time recording via ffmpeg..."
+INTRO_PNG="$RAW_DIR/zniff_intro.png"
+echo "==> Generating 1920x1080 bilingual intro card..."
+swift - "$REPO_ROOT/icons/zniff.icns" "$INTRO_PNG" <<'SWIFT'
+import AppKit
+import Foundation
+
+let iconPath = CommandLine.arguments[1]
+let outPath = CommandLine.arguments[2]
+let W = 1920
+let H = 1080
+
+guard let rep = NSBitmapImageRep(
+    bitmapDataPlanes: nil,
+    pixelsWide: W,
+    pixelsHigh: H,
+    bitsPerSample: 8,
+    samplesPerPixel: 4,
+    hasAlpha: true,
+    isPlanar: false,
+    colorSpaceName: .deviceRGB,
+    bytesPerRow: 0,
+    bitsPerPixel: 0
+) else { exit(1) }
+
+NSGraphicsContext.saveGraphicsState()
+NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+
+let rect = NSRect(x: 0, y: 0, width: W, height: H)
+let bgGrad = NSGradient(
+    starting: NSColor(red: 0.043, green: 0.067, blue: 0.118, alpha: 1.0),
+    ending: NSColor(red: 0.067, green: 0.106, blue: 0.180, alpha: 1.0)
+)
+bgGrad?.draw(in: rect, angle: 90)
+
+// Subtle radial glow behind icon/title
+if let glow = NSGradient(
+    colorsAndLocations:
+        (NSColor(red: 0.231, green: 0.510, blue: 0.965, alpha: 0.14), 0.0),
+        (NSColor(red: 0.231, green: 0.510, blue: 0.965, alpha: 0.0), 1.0)
+) {
+    glow.draw(in: NSRect(x: W / 2 - 480, y: H / 2 - 220, width: 960, height: 760), relativeCenterPosition: .zero)
+}
+
+func drawCentered(_ text: String, y: CGFloat, font: NSFont, color: NSColor) {
+    let style = NSMutableParagraphStyle()
+    style.alignment = .center
+    let attrs: [NSAttributedString.Key: Any] = [
+        .font: font,
+        .foregroundColor: color,
+        .paragraphStyle: style,
+    ]
+    let str = NSAttributedString(string: text, attributes: attrs)
+    let size = str.size()
+    str.draw(in: NSRect(x: 0, y: y, width: CGFloat(W), height: size.height + 8))
+}
+
+// App Icon
+if let icon = NSImage(contentsOfFile: iconPath) {
+    let iconSize: CGFloat = 148
+    icon.draw(in: NSRect(x: (CGFloat(W) - iconSize) / 2, y: 690, width: iconSize, height: iconSize))
+}
+
+// Title & bilingual taglines (AppKit y=0 is bottom)
+drawCentered(
+    "zniff",
+    y: 575,
+    font: NSFont.systemFont(ofSize: 84, weight: .bold),
+    color: NSColor(red: 0.973, green: 0.980, blue: 0.988, alpha: 1.0)
+)
+drawCentered(
+    "Single-process HTTP(S) debugging proxy in pure Rust",
+    y: 505,
+    font: NSFont.systemFont(ofSize: 30, weight: .medium),
+    color: NSColor(red: 0.800, green: 0.847, blue: 0.910, alpha: 1.0)
+)
+drawCentered(
+    "基于纯 Rust 的单进程 HTTP(S) 抓包调试代理",
+    y: 452,
+    font: NSFont.systemFont(ofSize: 27, weight: .regular),
+    color: NSColor(red: 0.580, green: 0.639, blue: 0.722, alpha: 1.0)
+)
+
+// Feature pills row
+let pills = [
+    "Native GUI · 原生界面",
+    "HTTP/2 & WebSocket",
+    "14 Rules · 14 项改写规则",
+    "Built-in MCP · AI 原生 MCP",
+]
+let pillFont = NSFont.systemFont(ofSize: 20, weight: .medium)
+let pillAttrs: [NSAttributedString.Key: Any] = [
+    .font: pillFont,
+    .foregroundColor: NSColor(red: 0.886, green: 0.918, blue: 0.961, alpha: 1.0),
+]
+let padX: CGFloat = 24
+let pillH: CGFloat = 46
+let gap: CGFloat = 18
+let widths = pills.map { NSAttributedString(string: $0, attributes: pillAttrs).size().width + padX * 2 }
+let totalW = widths.reduce(0, +) + gap * CGFloat(pills.count - 1)
+var curX = (CGFloat(W) - totalW) / 2
+let pillY: CGFloat = 338
+
+for (i, label) in pills.enumerated() {
+    let pw = widths[i]
+    let pRect = NSRect(x: curX, y: pillY, width: pw, height: pillH)
+    let path = NSBezierPath(roundedRect: pRect, xRadius: 23, yRadius: 23)
+    NSColor(red: 0.094, green: 0.137, blue: 0.216, alpha: 0.95).setFill()
+    path.fill()
+    NSColor(red: 0.180, green: 0.255, blue: 0.376, alpha: 1.0).setStroke()
+    path.lineWidth = 1.5
+    path.stroke()
+
+    let str = NSAttributedString(string: label, attributes: pillAttrs)
+    let sz = str.size()
+    str.draw(at: NSPoint(x: curX + (pw - sz.width) / 2, y: pillY + (pillH - sz.height) / 2))
+    curX += pw + gap
+}
+
+drawCentered(
+    "Live Capture & Inspection Demo  ·  实时抓包与调试演示",
+    y: 130,
+    font: NSFont.systemFont(ofSize: 20, weight: .regular),
+    color: NSColor(red: 0.392, green: 0.455, blue: 0.545, alpha: 1.0)
+)
+
+NSGraphicsContext.restoreGraphicsState()
+if let png = rep.representation(using: .png, properties: [:]) {
+    try png.write(to: URL(fileURLWithPath: outPath))
+}
+SWIFT
+
+echo "==> Combining intro card + real-time recording via ffmpeg..."
 DEMO_VIDEO="$SCREENSHOT_DIR/zniff_demo.mp4"
 TEST_VIDEO="/tmp/zniff_showcase_preview.mp4"
 rm -f "$DEMO_VIDEO" "$TEST_VIDEO"
-ffmpeg -y -i "$RAW_VIDEO" \
-    -vf "scale=1920:1080:flags=lanczos" \
-    -r 30 -c:v libx264 -preset medium -crf 22 -pix_fmt yuv420p -movflags +faststart \
+ffmpeg -y \
+    -loop 1 -t 2.4 -framerate 30 -i "$INTRO_PNG" \
+    -i "$RAW_VIDEO" \
+    -filter_complex "[0:v]scale=1920:1080,setsar=1,format=yuv420p[intro];[1:v]scale=1920:1080:flags=lanczos,fps=30,setsar=1,format=yuv420p[main];[intro][main]xfade=transition=fade:duration=0.4:offset=2.0,format=yuv420p[v]" \
+    -map "[v]" -c:v libx264 -preset medium -crf 22 -movflags +faststart \
     "$DEMO_VIDEO"
 cp -f "$DEMO_VIDEO" "$TEST_VIDEO"
 echo "==> Demo video generated at $DEMO_VIDEO ($(ls -lh "$DEMO_VIDEO" | awk '{print $5}'))"
