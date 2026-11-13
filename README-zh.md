@@ -45,16 +45,12 @@ https://github.com/user-attachments/assets/6088fb29-20fc-4b0c-a773-58b809688cef
 
 ### 1. 安装
 
-**macOS**
+**macOS、Linux 与 Windows**
+从 [GitHub Releases](https://github.com/vicanso/zniff/releases) 下载预编译安装包（`.dmg` / `.tar.gz`），或通过 Cargo 从源码安装：
 ```bash
-brew install zniff
-# 或从源码打包：make bundle
-```
-
-**Linux 与 Windows**
-从 [GitHub Releases](https://github.com/vicanso/zniff/releases) 下载独立二进制文件，或通过 Cargo 编译安装：
-```bash
-cargo install --path app
+cargo install --git https://github.com/vicanso/zniff
+# 或克隆仓库后打包 macOS .app：
+# git clone https://github.com/vicanso/zniff.git && cd zniff && make bundle
 ```
 
 **Docker（Web 控制台）**

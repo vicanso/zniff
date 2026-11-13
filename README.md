@@ -45,16 +45,12 @@ https://github.com/user-attachments/assets/6088fb29-20fc-4b0c-a773-58b809688cef
 
 ### 1. Install
 
-**macOS**
+**macOS, Linux & Windows**
+Download pre-built binaries (`.dmg` / `.tar.gz`) from [GitHub Releases](https://github.com/vicanso/zniff/releases), or build from source:
 ```bash
-brew install zniff
-# Or build from source: make bundle
-```
-
-**Linux & Windows**
-Download binaries from [GitHub Releases](https://github.com/vicanso/zniff/releases) or install via Cargo:
-```bash
-cargo install --path app
+cargo install --git https://github.com/vicanso/zniff
+# Or clone and package macOS .app:
+# git clone https://github.com/vicanso/zniff.git && cd zniff && make bundle
 ```
 
 **Docker (Web Console)**
