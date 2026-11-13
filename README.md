@@ -18,10 +18,6 @@
 
 https://github.com/user-attachments/assets/6088fb29-20fc-4b0c-a773-58b809688cef
 
-<p align="center">
-  <img src="./docs/screenshots/01_traffic_table_dual_pane.png" alt="zniff Dual-Pane Traffic Table" width="100%">
-</p>
-
 ---
 
 ## Features

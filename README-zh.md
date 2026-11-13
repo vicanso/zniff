@@ -18,10 +18,6 @@
 
 https://github.com/user-attachments/assets/6088fb29-20fc-4b0c-a773-58b809688cef
 
-<p align="center">
-  <img src="./docs/screenshots/01_traffic_table_dual_pane.png" alt="zniff 双栏流量列表" width="100%">
-</p>
-
 ---
 
 ## 核心特性
