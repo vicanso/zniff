@@ -236,8 +236,15 @@ pub(crate) fn export_response_web(controls: Arc<Controls>, id: Option<u64>) {
         set_status(&controls, StatusMsg::NeedSelection);
         return;
     };
-    let url = format!("/api/flows/{id}/body");
+    let rel = format!("api/flows/{id}/body");
     spawn_detached(async move {
+        let Some(url) = proxy::resolve_web_api_url(&rel).await else {
+            set_status(
+                &controls,
+                StatusMsg::ExportFailed("open_url blocked".into()),
+            );
+            return;
+        };
         if open_url(url).await {
             set_status(&controls, StatusMsg::Saved(format!("flow-{id}")));
         } else {
@@ -254,14 +261,21 @@ pub(crate) fn export_har_file(controls: Arc<Controls>, filter: &str) {
     let redact_on = lock_bool(&controls.redact_export);
     let redact_strict = lock_bool(&controls.redact_strict);
     let redact_fields = lock_string(&controls.redact_fields);
-    let url = format!(
-        "/api/export.har?filter={}&redact={}&redact_strict={}&redact_fields={}",
+    let rel = format!(
+        "api/export.har?filter={}&redact={}&redact_strict={}&redact_fields={}",
         url_encode_query_component(filter.trim()),
         if redact_on { "1" } else { "0" },
         if redact_strict { "1" } else { "0" },
         url_encode_query_component(&redact_fields),
     );
     spawn_detached(async move {
+        let Some(url) = proxy::resolve_web_api_url(&rel).await else {
+            set_status(
+                &controls,
+                StatusMsg::ExportFailed("open_url blocked".into()),
+            );
+            return;
+        };
         if open_url(url).await {
             set_status(&controls, StatusMsg::Exported("zniff.har".into()));
         } else {
@@ -317,8 +331,8 @@ pub(crate) fn export_html_file(controls: Arc<Controls>, filter: &str, zh: bool) 
     let redact_on = lock_bool(&controls.redact_export);
     let redact_strict = lock_bool(&controls.redact_strict);
     let redact_fields = lock_string(&controls.redact_fields);
-    let url = format!(
-        "/api/export.html?filter={}&redact={}&redact_strict={}&redact_fields={}&lang={}",
+    let rel = format!(
+        "api/export.html?filter={}&redact={}&redact_strict={}&redact_fields={}&lang={}",
         url_encode_query_component(filter.trim()),
         if redact_on { "1" } else { "0" },
         if redact_strict { "1" } else { "0" },
@@ -326,6 +340,13 @@ pub(crate) fn export_html_file(controls: Arc<Controls>, filter: &str, zh: bool) 
         if zh { "zh" } else { "en" },
     );
     spawn_detached(async move {
+        let Some(url) = proxy::resolve_web_api_url(&rel).await else {
+            set_status(
+                &controls,
+                StatusMsg::ExportFailed("open_url blocked".into()),
+            );
+            return;
+        };
         if open_url(url).await {
             set_status(&controls, StatusMsg::Exported("zniff.html".into()));
         } else {
@@ -455,7 +476,7 @@ pub(crate) fn begin_share(
     let controls = Arc::clone(controls);
     spawn(async move {
         let request =
-            HttpRequest::post("/api/hub", body).header("content-type", "application/json");
+            HttpRequest::post("api/hub", body).header("content-type", "application/json");
         let Ok(response) = fetch(request).await else {
             set_status(&controls, StatusMsg::RelayPushFailed("没有连上".into()));
             return;

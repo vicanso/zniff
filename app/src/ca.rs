@@ -37,6 +37,7 @@ struct CachedCustomCert {
 
 pub struct Ca {
     dir: PathBuf,
+    ca_name: String,
     /// Subject and key of the installed root. Leaf signing reads these.
     /// The PEM on disk is what gets installed.
     issuer: Issuer<'static, KeyPair>,
@@ -136,7 +137,7 @@ impl Ca {
         let mut params = CertificateParams::default();
         params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         let mut name = DistinguishedName::new();
-        name.push(DnType::CommonName, CA_NAME);
+        name.push(DnType::CommonName, default_ca_common_name());
         name.push(DnType::OrganizationName, "zniff");
         params.distinguished_name = name;
         params.key_usages = vec![
@@ -157,14 +158,20 @@ impl Ca {
         let issuer_key = KeyPair::from_pem(&key_pem).context("读取根 CA 私钥")?;
         let issuer = Issuer::from_ca_cert_pem(&cert_pem, issuer_key).context("读取根 CA 证书")?;
         let ca_der = ca_der_from_pem(&cert_pem)?;
+        let ca_name = extract_ca_common_name(&ca_der).unwrap_or_else(|| CA_NAME.to_string());
         Ok(Self {
             dir,
+            ca_name,
             issuer,
             ca_der,
             session_storage: rustls::server::ServerSessionMemoryCache::new(64),
             leaves: Mutex::new(Vec::new()),
             custom_certs: Mutex::new(Vec::new()),
         })
+    }
+
+    pub fn ca_name(&self) -> &str {
+        &self.ca_name
     }
 
     pub fn cert_path(&self) -> PathBuf {
@@ -418,6 +425,137 @@ fn ca_der_from_pem(pem: &str) -> Result<CertificateDer<'static>> {
     Ok(certs.swap_remove(0))
 }
 
+fn default_ca_common_name() -> String {
+    format_ca_common_name(detect_short_hostname().as_deref())
+}
+
+fn format_ca_common_name(host: Option<&str>) -> String {
+    let Some(raw) = host else {
+        return CA_NAME.to_string();
+    };
+    let cleaned: String = raw
+        .trim()
+        .trim_end_matches('.')
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .chars()
+        .filter(|ch| !ch.is_control() && *ch != '(' && *ch != ')')
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        return CA_NAME.to_string();
+    }
+    let short = &trimmed[..trimmed.floor_char_boundary(32)];
+    format!("{CA_NAME} ({short})")
+}
+
+fn detect_short_hostname() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    if let Ok(name) = fs::read_to_string("/proc/sys/kernel/hostname") {
+        let trimmed = name.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    #[cfg(target_os = "windows")]
+    if let Ok(name) = std::env::var("COMPUTERNAME") {
+        let trimmed = name.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    #[cfg(unix)]
+    if let Ok(output) = std::process::Command::new("hostname").arg("-s").output()
+        && output.status.success()
+    {
+        let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !name.is_empty() {
+            return Some(name);
+        }
+    }
+    std::env::var("HOSTNAME")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn read_der_tlv(input: &[u8]) -> Option<(u8, &[u8], &[u8])> {
+    let (&tag, rest) = input.split_first()?;
+    let (&first_len, rest) = rest.split_first()?;
+    let (len, rest) = if first_len & 0x80 == 0 {
+        (first_len as usize, rest)
+    } else {
+        let count = (first_len & 0x7f) as usize;
+        if count == 0 || count > std::mem::size_of::<usize>() || rest.len() < count {
+            return None;
+        }
+        let mut len = 0usize;
+        for &b in &rest[..count] {
+            len = (len << 8) | (b as usize);
+        }
+        (len, &rest[count..])
+    };
+    if rest.len() < len {
+        return None;
+    }
+    Some((tag, &rest[..len], &rest[len..]))
+}
+
+fn extract_ca_common_name(ca_der: &CertificateDer<'_>) -> Option<String> {
+    let (cert_tag, cert_body, _) = read_der_tlv(ca_der.as_ref())?;
+    if cert_tag != 0x30 {
+        return None;
+    }
+    let (tbs_tag, mut tbs_rest, _) = read_der_tlv(cert_body)?;
+    if tbs_tag != 0x30 {
+        return None;
+    }
+    // Optional explicit [0] version
+    if let Some((0xa0, _, next)) = read_der_tlv(tbs_rest) {
+        tbs_rest = next;
+    }
+    // Skip serialNumber, signature, issuer, validity (4 TLVs)
+    for _ in 0..4 {
+        let (_, _, next) = read_der_tlv(tbs_rest)?;
+        tbs_rest = next;
+    }
+    let (subj_tag, mut subj_rest, _) = read_der_tlv(tbs_rest)?;
+    if subj_tag != 0x30 {
+        return None;
+    }
+    // Walk RDN SEQUENCE -> SET (0x31) -> AttributeTypeAndValue SEQUENCE (0x30)
+    while let Some((rdn_tag, mut rdn_rest, next_rdn)) = read_der_tlv(subj_rest) {
+        subj_rest = next_rdn;
+        if rdn_tag != 0x31 {
+            continue;
+        }
+        while let Some((atv_tag, atv_body, next_atv)) = read_der_tlv(rdn_rest) {
+            rdn_rest = next_atv;
+            if atv_tag != 0x30 {
+                continue;
+            }
+            let Some((oid_tag, oid_bytes, val_rest)) = read_der_tlv(atv_body) else {
+                continue;
+            };
+            // OID 2.5.4.3 (id-at-commonName) = 0x55 0x04 0x03
+            if oid_tag == 0x06 && oid_bytes == [0x55, 0x04, 0x03] {
+                let (val_tag, val_bytes, _) = read_der_tlv(val_rest)?;
+                // UTF8String (0x0c), PrintableString (0x13), T61String (0x14), IA5String (0x16)
+                if matches!(val_tag, 0x0c | 0x13 | 0x14 | 0x16)
+                    && let Ok(text) = std::str::from_utf8(val_bytes)
+                {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        return Some(trimmed.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 fn load_custom_cert_pair(
     cert_path: &Path,
     key_path: Option<&Path>,
@@ -579,24 +717,30 @@ pub fn install(ca: &Ca) -> Result<String> {
 }
 
 pub fn remove(ca: &Ca) -> Result<String> {
+    let name = ca.ca_name();
     let _ = ca.cert_path();
     #[cfg(target_os = "macos")]
     {
-        let current = delete_named_cert(CA_NAME)?;
+        let current = delete_named_cert(name)?;
+        let default_ca = if name != CA_NAME {
+            delete_named_cert(CA_NAME)?
+        } else {
+            false
+        };
         let legacy = delete_named_cert(LEGACY_CA_NAME)?;
-        if current || legacy {
+        if current || default_ca || legacy {
             Ok("已从登录钥匙串移除".into())
         } else {
-            anyhow::bail!("登录钥匙串里没有 {CA_NAME}")
+            anyhow::bail!("登录钥匙串里没有 {name}")
         }
     }
     #[cfg(target_os = "windows")]
     {
-        remove_windows()
+        remove_windows(name)
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        remove_linux()
+        remove_linux(name)
     }
 }
 
@@ -625,7 +769,8 @@ pub fn classify_trust_status(installed: bool, verified: bool) -> CaStatus {
 
 /// Best-effort: checks whether the certificate is installed and trusted in the user store.
 pub fn trust_status(ca: &Ca) -> CaStatus {
-    let installed = is_installed();
+    let name = ca.ca_name();
+    let installed = is_installed_named(name);
     if !installed {
         return CaStatus::NotInstalled;
     }
@@ -642,7 +787,7 @@ pub fn trust_status(ca: &Ca) -> CaStatus {
                     .unwrap_or(false)
             })
             .unwrap_or(false)
-            || macos_has_trust_root(CA_NAME);
+            || macos_has_trust_root(name);
         classify_trust_status(installed, verified)
     }
     #[cfg(not(target_os = "macos"))]
@@ -652,26 +797,25 @@ pub fn trust_status(ca: &Ca) -> CaStatus {
     }
 }
 
-/// Best-effort: the certificate is present in the user store.
-pub fn is_installed() -> bool {
+fn is_installed_named(name: &str) -> bool {
     #[cfg(target_os = "macos")]
     {
         std::process::Command::new("security")
-            .args(["find-certificate", "-c", CA_NAME, &login_keychain()])
+            .args(["find-certificate", "-c", name, &login_keychain()])
             .output()
             .map(|output| output.status.success())
             .unwrap_or(false)
     }
     #[cfg(target_os = "windows")]
     {
-        windows_has_cert(CA_NAME)
+        windows_has_cert(name)
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         let home = std::env::var("HOME").unwrap_or_default();
         let db = linux_nss_db(&home);
         std::process::Command::new("certutil")
-            .args(linux_certutil_list_args(&db, CA_NAME))
+            .args(linux_certutil_list_args(&db, name))
             .output()
             .map(|output| output.status.success())
             .unwrap_or(false)
@@ -833,13 +977,18 @@ fn install_windows(ca: &Ca) -> Result<String> {
 }
 
 #[cfg(target_os = "windows")]
-fn remove_windows() -> Result<String> {
-    let current = delete_windows_cert(CA_NAME)?;
+fn remove_windows(name: &str) -> Result<String> {
+    let current = delete_windows_cert(name)?;
+    let default_ca = if name != CA_NAME {
+        delete_windows_cert(CA_NAME)?
+    } else {
+        false
+    };
     let legacy = delete_windows_cert(LEGACY_CA_NAME)?;
-    if current || legacy {
+    if current || default_ca || legacy {
         Ok("已从当前用户的 Root 存储移除".into())
     } else {
-        anyhow::bail!("当前用户的 Root 存储里没有 {CA_NAME}")
+        anyhow::bail!("当前用户的 Root 存储里没有 {name}")
     }
 }
 
@@ -870,7 +1019,7 @@ fn install_linux(ca: &Ca) -> Result<String> {
             "-t",
             "C,,",
             "-n",
-            CA_NAME,
+            ca.ca_name(),
             "-i",
             ca.cert_path().to_str().unwrap_or("ca.crt"),
         ])
@@ -884,15 +1033,20 @@ fn install_linux(ca: &Ca) -> Result<String> {
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-fn remove_linux() -> Result<String> {
+fn remove_linux(name: &str) -> Result<String> {
     let home = std::env::var("HOME").unwrap_or_default();
     let db = linux_nss_db(&home);
-    let current = delete_linux_cert(&db, CA_NAME)?;
+    let current = delete_linux_cert(&db, name)?;
+    let default_ca = if name != CA_NAME {
+        delete_linux_cert(&db, CA_NAME)?
+    } else {
+        false
+    };
     let legacy = delete_linux_cert(&db, LEGACY_CA_NAME)?;
-    if current || legacy {
+    if current || default_ca || legacy {
         Ok("已从 ~/.pki/nssdb 移除".into())
     } else {
-        anyhow::bail!("~/.pki/nssdb 里没有 {CA_NAME}")
+        anyhow::bail!("~/.pki/nssdb 里没有 {name}")
     }
 }
 
@@ -1650,5 +1804,58 @@ Cert 0: zniff CA
         );
         assert_eq!(resolve_custom_data_dir(None, Some("   ")), None);
         assert_eq!(resolve_custom_data_dir(Some(Path::new("")), None), None);
+    }
+
+    #[test]
+    fn format_ca_common_name_includes_short_host_and_falls_back() {
+        assert_eq!(format_ca_common_name(None), "zniff CA");
+        assert_eq!(format_ca_common_name(Some("   ")), "zniff CA");
+        assert_eq!(
+            format_ca_common_name(Some("omarchy")),
+            "zniff CA (omarchy)"
+        );
+        assert_eq!(
+            format_ca_common_name(Some("MacBook-Pro.local.")),
+            "zniff CA (MacBook-Pro)"
+        );
+        assert_eq!(
+            format_ca_common_name(Some("host(1).lan")),
+            "zniff CA (host1)"
+        );
+        let long = "a".repeat(50);
+        let formatted = format_ca_common_name(Some(&long));
+        assert_eq!(formatted, format!("zniff CA ({})", "a".repeat(32)));
+        assert!(formatted.len() <= 64);
+    }
+
+    #[test]
+    fn generated_ca_preserves_its_subject_cn_on_reload() {
+        let dir = std::env::temp_dir().join(format!("zniff-ca-cn-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let ca = Ca::open(&dir).unwrap();
+        let expected_cn = default_ca_common_name();
+        assert_eq!(ca.ca_name(), expected_cn);
+
+        let reloaded = Ca::open(&dir).unwrap();
+        assert_eq!(reloaded.ca_name(), expected_cn);
+
+        // Legacy/explicit "zniff CA" PEM on disk also keeps its CN on load.
+        let legacy_key = KeyPair::generate().unwrap();
+        let mut params = CertificateParams::default();
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let mut name = DistinguishedName::new();
+        name.push(DnType::CommonName, "zniff CA");
+        params.distinguished_name = name;
+        let legacy_cert = params.self_signed(&legacy_key).unwrap();
+        let legacy_ca = Ca::from_pem(
+            dir.clone(),
+            legacy_cert.pem(),
+            legacy_key.serialize_pem(),
+        )
+        .unwrap();
+        assert_eq!(legacy_ca.ca_name(), "zniff CA");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

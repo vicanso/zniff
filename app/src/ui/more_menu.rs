@@ -19,6 +19,7 @@ pub(crate) fn more_menu(
     pretty: Signal<bool>,
     shown_phase: Signal<Phase>,
     share_id: Signal<String>,
+    profiles: ProfileSignals,
     compose: Compose,
     seq_builder: SeqBuilder,
     selected: Signal<Option<u64>>,
@@ -49,6 +50,7 @@ pub(crate) fn more_menu(
             import_controls.clone(),
             filter,
             share_id,
+            profiles,
         ))
         .child(menu_action_enabled(
             Glyph::List,
@@ -124,7 +126,29 @@ pub(crate) fn more_menu(
                 }
             },
         ))
-        .child(menu_lang_row(import_controls.clone()));
+        .child(menu_lang_row(import_controls.clone()))
+        .child(menu_action_meta(
+            Glyph::Sliders,
+            tr("服务与中继设置", "Relay & Service Settings"),
+            {
+                let langs = ui_langs();
+                move || {
+                    let has_relay = !profiles.relay_url.get().trim().is_empty();
+                    let has_auth = !profiles.proxy_auth.get().trim().is_empty();
+                    let label = match (has_relay, has_auth) {
+                        (true, true) => t(ui_lang(langs), "中转 · 认证", "Relay · Auth"),
+                        (true, false) => t(ui_lang(langs), "中转", "Relay"),
+                        (false, true) => t(ui_lang(langs), "认证", "Auth"),
+                        (false, false) => "",
+                    };
+                    SharedString::from(label)
+                }
+            },
+            move || {
+                open.set(false);
+                profiles.machine_settings_open.set(true);
+            },
+        ));
     let items = desktop_child!(items, menu_rule());
     let items = desktop_child!(items, update_menu_section(update_state, import_controls));
     view()

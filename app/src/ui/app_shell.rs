@@ -173,6 +173,7 @@ pub fn App() -> impl IntoElement {
         relay_accept: relay_accept_sig,
         list_width,
         panel_open: signal(false),
+        machine_settings_open: signal(false),
         deselect_rev: signal(0),
     };
     let lan_url = signal(String::new());
@@ -802,7 +803,9 @@ pub fn App() -> impl IntoElement {
     let seq_esc = seq_builder;
     let shown_esc = shown;
     on_key("escape", move |_| {
-        if compose_esc.composing.get() {
+        if profile_signals.machine_settings_open.get() {
+            profile_signals.machine_settings_open.set(false);
+        } else if compose_esc.composing.get() {
             reset_compose(compose_esc);
         } else if seq_esc.open.get() {
             close_sequence_diagram(seq_esc);
@@ -949,8 +952,9 @@ pub fn App() -> impl IntoElement {
             listen_all,
             config_broken,
             config_broken_dismissed,
-            controls,
+            controls.clone(),
         ))
+        .child(machine_settings_modal(profile_signals, controls))
         .child(each(
             move || {
                 if toast_shown.with(Vec::is_empty) {
