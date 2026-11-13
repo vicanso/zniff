@@ -556,12 +556,55 @@ pub fn sync_web_config_diff(before: &crate::config::Config, after: &crate::confi
     }
 }
 
+fn web_base_slot() -> &'static Mutex<String> {
+    static BASE: Mutex<String> = Mutex::new(String::new());
+    &BASE
+}
+
+pub fn note_web_state_url(final_url: &str) {
+    let clean = final_url.split(['?', '#']).next().unwrap_or("");
+    if let Some(base) = clean.strip_suffix("api/state")
+        && (base.starts_with("http://") || base.starts_with("https://"))
+        && base.ends_with('/')
+    {
+        let mut guard = web_base_slot()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if guard.as_str() != base {
+            *guard = base.to_string();
+        }
+    }
+}
+
+pub async fn resolve_web_api_url(rel_path: &str) -> Option<String> {
+    let rel = rel_path.trim_start_matches('/');
+    {
+        let guard = web_base_slot()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if !guard.is_empty() {
+            return Some(format!("{}{rel}", guard.as_str()));
+        }
+    }
+    if let Some(page) = nsh_core::prelude::app_url().await {
+        let clean = page.split(['?', '#']).next().unwrap_or("");
+        if clean.starts_with("http://") || clean.starts_with("https://") {
+            let base = match clean.rfind('/') {
+                Some(idx) if idx > "https://".len() => &clean[..=idx],
+                _ => return Some(format!("{clean}/{rel}")),
+            };
+            return Some(format!("{base}{rel}"));
+        }
+    }
+    None
+}
+
 fn post_op(value: Value) {
     let Ok(body) = serde_json::to_vec(&value) else {
         return;
     };
     nsh_core::prelude::spawn(async move {
-        let request = nsh_core::prelude::HttpRequest::post("/api/hub", body)
+        let request = nsh_core::prelude::HttpRequest::post("api/hub", body)
             .header("content-type", "application/json");
         let _ = nsh_core::prelude::fetch(request).await;
     });
@@ -609,7 +652,7 @@ async fn post_ids(bytes: Vec<u8>) -> anyhow::Result<Vec<u64>> {
 }
 
 async fn post_json(bytes: Vec<u8>) -> anyhow::Result<Value> {
-    let request = nsh_core::prelude::HttpRequest::post("/api/hub", bytes)
+    let request = nsh_core::prelude::HttpRequest::post("api/hub", bytes)
         .header("content-type", "application/json");
     let response = nsh_core::prelude::fetch(request)
         .await

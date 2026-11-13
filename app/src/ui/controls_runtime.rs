@@ -526,7 +526,7 @@ pub(crate) fn toggle_capture(controls: Arc<Controls>) {
                 .into_bytes()
         };
         let request =
-            HttpRequest::post("/api/capture", body).header("content-type", "application/json");
+            HttpRequest::post("api/capture", body).header("content-type", "application/json");
         match fetch(request).await {
             Ok(response) => {
                 let value: serde_json::Value =
@@ -555,7 +555,11 @@ pub(crate) fn start_web_poll(
         let mut seeded = false;
         let mut seen_error = String::new();
         loop {
-            if let Ok(response) = fetch(HttpRequest::get("/api/state")).await
+            if let Ok(response) = fetch(HttpRequest::get("api/state")).await
+                && {
+                    proxy::note_web_state_url(&response.head.url);
+                    true
+                }
                 && let Ok(value) = serde_json::from_str::<serde_json::Value>(&response.text())
             {
                 controls.hub.apply_state(&value);
@@ -635,9 +639,9 @@ pub(crate) fn start_web_poll(
                 let f = effective_filter.get_untracked();
                 let trimmed = f.trim();
                 if trimmed.is_empty() {
-                    "/api/flows".to_string()
+                    "api/flows".to_string()
                 } else {
-                    format!("/api/flows?filter={}", url_encode_query_component(trimmed))
+                    format!("api/flows?filter={}", url_encode_query_component(trimmed))
                 }
             };
             if let Ok(response) = fetch(HttpRequest::get(flows_url)).await
@@ -655,7 +659,7 @@ pub(crate) fn start_web_poll(
                     .hub
                     .with_session(|session| session.cached_needs_detail(id));
                 if needs
-                    && let Ok(response) = fetch(HttpRequest::get(format!("/api/flows/{id}"))).await
+                    && let Ok(response) = fetch(HttpRequest::get(format!("api/flows/{id}"))).await
                     && response.ok()
                     && let Ok(value) = serde_json::from_str::<serde_json::Value>(&response.text())
                 {

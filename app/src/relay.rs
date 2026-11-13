@@ -30,10 +30,13 @@ const VIEW_DENY_DELAY: Duration = Duration::from_millis(300);
 const VIEW_CHALLENGE: &str = "WWW-Authenticate: Basic realm=\"zniff relay\", charset=\"UTF-8\"\r\n";
 /// Viewer credential for `zniff --relay` when `--view-auth` is absent.
 pub const VIEW_AUTH_ENV: &str = "ZNIFF_RELAY_VIEW_AUTH";
+/// URL path prefix for `zniff --relay` / `zniff --web --relay`.
+pub const PREFIX_ENV: &str = "ZNIFF_RELAY_PREFIX";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RelayBase {
     pub origin: String,
+    pub prefix: String,
     pub host: String,
     pub port: u16,
     pub tls: bool,
@@ -41,7 +44,74 @@ pub struct RelayBase {
 
 impl RelayBase {
     pub fn share_url(&self, id: &str) -> String {
-        format!("{}/s/{id}", self.origin)
+        format!("{}{}/s/{id}", self.origin, self.prefix)
+    }
+}
+
+pub fn normalize_prefix(raw: &str, flag: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed == "/" {
+        return Ok(String::new());
+    }
+    if trimmed.contains('?')
+        || trimmed.contains('#')
+        || trimmed.contains('\\')
+        || trimmed
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err(format!("{flag} 路径前缀格式无效"));
+    }
+    let inner = trimmed.trim_matches('/');
+    if inner.is_empty()
+        || inner
+            .split('/')
+            .any(|seg| seg.is_empty() || seg == "." || seg == "..")
+    {
+        return Err(format!("{flag} 路径前缀格式无效"));
+    }
+    let prefix = format!("/{inner}");
+    if prefix == "/health" || prefix.starts_with("/health/") {
+        return Err(format!("{flag} 不能使用 /health"));
+    }
+    Ok(prefix)
+}
+
+pub fn normalize_relay_prefix(raw: &str, flag: &str) -> Result<String, String> {
+    let prefix = normalize_prefix(raw, flag)?;
+    if prefix == "/s" || prefix.starts_with("/s/") || prefix.ends_with("/s") {
+        return Err(format!("{flag} 不能使用 /s"));
+    }
+    Ok(prefix)
+}
+
+pub fn normalize_web_prefix(raw: &str, flag: &str) -> Result<String, String> {
+    let prefix = normalize_prefix(raw, flag)?;
+    if prefix == "/api" || prefix.starts_with("/api/") {
+        return Err(format!("{flag} 不能使用 /api"));
+    }
+    Ok(prefix)
+}
+
+pub fn resolve_prefix(
+    cli: Option<&str>,
+    env: Option<&str>,
+    flag: &str,
+    is_relay: bool,
+) -> Result<String, String> {
+    let picked = [cli, env]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .unwrap_or("");
+    if picked.is_empty() {
+        return Ok(String::new());
+    }
+    if is_relay {
+        normalize_relay_prefix(picked, flag)
+    } else {
+        normalize_web_prefix(picked, flag)
     }
 }
 
@@ -58,7 +128,7 @@ pub enum ShareRoute {
 }
 
 /// Empty `relay_url` keeps the link on this computer. A filled-in address
-/// must be `http://host:port` or `https://host:port`, with a one-word token.
+/// must be `http(s)://host[:port][/prefix]`, with a one-word token.
 pub fn share_route(
     relay_url: &str,
     relay_token: &str,
@@ -99,21 +169,31 @@ pub(crate) fn bearer_ok(expected: &str, authorization: Option<&str>) -> bool {
 }
 
 pub fn normalize_base(raw: &str) -> Option<RelayBase> {
-    let raw = raw.trim().trim_end_matches('/');
+    let raw = raw.trim();
     let (tls, rest) = strip_ignore_case(raw, "https://")
         .map(|rest| (true, rest))
         .or_else(|| strip_ignore_case(raw, "http://").map(|rest| (false, rest)))?;
     if rest.is_empty()
-        || rest.contains('/')
         || rest.contains('?')
         || rest.contains('#')
         || rest.contains('@')
-        || rest.bytes().any(|byte| byte.is_ascii_whitespace())
+        || rest.contains('\\')
+        || rest
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
     {
         return None;
     }
+    let (authority, raw_path) = match rest.find('/') {
+        Some(idx) => (&rest[..idx], &rest[idx..]),
+        None => (rest, ""),
+    };
+    if authority.is_empty() {
+        return None;
+    }
+    let prefix = normalize_relay_prefix(raw_path, "relay_url").ok()?;
     let default_port = if tls { 443 } else { 80 };
-    let (host, port) = split_host_port(rest, default_port)?;
+    let (host, port) = split_host_port(authority, default_port)?;
     let origin = if host.contains(':') {
         format!("{}://[{host}]:{port}", if tls { "https" } else { "http" })
     } else {
@@ -121,6 +201,7 @@ pub fn normalize_base(raw: &str) -> Option<RelayBase> {
     };
     Some(RelayBase {
         origin,
+        prefix,
         host,
         port,
         tls,
@@ -134,6 +215,8 @@ pub struct CliSettings {
     pub token: String,
     /// `--view-auth` as typed. [`resolve_view_auth`] adds env and config.
     pub view_auth: Option<String>,
+    /// Normalized `--prefix` / `--relay-prefix` when passed.
+    pub prefix: Option<String>,
 }
 
 impl CliSettings {
@@ -154,6 +237,7 @@ pub fn cli_settings(
     let mut token = None;
     let mut bind = None;
     let mut view_auth = None;
+    let mut prefix = None;
     let mut index = 0;
     while index < args.len() {
         let arg = args[index].as_str();
@@ -175,6 +259,22 @@ pub fn cli_settings(
             index += 1;
             let next = args.get(index).ok_or_else(|| "缺少监听地址".to_string())?;
             bind = Some(parse_bind(next)?);
+        } else if let Some(rest) = arg.strip_prefix("--prefix=") {
+            prefix = Some(normalize_relay_prefix(rest, "--prefix")?);
+        } else if arg == "--prefix" {
+            index += 1;
+            let next = args
+                .get(index)
+                .ok_or_else(|| "缺少路径前缀 (--prefix </path>)".to_string())?;
+            prefix = Some(normalize_relay_prefix(next, "--prefix")?);
+        } else if let Some(rest) = arg.strip_prefix("--relay-prefix=") {
+            prefix = Some(normalize_relay_prefix(rest, "--relay-prefix")?);
+        } else if arg == "--relay-prefix" {
+            index += 1;
+            let next = args
+                .get(index)
+                .ok_or_else(|| "缺少路径前缀 (--relay-prefix </path>)".to_string())?;
+            prefix = Some(normalize_relay_prefix(next, "--relay-prefix")?);
         } else if let Some(rest) = arg.strip_prefix("--view-auth=") {
             view_auth = Some(rest.to_string());
         } else if arg == "--view-auth" {
@@ -205,6 +305,7 @@ pub fn cli_settings(
         port,
         token,
         view_auth,
+        prefix,
     })
 }
 
@@ -284,14 +385,32 @@ pub fn run_cli(
             return 2;
         }
     };
-    let relay = match Relay::start_with_view_auth(settings.addr(), &settings.token, &view_auth) {
+    let env_prefix = std::env::var(PREFIX_ENV).ok();
+    let prefix = match resolve_prefix(
+        settings.prefix.as_deref(),
+        env_prefix.as_deref(),
+        "--prefix",
+        true,
+    ) {
+        Ok(prefix) => prefix,
+        Err(message) => {
+            eprintln!("{message}");
+            return 2;
+        }
+    };
+    let relay = match Relay::start_with_options(
+        settings.addr(),
+        &settings.token,
+        &view_auth,
+        &prefix,
+    ) {
         Ok(relay) => relay,
         Err(err) => {
             eprintln!("zniff relay 没有绑上 {}: {err}", settings.addr());
             return 1;
         }
     };
-    println!("zniff relay listening on http://{}", relay.addr());
+    println!("zniff relay listening on http://{}{}", relay.addr(), prefix);
     print_view_auth_notice(&view_auth);
     if let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -319,11 +438,24 @@ impl Relay {
 
     /// Same as [`Relay::start`], but `GET`/`HEAD` need HTTP Basic `view_auth`
     /// when it is not empty. Uploads and deletes still use the bearer token.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn start_with_view_auth(
         bind: SocketAddr,
         token: &str,
         view_auth: &str,
     ) -> std::io::Result<Self> {
+        Self::start_with_options(bind, token, view_auth, "")
+    }
+
+    /// Starts the relay listener with optional viewer Basic auth and URL subpath prefix.
+    pub fn start_with_options(
+        bind: SocketAddr,
+        token: &str,
+        view_auth: &str,
+        prefix: &str,
+    ) -> std::io::Result<Self> {
+        let prefix = normalize_relay_prefix(prefix, "--relay-prefix")
+            .map_err(|msg| std::io::Error::new(std::io::ErrorKind::InvalidInput, msg))?;
         let view_auth = view_auth.to_string();
         let listener = std::net::TcpListener::bind(bind)?;
         listener.set_nonblocking(true)?;
@@ -355,6 +487,7 @@ impl Relay {
                     let state = Arc::new(Mutex::new(State {
                         token,
                         view_auth,
+                        prefix,
                         slots: HashMap::new(),
                     }));
                     loop {
@@ -557,7 +690,7 @@ async fn push_export(
         put(
             base,
             token,
-            &format!("/s/{id}/flows.json"),
+            &format!("{}/s/{id}/flows.json", base.prefix),
             export.document.as_bytes(),
             "application/json",
         )
@@ -571,7 +704,7 @@ async fn push_export(
         if let Err(err) = put(
             base,
             token,
-            &format!("/s/{id}/flows/{flow_id}.json"),
+            &format!("{}/s/{id}/flows/{flow_id}.json", base.prefix),
             body.as_bytes(),
             "application/json",
         )
@@ -588,7 +721,14 @@ async fn push_export(
 }
 
 async fn delete_share(base: &RelayBase, token: &str, id: &str) -> Result<(), PushError> {
-    request(base, "DELETE", &format!("/s/{id}"), token, &[]).await?;
+    request(
+        base,
+        "DELETE",
+        &format!("{}/s/{id}", base.prefix),
+        token,
+        &[],
+    )
+    .await?;
     Ok(())
 }
 
@@ -596,6 +736,7 @@ struct State {
     token: String,
     /// `user:pass` viewers must send as HTTP Basic. Empty leaves pages open.
     view_auth: String,
+    prefix: String,
     slots: HashMap<String, Slot>,
 }
 
@@ -639,11 +780,14 @@ impl std::fmt::Display for PushError {
 
 async fn serve_one(mut socket: TcpStream, state: Arc<Mutex<State>>) -> std::io::Result<()> {
     let (head_bytes, rest) = read_header(&mut socket).await?;
-    let reply = match parse_head(&head_bytes) {
-        Ok(head) => dispatch(&mut socket, &head, &rest, &state).await,
-        Err(_) => plain(400, "Bad Request", "bad request"),
+    let (is_head, reply) = match parse_head(&head_bytes) {
+        Ok(head) => (
+            head.method.eq_ignore_ascii_case("HEAD"),
+            dispatch(&mut socket, &head, &rest, &state).await,
+        ),
+        Err(_) => (false, plain(400, "Bad Request", "bad request")),
     };
-    let bytes = encode(&reply);
+    let bytes = encode(&reply, is_head);
     let _ = tokio::time::timeout(IO_TIMEOUT, socket.write_all(&bytes)).await;
     Ok(())
 }
@@ -652,7 +796,23 @@ async fn dispatch(socket: &mut TcpStream, head: &Head, rest: &[u8], state: &Mute
     if head.method.eq_ignore_ascii_case("CONNECT") || head.target.contains("://") {
         return plain(403, "Forbidden", "relay does not proxy");
     }
-    let Some((id, kind)) = crate::share::parse_share_path(&head.target) else {
+    let prefix = lock(state).prefix.clone();
+    let path = head.target.split('?').next().unwrap_or("/");
+    if (path == "/health" || (!prefix.is_empty() && path == format!("{prefix}/health")))
+        && (head.method.eq_ignore_ascii_case("GET") || head.method.eq_ignore_ascii_case("HEAD"))
+    {
+        return plain(200, "OK", "ok");
+    }
+    let effective_target: std::borrow::Cow<'_, str> = if prefix.is_empty() {
+        std::borrow::Cow::Borrowed(head.target.as_str())
+    } else if let Some(stripped) = head.target.strip_prefix(&prefix)
+        && stripped.starts_with('/')
+    {
+        std::borrow::Cow::Borrowed(stripped)
+    } else {
+        return plain(404, "Not Found", "not found");
+    };
+    let Some((id, kind)) = crate::share::parse_share_path(&effective_target) else {
         return plain(404, "Not Found", "not found");
     };
     let zh = crate::share::prefers_zh(header(head, "accept-language"));
@@ -793,7 +953,7 @@ fn get_page(state: &Mutex<State>, id: &str, zh: bool) -> Reply {
         return expired(zh);
     };
     let json = String::from_utf8_lossy(&slot.flows).into_owned();
-    let live = format!("/s/{id}/flows.json");
+    let live = format!("{}/s/{id}/flows.json", state.prefix);
     let html = crate::share::page(&json, &live, zh);
     Reply {
         status: 200,
@@ -1017,7 +1177,7 @@ fn plain(status: u16, reason: &'static str, message: &str) -> Reply {
     }
 }
 
-fn encode(reply: &Reply) -> Vec<u8> {
+fn encode(reply: &Reply, is_head: bool) -> Vec<u8> {
     let encoding = match reply.encoding {
         Some(value) => format!("Content-Encoding: {value}\r\n"),
         None => String::new(),
@@ -1031,7 +1191,9 @@ fn encode(reply: &Reply) -> Vec<u8> {
         len = reply.body.len(),
     );
     let mut out = head.into_bytes();
-    out.extend_from_slice(&reply.body);
+    if !is_head {
+        out.extend_from_slice(&reply.body);
+    }
     out
 }
 
@@ -1427,9 +1589,58 @@ mod tests {
             normalize_base("http://[::1]:9").unwrap().share_url("abc"),
             "http://[::1]:9/s/abc"
         );
+        let prefixed = normalize_base("https://relay.example/zniff-relay/").unwrap();
+        assert_eq!(prefixed.origin, "https://relay.example:443");
+        assert_eq!(prefixed.prefix, "/zniff-relay");
+        assert_eq!(
+            prefixed.share_url("abc"),
+            "https://relay.example:443/zniff-relay/s/abc"
+        );
         assert!(normalize_base("10.1.2.3:9").is_none());
         assert!(normalize_base("http://10.1.2.3:9/s/x").is_none());
+        assert!(normalize_base("http://10.1.2.3:9/s").is_none());
+        assert!(normalize_base("http://10.1.2.3:9/health").is_none());
         assert!(normalize_base("http://user:secret@10.1.2.3:9").is_none());
+
+        let with_prefix = cli_settings(
+            &[
+                "--relay".into(),
+                "--token".into(),
+                "tok".into(),
+                "--prefix".into(),
+                "zniff-relay/".into(),
+            ],
+            8877,
+            "",
+        )
+        .unwrap();
+        assert_eq!(with_prefix.prefix.as_deref(), Some("/zniff-relay"));
+        let with_relay_prefix = cli_settings(
+            &[
+                "--relay".into(),
+                "--token".into(),
+                "tok".into(),
+                "--relay-prefix=/ops/relay".into(),
+            ],
+            8877,
+            "",
+        )
+        .unwrap();
+        assert_eq!(with_relay_prefix.prefix.as_deref(), Some("/ops/relay"));
+        assert!(
+            cli_settings(
+                &[
+                    "--relay".into(),
+                    "--token".into(),
+                    "tok".into(),
+                    "--prefix".into(),
+                    "/s".into(),
+                ],
+                8877,
+                "",
+            )
+            .is_err()
+        );
 
         assert!(matches!(
             share_route("", "", "http://127.0.0.1:1", true),
@@ -1558,6 +1769,21 @@ mod tests {
         };
         let good = format!("Basic {}", crate::session::base64_encode(b"ann:s3cr3t"));
         let wrong = format!("Basic {}", crate::session::base64_encode(b"ann:nope"));
+
+        let (status, _, body) = raw_exchange(
+            addr,
+            &format!("GET /health HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(body, b"ok");
+        let (status, _, body) = raw_exchange(
+            addr,
+            &format!("HEAD /health HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert!(body.is_empty());
 
         let (status, _, _) = raw_exchange(addr, &put(&good)).await;
         assert_eq!(status, 401, "viewer credential must not upload");
@@ -1912,6 +2138,84 @@ mod tests {
         }
         assert!(gone, "stop did not delete the relay share");
         let _ = std::fs::remove_dir_all(&dir);
+        drop(relay);
+    }
+
+    #[tokio::test]
+    async fn prefixed_relay_round_trip() {
+        let relay = Relay::start_with_options(
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            "tok",
+            "",
+            "/zniff-relay",
+        )
+        .unwrap();
+        let addr = relay.addr();
+        let base = normalize_base(&format!("http://{addr}/zniff-relay")).unwrap();
+        let id = sample_id(11);
+        let export = ShareExport {
+            rev: 1,
+            document: flows_json("prefixed.example", future_expires(600), false),
+            bodies: Vec::new(),
+        };
+        let mut last_rev = None;
+        let mut pushed_bodies = HashSet::new();
+        push_export(&base, "tok", &id, &export, &mut last_rev, &mut pushed_bodies)
+            .await
+            .unwrap();
+
+        for path in ["/health", "/zniff-relay/health"] {
+            let (status, _, body) = raw_exchange(
+                addr,
+                &format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"),
+            )
+            .await;
+            assert_eq!(status, 200, "{path}");
+            assert_eq!(body, b"ok", "{path}");
+        }
+
+        let (status, _, html) = raw_exchange(
+            addr,
+            &format!(
+                "GET /zniff-relay/s/{id} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+            ),
+        )
+        .await;
+        assert_eq!(status, 200);
+        let html_str = String::from_utf8_lossy(&html);
+        assert!(
+            html_str.contains(&format!("/zniff-relay/s/{id}/flows.json")),
+            "{html_str}"
+        );
+
+        let (status, _, json_body) = raw_exchange(
+            addr,
+            &format!(
+                "GET /zniff-relay/s/{id}/flows.json HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+            ),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert!(
+            String::from_utf8_lossy(&json_body).contains("prefixed.example")
+        );
+
+        let (status, _, _) = raw_exchange(
+            addr,
+            &format!("GET /s/{id} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"),
+        )
+        .await;
+        assert_eq!(status, 404);
+
+        delete_share(&base, "tok", &id).await.unwrap();
+        let (status, _, _) = raw_exchange(
+            addr,
+            &format!(
+                "GET /zniff-relay/s/{id} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+            ),
+        )
+        .await;
+        assert_eq!(status, 404);
         drop(relay);
     }
 

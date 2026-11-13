@@ -282,7 +282,12 @@ pub(crate) fn facet_toggle_button(
 ) -> impl IntoElement {
     let has_facet_filter = computed(move || {
         let f = filter.get();
-        !extract_host_or(&f).is_empty() || !extract_app_or(&f).is_empty()
+        !extract_host_or(&f).is_empty()
+            || !extract_app_or(&f).is_empty()
+            || filter_has_token(&f, SLOW_ALIASES)
+            || filter_has_token(&f, ERR_ALIASES)
+            || filter_has_token(&f, JSON_ALIASES)
+            || filter_has_token(&f, PIN_ALIASES)
     });
     view()
         .w(px(30.0))
@@ -421,13 +426,52 @@ pub(crate) fn facet_drawer(
                 .gap_1p5()
                 .child(
                     view()
+                        .min_w(px(0.0))
                         .flex_row()
+                        .flex_wrap()
                         .items_center()
                         .gap_1()
                         .child(tab_btn(0, "域名", "Domains", |f| f.domains.len()))
                         .child(tab_btn(1, "应用 / 来源", "Apps / Clients", |f| {
                             f.apps.len()
-                        })),
+                        }))
+                        .child(view().w(px(1.0)).h(px(14.0)).mx_0p5().bg(border_subtle()))
+                        .child(drawer_quick_chip(
+                            filter,
+                            "慢请求",
+                            "Slow",
+                            "slow:",
+                            SLOW_ALIASES,
+                            "筛选耗时 ≥ 1s 或进行中的慢请求 (slow:)",
+                            "Filter slow requests >= 1s (slow:)",
+                        ))
+                        .child(drawer_quick_chip(
+                            filter,
+                            "出错",
+                            "Errors",
+                            "status:4xx|5xx|err",
+                            ERR_ALIASES,
+                            "筛选 4xx / 5xx / 连接失败请求 (status:4xx|5xx|err)",
+                            "Filter 4xx / 5xx / failed requests (status:4xx|5xx|err)",
+                        ))
+                        .child(drawer_quick_chip(
+                            filter,
+                            "JSON",
+                            "JSON",
+                            "type:json",
+                            JSON_ALIASES,
+                            "筛选 JSON 请求/响应 (type:json)",
+                            "Filter JSON traffic (type:json)",
+                        ))
+                        .child(drawer_quick_chip(
+                            filter,
+                            "星标",
+                            "Starred",
+                            "pin:",
+                            PIN_ALIASES,
+                            "只看已星标请求 (pin:)",
+                            "Show starred requests only (pin:)",
+                        )),
                 )
                 .child(
                     text(move || -> SharedString {
@@ -638,8 +682,81 @@ pub(crate) fn facet_drawer(
         )
 }
 
+#[allow(clippy::too_many_arguments)]
+fn drawer_quick_chip(
+    filter: Signal<String>,
+    zh: &'static str,
+    en: &'static str,
+    token: &'static str,
+    aliases: &'static [&'static str],
+    tip_zh: &'static str,
+    tip_en: &'static str,
+) -> impl IntoElement {
+    let is_active = computed(move || filter_has_token(&filter.get(), aliases));
+    view()
+        .h(px(22.0))
+        .px_2()
+        .rounded(px(5.0))
+        .border_1()
+        .border_color(move || {
+            if is_active.get() {
+                accent_blue_border()
+            } else {
+                border_control()
+            }
+        })
+        .bg(move || {
+            if is_active.get() {
+                accent_blue_soft()
+            } else {
+                bg_control()
+            }
+        })
+        .hover(|style| {
+            style.bg(move || {
+                if is_active.get() {
+                    accent_blue_soft_hover()
+                } else {
+                    bg_control_hover()
+                }
+            })
+        })
+        .active(|style| style.opacity(0.8))
+        .cursor(Cursor::Pointer)
+        .label(tr(zh, en))
+        .tooltip(label_tip(tip_zh, tip_en))
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .on_press(move || filter.set(toggle_filter_chip(&filter.get(), token, aliases)))
+        .child(view().w(px(5.0)).h(px(5.0)).rounded_full().bg(move || {
+            if is_active.get() {
+                accent_blue()
+            } else {
+                fg_muted()
+            }
+        }))
+        .child(
+            control_text(tr(zh, en))
+                .text_size(px(11.0))
+                .text_color(move || {
+                    if is_active.get() {
+                        accent_blue_text()
+                    } else {
+                        fg_secondary()
+                    }
+                }),
+        )
+}
+
 pub(crate) const JSON_ALIASES: &[&str] = &["type:json", "ct:json"];
 pub(crate) const FAIL_ALIASES: &[&str] = &["失败", "fail", "err", "error"];
+pub(crate) const ERR_ALIASES: &[&str] = &[
+    "status:4xx|5xx|err",
+    "status:4xx,5xx,err",
+    "4xx|5xx|err",
+    "4xx,5xx,err",
+];
 pub(crate) const PIN_ALIASES: &[&str] = &["pin:"];
 pub(crate) const SLOW_ALIASES: &[&str] = &["slow:"];
 

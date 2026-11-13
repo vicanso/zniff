@@ -2430,7 +2430,12 @@ const PAGE_TEMPLATE: &str = r##"<!DOCTYPE html>
 <div class="toast" id="toast"></div>
 
 <script>
-const LIVE = "__ZNIFF_LIVE__";
+const RAW_LIVE = "__ZNIFF_LIVE__";
+const LIVE = RAW_LIVE
+  ? ((typeof location !== "undefined" && location.pathname && /\/s\/[0-9a-fA-F-]{36}\/?$/.test(location.pathname))
+      ? `${location.pathname.replace(/\/+$/, "")}/flows.json`
+      : RAW_LIVE)
+  : "";
 const DEFAULT_ZH = __ZNIFF_ZH_BOOL__;
 const INITIAL = __ZNIFF_INITIAL_JSON__;
 const FIXED_DEF = [

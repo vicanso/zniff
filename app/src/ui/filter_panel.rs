@@ -180,14 +180,6 @@ pub(crate) fn saved_filter_panel(
     let rules_save_controls = controls.clone();
     let rules_clear_controls = controls.clone();
     let upstream_controls = controls.clone();
-    let proxy_auth_text = profiles.proxy_auth;
-    let proxy_auth_controls = controls.clone();
-    let relay_url_text = profiles.relay_url;
-    let relay_token_text = signal(lock_string(&controls.relay_token));
-    let relay_accept_on = profiles.relay_accept;
-    let relay_url_controls = controls.clone();
-    let relay_token_controls = controls.clone();
-    let relay_accept_controls = controls.clone();
     let tunnel_controls = controls;
     let draft_host = signal(String::new());
     let draft_path = signal(String::new());
@@ -661,128 +653,7 @@ pub(crate) fn saved_filter_panel(
                                     }
                                 },
                             ),
-                        ))
-                        .child(config_field(
-                            "代理认证",
-                            "Proxy auth",
-                            side_input(
-                                proxy_auth_text,
-                                tr(
-                                    "user:pass，空着不校验",
-                                    "user:pass, empty disables auth",
-                                ),
-                                28.0,
-                                false,
-                                move |text| {
-                                    proxy_auth_text.set(text.to_string());
-                                    let stored = text.trim().to_string();
-                                    proxy_auth_controls.hub.set_proxy_auth(&stored);
-                                    if let Err(err) =
-                                        save_config(|config| config.proxy_auth = stored)
-                                    {
-                                        set_status(
-                                            &proxy_auth_controls,
-                                            StatusMsg::PrefUnsaved {
-                                                name: PrefName::ProxyAuth,
-                                                err: err.to_string(),
-                                            },
-                                        );
-                                    }
-                                },
-                            ),
-                        ))
-                        .child(config_field(
-                            "中转地址",
-                            "Relay address",
-                            side_input(
-                                relay_url_text,
-                                tr(
-                                    "http://主机:端口，空着只在本机分享",
-                                    "http://host:port, empty shares locally",
-                                ),
-                                28.0,
-                                false,
-                                move |text| {
-                                    relay_url_text.set(text.to_string());
-                                    let stored = text.trim().to_string();
-                                    *relay_url_controls
-                                        .relay_url
-                                        .lock()
-                                        .unwrap_or_else(|err| err.into_inner()) = stored.clone();
-                                    if let Err(err) =
-                                        save_config(|config| config.relay_url = stored)
-                                    {
-                                        set_status(
-                                            &relay_url_controls,
-                                            StatusMsg::PrefUnsaved {
-                                                name: PrefName::Relay,
-                                                err: err.to_string(),
-                                            },
-                                        );
-                                    }
-                                },
-                            ),
-                        ))
-                        .child(config_field(
-                            "中转密钥",
-                            "Relay token",
-                            side_input(
-                                relay_token_text,
-                                tr(
-                                    "上传和接收用同一个密钥",
-                                    "Same secret for upload and receive",
-                                ),
-                                28.0,
-                                false,
-                                move |text| {
-                                    relay_token_text.set(text.to_string());
-                                    let stored = text.trim().to_string();
-                                    *relay_token_controls
-                                        .relay_token
-                                        .lock()
-                                        .unwrap_or_else(|err| err.into_inner()) = stored.clone();
-                                    relay_token_controls.hub.set_relay_token(&stored);
-                                    if let Err(err) =
-                                        save_config(|config| config.relay_token = stored)
-                                    {
-                                        set_status(
-                                            &relay_token_controls,
-                                            StatusMsg::PrefUnsaved {
-                                                name: PrefName::Relay,
-                                                err: err.to_string(),
-                                            },
-                                        );
-                                    }
-                                },
-                            ),
-                        ))
-                        .child(
-                            view().w_full().flex_row().child(enable_switch(
-                                relay_accept_on,
-                                "接收中继",
-                                "Accept relay",
-                                move |on| {
-                                    relay_accept_controls.hub.set_relay_accept(on);
-                                    if on && !relay_accept_controls.hub.relay_token_ready() {
-                                        set_status(
-                                            &relay_accept_controls,
-                                            StatusMsg::RelayAcceptNeedToken,
-                                        );
-                                    }
-                                    if let Err(err) =
-                                        save_config(|config| config.relay_accept = on)
-                                    {
-                                        set_status(
-                                            &relay_accept_controls,
-                                            StatusMsg::PrefUnsaved {
-                                                name: PrefName::Relay,
-                                                err: err.to_string(),
-                                            },
-                                        );
-                                    }
-                                },
-                            )),
-                        ),
+                        )),
                 ),
                 ),
         )

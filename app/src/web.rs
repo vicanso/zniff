@@ -29,10 +29,14 @@ const HUB_BODY_CAP: usize = 1024 * 1024;
 const LIST_CAP: usize = 400;
 const PREVIEW_CAP: usize = 256 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
+const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
+const SYSTEM_WEB_ROOT: &str = "/usr/share/zniff/web";
 /// Default relay port for `zniff --web --relay`.
 pub const RELAY_DEFAULT_PORT: u16 = 8879;
 /// Console credential when `--web-auth` is absent.
 pub const WEB_AUTH_ENV: &str = "ZNIFF_WEB_AUTH";
+/// URL path prefix for `zniff --web`.
+pub const WEB_PREFIX_ENV: &str = "ZNIFF_WEB_PREFIX";
 /// Wait before answering a console request with a missing or wrong credential.
 const AUTH_DENY_DELAY: Duration = Duration::from_millis(300);
 
@@ -43,6 +47,8 @@ pub struct WebSettings {
     pub capture_port: u16,
     /// `--no-capture`: the console may never open the capture port.
     pub no_capture: bool,
+    /// Normalized `--web-prefix` when passed.
+    pub web_prefix: Option<String>,
     /// `--web-auth` as typed. [`crate::relay::resolve_basic_credential`] adds env and config.
     pub web_auth: Option<String>,
     /// Present with `--relay`: a relay listener in the same process.
@@ -57,6 +63,8 @@ pub struct RelayListen {
     pub token: Option<String>,
     /// `--view-auth` as typed.
     pub view_auth: Option<String>,
+    /// Normalized `--relay-prefix` when passed.
+    pub prefix: Option<String>,
 }
 
 impl RelayListen {
@@ -80,10 +88,12 @@ pub fn cli_settings(args: &[String], config_port: u16) -> std::result::Result<We
     let mut capture_port = None;
     let mut capture_bind = None;
     let mut no_capture = false;
+    let mut web_prefix = None;
     let mut web_auth = None;
     let mut relay = false;
     let mut relay_port = None;
     let mut relay_bind = None;
+    let mut relay_prefix = None;
     let mut token = None;
     let mut view_auth = None;
     let mut index = 0;
@@ -101,6 +111,14 @@ pub fn cli_settings(args: &[String], config_port: u16) -> std::result::Result<We
             index += 1;
             let next = args.get(index).ok_or_else(|| "缺少网页地址".to_string())?;
             web_bind = Some(parse_bind(next)?);
+        } else if let Some(rest) = arg.strip_prefix("--web-prefix=") {
+            web_prefix = Some(crate::relay::normalize_web_prefix(rest, "--web-prefix")?);
+        } else if arg == "--web-prefix" {
+            index += 1;
+            let next = args
+                .get(index)
+                .ok_or_else(|| "缺少网页路径前缀 (--web-prefix </path>)".to_string())?;
+            web_prefix = Some(crate::relay::normalize_web_prefix(next, "--web-prefix")?);
         } else if let Some(rest) = arg.strip_prefix("--port=") {
             capture_port = Some(parse_port(rest)?);
         } else if arg == "--port" || arg == "-p" {
@@ -129,6 +147,20 @@ pub fn cli_settings(args: &[String], config_port: u16) -> std::result::Result<We
             index += 1;
             let next = args.get(index).ok_or_else(|| "缺少中继地址".to_string())?;
             relay_bind = Some(parse_bind(next)?);
+        } else if let Some(rest) = arg.strip_prefix("--relay-prefix=") {
+            relay_prefix = Some(crate::relay::normalize_relay_prefix(
+                rest,
+                "--relay-prefix",
+            )?);
+        } else if arg == "--relay-prefix" {
+            index += 1;
+            let next = args
+                .get(index)
+                .ok_or_else(|| "缺少中继路径前缀 (--relay-prefix </path>)".to_string())?;
+            relay_prefix = Some(crate::relay::normalize_relay_prefix(
+                next,
+                "--relay-prefix",
+            )?);
         } else if let Some(rest) = arg.strip_prefix("--token=") {
             token = Some(rest.to_string());
         } else if arg == "--token" {
@@ -158,8 +190,16 @@ pub fn cli_settings(args: &[String], config_port: u16) -> std::result::Result<We
     }
     let web_port = web_port.unwrap_or(WEB_DEFAULT_PORT);
     let capture_port = capture_port.unwrap_or(config_port);
-    if !relay && (relay_port.is_some() || relay_bind.is_some() || view_auth.is_some()) {
-        return Err("--relay-port、--relay-bind、--view-auth 要和 --relay 一起用".to_string());
+    if !relay
+        && (relay_port.is_some()
+            || relay_bind.is_some()
+            || relay_prefix.is_some()
+            || view_auth.is_some())
+    {
+        return Err(
+            "--relay-port、--relay-bind、--relay-prefix、--view-auth 要和 --relay 一起用"
+                .to_string(),
+        );
     }
     if no_capture && !relay {
         return Err("--no-capture 只用于中继：zniff --web --relay --no-capture".to_string());
@@ -172,6 +212,7 @@ pub fn cli_settings(args: &[String], config_port: u16) -> std::result::Result<We
         port: relay_port.unwrap_or(RELAY_DEFAULT_PORT),
         token,
         view_auth,
+        prefix: relay_prefix,
     });
     if let Some(relay) = &relay {
         if relay.port == web_port {
@@ -187,6 +228,7 @@ pub fn cli_settings(args: &[String], config_port: u16) -> std::result::Result<We
         capture_bind: capture_bind.unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST)),
         capture_port,
         no_capture,
+        web_prefix,
         web_auth,
         relay,
     })
@@ -250,6 +292,19 @@ pub fn run_cli(args: &[String], config_port: u16) -> i32 {
             return 2;
         }
     };
+    let env_web_prefix = std::env::var(WEB_PREFIX_ENV).ok();
+    let web_prefix = match crate::relay::resolve_prefix(
+        settings.web_prefix.as_deref(),
+        env_web_prefix.as_deref(),
+        "--web-prefix",
+        false,
+    ) {
+        Ok(prefix) => prefix,
+        Err(message) => {
+            eprintln!("{message}");
+            return 2;
+        }
+    };
     let relay = match &settings.relay {
         Some(listen) => match start_relay(listen, &loaded) {
             Ok(relay) => Some(relay),
@@ -259,6 +314,7 @@ pub fn run_cli(args: &[String], config_port: u16) -> i32 {
     };
     let mut prefs = WebPrefs::from_loaded(&loaded, data_dir, dev_mode);
     prefs.web_auth = web_auth.clone();
+    prefs.web_prefix = web_prefix.clone();
     prefs.no_capture = settings.no_capture;
     let web_root = packaged_web_root();
     match &web_root {
@@ -280,7 +336,11 @@ pub fn run_cli(args: &[String], config_port: u16) -> i32 {
             return 1;
         }
     };
-    println!("zniff web listening on http://{}", server.addr());
+    if web_prefix.is_empty() {
+        println!("zniff web listening on http://{}", server.addr());
+    } else {
+        println!("zniff web listening on http://{}{}/", server.addr(), web_prefix);
+    }
     if settings.no_capture {
         println!("只做中继 (--no-capture)：这个进程不会打开抓包端口");
     } else {
@@ -339,12 +399,28 @@ fn start_relay(
         eprintln!("{message}");
         2
     })?;
-    let relay = crate::relay::Relay::start_with_view_auth(listen.addr(), &token, &view_auth)
-        .map_err(|err| {
-            eprintln!("zniff relay 没有绑上 {}: {err}", listen.addr());
-            1
-        })?;
-    println!("zniff relay listening on http://{}", relay.addr());
+    let env_prefix = std::env::var(crate::relay::PREFIX_ENV).ok();
+    let relay_prefix = crate::relay::resolve_prefix(
+        listen.prefix.as_deref(),
+        env_prefix.as_deref(),
+        "--relay-prefix",
+        true,
+    )
+    .map_err(|message| {
+        eprintln!("{message}");
+        2
+    })?;
+    let relay = crate::relay::Relay::start_with_options(
+        listen.addr(),
+        &token,
+        &view_auth,
+        &relay_prefix,
+    )
+    .map_err(|err| {
+        eprintln!("zniff relay 没有绑上 {}: {err}", listen.addr());
+        1
+    })?;
+    println!("zniff relay listening on http://{}{}", relay.addr(), relay_prefix);
     crate::relay::print_view_auth_notice(&view_auth);
     Ok(relay)
 }
@@ -501,6 +577,8 @@ struct WebPrefs {
     relay_url: String,
     /// `user:pass` every console request must send as HTTP Basic. Empty: open.
     web_auth: String,
+    /// Normalized URL path prefix (empty or `/...`).
+    web_prefix: String,
     /// Refuse to start capture (`--web --relay --no-capture`).
     no_capture: bool,
 }
@@ -519,6 +597,7 @@ impl WebPrefs {
             redact_fields: loaded.redact_fields.clone(),
             relay_url: loaded.relay_url.clone(),
             web_auth: String::new(),
+            web_prefix: String::new(),
             no_capture: false,
         }
     }
@@ -592,12 +671,29 @@ struct Reply {
     reason: &'static str,
     content_type: std::borrow::Cow<'static, str>,
     attachment: Option<String>,
+    location: Option<String>,
+    encoding: Option<&'static str>,
+    vary_encoding: bool,
     body: Vec<u8>,
 }
 
 async fn serve_one(mut socket: TcpStream, slot: Arc<Mutex<Slot>>) -> Result<()> {
     let (head_bytes, rest) = read_header(&mut socket).await?;
     let (is_head, reply) = match parse_head(&head_bytes) {
+        Ok(head) if is_health_request(&slot, &head) => (
+            head.method.eq_ignore_ascii_case("HEAD"),
+            text(200, "OK", "ok"),
+        ),
+        Ok(head)
+            if !head.method.eq_ignore_ascii_case("CONNECT")
+                && !head.target.contains("://")
+                && (head.method.eq_ignore_ascii_case("GET")
+                    || head.method.eq_ignore_ascii_case("HEAD"))
+                && prefix_exact_match(&slot, &head.target).is_some() =>
+        {
+            let loc = prefix_exact_match(&slot, &head.target).unwrap_or_default();
+            (head.method.eq_ignore_ascii_case("HEAD"), redirect(loc))
+        }
         Ok(head) if !console_authorized(&slot, &head) => {
             tokio::time::sleep(AUTH_DENY_DELAY).await;
             let _ = tokio::time::timeout(IO_TIMEOUT, socket.write_all(CONSOLE_CHALLENGE)).await;
@@ -611,11 +707,40 @@ async fn serve_one(mut socket: TcpStream, slot: Arc<Mutex<Slot>>) -> Result<()> 
         Err(_) => (false, text(400, "Bad Request", "bad request")),
     };
     let bytes = encode(&reply, is_head);
-    let _ = tokio::time::timeout(IO_TIMEOUT, socket.write_all(&bytes)).await;
+    let _ = tokio::time::timeout(WRITE_TIMEOUT, socket.write_all(&bytes)).await;
     Ok(())
 }
 
 const CONSOLE_CHALLENGE: &[u8] = b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"zniff web\", charset=\"UTF-8\"\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 23\r\nConnection: close\r\nCache-Control: no-store\r\n\r\nauthentication required";
+
+fn is_health_request(slot: &Mutex<Slot>, head: &Head) -> bool {
+    if !(head.method.eq_ignore_ascii_case("GET") || head.method.eq_ignore_ascii_case("HEAD")) {
+        return false;
+    }
+    let path = head.target.split('?').next().unwrap_or("/");
+    if path == "/health" {
+        return true;
+    }
+    let web_prefix = lock(slot).prefs.web_prefix.clone();
+    !web_prefix.is_empty() && path == format!("{web_prefix}/health")
+}
+
+fn prefix_exact_match(slot: &Mutex<Slot>, target: &str) -> Option<String> {
+    let web_prefix = lock(slot).prefs.web_prefix.clone();
+    if web_prefix.is_empty() {
+        return None;
+    }
+    let (path, query) = target
+        .split_once('?')
+        .map_or((target, None), |(p, q)| (p, Some(q)));
+    if path != web_prefix {
+        return None;
+    }
+    Some(match query {
+        Some(q) => format!("{web_prefix}/?{q}"),
+        None => format!("{web_prefix}/"),
+    })
+}
 
 /// Open when `--web-auth` is not set. Otherwise every request, pages and
 /// `/api` alike, must carry `Authorization: Basic` for that `user:pass`.
@@ -634,12 +759,26 @@ async fn route(socket: &mut TcpStream, head: &Head, rest: &[u8], slot: &Mutex<Sl
     if head.method.eq_ignore_ascii_case("CONNECT") || head.target.contains("://") {
         return text(403, "Forbidden", "web server does not proxy");
     }
-    let path = head.target.split('?').next().unwrap_or("/");
+    let raw_path = head.target.split('?').next().unwrap_or("/");
+    let (web_root, web_prefix) = {
+        let guard = lock(slot);
+        (guard.web_root.clone(), guard.prefs.web_prefix.clone())
+    };
+    let path = if web_prefix.is_empty() {
+        raw_path
+    } else if let Some(rest_path) = raw_path.strip_prefix(web_prefix.as_str())
+        && rest_path.starts_with('/')
+    {
+        rest_path
+    } else {
+        return text(404, "Not Found", "not found");
+    };
     let method = head.method.as_str();
-    let web_root = lock(slot).web_root.clone();
     if method.eq_ignore_ascii_case("GET") || method.eq_ignore_ascii_case("HEAD") {
         if path == "/" {
-            if let Some(file) = static_reply(path, web_root.as_deref()) {
+            if let Some(file) =
+                static_reply(path, web_root.as_deref(), header(head, "accept-encoding"))
+            {
                 return file;
             }
             let zh = prefers_zh(header(head, "accept-language"));
@@ -703,7 +842,8 @@ async fn route(socket: &mut TcpStream, head: &Head, rest: &[u8], slot: &Mutex<Sl
                 };
             }
         }
-        if let Some(file) = static_reply(path, web_root.as_deref()) {
+        if let Some(file) = static_reply(path, web_root.as_deref(), header(head, "accept-encoding"))
+        {
             return file;
         }
         return text(404, "Not Found", "not found");
@@ -716,7 +856,7 @@ async fn route(socket: &mut TcpStream, head: &Head, rest: &[u8], slot: &Mutex<Sl
         };
         let body = match read_body(socket, head, rest, cap).await {
             Ok(body) => body,
-            Err(reply) => return reply,
+            Err(reply) => return *reply,
         };
         if path == "/api/capture" {
             let value = match serde_json::from_slice::<Value>(&body) {
@@ -1093,6 +1233,9 @@ fn flow_body_reply(hub: &Hub, id: u64, redact: &crate::share::RedactOptions) -> 
         reason: "OK",
         content_type,
         attachment: Some(format!("flow-{id}.{ext}")),
+        location: None,
+        encoding: None,
+        vary_encoding: false,
         body: flow.response_body,
     }
 }
@@ -1109,6 +1252,9 @@ fn export_har_reply(hub: &Hub, filter: &str, redact: &crate::share::RedactOption
         reason: "OK",
         content_type: std::borrow::Cow::Borrowed("application/json; charset=utf-8"),
         attachment: Some(format!("zniff-{secs}.har")),
+        location: None,
+        encoding: None,
+        vary_encoding: false,
         body,
     }
 }
@@ -1137,6 +1283,9 @@ fn export_html_reply(
         reason: "OK",
         content_type: std::borrow::Cow::Borrowed("text/html; charset=utf-8"),
         attachment: Some(format!("zniff-{secs}.html")),
+        location: None,
+        encoding: None,
+        vary_encoding: false,
         body: page_html.into_bytes(),
     }
 }
@@ -1264,8 +1413,8 @@ function paint(flows) {
     rowsEl.appendChild(tr);
   }
 }
-async function load(id) {
-  const res = await fetch("/api/flows/" + id);
+async fn load(id) {
+  const res = await fetch("api/flows/" + id);
   if (!res.ok) { detailEl.textContent = I.detail; return; }
   const flow = await res.json();
   const lines = [
@@ -1280,16 +1429,16 @@ async function load(id) {
   detailEl.textContent = lines.filter((line, index) => line !== "" || index > 2).join("\n");
 }
 async function tick() {
-  const state = await fetch("/api/state").then((res) => res.json());
+  const state = await fetch("api/state").then((res) => res.json());
   toggle.textContent = state.capturing ? I.stop : I.start;
   toggle.className = state.capturing ? "stop" : "";
   toggle.dataset.on = state.capturing ? "0" : "1";
   stateEl.textContent = (state.capturing ? (I.listening + " " + state.listen) : (I.closed + " " + state.listen_port)) + (state.error ? (" — " + state.error) : "");
-  const list = await fetch("/api/flows?filter=" + encodeURIComponent(filterEl.value || "")).then((res) => res.json());
+  const list = await fetch("api/flows?filter=" + encodeURIComponent(filterEl.value || "")).then((res) => res.json());
   paint(list.flows || []);
 }
 toggle.onclick = async () => {
-  await fetch("/api/capture", {
+  await fetch("api/capture", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ on: toggle.dataset.on === "1" })
@@ -1297,7 +1446,7 @@ toggle.onclick = async () => {
   await tick();
 };
 clearBtn.onclick = async () => {
-  await fetch("/api/clear", { method: "POST" });
+  await fetch("api/clear", { method: "POST" });
   selected = null;
   detailEl.textContent = I.detail;
   await tick();
@@ -1316,6 +1465,9 @@ fn html(status: u16, reason: &'static str, body: Vec<u8>) -> Reply {
         reason,
         content_type: std::borrow::Cow::Borrowed("text/html; charset=utf-8"),
         attachment: None,
+        location: None,
+        encoding: None,
+        vary_encoding: false,
         body,
     }
 }
@@ -1326,7 +1478,23 @@ fn text(status: u16, reason: &'static str, message: &str) -> Reply {
         reason,
         content_type: std::borrow::Cow::Borrowed("text/plain; charset=utf-8"),
         attachment: None,
+        location: None,
+        encoding: None,
+        vary_encoding: false,
         body: message.as_bytes().to_vec(),
+    }
+}
+
+fn redirect(location: String) -> Reply {
+    Reply {
+        status: 302,
+        reason: "Found",
+        content_type: std::borrow::Cow::Borrowed("text/plain; charset=utf-8"),
+        attachment: None,
+        location: Some(location),
+        encoding: None,
+        vary_encoding: false,
+        body: Vec::new(),
     }
 }
 
@@ -1336,6 +1504,9 @@ fn json_reply(status: u16, reason: &'static str, value: &Value) -> Reply {
         reason,
         content_type: std::borrow::Cow::Borrowed("application/json; charset=utf-8"),
         attachment: None,
+        location: None,
+        encoding: None,
+        vary_encoding: false,
         body: serde_json::to_vec(value).unwrap_or_else(|_| b"{}".to_vec()),
     }
 }
@@ -1346,8 +1517,22 @@ fn encode(reply: &Reply, is_head: bool) -> Vec<u8> {
         .as_deref()
         .map(|name| format!("Content-Disposition: attachment; filename=\"{name}\"\r\n"))
         .unwrap_or_default();
+    let location = reply
+        .location
+        .as_deref()
+        .map(|loc| format!("Location: {loc}\r\n"))
+        .unwrap_or_default();
+    let encoding = reply
+        .encoding
+        .map(|enc| format!("Content-Encoding: {enc}\r\n"))
+        .unwrap_or_default();
+    let vary = if reply.vary_encoding {
+        "Vary: Accept-Encoding\r\n"
+    } else {
+        ""
+    };
     let head = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\n{disposition}Content-Length: {len}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\n{location}{disposition}{encoding}{vary}Content-Length: {len}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n",
         status = reply.status,
         reason = reply.reason,
         content_type = reply.content_type,
@@ -1473,26 +1658,26 @@ async fn read_body(
     head: &Head,
     rest: &[u8],
     cap: usize,
-) -> std::result::Result<Vec<u8>, Reply> {
+) -> std::result::Result<Vec<u8>, Box<Reply>> {
     if head.headers.iter().any(|(name, value)| {
         name.eq_ignore_ascii_case("transfer-encoding")
             && value.to_ascii_lowercase().contains("chunked")
     }) {
-        return Err(text(
+        return Err(Box::new(text(
             411,
             "Length Required",
             "chunked bodies are not accepted",
-        ));
+        )));
     }
     let Some(raw) = header(head, "content-length") else {
-        return Err(text(411, "Length Required", "content-length required"));
+        return Err(Box::new(text(411, "Length Required", "content-length required")));
     };
     let len: usize = match raw.parse() {
         Ok(len) => len,
-        Err(_) => return Err(text(400, "Bad Request", "bad content-length")),
+        Err(_) => return Err(Box::new(text(400, "Bad Request", "bad content-length"))),
     };
     if len > cap {
-        return Err(text(413, "Content Too Large", "body is too large"));
+        return Err(Box::new(text(413, "Content Too Large", "body is too large")));
     }
     let mut body = Vec::with_capacity(len);
     let take = rest.len().min(len);
@@ -1500,9 +1685,9 @@ async fn read_body(
     while body.len() < len {
         let mut buf = [0_u8; 1024];
         let read = match tokio::time::timeout(IO_TIMEOUT, socket.read(&mut buf)).await {
-            Ok(Ok(0)) => return Err(text(400, "Bad Request", "body ended early")),
+            Ok(Ok(0)) => return Err(Box::new(text(400, "Bad Request", "body ended early"))),
             Ok(Ok(count)) => count,
-            _ => return Err(text(400, "Bad Request", "body read failed")),
+            _ => return Err(Box::new(text(400, "Bad Request", "body read failed"))),
         };
         let need = len - body.len();
         body.extend_from_slice(&buf[..read.min(need)]);
@@ -1530,30 +1715,79 @@ fn parse_bind(text: &str) -> std::result::Result<IpAddr, String> {
 }
 
 /// Directory of the packaged nsh page. `ZNIFF_WEB_ROOT` wins. Otherwise look
-/// for `app/.nsh/web` from the repo root, or `.nsh/web` when the cwd is `app/`.
+/// for `app/.nsh/web` from the repo root, `.nsh/web` when the cwd is `app/`,
+/// or the baked system directory (`/usr/share/zniff/web`).
 fn packaged_web_root() -> Option<PathBuf> {
     let env = std::env::var_os("ZNIFF_WEB_ROOT").map(PathBuf::from);
     let cwd = std::env::current_dir().ok();
-    choose_web_root(env.as_deref(), cwd.as_deref())
+    choose_web_root_with_fallback(env.as_deref(), cwd.as_deref(), Some(Path::new(SYSTEM_WEB_ROOT)))
 }
 
+#[cfg(test)]
 fn choose_web_root(env: Option<&Path>, cwd: Option<&Path>) -> Option<PathBuf> {
+    choose_web_root_with_fallback(env, cwd, None)
+}
+
+fn choose_web_root_with_fallback(
+    env: Option<&Path>,
+    cwd: Option<&Path>,
+    system: Option<&Path>,
+) -> Option<PathBuf> {
     if let Some(dir) = env.filter(|dir| dir.join("index.html").is_file()) {
         return Some(dir.to_path_buf());
     }
-    let cwd = cwd?;
-    for rel in ["app/.nsh/web", ".nsh/web"] {
-        let dir = cwd.join(rel);
-        if dir.join("index.html").is_file() {
-            return Some(dir);
+    if let Some(cwd) = cwd {
+        for rel in ["app/.nsh/web", ".nsh/web"] {
+            let dir = cwd.join(rel);
+            if dir.join("index.html").is_file() {
+                return Some(dir);
+            }
         }
+    }
+    if let Some(dir) = system.filter(|dir| dir.join("index.html").is_file()) {
+        return Some(dir.to_path_buf());
     }
     None
 }
 
+fn accepts_encoding(header_val: Option<&str>, token: &str) -> bool {
+    let Some(header_val) = header_val else {
+        return false;
+    };
+    header_val.split(',').any(|item| {
+        let mut parts = item.split(';');
+        let Some(name) = parts.next() else {
+            return false;
+        };
+        if !name.trim().eq_ignore_ascii_case(token) {
+            return false;
+        }
+        for param in parts {
+            let param = param.trim();
+            if let Some((k, v)) = param.split_once('=')
+                && k.trim().eq_ignore_ascii_case("q")
+            {
+                return matches!(v.trim().parse::<f32>(), Ok(q) if q > 0.0);
+            }
+        }
+        true
+    })
+}
+
+fn compressed_sidecar(full_canon: &Path, root_canon: &Path, ext: &str) -> Option<PathBuf> {
+    let mut os = full_canon.as_os_str().to_os_string();
+    os.push(ext);
+    let sidecar = PathBuf::from(os).canonicalize().ok()?;
+    if sidecar.starts_with(root_canon) && sidecar.is_file() {
+        Some(sidecar)
+    } else {
+        None
+    }
+}
+
 /// The packaged nsh page. `None` keeps the hand-written console, so tests do
 /// not serve a developer package that happens to sit on disk.
-fn static_reply(path: &str, root: Option<&Path>) -> Option<Reply> {
+fn static_reply(path: &str, root: Option<&Path>, accept_encoding: Option<&str>) -> Option<Reply> {
     let root = root?;
     let rel = path.trim_start_matches('/');
     let rel = if rel.is_empty() { "index.html" } else { rel };
@@ -1562,15 +1796,38 @@ fn static_reply(path: &str, root: Option<&Path>) -> Option<Reply> {
     }
     let root_canon = root.canonicalize().ok()?;
     let full_canon = root.join(rel).canonicalize().ok()?;
-    if !full_canon.starts_with(&root_canon) {
+    if !full_canon.starts_with(&root_canon) || !full_canon.is_file() {
         return Some(text(403, "Forbidden", "bad path"));
     }
-    let bytes = std::fs::read(&full_canon).ok()?;
+    let content_type = std::borrow::Cow::Borrowed(static_mime(&full_canon));
+    let mut encoding = None;
+    let mut vary_encoding = false;
+    let mut read_path = full_canon.clone();
+    if !rel.ends_with(".br") && !rel.ends_with(".gz") {
+        let br_path = compressed_sidecar(&full_canon, &root_canon, ".br");
+        let gz_path = compressed_sidecar(&full_canon, &root_canon, ".gz");
+        vary_encoding = br_path.is_some() || gz_path.is_some();
+        if accepts_encoding(accept_encoding, "br")
+            && let Some(path) = br_path
+        {
+            encoding = Some("br");
+            read_path = path;
+        } else if accepts_encoding(accept_encoding, "gzip")
+            && let Some(path) = gz_path
+        {
+            encoding = Some("gzip");
+            read_path = path;
+        }
+    }
+    let bytes = std::fs::read(&read_path).ok()?;
     Some(Reply {
         status: 200,
         reason: "OK",
-        content_type: std::borrow::Cow::Borrowed(static_mime(&full_canon)),
+        content_type,
         attachment: None,
+        location: None,
+        encoding,
+        vary_encoding,
         body: bytes,
     })
 }
@@ -1587,6 +1844,7 @@ fn static_mime(path: &Path) -> &'static str {
         "js" => "text/javascript; charset=utf-8",
         "css" => "text/css; charset=utf-8",
         "json" => "application/json",
+        "webmanifest" => "application/manifest+json",
         "wasm" => "application/wasm",
         "svg" => "image/svg+xml",
         "png" => "image/png",
@@ -2202,6 +2460,7 @@ mod tests {
             port: 0,
             token: token.map(str::to_string),
             view_auth: view.map(str::to_string),
+            prefix: None,
         };
         assert_eq!(start_relay(&listen(None, None), &loaded).err(), Some(2));
         assert_eq!(
@@ -2225,6 +2484,7 @@ mod tests {
                 port: 0,
                 token: Some("up".into()),
                 view_auth: Some("v:pw".into()),
+                prefix: None,
             },
             &loaded,
         )
@@ -2289,6 +2549,20 @@ mod tests {
         )
         .unwrap();
         let web = server.addr();
+        let (status, reply) = exchange(
+            web,
+            "GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert_eq!(status, 200, "{reply}");
+        assert_eq!(body_of(&reply), "ok");
+        let (status, reply) = exchange(
+            web,
+            "HEAD /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert_eq!(status, 200, "{reply}");
+        assert!(body_of(&reply).is_empty(), "{reply}");
         let good = format!("Basic {}", crate::session::base64_encode(b"op:s3cr3t"));
         let wrong = format!("Basic {}", crate::session::base64_encode(b"op:nope"));
         for path in ["/", "/api/state", "/api/flows", "/index.wasm"] {
@@ -2350,14 +2624,17 @@ mod tests {
         let env_dir = root.join("env");
         let repo = root.join("repo");
         let app = root.join("appdir");
+        let sys_dir = root.join("sys");
         let empty = root.join("empty");
         std::fs::create_dir_all(&env_dir).unwrap();
         std::fs::create_dir_all(repo.join("app/.nsh/web")).unwrap();
         std::fs::create_dir_all(app.join(".nsh/web")).unwrap();
+        std::fs::create_dir_all(&sys_dir).unwrap();
         std::fs::create_dir_all(&empty).unwrap();
         std::fs::write(env_dir.join("index.html"), b"e").unwrap();
         std::fs::write(repo.join("app/.nsh/web/index.html"), b"r").unwrap();
         std::fs::write(app.join(".nsh/web/index.html"), b"a").unwrap();
+        std::fs::write(sys_dir.join("index.html"), b"s").unwrap();
         assert_eq!(
             choose_web_root(Some(&env_dir), Some(&repo)).unwrap(),
             env_dir
@@ -2371,6 +2648,18 @@ mod tests {
             app.join(".nsh/web")
         );
         assert!(choose_web_root(None, Some(&root)).is_none());
+        assert_eq!(
+            choose_web_root_with_fallback(None, Some(&empty), Some(&sys_dir)).unwrap(),
+            sys_dir
+        );
+        assert_eq!(
+            choose_web_root_with_fallback(Some(&empty), Some(&repo), Some(&sys_dir)).unwrap(),
+            repo.join("app/.nsh/web")
+        );
+        assert_eq!(
+            choose_web_root_with_fallback(Some(&env_dir), Some(&repo), Some(&sys_dir)).unwrap(),
+            env_dir
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2380,6 +2669,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("index.html"), b"<!doctype html>shared-ui").unwrap();
+        std::fs::write(dir.join("app.wasm"), b"raw-wasm").unwrap();
+        std::fs::write(dir.join("app.wasm.br"), b"br-wasm").unwrap();
+        std::fs::write(dir.join("app.wasm.gz"), b"gz-wasm").unwrap();
         let ca_dir = dir.join("ca");
         std::fs::create_dir_all(&ca_dir).unwrap();
         let ca = Arc::new(Ca::open(&ca_dir).unwrap());
@@ -2400,6 +2692,40 @@ mod tests {
         assert_eq!(status, 200);
         assert!(page.contains("shared-ui"), "{page}");
         assert!(!page.contains("开始"), "{page}");
+
+        let (status, br_reply) = exchange(
+            server.addr(),
+            "GET /app.wasm HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept-Encoding: gzip, br\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert!(br_reply.contains("Content-Type: application/wasm\r\n"), "{br_reply}");
+        assert!(br_reply.contains("Content-Encoding: br\r\n"), "{br_reply}");
+        assert!(br_reply.contains("Vary: Accept-Encoding\r\n"), "{br_reply}");
+        assert_eq!(body_of(&br_reply), "br-wasm");
+
+        let (status, gz_reply) = exchange(
+            server.addr(),
+            "GET /app.wasm HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept-Encoding: gzip, br;q=0\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert!(gz_reply.contains("Content-Type: application/wasm\r\n"), "{gz_reply}");
+        assert!(gz_reply.contains("Content-Encoding: gzip\r\n"), "{gz_reply}");
+        assert!(gz_reply.contains("Vary: Accept-Encoding\r\n"), "{gz_reply}");
+        assert_eq!(body_of(&gz_reply), "gz-wasm");
+
+        let (status, raw_reply) = exchange(
+            server.addr(),
+            "GET /app.wasm HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert!(raw_reply.contains("Content-Type: application/wasm\r\n"), "{raw_reply}");
+        assert!(!raw_reply.contains("Content-Encoding:"), "{raw_reply}");
+        assert!(raw_reply.contains("Vary: Accept-Encoding\r\n"), "{raw_reply}");
+        assert_eq!(body_of(&raw_reply), "raw-wasm");
+
         drop(server);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2428,7 +2754,7 @@ mod tests {
         .await;
         assert_eq!(status, 200);
         assert!(page.contains("开始"), "{page}");
-        assert!(page.contains("/api/capture"), "{page}");
+        assert!(page.contains("api/capture"), "{page}");
         assert!(!page.contains("zniff-ca.crt"), "{page}");
         let (status, english) = exchange(
             web,
@@ -3042,6 +3368,140 @@ mod tests {
         assert_eq!(status, 200);
         let state: Value = serde_json::from_str(body_of(&raw_state)).unwrap();
         assert_eq!(state["prefs"]["proxy_auth"], "admin:pass123");
+
+        drop(server);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cli_settings_parses_web_and_relay_prefixes() {
+        let parsed = cli_settings(
+            &[
+                "--web".into(),
+                "--web-prefix".into(),
+                "zniff/".into(),
+                "--relay".into(),
+                "--token".into(),
+                "t".into(),
+                "--relay-prefix=/ops/relay/".into(),
+            ],
+            8877,
+        )
+        .unwrap();
+        assert_eq!(parsed.web_prefix.as_deref(), Some("/zniff"));
+        assert_eq!(
+            parsed.relay.as_ref().and_then(|r| r.prefix.as_deref()),
+            Some("/ops/relay")
+        );
+
+        assert!(cli_settings(&["--web".into(), "--web-prefix".into(), "/api".into()], 8877).is_err());
+        assert!(cli_settings(&["--web".into(), "--relay-prefix".into(), "/r".into()], 8877).is_err());
+    }
+
+    #[tokio::test]
+    async fn web_prefix_routes_redirect_assets_api_and_health() {
+        let dir = std::env::temp_dir().join(format!("zniff-web-prefix-{}", std::process::id()));
+        let web_root = dir.join("www");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&web_root).unwrap();
+        std::fs::write(web_root.join("index.html"), b"<html>zniff-wasm</html>").unwrap();
+        std::fs::write(web_root.join("nsh.test.wasm"), b"wasmbytes").unwrap();
+
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+        let capture_port = reserve_port();
+        let prefs = WebPrefs {
+            web_auth: "ops:secret".into(),
+            web_prefix: "/zniff".into(),
+            ..WebPrefs::default()
+        };
+        let server = WebServer::start_with_prefs(
+            "127.0.0.1:0".parse().unwrap(),
+            hub,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            capture_port,
+            Some(web_root),
+            prefs,
+        )
+        .unwrap();
+        let web = server.addr();
+
+        for path in ["/health", "/zniff/health"] {
+            let (status, resp) = exchange(
+                web,
+                &format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"),
+            )
+            .await;
+            assert_eq!(status, 200, "{path}: {resp}");
+            assert_eq!(body_of(&resp), "ok", "{path}");
+        }
+
+        let (status, redir) = exchange(
+            web,
+            "GET /zniff HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert_eq!(status, 302, "{redir}");
+        assert!(redir.contains("Location: /zniff/\r\n"), "{redir}");
+
+        let (status, redir_q) = exchange(
+            web,
+            "GET /zniff?x=1 HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert_eq!(status, 302, "{redir_q}");
+        assert!(redir_q.contains("Location: /zniff/?x=1\r\n"), "{redir_q}");
+
+        let (status, unauth) = exchange(
+            web,
+            "GET /zniff/ HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert_eq!(status, 401, "{unauth}");
+
+        let auth = crate::session::base64_encode(b"ops:secret");
+        let (status, index_resp) = exchange(
+            web,
+            &format!(
+                "GET /zniff/ HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Basic {auth}\r\nConnection: close\r\n\r\n"
+            ),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(body_of(&index_resp), "<html>zniff-wasm</html>");
+
+        let (status, wasm_resp) = exchange(
+            web,
+            &format!(
+                "GET /zniff/nsh.test.wasm HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Basic {auth}\r\nConnection: close\r\n\r\n"
+            ),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert!(wasm_resp.contains("Content-Type: application/wasm"), "{wasm_resp}");
+        assert_eq!(body_of(&wasm_resp), "wasmbytes");
+
+        let (status, state_resp) = exchange(
+            web,
+            &format!(
+                "GET /zniff/api/state HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Basic {auth}\r\nConnection: close\r\n\r\n"
+            ),
+        )
+        .await;
+        assert_eq!(status, 200);
+        let state: Value = serde_json::from_str(body_of(&state_resp)).unwrap();
+        assert_eq!(state["capturing"], false);
+
+        for outside in ["/", "/api/state", "/zniff-other/"] {
+            let (status, resp) = exchange(
+                web,
+                &format!(
+                    "GET {outside} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Basic {auth}\r\nConnection: close\r\n\r\n"
+                ),
+            )
+            .await;
+            assert_eq!(status, 404, "{outside}: {resp}");
+        }
 
         drop(server);
         let _ = std::fs::remove_dir_all(&dir);

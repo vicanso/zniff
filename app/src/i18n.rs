@@ -439,8 +439,8 @@ impl StatusMsg {
             }
             Self::RelayBadUrl => t(
                 lang,
-                "中转地址要写成 http://主机:端口",
-                "Relay address must look like http://host:port",
+                "中转地址要写成 http(s)://主机:端口[/前缀]",
+                "Relay address must look like http(s)://host:port[/prefix]",
             )
             .into(),
             Self::RelayNeedToken => t(

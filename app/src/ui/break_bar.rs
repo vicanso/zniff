@@ -217,7 +217,7 @@ pub(crate) fn reset_broken_config_action(
     spawn(async move {
         let body = b"{\"op\":\"reset_broken_config\"}".to_vec();
         let request =
-            HttpRequest::post("/api/hub", body).header("content-type", "application/json");
+            HttpRequest::post("api/hub", body).header("content-type", "application/json");
         match fetch(request).await {
             Ok(response) => {
                 let value: serde_json::Value =

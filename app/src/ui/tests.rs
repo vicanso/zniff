@@ -101,8 +101,17 @@ fn filter_chips_toggle_a_whole_token() {
         super::toggle_filter_chip("pin: slow:", "slow:", super::SLOW_ALIASES),
         "pin:"
     );
+    assert_eq!(
+        super::toggle_filter_chip("", "status:4xx|5xx|err", super::ERR_ALIASES),
+        "status:4xx|5xx|err"
+    );
+    assert_eq!(
+        super::toggle_filter_chip("slow: 4xx|5xx|err", "status:4xx|5xx|err", super::ERR_ALIASES),
+        "slow:"
+    );
     assert!(!super::filter_has_token("type:jsonl", super::JSON_ALIASES));
     assert!(super::filter_has_token("pin:", super::PIN_ALIASES));
+    assert!(super::filter_has_token("status:4xx|5xx|err", super::ERR_ALIASES));
 }
 
 #[test]
@@ -1531,6 +1540,8 @@ fn auto_height_popover_scroll_containers_never_use_flex_1() {
         include_str!("lan_qr.rs"),
         "\n",
         include_str!("list_columns.rs"),
+        "\n",
+        include_str!("machine_settings.rs"),
         "\n",
         include_str!("more_menu.rs"),
         "\n",

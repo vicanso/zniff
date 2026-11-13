@@ -333,7 +333,7 @@ pub(crate) fn menu_redact_row(
                                     if marked() {
                                         accent_blue()
                                     } else {
-                                        border_control()
+                                        fg_muted()
                                     }
                                 })
                                 .bg(move || if marked() { accent_blue() } else { bg_card() }),
@@ -364,6 +364,7 @@ pub(crate) fn menu_share_row(
     controls: Arc<Controls>,
     filter: Signal<String>,
     share_id: Signal<String>,
+    profiles: ProfileSignals,
 ) -> impl IntoElement {
     let c15 = controls.clone();
     let c60 = controls.clone();
@@ -438,7 +439,59 @@ pub(crate) fn menu_share_row(
                                     .text_color(status_err_fg()),
                             )
                     },
-                )),
+                ))
+                .child(
+                    view()
+                        .w(px(22.0))
+                        .h(px(22.0))
+                        .rounded(px(5.0))
+                        .flex_shrink_0()
+                        .flex_row()
+                        .items_center()
+                        .justify_center()
+                        .border_1()
+                        .border_color(move || {
+                            if !profiles.relay_url.get().trim().is_empty() {
+                                accent_blue_border()
+                            } else {
+                                border_control()
+                            }
+                        })
+                        .bg(move || {
+                            if !profiles.relay_url.get().trim().is_empty() {
+                                accent_blue_soft()
+                            } else {
+                                bg_control()
+                            }
+                        })
+                        .hover(|style| {
+                            style.bg(move || {
+                                if !profiles.relay_url.get().trim().is_empty() {
+                                    accent_blue_soft_hover()
+                                } else {
+                                    bg_control_hover()
+                                }
+                            })
+                        })
+                        .active(|style| style.opacity(0.75))
+                        .cursor(Cursor::Pointer)
+                        .tooltip(label_tip("配置中转服务器", "Configure relay server"))
+                        .on_press(move || {
+                            open.set(false);
+                            profiles.machine_settings_open.set(true);
+                        })
+                        .child(glyph_px(
+                            11.5,
+                            || Glyph::Sliders,
+                            move || {
+                                if !profiles.relay_url.get().trim().is_empty() {
+                                    color(accent_blue_text())
+                                } else {
+                                    color(fg_secondary())
+                                }
+                            },
+                        )),
+                ),
         )
 }
 
