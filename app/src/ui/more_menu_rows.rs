@@ -329,13 +329,11 @@ pub(crate) fn menu_redact_row(
                                 .h(px(10.0))
                                 .rounded(px(2.5))
                                 .border_1()
-                                .border_color(move || {
-                                    if marked() {
-                                        accent_blue()
-                                    } else {
-                                        fg_muted()
-                                    }
-                                })
+                                .border_color(
+                                    move || {
+                                        if marked() { accent_blue() } else { fg_muted() }
+                                    },
+                                )
                                 .bg(move || if marked() { accent_blue() } else { bg_card() }),
                         ),
                 )

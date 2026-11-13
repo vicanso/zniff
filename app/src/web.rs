@@ -339,7 +339,11 @@ pub fn run_cli(args: &[String], config_port: u16) -> i32 {
     if web_prefix.is_empty() {
         println!("zniff web listening on http://{}", server.addr());
     } else {
-        println!("zniff web listening on http://{}{}/", server.addr(), web_prefix);
+        println!(
+            "zniff web listening on http://{}{}/",
+            server.addr(),
+            web_prefix
+        );
     }
     if settings.no_capture {
         println!("只做中继 (--no-capture)：这个进程不会打开抓包端口");
@@ -410,17 +414,17 @@ fn start_relay(
         eprintln!("{message}");
         2
     })?;
-    let relay = crate::relay::Relay::start_with_options(
-        listen.addr(),
-        &token,
-        &view_auth,
-        &relay_prefix,
-    )
-    .map_err(|err| {
-        eprintln!("zniff relay 没有绑上 {}: {err}", listen.addr());
-        1
-    })?;
-    println!("zniff relay listening on http://{}{}", relay.addr(), relay_prefix);
+    let relay =
+        crate::relay::Relay::start_with_options(listen.addr(), &token, &view_auth, &relay_prefix)
+            .map_err(|err| {
+            eprintln!("zniff relay 没有绑上 {}: {err}", listen.addr());
+            1
+        })?;
+    println!(
+        "zniff relay listening on http://{}{}",
+        relay.addr(),
+        relay_prefix
+    );
     crate::relay::print_view_auth_notice(&view_auth);
     Ok(relay)
 }
@@ -1670,14 +1674,22 @@ async fn read_body(
         )));
     }
     let Some(raw) = header(head, "content-length") else {
-        return Err(Box::new(text(411, "Length Required", "content-length required")));
+        return Err(Box::new(text(
+            411,
+            "Length Required",
+            "content-length required",
+        )));
     };
     let len: usize = match raw.parse() {
         Ok(len) => len,
         Err(_) => return Err(Box::new(text(400, "Bad Request", "bad content-length"))),
     };
     if len > cap {
-        return Err(Box::new(text(413, "Content Too Large", "body is too large")));
+        return Err(Box::new(text(
+            413,
+            "Content Too Large",
+            "body is too large",
+        )));
     }
     let mut body = Vec::with_capacity(len);
     let take = rest.len().min(len);
@@ -1720,7 +1732,11 @@ fn parse_bind(text: &str) -> std::result::Result<IpAddr, String> {
 fn packaged_web_root() -> Option<PathBuf> {
     let env = std::env::var_os("ZNIFF_WEB_ROOT").map(PathBuf::from);
     let cwd = std::env::current_dir().ok();
-    choose_web_root_with_fallback(env.as_deref(), cwd.as_deref(), Some(Path::new(SYSTEM_WEB_ROOT)))
+    choose_web_root_with_fallback(
+        env.as_deref(),
+        cwd.as_deref(),
+        Some(Path::new(SYSTEM_WEB_ROOT)),
+    )
 }
 
 #[cfg(test)]
@@ -2699,7 +2715,10 @@ mod tests {
         )
         .await;
         assert_eq!(status, 200);
-        assert!(br_reply.contains("Content-Type: application/wasm\r\n"), "{br_reply}");
+        assert!(
+            br_reply.contains("Content-Type: application/wasm\r\n"),
+            "{br_reply}"
+        );
         assert!(br_reply.contains("Content-Encoding: br\r\n"), "{br_reply}");
         assert!(br_reply.contains("Vary: Accept-Encoding\r\n"), "{br_reply}");
         assert_eq!(body_of(&br_reply), "br-wasm");
@@ -2710,8 +2729,14 @@ mod tests {
         )
         .await;
         assert_eq!(status, 200);
-        assert!(gz_reply.contains("Content-Type: application/wasm\r\n"), "{gz_reply}");
-        assert!(gz_reply.contains("Content-Encoding: gzip\r\n"), "{gz_reply}");
+        assert!(
+            gz_reply.contains("Content-Type: application/wasm\r\n"),
+            "{gz_reply}"
+        );
+        assert!(
+            gz_reply.contains("Content-Encoding: gzip\r\n"),
+            "{gz_reply}"
+        );
         assert!(gz_reply.contains("Vary: Accept-Encoding\r\n"), "{gz_reply}");
         assert_eq!(body_of(&gz_reply), "gz-wasm");
 
@@ -2721,9 +2746,15 @@ mod tests {
         )
         .await;
         assert_eq!(status, 200);
-        assert!(raw_reply.contains("Content-Type: application/wasm\r\n"), "{raw_reply}");
+        assert!(
+            raw_reply.contains("Content-Type: application/wasm\r\n"),
+            "{raw_reply}"
+        );
         assert!(!raw_reply.contains("Content-Encoding:"), "{raw_reply}");
-        assert!(raw_reply.contains("Vary: Accept-Encoding\r\n"), "{raw_reply}");
+        assert!(
+            raw_reply.contains("Vary: Accept-Encoding\r\n"),
+            "{raw_reply}"
+        );
         assert_eq!(body_of(&raw_reply), "raw-wasm");
 
         drop(server);
@@ -3394,8 +3425,20 @@ mod tests {
             Some("/ops/relay")
         );
 
-        assert!(cli_settings(&["--web".into(), "--web-prefix".into(), "/api".into()], 8877).is_err());
-        assert!(cli_settings(&["--web".into(), "--relay-prefix".into(), "/r".into()], 8877).is_err());
+        assert!(
+            cli_settings(
+                &["--web".into(), "--web-prefix".into(), "/api".into()],
+                8877
+            )
+            .is_err()
+        );
+        assert!(
+            cli_settings(
+                &["--web".into(), "--relay-prefix".into(), "/r".into()],
+                8877
+            )
+            .is_err()
+        );
     }
 
     #[tokio::test]
@@ -3478,7 +3521,10 @@ mod tests {
         )
         .await;
         assert_eq!(status, 200);
-        assert!(wasm_resp.contains("Content-Type: application/wasm"), "{wasm_resp}");
+        assert!(
+            wasm_resp.contains("Content-Type: application/wasm"),
+            "{wasm_resp}"
+        );
         assert_eq!(body_of(&wasm_resp), "wasmbytes");
 
         let (status, state_resp) = exchange(

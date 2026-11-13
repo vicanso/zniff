@@ -106,12 +106,19 @@ fn filter_chips_toggle_a_whole_token() {
         "status:4xx|5xx|err"
     );
     assert_eq!(
-        super::toggle_filter_chip("slow: 4xx|5xx|err", "status:4xx|5xx|err", super::ERR_ALIASES),
+        super::toggle_filter_chip(
+            "slow: 4xx|5xx|err",
+            "status:4xx|5xx|err",
+            super::ERR_ALIASES
+        ),
         "slow:"
     );
     assert!(!super::filter_has_token("type:jsonl", super::JSON_ALIASES));
     assert!(super::filter_has_token("pin:", super::PIN_ALIASES));
-    assert!(super::filter_has_token("status:4xx|5xx|err", super::ERR_ALIASES));
+    assert!(super::filter_has_token(
+        "status:4xx|5xx|err",
+        super::ERR_ALIASES
+    ));
 }
 
 #[test]
