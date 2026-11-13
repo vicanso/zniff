@@ -43,6 +43,10 @@ cleanup() {
         kill "$MOCK_PID" 2>/dev/null || true
         wait "$MOCK_PID" 2>/dev/null || true
     fi
+    if [ -n "${REC_PID:-}" ] && kill -0 "$REC_PID" 2>/dev/null; then
+        kill -INT "$REC_PID" 2>/dev/null || true
+        wait "$REC_PID" 2>/dev/null || true
+    fi
     if [ -n "${CAFFEINATE_PID:-}" ] && kill -0 "$CAFFEINATE_PID" 2>/dev/null; then
         kill "$CAFFEINATE_PID" 2>/dev/null || true
     fi
@@ -67,6 +71,25 @@ let opts = CGWindowListOption(arrayLiteral: .excludeDesktopElements, .optionOnSc
 if let list = CGWindowListCopyWindowInfo(opts, kCGNullWindowID) as? [[String: Any]] {
     for w in list where (w[kCGWindowOwnerPID as String] as? Int) == pid {
         if let id = w[kCGWindowNumber as String] as? Int { print(id); break }
+    }
+}' "$pid"
+}
+
+get_win_bounds() {
+    local pid="$1"
+    swift -e 'import CoreGraphics; import Foundation
+guard CommandLine.arguments.count > 1, let pid = Int(CommandLine.arguments[1]) else { exit(0) }
+let opts = CGWindowListOption(arrayLiteral: .excludeDesktopElements, .optionOnScreenOnly)
+if let list = CGWindowListCopyWindowInfo(opts, kCGNullWindowID) as? [[String: Any]] {
+    for w in list where (w[kCGWindowOwnerPID as String] as? Int) == pid {
+        if let bounds = w[kCGWindowBounds as String] as? [String: Any],
+           let x = bounds["X"] as? Double,
+           let y = bounds["Y"] as? Double,
+           let width = bounds["Width"] as? Double,
+           let height = bounds["Height"] as? Double {
+            print("\(Int(x)),\(Int(y)),\(Int(width)),\(Int(height))")
+            break
+        }
     }
 }' "$pid"
 }
@@ -308,6 +331,17 @@ osascript -e 'tell application "System Events" to tell process "zniff" to set si
 osascript -e 'tell application "System Events" to tell process "zniff" to set frontmost to true' 2>/dev/null || true
 sleep 1.0
 
+WIN_BOUNDS=$(get_win_bounds "$ZNIFF_PID")
+if [ -z "$WIN_BOUNDS" ]; then
+    echo "ERROR: Failed to detect zniff window bounds!"
+    exit 1
+fi
+RAW_VIDEO="$RAW_DIR/zniff_raw_recording.mov"
+echo "==> Starting real-time window recording ($WIN_BOUNDS)..."
+/usr/sbin/screencapture -x -v -C -k -R "$WIN_BOUNDS" "$RAW_VIDEO" &
+REC_PID=$!
+sleep 0.8
+
 capture_uniform_screenshot() {
     local scene_name="$1"
     local raw_path="$RAW_DIR/raw_${scene_name}"
@@ -483,24 +517,26 @@ capture_uniform_screenshot "10_theme_light_contrast.png"
 set_dark_mode true
 sleep 0.5
 
+# Stop real-time recording cleanly
+if [ -n "${REC_PID:-}" ] && kill -0 "$REC_PID" 2>/dev/null; then
+    echo "==> Stopping real-time window recording..."
+    kill -INT "$REC_PID" 2>/dev/null || true
+    wait "$REC_PID" 2>/dev/null || true
+    unset REC_PID
+fi
+
 # -------------------------------------------------------------
 # Clean up old outdated non-uniform screenshots in docs/screenshots
 # -------------------------------------------------------------
-echo "==> Pruning any legacy non-uniform files in $DOCS_SCREENSHOT_DIR..."
+echo "==> Pruning any unused files in $DOCS_SCREENSHOT_DIR..."
 for f in "$DOCS_SCREENSHOT_DIR"/*.png; do
     fname="$(basename "$f")"
     case "$fname" in
-        01_traffic_table_dual_pane.png|\
         02_detail_json_graphql.png|\
-        03_detail_protobuf_hex.png|\
-        04_baseline_diff_view.png|\
         05_filter_rules_popup.png|\
-        06_breakpoint_intercept_queue.png|\
         07_sequence_diagram_waterfall.png|\
-        08_mobile_qr_cert_console.png|\
-        09_mcp_ai_integration.png|\
         10_theme_light_contrast.png)
-            # Retain current 10 scenes
+            # Retain screenshots referenced by README
             ;;
         *)
             rm -f "$f"
@@ -548,12 +584,17 @@ for dir in "$DOCS_SCREENSHOT_DIR" "$SCREENSHOT_DIR"; do
 done
 
 # -------------------------------------------------------------
-# Verify Video Generation Readiness via ffmpeg
+# Transcode real-time recording to 1920x1080 MP4 via ffmpeg
 # -------------------------------------------------------------
-echo "==> Verifying video compilation via ffmpeg..."
+echo "==> Transcoding real-time recording via ffmpeg..."
+DEMO_VIDEO="$SCREENSHOT_DIR/zniff_demo.mp4"
 TEST_VIDEO="/tmp/zniff_showcase_preview.mp4"
-rm -f "$TEST_VIDEO"
-ffmpeg -y -framerate 1 -pattern_type glob -i "$DOCS_SCREENSHOT_DIR/*.png" -c:v libx264 -pix_fmt yuv420p "$TEST_VIDEO"
-echo "==> Video generated successfully at $TEST_VIDEO ($(ls -lh "$TEST_VIDEO" | awk '{print $5}'))"
+rm -f "$DEMO_VIDEO" "$TEST_VIDEO"
+ffmpeg -y -i "$RAW_VIDEO" \
+    -vf "scale=1920:1080:flags=lanczos" \
+    -r 30 -c:v libx264 -preset medium -crf 22 -pix_fmt yuv420p -movflags +faststart \
+    "$DEMO_VIDEO"
+cp -f "$DEMO_VIDEO" "$TEST_VIDEO"
+echo "==> Demo video generated at $DEMO_VIDEO ($(ls -lh "$DEMO_VIDEO" | awk '{print $5}'))"
 
-echo "==> Screenshot capture pipeline completed successfully! All 10 scenes verified at 1920x1080."
+echo "==> Capture & recording pipeline completed successfully!"
