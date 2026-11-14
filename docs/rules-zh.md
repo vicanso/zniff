@@ -16,6 +16,8 @@
 | **Windows** | `%APPDATA%\zniff`（例如 `C:\Users\<用户名>\AppData\Roaming\zniff`） |
 | **Linux** | `$XDG_DATA_HOME/zniff`（未设置时为 `~/.local/share/zniff`） |
 
+可通过 `--data-dir <目录>` 或环境变量 `ZNIFF_DATA_DIR` 覆盖数据目录（Docker 镜像默认 `ZNIFF_DATA_DIR=/data`）。
+
 ### 目录下的文件说明
 
 | 文件名 | 用途 |
@@ -39,16 +41,19 @@
 | `host:<域名>` 或 `domain:<域名>` | 按主机名子串或泛域名（`*.`）匹配，支持多域名 `OR` | `host:api.example.com\|*.cdn.com` |
 | `path:<路径前缀>` | 按请求路径前缀匹配，支持多前缀 `OR` | `path:/api/v1\|/auth\|/graphql` |
 | `ip:<IP>` 或 `client:<IP>` / `app:<进程名>` 或 `proc:<进程名>` | 按客户端来源 IP 或本地进程名匹配，支持多项 `OR` | `ip:127.0.0.1\|192.168.1.25`、`app:curl\|node` |
-| `GET` / `POST` / `PUT` / `DELETE` / `CONNECT` 等 | 精确匹配 HTTP 方法（全大写或忽略大小写） | `POST host:api.example.com` |
-| `200` / `404` / `1xx`–`5xx` | 精确匹配状态码或状态码段 | `5xx` 或 `404` |
+| `GET` / `POST` / `PUT` / `DELETE` / `CONNECT` 等，或 `method:<方法>` | 精确匹配 HTTP 方法（忽略大小写），支持 `\|` 多项 `OR` | `POST host:api.example.com`、`method:put\|patch` |
+| `200` / `404` / `1xx`–`5xx`，或 `status:<状态码>` | 精确匹配状态码或状态码段 | `5xx`、`404`、`status:401\|403` |
 | `失败` / `fail` / `err` / `error` | 筛选发生错误（状态码为 `ERR` 或 `>= 400`）的请求 | `失败` |
 | `type:<类型>` 或 `ct:<类型>` | 匹配响应 `Content-Type` 子串 | `type:json`、`ct:html`、`type:image` |
-| `body:<关键词>` | 在解压后的请求正文与响应正文中搜索（支持检索落盘的大体积正文） | `body:access_token` |
+| `body:<关键词>` | 在解压后的请求正文、响应正文与 WebSocket 消息中搜索（支持检索落盘的大体积正文） | `body:access_token` |
 | `header:<关键词>` | 在请求头与响应头的名称和值中搜索 | `header:authorization`、`header:x-trace-id` |
 | `note:<关键词>` 或 `comment:<关键词>` | 按流量备注子串匹配（写 `note:` 可筛选所有带备注的流量） | `note:复现`、`note:` |
-| `pin:` / `star:` / `星标` | 仅显示已加星标的请求 | `pin:` |
-| `slow:` / `慢` | 仅显示总耗时 `>= 1s` 的慢请求 | `slow:` |
+| `repeat:` 或 `repeat:<id>` | 匹配批量重放生成的流量及其源请求；`repeat:<id>` 只看某个源请求 | `repeat:`、`repeat:42` |
+| `op:<操作名>` / `gql:<操作名>` / `operation:<操作名>` | 匹配 GraphQL 操作名（显式 `operationName`、从查询推断的命名操作、匿名 `anonymous`、批量数组），支持 `*` 通配与 `\|` | `op:GetUser*\|Checkout` |
+| `pin:` | 仅显示已加星标的请求 | `pin:` |
+| `slow:` | 仅显示总耗时 `>= 1s` 的慢请求 | `slow:` |
 | `mute:<词>` 或 `-<词>` | 排除主机或路径中包含该词的流量，支持 `\|` 分隔多项 | `mute:ads.example.com\|/health` 或 `-telemetry` |
+| `-host:` / `-path:` / `-status:` / `-method:` / `-type:` / `-app:` / `-header:` / `-body:` / `-note:` / `-op:` / `-repeat:` / `-pin:` / `-slow:` | 以上结构化条件的反向（排除）写法 | `-host:*.cdn.com -status:3xx -pin:` |
 | 普通裸词 | 同时在主机名（Host）、路径（Path）和流量备注中做不区分大小写的子串匹配 | `login` |
 
 **组合过滤示例：**
@@ -115,15 +120,17 @@ only: api.example.com *.dev.internal
 
 ### 4.3 十四种规则语法与实战示例
 
-#### ① `map-local` — 本地文件映射 / 纯状态码空响应（Mock 响应）
+#### ① `map-local` — 本地文件 / 目录映射 / 纯状态码空响应（Mock 响应）
 
 直接读取本地文件（或在仅指定 `status=<状态码>` 时返回空正文）作为响应返回给客户端，**不连接源站**。响应 `Content-Type` 会根据文件扩展名（`.json`、`.html`、`.js`、`.css`、`.xml`、`.png`、`.jpg`、`.svg`、`.webp`、`.gif`、`.txt` 等）自动推断。
 
+目标为**目录**时，`zniff` 会从请求路径中去掉命中的路径前缀与 `?查询串`，百分号解码后在该目录内查找对应文件；`/` 或子目录默认取 `index.html`；越出目录根的路径会被拒绝。
+
 **语法：**
 ```text
-map-local <pattern> [<本地文件路径>] [status=<状态码>] [delay=<时长>]
+map-local <pattern> [<本地文件或目录>] [status=<状态码>] [delay=<时长>] [fallback] [op=<GraphQL操作名>]
 ```
-> 注意：若本地文件路径包含空格，请使用英文双引号 `"..."` 包裹；省略 `status=` 时默认返回 `200`；省略 `<本地文件路径>` 时必须提供 `status=<状态码>`（直接返回该状态码与空响应体）；也可直接在列表右键或详情「更多」中点击 **「本地映射」** 将当前响应另存为文件并自动追加规则。
+> 注意：若本地路径包含空格，请使用英文双引号 `"..."` 包裹；省略 `status=` 时默认返回 `200`；省略 `<本地文件或目录>` 时必须提供 `status=<状态码>`（直接返回该状态码与空响应体）；未加 `fallback` 时文件不存在会返回 `502` 并附原因，加上 `fallback` 后文件不存在则改为回源站请求（流量备注记为 `map-local(fallback)`）；也可直接在列表右键或详情「更多」中点击 **「本地映射」** 将当前响应另存为文件并自动追加规则。
 
 **示例：**
 ```text
@@ -141,6 +148,9 @@ map-local api.example.com/v1/orders /tmp/rate_limit.json status=429 delay=1500ms
 
 # 多环境域名同时使用同一份本地配置
 map-local dev.example.com|staging.example.com/config /tmp/app-config.json
+
+# 将 /static 映射到本地构建目录，本地没有的文件回源站
+map-local www.example.com/static ./dist fallback
 ```
 
 ---
@@ -171,10 +181,10 @@ map-remote test.example.com https://staging-api.example.com
 
 #### ③ `break` — 请求断点（发往源站前暂停编辑）
 
-在请求发往源站之前暂停拦截。界面顶栏会出现黄色断点提示条，右侧详情面板点击「编辑重发」或直接在断点栏点击 **「放行」** / **「丢弃」**：
-- 可实时修改 **HTTP 方法、URL、请求头、请求 Body**。
-- 点击「丢弃」会直接向客户端返回 `204` 并终止转发；多条断点排队时可点击 **「全部放行」** 一键放行队列中的所有断点。
-- 请求断点与响应断点共用最多 **8 条的有界 FIFO 队列**：并发请求命中断点时按先后顺序排队（断点栏显示 `(1 / N)`），不会顶掉正在编辑的请求；队首断点无操作满 60 秒自动放行（正在编辑器中修改内容时会自动续期超时）。
+在请求发往源站之前暂停拦截。界面顶栏会出现黄色断点提示条，可点击「编辑请求」或直接在断点栏点击 **「放行」** / **「丢弃」**：
+- 「编辑请求」展示只读的方法与 URL，可修改 **请求头与请求 Body**，改完点「放行」或按 `Cmd/Ctrl+Enter`。
+- 点击「丢弃」会直接关闭客户端连接或流并终止转发（列表记为 `ERR · 断点丢弃`）；多条断点排队时可点击 **「全部放行」** 一键放行队列中的所有断点。
+- 请求断点与响应断点共用最多 **8 条的有界 FIFO 队列**：并发请求命中断点时按先后顺序排队，不会顶掉正在编辑的请求；队列多于一条时，断点栏按顺序排出 `#id 请求/响应` 胶囊，点一条会把它提到队首并选中。队首断点无操作满 60 秒自动放行（正在编辑器中修改内容时会自动续期超时）。
 
 **语法：**
 ```text
@@ -216,7 +226,7 @@ break-res api.example.com/v1/permissions
 对 UTF-8 文本进行查找替换（叠加规则，可配置多条按顺序执行）：
 - **`req`（请求侧）**：同时作用于 **请求目标（`/path?query`）** 和 **请求正文（带 `Content-Length` 且 `<= 1 MB` 的 UTF-8 正文）**。即便请求没有 Body（如 `GET` 请求），也会改写 `/path?query`（改写结果仍须以 `/` 开头）。
 - **`res`（响应侧）**：作用于带 `Content-Length` 且 `<= 1 MB` 的 UTF-8 响应正文，替换后自动重算 `Content-Length`。
-- `<原文>` 为单个无空格词；`->` 右侧留空表示**删除**匹配到的 `<原文>`。
+- `<原文>` 或 `<替换为>` 含空格、或文本本身以 `"` 开头时，用英文双引号包裹（内部引号写成 `\"`）；`->` 右侧留空表示**删除**匹配到的 `<原文>`。支持在末尾追加 `op=<GraphQL操作名>`。
 
 **语法：**
 ```text
@@ -226,7 +236,7 @@ replace <pattern> req|res <原文> -> <替换为>
 **示例：**
 ```text
 # 将响应正文中的环境标识从 prod 替换为 debug
-replace api.example.com/v1 res "env":"prod" -> "env":"debug"
+replace api.example.com/v1 res "\"env\":\"prod\"" -> "\"env\":\"debug\""
 
 # 将 GET/POST 请求 URL 查询串或请求体中的 draft=1 替换为 draft=0
 replace api.example.com/articles req draft=1 -> draft=0
@@ -311,7 +321,7 @@ query *.example.com del utm_source
 - `Access-Control-Allow-Headers: *`
 - `Access-Control-Max-Age: 86400`
 
-此外，当浏览器的 **`OPTIONS` 预检请求**命中 `cors` 且没有命中其他终点规则时，`zniff` 会**直接返回 `204 No Content` + CORS 响应头**，无需源站支持 `OPTIONS`。
+此外，当浏览器的 **`OPTIONS` 预检请求**命中 `cors` 且没有命中任何终点规则（`map-local`、`map-remote`、`break`、`break-res`、`block`）时，`zniff` 会**直接返回 `204 No Content` + CORS 响应头**，无需源站支持 `OPTIONS`。
 
 **语法：**
 ```text
@@ -332,12 +342,12 @@ cors *
 #### ⑩ `block` — 规则阻断与物理断开连接
 
 在代理层直接拦截匹配流量，无需连接后端源站：
-- 支持返回指定状态码（如 `status=403`、`status=500`），亦可附带自定义响应正文。
-- 或使用 `drop` / `reset` 立即切断底层 TCP 连接或重置流（流量列表中记为 `规则阻断 (连接已断开)`）。
+- 返回指定状态码与空正文（`status=403`，或直接写 `403`）；既未写状态码也未写 `drop` 时默认返回 `403`。
+- 或使用 `drop` / `reset` / `abort` 立即切断底层 TCP 连接或重置流（流量列表中记为 `规则阻断 (连接已断开)`）。
 
 **语法：**
 ```text
-block <pattern> [status=<状态码-100..599>] [drop|reset]
+block <pattern> [status=<状态码-100..599>|drop|reset|abort] [op=<GraphQL操作名>]
 ```
 
 **示例：**
@@ -376,13 +386,14 @@ json api.example.com/events req del /metadata/device_fingerprint
 
 #### ⑫ `throttle` — 弱网模拟与带宽限速
 
-模拟各种弱网带宽环境，采用 4 KB 分片平滑流式限速：
-- 预设网络模式：`2g`（50 kbps，500ms RTT）、`3g`（750 kbps，100ms RTT）、`4g`（4 Mbps，20ms RTT）。
-- 或自定义方向速率：`down=<下行速率>` 与 `up=<上行速率>`（如 `down=500k up=100k`）。
+按 4 KB 分片控制正文流速，模拟弱网带宽（只限带宽、不额外注入往返延迟，需要 RTT 时可叠加 `delay`）：
+- 预设（下行 / 上行）：`2g` 或 `slow-3g`（约 400 / 160 kbps）、`3g` 或 `fast-3g`（约 768 / 256 kbps）、`4g` 或 `slow-4g`（约 4 / 1 Mbps）。
+- 只写一个速率时上下行共用；`down=<速率>` / `dl=<速率>` 与 `up=<速率>` / `ul=<速率>` 分别设置两个方向。
+- 速率单位（不区分大小写）：`kbps` / `kbit/s` / `kb` 或纯数字 = 千比特每秒；`mbps` / `mbit/s` / `mb` = 兆比特每秒；`kb/s` / `kbyte/s` = KiB 每秒；`mb/s` / `mbyte/s` = MiB 每秒；`b/s` / `bps` = 字节每秒。**不支持**单独的 `k` 后缀（如 `500k`）。
 
 **语法：**
 ```text
-throttle <pattern> <预设名|down=<速率> up=<速率>>
+throttle <pattern> <预设名|速率|down=<速率> [up=<速率>]>
 ```
 
 **示例：**
@@ -391,7 +402,10 @@ throttle <pattern> <预设名|down=<速率> up=<速率>>
 throttle api.example.com/mobile 3g
 
 # 限制静态大视频资源下载速度至 500 KB/s
-throttle cdn.example.com/video down=500k
+throttle cdn.example.com/video down=500kb/s
+
+# 非对称链路：下行 2 Mbps、上行 512 kbps
+throttle api.example.com/upload down=2mbps up=512kbps
 ```
 
 ---
@@ -417,13 +431,14 @@ no-cache static.example.com/assets
 
 #### ⑭ `cert` / `client-cert` — 自定义域名证书或上游双向认证 (mTLS)
 
-提供细粒度的 TLS 证书接管与客户端认证：
-- 为特定私有域名挂载真实证书与私钥，无需依赖本地根 CA 动态签发叶子证书。
-- 或为需要 mTLS 双向认证的上游企业服务注入客户端证书与私钥。
+两个相关关键字，提供细粒度的 TLS 证书控制。两者都**只按主机匹配**（`<pattern>` 里的路径部分会被忽略），且不支持 `op=`；当 PEM 文件同时包含证书链与私钥时可省略 `<私钥文件路径>`。
+- **`cert`**：为匹配的主机向客户端出示你自己的服务端证书，不再由本地根 CA 动态签发叶子证书。
+- **`client-cert`**（别名 `mtls`）：源站要求 mTLS 双向认证时，向源站出示客户端证书；所用证书会显示在该流量的连接详情中。
 
 **语法：**
 ```text
-cert <pattern> <证书文件路径> <私钥文件路径>
+cert        <pattern> <证书文件路径> [<私钥文件路径>]
+client-cert <pattern> <证书文件路径> [<私钥文件路径>]
 ```
 
 **示例：**
@@ -432,7 +447,10 @@ cert <pattern> <证书文件路径> <私钥文件路径>
 cert *.internal.corp /etc/ssl/internal.crt /etc/ssl/internal.key
 
 # 对接上游金融专线 API 时注入客户端 mTLS 证书
-cert secure.bank.com/api ./certs/client.pem ./certs/client.key
+client-cert secure.bank.com ./certs/client.pem ./certs/client.key
+
+# 证书与私钥合并在同一个 PEM 文件中
+mtls partner.example.com ./certs/partner-bundle.pem
 ```
 
 ---
@@ -473,7 +491,20 @@ break api.example.com/graphql op=Checkout|Payment
 127.0.0.1:7890
 # 或带协议前缀
 http://proxy.internal.corp:8080
+# 带 HTTP Basic 认证（特殊字符需百分号编码）
+http://alice:p%40ss@proxy.internal.corp:8080
 ```
+
+### 本机设置（不进已保存配置）
+
+上游代理下方是属于这台机器、而非某套配置的设置项。改完立即写入 `config.toml`，**不会**进入已保存配置或导出内容：
+
+| 字段 | `config.toml` 键 | 说明 |
+| :--- | :--- | :--- |
+| 代理认证 | `proxy_auth` | `user:pass`。配置后抓包端口对代理转发与 `CONNECT` 要求 HTTP Basic `Proxy-Authorization`（缺失或错误回 `407 Proxy Authentication Required`），转发前剥离该头；`/zniff`、`/zniff-ca.crt`、`/s/{uuid}`、`/r/{uuid}` 与本机 `/mcp` 豁免。可被 `--proxy-auth <user:pass>` 或 `ZNIFF_PROXY_AUTH` 覆盖。 |
+| 中转地址 | `relay_url` | 用于实时分享的 `zniff --relay` 服务地址。 |
+| 中转密钥 | `relay_token` | 上传到中继时使用的 Bearer 密钥。 |
+| 接收中继 | `relay_accept` | 默认关闭；只填写中转地址不会打开接收。 |
 
 ---
 
@@ -481,8 +512,9 @@ http://proxy.internal.corp:8080
 
 弹出层底栏可以将当前的 **「过滤表达式 + 直通名单 + 转发改写规则 + 上游代理 + 三个开关状态」** 打包保存为一套命名配置（最多保存 16 套，存储在 `config.toml` 的 `[[saved_profiles]]` 中）：
 
-- **切换配置**：点击左下角下拉框选择任意预设，即可一键回填全部过滤与规则并立即生效。
-- **保存配置**：输入配置名称后点击「保存」（若快速添加栏有已填写的草稿规则会自动并入）。同名配置（忽略大小写）会自动覆盖更新。
+- **切换配置**：点击左下角下拉框选择任意预设，即可一键回填全部过滤与规则并立即生效。当前配置记在 `active_profile`，并在顶栏状态圆点右侧显示 `[<配置名> ×]` 徽章：点配置名打开「过滤」弹出层；点 `×`（或下拉菜单顶部的「取消选择当前配置」，或再次点击已激活条目）即可取消选择，不会删除该配置。未点「保存」的临时改动以顶层覆盖值的形式保留在 `config.toml` 中。
+- **历史快照**：历史下拉自动保留最近 10 条配置快照（`profile_history`），便于回退。
+- **保存配置**：输入配置名称后点击「保存」（若快速添加栏有已填写的草稿规则会自动并入）。同名配置（忽略大小写）会自动覆盖更新。没有任何改动时「保存」为灰色不可点。
 - **新建配置**：点击「新建配置」清空当前工作区的过滤、直通、规则与上游代理，恢复默认开关状态（不会删除已保存的配置预设）。
 - **导出与导入 `.toml`**：
   - 点击 **「导出」** 将配置序列化为 `.toml` 文本并直接复制到剪贴板。

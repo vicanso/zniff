@@ -1,14 +1,15 @@
 # zniff desktop capture app. Run from the repository root.
 # The crate lives in app/. app/Cargo.toml is the single source of truth
-# for the version number.
+# for the version number; app/nsh.json mirrors it (see sync-version).
 
 CARGO ?= cargo
 MANIFEST := app/Cargo.toml
+NSH_JSON := app/nsh.json
 CARGO_FLAGS := --manifest-path $(MANIFEST)
 VERSION := $(shell sed -n 's/^version = "\([^"]*\)"/\1/p' $(MANIFEST) | head -1)
 
 .PHONY: all help build dev debug run web web-ui fmt lint test check check-wasm release bundle clean \
-	bloat udeps version version-patch version-minor version-major tag nightly changelog
+	bloat udeps version sync-version version-patch version-minor version-major tag nightly changelog
 
 # --- develop ---------------------------------------------------------------
 
@@ -34,7 +35,8 @@ help:
 		'udeps    unused dependencies (nightly)' \
 		'' \
 		'version-patch | version-minor | version-major' \
-		'         bump app/Cargo.toml, then prepend CHANGELOG.md' \
+		'         bump app/Cargo.toml, sync app/nsh.json, then prepend CHANGELOG.md' \
+		'sync-version  copy the app/Cargo.toml version into app/nsh.json' \
 		'tag      annotate v$(VERSION) (push it yourself)' \
 		'nightly  move and push the nightly tag; CI ships the pre-release and vicanso/zniff-web:nightly' \
 		'changelog  regenerate CHANGELOG.md from conventional commits' \
@@ -145,7 +147,8 @@ clean:
 # Release flow: `make version-patch` (bump + changelog), review the diff,
 # commit it as `chore: version X.Y.Z`, then `make tag` and
 # `git push origin vX.Y.Z`. Nothing here commits or pushes.
-# app/Cargo.toml is the only place the number lives.
+# app/Cargo.toml is where the number is set; app/nsh.json only mirrors it
+# and is rewritten by `sync-version` on every bump.
 #
 # The tag is not optional bookkeeping: `git cliff --unreleased` bounds its
 # range by the latest tag, so a release that never gets tagged makes the
@@ -171,20 +174,29 @@ version:
 		echo "  git cliff --tag-pattern '^v[0-9]+' --unreleased -vv 2>&1 | grep 'did not match'"; \
 	fi
 
-# Bump app/Cargo.toml (+ app/Cargo.lock) via cargo-edit, then run `version`
-# in a fresh make invocation — VERSION is expanded at parse time, so the
-# recursive $(MAKE) is what picks up the just-bumped number.
+# Copy the Cargo.toml version into the top-level "version" of app/nsh.json.
+# `-i.bak` + rm keeps the in-place edit portable across BSD and GNU sed.
+sync-version:
+	@test -n "$(VERSION)" || { echo "could not read version from $(MANIFEST)"; exit 1; }
+	@sed -i.bak -E 's/^(  "version": *")[^"]*(",?)$$/\1$(VERSION)\2/' $(NSH_JSON) && rm -f $(NSH_JSON).bak
+	@grep -q '^  "version": "$(VERSION)"' $(NSH_JSON) || { echo "failed to set version in $(NSH_JSON)"; exit 1; }
+	@echo "$(NSH_JSON) version -> $(VERSION)"
+
+# Bump app/Cargo.toml (+ app/Cargo.lock) via cargo-edit, then run
+# `sync-version` and `version` in a fresh make invocation — VERSION is
+# expanded at parse time, so the recursive $(MAKE) is what picks up the
+# just-bumped number.
 version-patch:
 	$(CARGO) set-version --manifest-path $(MANIFEST) --bump patch
-	$(MAKE) version
+	$(MAKE) sync-version version
 
 version-minor:
 	$(CARGO) set-version --manifest-path $(MANIFEST) --bump minor
-	$(MAKE) version
+	$(MAKE) sync-version version
 
 version-major:
 	$(CARGO) set-version --manifest-path $(MANIFEST) --bump major
-	$(MAKE) version
+	$(MAKE) sync-version version
 
 tag:
 	git tag -a v$(VERSION) -m "version $(VERSION)"
