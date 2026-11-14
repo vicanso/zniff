@@ -22,7 +22,7 @@ https://github.com/user-attachments/assets/773009a3-beee-4548-b9dd-51ee4fd65a8e
 
 ## 核心特性
 
-- **原生轻量**：代理内核与 `nsh` GUI 运行在同一 Rust 进程内，无 Electron、无 JVM。冷启动 **< 30 ms**，空闲内存 **< 25 MB**。
+- **原生轻量**：代理内核与 `nsh` GUI 编译为单个纯 Rust 二进制程序，启动迅速且内存占用低。
 - **严格协议跟随**：解析 `ClientHello` 的 ALPN 提案并直接与源站协商。支持 HTTP/2 多路复用、WebSocket（RFC 6455）与 SSE，不降级为 HTTP/1.1。
 - **深度检视**：支持 JSON、GraphQL（自动拆分 `operationName`、查询语句与变量）、HTML/XML、无模式 Protobuf/gRPC 与 MessagePack 解码；行内自动解码 JWT、Unix 时间戳和 Base64，支持基准行级 Diff 与正文检索。
 - **14 项改写规则与断点队列**：包含终点规则（`map-local`、`map-remote`、`break`、`break-res`、`block`）与叠加修饰规则（`replace`、`json`、`delay`、`throttle`、`header`、`query`、`cors`、`no-cache`、`cert`），支持 GraphQL `op=` 精准匹配与 8 槽位 FIFO 断点排队。
