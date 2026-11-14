@@ -70,9 +70,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     && /opt/nsh/bin/nsh package --target web -v /src/app -o /web-pkg \
     && mv /web-pkg/zniff /web \
     && test -f /web/index.html \
+    && wflags="--enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue --enable-simd --enable-gc --enable-tail-call --enable-extended-const" \
+    && if wasm-opt --help | grep -q -- '--enable-bulk-memory-opt'; then wflags="$wflags --enable-bulk-memory-opt"; fi \
     && for w in /web/nsh.*.wasm; do \
         [ -f "$w" ] || continue; \
-        wasm-opt -Oz --all-features "$w" -o "$w.opt" && mv "$w.opt" "$w"; \
+        wasm-opt -Oz $wflags "$w" -o "$w.opt" && mv "$w.opt" "$w"; \
         gzip -9 -c "$w" > "$w.gz"; \
         brotli -f -q 11 -o "$w.br" "$w"; \
     done \

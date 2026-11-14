@@ -73,9 +73,13 @@ web-ui:
 	rm -rf $(WEB_DIR)
 	mv $(CURDIR)/app/.nsh/web-pkg/zniff $(WEB_DIR)
 	@if command -v wasm-opt >/dev/null 2>&1; then \
+		wflags="--enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue --enable-simd --enable-gc --enable-tail-call --enable-extended-const"; \
+		if wasm-opt --help | grep -q -- '--enable-bulk-memory-opt'; then \
+			wflags="$$wflags --enable-bulk-memory-opt"; \
+		fi; \
 		for w in $(WEB_DIR)/nsh.*.wasm; do \
 			[ -f "$$w" ] || continue; \
-			wasm-opt -Oz --all-features "$$w" -o "$$w.opt" && mv "$$w.opt" "$$w"; \
+			wasm-opt -Oz $$wflags "$$w" -o "$$w.opt" && mv "$$w.opt" "$$w"; \
 			gzip -9 -c "$$w" > "$$w.gz"; \
 			if command -v brotli >/dev/null 2>&1; then \
 				brotli -f -q 11 -o "$$w.br" "$$w"; \

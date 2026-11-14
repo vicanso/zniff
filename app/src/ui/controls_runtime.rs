@@ -532,10 +532,267 @@ pub(crate) fn toggle_capture(controls: Arc<Controls>) {
                 let value: serde_json::Value =
                     serde_json::from_str(&response.text()).unwrap_or(serde_json::json!({}));
                 apply_capture_state(&controls, &value, response.ok());
+                proxy::notify_poll_wake();
             }
             Err(err) => set_status(&controls, StatusMsg::BindFailed { port, err }),
         }
     });
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub(crate) fn web_poll_delay_ms(capturing: bool, idle_streak: u32) -> u64 {
+    if capturing {
+        match idle_streak {
+            0 => 450,
+            1..=2 => 750,
+            3..=5 => 1200,
+            _ => 2100,
+        }
+    } else {
+        match idle_streak {
+            0 => 750,
+            1..=2 => 1500,
+            _ => 3000,
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, PartialEq, Eq)]
+struct WebPollSnapshot {
+    capturing: bool,
+    gen_num: u64,
+    rev_num: u64,
+    paused_len: usize,
+    share_id: String,
+    relay_accept: bool,
+}
+
+#[cfg(target_arch = "wasm32")]
+struct WebPollUi {
+    port_text: Signal<String>,
+    listen_all: Signal<bool>,
+    profiles: ProfileSignals,
+    seq_builder: SeqBuilder,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Default)]
+struct WebPollState {
+    seeded: bool,
+    seen_error: String,
+    last_flows_sync: Option<(u64, u64, String)>,
+    last_snap: Option<WebPollSnapshot>,
+    idle_streak: u32,
+}
+
+#[cfg(target_arch = "wasm32")]
+struct WebPollCursor<'a> {
+    filter: &'a str,
+    picked: Option<u64>,
+    baseline: Option<u64>,
+}
+
+#[cfg(target_arch = "wasm32")]
+fn apply_web_state_snapshot(
+    controls: &Controls,
+    ui: &WebPollUi,
+    state: &mut WebPollState,
+    value: &serde_json::Value,
+) -> Option<WebPollSnapshot> {
+    let gen_num = value
+        .get("generation")
+        .and_then(serde_json::Value::as_u64)?;
+    let rev_num = value
+        .get("session_rev")
+        .and_then(serde_json::Value::as_u64)?;
+    controls.hub.apply_state(value);
+    let mut relay_accept = ui.profiles.relay_accept.get_untracked();
+    if let Some(prefs) = value.get("prefs") {
+        if let Some(on) = prefs
+            .get("relay_accept")
+            .and_then(serde_json::Value::as_bool)
+        {
+            relay_accept = on;
+            if ui.profiles.relay_accept.get_untracked() != on {
+                ui.profiles.relay_accept.set(on);
+            }
+        }
+        let cfg_err = prefs
+            .get("config_error")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned);
+        *controls
+            .config_error
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = cfg_err;
+        if let Some(cfg_path) = prefs.get("config_path").and_then(serde_json::Value::as_str) {
+            *controls
+                .config_path
+                .lock()
+                .unwrap_or_else(|err| err.into_inner()) = cfg_path.to_string();
+        }
+    }
+    if !state.seeded {
+        state.seeded = true;
+        if let Some(port) = json_port(value) {
+            set_port(&controls.listen_port, port);
+            ui.port_text.set(port.to_string());
+        }
+        if let Some(all) = value.get("listen_all").and_then(serde_json::Value::as_bool) {
+            set_bool(&controls.listen_all, all);
+            ui.listen_all.set(all);
+        }
+        if let Some(prefs) = value.get("prefs") {
+            seed_web_prefs(controls, prefs, ui.profiles, ui.seq_builder);
+        }
+    }
+    let capturing = value
+        .get("capturing")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    set_bool(&controls.running, capturing);
+    let listen = value
+        .get("listen")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    *controls
+        .listen
+        .lock()
+        .unwrap_or_else(|err| err.into_inner()) = listen.to_string();
+    let error = value
+        .get("error")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    if !error.is_empty() && error != state.seen_error.as_str() {
+        state.seen_error = error.to_string();
+        set_status(
+            controls,
+            StatusMsg::BindFailed {
+                port: json_port(value).unwrap_or(0),
+                err: error.to_string(),
+            },
+        );
+    } else if error.is_empty() {
+        state.seen_error.clear();
+    }
+    let paused_len = value
+        .get("paused_queue")
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, Vec::len);
+    let share_id = value
+        .get("share_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    Some(WebPollSnapshot {
+        capturing,
+        gen_num,
+        rev_num,
+        paused_len,
+        share_id,
+        relay_accept,
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn sync_web_flows_if_needed(
+    controls: &Controls,
+    trimmed_filter: &str,
+    state_stamp: Option<(u64, u64)>,
+    last_flows_sync: &mut Option<(u64, u64, String)>,
+) {
+    let desired_sync =
+        state_stamp.map(|(gen_num, rev_num)| (gen_num, rev_num, trimmed_filter.to_string()));
+    let should_fetch_flows = match (&*last_flows_sync, &desired_sync) {
+        (Some(prev), Some(next)) => prev != next,
+        _ => true,
+    };
+    if !should_fetch_flows {
+        return;
+    }
+    let flows_url = if trimmed_filter.is_empty() {
+        "api/flows".to_string()
+    } else {
+        format!(
+            "api/flows?filter={}",
+            url_encode_query_component(trimmed_filter)
+        )
+    };
+    if let Ok(response) = fetch(HttpRequest::get(flows_url)).await
+        && let Ok(value) = serde_json::from_str::<serde_json::Value>(&response.text())
+    {
+        controls.hub.apply_flows(&value);
+        *last_flows_sync = desired_sync;
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn hydrate_selected_web_details(controls: &Controls, picked: Option<u64>, base: Option<u64>) {
+    for maybe_id in [picked, if base != picked { base } else { None }] {
+        let Some(id) = maybe_id else {
+            continue;
+        };
+        let needs = controls
+            .hub
+            .with_session(|session| session.cached_needs_detail(id));
+        if needs
+            && let Ok(response) = fetch(HttpRequest::get(format!("api/flows/{id}"))).await
+            && response.ok()
+            && let Ok(value) = serde_json::from_str::<serde_json::Value>(&response.text())
+        {
+            controls.hub.fill_detail(&value);
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn needs_selected_detail(controls: &Controls, picked: Option<u64>, base: Option<u64>) -> bool {
+    [picked, if base != picked { base } else { None }]
+        .into_iter()
+        .flatten()
+        .any(|id| {
+            controls
+                .hub
+                .with_session(|session| session.cached_needs_detail(id))
+        })
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn wait_next_web_poll(
+    controls: &Controls,
+    effective_filter: Signal<String>,
+    selected: Signal<Option<u64>>,
+    baseline: Signal<Option<u64>>,
+    cursor: &WebPollCursor<'_>,
+    delay_ms: u64,
+) -> bool {
+    const SLICE_MS: u64 = 150;
+    let mut elapsed = 0u64;
+    while elapsed < delay_ms {
+        if proxy::take_poll_wake() {
+            return true;
+        }
+        let step = (delay_ms - elapsed).min(SLICE_MS);
+        timer(Duration::from_millis(step)).await;
+        elapsed += step;
+        if proxy::take_poll_wake() {
+            return true;
+        }
+        if effective_filter.get_untracked().trim() != cursor.filter {
+            return true;
+        }
+        let cur_picked = selected.get_untracked();
+        let cur_baseline = baseline.get_untracked();
+        if (cur_picked != cursor.picked || cur_baseline != cursor.baseline)
+            && needs_selected_detail(controls, cur_picked, cur_baseline)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// The browser does not capture. This loop copies the server process into the
@@ -552,138 +809,73 @@ pub(crate) fn start_web_poll(
     baseline: Signal<Option<u64>>,
 ) {
     spawn(async move {
-        let mut seeded = false;
-        let mut seen_error = String::new();
-        let mut last_flows_sync: Option<(u64, u64, String)> = None;
+        let ui = WebPollUi {
+            port_text,
+            listen_all,
+            profiles,
+            seq_builder,
+        };
+        let mut state = WebPollState::default();
         loop {
-            let mut state_stamp: Option<(u64, u64)> = None;
-            if let Ok(response) = fetch(HttpRequest::get("api/state")).await
+            let url = if state.seeded {
+                "api/state?lite=1"
+            } else {
+                "api/state"
+            };
+            let mut next_snap = None;
+            if let Ok(response) = fetch(HttpRequest::get(url)).await
                 && {
                     proxy::note_web_state_url(&response.head.url);
                     true
                 }
                 && let Ok(value) = serde_json::from_str::<serde_json::Value>(&response.text())
             {
-                if let (Some(gen_num), Some(rev_num)) = (
-                    value.get("generation").and_then(serde_json::Value::as_u64),
-                    value.get("session_rev").and_then(serde_json::Value::as_u64),
-                ) {
-                    state_stamp = Some((gen_num, rev_num));
-                }
-                controls.hub.apply_state(&value);
-                if let Some(prefs) = value.get("prefs") {
-                    if let Some(on) = prefs
-                        .get("relay_accept")
-                        .and_then(serde_json::Value::as_bool)
-                        && profiles.relay_accept.get_untracked() != on
-                    {
-                        profiles.relay_accept.set(on);
-                    }
-                    let cfg_err = prefs
-                        .get("config_error")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(ToOwned::to_owned);
-                    *controls
-                        .config_error
-                        .lock()
-                        .unwrap_or_else(|err| err.into_inner()) = cfg_err;
-                    if let Some(cfg_path) =
-                        prefs.get("config_path").and_then(serde_json::Value::as_str)
-                    {
-                        *controls
-                            .config_path
-                            .lock()
-                            .unwrap_or_else(|err| err.into_inner()) = cfg_path.to_string();
-                    }
-                }
-                if !seeded {
-                    seeded = true;
-                    if let Some(port) = json_port(&value) {
-                        set_port(&controls.listen_port, port);
-                        port_text.set(port.to_string());
-                    }
-                    if let Some(all) = value.get("listen_all").and_then(serde_json::Value::as_bool)
-                    {
-                        set_bool(&controls.listen_all, all);
-                        listen_all.set(all);
-                    }
-                    if let Some(prefs) = value.get("prefs") {
-                        seed_web_prefs(&controls, prefs, profiles, seq_builder);
-                    }
-                }
-                let capturing = value
-                    .get("capturing")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false);
-                set_bool(&controls.running, capturing);
-                let listen = value
-                    .get("listen")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("");
-                *controls
-                    .listen
-                    .lock()
-                    .unwrap_or_else(|err| err.into_inner()) = listen.to_string();
-                let error = value
-                    .get("error")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("");
-                if !error.is_empty() && error != seen_error {
-                    seen_error = error.to_string();
-                    set_status(
-                        &controls,
-                        StatusMsg::BindFailed {
-                            port: json_port(&value).unwrap_or(0),
-                            err: error.to_string(),
-                        },
-                    );
-                } else if error.is_empty() {
-                    seen_error.clear();
-                }
+                next_snap = apply_web_state_snapshot(&controls, &ui, &mut state, &value);
             }
-            let trimmed_filter = effective_filter.get_untracked().trim().to_string();
-            let desired_sync =
-                state_stamp.map(|(gen_num, rev_num)| (gen_num, rev_num, trimmed_filter.clone()));
-            let should_fetch_flows = match (&last_flows_sync, &desired_sync) {
+            let state_changed = match (&state.last_snap, &next_snap) {
                 (Some(prev), Some(next)) => prev != next,
-                _ => true,
+                (None, Some(_)) => true,
+                _ => false,
             };
-            if should_fetch_flows {
-                let flows_url = if trimmed_filter.is_empty() {
-                    "api/flows".to_string()
-                } else {
-                    format!(
-                        "api/flows?filter={}",
-                        url_encode_query_component(&trimmed_filter)
-                    )
-                };
-                if let Ok(response) = fetch(HttpRequest::get(flows_url)).await
-                    && let Ok(value) = serde_json::from_str::<serde_json::Value>(&response.text())
-                {
-                    controls.hub.apply_flows(&value);
-                    last_flows_sync = desired_sync;
-                }
+            if let Some(snap) = next_snap {
+                state.last_snap = Some(snap);
             }
+            if state_changed {
+                state.idle_streak = 0;
+            } else {
+                state.idle_streak = state.idle_streak.saturating_add(1);
+            }
+            let state_stamp = state.last_snap.as_ref().map(|s| (s.gen_num, s.rev_num));
+            let trimmed_filter = effective_filter.get_untracked().trim().to_string();
+            sync_web_flows_if_needed(
+                &controls,
+                &trimmed_filter,
+                state_stamp,
+                &mut state.last_flows_sync,
+            )
+            .await;
             let picked = selected.get_untracked();
             let base = baseline.get_untracked();
-            for maybe_id in [picked, if base != picked { base } else { None }] {
-                let Some(id) = maybe_id else {
-                    continue;
-                };
-                let needs = controls
-                    .hub
-                    .with_session(|session| session.cached_needs_detail(id));
-                if needs
-                    && let Ok(response) = fetch(HttpRequest::get(format!("api/flows/{id}"))).await
-                    && response.ok()
-                    && let Ok(value) = serde_json::from_str::<serde_json::Value>(&response.text())
-                {
-                    controls.hub.fill_detail(&value);
-                }
+            hydrate_selected_web_details(&controls, picked, base).await;
+            let capturing = state.last_snap.as_ref().is_some_and(|s| s.capturing);
+            let delay_ms = web_poll_delay_ms(capturing, state.idle_streak);
+            let cursor = WebPollCursor {
+                filter: &trimmed_filter,
+                picked,
+                baseline: base,
+            };
+            if wait_next_web_poll(
+                &controls,
+                effective_filter,
+                selected,
+                baseline,
+                &cursor,
+                delay_ms,
+            )
+            .await
+            {
+                state.idle_streak = 0;
             }
-            timer(Duration::from_millis(400)).await;
         }
     });
 }

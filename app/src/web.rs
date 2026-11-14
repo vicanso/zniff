@@ -621,7 +621,7 @@ struct Slot {
 }
 
 #[derive(Serialize)]
-struct StateBody {
+struct StateRuntime {
     capturing: bool,
     listen: String,
     listen_port: u16,
@@ -633,7 +633,20 @@ struct StateBody {
     session_rev: u64,
     paused: Option<PausedBody>,
     paused_queue: Vec<PausedBody>,
+}
+
+#[derive(Serialize)]
+struct StateBody {
+    #[serde(flatten)]
+    runtime: StateRuntime,
     prefs: PrefsBody,
+}
+
+#[derive(Serialize)]
+struct StateLiteBody {
+    #[serde(flatten)]
+    runtime: StateRuntime,
+    prefs: PrefsLiteBody,
 }
 
 #[derive(Serialize)]
@@ -660,6 +673,19 @@ struct PrefsBody {
     redact_export: bool,
     redact_strict: bool,
     redact_fields: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    config_error: Option<String>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    config_path: String,
+}
+
+#[derive(Serialize)]
+struct PrefsLiteBody {
+    proxy_auth: String,
+    rules_enabled: bool,
+    breaks_enabled: bool,
+    show_tunnels: bool,
+    relay_accept: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     config_error: Option<String>,
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -835,10 +861,14 @@ async fn route(
             return (html(200, "OK", page(zh).into_bytes()), clean_nobody);
         }
         if path == "/api/state" {
-            return (
-                json_reply(200, "OK", &state_value(&lock(slot))),
-                clean_nobody,
-            );
+            let lite = matches!(query_value(&head.target, "lite").as_str(), "1" | "true");
+            let slot = lock(slot);
+            let value = if lite {
+                state_lite_value(&slot)
+            } else {
+                state_value(&slot)
+            };
+            return (json_reply(200, "OK", &value), clean_nobody);
         }
         if path == "/api/flows" {
             let filter = query_value(&head.target, "filter");
@@ -1015,7 +1045,7 @@ fn set_capture(
     }
 }
 
-fn state_of(slot: &Slot) -> StateBody {
+fn state_runtime(slot: &Slot) -> StateRuntime {
     let listen = slot
         .capture
         .as_ref()
@@ -1030,7 +1060,7 @@ fn state_of(slot: &Slot) -> StateBody {
         .hub
         .with_session(|session| (session.len(), session.rev()));
     let queue = slot.hub.paused_queue();
-    StateBody {
+    StateRuntime {
         capturing: slot.capture.is_some(),
         listen,
         listen_port,
@@ -1051,6 +1081,32 @@ fn state_of(slot: &Slot) -> StateBody {
                 side: break_side_name(*side),
             })
             .collect(),
+    }
+}
+
+fn config_status(slot: &Slot) -> (Option<String>, String) {
+    let config_error = slot
+        .prefs
+        .config_dir
+        .as_ref()
+        .and_then(|_| crate::config::last_load_error());
+    let config_path = slot
+        .prefs
+        .config_dir
+        .as_ref()
+        .map(|dir| {
+            crate::config::config_path_for(dir, slot.prefs.dev_mode)
+                .display()
+                .to_string()
+        })
+        .unwrap_or_default();
+    (config_error, config_path)
+}
+
+fn state_of(slot: &Slot) -> StateBody {
+    let (config_error, config_path) = config_status(slot);
+    StateBody {
+        runtime: state_runtime(slot),
         prefs: PrefsBody {
             bypass: slot.hub.bypass_text(),
             rules: slot.hub.rules_text(),
@@ -1068,21 +1124,8 @@ fn state_of(slot: &Slot) -> StateBody {
             redact_export: slot.prefs.redact_export,
             redact_strict: slot.prefs.redact_strict,
             redact_fields: slot.prefs.redact_fields.clone(),
-            config_error: slot
-                .prefs
-                .config_dir
-                .as_ref()
-                .and_then(|_| crate::config::last_load_error()),
-            config_path: slot
-                .prefs
-                .config_dir
-                .as_ref()
-                .map(|dir| {
-                    crate::config::config_path_for(dir, slot.prefs.dev_mode)
-                        .display()
-                        .to_string()
-                })
-                .unwrap_or_default(),
+            config_error,
+            config_path,
         },
     }
 }
@@ -1100,6 +1143,23 @@ fn state_value(slot: &Slot) -> Value {
 
 fn state_value_from(body: &StateBody) -> Value {
     serde_json::to_value(body).unwrap_or(json!({}))
+}
+
+fn state_lite_value(slot: &Slot) -> Value {
+    let (config_error, config_path) = config_status(slot);
+    let body = StateLiteBody {
+        runtime: state_runtime(slot),
+        prefs: PrefsLiteBody {
+            proxy_auth: slot.hub.proxy_auth_text(),
+            rules_enabled: slot.hub.rules_enabled(),
+            breaks_enabled: slot.hub.breaks_enabled(),
+            show_tunnels: slot.hub.tunnel_failures_shown(),
+            relay_accept: slot.hub.relay_accepts(),
+            config_error,
+            config_path,
+        },
+    };
+    serde_json::to_value(&body).unwrap_or(json!({}))
 }
 
 fn flow_list(hub: &Hub, filter: &str) -> Value {
@@ -1492,15 +1552,51 @@ async fn load(id) {
   ];
   detailEl.textContent = lines.filter((line, index) => line !== "" || index > 2).join("\n");
 }
-async function tick() {
-  const state = await fetch("api/state").then((res) => res.json());
-  toggle.textContent = state.capturing ? I.stop : I.start;
-  toggle.className = state.capturing ? "stop" : "";
-  toggle.dataset.on = state.capturing ? "0" : "1";
-  stateEl.textContent = (state.capturing ? (I.listening + " " + state.listen) : (I.closed + " " + state.listen_port)) + (state.error ? (" — " + state.error) : "");
-  const list = await fetch("api/flows?filter=" + encodeURIComponent(filterEl.value || "")).then((res) => res.json());
-  paint(list.flows || []);
+let pollTimer = 0;
+let lastFlowStamp = "";
+let lastCapturing = false;
+let polling = false;
+let queued = false;
+function schedulePoll(capturing) {
+  clearTimeout(pollTimer);
+  if (document.hidden) return;
+  pollTimer = setTimeout(tick, capturing ? 1000 : 3000);
 }
+async function tick() {
+  if (polling) { queued = true; return; }
+  polling = true;
+  clearTimeout(pollTimer);
+  try {
+    const state = await fetch("api/state?lite=1").then((res) => res.json());
+    lastCapturing = !!state.capturing;
+    toggle.textContent = state.capturing ? I.stop : I.start;
+    toggle.className = state.capturing ? "stop" : "";
+    toggle.dataset.on = state.capturing ? "0" : "1";
+    stateEl.textContent = (state.capturing ? (I.listening + " " + state.listen) : (I.closed + " " + state.listen_port)) + (state.error ? (" — " + state.error) : "");
+    const filter = filterEl.value || "";
+    const stamp = String(state.generation || 0) + ":" + String(state.session_rev || 0) + ":" + filter;
+    if (stamp !== lastFlowStamp) {
+      const list = await fetch("api/flows?filter=" + encodeURIComponent(filter)).then((res) => res.json());
+      paint(list.flows || []);
+      lastFlowStamp = stamp;
+    }
+  } finally {
+    polling = false;
+    if (queued) {
+      queued = false;
+      tick();
+    } else {
+      schedulePoll(lastCapturing);
+    }
+  }
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    clearTimeout(pollTimer);
+  } else {
+    tick();
+  }
+});
 toggle.onclick = async () => {
   await fetch("api/capture", {
     method: "POST",
@@ -1517,7 +1613,6 @@ clearBtn.onclick = async () => {
 };
 filterEl.oninput = () => { tick(); };
 tick();
-setInterval(tick, 1000);
 </script>
 </body>
 </html>
@@ -3578,6 +3673,81 @@ mod tests {
         assert_eq!(status, 200);
         let state: Value = serde_json::from_str(body_of(&raw_state)).unwrap();
         assert_eq!(state["prefs"]["proxy_auth"], "admin:pass123");
+
+        drop(server);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn web_state_lite_omits_static_prefs_and_keeps_runtime_fields() {
+        let dir = std::env::temp_dir().join(format!("zniff-web-state-lite-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+        let capture_port = reserve_port();
+        let server = WebServer::start(
+            "127.0.0.1:0".parse().unwrap(),
+            hub.clone(),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            capture_port,
+        )
+        .unwrap();
+        let web = server.addr();
+
+        let (status, _) = post(
+            web,
+            "/api/hub",
+            r#"{"op":"set_bypass","text":"localhost\nexample.com"}"#,
+        )
+        .await;
+        assert_eq!(status, 200);
+        let (status, _) = post(
+            web,
+            "/api/hub",
+            r#"{"op":"set_rules","text":"map-local https://a.test/x status=200 body=ok"}"#,
+        )
+        .await;
+        assert_eq!(status, 200);
+        let (status, _) = post(web, "/api/hub", r#"{"op":"set_proxy_auth","text":"u:p"}"#).await;
+        assert_eq!(status, 200);
+
+        let (status, raw_full) = exchange(
+            web,
+            "GET /api/state HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert_eq!(status, 200);
+        let full: Value = serde_json::from_str(body_of(&raw_full)).unwrap();
+        assert_eq!(full["prefs"]["bypass"], "localhost\nexample.com");
+        assert!(full["prefs"].get("rules").is_some());
+        assert!(full["prefs"].get("saved_profiles").is_some());
+        assert!(full["prefs"].get("profile_history").is_some());
+
+        let (status, raw_lite) = exchange(
+            web,
+            "GET /api/state?lite=1 HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert_eq!(status, 200);
+        let lite: Value = serde_json::from_str(body_of(&raw_lite)).unwrap();
+        assert_eq!(lite["capturing"], false);
+        assert!(lite.get("listen_port").is_some());
+        assert!(lite.get("generation").is_some());
+        assert!(lite.get("session_rev").is_some());
+        assert_eq!(lite["error"], "");
+        assert_eq!(lite["share_id"], "");
+        assert!(lite["paused_queue"].is_array());
+        assert_eq!(lite["prefs"]["proxy_auth"], "u:p");
+        assert!(lite["prefs"].get("rules_enabled").is_some());
+        assert!(lite["prefs"].get("breaks_enabled").is_some());
+        assert!(lite["prefs"].get("show_tunnels").is_some());
+        assert!(lite["prefs"].get("relay_accept").is_some());
+        assert!(lite["prefs"].get("rules").is_none());
+        assert!(lite["prefs"].get("bypass").is_none());
+        assert!(lite["prefs"].get("upstream").is_none());
+        assert!(lite["prefs"].get("saved_profiles").is_none());
+        assert!(lite["prefs"].get("profile_history").is_none());
+        assert!(lite["prefs"].get("filter").is_none());
 
         drop(server);
         let _ = std::fs::remove_dir_all(&dir);

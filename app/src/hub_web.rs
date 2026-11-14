@@ -626,6 +626,15 @@ pub async fn resolve_web_api_url(rel_path: &str) -> Option<String> {
 }
 
 static LAST_SAVE_ERROR: Mutex<Option<String>> = Mutex::new(None);
+static POLL_WAKE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn notify_poll_wake() {
+    POLL_WAKE.store(true, std::sync::atomic::Ordering::Release);
+}
+
+pub fn take_poll_wake() -> bool {
+    POLL_WAKE.swap(false, std::sync::atomic::Ordering::AcqRel)
+}
 
 pub fn take_save_error() -> Option<String> {
     LAST_SAVE_ERROR
@@ -641,17 +650,19 @@ fn post_op(value: Value) {
     nsh_core::prelude::spawn(async move {
         let request = nsh_core::prelude::HttpRequest::post("api/hub", body)
             .header("content-type", "application/json");
-        if let Ok(response) = nsh_core::prelude::fetch(request).await
-            && let Ok(parsed) = serde_json::from_str::<Value>(&response.text())
-            && let Some(err) = parsed
-                .get("save_error")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-        {
-            *LAST_SAVE_ERROR
-                .lock()
-                .unwrap_or_else(|err| err.into_inner()) = Some(err.to_string());
+        if let Ok(response) = nsh_core::prelude::fetch(request).await {
+            notify_poll_wake();
+            if let Ok(parsed) = serde_json::from_str::<Value>(&response.text())
+                && let Some(err) = parsed
+                    .get("save_error")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+            {
+                *LAST_SAVE_ERROR
+                    .lock()
+                    .unwrap_or_else(|err| err.into_inner()) = Some(err.to_string());
+            }
         }
     });
 }
@@ -703,6 +714,7 @@ async fn post_json(bytes: Vec<u8>) -> anyhow::Result<Value> {
     let response = nsh_core::prelude::fetch(request)
         .await
         .map_err(|err| anyhow!(err))?;
+    notify_poll_wake();
     let value: Value = serde_json::from_str(&response.text()).unwrap_or(json!({}));
     if !response.ok() {
         return Err(anyhow!(json_error(&value, "请求失败")));
