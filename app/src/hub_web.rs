@@ -599,6 +599,15 @@ pub async fn resolve_web_api_url(rel_path: &str) -> Option<String> {
     None
 }
 
+static LAST_SAVE_ERROR: Mutex<Option<String>> = Mutex::new(None);
+
+pub fn take_save_error() -> Option<String> {
+    LAST_SAVE_ERROR
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .take()
+}
+
 fn post_op(value: Value) {
     let Ok(body) = serde_json::to_vec(&value) else {
         return;
@@ -606,7 +615,18 @@ fn post_op(value: Value) {
     nsh_core::prelude::spawn(async move {
         let request = nsh_core::prelude::HttpRequest::post("api/hub", body)
             .header("content-type", "application/json");
-        let _ = nsh_core::prelude::fetch(request).await;
+        if let Ok(response) = nsh_core::prelude::fetch(request).await
+            && let Ok(parsed) = serde_json::from_str::<Value>(&response.text())
+            && let Some(err) = parsed
+                .get("save_error")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        {
+            *LAST_SAVE_ERROR
+                .lock()
+                .unwrap_or_else(|err| err.into_inner()) = Some(err.to_string());
+        }
     });
 }
 
