@@ -127,6 +127,7 @@ pub(crate) fn more_menu(
             },
         ))
         .child(menu_lang_row(import_controls.clone()))
+        .child(menu_mono_font_row(import_controls.clone()))
         .child(menu_action_meta(
             Glyph::Sliders,
             tr("服务与中继设置", "Relay & Service Settings"),

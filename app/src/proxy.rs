@@ -5250,7 +5250,7 @@ const INSTALL_PAGE: &str = r#"<!DOCTYPE html>
   p { margin: 0.4rem 0; }
   a.btn { display: block; margin: 1rem 0 0.4rem; padding: 0.85rem 1rem; border-radius: 10px; background: #2563eb; color: #fff; font-weight: 600; text-align: center; text-decoration: none; }
   ol { margin: 0.3rem 0; padding-left: 1.2rem; }
-  code { font-family: ui-monospace, Menlo, monospace; }
+  code { font-family: "JetBrains Mono", "JetBrains Mono NL", ui-monospace, Menlo, monospace; }
   .note { color: #94a3b8; font-size: 0.9rem; }
 </style>
 </head>
@@ -5308,7 +5308,7 @@ const INSTALL_PAGE_EN: &str = r#"<!DOCTYPE html>
   p { margin: 0.4rem 0; }
   a.btn { display: block; margin: 1rem 0 0.4rem; padding: 0.85rem 1rem; border-radius: 10px; background: #2563eb; color: #fff; font-weight: 600; text-align: center; text-decoration: none; }
   ol { margin: 0.3rem 0; padding-left: 1.2rem; }
-  code { font-family: ui-monospace, Menlo, monospace; }
+  code { font-family: "JetBrains Mono", "JetBrains Mono NL", ui-monospace, Menlo, monospace; }
   .note { color: #94a3b8; font-size: 0.9rem; }
 </style>
 </head>

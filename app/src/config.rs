@@ -293,6 +293,8 @@ pub struct Config {
     pub show_full_url: bool,
     /// Where to ellipsize overflowing Path/URL and Host cells (`head`, `middle`, `tail`).
     pub ellipsize: ListEllipsize,
+    /// False draws monospaced text in the bundled JetBrains Mono; true uses the system's.
+    pub system_mono_font: bool,
     pub list_width: u32,
     pub window_width: u32,
     pub window_height: u32,
@@ -386,6 +388,8 @@ struct RawConfig {
     show_full_url: bool,
     #[serde(default, skip_serializing_if = "ListEllipsize::is_default")]
     ellipsize: ListEllipsize,
+    #[serde(default, skip_serializing_if = "is_false")]
+    system_mono_font: bool,
     #[serde(
         default = "default_list_width",
         skip_serializing_if = "is_default_list_width"
@@ -567,6 +571,7 @@ impl From<RawConfig> for Config {
             show_size: raw.show_size,
             show_full_url: raw.show_full_url,
             ellipsize: raw.ellipsize,
+            system_mono_font: raw.system_mono_font,
             list_width: raw.list_width,
             window_width: raw.window_width,
             window_height: raw.window_height,
@@ -664,6 +669,7 @@ impl From<Config> for RawConfig {
             show_size: config.show_size,
             show_full_url: config.show_full_url,
             ellipsize: config.ellipsize,
+            system_mono_font: config.system_mono_font,
             list_width: config.list_width,
             window_width: config.window_width,
             window_height: config.window_height,
@@ -715,6 +721,7 @@ impl Default for Config {
             show_size: true,
             show_full_url: false,
             ellipsize: ListEllipsize::Middle,
+            system_mono_font: false,
             list_width: default_list_width(),
             window_width: default_window_width(),
             window_height: default_window_height(),
@@ -1707,6 +1714,19 @@ mod tests {
         assert!(is_dev_env(Some(" true ")));
         assert!(!is_dev_env(Some("0")));
         assert!(!is_dev_env(None));
+    }
+
+    #[test]
+    fn system_mono_font_defaults_off_and_persists() {
+        let dir = Scratch::new();
+        assert!(!load(dir.path()).system_mono_font);
+        update(dir.path(), |config| config.system_mono_font = true).unwrap();
+        let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(text.contains("system_mono_font = true"), "{text}");
+        assert!(load(dir.path()).system_mono_font);
+        update(dir.path(), |config| config.system_mono_font = false).unwrap();
+        let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(!text.contains("system_mono_font"), "{text}");
     }
 
     #[test]

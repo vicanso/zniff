@@ -2144,7 +2144,7 @@ const PAGE_TEMPLATE: &str = r##"<!DOCTYPE html>
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg-canvas); color: var(--fg-primary); font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; -webkit-font-smoothing: antialiased; }
   button, input { font-family: inherit; }
-  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+  .mono { font-family: "JetBrains Mono", "JetBrains Mono NL", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
   .shell { display: flex; flex-direction: column; height: 100vh; width: 100vw; overflow: hidden; }
   .topbar { height: 44px; flex-shrink: 0; background: var(--bg-chrome); border-bottom: 1px solid var(--border-strong); padding: 0 12px; display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 0; }
   .brand { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; overflow: hidden; }
