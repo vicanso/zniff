@@ -5345,9 +5345,9 @@ const INSTALL_PAGE: &str = r#"<!DOCTYPE html>
   <a class="btn" href="/zniff-ca.crt">下载根证书</a>
   <h2>iPhone / iPad</h2>
   <ol>
-    <li>点上面的下载。系统会提示安装描述文件。</li>
-    <li>打开「设置」→「已下载描述文件」，安装 zniff CA。</li>
-    <li>再到「设置」→「通用」→「关于本机」→「证书信任设置」，打开 zniff CA 的完全信任。</li>
+    <li>用 <strong>Safari</strong> 打开本页，点上面的「下载根证书」并允许下载描述文件（微信或第三方浏览器无法唤起描述文件安装）。</li>
+    <li>打开「设置」→「已下载描述文件」（或「设置」→「通用」→「VPN 与设备管理」），安装 zniff CA。</li>
+    <li>安装完成后，才会在「设置」→「通用」→「关于本机」→「证书信任设置」里看到 zniff CA，打开它的完全信任。</li>
   </ol>
   <h2>Android</h2>
   <ol>
@@ -5403,9 +5403,9 @@ const INSTALL_PAGE_EN: &str = r#"<!DOCTYPE html>
   <a class="btn" href="/zniff-ca.crt">Download the root certificate</a>
   <h2>iPhone / iPad</h2>
   <ol>
-    <li>Tap the download. The system offers to install a profile.</li>
-    <li>Open Settings → Profile Downloaded and install zniff CA.</li>
-    <li>Then open Settings → General → About → Certificate Trust Settings and enable full trust for zniff CA.</li>
+    <li>Open this page in <strong>Safari</strong>, tap Download the root certificate above, and allow the configuration profile (other browsers only save the file).</li>
+    <li>Open Settings → Profile Downloaded (or Settings → General → VPN &amp; Device Management) and install zniff CA.</li>
+    <li>Once installed, zniff CA appears in Settings → General → About → Certificate Trust Settings. Enable full trust for it.</li>
   </ol>
   <h2>Android</h2>
   <ol>

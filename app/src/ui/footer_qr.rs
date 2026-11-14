@@ -302,7 +302,7 @@ pub(crate) fn qr_panel(
                                 .w_full()
                                 .flex_row()
                                 .flex_wrap()
-                                .items_start()
+                                .items_stretch()
                                 .gap_3()
                                 .child(qr_code_side(
                                     listen, lan_url, lan_choice, lan_addrs, qr_path,
@@ -377,20 +377,29 @@ pub(crate) fn qr_code_side(
                 ))
             },
         ))
-        .child(when(
-            move || !qr_path.get().is_empty(),
-            move || {
-                view()
-                    .p_2()
-                    .rounded(px(8.0))
-                    .bg(AdaptiveColor::rgb(0xffffff, 0xffffff))
-                    .child(image(move || qr_path.get()).w(px(168.0)).h(px(168.0)))
-            },
-        ))
-        .child(when(
-            move || qr_path.get().is_empty(),
-            move || muted_line(tr("二维码没有生成", "QR code was not generated")),
-        ))
+        .child(
+            view()
+                .w_full()
+                .flex_grow(1.0)
+                .flex_shrink_0()
+                .pt_2()
+                .items_center()
+                .justify_center()
+                .child(when(
+                    move || !qr_path.get().is_empty(),
+                    move || {
+                        view()
+                            .p_2()
+                            .rounded(px(8.0))
+                            .bg(AdaptiveColor::rgb(0xffffff, 0xffffff))
+                            .child(image(move || qr_path.get()).w(px(168.0)).h(px(168.0)))
+                    },
+                ))
+                .child(when(
+                    move || qr_path.get().is_empty(),
+                    move || muted_line(tr("二维码没有生成", "QR code was not generated")),
+                )),
+        )
 }
 
 /// Steps shown beside the QR. Same path as the phone install page, plus the
@@ -412,22 +421,22 @@ pub(crate) fn qr_phone_steps() -> impl IntoElement {
                         .child(qr_step(
                             "1.",
                             tr(
-                                "扫码打开安装页，点「下载根证书」。系统会提示安装描述文件。",
-                                "Scan to open the page and tap Download the root certificate. The system offers to install a profile.",
+                                "用系统相机扫码并在 Safari 中打开安装页，点「下载根证书」并允许下载描述文件（勿用微信或第三方浏览器）。",
+                                "Scan with Camera to open the page in Safari, tap Download the root certificate, and allow the configuration profile (other browsers only save the file).",
                             ),
                         ))
                         .child(qr_step(
                             "2.",
                             tr(
-                                "打开「设置」→「已下载描述文件」，安装 zniff CA。",
-                                "Open Settings → Profile Downloaded and install zniff CA.",
+                                "打开「设置」→「已下载描述文件」（或「设置」→「通用」→「VPN 与设备管理」），安装 zniff CA。",
+                                "Open Settings → Profile Downloaded (or Settings → General → VPN & Device Management) and install zniff CA.",
                             ),
                         ))
                         .child(qr_step(
                             "3.",
                             tr(
-                                "再到「设置」→「通用」→「关于本机」→「证书信任设置」，打开 zniff CA 的完全信任。",
-                                "Then open Settings → General → About → Certificate Trust Settings and enable full trust for zniff CA.",
+                                "安装完成后，才会在「设置」→「通用」→「关于本机」→「证书信任设置」里看到 zniff CA，打开它的完全信任。",
+                                "Once installed, zniff CA appears in Settings → General → About → Certificate Trust Settings. Enable full trust for it.",
                             ),
                         ))
                         .child(qr_step(
