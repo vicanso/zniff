@@ -1885,55 +1885,64 @@ async fn hub_dispatch(slot: &Mutex<Slot>, head: &Head, value: Value) -> Reply {
     sync_hub_op(&mut guard, &op, &value)
 }
 
-fn persist_slot_config(slot: &Slot, change: impl FnOnce(&mut crate::config::Config)) {
-    if let Some(dir) = &slot.prefs.config_dir {
-        let _ = crate::config::update_mode(dir, slot.prefs.dev_mode, change);
+fn persist_slot_config(
+    slot: &Slot,
+    change: impl FnOnce(&mut crate::config::Config),
+) -> Option<String> {
+    let dir = slot.prefs.config_dir.as_ref()?;
+    match crate::config::update_mode(dir, slot.prefs.dev_mode, change) {
+        Ok(()) => None,
+        Err(err) => {
+            eprintln!("zniff: config save failed: {err}");
+            Some(err.to_string())
+        }
     }
 }
 
 fn sync_hub_op(slot: &mut Slot, op: &str, value: &Value) -> Reply {
+    let mut save_error = None;
     match op {
         "set_bypass" => {
             let text = json_text(value);
             slot.hub.set_bypass(&text);
-            persist_slot_config(slot, |cfg| cfg.bypass_hosts = text);
+            save_error = persist_slot_config(slot, |cfg| cfg.bypass_hosts = text);
         }
         "set_rules" => {
             let text = json_text(value);
             slot.hub.set_rules(&text);
-            persist_slot_config(slot, |cfg| cfg.rules = text);
+            save_error = persist_slot_config(slot, |cfg| cfg.rules = text);
         }
         "set_upstream" => {
             let text = json_text(value);
             slot.hub.set_upstream(&text);
-            persist_slot_config(slot, |cfg| cfg.upstream_proxy = text);
+            save_error = persist_slot_config(slot, |cfg| cfg.upstream_proxy = text);
         }
         "set_proxy_auth" => {
             let text = json_text(value);
             slot.hub.set_proxy_auth(&text);
             let trimmed = text.trim().to_string();
-            persist_slot_config(slot, |cfg| cfg.proxy_auth = trimmed);
+            save_error = persist_slot_config(slot, |cfg| cfg.proxy_auth = trimmed);
         }
         "set_relay_token" => {
             let text = json_text(value);
             slot.hub.set_relay_token(&text);
             let trimmed = text.trim().to_string();
-            persist_slot_config(slot, |cfg| cfg.relay_token = trimmed);
+            save_error = persist_slot_config(slot, |cfg| cfg.relay_token = trimmed);
         }
         "set_relay_url" => {
             let text = json_text(value).trim().to_string();
             slot.prefs.relay_url = text.clone();
-            persist_slot_config(slot, |cfg| cfg.relay_url = text);
+            save_error = persist_slot_config(slot, |cfg| cfg.relay_url = text);
         }
         "set_filter" => {
             let text = json_text(value);
             slot.prefs.filter = text.clone();
-            persist_slot_config(slot, |cfg| cfg.filter = text);
+            save_error = persist_slot_config(slot, |cfg| cfg.filter = text);
         }
         "set_active_profile" => {
             let name = json_text(value).trim().to_string();
             slot.prefs.active_profile = name.clone();
-            persist_slot_config(slot, |cfg| cfg.active_profile = name);
+            save_error = persist_slot_config(slot, |cfg| cfg.active_profile = name);
         }
         "select_profile" => {
             let name = value
@@ -1958,7 +1967,7 @@ fn sync_hub_op(slot: &mut Slot, op: &str, value: &Value) -> Reply {
                 slot.hub.set_breaks_enabled(found.breaks_enabled);
                 slot.hub
                     .set_show_tunnel_failures(found.show_tunnel_failures);
-                persist_slot_config(slot, |cfg| {
+                save_error = persist_slot_config(slot, |cfg| {
                     cfg.active_profile = found.name;
                     cfg.filter = found.filter;
                     cfg.bypass_hosts = found.bypass_hosts;
@@ -1970,7 +1979,7 @@ fn sync_hub_op(slot: &mut Slot, op: &str, value: &Value) -> Reply {
                 });
             } else if trimmed.is_empty() {
                 slot.prefs.active_profile.clear();
-                persist_slot_config(slot, |cfg| cfg.active_profile.clear());
+                save_error = persist_slot_config(slot, |cfg| cfg.active_profile.clear());
             } else {
                 return json_reply(404, "Not Found", &json!({"error": "profile not found"}));
             }
@@ -1990,7 +1999,7 @@ fn sync_hub_op(slot: &mut Slot, op: &str, value: &Value) -> Reply {
             }
             let saved_next = slot.prefs.saved_profiles.clone();
             let active_next = slot.prefs.active_profile.clone();
-            persist_slot_config(slot, |cfg| {
+            save_error = persist_slot_config(slot, |cfg| {
                 cfg.saved_profiles = saved_next;
                 cfg.active_profile = active_next;
             });
@@ -2016,7 +2025,7 @@ fn sync_hub_op(slot: &mut Slot, op: &str, value: &Value) -> Reply {
             let saved_next = slot.prefs.saved_profiles.clone();
             let hist_next = slot.prefs.profile_history.clone();
             let active_next = slot.prefs.active_profile.clone();
-            persist_slot_config(slot, |cfg| {
+            save_error = persist_slot_config(slot, |cfg| {
                 cfg.saved_profiles = saved_next;
                 cfg.profile_history = hist_next;
                 cfg.active_profile = active_next;
@@ -2039,7 +2048,7 @@ fn sync_hub_op(slot: &mut Slot, op: &str, value: &Value) -> Reply {
             let on = slot.prefs.redact_export;
             let strict = slot.prefs.redact_strict;
             let fields = slot.prefs.redact_fields.clone();
-            persist_slot_config(slot, |cfg| {
+            save_error = persist_slot_config(slot, |cfg| {
                 cfg.redact_export = on;
                 cfg.redact_strict = strict;
                 cfg.redact_fields = fields;
@@ -2050,28 +2059,28 @@ fn sync_hub_op(slot: &mut Slot, op: &str, value: &Value) -> Reply {
                 return json_reply(400, "Bad Request", &json!({"error": "need on"}));
             };
             slot.hub.set_rules_enabled(on);
-            persist_slot_config(slot, |cfg| cfg.rules_enabled = on);
+            save_error = persist_slot_config(slot, |cfg| cfg.rules_enabled = on);
         }
         "set_breaks_enabled" => {
             let Some(on) = json_flag(value) else {
                 return json_reply(400, "Bad Request", &json!({"error": "need on"}));
             };
             slot.hub.set_breaks_enabled(on);
-            persist_slot_config(slot, |cfg| cfg.breaks_enabled = on);
+            save_error = persist_slot_config(slot, |cfg| cfg.breaks_enabled = on);
         }
         "set_show_tunnel_failures" => {
             let Some(on) = json_flag(value) else {
                 return json_reply(400, "Bad Request", &json!({"error": "need on"}));
             };
             slot.hub.set_show_tunnel_failures(on);
-            persist_slot_config(slot, |cfg| cfg.show_tunnel_failures = on);
+            save_error = persist_slot_config(slot, |cfg| cfg.show_tunnel_failures = on);
         }
         "set_relay_accept" => {
             let Some(on) = json_flag(value) else {
                 return json_reply(400, "Bad Request", &json!({"error": "need on"}));
             };
             slot.hub.set_relay_accept(on);
-            persist_slot_config(slot, |cfg| cfg.relay_accept = on);
+            save_error = persist_slot_config(slot, |cfg| cfg.relay_accept = on);
         }
         "reset_broken_config" => {
             if let Some(dir) = &slot.prefs.config_dir {
@@ -2164,7 +2173,17 @@ fn sync_hub_op(slot: &mut Slot, op: &str, value: &Value) -> Reply {
         }
         _ => return json_reply(400, "Bad Request", &json!({"error": "unknown op"})),
     }
-    json_reply(200, "OK", &state_value(slot))
+    let mut body = serde_json::to_value(state_value(slot)).unwrap_or_else(|_| json!({}));
+    if let Some(err) = save_error
+        && let Some(obj) = body.as_object_mut()
+    {
+        obj.insert(
+            "warning".to_string(),
+            json!(format!("Failed to persist config to disk: {err}")),
+        );
+        obj.insert("save_error".to_string(), json!(err));
+    }
+    json_reply(200, "OK", &body)
 }
 
 fn begin_share_op(slot: &mut Slot, head: &Head, value: &Value) -> Reply {
@@ -3024,6 +3043,52 @@ mod tests {
         assert_eq!(status, 400, "{unknown}");
         drop(server);
         assert!(refused(capture).await);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn hub_set_rules_reports_save_error_when_config_is_broken() {
+        let dir = std::env::temp_dir().join(format!("zniff-web-broken-cfg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let broken_toml = "listen_port = 8883\nrules = \"\"\"\nheader 127.0.0.1/echo req set X-Win \"C:\\Users\\me\\a.json\"\n\"\"\"\n";
+        let cfg_path = crate::config::config_path_for(&dir, false);
+        std::fs::write(&cfg_path, broken_toml).unwrap();
+
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+        let capture_port = reserve_port();
+        let prefs = WebPrefs {
+            config_dir: Some(dir.clone()),
+            dev_mode: false,
+            ..WebPrefs::default()
+        };
+        let server = WebServer::start_with_prefs(
+            "127.0.0.1:0".parse().unwrap(),
+            hub,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            capture_port,
+            None,
+            prefs,
+        )
+        .unwrap();
+
+        let (status, body) = post(
+            server.addr(),
+            "/api/hub",
+            r#"{"op":"set_rules","text":"cors test.example.com"}"#,
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert!(body.contains("cors test.example.com"), "{body}");
+        assert!(body.contains("\"save_error\":"), "{body}");
+        assert!(
+            body.contains("\"warning\":\"Failed to persist config to disk:"),
+            "{body}"
+        );
+        assert_eq!(std::fs::read_to_string(&cfg_path).unwrap(), broken_toml);
+
+        drop(server);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -375,6 +375,9 @@ pub fn App() -> impl IntoElement {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = update_probe_at.get();
+            if let Some(err) = proxy::take_save_error() {
+                set_status(&controls_tick, StatusMsg::ProxyOptionUnsaved(err));
+            }
         }
         let cfg_err_now = current_config_error(&controls_tick);
         if cfg_err_now != seen_config_broken.get() {
