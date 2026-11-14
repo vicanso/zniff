@@ -55,7 +55,8 @@ RUN set -eux; \
     /opt/nsh/bin/nsh --version
 
 WORKDIR /src
-COPY app/Cargo.toml app/Cargo.lock app/nsh.json app/
+COPY app/Cargo.toml app/Cargo.lock app/build.rs app/nsh.json app/
+COPY app/assets app/assets
 COPY app/src app/src
 WORKDIR /src/app
 
