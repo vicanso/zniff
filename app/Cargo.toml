@@ -16,7 +16,7 @@ desktop = [
 
 [dependencies]
 nsh-core = "0.5.0"
-nsh-base = "0.5.0"
+nsh-base = { version = "0.5.0", default-features = false, features = ["editor", "highlight"] }
 log = "0.4.35"
 bytes = "1.12.1"
 http = "1.5.0"
@@ -29,19 +29,19 @@ qrcode = { version = "0.14.1", default-features = false }
 
 # The browser build is the same view. It does not link the proxy, TLS, or CA stack.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-env_logger = "0.11.11"
+env_logger = { version = "0.11.11", default-features = false, features = ["auto-color"] }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal"] }
 hyper = { version = "1.12.0", features = ["client", "server", "http1", "http2"] }
 hyper-util = { version = "0.1.21", features = ["tokio", "http1", "http2"] }
 http-body = "1.1.0"
 http-body-util = "0.1.5"
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
-tokio-rustls = "0.26.6"
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12", "logging"] }
 rustls-pki-types = "1.15.1"
 webpki-roots = "1.0.11"
 rcgen = { version = "0.14.10", features = ["x509-parser"] }
-brotli = "9.1.1"
-zstd = "0.14.3"
+brotli-decompressor = "5.0"
+zstd = { version = "0.14.3", default-features = false }
 ring = "0.17.14"
 
 [target.'cfg(unix)'.dependencies]
@@ -68,9 +68,25 @@ flate2 = "1.1.10"
 [dev-dependencies]
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
 
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+brotli = "9.1.1"
+
 
 [profile.release]
+opt-level = "s"
 codegen-units = 1
 lto = true
 strip = true
 panic = "abort"
+
+[profile.release.package.zlib-rs]
+opt-level = 3
+
+[profile.release.package.ring]
+opt-level = 3
+
+[profile.release.package.brotli-decompressor]
+opt-level = 3
+
+[profile.release.package.httparse]
+opt-level = 3

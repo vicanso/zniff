@@ -554,7 +554,9 @@ pub(crate) fn start_web_poll(
     spawn(async move {
         let mut seeded = false;
         let mut seen_error = String::new();
+        let mut last_flows_sync: Option<(u64, u64, String)> = None;
         loop {
+            let mut state_stamp: Option<(u64, u64)> = None;
             if let Ok(response) = fetch(HttpRequest::get("api/state")).await
                 && {
                     proxy::note_web_state_url(&response.head.url);
@@ -562,6 +564,12 @@ pub(crate) fn start_web_poll(
                 }
                 && let Ok(value) = serde_json::from_str::<serde_json::Value>(&response.text())
             {
+                if let (Some(gen_num), Some(rev_num)) = (
+                    value.get("generation").and_then(serde_json::Value::as_u64),
+                    value.get("session_rev").and_then(serde_json::Value::as_u64),
+                ) {
+                    state_stamp = Some((gen_num, rev_num));
+                }
                 controls.hub.apply_state(&value);
                 if let Some(prefs) = value.get("prefs") {
                     if let Some(on) = prefs
@@ -635,19 +643,28 @@ pub(crate) fn start_web_poll(
                     seen_error.clear();
                 }
             }
-            let flows_url = {
-                let f = effective_filter.get_untracked();
-                let trimmed = f.trim();
-                if trimmed.is_empty() {
+            let trimmed_filter = effective_filter.get_untracked().trim().to_string();
+            let desired_sync =
+                state_stamp.map(|(gen_num, rev_num)| (gen_num, rev_num, trimmed_filter.clone()));
+            let should_fetch_flows = match (&last_flows_sync, &desired_sync) {
+                (Some(prev), Some(next)) => prev != next,
+                _ => true,
+            };
+            if should_fetch_flows {
+                let flows_url = if trimmed_filter.is_empty() {
                     "api/flows".to_string()
                 } else {
-                    format!("api/flows?filter={}", url_encode_query_component(trimmed))
+                    format!(
+                        "api/flows?filter={}",
+                        url_encode_query_component(&trimmed_filter)
+                    )
+                };
+                if let Ok(response) = fetch(HttpRequest::get(flows_url)).await
+                    && let Ok(value) = serde_json::from_str::<serde_json::Value>(&response.text())
+                {
+                    controls.hub.apply_flows(&value);
+                    last_flows_sync = desired_sync;
                 }
-            };
-            if let Ok(response) = fetch(HttpRequest::get(flows_url)).await
-                && let Ok(value) = serde_json::from_str::<serde_json::Value>(&response.text())
-            {
-                controls.hub.apply_flows(&value);
             }
             let picked = selected.get_untracked();
             let base = baseline.get_untracked();

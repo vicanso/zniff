@@ -26,6 +26,8 @@ ENV CARGO_NET_RETRY=10 \
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
+        binaryen \
+        brotli \
         clang \
         libclang-dev \
         libgstreamer-plugins-base1.0-dev \
@@ -62,11 +64,18 @@ WORKDIR /src/app
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/src/app/target,sharing=locked \
+    RUSTFLAGS="--remap-path-prefix=/src=. --remap-path-prefix=/usr/local/cargo=/cargo --remap-path-prefix=/usr/local/rustup=/rustup" \
     cargo build --release --locked --no-default-features \
     && cp target/release/zniff /zniff \
     && /opt/nsh/bin/nsh package --target web -v /src/app -o /web-pkg \
     && mv /web-pkg/zniff /web \
     && test -f /web/index.html \
+    && for w in /web/nsh.*.wasm; do \
+        [ -f "$w" ] || continue; \
+        wasm-opt -Oz --all-features "$w" -o "$w.opt" && mv "$w.opt" "$w"; \
+        gzip -9 -c "$w" > "$w.gz"; \
+        brotli -f -q 11 -o "$w.br" "$w"; \
+    done \
     && rm -rf /src/app/.nsh /web-pkg
 
 FROM debian:trixie-slim

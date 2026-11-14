@@ -70,6 +70,18 @@ web-ui:
 		PATH="$$llvm$$PATH" $(NSH_05) package --target web $(CURDIR)/app -o $(CURDIR)/app/.nsh/web-pkg
 	rm -rf $(WEB_DIR)
 	mv $(CURDIR)/app/.nsh/web-pkg/zniff $(WEB_DIR)
+	@if command -v wasm-opt >/dev/null 2>&1; then \
+		for w in $(WEB_DIR)/nsh.*.wasm; do \
+			[ -f "$$w" ] || continue; \
+			wasm-opt -Oz --all-features "$$w" -o "$$w.opt" && mv "$$w.opt" "$$w"; \
+			gzip -9 -c "$$w" > "$$w.gz"; \
+			if command -v brotli >/dev/null 2>&1; then \
+				brotli -f -q 11 -o "$$w.br" "$$w"; \
+			else \
+				rm -f "$$w.br"; \
+			fi; \
+		done; \
+	fi
 
 web:
 	@if [ ! -f $(WEB_DIR)/index.html ] || find $(CURDIR)/app/src $(CURDIR)/app/assets $(CURDIR)/app/build.rs $(CURDIR)/app/Cargo.toml -newer $(WEB_DIR)/index.html -print -quit 2>/dev/null | grep -q .; then \
@@ -102,6 +114,9 @@ test:
 # --- release ---------------------------------------------------------------
 
 release:
+	@cargo_home="$${CARGO_HOME:-$$HOME/.cargo}"; \
+	rustup_home="$${RUSTUP_HOME:-$$HOME/.rustup}"; \
+	RUSTFLAGS="--remap-path-prefix=$(CURDIR)=. --remap-path-prefix=$$cargo_home=/cargo --remap-path-prefix=$$rustup_home=/rustup $${RUSTFLAGS:-}" \
 	$(CARGO) build $(CARGO_FLAGS) --release $(ARGS)
 
 # macOS .app. The Dock and Finder icon is icons/zniff.icns.

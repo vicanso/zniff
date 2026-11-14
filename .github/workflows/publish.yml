@@ -124,7 +124,11 @@ jobs:
           fi
           echo "clean at $(git rev-parse --short=12 HEAD)"
       - name: release
-        run: cargo build --manifest-path app/Cargo.toml --release --target ${{ matrix.target }}
+        run: |
+          cargo_home="${CARGO_HOME:-${USERPROFILE:-$HOME}/.cargo}"
+          rustup_home="${RUSTUP_HOME:-${USERPROFILE:-$HOME}/.rustup}"
+          RUSTFLAGS="--remap-path-prefix=${GITHUB_WORKSPACE}=. --remap-path-prefix=${cargo_home}=/cargo --remap-path-prefix=${rustup_home}=/rustup ${RUSTFLAGS:-}" \
+            cargo build --manifest-path app/Cargo.toml --release --locked --target ${{ matrix.target }}
       - name: bundle app
         run: |
           set -euo pipefail
@@ -238,7 +242,11 @@ jobs:
           workspaces: app
           key: release-${{ matrix.os }}-${{ matrix.target }}
       - name: release
-        run: cargo build --manifest-path app/Cargo.toml --release --target ${{ matrix.target }}
+        run: |
+          cargo_home="${CARGO_HOME:-${USERPROFILE:-$HOME}/.cargo}"
+          rustup_home="${RUSTUP_HOME:-${USERPROFILE:-$HOME}/.rustup}"
+          RUSTFLAGS="--remap-path-prefix=${GITHUB_WORKSPACE}=. --remap-path-prefix=${cargo_home}=/cargo --remap-path-prefix=${rustup_home}=/rustup ${RUSTFLAGS:-}" \
+            cargo build --manifest-path app/Cargo.toml --release --locked --target ${{ matrix.target }}
       - name: check glibc symbol baseline
         if: startsWith(matrix.name, 'linux-')
         run: |

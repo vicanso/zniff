@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::session::{Direction, Flow};
 
 /// Newest flows kept in one share document.
-const FLOW_CAP: usize = 400;
+pub(crate) const FLOW_CAP: usize = 400;
 /// Characters of one body included in the share.
 const BODY_CHARS: usize = 16_000;
 /// Maximum WebSocket frames or SSE events included per shared flow.
@@ -557,21 +557,46 @@ pub fn document_since_with_redact(
     redact: &RedactOptions,
 ) -> String {
     let omitted = flows.len().saturating_sub(FLOW_CAP);
-    let window = &flows[omitted..];
+    document_window_with_redact(
+        omitted,
+        &flows[omitted..],
+        expires,
+        filter,
+        session_rev,
+        since,
+        redact,
+    )
+    .2
+}
+
+pub(crate) fn document_window_with_redact(
+    omitted: usize,
+    window: &[Flow],
+    expires: SystemTime,
+    filter: &str,
+    session_rev: u64,
+    since: Option<u64>,
+    redact: &RedactOptions,
+) -> (u64, Vec<u64>, String) {
     let ids: Vec<u64> = window.iter().map(|flow| flow.id).collect();
     let rev = session_rev.max(window.iter().map(|flow| flow.rev).max().unwrap_or(0));
     let mut previous = None;
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(window.len());
+    let mut spilled_ids = Vec::new();
     for flow in window {
         let prev = previous;
         previous = Some(flow.started);
         if since.is_none_or(|s| flow.rev > s) {
-            if redact.enabled {
+            let item = if redact.enabled {
                 let (sanitized, _) = redact_flow(flow, redact);
-                out.push(share_flow(&sanitized, prev, Some(redact)));
+                share_flow(&sanitized, prev, Some(redact))
             } else {
-                out.push(share_flow(flow, prev, None));
+                share_flow(flow, prev, None)
+            };
+            if item.request_body_spilled || item.response_body_spilled {
+                spilled_ids.push(item.id);
             }
+            out.push(item);
         }
     }
     let doc = ShareDoc {
@@ -587,7 +612,8 @@ pub fn document_since_with_redact(
         ids,
         flows: out,
     };
-    serde_json::to_string(&doc).unwrap_or_else(|_| "{}".into())
+    let json = serde_json::to_string(&doc).unwrap_or_else(|_| "{}".into());
+    (rev, spilled_ids, json)
 }
 
 pub fn flow_body_document_with_redact(flow: &Flow, redact: &RedactOptions) -> String {

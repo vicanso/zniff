@@ -29,6 +29,7 @@ const HUB_BODY_CAP: usize = 1024 * 1024;
 const LIST_CAP: usize = 400;
 const PREVIEW_CAP: usize = 256 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
+const KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(15);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
 const SYSTEM_WEB_ROOT: &str = "/usr/share/zniff/web";
 /// Default relay port for `zniff --web --relay`.
@@ -629,6 +630,7 @@ struct StateBody {
     error: String,
     share_id: String,
     generation: u64,
+    session_rev: u64,
     paused: Option<PausedBody>,
     paused_queue: Vec<PausedBody>,
     prefs: PrefsBody,
@@ -667,6 +669,7 @@ struct PrefsBody {
 struct Head {
     method: String,
     target: String,
+    http_11: bool,
     headers: Vec<(String, String)>,
 }
 
@@ -678,41 +681,78 @@ struct Reply {
     location: Option<String>,
     encoding: Option<&'static str>,
     vary_encoding: bool,
+    cache_control: &'static str,
     body: Vec<u8>,
 }
 
 async fn serve_one(mut socket: TcpStream, slot: Arc<Mutex<Slot>>) -> Result<()> {
-    let (head_bytes, rest) = read_header(&mut socket).await?;
-    let (is_head, reply) = match parse_head(&head_bytes) {
-        Ok(head) if is_health_request(&slot, &head) => (
-            head.method.eq_ignore_ascii_case("HEAD"),
-            text(200, "OK", "ok"),
-        ),
-        Ok(head)
-            if !head.method.eq_ignore_ascii_case("CONNECT")
-                && !head.target.contains("://")
-                && (head.method.eq_ignore_ascii_case("GET")
-                    || head.method.eq_ignore_ascii_case("HEAD"))
-                && prefix_exact_match(&slot, &head.target).is_some() =>
-        {
-            let loc = prefix_exact_match(&slot, &head.target).unwrap_or_default();
-            (head.method.eq_ignore_ascii_case("HEAD"), redirect(loc))
+    let mut pending = Vec::new();
+    let mut first = true;
+    loop {
+        let Some(head_bytes) = read_header_buffered(&mut socket, &mut pending, first).await? else {
+            break;
+        };
+        first = false;
+        let (is_head, reply, keep_alive) = match parse_head(&head_bytes) {
+            Ok(head) if is_health_request(&slot, &head) => {
+                let keep_alive =
+                    head.http_11 && !connection_has_close(&head) && !request_has_body(&head);
+                (
+                    head.method.eq_ignore_ascii_case("HEAD"),
+                    text(200, "OK", "ok"),
+                    keep_alive,
+                )
+            }
+            Ok(head)
+                if !head.method.eq_ignore_ascii_case("CONNECT")
+                    && !head.target.contains("://")
+                    && (head.method.eq_ignore_ascii_case("GET")
+                        || head.method.eq_ignore_ascii_case("HEAD"))
+                    && prefix_exact_match(&slot, &head.target).is_some() =>
+            {
+                let loc = prefix_exact_match(&slot, &head.target).unwrap_or_default();
+                let keep_alive =
+                    head.http_11 && !connection_has_close(&head) && !request_has_body(&head);
+                (
+                    head.method.eq_ignore_ascii_case("HEAD"),
+                    redirect(loc),
+                    keep_alive,
+                )
+            }
+            Ok(head) if !console_authorized(&slot, &head) => {
+                tokio::time::sleep(AUTH_DENY_DELAY).await;
+                let _ = tokio::time::timeout(IO_TIMEOUT, socket.write_all(CONSOLE_CHALLENGE)).await;
+                return Ok(());
+            }
+            Ok(head) => {
+                let is_head = head.method.eq_ignore_ascii_case("HEAD");
+                let want_keep = head.http_11 && !connection_has_close(&head);
+                let (reply, framed_cleanly) = route(&mut socket, &head, &mut pending, &slot).await;
+                (is_head, reply, want_keep && framed_cleanly)
+            }
+            Err(_) => (false, text(400, "Bad Request", "bad request"), false),
+        };
+        let bytes = encode(&reply, is_head, keep_alive);
+        let written = tokio::time::timeout(WRITE_TIMEOUT, socket.write_all(&bytes)).await;
+        if !matches!(written, Ok(Ok(()))) || !keep_alive {
+            break;
         }
-        Ok(head) if !console_authorized(&slot, &head) => {
-            tokio::time::sleep(AUTH_DENY_DELAY).await;
-            let _ = tokio::time::timeout(IO_TIMEOUT, socket.write_all(CONSOLE_CHALLENGE)).await;
-            return Ok(());
-        }
-        Ok(head) => {
-            let is_head = head.method.eq_ignore_ascii_case("HEAD");
-            let reply = route(&mut socket, &head, &rest, &slot).await;
-            (is_head, reply)
-        }
-        Err(_) => (false, text(400, "Bad Request", "bad request")),
-    };
-    let bytes = encode(&reply, is_head);
-    let _ = tokio::time::timeout(WRITE_TIMEOUT, socket.write_all(&bytes)).await;
+    }
     Ok(())
+}
+
+fn connection_has_close(head: &Head) -> bool {
+    head.headers.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case("connection")
+            && value
+                .split(',')
+                .any(|token| token.trim().eq_ignore_ascii_case("close"))
+    })
+}
+
+fn request_has_body(head: &Head) -> bool {
+    header(head, "transfer-encoding").is_some()
+        || header(head, "content-length").is_some_and(|raw| raw.trim() != "0")
 }
 
 const CONSOLE_CHALLENGE: &[u8] = b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"zniff web\", charset=\"UTF-8\"\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 23\r\nConnection: close\r\nCache-Control: no-store\r\n\r\nauthentication required";
@@ -759,10 +799,16 @@ fn console_authorized(slot: &Mutex<Slot>, head: &Head) -> bool {
         .any(|(_, value)| crate::proxy::verify_basic_auth(&expected, value))
 }
 
-async fn route(socket: &mut TcpStream, head: &Head, rest: &[u8], slot: &Mutex<Slot>) -> Reply {
+async fn route(
+    socket: &mut TcpStream,
+    head: &Head,
+    pending: &mut Vec<u8>,
+    slot: &Mutex<Slot>,
+) -> (Reply, bool) {
     if head.method.eq_ignore_ascii_case("CONNECT") || head.target.contains("://") {
-        return text(403, "Forbidden", "web server does not proxy");
+        return (text(403, "Forbidden", "web server does not proxy"), false);
     }
+    let clean_nobody = !request_has_body(head);
     let raw_path = head.target.split('?').next().unwrap_or("/");
     let (web_root, web_prefix) = {
         let guard = lock(slot);
@@ -775,7 +821,7 @@ async fn route(socket: &mut TcpStream, head: &Head, rest: &[u8], slot: &Mutex<Sl
     {
         rest_path
     } else {
-        return text(404, "Not Found", "not found");
+        return (text(404, "Not Found", "not found"), clean_nobody);
     };
     let method = head.method.as_str();
     if method.eq_ignore_ascii_case("GET") || method.eq_ignore_ascii_case("HEAD") {
@@ -783,18 +829,24 @@ async fn route(socket: &mut TcpStream, head: &Head, rest: &[u8], slot: &Mutex<Sl
             if let Some(file) =
                 static_reply(path, web_root.as_deref(), header(head, "accept-encoding"))
             {
-                return file;
+                return (file, clean_nobody);
             }
             let zh = prefers_zh(header(head, "accept-language"));
-            return html(200, "OK", page(zh).into_bytes());
+            return (html(200, "OK", page(zh).into_bytes()), clean_nobody);
         }
         if path == "/api/state" {
-            return json_reply(200, "OK", &state_value(&lock(slot)));
+            return (
+                json_reply(200, "OK", &state_value(&lock(slot))),
+                clean_nobody,
+            );
         }
         if path == "/api/flows" {
             let filter = query_value(&head.target, "filter");
             let hub = Arc::clone(&lock(slot).hub);
-            return json_reply(200, "OK", &flow_list(&hub, &filter));
+            return (
+                json_reply(200, "OK", &flow_list(&hub, &filter)),
+                clean_nobody,
+            );
         }
         if path == "/api/export.har" {
             let filter = query_value(&head.target, "filter");
@@ -805,7 +857,7 @@ async fn route(socket: &mut TcpStream, head: &Head, rest: &[u8], slot: &Mutex<Sl
                     redact_options_for_target(&guard.prefs, &head.target),
                 )
             };
-            return export_har_reply(&hub, &filter, &redact);
+            return (export_har_reply(&hub, &filter, &redact), clean_nobody);
         }
         if path == "/api/export.html" {
             let filter = query_value(&head.target, "filter");
@@ -823,7 +875,7 @@ async fn route(socket: &mut TcpStream, head: &Head, rest: &[u8], slot: &Mutex<Sl
                     redact_options_for_target(&guard.prefs, &head.target),
                 )
             };
-            return export_html_reply(&hub, &filter, &redact, zh);
+            return (export_html_reply(&hub, &filter, &redact, zh), clean_nobody);
         }
         if let Some(rest_flow) = path.strip_prefix("/api/flows/") {
             if let Some(id_str) = rest_flow.strip_suffix("/body")
@@ -836,21 +888,22 @@ async fn route(socket: &mut TcpStream, head: &Head, rest: &[u8], slot: &Mutex<Sl
                         redact_options_for_target(&guard.prefs, &head.target),
                     )
                 };
-                return flow_body_reply(&hub, id, &redact);
+                return (flow_body_reply(&hub, id, &redact), clean_nobody);
             }
             if let Ok(id) = rest_flow.parse::<u64>() {
                 let hub = Arc::clone(&lock(slot).hub);
-                return match flow_detail(&hub, id) {
+                let reply = match flow_detail(&hub, id) {
                     Some(value) => json_reply(200, "OK", &value),
                     None => json_reply(404, "Not Found", &json!({"error": "not found"})),
                 };
+                return (reply, clean_nobody);
             }
         }
         if let Some(file) = static_reply(path, web_root.as_deref(), header(head, "accept-encoding"))
         {
-            return file;
+            return (file, clean_nobody);
         }
-        return text(404, "Not Found", "not found");
+        return (text(404, "Not Found", "not found"), clean_nobody);
     }
     if method.eq_ignore_ascii_case("POST") {
         let cap = if path == "/api/hub" {
@@ -858,24 +911,24 @@ async fn route(socket: &mut TcpStream, head: &Head, rest: &[u8], slot: &Mutex<Sl
         } else {
             BODY_CAP
         };
-        let body = match read_body(socket, head, rest, cap).await {
+        let body = match read_body(socket, head, pending, cap).await {
             Ok(body) => body,
-            Err(reply) => return *reply,
+            Err(reply) => return (*reply, false),
         };
         if path == "/api/capture" {
             let value = match serde_json::from_slice::<Value>(&body) {
                 Ok(value) => value,
-                Err(_) => return text(400, "Bad Request", "need JSON"),
+                Err(_) => return (text(400, "Bad Request", "need JSON"), true),
             };
             let Some(on) = value.get("on").and_then(Value::as_bool) else {
-                return text(400, "Bad Request", "need {\"on\":true|false}");
+                return (text(400, "Bad Request", "need {\"on\":true|false}"), true);
             };
             let listen_all = value.get("listen_all").and_then(Value::as_bool);
             let port = match value.get("port") {
                 None | Some(Value::Null) => None,
                 Some(value) => match value.as_u64().and_then(|port| u16::try_from(port).ok()) {
                     Some(port) => Some(port),
-                    None => return text(400, "Bad Request", "bad port"),
+                    None => return (text(400, "Bad Request", "bad port"), true),
                 },
             };
             let (status, value) = {
@@ -889,22 +942,22 @@ async fn route(socket: &mut TcpStream, head: &Head, rest: &[u8], slot: &Mutex<Sl
                 403 => "Forbidden",
                 _ => "Conflict",
             };
-            return json_reply(status, reason, &value);
+            return (json_reply(status, reason, &value), true);
         }
         if path == "/api/clear" {
             lock(slot).hub.clear_session();
-            return json_reply(200, "OK", &state_value(&lock(slot)));
+            return (json_reply(200, "OK", &state_value(&lock(slot))), true);
         }
         if path == "/api/hub" {
             let value = match serde_json::from_slice::<Value>(&body) {
                 Ok(value) => value,
-                Err(_) => return text(400, "Bad Request", "need JSON"),
+                Err(_) => return (text(400, "Bad Request", "need JSON"), true),
             };
-            return hub_dispatch(slot, head, value).await;
+            return (hub_dispatch(slot, head, value).await, true);
         }
-        return text(404, "Not Found", "not found");
+        return (text(404, "Not Found", "not found"), true);
     }
-    text(405, "Method Not Allowed", "method not allowed")
+    (text(405, "Method Not Allowed", "method not allowed"), false)
 }
 
 fn set_capture(
@@ -973,7 +1026,9 @@ fn state_of(slot: &Slot) -> StateBody {
         .as_ref()
         .map(|capture| capture.addr.port())
         .unwrap_or(slot.capture_port);
-    let flows = slot.hub.with_session(|session| session.len());
+    let (flows, session_rev) = slot
+        .hub
+        .with_session(|session| (session.len(), session.rev()));
     let queue = slot.hub.paused_queue();
     StateBody {
         capturing: slot.capture.is_some(),
@@ -984,6 +1039,7 @@ fn state_of(slot: &Slot) -> StateBody {
         error: slot.error.clone(),
         share_id: slot.hub.share_id().unwrap_or_default(),
         generation: slot.hub.generation(),
+        session_rev,
         paused: queue.first().map(|(id, side)| PausedBody {
             id: *id,
             side: break_side_name(*side),
@@ -1050,20 +1106,21 @@ fn flow_list(hub: &Hub, filter: &str) -> Value {
     // `finish` reads spilled bodies and must not run under the session lock.
     let plan = hub.with_session(|session| session.plan_filter(filter));
     let matched = plan.finish();
+    let total = matched.len();
+    let start = total.saturating_sub(LIST_CAP);
+    let window = &matched[start..];
     let (session_total, rows) = hub.with_session(|session| {
-        let rows = matched
-            .into_iter()
-            .filter_map(|(id, _)| session.get(id).map(flow_summary))
+        let rows = window
+            .iter()
+            .filter_map(|(id, _)| session.get(*id).map(flow_summary))
             .collect::<Vec<_>>();
         (session.len(), rows)
     });
-    let total = rows.len();
-    let start = total.saturating_sub(LIST_CAP);
     json!({
         "total": total,
         "session_total": session_total,
         "omitted": start,
-        "flows": &rows[start..],
+        "flows": rows,
     })
 }
 
@@ -1240,6 +1297,7 @@ fn flow_body_reply(hub: &Hub, id: u64, redact: &crate::share::RedactOptions) -> 
         location: None,
         encoding: None,
         vary_encoding: false,
+        cache_control: "no-store",
         body: flow.response_body,
     }
 }
@@ -1259,6 +1317,7 @@ fn export_har_reply(hub: &Hub, filter: &str, redact: &crate::share::RedactOption
         location: None,
         encoding: None,
         vary_encoding: false,
+        cache_control: "no-store",
         body,
     }
 }
@@ -1290,6 +1349,7 @@ fn export_html_reply(
         location: None,
         encoding: None,
         vary_encoding: false,
+        cache_control: "no-store",
         body: page_html.into_bytes(),
     }
 }
@@ -1472,6 +1532,7 @@ fn html(status: u16, reason: &'static str, body: Vec<u8>) -> Reply {
         location: None,
         encoding: None,
         vary_encoding: false,
+        cache_control: "no-store",
         body,
     }
 }
@@ -1485,6 +1546,7 @@ fn text(status: u16, reason: &'static str, message: &str) -> Reply {
         location: None,
         encoding: None,
         vary_encoding: false,
+        cache_control: "no-store",
         body: message.as_bytes().to_vec(),
     }
 }
@@ -1498,6 +1560,7 @@ fn redirect(location: String) -> Reply {
         location: Some(location),
         encoding: None,
         vary_encoding: false,
+        cache_control: "no-store",
         body: Vec::new(),
     }
 }
@@ -1511,11 +1574,12 @@ fn json_reply(status: u16, reason: &'static str, value: &Value) -> Reply {
         location: None,
         encoding: None,
         vary_encoding: false,
+        cache_control: "no-store",
         body: serde_json::to_vec(value).unwrap_or_else(|_| b"{}".to_vec()),
     }
 }
 
-fn encode(reply: &Reply, is_head: bool) -> Vec<u8> {
+fn encode(reply: &Reply, is_head: bool, keep_alive: bool) -> Vec<u8> {
     let disposition = reply
         .attachment
         .as_deref()
@@ -1535,12 +1599,14 @@ fn encode(reply: &Reply, is_head: bool) -> Vec<u8> {
     } else {
         ""
     };
+    let connection = if keep_alive { "keep-alive" } else { "close" };
     let head = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\n{location}{disposition}{encoding}{vary}Content-Length: {len}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\n{location}{disposition}{encoding}{vary}Content-Length: {len}\r\nConnection: {connection}\r\nCache-Control: {cache_control}\r\n\r\n",
         status = reply.status,
         reason = reply.reason,
         content_type = reply.content_type,
         len = reply.body.len(),
+        cache_control = reply.cache_control,
     );
     let mut bytes = head.into_bytes();
     if !is_head {
@@ -1604,6 +1670,9 @@ fn parse_head(bytes: &[u8]) -> std::result::Result<Head, ()> {
     let mut parts = start.split_whitespace();
     let method = parts.next().unwrap_or("").to_string();
     let target = parts.next().unwrap_or("/").to_string();
+    let http_11 = parts
+        .next()
+        .is_some_and(|version| version.eq_ignore_ascii_case("HTTP/1.1"));
     if method.is_empty() {
         return Err(());
     }
@@ -1620,34 +1689,53 @@ fn parse_head(bytes: &[u8]) -> std::result::Result<Head, ()> {
     Ok(Head {
         method,
         target,
+        http_11,
         headers,
     })
 }
 
-async fn read_header(socket: &mut TcpStream) -> Result<(Vec<u8>, Vec<u8>)> {
-    let mut buf = Vec::new();
-    let mut tmp = [0_u8; 2048];
+async fn read_header_buffered(
+    socket: &mut TcpStream,
+    pending: &mut Vec<u8>,
+    first_request: bool,
+) -> Result<Option<Vec<u8>>> {
+    let mut tmp = [0_u8; 4096];
     loop {
-        if let Some(end) = header_end(&buf) {
-            let rest = buf.split_off(end);
-            return Ok((buf, rest));
+        if let Some(end) = header_end(pending) {
+            let head_bytes: Vec<u8> = pending.drain(..end).collect();
+            return Ok(Some(head_bytes));
         }
-        if buf.len() > HEADER_CAP {
+        if pending.len() > HEADER_CAP {
             return Err(std::io::Error::new(
                 ErrorKind::InvalidData,
                 "header too large",
             ));
         }
-        let count = tokio::time::timeout(IO_TIMEOUT, socket.read(&mut tmp))
-            .await
-            .map_err(|_| std::io::Error::new(ErrorKind::TimedOut, "header timeout"))??;
+        let wait = if !first_request && pending.is_empty() {
+            KEEP_ALIVE_TIMEOUT
+        } else {
+            IO_TIMEOUT
+        };
+        let count = match tokio::time::timeout(wait, socket.read(&mut tmp)).await {
+            Ok(Ok(count)) => count,
+            Ok(Err(err)) => return Err(err),
+            Err(_) => {
+                if !first_request && pending.is_empty() {
+                    return Ok(None);
+                }
+                return Err(std::io::Error::new(ErrorKind::TimedOut, "header timeout"));
+            }
+        };
         if count == 0 {
+            if !first_request && pending.is_empty() {
+                return Ok(None);
+            }
             return Err(std::io::Error::new(
                 ErrorKind::UnexpectedEof,
                 "header ended",
             ));
         }
-        buf.extend_from_slice(&tmp[..count]);
+        pending.extend_from_slice(&tmp[..count]);
     }
 }
 
@@ -1660,7 +1748,7 @@ fn header_end(buf: &[u8]) -> Option<usize> {
 async fn read_body(
     socket: &mut TcpStream,
     head: &Head,
-    rest: &[u8],
+    pending: &mut Vec<u8>,
     cap: usize,
 ) -> std::result::Result<Vec<u8>, Box<Reply>> {
     if head.headers.iter().any(|(name, value)| {
@@ -1692,17 +1780,20 @@ async fn read_body(
         )));
     }
     let mut body = Vec::with_capacity(len);
-    let take = rest.len().min(len);
-    body.extend_from_slice(&rest[..take]);
+    let take = pending.len().min(len);
+    body.extend(pending.drain(..take));
+    let mut buf = [0_u8; 8192];
     while body.len() < len {
-        let mut buf = [0_u8; 1024];
         let read = match tokio::time::timeout(IO_TIMEOUT, socket.read(&mut buf)).await {
             Ok(Ok(0)) => return Err(Box::new(text(400, "Bad Request", "body ended early"))),
             Ok(Ok(count)) => count,
             _ => return Err(Box::new(text(400, "Bad Request", "body read failed"))),
         };
-        let need = len - body.len();
-        body.extend_from_slice(&buf[..read.min(need)]);
+        let need = (len - body.len()).min(read);
+        body.extend_from_slice(&buf[..need]);
+        if read > need {
+            pending.extend_from_slice(&buf[need..read]);
+        }
     }
     Ok(body)
 }
@@ -1844,8 +1935,31 @@ fn static_reply(path: &str, root: Option<&Path>, accept_encoding: Option<&str>) 
         location: None,
         encoding,
         vary_encoding,
+        cache_control: static_cache_control(rel),
         body: bytes,
     })
+}
+
+fn static_cache_control(rel: &str) -> &'static str {
+    let is_hashed_hex = |s: &str| s.len() >= 8 && s.bytes().all(|b| b.is_ascii_hexdigit());
+    let mut parts = rel.split('/');
+    let file_name = parts.next_back().unwrap_or("");
+    if parts.any(|dir| dir.strip_prefix("browser.").is_some_and(is_hashed_hex)) {
+        return "public, max-age=31536000, immutable";
+    }
+    let trimmed = file_name
+        .strip_suffix(".br")
+        .or_else(|| file_name.strip_suffix(".gz"))
+        .unwrap_or(file_name);
+    let segments: Vec<&str> = trimmed.split('.').collect();
+    if segments.len() >= 3
+        && let Some(ext) = segments.last().copied()
+        && matches!(ext, "wasm" | "js" | "css" | "bin" | "ttf" | "woff2")
+        && is_hashed_hex(segments[segments.len() - 2])
+    {
+        return "public, max-age=31536000, immutable";
+    }
+    "no-store"
 }
 
 fn static_mime(path: &Path) -> &'static str {
@@ -3613,6 +3727,70 @@ mod tests {
             .await;
             assert_eq!(status, 404, "{outside}: {resp}");
         }
+
+        drop(server);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn web_supports_keep_alive_and_immutable_static_cache_headers() {
+        let dir = std::env::temp_dir().join(format!("zniff-web-p0-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let web_root = dir.join("web");
+        let chunk_dir = web_root.join("browser.bddb1349e4");
+        std::fs::create_dir_all(&chunk_dir).unwrap();
+        std::fs::write(web_root.join("index.html"), "<html>ok</html>").unwrap();
+        std::fs::write(web_root.join("nsh.a5967f7600.wasm"), b"\x00asm").unwrap();
+        std::fs::write(chunk_dir.join("chunk.js"), b"export const x = 1;").unwrap();
+
+        let ca_dir = dir.join("ca");
+        std::fs::create_dir_all(&ca_dir).unwrap();
+        let ca = Arc::new(Ca::open(&ca_dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+        let server = WebServer::start_with(
+            "127.0.0.1:0".parse().unwrap(),
+            hub,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            reserve_port(),
+            Some(web_root),
+        )
+        .unwrap();
+        let addr = server.addr();
+
+        let mut sock = TcpStream::connect(addr).await.unwrap();
+        sock.write_all(
+            b"GET /nsh.a5967f7600.wasm HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n\
+              GET /browser.bddb1349e4/chunk.js HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n\
+              GET /index.html HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        )
+        .await
+        .unwrap();
+        let mut raw = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), sock.read_to_end(&mut raw))
+            .await
+            .unwrap()
+            .unwrap();
+        let text = String::from_utf8_lossy(&raw);
+        let responses: Vec<&str> = text.split("HTTP/1.1 ").skip(1).collect();
+        assert_eq!(responses.len(), 3, "expected 3 keep-alive replies: {text}");
+        assert!(
+            responses[0].contains("Connection: keep-alive\r\n")
+                && responses[0].contains("Cache-Control: public, max-age=31536000, immutable\r\n"),
+            "wasm reply: {}",
+            responses[0]
+        );
+        assert!(
+            responses[1].contains("Connection: keep-alive\r\n")
+                && responses[1].contains("Cache-Control: public, max-age=31536000, immutable\r\n"),
+            "chunk reply: {}",
+            responses[1]
+        );
+        assert!(
+            responses[2].contains("Connection: close\r\n")
+                && responses[2].contains("Cache-Control: no-store\r\n"),
+            "index reply: {}",
+            responses[2]
+        );
 
         drop(server);
         let _ = std::fs::remove_dir_all(&dir);
