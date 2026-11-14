@@ -168,3 +168,15 @@ pub(crate) fn http_status_bg(status: Option<u16>, failed: bool) -> AdaptiveColor
         _ => bg_control(),
     }
 }
+
+pub(crate) fn json_string_fg() -> AdaptiveColor {
+    AdaptiveColor::rgb(0x047857, 0x4ade80)
+}
+
+pub(crate) fn json_number_fg() -> AdaptiveColor {
+    AdaptiveColor::rgb(0x1d4ed8, 0x60a5fa)
+}
+
+pub(crate) fn json_literal_fg() -> AdaptiveColor {
+    AdaptiveColor::rgb(0x6d28d9, 0xc084fc)
+}

@@ -4146,17 +4146,36 @@ pub fn is_msgpack(content_type: Option<&str>) -> bool {
     content_type.is_some_and(|ct| ct.to_ascii_lowercase().contains("msgpack"))
 }
 
-/// Decodes a binary MessagePack payload into pretty-printed JSON.
-pub fn decode_msgpack_to_json(body: &[u8]) -> Option<String> {
+fn decode_msgpack_value(body: &[u8]) -> Option<serde_json::Value> {
     if body.is_empty() {
         return None;
     }
     let mut pos = 0usize;
     let val = read_msgpack_value(body, &mut pos, 0)?;
-    if pos != body.len() {
+    (pos == body.len()).then_some(val)
+}
+
+/// Decodes a binary MessagePack payload into pretty-printed JSON.
+pub fn decode_msgpack_to_json(body: &[u8]) -> Option<String> {
+    let val = decode_msgpack_value(body)?;
+    serde_json::to_string_pretty(&val).ok()
+}
+
+/// Parses a stored body payload (UTF-8 JSON/GraphQL-JSON or MessagePack) into a JSON value.
+pub fn parse_json_body(content_type: Option<&str>, body: &[u8]) -> Option<serde_json::Value> {
+    if body.is_empty() {
         return None;
     }
-    serde_json::to_string_pretty(&val).ok()
+    if is_msgpack(content_type) {
+        return decode_msgpack_value(body);
+    }
+    let text = std::str::from_utf8(body).ok()?;
+    let kind = content_type.unwrap_or("").to_ascii_lowercase();
+    if kind.contains("json") || kind.contains("graphql") || looks_like_json(text) {
+        serde_json::from_str(text).ok()
+    } else {
+        None
+    }
 }
 
 fn read_msgpack_value(bytes: &[u8], pos: &mut usize, depth: usize) -> Option<serde_json::Value> {

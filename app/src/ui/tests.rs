@@ -1561,6 +1561,8 @@ fn auto_height_popover_scroll_containers_never_use_flex_1() {
         "\n",
         include_str!("footer_qr.rs"),
         "\n",
+        include_str!("json_tree.rs"),
+        "\n",
         include_str!("lan_qr.rs"),
         "\n",
         include_str!("list_columns.rs"),
@@ -1684,6 +1686,14 @@ fn auto_height_popover_scroll_containers_never_use_flex_1() {
             assert!(
                 before.contains("guard_culled_pointer_events(view())"),
                 "every diff_view() must be wrapped in guard_culled_pointer_events(view()): {before}"
+            );
+        }
+        for (idx, _) in prod_src.match_indices("tree()\n") {
+            let start = prod_src.floor_char_boundary(idx.saturating_sub(600));
+            let before = &prod_src[start..idx];
+            assert!(
+                before.contains("guard_culled_pointer_events(view())"),
+                "every tree() must be wrapped in guard_culled_pointer_events(view()): {before}"
             );
         }
     }
@@ -2177,5 +2187,228 @@ fn deselecting_active_profile_clears_config_and_keeps_saved_presets() {
             crate::i18n::Lang::Zh,
         ),
         ("全部流量 · 未设置过滤条件".to_string(), false)
+    );
+}
+
+#[test]
+fn json_tree_builds_pointer_ids_root_only_expansion_search_cap_and_copy() {
+    let raw = br#"{
+        "statusCode": 400,
+        "category": "validate",
+        "extra": {
+            "route": "/utils/v1/recognize",
+            "a/b~c": true
+        },
+        "tags": ["alpha", null],
+        "empty": {}
+    }"#;
+    let parsed = crate::present::parse_json_body(Some("application/json"), raw).expect("json");
+    assert_eq!(parsed["statusCode"], 400);
+
+    // GraphQL JSON & MessagePack also parse; form & truncated/non-JSON reject.
+    let gql = br#"{"operationName":"GetUser","query":"query GetUser { id }","variables":{"id":1}}"#;
+    assert!(crate::present::parse_json_body(Some("application/json"), gql).is_some());
+    assert!(
+        crate::present::parse_json_body(Some("application/x-msgpack"), b"\x82\xa2ok\xc3\xa1n\x07")
+            .is_some()
+    );
+    assert!(
+        crate::present::parse_json_body(Some("application/x-www-form-urlencoded"), b"a=1&b=2")
+            .is_none()
+    );
+    assert!(
+        crate::present::parse_json_body(Some("application/json"), br#"{"truncated":"#).is_none()
+    );
+
+    // Default unfiltered tree: expands only `$` one level; nested `extra` and `tags` start collapsed.
+    let view = super::build_json_tree_view(&parsed, "");
+    assert_eq!(view.auto_expand_ids, vec![SharedString::from("$")]);
+    assert_eq!(view.items.len(), 1);
+    assert_eq!(view.items[0].id.as_ref(), "$");
+    assert_eq!(view.items[0].children.len(), 5);
+    assert_eq!(
+        super::visible_tree_row_count(&view.items, &view.auto_expand_ids),
+        6,
+        "root + 5 direct children visible; grandchildren under `extra` and `tags` remain collapsed"
+    );
+
+    // RFC 6901 pointer IDs & copy behavior (scalars unquoted, containers pretty JSON).
+    assert!(view.meta.contains_key("$/extra/a~1b~0c"));
+    assert_eq!(
+        super::copy_json_node_value(&parsed, "$/category").as_deref(),
+        Some("validate")
+    );
+    assert_eq!(
+        super::copy_json_node_value(&parsed, "$/statusCode").as_deref(),
+        Some("400")
+    );
+    assert_eq!(
+        super::copy_json_node_value(&parsed, "$/tags/1").as_deref(),
+        Some("null")
+    );
+    assert_eq!(
+        super::copy_json_node_value(&parsed, "$/extra/a~1b~0c").as_deref(),
+        Some("true")
+    );
+    let extra_copy = super::copy_json_node_value(&parsed, "$/extra").expect("extra object");
+    assert!(extra_copy.contains("\"route\": \"/utils/v1/recognize\""));
+    assert_eq!(super::copy_json_node_value(&parsed, "__truncated:$"), None);
+
+    // Search filters to matching leaves & auto-expands ancestor paths down to matches.
+    let jb = super::JsonBody {
+        flow_id: 1,
+        body_hash: 42,
+        value: std::sync::Arc::new(parsed.clone()),
+    };
+    assert_eq!(super::json_tree_search_hits(&jb, "recognize"), 1);
+    let searched = super::build_json_tree_view(&parsed, "recognize");
+    assert!(searched.auto_expand_ids.contains(&SharedString::from("$")));
+    assert!(
+        searched
+            .auto_expand_ids
+            .contains(&SharedString::from("$/extra"))
+    );
+    assert_eq!(
+        super::visible_tree_row_count(&searched.items, &searched.auto_expand_ids),
+        3,
+        "only `$` -> `extra` -> `route` should remain visible when searching `recognize`"
+    );
+
+    // Node budget cap prevents pathological huge JSON from stalling UI.
+    let huge = serde_json::Value::Array((0..25).map(|i| serde_json::json!(i)).collect());
+    let capped = super::build_json_tree_with_limit(&huge, "", 5);
+    assert!(capped.items[0].children.len() <= 5);
+    assert!(
+        capped
+            .meta
+            .values()
+            .any(|m| m.kind == super::JsonNodeKind::Truncated)
+    );
+}
+
+#[tokio::test]
+async fn json_tree_panel_mounts_inside_culled_detail_scroll_with_overflow() {
+    use nsh_core::prelude::*;
+    use nsh_core::{
+        ApproxTextEngine, Core, EventKind, EventPayload, MountItem, NodeId, Op, PressEvent, Prop,
+        ROOT_ID, Tag, ViewKind,
+    };
+
+    #[component]
+    fn CulledJsonTreeHarness() -> impl IntoElement {
+        provide_context(signal(Some(crate::i18n::Lang::En)));
+        let open = signal(false);
+        let search = signal(String::new());
+        let obj: serde_json::Map<String, serde_json::Value> = (0..24)
+            .map(|i| {
+                (
+                    format!("field_{i:02}"),
+                    serde_json::json!(format!("val_{i}")),
+                )
+            })
+            .collect();
+        let json = signal(Some(super::JsonBody {
+            flow_id: 7,
+            body_hash: 99,
+            value: std::sync::Arc::new(serde_json::Value::Object(obj)),
+        }));
+        view()
+            .w(px(540.0))
+            .h(px(600.0))
+            .on_press(move || open.set(true))
+            .child(
+                scroll().flex_1().w_full().child(
+                    super::uncull_nested_scroll(view())
+                        .w_full()
+                        .p_3()
+                        .child(when(
+                            move || open.get(),
+                            move || super::json_tree_panel(json, search, |_| {}),
+                        )),
+                ),
+            )
+    }
+
+    let mut core = Core::new(ApproxTextEngine, Size::new(px(540.0), px(600.0)));
+    core.set_content_culling(true);
+    let mut registry = Registry::new();
+    registry.register::<CulledJsonTreeHarness>();
+    core.set_components(registry);
+    for op in [
+        Op::Create {
+            id: 2,
+            tag: Tag::View,
+        },
+        Op::SetProp {
+            id: 2,
+            prop: Prop::Component(std::any::type_name::<CulledJsonTreeHarness>().into()),
+        },
+        Op::Insert {
+            parent: ROOT_ID,
+            child: 2,
+            before: None,
+        },
+    ] {
+        core.apply(op).expect("apply op");
+    }
+
+    let mut kinds = std::collections::HashMap::<NodeId, ViewKind>::new();
+    let mut frames = std::collections::HashMap::<NodeId, Bounds<Points>>::new();
+    let mut scroll_contents = std::collections::HashMap::<NodeId, Size<Points>>::new();
+    let mut evs = Vec::new();
+    let mut pump = |core: &mut Core<ApproxTextEngine>| {
+        for _ in 0..12 {
+            let batch = core.commit();
+            if let Some(b) = &batch {
+                for item in &b.items {
+                    match item {
+                        MountItem::Create { id, kind } => {
+                            kinds.insert(*id, *kind);
+                        }
+                        MountItem::Frame { id, frame } => {
+                            frames.insert(*id, *frame);
+                        }
+                        MountItem::ScrollContent { id, size } => {
+                            scroll_contents.insert(*id, *size);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            evs.clear();
+            core.take_events(&mut evs);
+            let mut any = false;
+            for ev in evs.drain(..) {
+                if let nsh_core::element::JsEvent::Event(id, kind, payload) = ev {
+                    any |= core.component_event(id, kind, &payload);
+                }
+            }
+            if batch.is_none() && !any {
+                break;
+            }
+        }
+    };
+
+    pump(&mut core);
+    core.component_event(
+        2,
+        EventKind::Press,
+        &EventPayload::Press(PressEvent::default()),
+    );
+    pump(&mut core);
+
+    let tree_vscrolls = frames
+        .iter()
+        .filter(|(id, f)| {
+            kinds.get(id) == Some(&ViewKind::Scroll)
+                && f.size.height.0 > 0.0
+                && scroll_contents
+                    .get(id)
+                    .is_some_and(|c| c.height.0 > f.size.height.0)
+        })
+        .count();
+    assert!(
+        tree_vscrolls >= 1,
+        "expected json_tree_panel internal Scroll to mount and overflow when 25 rows are expanded"
     );
 }
