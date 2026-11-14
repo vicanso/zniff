@@ -22,7 +22,7 @@ https://github.com/user-attachments/assets/773009a3-beee-4548-b9dd-51ee4fd65a8e
 
 ## Features
 
-- **Native & Lightweight**: Proxy engine and `nsh` GUI run in a single Rust process—no Electron, no JVM. Cold starts in **< 30 ms** and idles around **< 25 MB RAM**.
+- **Native & Lightweight**: Proxy engine and `nsh` GUI compiled into a single pure-Rust binary for fast startup and low memory footprint.
 - **True Protocol Following**: Reads `ClientHello` ALPN offers and negotiates directly with origins. Supports HTTP/2 multiplexing, WebSocket frames (RFC 6455), and SSE without downgrading to HTTP/1.1.
 - **Deep Inspection**: Formats JSON, GraphQL (splitting `operationName`, query, and variables), HTML/XML, schema-less Protobuf/gRPC, and MessagePack. Decodes JWTs, Unix timestamps, and Base64 inline, with baseline line-by-line Diff and body search.
 - **14 Rewrite Rules & Breakpoints**: Terminal (`map-local`, `map-remote`, `break`, `break-res`, `block`) and additive (`replace`, `json`, `delay`, `throttle`, `header`, `query`, `cors`, `no-cache`, `cert`) rules, with GraphQL `op=` targeting and an 8-slot FIFO breakpoint queue.
