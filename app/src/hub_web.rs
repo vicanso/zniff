@@ -88,39 +88,65 @@ impl Hub {
     }
 
     pub fn apply_state(&self, value: &Value) {
+        let mut changed = false;
         if let Some(id) = value.get("share_id").and_then(Value::as_str) {
-            *self.share_id.lock().unwrap_or_else(|err| err.into_inner()) = if id.is_empty() {
+            let next = if id.is_empty() {
                 None
             } else {
                 Some(id.to_string())
             };
+            let mut guard = self.share_id.lock().unwrap_or_else(|err| err.into_inner());
+            if *guard != next {
+                *guard = next;
+                changed = true;
+            }
         }
         if let Some(queue) = value.get("paused_queue").and_then(Value::as_array) {
-            *self
+            let next: Vec<(u64, BreakSide)> = queue.iter().filter_map(parse_paused).collect();
+            let mut guard = self
                 .paused_queue
                 .lock()
-                .unwrap_or_else(|err| err.into_inner()) =
-                queue.iter().filter_map(parse_paused).collect();
+                .unwrap_or_else(|err| err.into_inner());
+            if *guard != next {
+                *guard = next;
+                changed = true;
+            }
         }
         if let Some(flows) = value.get("flows").and_then(Value::as_u64) {
-            self.with_session(|session| session.set_cached_total(Some(flows as usize)));
+            let total_changed = self.with_session(|session| {
+                let rev_before = session.rev();
+                session.set_cached_total(Some(flows as usize));
+                session.rev() != rev_before
+            });
+            if total_changed {
+                changed = true;
+            }
         }
         if let Some(accept) = value
             .get("prefs")
             .and_then(|prefs| prefs.get("relay_accept"))
             .and_then(Value::as_bool)
+            && self.relay_accept.swap(accept, Ordering::Relaxed) != accept
         {
-            self.relay_accept.store(accept, Ordering::Relaxed);
+            changed = true;
         }
         if let Some(auth) = value
             .get("prefs")
             .and_then(|prefs| prefs.get("proxy_auth"))
             .and_then(Value::as_str)
         {
-            *self
+            let next = auth.trim().to_string();
+            let mut guard = self
                 .proxy_auth
                 .lock()
-                .unwrap_or_else(|err| err.into_inner()) = auth.trim().to_string();
+                .unwrap_or_else(|err| err.into_inner());
+            if *guard != next {
+                *guard = next;
+                changed = true;
+            }
+        }
+        if changed {
+            self.bump();
         }
     }
 

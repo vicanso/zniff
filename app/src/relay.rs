@@ -15,7 +15,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use crate::proxy::{Hub, ShareExport};
+use crate::proxy::{Hub, ShareExport, SharePoll};
 
 /// Largest accepted upload. A share is at most 400 flows with clipped bodies.
 pub(crate) const MAX_BODY: usize = 32 * 1024 * 1024;
@@ -628,6 +628,7 @@ async fn push_loop(
     stop: Arc<AtomicBool>,
     on_event: Arc<dyn Fn(PushEvent) + Send + Sync>,
 ) {
+    let mut synced_rev: Option<u64> = None;
     let mut last_rev = None;
     let mut pushed_bodies = HashSet::new();
     let mut failing = false;
@@ -635,30 +636,34 @@ async fn push_loop(
         if stop.load(Ordering::Relaxed) {
             break;
         }
-        let export = hub.share_export(&id);
-        let Some(export) = export else {
-            break;
-        };
-        match push_export(
-            &base,
-            &token,
-            &id,
-            &export,
-            &mut last_rev,
-            &mut pushed_bodies,
-        )
-        .await
-        {
-            Ok(()) => {
-                if failing {
-                    failing = false;
-                    on_event(PushEvent::Connected);
-                }
-            }
-            Err(err) => {
-                if !failing {
-                    failing = true;
-                    on_event(PushEvent::Failed(err.to_string()));
+        match hub.share_export_if_changed(&id, synced_rev, &pushed_bodies) {
+            SharePoll::Ended => break,
+            SharePoll::Unchanged => {}
+            SharePoll::Ready(export) => {
+                match push_export(
+                    &base,
+                    &token,
+                    &id,
+                    &export,
+                    &mut last_rev,
+                    &mut pushed_bodies,
+                )
+                .await
+                {
+                    Ok(()) => {
+                        synced_rev = Some(export.rev);
+                        if failing {
+                            failing = false;
+                            on_event(PushEvent::Connected);
+                        }
+                    }
+                    Err(err) => {
+                        synced_rev = None;
+                        if !failing {
+                            failing = true;
+                            on_event(PushEvent::Failed(err.to_string()));
+                        }
+                    }
                 }
             }
         }

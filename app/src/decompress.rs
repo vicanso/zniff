@@ -73,7 +73,7 @@ enum Layer {
     Identity,
     Gzip(GzDecoder<CappedBuf>),
     Deflate(DeflateInner),
-    Brotli(Box<brotli::DecompressorWriter<CappedBuf>>),
+    Brotli(Box<brotli_decompressor::DecompressorWriter<CappedBuf>>),
     Zstd(zstd::stream::write::Decoder<'static, CappedBuf>),
 }
 
@@ -111,10 +111,9 @@ impl Decoder {
                 "deflate" => {
                     layers.push(Layer::Deflate(DeflateInner::Sniff(Vec::with_capacity(2))))
                 }
-                "br" => layers.push(Layer::Brotli(Box::new(brotli::DecompressorWriter::new(
-                    CappedBuf::new(BODY_CAP),
-                    4096,
-                )))),
+                "br" => layers.push(Layer::Brotli(Box::new(
+                    brotli_decompressor::DecompressorWriter::new(CappedBuf::new(BODY_CAP), 4096),
+                ))),
                 "zstd" => match zstd::stream::write::Decoder::new(CappedBuf::new(BODY_CAP)) {
                     Ok(decoder) => layers.push(Layer::Zstd(decoder)),
                     Err(err) => {

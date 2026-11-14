@@ -39,6 +39,9 @@ fn main() -> impl std::process::Termination {
     let mut options = nsh_core::desktop::MainWindowOptions::default();
     options.attributes = attributes;
     let root = platform::Root::of::<zniff::App>().main_window(options);
+    platform::set_ui_sets(vec![nsh_base::registry_of([
+        nsh_base::parts::core as nsh_base::parts::Part
+    ])]);
     let result = platform::run_app(
         platform::AppSource::Rust(root),
         platform::AppOptions {

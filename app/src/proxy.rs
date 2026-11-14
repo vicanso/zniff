@@ -4,7 +4,7 @@
 //! copy of each body is decompressed and capped; forwarding does not wait
 //! for the UI.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -46,6 +46,9 @@ use crate::ws::{self, FrameFeed};
 const IO_TIMEOUT: Duration = Duration::from_secs(20);
 /// Drop a cached origin HTTP/2 connection before a typical server idle timeout.
 const H2_IDLE: Duration = Duration::from_secs(45);
+const H2_POOL_CAP: usize = 128;
+const HTTP1_POOL_CAP: usize = 128;
+const MAX_BUFFERED_REQUEST_BODY: usize = 64 * 1024 * 1024;
 /// List refreshes follow `generation`. Streaming body chunks bump it at most this often.
 const BODY_UI_TOUCH: Duration = Duration::from_millis(100);
 
@@ -431,6 +434,14 @@ pub(crate) struct ShareExport {
     pub bodies: Vec<(u64, String)>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SharePoll {
+    Ended,
+    Unchanged,
+    Ready(ShareExport),
+}
+
+#[cfg(test)]
 pub(crate) fn spilled_flow_ids(document: &str) -> Vec<u64> {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(document) else {
         return Vec::new();
@@ -637,15 +648,20 @@ impl Hub {
         let (plan, rev) =
             self.with_session(|session| (session.plan_filter(&filter), session.rev()));
         let matched = plan.finish();
+        let omitted = matched.len().saturating_sub(crate::share::FLOW_CAP);
+        let window_ids = &matched[omitted..];
         let flows = self.with_session(|session| {
-            matched
+            window_ids
                 .iter()
                 .filter_map(|(id, _)| session.get(*id).cloned())
                 .collect::<Vec<_>>()
         });
-        Some(crate::share::document_since_with_redact(
-            &flows, expires, &filter, rev, since, &redact,
-        ))
+        Some(
+            crate::share::document_window_with_redact(
+                omitted, &flows, expires, &filter, rev, since, &redact,
+            )
+            .2,
+        )
     }
 
     fn share_flow_body(&self, id: &str, flow_id: u64) -> Option<String> {
@@ -665,26 +681,78 @@ impl Hub {
         Some(crate::share::flow_body_document_with_redact(&flow, &redact))
     }
 
-    /// Full share document plus any spilled bodies the page will ask for.
-    /// `rev` is the document revision. A later call with the same `rev` has
-    /// the same flow list.
-    pub(crate) fn share_export(&self, id: &str) -> Option<ShareExport> {
-        let document = self.share_document_since(id, None)?;
-        let rev = serde_json::from_str::<serde_json::Value>(&document)
-            .ok()
-            .and_then(|value| value.get("rev")?.as_u64())
-            .unwrap_or(0);
+    /// Full share document plus any spilled bodies not already pushed.
+    /// Returns [`SharePoll::Unchanged`] with zero allocations or disk I/O
+    /// whenever `session.rev()` matches `synced_rev`.
+    pub(crate) fn share_export_if_changed(
+        &self,
+        id: &str,
+        synced_rev: Option<u64>,
+        pushed_bodies: &HashSet<u64>,
+    ) -> SharePoll {
+        let (expires, filter, redact) = {
+            let mut slot = self.share.lock().unwrap_or_else(|err| err.into_inner());
+            let Some(share) = slot.as_ref() else {
+                return SharePoll::Ended;
+            };
+            let now = std::time::SystemTime::now();
+            if !crate::share::grant_ok(share, id, now) {
+                if share.id == id {
+                    *slot = None;
+                }
+                return SharePoll::Ended;
+            }
+            (share.expires, share.filter.clone(), share.redact.clone())
+        };
+        let current_rev = self.with_session(|session| session.rev());
+        if synced_rev == Some(current_rev) {
+            return SharePoll::Unchanged;
+        }
+        let (plan, session_rev) =
+            self.with_session(|session| (session.plan_filter(&filter), session.rev()));
+        let matched = plan.finish();
+        let omitted = matched.len().saturating_sub(crate::share::FLOW_CAP);
+        let window_ids = &matched[omitted..];
+        let flows = self.with_session(|session| {
+            window_ids
+                .iter()
+                .filter_map(|(id, _)| session.get(*id).cloned())
+                .collect::<Vec<_>>()
+        });
+        let (rev, spilled_ids, document) = crate::share::document_window_with_redact(
+            omitted,
+            &flows,
+            expires,
+            &filter,
+            session_rev,
+            None,
+            &redact,
+        );
         let mut bodies = Vec::new();
-        for flow_id in spilled_flow_ids(&document) {
+        for flow_id in spilled_ids {
+            if pushed_bodies.contains(&flow_id) {
+                continue;
+            }
             if let Some(body) = self.share_flow_body(id, flow_id) {
                 bodies.push((flow_id, body));
             }
         }
-        Some(ShareExport {
+        SharePoll::Ready(ShareExport {
             rev,
             document,
             bodies,
         })
+    }
+
+    /// Full share document plus any spilled bodies the page will ask for.
+    /// `rev` is the document revision. A later call with the same `rev` has
+    /// the same flow list.
+    #[allow(dead_code)]
+    pub(crate) fn share_export(&self, id: &str) -> Option<ShareExport> {
+        match self.share_export_if_changed(id, None, &HashSet::new()) {
+            SharePoll::Ready(export) => Some(export),
+            SharePoll::Ended | SharePoll::Unchanged => None,
+        }
     }
 
     fn put_inbound_flows(&self, id: &str, body: &[u8]) -> Result<(), crate::relay::RelayStatus> {
@@ -1031,7 +1099,7 @@ impl Hub {
         }
     }
 
-    fn server_config_for_host(&self, host: &str, alpn: &[u8]) -> Result<rustls::ServerConfig> {
+    fn server_config_for_host(&self, host: &str, alpn: &[u8]) -> Result<Arc<rustls::ServerConfig>> {
         let rule_cert = if self.apply_rules.load(Ordering::Relaxed) {
             let rules = self
                 .rules
@@ -1388,8 +1456,16 @@ impl Hub {
         let first_used = Arc::new(AtomicBool::new(false));
         let mut pool = self.h2_pool.lock().unwrap_or_else(|err| err.into_inner());
         let replacing = pool.contains_key(&key);
-        if !replacing && pool.len() >= 16 {
-            pool.clear();
+        if !replacing && pool.len() >= H2_POOL_CAP {
+            pool.retain(|_, v| v.used.elapsed() < H2_IDLE);
+            if pool.len() >= H2_POOL_CAP
+                && let Some(oldest_key) = pool
+                    .iter()
+                    .min_by_key(|(_, v)| v.used)
+                    .map(|(k, _)| k.clone())
+            {
+                pool.remove(&oldest_key);
+            }
         }
         pool.insert(
             key,
@@ -1468,8 +1544,16 @@ impl Hub {
         }
         let epoch = self.origin_epoch.load(Ordering::Acquire);
         let mut pool = self.pool.lock().await;
-        if pool.len() >= 32 && !pool.contains_key(&key) {
-            pool.clear();
+        if pool.len() >= HTTP1_POOL_CAP && !pool.contains_key(&key) {
+            pool.retain(|_, slots| {
+                slots.retain(|(ep, _)| *ep == epoch);
+                !slots.is_empty()
+            });
+            if pool.len() >= HTTP1_POOL_CAP
+                && let Some(evict_key) = pool.keys().next().cloned()
+            {
+                pool.remove(&evict_key);
+            }
         }
         let slots = pool.entry(key).or_default();
         if slots.len() >= 4 {
@@ -2209,7 +2293,7 @@ where
             return Err(anyhow!(reason));
         }
     };
-    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+    let acceptor = tokio_rustls::TlsAcceptor::from(config);
     let rewound = Prefixed {
         prefix: client_hello,
         pos: 0,
@@ -2257,7 +2341,7 @@ where
                     url: format!("https://{authority}{path}"),
                     request_headers: header_pairs(&parts.headers),
                 });
-                let _ = record_request_bytes(&hub, id, body, encoding.as_deref()).await;
+                let _ = drain_and_record_request(&hub, id, body, encoding.as_deref()).await;
                 hub.note_rules_with_ops(id, &host, &path, &[]);
                 if hub.ca.has_client_cert_in_dir(&host) {
                     hub.with_session(|session| {
@@ -2326,7 +2410,7 @@ where
     let config = hub
         .server_config_for_host(host, &selected)
         .context("叶子证书")?;
-    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+    let acceptor = tokio_rustls::TlsAcceptor::from(config);
     let rewound = Prefixed {
         prefix: client_hello,
         pos: 0,
@@ -2683,7 +2767,7 @@ where
     let config = hub
         .server_config_for_host(host, b"h2")
         .context("叶子证书")?;
-    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+    let acceptor = tokio_rustls::TlsAcceptor::from(config);
     let rewound = Prefixed {
         prefix: client_hello,
         pos: 0,
@@ -7056,7 +7140,7 @@ async fn forward_request(
             }) => match rules::resolve_map_local_target(file.as_deref(), path_prefix, &path) {
                 Ok(resolved) => {
                     if let Some(left) = incoming.take() {
-                        record_request_bytes(&hub, id, left, encoding.as_deref()).await?;
+                        drain_and_record_request(&hub, id, left, encoding.as_deref()).await?;
                     }
                     return mapped_file_response(
                         &hub,
@@ -7073,7 +7157,7 @@ async fn forward_request(
                 }
                 Err(err) => {
                     if let Some(left) = incoming.take() {
-                        record_request_bytes(&hub, id, left, encoding.as_deref()).await?;
+                        drain_and_record_request(&hub, id, left, encoding.as_deref()).await?;
                     }
                     let text = err.message();
                     hub.set_error(id, text.clone());
@@ -7091,7 +7175,7 @@ async fn forward_request(
                 let decision = hub.wait_break(id, BreakSide::Request).await;
                 if decision.drop {
                     if let Some(left) = incoming.take() {
-                        let _ = record_request_bytes(&hub, id, left, encoding.as_deref()).await;
+                        let _ = drain_and_record_request(&hub, id, left, encoding.as_deref()).await;
                     }
                     hub.set_error(id, "断点丢弃");
                     hub.mark_finished(id);
@@ -7140,7 +7224,7 @@ async fn forward_request(
             Some(Action::BreakResponse) => break_response = true,
             Some(Action::Block { drop_conn, status }) => {
                 if let Some(left) = incoming.take() {
-                    let _ = record_request_bytes(&hub, id, left, encoding.as_deref()).await;
+                    let _ = drain_and_record_request(&hub, id, left, encoding.as_deref()).await;
                 }
                 if *drop_conn {
                     hub.set_error(id, "规则阻断 (连接已断开)");
@@ -7248,7 +7332,14 @@ async fn forward_request(
         && !parts.headers.contains_key(http::header::CONTENT_LENGTH)
         && let Some(left) = incoming.take()
     {
-        let raw = record_request_bytes(&hub, id, left, encoding.as_deref()).await?;
+        let raw = collect_request_bytes_capped(
+            &hub,
+            id,
+            left,
+            encoding.as_deref(),
+            MAX_BUFFERED_REQUEST_BODY,
+        )
+        .await?;
         request_recorded = true;
         body_override = Some(raw.to_vec());
     }
@@ -7629,25 +7720,72 @@ fn response_from_headers(
         .context("组装断点响应")
 }
 
-async fn record_request_bytes(
+async fn drain_and_record_request(
+    hub: &Arc<Hub>,
+    id: u64,
+    mut body: Incoming,
+    encoding: Option<&str>,
+) -> Result<()> {
+    let mut decoder = Decoder::from_header(encoding);
+    let early = decoder.error().map(str::to_string);
+    loop {
+        match body.frame().await {
+            Some(Ok(frame)) => {
+                let Ok(data) = frame.into_data() else {
+                    continue;
+                };
+                if data.is_empty() {
+                    continue;
+                }
+                let decoded = decoder.push(&data);
+                hub.record_chunk(id, Direction::Request, data.len() as u64, &decoded, None);
+            }
+            Some(Err(err)) => return Err(anyhow!("读取请求体: {err}")),
+            None => {
+                let tail = decoder.finish();
+                let error = decoder.error().map(str::to_string).or(early);
+                hub.record_chunk(id, Direction::Request, 0, &tail, error.as_deref());
+                return Ok(());
+            }
+        }
+    }
+}
+
+async fn collect_frames_capped<B>(mut body: B, cap: usize) -> Result<Bytes>
+where
+    B: Body<Data = Bytes> + Unpin,
+    B::Error: std::fmt::Display,
+{
+    let mut buf = Vec::new();
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|err| anyhow!("读取请求体: {err}"))?;
+        let Ok(data) = frame.into_data() else {
+            continue;
+        };
+        if buf.len().saturating_add(data.len()) > cap {
+            anyhow::bail!("请求体超过 {} MB 缓冲上限", cap / (1024 * 1024));
+        }
+        buf.extend_from_slice(&data);
+    }
+    Ok(Bytes::from(buf))
+}
+
+async fn collect_request_bytes_capped(
     hub: &Arc<Hub>,
     id: u64,
     body: Incoming,
     encoding: Option<&str>,
+    cap: usize,
 ) -> Result<Bytes> {
-    let collected = body
-        .collect()
-        .await
-        .map_err(|err| anyhow!("读取请求体: {err}"))?;
-    let raw = collected.to_bytes();
+    let raw = collect_frames_capped(body, cap).await?;
     note_decoded(hub, id, Direction::Request, &raw, encoding);
     Ok(raw)
 }
 
-async fn drain_incoming(body: Incoming) -> Result<()> {
-    body.collect()
-        .await
-        .map_err(|err| anyhow!("丢掉请求体: {err}"))?;
+async fn drain_incoming(mut body: Incoming) -> Result<()> {
+    while let Some(frame) = body.frame().await {
+        frame.map_err(|err| anyhow!("丢掉请求体: {err}"))?;
+    }
     Ok(())
 }
 
@@ -14001,6 +14139,78 @@ mod tests {
 
         capture.stop();
         upstream_capture.stop();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn pool_evicts_single_entry_at_cap_and_capped_collect_enforces_limit() {
+        let dir = std::env::temp_dir().join(format!("zniff-proxy-p0-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accept_task = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while held.len() <= HTTP1_POOL_CAP {
+                let Ok((s, _)) = listener.accept().await else {
+                    break;
+                };
+                held.push(s);
+            }
+            held
+        });
+
+        for idx in 0..HTTP1_POOL_CAP {
+            let s = TcpStream::connect(addr).await.unwrap();
+            hub.park_idle((format!("h{idx}.pool.test"), 80), s).await;
+        }
+        assert_eq!(hub.pool.lock().await.len(), HTTP1_POOL_CAP);
+
+        let extra = TcpStream::connect(addr).await.unwrap();
+        hub.park_idle(("overflow.pool.test".into(), 80), extra)
+            .await;
+        let pool_guard = hub.pool.lock().await;
+        assert_eq!(
+            pool_guard.len(),
+            HTTP1_POOL_CAP,
+            "pool must evict one entry instead of clearing all entries"
+        );
+        assert!(pool_guard.contains_key(&("overflow.pool.test".into(), 80)));
+        drop(pool_guard);
+        accept_task.abort();
+
+        let small = collect_frames_capped(Full::new(Bytes::from(vec![b'a'; 64])), 64)
+            .await
+            .unwrap();
+        assert_eq!(small.len(), 64);
+        assert!(
+            collect_frames_capped(Full::new(Bytes::from(vec![b'a'; 65])), 64)
+                .await
+                .is_err()
+        );
+
+        let (share_id, _) = hub.begin_share(Duration::from_secs(60), "");
+        let flow_id = hub.open(FlowDraft {
+            protocol: Protocol::Http11,
+            method: "GET".into(),
+            host: "share.test".into(),
+            path: "/".into(),
+            url: "http://share.test/".into(),
+            request_headers: Vec::new(),
+        });
+        hub.mark_finished(flow_id);
+        let first = hub.share_export_if_changed(&share_id, None, &HashSet::new());
+        let rev = match first {
+            SharePoll::Ready(exp) => exp.rev,
+            other => panic!("expected Ready, got {other:?}"),
+        };
+        assert_eq!(
+            hub.share_export_if_changed(&share_id, Some(rev), &HashSet::new()),
+            SharePoll::Unchanged
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

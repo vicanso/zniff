@@ -3,10 +3,12 @@
 //! The root is installed into the current user's trust store and kept when
 //! the app exits. The private key stays in that directory.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
@@ -23,8 +25,15 @@ const CA_NAME: &str = "zniff CA";
 /// The previous product name. Still removed so an already-trusted root does not linger.
 const LEGACY_CA_NAME: &str = "Snoop CA";
 
-const MAX_CACHED_LEAVES: usize = 256;
+const MAX_CACHED_LEAVES: usize = 512;
 const MAX_CACHED_CUSTOM_CERTS: usize = 64;
+
+struct CachedLeaf {
+    base: ServerConfig,
+    h1: Arc<ServerConfig>,
+    h2: Arc<ServerConfig>,
+    used_seq: u64,
+}
 
 struct CachedCustomCert {
     cert_path: PathBuf,
@@ -42,8 +51,14 @@ pub struct Ca {
     /// The PEM on disk is what gets installed.
     issuer: Issuer<'static, KeyPair>,
     ca_der: CertificateDer<'static>,
+    /// Shared ECDSA P-256 keypair reused across MITM leaf certificates so
+    /// per-host leaf generation avoids expensive CSPRNG/keypair generation
+    /// inside or outside `leaves` lock.
+    leaf_key: KeyPair,
+    leaf_key_der: Vec<u8>,
+    leaf_seq: AtomicU64,
     session_storage: Arc<dyn rustls::server::StoresServerSessions>,
-    leaves: Mutex<Vec<(String, ServerConfig)>>,
+    leaves: Mutex<HashMap<String, CachedLeaf>>,
     custom_certs: Mutex<Vec<CachedCustomCert>>,
 }
 
@@ -159,13 +174,18 @@ impl Ca {
         let issuer = Issuer::from_ca_cert_pem(&cert_pem, issuer_key).context("读取根 CA 证书")?;
         let ca_der = ca_der_from_pem(&cert_pem)?;
         let ca_name = extract_ca_common_name(&ca_der).unwrap_or_else(|| CA_NAME.to_string());
+        let leaf_key = KeyPair::generate().context("生成叶子证书密钥")?;
+        let leaf_key_der = leaf_key.serialize_der();
         Ok(Self {
             dir,
             ca_name,
             issuer,
             ca_der,
+            leaf_key,
+            leaf_key_der,
+            leaf_seq: AtomicU64::new(0),
             session_storage: rustls::server::ServerSessionMemoryCache::new(64),
-            leaves: Mutex::new(Vec::new()),
+            leaves: Mutex::new(HashMap::new()),
             custom_certs: Mutex::new(Vec::new()),
         })
     }
@@ -190,6 +210,7 @@ impl Ca {
     #[cfg(test)]
     pub fn server_config(&self, host: &str, alpn: &[u8]) -> Result<ServerConfig> {
         self.server_config_with_custom(host, alpn, None)
+            .map(|cfg| (*cfg).clone())
     }
 
     pub fn server_config_with_custom(
@@ -197,7 +218,7 @@ impl Ca {
         host: &str,
         alpn: &[u8],
         custom: Option<(&Path, Option<&Path>)>,
-    ) -> Result<ServerConfig> {
+    ) -> Result<Arc<ServerConfig>> {
         let dir_found;
         let effective_custom = match custom {
             Some(pair) => Some(pair),
@@ -216,11 +237,9 @@ impl Ca {
                 .with_context(|| format!("组装自定义证书 {}", cert_path.display()))?;
             config.session_storage = Arc::clone(&self.session_storage);
             config.alpn_protocols = vec![alpn.to_vec()];
-            return Ok(config);
+            return Ok(Arc::new(config));
         }
-        let mut config = self.leaf_config(host)?;
-        config.alpn_protocols = vec![alpn.to_vec()];
-        Ok(config)
+        self.leaf_config_arc(host, alpn)
     }
 
     /// Looks up a custom certificate in `<data_dir>/certs/` for `host`
@@ -352,30 +371,49 @@ impl Ca {
         None
     }
 
-    fn leaf_config(&self, host: &str) -> Result<ServerConfig> {
+    fn leaf_config_arc(&self, host: &str, alpn: &[u8]) -> Result<Arc<ServerConfig>> {
         let normalized = normalize_ca_host(host);
         let target = if normalized.is_empty() {
             host.trim()
         } else {
             normalized.as_str()
         };
+        {
+            let mut guard = self.leaves.lock().unwrap_or_else(|err| err.into_inner());
+            if let Some(entry) = guard.get_mut(target) {
+                entry.used_seq = self.leaf_seq.fetch_add(1, Ordering::Relaxed) + 1;
+                return Ok(select_leaf_alpn(entry, alpn));
+            }
+        }
+        let seq = self.leaf_seq.fetch_add(1, Ordering::Relaxed) + 1;
+        let built = self.sign_leaf_entry(target, seq)?;
         let mut guard = self.leaves.lock().unwrap_or_else(|err| err.into_inner());
-        if let Some(pos) = guard.iter().position(|(name, _)| name == target) {
-            let entry = guard.remove(pos);
-            let cfg = entry.1.clone();
-            guard.push(entry);
-            return Ok(cfg);
+        if let Some(existing) = guard.get_mut(target) {
+            existing.used_seq = self.leaf_seq.fetch_add(1, Ordering::Relaxed) + 1;
+            return Ok(select_leaf_alpn(existing, alpn));
         }
-        let cfg = self.sign_leaf_config(target)?;
         while guard.len() >= MAX_CACHED_LEAVES {
-            guard.remove(0);
+            if let Some(oldest_key) = guard
+                .iter()
+                .min_by_key(|(_, v)| v.used_seq)
+                .map(|(k, _)| k.clone())
+            {
+                guard.remove(&oldest_key);
+            } else {
+                break;
+            }
         }
-        guard.push((target.to_string(), cfg.clone()));
-        Ok(cfg)
+        let out = select_leaf_alpn(&built, alpn);
+        guard.insert(target.to_string(), built);
+        Ok(out)
     }
 
+    #[cfg(test)]
     fn sign_leaf_config(&self, host: &str) -> Result<ServerConfig> {
-        let leaf_key = KeyPair::generate()?;
+        self.sign_leaf_entry(host, 0).map(|entry| entry.base)
+    }
+
+    fn sign_leaf_entry(&self, host: &str, used_seq: u64) -> Result<CachedLeaf> {
         let mut params = CertificateParams::default();
         let mut name = DistinguishedName::new();
         let common = &host[..host.floor_char_boundary(64)];
@@ -387,16 +425,37 @@ impl Ca {
         params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
         params.use_authority_key_identifier_extension = true;
         let cert = params
-            .signed_by(&leaf_key, &self.issuer)
+            .signed_by(&self.leaf_key, &self.issuer)
             .context("签发叶子证书")?;
         let leaf_der = CertificateDer::from(cert.der().to_vec());
-        let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf_key.serialize_der()));
-        let mut config = ServerConfig::builder()
+        let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(self.leaf_key_der.clone()));
+        let mut base = ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(vec![leaf_der, self.ca_der.clone()], key_der)
             .context("组装叶子证书")?;
-        config.session_storage = Arc::clone(&self.session_storage);
-        Ok(config)
+        base.session_storage = Arc::clone(&self.session_storage);
+        let mut h1_cfg = base.clone();
+        h1_cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let mut h2_cfg = base.clone();
+        h2_cfg.alpn_protocols = vec![b"h2".to_vec()];
+        Ok(CachedLeaf {
+            base,
+            h1: Arc::new(h1_cfg),
+            h2: Arc::new(h2_cfg),
+            used_seq,
+        })
+    }
+}
+
+fn select_leaf_alpn(entry: &CachedLeaf, alpn: &[u8]) -> Arc<ServerConfig> {
+    if alpn == b"h2" {
+        Arc::clone(&entry.h2)
+    } else if alpn == b"http/1.1" {
+        Arc::clone(&entry.h1)
+    } else {
+        let mut cfg = entry.base.clone();
+        cfg.alpn_protocols = vec![alpn.to_vec()];
+        Arc::new(cfg)
     }
 }
 
@@ -1849,6 +1908,39 @@ Cert 0: zniff CA
             Ca::from_pem(dir.clone(), legacy_cert.pem(), legacy_key.serialize_pem()).unwrap();
         assert_eq!(legacy_ca.ca_name(), "zniff CA");
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn leaf_config_arc_reuses_arc_per_alpn_and_caps_lru_size() {
+        let dir = std::env::temp_dir().join(format!("zniff-ca-lru-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let ca = Ca::open(&dir).unwrap();
+
+        let a1 = ca
+            .server_config_with_custom("lru.example.com", b"h2", None)
+            .unwrap();
+        let a2 = ca
+            .server_config_with_custom("LRU.EXAMPLE.COM.", b"h2", None)
+            .unwrap();
+        assert!(
+            Arc::ptr_eq(&a1, &a2),
+            "cache hit must reuse Arc<ServerConfig>"
+        );
+
+        let h1 = ca
+            .server_config_with_custom("lru.example.com", b"http/1.1", None)
+            .unwrap();
+        assert_eq!(h1.alpn_protocols, vec![b"http/1.1".to_vec()]);
+        assert_eq!(a1.alpn_protocols, vec![b"h2".to_vec()]);
+
+        for idx in 0..(MAX_CACHED_LEAVES + 16) {
+            let host = format!("h{idx}.lru.test");
+            let _ = ca
+                .server_config_with_custom(&host, b"http/1.1", None)
+                .unwrap();
+        }
+        assert_eq!(ca.leaves.lock().unwrap().len(), MAX_CACHED_LEAVES);
         let _ = fs::remove_dir_all(&dir);
     }
 }
