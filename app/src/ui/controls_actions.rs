@@ -214,7 +214,7 @@ pub(crate) fn hex_display_rows(body: &[u8], per_row: usize) -> String {
     out
 }
 
-/// 12px Menlo is about 7.25px wide. A row is `0001  ` plus `xx ` per byte,
+/// 12px Menlo and JetBrains Mono are both about 7.2px wide (7.25 leaves slack). A row is `0001  ` plus `xx ` per byte,
 /// and a 32-byte row adds one space between the two halves.
 pub(crate) fn hex_line_width(bytes: usize) -> f32 {
     const CHAR: f32 = 7.25;

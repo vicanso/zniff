@@ -1360,10 +1360,10 @@ const PAGE: &str = r##"<!DOCTYPE html>
   section { background: #131822; border: 1px solid #222938; border-radius: 10px; overflow: auto; max-height: calc(100vh - 6.5rem); }
   table { width: 100%; border-collapse: collapse; }
   th, td { text-align: left; padding: 0.35rem 0.5rem; border-bottom: 1px solid #19202e; font-size: 13px; }
-  td.mono, th { font-family: ui-monospace, Menlo, monospace; }
+  td.mono, th { font-family: "JetBrains Mono", "JetBrains Mono NL", ui-monospace, Menlo, monospace; }
   tr { cursor: pointer; }
   tr:hover, tr.on { background: #172554; }
-  pre { margin: 0; padding: 0.8rem; white-space: pre-wrap; word-break: break-word; font: 12.5px/1.45 ui-monospace, Menlo, monospace; }
+  pre { margin: 0; padding: 0.8rem; white-space: pre-wrap; word-break: break-word; font: 12.5px/1.45 "JetBrains Mono", "JetBrains Mono NL", ui-monospace, Menlo, monospace; }
   @media (max-width: 800px) { main { grid-template-columns: 1fr; } }
 </style>
 </head>

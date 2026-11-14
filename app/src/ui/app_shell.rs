@@ -15,6 +15,7 @@ pub fn App() -> impl IntoElement {
     }
     let langs = signal(load_lang_pref());
     provide_context(langs);
+    provide_mono_font(saved_config().system_mono_font);
     let status = signal(StatusMsg::Idle);
     let running = signal(false);
     let ca_status = signal(ca::CaStatus::NotInstalled);

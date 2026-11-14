@@ -157,7 +157,7 @@ pub(crate) fn body_section(
                 let divided = !note.get().is_empty();
                 view()
                     .w_full()
-                    .h(move || px(editor_box_height(&body.get()).max(140.0)))
+                    .h(move || px(editor_box_height(&body.get(), 0.0).max(140.0)))
                     .bg(bg_code())
                     .overflow_hidden()
                     .border_t(move || if divided { px(1.0) } else { px(0.0) })
@@ -597,8 +597,40 @@ pub(crate) fn body_box_height(lines: usize) -> f32 {
     shown * BODY_LINE_H + BODY_CHROME
 }
 
-pub(crate) fn editor_box_height(text: &str) -> f32 {
-    body_box_height(body_line_count(text))
+/// Width of one 12px monospaced character (Menlo and JetBrains Mono are
+/// both about 7.2px).
+const EDITOR_CHAR_W: f32 = 7.2;
+/// The editor's line-number and fold gutter plus its scroll bar, measured
+/// generously so the estimate errs towards one row too many.
+const EDITOR_GUTTER_W: f32 = 84.0;
+/// Columns assumed before the box has been laid out.
+const EDITOR_FALLBACK_COLS: usize = 80;
+
+/// How many characters fit on one soft-wrapped editor row in `width`.
+pub(crate) fn editor_wrap_cols(width: f32) -> usize {
+    if width <= EDITOR_GUTTER_W {
+        return EDITOR_FALLBACK_COLS;
+    }
+    (((width - EDITOR_GUTTER_W) / EDITOR_CHAR_W).floor() as usize).max(20)
+}
+
+/// Rows the soft-wrapping editor draws for `text` at `cols` characters a
+/// row, stopping once past [`BODY_LINES`]: minified JS or JSON is one long
+/// line but many rows, and should open the box to its full height.
+pub(crate) fn wrapped_line_count(text: &str, cols: usize) -> usize {
+    let cols = cols.max(1);
+    let mut rows = 0usize;
+    for line in text.lines() {
+        rows += line.chars().count().div_ceil(cols).max(1);
+        if rows > BODY_LINES {
+            break;
+        }
+    }
+    rows.max(1)
+}
+
+pub(crate) fn editor_box_height(text: &str, width: f32) -> f32 {
+    body_box_height(wrapped_line_count(text, editor_wrap_cols(width)))
 }
 
 pub(crate) fn code_body(
@@ -615,9 +647,16 @@ pub(crate) fn code_body(
             present::filter_body_lines(&raw, &q).1
         }
     };
+    let width = signal(0.0_f32);
     guard_culled_pointer_events(view())
         .w_full()
-        .h(move || px(editor_box_height(&shown_text())))
+        .h(move || px(editor_box_height(&shown_text(), width.get())))
+        .on_layout(move |bounds: &Bounds<Points>| {
+            let w = bounds.size.width.0;
+            if editor_wrap_cols(w) != editor_wrap_cols(width.get_untracked()) {
+                width.set(w);
+            }
+        })
         .bg(bg_code())
         .overflow_hidden()
         .child(

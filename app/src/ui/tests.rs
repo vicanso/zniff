@@ -218,9 +218,26 @@ fn body_box_follows_the_text_and_stops_at_fifteen_lines() {
     assert_eq!(super::body_box_height(10), 196.0);
     assert_eq!(super::body_box_height(15), 286.0);
     assert_eq!(super::body_box_height(40), 286.0);
-    assert_eq!(super::editor_box_height("only"), 34.0);
+    assert_eq!(super::editor_box_height("only", 0.0), 34.0);
     let long = "x\n".repeat(30);
-    assert_eq!(super::editor_box_height(&long), 286.0);
+    assert_eq!(super::editor_box_height(&long, 0.0), 286.0);
+}
+
+#[test]
+fn soft_wrapped_long_lines_open_the_editor_box() {
+    // Minified JS: one line, many rows once wrapped, so the box goes full height.
+    let minified = "a".repeat(20_000);
+    assert!(super::wrapped_line_count(&minified, 100) > super::BODY_LINES);
+    assert_eq!(super::editor_box_height(&minified, 800.0), 286.0);
+    // A line a bit wider than the box takes two rows, not the full height.
+    let cols = super::editor_wrap_cols(800.0);
+    let two_rows = "b".repeat(cols + 1);
+    assert_eq!(super::wrapped_line_count(&two_rows, cols), 2);
+    assert_eq!(super::editor_box_height(&two_rows, 800.0), 52.0);
+    // Short lines still count one row each; empty lines too.
+    assert_eq!(super::wrapped_line_count("a\n\nb", 80), 3);
+    assert_eq!(super::editor_wrap_cols(0.0), 80);
+    assert_eq!(super::editor_wrap_cols(100.0), 20);
 }
 
 #[test]
@@ -2004,7 +2021,7 @@ async fn nested_scroll_widgets_emit_scroll_content_under_content_culling() {
         found
     };
 
-    assert_eq!(super::editor_box_height(&sample_json), 286.0);
+    assert_eq!(super::editor_box_height(&sample_json, 0.0), 286.0);
 
     // 1. Reproduce the unguarded bug: `Layer::Paint` above `ed.vscroll` defaults to
     //    `Auto` because `MountItem::ViewProps { pointer_events: None }` is never emitted!

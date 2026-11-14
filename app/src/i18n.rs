@@ -50,6 +50,7 @@ pub enum PrefName {
     Redact,
     Language,
     Window,
+    MonoFont,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -333,6 +334,7 @@ impl StatusMsg {
                         t(lang, "界面语言没有记住:", "Language setting was not saved:")
                     }
                     PrefName::Window => t(lang, "窗口尺寸没有记住:", "Window size was not saved:"),
+                    PrefName::MonoFont => t(lang, "等宽字体没有记住:", "Mono font was not saved:"),
                 };
                 format!("{name} {err}")
             }
