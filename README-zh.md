@@ -16,7 +16,7 @@
   <a href="#运行模式与-mcp"><img src="https://img.shields.io/badge/MCP-JSON--RPC%202.0-blueviolet.svg" alt="MCP Ready"></a>
 </p>
 
-https://github.com/user-attachments/assets/773009a3-beee-4548-b9dd-51ee4fd65a8e
+https://github.com/user-attachments/assets/15117c1d-50a0-4578-8201-a305fb0d12a3
 
 ---
 
