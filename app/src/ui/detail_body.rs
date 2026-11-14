@@ -20,21 +20,36 @@ pub(crate) fn body_section(
     folded: Signal<u8>,
     bit: u8,
 ) -> impl IntoElement {
-    let preview_flag = if embed_image {
-        shown.res_doc_preview
+    let (preview_flag, json, tree_flag, side) = if embed_image {
+        (
+            shown.res_doc_preview,
+            shown.response_json,
+            shown.res_json_tree,
+            Side::Response,
+        )
     } else {
-        shown.req_doc_preview
+        (
+            shown.req_doc_preview,
+            shown.request_json,
+            shown.req_json_tree,
+            Side::Request,
+        )
     };
     let image_on = move || embed_image && shown.pretty.get() && !shown.preview.get().is_empty();
     let doc_on = move || preview_flag.get() && doc.with(Option::is_some);
-    let has_body_below =
-        move || doc_on() || image_on() || !form.with(Vec::is_empty) || !body.get().is_empty();
+    let tree_on = move || !doc_on() && tree_flag.get() && json.with(Option::is_some);
+    let has_body_below = move || {
+        doc_on() || tree_on() || image_on() || !form.with(Vec::is_empty) || !body.get().is_empty()
+    };
     let can_search = move || {
         !card_folded(folded, bit)
             && !doc_on()
-            && (!form.with(Vec::is_empty) || !body.get().is_empty())
+            && (tree_on() || !form.with(Vec::is_empty) || !body.get().is_empty())
     };
     let pane_width = shown.pane_width;
+    let nav_controls = controls.clone();
+    let switch_controls = controls.clone();
+    let tree_controls = controls;
     view()
         .rounded(px(10.0))
         .border_1()
@@ -84,6 +99,9 @@ pub(crate) fn body_section(
                         .gap_1p5()
                         .child(when(
                             move || {
+                                if tree_on() {
+                                    return false;
+                                }
                                 let window = if embed_image {
                                     shown.response_window.get()
                                 } else {
@@ -92,7 +110,7 @@ pub(crate) fn body_section(
                                 window.has_prev() || window.has_more()
                             },
                             {
-                                let controls = controls.clone();
+                                let controls = nav_controls;
                                 move || {
                                     body_window_nav(
                                         embed_image,
@@ -106,6 +124,9 @@ pub(crate) fn body_section(
                         ))
                         .child(when(can_search, move || {
                             let is_paged = move || {
+                                if tree_on() {
+                                    return false;
+                                }
                                 let window = if embed_image {
                                     shown.response_window.get()
                                 } else {
@@ -113,7 +134,16 @@ pub(crate) fn body_section(
                                 };
                                 window.has_prev() || window.has_more()
                             };
-                            body_search_box(search, body, hex, form, shown.pane_width, is_paged)
+                            body_search_box(
+                                search,
+                                body,
+                                hex,
+                                form,
+                                json,
+                                tree_flag,
+                                shown.pane_width,
+                                is_paged,
+                            )
                         }))
                         .child(when(
                             move || doc.with(Option::is_some),
@@ -122,7 +152,9 @@ pub(crate) fn body_section(
                         .child(pretty_switch(
                             shown,
                             preview_flag,
-                            controls,
+                            json,
+                            tree_flag,
+                            switch_controls,
                             selected,
                             baseline,
                         )),
@@ -172,8 +204,18 @@ pub(crate) fn body_section(
                     )
             },
         ))
+        .child(when(move || !card_folded(folded, bit) && tree_on(), {
+            let tree_controls = tree_controls.clone();
+            move || {
+                let divided = !note.get().is_empty();
+                view()
+                    .border_t(move || if divided { px(1.0) } else { px(0.0) })
+                    .border_t_color(border_subtle())
+                    .child(json_tree_body(json, search, side, tree_controls.clone()))
+            }
+        }))
         .child(when(
-            move || !card_folded(folded, bit) && !doc_on() && image_on(),
+            move || !card_folded(folded, bit) && !doc_on() && !tree_on() && image_on(),
             move || {
                 view()
                     .px_3()
@@ -210,6 +252,7 @@ pub(crate) fn body_section(
             move || {
                 !card_folded(folded, bit)
                     && !doc_on()
+                    && !tree_on()
                     && form.with(Vec::is_empty)
                     && !body.get().is_empty()
                     && code.get().is_empty()
@@ -269,6 +312,7 @@ pub(crate) fn body_section(
             move || {
                 !card_folded(folded, bit)
                     && !doc_on()
+                    && !tree_on()
                     && form.with(Vec::is_empty)
                     && !body.get().is_empty()
                     && !code.get().is_empty()
@@ -282,7 +326,9 @@ pub(crate) fn body_section(
             },
         ))
         .child(when(
-            move || !card_folded(folded, bit) && !doc_on() && !form.with(Vec::is_empty),
+            move || {
+                !card_folded(folded, bit) && !doc_on() && !tree_on() && !form.with(Vec::is_empty)
+            },
             move || {
                 each(
                     move || filtered_form_lines(&form.get(), &search.get()),
@@ -461,12 +507,19 @@ pub(crate) fn body_search_hit_count(
     body: Signal<String>,
     hex: Signal<Vec<u8>>,
     form: Signal<Vec<HeaderLine>>,
+    json: Signal<Option<JsonBody>>,
+    tree_flag: Signal<bool>,
     pane_width: Signal<f32>,
     query: &str,
 ) -> usize {
     let q = query.trim();
     if q.is_empty() {
         return 0;
+    }
+    if tree_flag.get()
+        && let Some(jb) = json.get()
+    {
+        return json_tree_search_hits(&jb, q);
     }
     if !form.with(Vec::is_empty) {
         return filtered_form_lines(&form.get(), q).len();
@@ -480,11 +533,14 @@ pub(crate) fn body_search_hit_count(
     present::filter_body_lines(&source, q).0
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn body_search_box(
     search: Signal<String>,
     body: Signal<String>,
     hex: Signal<Vec<u8>>,
     form: Signal<Vec<HeaderLine>>,
+    json: Signal<Option<JsonBody>>,
+    tree_flag: Signal<bool>,
     pane_width: Signal<f32>,
     is_paged: impl Fn() -> bool + Copy + 'static,
 ) -> impl IntoElement {
@@ -567,6 +623,8 @@ pub(crate) fn body_search_box(
                                             body,
                                             hex,
                                             form,
+                                            json,
+                                            tree_flag,
                                             pane_width,
                                             &search.get()
                                         )
@@ -748,6 +806,8 @@ pub(crate) fn doc_preview_chip(preview: Signal<bool>) -> impl IntoElement {
 pub(crate) fn pretty_switch(
     shown: Shown,
     preview: Signal<bool>,
+    json: Signal<Option<JsonBody>>,
+    tree_flag: Signal<bool>,
     controls: Arc<Controls>,
     selected: Signal<Option<u64>>,
     baseline: Signal<Option<u64>>,
@@ -763,6 +823,7 @@ pub(crate) fn pretty_switch(
         .child(pretty_chip(
             shown,
             preview,
+            tree_flag,
             controls.clone(),
             selected,
             baseline,
@@ -770,29 +831,28 @@ pub(crate) fn pretty_switch(
             "美化",
             "Pretty",
         ))
+        .child(when(
+            move || json.with(Option::is_some),
+            move || tree_chip(preview, tree_flag),
+        ))
         .child(pretty_chip(
-            shown, preview, controls, selected, baseline, false, "原文", "Raw",
+            shown, preview, tree_flag, controls, selected, baseline, false, "原文", "Raw",
         ))
 }
 
-pub(crate) fn pretty_chip(
-    shown: Shown,
-    preview: Signal<bool>,
-    controls: Arc<Controls>,
-    selected: Signal<Option<u64>>,
-    baseline: Signal<Option<u64>>,
-    on: bool,
+fn body_mode_chip(
     zh: &'static str,
     en: &'static str,
+    has_right_border: bool,
+    is_active: impl Fn() -> bool + Copy + 'static,
+    on_press: impl Fn() + 'static,
 ) -> impl IntoElement {
-    let langs = ui_langs();
-    let is_active = move || !preview.get() && shown.pretty.get() == on;
     view()
         .h(px(22.0))
         .px_2()
         .flex_row()
         .items_center()
-        .border_r(move || if on { px(1.0) } else { px(0.0) })
+        .border_r(if has_right_border { px(1.0) } else { px(0.0) })
         .border_r_color(border_control())
         .bg(move || {
             if is_active() {
@@ -812,24 +872,7 @@ pub(crate) fn pretty_chip(
         })
         .active(|style| style.opacity(0.8))
         .cursor(Cursor::Pointer)
-        .on_press(move || {
-            let was_preview = preview.get();
-            if was_preview {
-                preview.set(false);
-            }
-            if !was_preview && shown.pretty.get() == on {
-                return;
-            }
-            shown.pretty.set(on);
-            reset_body_offsets(shown);
-            publish_detail(
-                &shown,
-                &controls.hub,
-                selected.get(),
-                ui_lang(langs),
-                baseline.get(),
-            );
-        })
+        .on_press(on_press)
         .child(
             text(tr(zh, en))
                 .number_of_lines(1)
@@ -843,4 +886,50 @@ pub(crate) fn pretty_chip(
                     }
                 }),
         )
+}
+
+fn tree_chip(preview: Signal<bool>, tree_flag: Signal<bool>) -> impl IntoElement {
+    body_mode_chip(
+        "树形",
+        "Tree",
+        true,
+        move || !preview.get() && tree_flag.get(),
+        move || {
+            preview.set(false);
+            tree_flag.set(true);
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn pretty_chip(
+    shown: Shown,
+    preview: Signal<bool>,
+    tree_flag: Signal<bool>,
+    controls: Arc<Controls>,
+    selected: Signal<Option<u64>>,
+    baseline: Signal<Option<u64>>,
+    on: bool,
+    zh: &'static str,
+    en: &'static str,
+) -> impl IntoElement {
+    let langs = ui_langs();
+    let is_active = move || !preview.get() && !tree_flag.get() && shown.pretty.get() == on;
+    body_mode_chip(zh, en, on, is_active, move || {
+        let changed = shown.pretty.get() != on;
+        preview.set(false);
+        tree_flag.set(false);
+        if !changed {
+            return;
+        }
+        shown.pretty.set(on);
+        reset_body_offsets(shown);
+        publish_detail(
+            &shown,
+            &controls.hub,
+            selected.get(),
+            ui_lang(langs),
+            baseline.get(),
+        );
+    })
 }

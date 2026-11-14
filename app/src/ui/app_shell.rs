@@ -60,6 +60,10 @@ pub fn App() -> impl IntoElement {
         response_doc: signal(None),
         req_doc_preview: signal(false),
         res_doc_preview: signal(false),
+        request_json: signal(None),
+        response_json: signal(None),
+        req_json_tree: signal(false),
+        res_json_tree: signal(false),
         request_form: signal(Vec::new()),
         request_note: signal(String::new()),
         response_note: signal(String::new()),
@@ -652,6 +656,8 @@ pub fn App() -> impl IntoElement {
             seen_selected.replace(selected_now);
             shown_tick.req_doc_preview.set(false);
             shown_tick.res_doc_preview.set(false);
+            shown_tick.req_json_tree.set(false);
+            shown_tick.res_json_tree.set(false);
             shown_tick.editing_comment.set(false);
             shown_tick.repeating.set(false);
             shown_tick.msg_search.set(String::new());

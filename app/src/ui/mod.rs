@@ -23,8 +23,9 @@ pub(crate) use nsh_base::{
     Anchor, DataTable, DataTableApi, DataTableCell, DataTableClasses, DataTableColumn,
     DataTableColumnMove, DataTableContextMenu, DataTableEvent, DataTableHeaderCell, DataTablePress,
     DataTableRange, DataTableRows, DataTableSelection, DiffLayout, ToastManager, ToastMotion,
-    ToastOptions, ToastStackState, ToastTransitionStatus, data_table, diff_view, editor, input,
-    menu, menu_item, popover, theme, toast, toast_stack, tooltip,
+    ToastOptions, ToastStackState, ToastTransitionStatus, Tree, TreeEntry, TreeEvent, TreeItem,
+    data_table, diff_view, editor, input, menu, menu_item, popover, theme, toast, toast_stack,
+    tooltip, tree,
 };
 #[allow(unused_imports)]
 pub(crate) use nsh_core::EllipsizeMode;
@@ -86,6 +87,7 @@ mod filter_tokens;
 mod flow_cells;
 mod flow_table;
 mod footer_qr;
+mod json_tree;
 mod lan_qr;
 mod list_columns;
 mod machine_settings;
@@ -127,6 +129,7 @@ pub(crate) use self::filter_tokens::*;
 pub(crate) use self::flow_cells::*;
 pub(crate) use self::flow_table::*;
 pub(crate) use self::footer_qr::*;
+pub(crate) use self::json_tree::*;
 pub(crate) use self::lan_qr::*;
 pub(crate) use self::list_columns::*;
 pub(crate) use self::machine_settings::*;

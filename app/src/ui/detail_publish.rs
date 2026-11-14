@@ -173,6 +173,24 @@ pub(crate) fn publish_detail(
         response_type,
         &flow.response_body,
     ));
+    let req_is_form = present::multipart_pairs(request_type, &flow.request_body).is_some()
+        || std::str::from_utf8(&flow.request_body)
+            .ok()
+            .is_some_and(|text| present::is_form(request_type, text));
+    update_json_body_signal(
+        shown.request_json,
+        id,
+        request_type,
+        &flow.request_body,
+        req_is_form,
+    );
+    update_json_body_signal(
+        shown.response_json,
+        id,
+        response_type,
+        &flow.response_body,
+        false,
+    );
     shown
         .request_body
         .set(if shown.request_form.with(Vec::is_empty) {

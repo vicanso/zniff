@@ -181,6 +181,8 @@ pub(crate) fn detail_actions(
                 move || {
                     shown.req_doc_preview.set(false);
                     shown.res_doc_preview.set(false);
+                    shown.req_json_tree.set(false);
+                    shown.res_json_tree.set(false);
                     shown.pretty.set(!shown.pretty.get());
                     reset_body_offsets(shown);
                     publish_detail(

@@ -848,6 +848,10 @@ pub(crate) fn clear_shown(shown: Shown) {
     shown.response_doc.set(None);
     shown.req_doc_preview.set(false);
     shown.res_doc_preview.set(false);
+    shown.request_json.set(None);
+    shown.response_json.set(None);
+    shown.req_json_tree.set(false);
+    shown.res_json_tree.set(false);
     shown.request_form.set(Vec::new());
     shown.request_note.set(String::new());
     shown.response_note.set(String::new());

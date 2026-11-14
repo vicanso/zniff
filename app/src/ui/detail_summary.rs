@@ -39,6 +39,10 @@ pub(crate) struct Shown {
     pub(crate) response_doc: Signal<Option<nsh_base::text_view::Document>>,
     pub(crate) req_doc_preview: Signal<bool>,
     pub(crate) res_doc_preview: Signal<bool>,
+    pub(crate) request_json: Signal<Option<JsonBody>>,
+    pub(crate) response_json: Signal<Option<JsonBody>>,
+    pub(crate) req_json_tree: Signal<bool>,
+    pub(crate) res_json_tree: Signal<bool>,
     pub(crate) request_form: Signal<Vec<HeaderLine>>,
     pub(crate) request_note: Signal<String>,
     pub(crate) response_note: Signal<String>,
@@ -572,6 +576,7 @@ pub(crate) fn ready_detail(
                 !shown.response_body.get().is_empty()
                     || !shown.response_note.get().is_empty()
                     || (shown.pretty.get() && !shown.preview.get().is_empty())
+                    || shown.response_json.with(Option::is_some)
             },
             {
                 let controls = controls.clone();
@@ -610,6 +615,7 @@ pub(crate) fn ready_detail(
                 !shown.request_body.get().is_empty()
                     || !shown.request_note.get().is_empty()
                     || !shown.request_form.with(Vec::is_empty)
+                    || shown.request_json.with(Option::is_some)
             },
             {
                 let controls = controls.clone();
