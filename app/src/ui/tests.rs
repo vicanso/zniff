@@ -2412,3 +2412,23 @@ async fn json_tree_panel_mounts_inside_culled_detail_scroll_with_overflow() {
         "expected json_tree_panel internal Scroll to mount and overflow when 25 rows are expanded"
     );
 }
+
+#[test]
+fn web_poll_delay_scales_by_capture_and_idle_streak() {
+    use crate::ui::controls_runtime::web_poll_delay_ms;
+
+    // Capturing mode starts snappy and backs off smoothly during quiet periods.
+    assert_eq!(web_poll_delay_ms(true, 0), 450);
+    assert_eq!(web_poll_delay_ms(true, 1), 750);
+    assert_eq!(web_poll_delay_ms(true, 2), 750);
+    assert_eq!(web_poll_delay_ms(true, 3), 1200);
+    assert_eq!(web_poll_delay_ms(true, 6), 2100);
+    assert!(web_poll_delay_ms(true, 100) == 2100);
+
+    // Stopped mode backs off more aggressively up to 3 seconds.
+    assert_eq!(web_poll_delay_ms(false, 0), 750);
+    assert_eq!(web_poll_delay_ms(false, 1), 1500);
+    assert_eq!(web_poll_delay_ms(false, 2), 1500);
+    assert_eq!(web_poll_delay_ms(false, 3), 3000);
+    assert!(web_poll_delay_ms(false, 50) > web_poll_delay_ms(true, 50));
+}
