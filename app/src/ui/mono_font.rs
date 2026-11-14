@@ -2,20 +2,37 @@
 //!
 //! The NL cut has no ligatures, so `!=`, `->` and `==` stay one column per
 //! character in headers, JSON and hex. The four faces cover the weights the
-//! UI draws mono text in (regular, medium, semibold, bold). They are
-//! registered once at start; the theme's `font-mono` token then names the
-//! family, so `mono()`, `editor()` and `diff_view()` all follow it.
+//! UI draws mono text in (regular, medium, semibold, bold). `build.rs`
+//! zlib-compresses them into `OUT_DIR` (~404 KB instead of ~838 KB, skipped on
+//! headless `--no-default-features` server builds); at start each face is
+//! inflated into a temporary `Vec<u8>`, handed to `register_font`, and freed.
+
+use std::io::Read;
+
+use flate2::read::ZlibDecoder;
 
 #[allow(unused_imports)]
 use super::*;
 
-/// JetBrains Mono NL 2.304 (SIL Open Font License 1.1, `assets/fonts/OFL.txt`).
-const BUNDLED_FACES: [&[u8]; 4] = [
-    include_bytes!("../../assets/fonts/JetBrainsMonoNL-Regular.ttf"),
-    include_bytes!("../../assets/fonts/JetBrainsMonoNL-Medium.ttf"),
-    include_bytes!("../../assets/fonts/JetBrainsMonoNL-SemiBold.ttf"),
-    include_bytes!("../../assets/fonts/JetBrainsMonoNL-Bold.ttf"),
+/// Zlib-compressed JetBrains Mono NL 2.304 faces built by `build.rs`
+/// (SIL Open Font License 1.1, `assets/fonts/OFL.txt`).
+#[cfg(any(feature = "desktop", target_arch = "wasm32"))]
+const BUNDLED_FACES_ZZ: [&[u8]; 4] = [
+    include_bytes!(concat!(env!("OUT_DIR"), "/JetBrainsMonoNL-Regular.ttf.zz")),
+    include_bytes!(concat!(env!("OUT_DIR"), "/JetBrainsMonoNL-Medium.ttf.zz")),
+    include_bytes!(concat!(env!("OUT_DIR"), "/JetBrainsMonoNL-SemiBold.ttf.zz")),
+    include_bytes!(concat!(env!("OUT_DIR"), "/JetBrainsMonoNL-Bold.ttf.zz")),
 ];
+
+#[cfg(not(any(feature = "desktop", target_arch = "wasm32")))]
+const BUNDLED_FACES_ZZ: [&[u8]; 0] = [];
+
+fn inflate_face(compressed: &[u8]) -> std::io::Result<Vec<u8>> {
+    let mut decoder = ZlibDecoder::new(compressed);
+    let mut out = Vec::with_capacity(compressed.len() * 2);
+    decoder.read_to_end(&mut out)?;
+    Ok(out)
+}
 
 /// The user's monospaced font choice and the bundled family once registered.
 #[derive(Clone, Copy)]
@@ -36,8 +53,15 @@ pub(crate) fn provide_mono_font(system: bool) -> MonoFont {
     provide_context(font);
     spawn_detached(async move {
         let mut family = None;
-        for face in BUNDLED_FACES {
-            match register_font(face).await {
+        for compressed in BUNDLED_FACES_ZZ {
+            let bytes = match inflate_face(compressed) {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    log::warn!("解压内置等宽字体失败: {err}");
+                    continue;
+                }
+            };
+            match register_font(bytes).await {
                 Ok(name) => {
                     family.get_or_insert(name);
                 }
@@ -126,12 +150,24 @@ pub(crate) fn menu_mono_font_row(controls: Arc<Controls>) -> impl IntoElement {
 mod tests {
     use super::*;
 
+    #[cfg(any(feature = "desktop", target_arch = "wasm32"))]
     #[test]
-    fn bundled_faces_are_truetype() {
-        for face in BUNDLED_FACES {
-            assert!(face.len() > 100_000);
+    fn bundled_faces_decompress_to_truetype() {
+        for compressed in BUNDLED_FACES_ZZ {
+            assert!(
+                compressed.len() < 120_000,
+                "compressed face should be shrunk: {} bytes",
+                compressed.len()
+            );
+            let face = inflate_face(compressed).expect("valid zlib stream");
+            assert!(face.len() > 200_000);
             assert_eq!(&face[..4], &[0, 1, 0, 0]);
         }
+    }
+
+    #[test]
+    fn inflate_rejects_corrupt_stream() {
+        assert!(inflate_face(b"not-zlib").is_err());
     }
 
     #[test]

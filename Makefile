@@ -72,7 +72,7 @@ web-ui:
 	mv $(CURDIR)/app/.nsh/web-pkg/zniff $(WEB_DIR)
 
 web:
-	@if [ ! -f $(WEB_DIR)/index.html ] || find $(CURDIR)/app/src $(CURDIR)/app/Cargo.toml -newer $(WEB_DIR)/index.html -print -quit 2>/dev/null | grep -q .; then \
+	@if [ ! -f $(WEB_DIR)/index.html ] || find $(CURDIR)/app/src $(CURDIR)/app/assets $(CURDIR)/app/build.rs $(CURDIR)/app/Cargo.toml -newer $(WEB_DIR)/index.html -print -quit 2>/dev/null | grep -q .; then \
 		$(MAKE) web-ui; \
 	fi
 	ZNIFF_DEV=1 ZNIFF_WEB_ROOT=$(WEB_DIR) $(CARGO) run $(CARGO_FLAGS) -- --web $(ARGS)
