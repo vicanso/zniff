@@ -1,7 +1,7 @@
 {
   "name": "zniff",
   "id": "dev.zniff.app",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "build": 1,
   "rust": ".",
   "root": "App",
