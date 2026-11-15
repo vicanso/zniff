@@ -61,10 +61,104 @@ pub(crate) fn kv_value_cell(line: ReadSignal<HeaderLine>) -> impl IntoElement {
         ))
 }
 
+fn pulse_animation(duration_ms: f32) -> KeyframeAnimation {
+    KeyframeAnimation::new(Keyframes::Pulse)
+        .duration(duration_ms)
+        .easing([0.4, 0.0, 0.6, 1.0])
+        .frame_rate(30.0)
+}
+
+pub(crate) fn detail_loading_row() -> impl IntoElement {
+    view()
+        .px_3p5()
+        .py_2p5()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .child(
+            view()
+                .w(px(6.0))
+                .h(px(6.0))
+                .rounded(px(3.0))
+                .flex_shrink_0()
+                .bg(accent_blue())
+                .style_with(|s| {
+                    if reduce_motion() {
+                        s
+                    } else {
+                        s.animation(pulse_animation(1200.0))
+                    }
+                }),
+        )
+        .child(muted_line(tr("加载中…", "Loading…")))
+}
+
+pub(crate) fn detail_loading_box() -> impl IntoElement {
+    let skeleton_bar = |width: f32| {
+        view()
+            .w(relative(width))
+            .h(px(8.0))
+            .rounded(px(4.0))
+            .bg(bg_control())
+            .style_with(|s| {
+                if reduce_motion() {
+                    s
+                } else {
+                    s.animation(pulse_animation(1500.0))
+                }
+            })
+    };
+    view()
+        .w_full()
+        .bg(bg_code())
+        .px_3p5()
+        .py_3()
+        .gap_2p5()
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_2p5()
+                .child(
+                    progress()
+                        .indeterminate(true)
+                        .accessibility_label(move || SharedString::from(tr("加载中", "Loading")()))
+                        .w(px(120.0))
+                        .track_style(|s| {
+                            s.w_full()
+                                .h(px(4.0))
+                                .rounded(px(2.0))
+                                .bg(bg_control())
+                                .overflow_hidden()
+                        })
+                        .indicator_style(|s| {
+                            let s = s
+                                .w(relative(0.42))
+                                .h_full()
+                                .rounded(px(2.0))
+                                .bg(accent_blue());
+                            if reduce_motion() {
+                                s
+                            } else {
+                                s.animation(pulse_animation(1100.0))
+                            }
+                        }),
+                )
+                .child(muted_line(tr("加载中…", "Loading…"))),
+        )
+        .child(
+            view()
+                .gap_1p5()
+                .child(skeleton_bar(0.68))
+                .child(skeleton_bar(0.42)),
+        )
+}
+
 pub(crate) fn header_section(
     zh: &'static str,
     en: &'static str,
     lines: Signal<Vec<HeaderLine>>,
+    loading: Signal<bool>,
     pane_width: Signal<f32>,
     folded: Signal<u8>,
     bit: u8,
@@ -104,55 +198,67 @@ pub(crate) fn header_section(
                         .rounded(px(4.0))
                         .bg(bg_control())
                         .child(
-                            mono(move || format!("{}", lines.with(Vec::len)))
-                                .tabular_nums()
-                                .text_size(px(11.0))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(fg_muted()),
+                            mono(move || {
+                                if loading.get() {
+                                    "…".to_string()
+                                } else {
+                                    format!("{}", lines.with(Vec::len))
+                                }
+                            })
+                            .tabular_nums()
+                            .text_size(px(11.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(fg_muted()),
                         ),
                 ),
         )
         .child(when(
             move || !card_folded(folded, bit),
             move || {
-                when(
-                    move || lines.with(Vec::is_empty),
-                    || view().px_3p5().py_2p5().child(muted_line(tr("无", "None"))),
-                )
-                .otherwise(move || {
-                    each(
-                        lines,
-                        |line| line.key,
-                        move |line, index| {
-                            view()
-                                .flex_row()
-                                .gap_3()
-                                .px_3p5()
-                                .py_2()
-                                .bg(move || {
-                                    if index.get() % 2 == 1 {
-                                        bg_code()
-                                    } else {
-                                        bg_card()
-                                    }
-                                })
-                                .border_t(move || if index.get() > 0 { px(1.0) } else { px(0.0) })
-                                .border_t_color(border_subtle())
-                                .on_press_up(dismiss_keyboard)
-                                .child(
-                                    mono(move || line.with(|line| line.name.clone()))
-                                        .w(move || px(kv_key_width(pane_width.get())))
-                                        .flex_shrink_0()
-                                        .selectable(true)
-                                        .number_of_lines(1)
-                                        .text_overflow(EllipsizeMode::Tail)
-                                        .text_size(px(12.0))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .text_color(fg_muted()),
-                                )
-                                .child(kv_value_cell(line))
-                        },
+                when(move || loading.get(), detail_loading_row).otherwise(move || {
+                    when(
+                        move || lines.with(Vec::is_empty),
+                        || view().px_3p5().py_2p5().child(muted_line(tr("无", "None"))),
                     )
+                    .otherwise(move || {
+                        each(
+                            lines,
+                            |line| line.key,
+                            move |line, index| {
+                                view()
+                                    .flex_row()
+                                    .gap_3()
+                                    .px_3p5()
+                                    .py_2()
+                                    .bg(move || {
+                                        if index.get() % 2 == 1 {
+                                            bg_code()
+                                        } else {
+                                            bg_card()
+                                        }
+                                    })
+                                    .border_t(
+                                        move || {
+                                            if index.get() > 0 { px(1.0) } else { px(0.0) }
+                                        },
+                                    )
+                                    .border_t_color(border_subtle())
+                                    .on_press_up(dismiss_keyboard)
+                                    .child(
+                                        mono(move || line.with(|line| line.name.clone()))
+                                            .w(move || px(kv_key_width(pane_width.get())))
+                                            .flex_shrink_0()
+                                            .selectable(true)
+                                            .number_of_lines(1)
+                                            .text_overflow(EllipsizeMode::Tail)
+                                            .text_size(px(12.0))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(fg_muted()),
+                                    )
+                                    .child(kv_value_cell(line))
+                            },
+                        )
+                    })
                 })
             },
         ))
@@ -344,6 +450,9 @@ pub(crate) fn messages_section(
                                 .bg(bg_control())
                                 .child(
                                     mono(move || {
+                                        if shown.messages_loading.get() {
+                                            return "…".to_string();
+                                        }
                                         let total = lines.with(Vec::len);
                                         if search.get().trim().is_empty()
                                             && dir.get() == 0
@@ -369,7 +478,7 @@ pub(crate) fn messages_section(
                         ),
                 )
                 .child(when(
-                    move || !card_folded(folded, FOLD_MESSAGES),
+                    move || !card_folded(folded, FOLD_MESSAGES) && !shown.messages_loading.get(),
                     move || {
                         let copy_all_controls = copy_all_controls.clone();
                         view()
@@ -452,99 +561,104 @@ pub(crate) fn messages_section(
                 let filtered = move || {
                     filter_message_lines(&lines.get(), &search.get(), dir.get(), kind.get())
                 };
-                when(
-                    move || filtered().is_empty(),
-                    || view().px_3p5().py_2p5().child(muted_line(tr("无", "None"))),
-                )
-                .otherwise(move || {
+                when(move || shown.messages_loading.get(), detail_loading_row).otherwise(move || {
                     let row_controls = row_controls.clone();
-                    each(
-                        filtered,
-                        |line| line.key,
-                        move |line, index| {
-                            let controls = row_controls.clone();
-                            view()
-                                .flex_row()
-                                .items_start()
-                                .gap_3()
-                                .px_3p5()
-                                .py_2()
-                                .bg(move || {
-                                    if index.get() % 2 == 1 {
-                                        bg_code()
-                                    } else {
-                                        bg_card()
-                                    }
-                                })
-                                .border_t(move || if index.get() > 0 { px(1.0) } else { px(0.0) })
-                                .border_t_color(border_subtle())
-                                .on_press_up(dismiss_keyboard)
-                                .child(
-                                    mono(move || line.with(|line| line.name.clone()))
-                                        .w(move || px(kv_key_width(pane_width.get())))
-                                        .flex_shrink_0()
-                                        .selectable(true)
-                                        .number_of_lines(1)
-                                        .text_overflow(EllipsizeMode::Tail)
-                                        .text_size(px(12.0))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .text_color(fg_muted()),
-                                )
-                                .child(
-                                    mono(move || line.with(|line| line.value.clone()))
-                                        .flex_1()
-                                        .min_w(px(0.0))
-                                        .selectable(true)
-                                        .text_size(px(12.0))
-                                        .text_color(fg_primary()),
-                                )
-                                .child(when(
-                                    move || line.with(|l| l.name != "…"),
-                                    move || {
-                                        let controls = controls.clone();
-                                        view()
-                                            .w(px(22.0))
-                                            .h(px(22.0))
-                                            .flex_shrink_0()
-                                            .flex_row()
-                                            .items_center()
-                                            .justify_center()
-                                            .rounded(px(5.0))
-                                            .border_1()
-                                            .border_color(border_control())
-                                            .bg(bg_control())
-                                            .hover(|style| style.bg(bg_control_hover()))
-                                            .active(|style| style.opacity(0.75))
-                                            .cursor(Cursor::Pointer)
-                                            .label(tr("复制消息", "Copy message"))
-                                            .tooltip(label_tip("复制此条消息", "Copy message"))
-                                            .on_press(move || {
-                                                let payload = line.with(|l| l.value.clone());
-                                                set_clipboard(payload);
-                                                set_status(
-                                                    &controls,
-                                                    StatusMsg::CopiedBody {
-                                                        side: Side::Response,
-                                                        hex: false,
-                                                    },
-                                                );
-                                            })
-                                            .child(
-                                                canvas(move || {
-                                                    Painter::new()
-                                                        .line_width(1.3)
-                                                        .stroke_color(color(fg_secondary()))
-                                                        .stroke_svg(
-                                                            "M4.5 4.5 H10.5 V11.0 H4.5 Z M2.5 8.5 H2.0 V2.0 H8.0 V3.0",
-                                                        )
-                                                })
-                                                .w(px(12.5))
-                                                .h(px(12.5)),
-                                            )
-                                    },
-                                ))
-                        },
+                    when(
+                        move || filtered().is_empty(),
+                        || view().px_3p5().py_2p5().child(muted_line(tr("无", "None"))),
                     )
+                    .otherwise(move || {
+                        let row_controls = row_controls.clone();
+                        each(
+                            filtered,
+                            |line| line.key,
+                            move |line, index| {
+                                let controls = row_controls.clone();
+                                view()
+                                    .flex_row()
+                                    .items_start()
+                                    .gap_3()
+                                    .px_3p5()
+                                    .py_2()
+                                    .bg(move || {
+                                        if index.get() % 2 == 1 {
+                                            bg_code()
+                                        } else {
+                                            bg_card()
+                                        }
+                                    })
+                                    .border_t(move || {
+                                        if index.get() > 0 { px(1.0) } else { px(0.0) }
+                                    })
+                                    .border_t_color(border_subtle())
+                                    .on_press_up(dismiss_keyboard)
+                                    .child(
+                                        mono(move || line.with(|line| line.name.clone()))
+                                            .w(move || px(kv_key_width(pane_width.get())))
+                                            .flex_shrink_0()
+                                            .selectable(true)
+                                            .number_of_lines(1)
+                                            .text_overflow(EllipsizeMode::Tail)
+                                            .text_size(px(12.0))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(fg_muted()),
+                                    )
+                                    .child(
+                                        mono(move || line.with(|line| line.value.clone()))
+                                            .flex_1()
+                                            .min_w(px(0.0))
+                                            .selectable(true)
+                                            .text_size(px(12.0))
+                                            .text_color(fg_primary()),
+                                    )
+                                    .child(when(
+                                        move || line.with(|l| l.name != "…"),
+                                        move || {
+                                            let controls = controls.clone();
+                                            view()
+                                                .w(px(22.0))
+                                                .h(px(22.0))
+                                                .flex_shrink_0()
+                                                .flex_row()
+                                                .items_center()
+                                                .justify_center()
+                                                .rounded(px(5.0))
+                                                .border_1()
+                                                .border_color(border_control())
+                                                .bg(bg_control())
+                                                .hover(|style| style.bg(bg_control_hover()))
+                                                .active(|style| style.opacity(0.75))
+                                                .cursor(Cursor::Pointer)
+                                                .label(tr("复制消息", "Copy message"))
+                                                .tooltip(label_tip("复制此条消息", "Copy message"))
+                                                .on_press(move || {
+                                                    let payload = line.with(|l| l.value.clone());
+                                                    set_clipboard(payload);
+                                                    set_status(
+                                                        &controls,
+                                                        StatusMsg::CopiedBody {
+                                                            side: Side::Response,
+                                                            hex: false,
+                                                        },
+                                                    );
+                                                })
+                                                .child(
+                                                    canvas(move || {
+                                                        Painter::new()
+                                                            .line_width(1.3)
+                                                            .stroke_color(color(fg_secondary()))
+                                                            .stroke_svg(
+                                                                "M4.5 4.5 H10.5 V11.0 H4.5 Z M2.5 8.5 H2.0 V2.0 H8.0 V3.0",
+                                                            )
+                                                    })
+                                                    .w(px(12.5))
+                                                    .h(px(12.5)),
+                                                )
+                                        },
+                                    ))
+                            },
+                        )
+                    })
                 })
             },
         ))
@@ -583,29 +697,31 @@ pub(crate) fn diff_card(shown: Shown, folded: Signal<u8>) -> impl IntoElement {
         .child(when(
             move || !card_folded(folded, FOLD_DIFF),
             move || {
-                view()
-                    .bg(bg_code())
-                    .h(px(320.0))
-                    .flex_col()
-                    .overflow_hidden()
-                    .child(diff_legend())
-                    .child(
-                        guard_culled_pointer_events(view())
-                            .flex_1()
-                            .min_h(px(0.0))
-                            .overflow_hidden()
-                            .child(
-                                diff_view()
-                                    .old_value(move || SharedString::from(shown.diff_old.get()))
-                                    .new_value(move || SharedString::from(shown.diff_new.get()))
-                                    .layout(DiffLayout::Unified)
-                                    .language("plaintext")
-                                    .soft_wrap(true)
-                                    .font_size(Points(12.0))
-                                    .line_height(Points(18.0))
-                                    .size_full(),
-                            ),
-                    )
+                when(move || shown.diff_loading.get(), detail_loading_box).otherwise(move || {
+                    view()
+                        .bg(bg_code())
+                        .h(px(320.0))
+                        .flex_col()
+                        .overflow_hidden()
+                        .child(diff_legend())
+                        .child(
+                            guard_culled_pointer_events(view())
+                                .flex_1()
+                                .min_h(px(0.0))
+                                .overflow_hidden()
+                                .child(
+                                    diff_view()
+                                        .old_value(move || SharedString::from(shown.diff_old.get()))
+                                        .new_value(move || SharedString::from(shown.diff_new.get()))
+                                        .layout(DiffLayout::Unified)
+                                        .language("plaintext")
+                                        .soft_wrap(true)
+                                        .font_size(Points(12.0))
+                                        .line_height(Points(18.0))
+                                        .size_full(),
+                                ),
+                        )
+                })
             },
         ))
 }

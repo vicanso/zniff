@@ -874,6 +874,12 @@ pub(crate) fn clear_shown(shown: Shown) {
     shown.comment.set(String::new());
     shown.editing_comment.set(false);
     shown.repeating.set(false);
+    shown.req_headers_loading.set(false);
+    shown.res_headers_loading.set(false);
+    shown.req_body_loading.set(false);
+    shown.res_body_loading.set(false);
+    shown.messages_loading.set(false);
+    shown.diff_loading.set(false);
 }
 
 /// Only hides the panels. The panel's views and memos are still mounted until

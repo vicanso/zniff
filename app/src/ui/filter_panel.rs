@@ -358,10 +358,10 @@ pub(crate) fn saved_filter_panel(
                                         ))
                                         .child(filter_chip(
                                             filter,
-                                            "报错",
+                                            "出错",
                                             "Errors",
-                                            "失败",
-                                            FAIL_ALIASES,
+                                            "status:4xx|5xx|err",
+                                            ERR_ALIASES,
                                         ))
                                         .child(filter_chip(
                                             filter,

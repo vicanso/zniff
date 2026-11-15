@@ -4,6 +4,7 @@
 //! which is the only place `Capture` listens. Reads use a session cache that
 //! the view fills from `/api/state` and `/api/flows`.
 
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -61,6 +62,7 @@ pub struct Hub {
     breaks_on: AtomicBool,
     show_tunnels: AtomicBool,
     paused_queue: Mutex<Vec<(u64, BreakSide)>>,
+    in_flight_details: Mutex<HashSet<u64>>,
     share_id: Mutex<Option<String>>,
     relay_accept: AtomicBool,
     relay_token: Mutex<String>,
@@ -81,6 +83,7 @@ impl Hub {
             breaks_on: AtomicBool::new(true),
             show_tunnels: AtomicBool::new(false),
             paused_queue: Mutex::new(Vec::new()),
+            in_flight_details: Mutex::new(HashSet::new()),
             share_id: Mutex::new(None),
             relay_accept: AtomicBool::new(false),
             relay_token: Mutex::new(String::new()),
@@ -174,6 +177,28 @@ impl Hub {
         let rev = self.with_session(|session| session.fill_cached_detail(detail))?;
         self.bump();
         Some(rev)
+    }
+
+    pub fn begin_detail_fetch(&self, id: u64) -> bool {
+        self.in_flight_details
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .insert(id)
+    }
+
+    pub fn end_detail_fetch(&self, id: u64) {
+        self.in_flight_details
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .remove(&id);
+    }
+
+    pub fn drop_cached_flow(&self, id: u64) -> bool {
+        let dropped = self.with_session(|session| session.drop_cached_flow(id));
+        if dropped {
+            self.bump();
+        }
+        dropped
     }
 
     pub fn share_id(&self) -> Option<String> {
@@ -394,6 +419,10 @@ impl Hub {
 
     pub fn clear_session(&self) {
         self.with_session(|session| session.clear());
+        self.in_flight_details
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clear();
         self.bump();
         post_op(json!({"op": "clear"}));
     }

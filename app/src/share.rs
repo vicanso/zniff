@@ -1902,12 +1902,12 @@ function setMainFilter(next) {
   renderAll();
 }
 
-function toggleToken(token) {
+function toggleToken(token, aliases) {
   const parts = state.filter.trim().split(/\s+/).filter(Boolean);
-  const idx = parts.findIndex(p => p.toLowerCase() === token.toLowerCase());
-  if (idx >= 0) parts.splice(idx, 1);
-  else parts.push(token);
-  setMainFilter(parts.join(" "));
+  const targets = new Set([token].concat(aliases || []).map(t => t.toLowerCase()));
+  const next = parts.filter(p => !targets.has(p.toLowerCase()));
+  if (next.length === parts.length) next.push(token);
+  setMainFilter(next.join(" "));
 }
 
 function mergeSecondaryFilter() {
@@ -2307,18 +2307,24 @@ function renderToolbar(filteredCount, totalCount, allFlows) {
   countPill.title = tr("点击查看当前列表统计", "Click to view current list summary");
 
   const chips = [
-    { token: "type:json", label: "JSON" },
-    { token: "失败", alt: "err", label: tr("失败", "Errors") },
+    { token: "type:json", aliases: ["ct:json"], label: "JSON" },
+    {
+      token: "status:4xx|5xx|err",
+      aliases: ["status:4xx,5xx,err", "4xx|5xx|err", "4xx,5xx,err"],
+      label: tr("出错", "Errors"),
+    },
     { token: "pin:", label: tr("星标", "Starred") },
     { token: "slow:", label: tr("慢请求", "Slow") },
   ];
   const chipsRow = document.getElementById("chips-row");
-  chipsRow.innerHTML = chips.map(c => {
-    const on = (hasToken(state.filter, c.token) || (c.alt && hasToken(state.filter, c.alt))) ? " active" : "";
-    return `<button class="chip${on}" data-token="${esc(c.token)}" type="button"><span class="chip-dot"></span>${esc(c.label)}</button>`;
+  chipsRow.innerHTML = chips.map((c, idx) => {
+    const all = [c.token].concat(c.aliases || []);
+    const on = all.some(t => hasToken(state.filter, t)) ? " active" : "";
+    return `<button class="chip${on}" data-chip="${idx}" data-token="${esc(c.token)}" type="button"><span class="chip-dot"></span>${esc(c.label)}</button>`;
   }).join("");
   chipsRow.querySelectorAll(".chip").forEach(btn => {
-    btn.onclick = () => toggleToken(btn.dataset.token);
+    const chip = chips[Number(btn.dataset.chip)];
+    btn.onclick = () => toggleToken(chip.token, chip.aliases || []);
   });
 
   renderFacetDrawer(allFlows);
@@ -4846,6 +4852,8 @@ mod tests {
             true,
         );
         assert!(html.contains("function applyShareUpdate(prevData, next)"));
+        assert!(html.contains("token: \"status:4xx|5xx|err\""));
+        assert!(html.contains("label: tr(\"出错\", \"Errors\")"));
         assert!(html.contains("state.data.rev"));
         assert!(html.contains("${LIVE}${sep}since=${curRev}"));
         assert!(html.contains("next.incremental"));

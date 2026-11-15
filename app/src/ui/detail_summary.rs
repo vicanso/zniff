@@ -76,6 +76,12 @@ pub(crate) struct Shown {
     pub(crate) response_offset: Signal<usize>,
     pub(crate) request_window: Signal<TextWindow>,
     pub(crate) response_window: Signal<TextWindow>,
+    pub(crate) req_headers_loading: Signal<bool>,
+    pub(crate) res_headers_loading: Signal<bool>,
+    pub(crate) req_body_loading: Signal<bool>,
+    pub(crate) res_body_loading: Signal<bool>,
+    pub(crate) messages_loading: Signal<bool>,
+    pub(crate) diff_loading: Signal<bool>,
 }
 
 #[derive(Clone, Copy)]
@@ -552,6 +558,7 @@ pub(crate) fn ready_detail(
     folded: Signal<u8>,
 ) -> impl IntoElement {
     let no_form = signal(Vec::<HeaderLine>::new());
+    let no_loading = signal(false);
     uncull_nested_scroll(view())
         .pl_3p5()
         .pr_5()
@@ -573,7 +580,8 @@ pub(crate) fn ready_detail(
         }))
         .child(when(
             move || {
-                !shown.response_body.get().is_empty()
+                shown.res_body_loading.get()
+                    || !shown.response_body.get().is_empty()
                     || !shown.response_note.get().is_empty()
                     || (shown.pretty.get() && !shown.preview.get().is_empty())
                     || shown.response_json.with(Option::is_some)
@@ -598,6 +606,7 @@ pub(crate) fn ready_detail(
                         baseline,
                         folded,
                         FOLD_RES_BODY,
+                        shown.res_body_loading,
                     )
                 }
             },
@@ -606,13 +615,15 @@ pub(crate) fn ready_detail(
             "响应头",
             "Response headers",
             shown.response_headers,
+            shown.res_headers_loading,
             shown.pane_width,
             folded,
             FOLD_RES_HEADERS,
         ))
         .child(when(
             move || {
-                !shown.request_body.get().is_empty()
+                shown.req_body_loading.get()
+                    || !shown.request_body.get().is_empty()
                     || !shown.request_note.get().is_empty()
                     || !shown.request_form.with(Vec::is_empty)
                     || shown.request_json.with(Option::is_some)
@@ -637,6 +648,7 @@ pub(crate) fn ready_detail(
                         baseline,
                         folded,
                         FOLD_REQ_BODY,
+                        shown.req_body_loading,
                     )
                 }
             },
@@ -648,6 +660,7 @@ pub(crate) fn ready_detail(
                     "查询参数",
                     "Query",
                     shown.query,
+                    no_loading,
                     shown.pane_width,
                     folded,
                     FOLD_QUERY,
@@ -658,16 +671,17 @@ pub(crate) fn ready_detail(
             "请求头",
             "Request headers",
             shown.request_headers,
+            shown.req_headers_loading,
             shown.pane_width,
             folded,
             FOLD_REQ_HEADERS,
         ))
         .child(when(
-            move || !shown.diff.get().is_empty(),
+            move || shown.diff_loading.get() || !shown.diff.get().is_empty(),
             move || diff_card(shown, folded),
         ))
         .child(when(
-            move || !shown.messages.with(Vec::is_empty),
+            move || shown.messages_loading.get() || !shown.messages.with(Vec::is_empty),
             move || messages_section(shown, controls.clone(), folded),
         ))
 }

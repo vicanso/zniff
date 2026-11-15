@@ -24,11 +24,13 @@ pub(crate) use nsh_base::{
     DataTableColumnMove, DataTableContextMenu, DataTableEvent, DataTableHeaderCell, DataTablePress,
     DataTableRange, DataTableRows, DataTableSelection, DiffLayout, ToastManager, ToastMotion,
     ToastOptions, ToastStackState, ToastTransitionStatus, Tree, TreeEntry, TreeEvent, TreeItem,
-    data_table, diff_view, editor, input, menu, menu_item, popover, theme, toast, toast_stack,
-    tooltip, tree,
+    data_table, diff_view, editor, input, menu, menu_item, popover, progress, theme, toast,
+    toast_stack, tooltip, tree,
 };
 #[allow(unused_imports)]
 pub(crate) use nsh_core::EllipsizeMode;
+#[allow(unused_imports)]
+pub(crate) use nsh_core::platform::Lifecycle;
 #[allow(unused_imports)]
 pub(crate) use nsh_core::prelude::*;
 
@@ -106,6 +108,7 @@ mod seq_swimlane;
 mod session_actions;
 mod theme;
 mod toolbar;
+mod web_poll;
 
 pub use self::app_shell::App;
 pub(crate) use self::break_bar::*;
@@ -148,6 +151,8 @@ pub(crate) use self::seq_swimlane::*;
 pub(crate) use self::session_actions::*;
 pub(crate) use self::theme::*;
 pub(crate) use self::toolbar::*;
+#[allow(unused_imports)]
+pub(crate) use self::web_poll::*;
 
 #[cfg(test)]
 mod tests;

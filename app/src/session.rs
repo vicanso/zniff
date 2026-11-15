@@ -511,6 +511,7 @@ pub struct Flow {
     pub relay_remote_id: Option<u64>,
     /// Monotonic revision bumped whenever this flow is created or modified.
     pub rev: u64,
+    cached_view: bool,
     cached_server_rev: u64,
     cached_detail_rev: Option<u64>,
     accounted: usize,
@@ -707,6 +708,17 @@ impl Flow {
         self.req_bytes().saturating_add(self.res_bytes())
     }
 
+    pub fn detail_unloaded(&self) -> bool {
+        self.cached_view && self.cached_detail_rev.is_none()
+    }
+
+    pub fn detail_pending(&self) -> bool {
+        self.cached_view
+            && self
+                .cached_detail_rev
+                .is_none_or(|detail_rev| detail_rev < self.cached_server_rev)
+    }
+
     pub fn elapsed_ms(&self) -> Option<u64> {
         self.finished_at?
             .duration_since(self.started)
@@ -858,6 +870,7 @@ fn blank_cached_flow(id: u64) -> Flow {
         relay_source: None,
         relay_remote_id: None,
         rev: 0,
+        cached_view: true,
         cached_server_rev: 0,
         cached_detail_rev: None,
         accounted: 0,
@@ -961,6 +974,7 @@ impl Session {
             relay_source: None,
             relay_remote_id: None,
             rev,
+            cached_view: false,
             cached_server_rev: 0,
             cached_detail_rev: None,
             accounted: headers_size,
@@ -1906,16 +1920,28 @@ impl Session {
     /// or its server `rev` advanced since the last [`Session::fill_cached_detail`].
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     pub fn cached_needs_detail(&self, id: u64) -> bool {
-        self.flows.get(&id).is_some_and(|flow| {
-            flow.cached_detail_rev
-                .is_none_or(|detail_rev| detail_rev < flow.cached_server_rev)
-        })
+        self.flows.get(&id).is_some_and(Flow::detail_pending)
     }
 
-    /// Stores one detail payload. The same payload keeps the current revision.
+    /// Removes a stale web-cache entry after the server returns `404`.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub fn drop_cached_flow(&mut self, id: u64) -> bool {
+        if !self.flows.get(&id).is_some_and(|flow| flow.cached_view) {
+            return false;
+        }
+        self.flows.remove(&id);
+        self.order.retain(|row_id| *row_id != id);
+        self.next_rev += 1;
+        true
+    }
+
+    /// Stores one detail payload. Advances `rev` when payload or pending state changes.
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     pub fn fill_cached_detail(&mut self, detail: CachedFlowDetail) -> Option<u64> {
         let flow = self.flows.get_mut(&detail.id)?;
+        if detail.rev > 0 && flow.cached_detail_rev.is_some_and(|prev| detail.rev < prev) {
+            return Some(flow.rev);
+        }
         let same = flow.request_headers == detail.request_headers
             && flow.response_headers == detail.response_headers
             && flow.request_body == detail.request_body
@@ -1928,9 +1954,17 @@ impl Session {
             && flow.response_expired == detail.response_expired
             && flow.messages == detail.messages
             && flow.messages_truncated == detail.messages_truncated;
+        let was_unloaded = flow.detail_unloaded();
+        let was_pending = flow.detail_pending();
+        if detail.rev > 0 {
+            flow.cached_server_rev = flow.cached_server_rev.max(detail.rev);
+            flow.cached_detail_rev = Some(detail.rev);
+        } else {
+            flow.cached_detail_rev = Some(flow.cached_server_rev);
+        }
+        let now_unloaded = flow.detail_unloaded();
+        let now_pending = flow.detail_pending();
         if !same {
-            self.next_rev += 1;
-            flow.rev = self.next_rev;
             flow.request_headers = detail.request_headers;
             flow.response_headers = detail.response_headers;
             flow.request_body = detail.request_body;
@@ -1944,9 +1978,10 @@ impl Session {
             flow.messages = detail.messages;
             flow.messages_truncated = detail.messages_truncated;
         }
-        let synced_rev = flow.cached_server_rev.max(detail.rev);
-        flow.cached_server_rev = synced_rev;
-        flow.cached_detail_rev = Some(synced_rev);
+        if !same || was_pending != now_pending || was_unloaded != now_unloaded {
+            self.next_rev += 1;
+            flow.rev = self.next_rev;
+        }
         Some(flow.rev)
     }
 
@@ -4100,6 +4135,103 @@ mod tests {
         session.replace_cached_views(vec![view_v2]);
         assert!(session.get(7).unwrap().rev > rev_before);
         assert!(session.cached_needs_detail(7));
+    }
+
+    #[test]
+    fn cached_detail_loading_flags_and_stale_revs_behave_cleanly() {
+        let mut session = Session::default();
+        let local_id = session.open(FlowDraft {
+            protocol: Protocol::Http11,
+            method: "GET".into(),
+            host: "local.test".into(),
+            path: "/".into(),
+            url: "http://local.test/".into(),
+            request_headers: vec![],
+        });
+        let local_flow = session.get(local_id).unwrap();
+        assert!(!local_flow.detail_unloaded());
+        assert!(!local_flow.detail_pending());
+        assert!(!session.drop_cached_flow(local_id));
+        assert!(session.get(local_id).is_some());
+
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_millis(2_000);
+        let blank_view = CachedFlowView {
+            id: 9,
+            rev: 5,
+            protocol: Protocol::Http11,
+            method: "GET".into(),
+            host: "empty.test".into(),
+            path: "/ping".into(),
+            url: "http://empty.test/ping".into(),
+            client_ip: String::new(),
+            conn_info: ConnInfo::default(),
+            status: Some(204),
+            error: None,
+            started: t0,
+            response_at: Some(t0 + Duration::from_millis(2)),
+            finished_at: Some(t0 + Duration::from_millis(3)),
+            request_bytes: 0,
+            response_bytes: 0,
+            pinned: false,
+            rule_hit: String::new(),
+            comment: String::new(),
+            relay_source: None,
+        };
+        session.replace_cached_views(vec![blank_view.clone()]);
+        assert!(session.get(9).unwrap().detail_unloaded());
+        assert!(session.get(9).unwrap().detail_pending());
+
+        // Advancing server summary rev before an older detail arrives keeps detail_pending true.
+        let mut newer_view = blank_view;
+        newer_view.rev = 8;
+        session.replace_cached_views(vec![newer_view]);
+        let rev_before_old_detail = session.get(9).unwrap().rev;
+        session.fill_cached_detail(CachedFlowDetail {
+            id: 9,
+            rev: 5,
+            request_headers: vec![],
+            response_headers: vec![],
+            request_body: vec![],
+            response_body: vec![],
+            request_truncated: false,
+            response_truncated: false,
+            request_encoding_error: None,
+            response_encoding_error: None,
+            request_expired: None,
+            response_expired: None,
+            messages: vec![],
+            messages_truncated: false,
+        });
+        let after_old = session.get(9).unwrap();
+        assert!(!after_old.detail_unloaded());
+        assert!(after_old.detail_pending());
+        assert!(after_old.rev > rev_before_old_detail);
+
+        // Matching rev clears pending even when headers and bodies remain empty.
+        let rev_before_final_detail = after_old.rev;
+        session.fill_cached_detail(CachedFlowDetail {
+            id: 9,
+            rev: 8,
+            request_headers: vec![],
+            response_headers: vec![],
+            request_body: vec![],
+            response_body: vec![],
+            request_truncated: false,
+            response_truncated: false,
+            request_encoding_error: None,
+            response_encoding_error: None,
+            request_expired: None,
+            response_expired: None,
+            messages: vec![],
+            messages_truncated: false,
+        });
+        let after_final = session.get(9).unwrap();
+        assert!(!after_final.detail_unloaded());
+        assert!(!after_final.detail_pending());
+        assert!(after_final.rev > rev_before_final_detail);
+
+        assert!(session.drop_cached_flow(9));
+        assert!(session.get(9).is_none());
     }
 
     #[test]

@@ -96,6 +96,12 @@ pub fn App() -> impl IntoElement {
         response_offset: signal(0),
         request_window: signal(TextWindow::default()),
         response_window: signal(TextWindow::default()),
+        req_headers_loading: signal(false),
+        res_headers_loading: signal(false),
+        req_body_loading: signal(false),
+        res_body_loading: signal(false),
+        messages_loading: signal(false),
+        diff_loading: signal(false),
     };
     let port_text = signal(String::new());
     let listen_all = signal(false);
@@ -214,16 +220,30 @@ pub fn App() -> impl IntoElement {
         }
     }
     #[cfg(target_arch = "wasm32")]
-    start_web_poll(
-        controls.clone(),
-        port_text,
-        listen_all,
-        profile_signals,
-        effective_filter,
-        seq_builder,
-        selected,
-        baseline,
-    );
+    {
+        let web_bg = signal(lifecycle() == Lifecycle::Background);
+        effect(move || {
+            let bg = lifecycle() == Lifecycle::Background;
+            if web_bg.get_untracked() != bg {
+                web_bg.set(bg);
+                if !bg {
+                    proxy::notify_poll_wake();
+                }
+            }
+        });
+        start_web_poll(
+            controls.clone(),
+            port_text,
+            listen_all,
+            profile_signals,
+            effective_filter,
+            seq_builder,
+            selected,
+            baseline,
+            web_bg,
+        );
+        start_web_detail_watch(controls.clone(), selected, baseline);
+    }
 
     let controls_tick = controls.clone();
     let filter_tick = filter;
@@ -267,6 +287,8 @@ pub fn App() -> impl IntoElement {
         None::<u64>,
         shown_tick.pretty.get(),
         ui_lang(langs),
+        (false, false),
+        (false, false),
     ));
     let seen_listen = stored(String::new());
     let seen_lang = stored(ui_lang(langs));
@@ -669,20 +691,27 @@ pub fn App() -> impl IntoElement {
             detail_scroll_tick.scroll_to_offset(px(0.0), false);
             detail_top_left.replace(false);
         }
-        let (selected_rev, selected_done, baseline_rev) =
+        let (selected_rev, selected_done, selected_flags, baseline_rev, baseline_flags) =
             if selected_now.is_some() || baseline_now.is_some() {
                 controls_tick.hub.with_session(|session| {
                     let selected_flow = selected_now.and_then(|id| session.get(id));
+                    let base_flow = baseline_now.and_then(|id| session.get(id));
                     (
                         selected_flow.map(|flow| flow.rev),
                         selected_flow
                             .map(|flow| flow.finished_at.is_some())
                             .unwrap_or(true),
-                        baseline_now.and_then(|id| session.get(id).map(|flow| flow.rev)),
+                        selected_flow
+                            .map(|flow| (flow.detail_unloaded(), flow.detail_pending()))
+                            .unwrap_or((false, false)),
+                        base_flow.map(|flow| flow.rev),
+                        base_flow
+                            .map(|flow| (flow.detail_unloaded(), flow.detail_pending()))
+                            .unwrap_or((false, false)),
                     )
                 })
             } else {
-                (None, true, None)
+                (None, true, (false, false), None, (false, false))
             };
         let detail_stamp = (
             false,
@@ -692,13 +721,17 @@ pub fn App() -> impl IntoElement {
             baseline_rev,
             pretty_now,
             lang_now,
+            selected_flags,
+            baseline_flags,
         );
         if detail_stamp != seen_detail_stamp.get() || spill_expired {
             let prev = seen_detail_stamp.get();
             let view_changed = prev.1 != selected_now
                 || prev.3 != baseline_now
                 || prev.5 != pretty_now
-                || prev.6 != lang_now;
+                || prev.6 != lang_now
+                || prev.7 != selected_flags
+                || prev.8 != baseline_flags;
             let streaming = selected_now.is_some() && !selected_done;
             let due = clock::elapsed(detail_hold.get()) >= Duration::from_millis(200);
             if !streaming || view_changed || spill_expired || due {
