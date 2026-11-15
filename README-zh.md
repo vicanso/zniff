@@ -25,7 +25,7 @@ https://github.com/user-attachments/assets/15117c1d-50a0-4578-8201-a305fb0d12a3
 - **原生轻量**：代理内核与 `nsh` GUI 编译为单个纯 Rust 二进制程序，启动迅速且内存占用低。
 - **严格协议跟随**：解析 `ClientHello` 的 ALPN 提案并直接与源站协商。支持 HTTP/2 多路复用、WebSocket（RFC 6455）与 SSE，不降级为 HTTP/1.1。
 - **深度检视**：支持 JSON（含可折叠、可搜索的 JSON 树形视图）、GraphQL（自动拆分 `operationName`、查询语句与变量）、HTML/XML、无模式 Protobuf/gRPC 与 MessagePack 解码；行内自动解码 JWT、Unix 时间戳和 Base64，支持基准行级 Diff、正文检索与连接阶段耗时拆分（DNS / TCP / TLS、连接复用）。
-- **14 项改写规则与断点队列**：包含终点规则（`map-local`（支持目录映射与回源）、`map-remote`、`break`、`break-res`、`block`）与叠加修饰规则（`replace`、`json`、`delay`、`throttle`、`header`、`query`、`cors`、`no-cache`、`cert` / `client-cert`），支持 GraphQL `op=` 精准匹配与 8 槽位 FIFO 断点排队。
+- **15 项改写与解析规则及断点队列**：包含终点规则（`map-local`（支持目录映射与回源）、`map-remote`、`break`、`break-res`、`block`）、叠加修饰规则（`replace`、`json`、`delay`、`throttle`、`header`、`query`、`cors`、`no-cache`）与域名级规则（`cert` / `client-cert`、`resolve` / `dns` / `hosts`），支持 GraphQL `op=` 精准匹配与 8 槽位 FIFO 断点排队。
 - **快速定位**：丰富的过滤语法（`host:`、`path:`、`op:`、`body:`、`header:`、反向 `-host:` / `-status:` 等）、域名与应用分面抽屉、列表二次搜索、列拖拽排序，以及带历史快照的命名配置。
 - **图表、导出与协作**：一键生成瀑布图、泳道时序图、依赖流转图（`flowchart TD`）及 Mermaid 源码；可复制为 cURL、`fetch`、Python `requests`、Rust `reqwest`、Go `net/http`、TypeScript 类型或 Rust `serde` 结构体；支持导出 HAR/HTML（可选脱敏）与 `/s/{uuid}` 实时分享、`--relay` 中转。
 - **AI 原生 MCP 与网页控制台**：内置 JSON-RPC 2.0 MCP 服务（`POST /mcp` 与 `zniff --mcp`），以及无界面 WebAssembly 控制台（`zniff --web`），控制台与抓包端口均可开启 HTTP Basic 认证。
@@ -35,7 +35,7 @@ https://github.com/user-attachments/assets/15117c1d-50a0-4578-8201-a305fb0d12a3
 
 ## 界面预览
 
-| 深度检视（GraphQL 与 JSON） | 过滤与 14 项改写规则 |
+| 深度检视（GraphQL 与 JSON） | 过滤与 15 项改写规则 |
 | :---: | :---: |
 | ![深度检视](./docs/screenshots/02_detail_json_graphql.png) | ![过滤与规则](./docs/screenshots/05_filter_rules_popup.png) |
 | **瀑布图 / 时序图与断点栏** | **自适应浅色与深色主题** |

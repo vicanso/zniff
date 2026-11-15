@@ -201,8 +201,10 @@ pub(crate) fn replace_row(
         let to_raw = to.get();
         let op_raw = op_pattern.get();
         let (eff_from, eff_to) = effective_quick_inputs(kind_now, mode_now, &from_raw, &to_raw);
+        let path_raw = path_pattern.get();
+        let eff_path = effective_quick_path(kind_now, &path_raw);
         let eff_op = effective_quick_op(kind_now, &op_raw);
-        let combined = crate::rules::combine_rule_pattern(&host_pattern.get(), &path_pattern.get());
+        let combined = crate::rules::combine_rule_pattern(&host_pattern.get(), eff_path);
         crate::rules::append_quick_rule_with_op(
             "",
             quick_kind(kind_now),
@@ -239,7 +241,7 @@ pub(crate) fn replace_row(
                         .flex_wrap()
                         .items_center()
                         .gap_1()
-                        .children((0_u8..14).map(move |idx| {
+                        .children((0_u8..15).map(move |idx| {
                             let (zh, en) = quick_kind(idx).label();
                             view()
                                 .h(px(26.0))
@@ -305,13 +307,18 @@ pub(crate) fn replace_row(
                             false,
                             move |text| host_pattern.set(text.to_string()),
                         )))
-                        .child(view().flex_1().min_w(px(0.0)).child(side_input(
-                            path_pattern,
-                            tr("Path (*)", "Path (*)"),
-                            28.0,
-                            false,
-                            move |text| path_pattern.set(text.to_string()),
-                        )))
+                        .child(when(
+                            move || kind.get() != 14,
+                            move || {
+                                view().flex_1().min_w(px(0.0)).child(side_input(
+                                    path_pattern,
+                                    tr("Path (*)", "Path (*)"),
+                                    28.0,
+                                    false,
+                                    move |text| path_pattern.set(text.to_string()),
+                                ))
+                            },
+                        ))
                         .child(when(
                             move || quick_kind(kind.get()).supports_graphql_op(),
                             move || {
@@ -477,6 +484,12 @@ pub(crate) fn replace_row(
                                         "Status (default 403): 403 / 404 / 503",
                                     )
                                     .to_string(),
+                                    14 => t(
+                                        lang,
+                                        "目标 IP 或主机: 127.0.0.1 / ::1",
+                                        "Target IP or host: 127.0.0.1 / ::1",
+                                    )
+                                    .to_string(),
                                     _ => t(lang, "查找原文 (from)", "Find text (from)").to_string(),
                                 }
                             };
@@ -534,7 +547,7 @@ pub(crate) fn replace_row(
                         )
                     );
                     let row = row.child(when(
-                        move || matches!(kind.get(), 0 | 2 | 6 | 7 | 9 | 10 | 11),
+                        move || matches!(kind.get(), 0 | 2 | 6 | 7 | 9 | 10 | 11 | 14),
                         move || {
                             let placeholder = move || {
                                 let lang = ui_lang(langs);
@@ -563,6 +576,8 @@ pub(crate) fn replace_row(
                                         "JSON value: true / 42 / \"text\" (empty to delete)",
                                     )
                                     .to_string(),
+                                    14 => t(lang, "端口 (可选): 8080", "Port (optional): 8080")
+                                        .to_string(),
                                     _ => t(lang, "替换成 (to)", "Replace with (to)").to_string(),
                                 }
                             };
@@ -672,10 +687,12 @@ pub(crate) fn replace_row(
                                 let op_raw = op_pattern.get();
                                 let (eff_from, eff_to) =
                                     effective_quick_inputs(kind_now, mode_now, &from_raw, &to_raw);
+                                let path_raw = path_pattern.get();
+                                let eff_path = effective_quick_path(kind_now, &path_raw);
                                 let eff_op = effective_quick_op(kind_now, &op_raw);
                                 let combined_pattern = crate::rules::combine_rule_pattern(
                                     &host_pattern.get(),
-                                    &path_pattern.get(),
+                                    eff_path,
                                 );
                                 let Some(next) = crate::rules::append_quick_rule_with_op(
                                     &rules_text.get(),

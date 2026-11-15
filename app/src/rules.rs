@@ -14,6 +14,8 @@
 //! header example.com/api req del Cookie
 //! cors example.com
 //! replace example.com/api res hello -> hi there
+//! resolve example.com 10.0.0.8
+//! resolve example.com 127.0.0.1:8443
 //! ```
 //!
 //! `replace` changes UTF-8 text. `res` changes the response body. `req`
@@ -139,6 +141,13 @@ pub enum Rule {
         drop_conn: bool,
         status: u16,
         op: Option<String>,
+    },
+    /// Custom DNS / host resolution for `host`. Dials `(target_host, port.unwrap_or(orig_port))`
+    /// over TCP while preserving original HTTP `Host`, TLS SNI, and certificate verification name.
+    Resolve {
+        host: String,
+        target_host: String,
+        port: Option<u16>,
     },
 }
 
@@ -297,7 +306,9 @@ impl Rule {
             | Self::Block {
                 host, path_prefix, ..
             } => (host, path_prefix),
-            Self::Cert { host, .. } | Self::ClientCert { host, .. } => (host, "/"),
+            Self::Cert { host, .. }
+            | Self::ClientCert { host, .. }
+            | Self::Resolve { host, .. } => (host, "/"),
         }
     }
 }
@@ -322,6 +333,18 @@ pub fn custom_client_cert(rules: &[Rule], host: &str) -> Option<(PathBuf, Option
             cert_path,
             key_path,
         } if host_matches(rule_host, host) => Some((cert_path.clone(), key_path.clone())),
+        _ => None,
+    })
+}
+
+/// First matching `resolve` rule for `host`, returning `(target_host, port)`.
+pub fn custom_resolve(rules: &[Rule], host: &str) -> Option<(String, Option<u16>)> {
+    rules.iter().find_map(|rule| match rule {
+        Rule::Resolve {
+            host: rule_host,
+            target_host,
+            port,
+        } if host_matches(rule_host, host) => Some((target_host.clone(), *port)),
         _ => None,
     })
 }
@@ -380,6 +403,7 @@ pub fn hit_summary_with_ops(rules: &[Rule], host: &str, path: &str, ops: &[Strin
             Rule::Json { .. } => ("json", false),
             Rule::NoCache { .. } => ("no-cache", false),
             Rule::Block { .. } => ("block", true),
+            Rule::Resolve { .. } => ("resolve", false),
         };
         if terminal {
             if took_terminal {
@@ -825,6 +849,90 @@ fn parse_status_opt(text: &str) -> Option<u16> {
     (100..600).contains(&code).then_some(code)
 }
 
+fn is_valid_resolve_hostname(host: &str) -> bool {
+    let host = host.strip_suffix('.').unwrap_or(host);
+    if host.is_empty() || host.len() > 253 {
+        return false;
+    }
+    let labels: Vec<&str> = host.split('.').collect();
+    for label in &labels {
+        if label.is_empty()
+            || label.len() > 63
+            || label.starts_with('-')
+            || label.ends_with('-')
+            || !label
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        {
+            return false;
+        }
+    }
+    !labels
+        .last()
+        .is_none_or(|last| last.bytes().all(|b| b.is_ascii_digit()))
+}
+
+fn parse_resolve_target(tokens: &[String]) -> Option<(String, Option<u16>)> {
+    if tokens.is_empty()
+        || tokens.len() > 2
+        || tokens
+            .iter()
+            .any(|t| t.starts_with("op=") || t.starts_with("operation="))
+    {
+        return None;
+    }
+    let raw_target = tokens[0].as_str();
+    if raw_target.is_empty()
+        || raw_target.contains(|c: char| {
+            c.is_whitespace() || matches!(c, '/' | '?' | '#' | '@' | '*' | '|' | ',')
+        })
+    {
+        return None;
+    }
+    let (target_host, inline_port) = if let Some(after_open) = raw_target.strip_prefix('[') {
+        let (inside, after) = after_open.split_once(']')?;
+        let ip = inside.parse::<std::net::Ipv6Addr>().ok()?;
+        let port = if after.is_empty() {
+            None
+        } else {
+            let port_str = after.strip_prefix(':')?;
+            Some(port_str.parse::<u16>().ok().filter(|&p| p > 0)?)
+        };
+        (ip.to_string(), port)
+    } else if let Ok(ip) = raw_target.parse::<std::net::IpAddr>() {
+        (ip.to_string(), None)
+    } else if let Some((host_part, port_str)) = raw_target.split_once(':') {
+        if port_str.contains(':') {
+            return None;
+        }
+        let port = port_str.parse::<u16>().ok().filter(|&p| p > 0)?;
+        let target_host = if let Ok(ip4) = host_part.parse::<std::net::Ipv4Addr>() {
+            ip4.to_string()
+        } else if is_valid_resolve_hostname(host_part) {
+            host_part.trim_end_matches('.').to_ascii_lowercase()
+        } else {
+            return None;
+        };
+        (target_host, Some(port))
+    } else if is_valid_resolve_hostname(raw_target) {
+        (raw_target.trim_end_matches('.').to_ascii_lowercase(), None)
+    } else {
+        return None;
+    };
+
+    let port = if let Some(port_tok) = tokens.get(1) {
+        if inline_port.is_some() {
+            return None;
+        }
+        let port_str = port_tok.strip_prefix("port=").unwrap_or(port_tok.as_str());
+        Some(port_str.parse::<u16>().ok().filter(|&p| p > 0)?)
+    } else {
+        inline_port
+    };
+
+    Some((target_host, port))
+}
+
 fn parse_op_opt(text: &str) -> Option<String> {
     let raw = text
         .trim()
@@ -1044,6 +1152,18 @@ fn parse_line(line: &str) -> Option<Rule> {
                 host,
                 cert_path,
                 key_path,
+            })
+        }
+        "resolve" | "dns" | "hosts" => {
+            if pattern.contains('/') || pattern.contains(':') || host.is_empty() {
+                return None;
+            }
+            let tokens = rule_tokens(rest)?;
+            let (target_host, port) = parse_resolve_target(&tokens)?;
+            Some(Rule::Resolve {
+                host,
+                target_host,
+                port,
             })
         }
         "header" => {
@@ -1688,6 +1808,7 @@ pub enum QuickRule {
     Cert,
     NoCache,
     Block,
+    Resolve,
 }
 
 impl QuickRule {
@@ -1707,11 +1828,15 @@ impl QuickRule {
             Self::Cert => ("证书", "Cert"),
             Self::NoCache => ("禁缓存", "No-cache"),
             Self::Block => ("阻断", "Block"),
+            Self::Resolve => ("解析", "Resolve"),
         }
     }
 
     pub const fn supports_graphql_op(self) -> bool {
-        !matches!(self, Self::Cors | Self::Throttle | Self::Cert)
+        !matches!(
+            self,
+            Self::Cors | Self::Throttle | Self::Cert | Self::Resolve
+        )
     }
 }
 
@@ -2094,6 +2219,34 @@ pub fn append_quick_rule_with_op(
             } else {
                 let quoted_key = quote_rule_token(to);
                 format!("{cmd} {host_only} {quoted_cert} {quoted_key}")
+            }
+        }
+        QuickRule::Resolve => {
+            if explicit_op.is_some()
+                || from.is_empty()
+                || from.contains('\n')
+                || to.contains('\n')
+                || pattern.contains(':')
+                || pattern.contains('/')
+            {
+                return None;
+            }
+            let (host_only, _) = split_pattern(pattern);
+            if host_only.is_empty() {
+                return None;
+            }
+            let tokens = if to.is_empty() {
+                vec![from.to_string()]
+            } else {
+                vec![from.to_string(), to.to_string()]
+            };
+            let (target_host, port) = parse_resolve_target(&tokens)?;
+            match port {
+                Some(p) if target_host.contains(':') => {
+                    format!("resolve {host_only} [{target_host}]:{p}")
+                }
+                Some(p) => format!("resolve {host_only} {target_host}:{p}"),
+                None => format!("resolve {host_only} {target_host}"),
             }
         }
     };
@@ -3988,6 +4141,132 @@ break-res example.com/graphql op=anonymous
                 "GetUser"
             )
             .is_none()
+        );
+        assert!(
+            append_quick_rule_with_op(
+                "",
+                QuickRule::Resolve,
+                "a.test",
+                false,
+                "127.0.0.1",
+                "",
+                "GetUser"
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn resolve_rules_parse_validate_lookup_and_quick_append() {
+        let text = "\
+resolve a.com 10.0.0.8
+dns *.b.com 127.0.0.1:8443
+hosts c.com|*.d.com staging.internal port=8080
+resolve ipv6.test ::1
+resolve ipv6p.test [::1]:8443
+resolve ipv6sep.test ::1 9443
+resolve local.test localhost:3000
+";
+        assert_eq!(invalid_rule_lines(text), Vec::<usize>::new());
+        let parsed = parse_rules(text);
+        assert_eq!(parsed.len(), 7);
+        assert_eq!(
+            custom_resolve(&parsed, "a.com"),
+            Some(("10.0.0.8".into(), None))
+        );
+        assert_eq!(
+            custom_resolve(&parsed, "api.b.com"),
+            Some(("127.0.0.1".into(), Some(8443)))
+        );
+        assert_eq!(custom_resolve(&parsed, "b.com"), None);
+        assert_eq!(
+            custom_resolve(&parsed, "sub.d.com"),
+            Some(("staging.internal".into(), Some(8080)))
+        );
+        assert_eq!(
+            custom_resolve(&parsed, "ipv6.test"),
+            Some(("::1".into(), None))
+        );
+        assert_eq!(
+            custom_resolve(&parsed, "ipv6p.test"),
+            Some(("::1".into(), Some(8443)))
+        );
+        assert_eq!(
+            custom_resolve(&parsed, "ipv6sep.test"),
+            Some(("::1".into(), Some(9443)))
+        );
+        assert_eq!(
+            custom_resolve(&parsed, "local.test"),
+            Some(("localhost".into(), Some(3000)))
+        );
+
+        let mut combined = parsed.clone();
+        combined.extend(parse_rules(
+            "map-remote a.com https://other.test\ndelay a.com 10ms",
+        ));
+        assert_eq!(
+            hit_summary(&combined, "a.com", "/hello"),
+            "resolve map-remote delay"
+        );
+
+        let invalid = "\
+resolve a.com/api 1.2.3.4
+resolve a.com:443 1.2.3.4
+resolve a.com http://1.2.3.4
+resolve a.com 999.999.999.999
+resolve a.com 1.2.3
+resolve a.com 8080
+resolve a.com 1.2.3.4:0
+resolve a.com 1.2.3.4:80 90
+resolve a.com 1.2.3.4 op=GetUser
+resolve a.com *
+";
+        assert_eq!(
+            invalid_rule_lines(invalid),
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        );
+
+        assert_eq!(
+            append_quick_rule(
+                "",
+                QuickRule::Resolve,
+                "api.test",
+                false,
+                "127.0.0.1",
+                "8080"
+            )
+            .as_deref(),
+            Some("resolve api.test 127.0.0.1:8080\n")
+        );
+        assert_eq!(
+            append_quick_rule("", QuickRule::Resolve, "api.test", false, "::1", "8443").as_deref(),
+            Some("resolve api.test [::1]:8443\n")
+        );
+        assert_eq!(
+            append_quick_rule("", QuickRule::Resolve, "api.test", false, "10.0.0.2", "").as_deref(),
+            Some("resolve api.test 10.0.0.2\n")
+        );
+        assert_eq!(
+            append_quick_rule(
+                "",
+                QuickRule::Resolve,
+                "api.test/v1",
+                false,
+                "127.0.0.1",
+                ""
+            ),
+            None
+        );
+        assert_eq!(
+            append_quick_rule(
+                "",
+                QuickRule::Resolve,
+                "api.test:443",
+                false,
+                "127.0.0.1",
+                ""
+            ),
+            None
         );
     }
 }

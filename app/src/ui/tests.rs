@@ -1396,6 +1396,24 @@ fn draft_rules_ignores_hidden_leftover_inputs_across_rule_kinds() {
         ),
         "map-remote api.test/v1 https://staging.test/v1\n"
     );
+    // On `resolve` (`kind == 14`), hidden leftover `path` and `op` are ignored.
+    assert_eq!(
+        super::draft_rules_with_op("", "", "/v1", "GetUser", "", "", false, 14),
+        ""
+    );
+    assert_eq!(
+        super::draft_rules_with_op(
+            "",
+            "api.test",
+            "/v1",
+            "GetUser",
+            "127.0.0.1",
+            "8080",
+            false,
+            14,
+        ),
+        "resolve api.test 127.0.0.1:8080\n"
+    );
 }
 
 #[test]
