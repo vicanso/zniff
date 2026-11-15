@@ -229,6 +229,57 @@ fn about_meta_badge(label: impl IntoReactive<SharedString>) -> impl IntoElement 
         )
 }
 
+/// Registers a custom macOS application menu bar so "About zniff" opens our in-app modal
+/// instead of macOS's default `orderFrontStandardAboutPanel:`, while keeping standard
+/// Hide/Quit/Edit/Window roles and shortcuts intact.
+#[cfg(target_os = "macos")]
+pub(crate) fn install_macos_application_menu(about_open: Signal<bool>) {
+    use nsh_core::desktop::MenuRole;
+    use nsh_core::element::desktop::{MenuItem, set_application_menu};
+
+    let langs = ui_langs();
+    effect(move || {
+        let lang = ui_lang(langs);
+        set_application_menu(vec![
+            MenuItem::submenu(
+                "zniff",
+                [
+                    MenuItem::new(t(lang, "关于 zniff", "About zniff"))
+                        .on_select(move || about_open.set(true)),
+                    MenuItem::separator(),
+                    MenuItem::role(MenuRole::Hide),
+                    MenuItem::role(MenuRole::HideOthers),
+                    MenuItem::role(MenuRole::ShowAll),
+                    MenuItem::separator(),
+                    MenuItem::role(MenuRole::Quit),
+                ],
+            ),
+            MenuItem::submenu(
+                "Edit",
+                [
+                    MenuItem::role(MenuRole::Undo),
+                    MenuItem::role(MenuRole::Redo),
+                    MenuItem::separator(),
+                    MenuItem::role(MenuRole::Cut),
+                    MenuItem::role(MenuRole::Copy),
+                    MenuItem::role(MenuRole::Paste),
+                    MenuItem::role(MenuRole::SelectAll),
+                ],
+            ),
+            MenuItem::submenu(
+                "Window",
+                [
+                    MenuItem::role(MenuRole::Minimize),
+                    MenuItem::role(MenuRole::Zoom),
+                    MenuItem::role(MenuRole::ToggleFullScreen),
+                    MenuItem::separator(),
+                    MenuItem::role(MenuRole::Close),
+                ],
+            ),
+        ]);
+    });
+}
+
 /// Modal dialog displaying zniff branding, build metadata, project links, and runtime environment info.
 pub(crate) fn about_modal(profiles: ProfileSignals, controls: Arc<Controls>) -> impl IntoElement {
     when(

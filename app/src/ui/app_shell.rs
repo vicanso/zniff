@@ -194,6 +194,8 @@ pub fn App() -> impl IntoElement {
     let qr_path = signal(String::new());
     let controls = open_controls();
     let config_broken = signal(lock_config_error(&controls));
+    #[cfg(target_os = "macos")]
+    install_macos_application_menu(profile_signals.about_open);
     let config_broken_dismissed = signal(false);
     if let Some(err) = config_broken.get() {
         #[cfg(not(target_arch = "wasm32"))]
