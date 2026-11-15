@@ -153,7 +153,7 @@ pub fn tools_list_value() -> Value {
             },
             {
                 "name": "set_rules",
-                "description": "Set or append zniff rules and/or toggle `rules_enabled` / `breaks_enabled`. Validates syntax before applying. `<pat>` is `<host>[/<path>]` (`*` matches all, `*.example.com/v1`, `*/api`). Templates (one per line):\n- `replace <pat> req|res <from> -> [to] [op=<gql>]`\n- `map-remote <pat> <http(s)://target> [op=<gql>]`\n- `map-local <pat> [file_or_dir] [status=<code>] [delay=<ms|s>] [fallback] [op=<gql>]`\n- `delay <pat> <ms|s> [op=<gql>]`\n- `break <pat> [op=<gql>]` / `break-res <pat> [op=<gql>]`\n- `header <pat> req|res set <Name> <Value> [op=<gql>]` | `header <pat> req|res del <Name> [op=<gql>]`\n- `query <pat> set <Key> <Value> [op=<gql>]` | `query <pat> del <Key> [op=<gql>]`\n- `json <pat> req|res set <ptr_or_path> <json_val> [op=<gql>]` | `json <pat> req|res del <ptr_or_path> [op=<gql>]`\n- `cors <pat>`\n- `no-cache <pat> [op=<gql>]`\n- `block <pat> [status=<code,default 403>|drop|reset] [op=<gql>]`\n- `throttle <pat> <2g|3g|4g|rate>` | `throttle <pat> [down=<rate>] [up=<rate>]`\n- `cert <host> <cert.pem> [key.pem]`\n- `client-cert <host> <cert.pem> [key.pem]`",
+                "description": "Set or append zniff rules and/or toggle `rules_enabled` / `breaks_enabled`. Validates syntax before applying. `<pat>` is `<host>[/<path>]` (`*` matches all, `*.example.com/v1`, `*/api`). Templates (one per line):\n- `replace <pat> req|res <from> -> [to] [op=<gql>]`\n- `map-remote <pat> <http(s)://target> [op=<gql>]`\n- `map-local <pat> [file_or_dir] [status=<code>] [delay=<ms|s>] [fallback] [op=<gql>]`\n- `delay <pat> <ms|s> [op=<gql>]`\n- `break <pat> [op=<gql>]` / `break-res <pat> [op=<gql>]`\n- `header <pat> req|res set <Name> <Value> [op=<gql>]` | `header <pat> req|res del <Name> [op=<gql>]`\n- `query <pat> set <Key> <Value> [op=<gql>]` | `query <pat> del <Key> [op=<gql>]`\n- `json <pat> req|res set <ptr_or_path> <json_val> [op=<gql>]` | `json <pat> req|res del <ptr_or_path> [op=<gql>]`\n- `cors <pat>`\n- `no-cache <pat> [op=<gql>]`\n- `block <pat> [status=<code,default 403>|drop|reset] [op=<gql>]`\n- `throttle <pat> <2g|3g|4g|rate>` | `throttle <pat> [down=<rate>] [up=<rate>]`\n- `cert <host> <cert.pem> [key.pem]`\n- `client-cert <host> <cert.pem> [key.pem]`\n- `resolve <host> <ip_or_host>[:<port>]` (aliases `dns`, `hosts`)",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -1170,13 +1170,14 @@ no-cache api.example.com/v1 op=GetUser
 block ads.example.com status=451 op=Track
 throttle api.example.com down=512kb up=256kb
 cert internal.example.com ./server.crt ./server.key
-client-cert mtls.example.com ./client.crt ./client.key";
+client-cert mtls.example.com ./client.crt ./client.key
+resolve api.example.com 127.0.0.1:8443";
         assert!(
             rules::invalid_rule_lines(sample_rules).is_empty(),
             "invalid lines: {:?}",
             rules::invalid_rule_lines(sample_rules)
         );
-        assert_eq!(rules::parse_rules(sample_rules).len(), 18);
+        assert_eq!(rules::parse_rules(sample_rules).len(), 19);
 
         let tools = tools_list_value();
         let names: Vec<&str> = tools["tools"]

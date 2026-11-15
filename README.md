@@ -25,7 +25,7 @@ https://github.com/user-attachments/assets/15117c1d-50a0-4578-8201-a305fb0d12a3
 - **Native & Lightweight**: Proxy engine and `nsh` GUI compiled into a single pure-Rust binary for fast startup and low memory footprint.
 - **True Protocol Following**: Reads `ClientHello` ALPN offers and negotiates directly with origins. Supports HTTP/2 multiplexing, WebSocket frames (RFC 6455), and SSE without downgrading to HTTP/1.1.
 - **Deep Inspection**: Formats JSON (with a collapsible, searchable JSON tree view), GraphQL (splitting `operationName`, query, and variables), HTML/XML, schema-less Protobuf/gRPC, and MessagePack. Decodes JWTs, Unix timestamps, and Base64 inline, with baseline line-by-line Diff, body search, and per-connection timing breakdown (DNS / TCP / TLS, connection reuse).
-- **14 Rewrite Rules & Breakpoints**: Terminal (`map-local` with directory mapping and upstream fallback, `map-remote`, `break`, `break-res`, `block`) and additive (`replace`, `json`, `delay`, `throttle`, `header`, `query`, `cors`, `no-cache`, `cert` / `client-cert`) rules, with GraphQL `op=` targeting and an 8-slot FIFO breakpoint queue.
+- **15 Rewrite & Resolve Rules & Breakpoints**: Terminal (`map-local` with directory mapping and upstream fallback, `map-remote`, `break`, `break-res`, `block`), additive (`replace`, `json`, `delay`, `throttle`, `header`, `query`, `cors`, `no-cache`), and per-host (`cert` / `client-cert`, `resolve` / `dns` / `hosts`) rules, with GraphQL `op=` targeting and an 8-slot FIFO breakpoint queue.
 - **Fast Navigation**: Rich filter syntax (`host:`, `path:`, `op:`, `body:`, `header:`, negated `-host:` / `-status:` …), a domain & app facet drawer, a secondary list search, column reordering, and saved setups with history.
 - **Diagrams, Export & Sharing**: Generate interactive Waterfall, Swimlane Sequence, Dependency (`flowchart TD`), and Mermaid source views. Copy flows as cURL, `fetch`, Python `requests`, Rust `reqwest`, Go `net/http`, TypeScript interfaces, or Rust `serde` structs. Export HAR/HTML (with optional redaction) or share live sessions via `/s/{uuid}` and `--relay`.
 - **AI-Native MCP & Web Console**: Built-in JSON-RPC 2.0 MCP server (`POST /mcp` and `zniff --mcp`) plus a headless WebAssembly operator console (`zniff --web`) with optional HTTP Basic auth on both console and capture port.
@@ -35,7 +35,7 @@ https://github.com/user-attachments/assets/15117c1d-50a0-4578-8201-a305fb0d12a3
 
 ## Screenshots
 
-| Deep Inspection (GraphQL & JSON) | Filters & 14 Rewrite Rules |
+| Deep Inspection (GraphQL & JSON) | Filters & 15 Rewrite Rules |
 | :---: | :---: |
 | ![Deep Inspection](./docs/screenshots/02_detail_json_graphql.png) | ![Filters and Rules](./docs/screenshots/05_filter_rules_popup.png) |
 | **Waterfall / Sequence Diagrams & Breakpoints** | **Adaptive Light & Dark Mode** |

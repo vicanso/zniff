@@ -924,14 +924,14 @@ impl Hub {
             .lock()
             .unwrap_or_else(|err| err.into_inner()) = text.to_string();
         let next_rules = rules::parse_rules(text);
-        let client_certs_changed = {
+        let origin_rules_changed = {
             let mut guard = self.rules.lock().unwrap_or_else(|err| err.into_inner());
-            let changed = client_cert_rules(&guard) != client_cert_rules(&next_rules);
+            let changed = origin_dial_rules(&guard) != origin_dial_rules(&next_rules);
             *guard = next_rules;
             changed
         };
         self.rules_rev.fetch_add(1, Ordering::Relaxed);
-        if client_certs_changed {
+        if origin_rules_changed {
             self.invalidate_origin_pools();
         }
     }
@@ -950,13 +950,18 @@ impl Hub {
     pub fn set_rules_enabled(&self, enabled: bool) {
         let prev = self.apply_rules.swap(enabled, Ordering::Relaxed);
         if prev != enabled {
-            let has_client_certs = self
+            let has_origin_dial_rules = self
                 .rules
                 .lock()
                 .unwrap_or_else(|err| err.into_inner())
                 .iter()
-                .any(|r| matches!(r, rules::Rule::ClientCert { .. }));
-            if has_client_certs {
+                .any(|r| {
+                    matches!(
+                        r,
+                        rules::Rule::ClientCert { .. } | rules::Rule::Resolve { .. }
+                    )
+                });
+            if has_origin_dial_rules {
                 self.invalidate_origin_pools();
             }
         }
@@ -1022,6 +1027,22 @@ impl Hub {
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .clone()
+    }
+
+    fn resolve_for_host(&self, host: &str) -> Option<(String, Option<u16>)> {
+        if !self.apply_rules.load(Ordering::Relaxed) {
+            return None;
+        }
+        let rules = self.rules.lock().unwrap_or_else(|err| err.into_inner());
+        rules::custom_resolve(&rules, host)
+    }
+
+    fn upstream_for_host(&self, host: &str) -> Option<Upstream> {
+        if self.resolve_for_host(host).is_some() {
+            None
+        } else {
+            self.upstream()
+        }
     }
 
     pub fn set_proxy_auth(&self, auth: &str) {
@@ -3182,6 +3203,9 @@ where
     let has_expect = header_has_expect_100_continue(&head.headers);
     let websocket = header_is_websocket(&headers);
     let plan = if websocket {
+        if hub.resolve_for_host(&host).is_some() {
+            hub.with_session(|s| s.set_rule_hit(id, "resolve".to_string()));
+        }
         rules::Effect::default()
     } else {
         let mut ops = crate::present::graphql_operations(&path, &[]);
@@ -3568,7 +3592,7 @@ where
         });
         headers.push(("Content-Length".into(), body.len().to_string()));
     }
-    let upstream = hub.upstream();
+    let upstream = hub.upstream_for_host(&host);
     let target = if upstream.is_some() {
         format!("http://{}{path}", display_authority(&host, port, "http"))
     } else {
@@ -3908,6 +3932,12 @@ where
 }
 
 fn pool_key(host: &str, port: u16, hub: &Hub) -> (String, u16) {
+    if let Some((target_host, port_override)) = hub.resolve_for_host(host) {
+        return (
+            format!("{}@{target_host}", host.to_ascii_lowercase()),
+            port_override.unwrap_or(port),
+        );
+    }
     match hub.upstream() {
         Some(upstream) => (upstream.host, upstream.port),
         None => (host.to_string(), port),
@@ -3925,7 +3955,10 @@ async fn dial_timed(
     tunnel: bool,
 ) -> Result<(TcpStream, crate::session::ConnInfo)> {
     let mut info = crate::session::ConnInfo::default();
-    if let Some(upstream) = hub.upstream() {
+    let resolved = hub.resolve_for_host(host);
+    if resolved.is_none()
+        && let Some(upstream) = hub.upstream()
+    {
         let tcp_start = Instant::now();
         let mut stream = TcpStream::connect((upstream.host.as_str(), upstream.port))
             .await
@@ -3961,15 +3994,21 @@ async fn dial_timed(
         info.tcp_ms = Some(tcp_start.elapsed().as_millis() as u64);
         return Ok((stream, info));
     }
-    let clean_host = host.trim().trim_matches(|ch| ch == '[' || ch == ']');
+    let (dial_host, dial_port) = match resolved {
+        Some((target_host, port_override)) => (target_host, port_override.unwrap_or(port)),
+        None => (host.to_string(), port),
+    };
+    let clean_host = dial_host.trim().trim_matches(|ch| ch == '[' || ch == ']');
     let stream = if let Ok(ip) = clean_host.parse::<std::net::IpAddr>() {
         let tcp_start = Instant::now();
-        let s = TcpStream::connect((ip, port)).await?;
+        let s = TcpStream::connect((ip, dial_port)).await?;
         info.tcp_ms = Some(tcp_start.elapsed().as_millis() as u64);
         s
     } else {
         let dns_start = Instant::now();
-        let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port)).await?.collect();
+        let addrs: Vec<SocketAddr> = tokio::net::lookup_host((clean_host, dial_port))
+            .await?
+            .collect();
         info.dns_ms = Some(dns_start.elapsed().as_millis() as u64);
         if addrs.is_empty() {
             anyhow::bail!("主机名没有解析到地址");
@@ -4085,10 +4124,15 @@ fn parse_upstream(text: &str) -> Option<Upstream> {
     })
 }
 
-fn client_cert_rules(rules: &[rules::Rule]) -> Vec<&rules::Rule> {
+fn origin_dial_rules(rules: &[rules::Rule]) -> Vec<&rules::Rule> {
     rules
         .iter()
-        .filter(|r| matches!(r, rules::Rule::ClientCert { .. }))
+        .filter(|r| {
+            matches!(
+                r,
+                rules::Rule::ClientCert { .. } | rules::Rule::Resolve { .. }
+            )
+        })
         .collect()
 }
 
@@ -5672,7 +5716,7 @@ async fn replay_http(
         .await
         .context("连接源站超时")??;
     hub.set_conn_info(id, conn_info);
-    let target = if hub.upstream().is_some() {
+    let target = if hub.upstream_for_host(host).is_some() {
         format!("http://{}{path}", display_authority(host, port, "http"))
     } else {
         path.to_string()
@@ -5879,7 +5923,7 @@ where
         ));
     }
     if scheme == "http"
-        && let Some(auth) = hub.upstream().and_then(|u| u.auth_header)
+        && let Some(auth) = hub.upstream_for_host(host).and_then(|u| u.auth_header)
     {
         outbound.push_str(&format!("Proxy-Authorization: {auth}\r\n"));
     }
@@ -7324,6 +7368,8 @@ async fn forward_request(
                 }
             }
         }
+    } else if hub.resolve_for_host(&host).is_some() {
+        hub.with_session(|s| s.set_rule_hit(id, "resolve".to_string()));
     }
     if mapped_remote
         && body_override.is_none()
@@ -7976,7 +8022,7 @@ where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let authority = display_authority(host, port, scheme);
-    let upstream = hub.upstream();
+    let upstream = hub.upstream_for_host(host);
     let via_http_upstream = upstream.is_some() && scheme == "http";
     let target_uri = if via_http_upstream {
         absolute_uri(scheme, &authority, path)?
@@ -14211,6 +14257,261 @@ mod tests {
             SharePoll::Unchanged
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn https_resolve_dials_custom_ip_preserving_sni_and_host() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let dir = std::env::temp_dir().join(format!("zniff-https-resolve-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+
+        let origin_ca_key = rcgen::KeyPair::generate().unwrap();
+        let mut origin_ca_params = rcgen::CertificateParams::default();
+        origin_ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let mut origin_name = rcgen::DistinguishedName::new();
+        origin_name.push(rcgen::DnType::CommonName, "resolve-origin-ca");
+        origin_ca_params.distinguished_name = origin_name;
+        origin_ca_params.key_usages = vec![
+            rcgen::KeyUsagePurpose::KeyCertSign,
+            rcgen::KeyUsagePurpose::DigitalSignature,
+        ];
+        let origin_ca = origin_ca_params.self_signed(&origin_ca_key).unwrap();
+        let issuer = rcgen::Issuer::from_params(&origin_ca_params, &origin_ca_key);
+        let leaf_key = rcgen::KeyPair::generate().unwrap();
+        let mut leaf_params =
+            rcgen::CertificateParams::new(vec!["api.resolve.invalid".into()]).unwrap();
+        leaf_params.is_ca = rcgen::IsCa::NoCa;
+        leaf_params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
+        leaf_params.key_usages = vec![rcgen::KeyUsagePurpose::DigitalSignature];
+        let origin_leaf = leaf_params.signed_by(&leaf_key, &issuer).unwrap();
+
+        let server = origin_tls_config(
+            &origin_ca,
+            &origin_leaf,
+            &leaf_key,
+            vec![b"http/1.1".to_vec()],
+        );
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server));
+        let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        let seen_sni = Arc::new(Mutex::new(None::<String>));
+        let seen_req = Arc::new(Mutex::new(String::new()));
+        let seen_sni_task = seen_sni.clone();
+        let seen_req_task = seen_req.clone();
+        tokio::spawn(async move {
+            let (sock, _) = origin.accept().await.unwrap();
+            let mut tls = acceptor.accept(sock).await.unwrap();
+            *seen_sni_task.lock().unwrap() = tls.get_ref().1.server_name().map(str::to_string);
+            let mut req_buf = Vec::new();
+            let mut byte = [0u8; 1];
+            while !req_buf.ends_with(b"\r\n\r\n") {
+                if tls.read(&mut byte).await.unwrap() == 0 {
+                    break;
+                }
+                req_buf.push(byte[0]);
+            }
+            *seen_req_task.lock().unwrap() = String::from_utf8_lossy(&req_buf).into_owned();
+            tls.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\nresolve-ok",
+            )
+            .await
+            .unwrap();
+            let _ = tls.shutdown().await;
+        });
+
+        let mut hub = Hub::new(ca.clone()).unwrap();
+        hub.add_trust_anchor(origin_ca.der().clone());
+        hub.set_rules(&format!(
+            "resolve api.resolve.invalid 127.0.0.1:{}",
+            origin_addr.port()
+        ));
+        let hub = Arc::new(hub);
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        serve_one(proxy, hub.clone());
+
+        let mut tcp = TcpStream::connect(proxy_addr).await.unwrap();
+        tcp.write_all(
+            b"CONNECT api.resolve.invalid:443 HTTP/1.1\r\nHost: api.resolve.invalid:443\r\n\r\n",
+        )
+        .await
+        .unwrap();
+        read_http_head(&mut tcp).await;
+        let mut roots = RootCertStore::empty();
+        roots.add(ca.cert_der()).unwrap();
+        let client_config = ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let mut tls = timeout(
+            Duration::from_secs(5),
+            TlsConnector::from(Arc::new(client_config)).connect(
+                ServerName::try_from("api.resolve.invalid".to_string()).unwrap(),
+                tcp,
+            ),
+        )
+        .await
+        .expect("客户端 TLS 超时")
+        .expect("客户端 TLS");
+        tls.write_all(
+            b"GET /hello HTTP/1.1\r\nHost: api.resolve.invalid\r\nConnection: close\r\n\r\n",
+        )
+        .await
+        .unwrap();
+        let resp = read_h1_message(&mut tls).await;
+        let resp_text = String::from_utf8_lossy(&resp);
+        assert!(resp_text.contains("resolve-ok"), "{resp_text}");
+        assert_eq!(
+            seen_sni.lock().unwrap().as_deref(),
+            Some("api.resolve.invalid")
+        );
+        let req_text = seen_req.lock().unwrap().clone();
+        assert!(
+            req_text
+                .to_ascii_lowercase()
+                .contains("host: api.resolve.invalid"),
+            "{req_text}"
+        );
+
+        let flow = hub.with_session(|s| s.get(1).cloned()).unwrap();
+        assert_eq!(flow.host, "api.resolve.invalid");
+        assert_eq!(flow.rule_hit, "resolve");
+        assert_eq!(flow.conn_info.server_addr, origin_addr.to_string());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn http_resolve_switches_pooled_origin_and_bypasses_upstream() {
+        let dir = std::env::temp_dir().join(format!("zniff-http-resolve-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        let upstream_hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let upstream_hits_task = upstream_hits.clone();
+        let upstream_task = tokio::spawn(async move {
+            while let Ok((_, _)) = upstream.accept().await {
+                upstream_hits_task.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+
+        let origin1 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr1 = origin1.local_addr().unwrap();
+        let seen1 = Arc::new(Mutex::new(String::new()));
+        let seen1_task = seen1.clone();
+        let origin1_task = tokio::spawn(async move {
+            let (mut sock, _) = origin1.accept().await.unwrap();
+            let mut req_buf = Vec::new();
+            let mut byte = [0u8; 1];
+            while !req_buf.ends_with(b"\r\n\r\n") {
+                if sock.read(&mut byte).await.unwrap() == 0 {
+                    break;
+                }
+                req_buf.push(byte[0]);
+            }
+            *seen1_task.lock().unwrap() = String::from_utf8_lossy(&req_buf).into_owned();
+            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\norigin1")
+                .await
+                .unwrap();
+            // Keep socket idle-open so HTTP/1.1 connection pooling parks it.
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+
+        let origin2 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr2 = origin2.local_addr().unwrap();
+        let seen2 = Arc::new(Mutex::new(String::new()));
+        let seen2_task = seen2.clone();
+        tokio::spawn(async move {
+            let (mut sock, _) = origin2.accept().await.unwrap();
+            let mut req_buf = Vec::new();
+            let mut byte = [0u8; 1];
+            while !req_buf.ends_with(b"\r\n\r\n") {
+                if sock.read(&mut byte).await.unwrap() == 0 {
+                    break;
+                }
+                req_buf.push(byte[0]);
+            }
+            *seen2_task.lock().unwrap() = String::from_utf8_lossy(&req_buf).into_owned();
+            sock.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\norigin2",
+            )
+            .await
+            .unwrap();
+        });
+
+        hub.set_upstream(&format!("http://upuser:uppass@{upstream_addr}"));
+        hub.set_rules(&format!(
+            "resolve app.resolve.invalid 127.0.0.1:{}",
+            addr1.port()
+        ));
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        serve_proxy(proxy, hub.clone());
+
+        let mut c1 = TcpStream::connect(proxy_addr).await.unwrap();
+        c1.write_all(
+            b"GET http://app.resolve.invalid/check HTTP/1.1\r\nHost: app.resolve.invalid\r\n\r\n",
+        )
+        .await
+        .unwrap();
+        let resp1 = read_h1_message(&mut c1).await;
+        let text1 = String::from_utf8_lossy(&resp1);
+        assert!(text1.contains("origin1"), "{text1}");
+        let req1 = seen1.lock().unwrap().clone();
+        assert!(req1.starts_with("GET /check HTTP/1.1\r\n"), "{req1}");
+        assert!(
+            req1.to_ascii_lowercase()
+                .contains("host: app.resolve.invalid"),
+            "{req1}"
+        );
+        assert!(
+            !req1.to_ascii_lowercase().contains("proxy-authorization:"),
+            "{req1}"
+        );
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while hub.pool.lock().await.is_empty() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            !hub.pool.lock().await.is_empty(),
+            "first origin connection should have parked in HTTP/1.1 pool"
+        );
+
+        hub.set_rules(&format!(
+            "resolve app.resolve.invalid 127.0.0.1:{}",
+            addr2.port()
+        ));
+        assert!(
+            hub.pool.lock().await.is_empty(),
+            "changing resolve rules must invalidate pooled origin connections"
+        );
+
+        let mut c2 = TcpStream::connect(proxy_addr).await.unwrap();
+        c2.write_all(
+            b"GET http://app.resolve.invalid/check2 HTTP/1.1\r\nHost: app.resolve.invalid\r\nConnection: close\r\n\r\n",
+        )
+        .await
+        .unwrap();
+        let resp2 = read_h1_message(&mut c2).await;
+        let text2 = String::from_utf8_lossy(&resp2);
+        assert!(text2.contains("origin2"), "{text2}");
+        let req2 = seen2.lock().unwrap().clone();
+        assert!(req2.starts_with("GET /check2 HTTP/1.1\r\n"), "{req2}");
+        assert_eq!(upstream_hits.load(Ordering::Relaxed), 0);
+
+        let flow1 = hub.with_session(|s| s.get(1).cloned()).unwrap();
+        let flow2 = hub.with_session(|s| s.get(2).cloned()).unwrap();
+        assert_eq!(flow1.rule_hit, "resolve");
+        assert_eq!(flow1.conn_info.server_addr, addr1.to_string());
+        assert_eq!(flow2.rule_hit, "resolve");
+        assert_eq!(flow2.conn_info.server_addr, addr2.to_string());
+
+        upstream_task.abort();
+        origin1_task.abort();
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

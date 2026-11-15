@@ -31,7 +31,7 @@ impl QuickRuleModeSignals {
     }
 
     pub(crate) fn signal_for(self, kind: u8) -> Signal<bool> {
-        match kind % 14 {
+        match kind % 15 {
             2 => self.local_fallback,
             10 => self.mitm_mtls,
             13 => self.status_drop,
@@ -52,13 +52,17 @@ pub(crate) fn effective_quick_inputs<'a>(
     from: &'a str,
     to: &'a str,
 ) -> (&'a str, &'a str) {
-    let k = kind % 14;
+    let k = kind % 15;
     let from_used = !matches!(k, 4 | 5 | 8 | 12) && !(k == 13 && mode);
-    let to_used = matches!(k, 0 | 2 | 6 | 7 | 9 | 10 | 11);
+    let to_used = matches!(k, 0 | 2 | 6 | 7 | 9 | 10 | 11 | 14);
     (
         if from_used { from } else { "" },
         if to_used { to } else { "" },
     )
+}
+
+pub(crate) fn effective_quick_path(kind: u8, path: &str) -> &str {
+    if kind % 15 == 14 { "" } else { path }
 }
 
 pub(crate) fn effective_quick_op(kind: u8, op: &str) -> &str {
@@ -561,6 +565,7 @@ pub(crate) fn draft_rules_with_op(
     kind: u8,
 ) -> String {
     let (from, to) = effective_quick_inputs(kind, response, from, to);
+    let path = effective_quick_path(kind, path);
     let op = effective_quick_op(kind, op);
     let touched = !host.trim().is_empty()
         || !path.trim().is_empty()
