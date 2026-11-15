@@ -4,11 +4,11 @@ use super::*;
 /// The root view: a flow list and the selected flow.
 #[component]
 pub fn App() -> impl IntoElement {
-    #[cfg(all(not(target_arch = "wasm32"), target_os = "macos"))]
+    #[cfg(not(target_arch = "wasm32"))]
     {
         let mut bar = nsh_core::desktop::TitleBarOptions::default();
         bar.style = nsh_core::desktop::TitleBarStyle::Hidden;
-        bar.height = Some(px(42.0));
+        bar.height = Some(px(TOOLBAR_H));
         let mut attributes = nsh_core::desktop::WindowAttributes::default();
         attributes.title_bar = Some(bar);
         nsh_core::element::desktop::main_window().set(attributes);

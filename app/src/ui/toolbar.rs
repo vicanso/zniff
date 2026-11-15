@@ -1,6 +1,34 @@
 #[allow(unused_imports)]
 use super::*;
 
+pub(crate) const TOOLBAR_H: f32 = 42.0;
+pub(crate) const TOOLBAR_PAD_END: f32 = 12.0;
+pub(crate) const TITLE_BAR_CONTROLS_GAP: f32 = 6.0;
+
+/// Reserves horizontal toolbar padding for native window controls (macOS traffic
+/// lights, GTK `WindowControls`, Windows caption buttons) so edge controls remain clickable.
+pub(crate) fn toolbar_side_padding(title_left: f32, title_right: f32) -> (f32, f32) {
+    let left = if title_left > 0.0 {
+        (title_left + TITLE_BAR_CONTROLS_GAP).max(LIST_INSET)
+    } else {
+        LIST_INSET
+    };
+    let right = if title_right > 0.0 {
+        (title_right + TITLE_BAR_CONTROLS_GAP).max(TOOLBAR_PAD_END)
+    } else {
+        TOOLBAR_PAD_END
+    };
+    (left, right)
+}
+
+pub(crate) fn toolbar_bar_height(title_top: f32) -> f32 {
+    if title_top > TOOLBAR_H {
+        title_top
+    } else {
+        TOOLBAR_H
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn toolbar(
     status: Signal<StatusMsg>,
@@ -36,24 +64,45 @@ pub(crate) fn toolbar(
     let deselect_controls = import_controls.clone();
     #[cfg(not(target_arch = "wasm32"))]
     let update_controls = import_controls.clone();
-    const TOOLBAR_H: f32 = 42.0;
     let bar = view()
         .window_drag(true)
         .flex_row()
         .items_center()
         .gap_2()
         .pl(move || {
-            #[cfg(all(not(target_arch = "wasm32"), target_os = "macos"))]
+            #[cfg(not(target_arch = "wasm32"))]
             {
-                let left = nsh_core::element::desktop::title_bar().left.0;
-                if left > 0.0 {
-                    return px(left + 6.0);
-                }
+                let edges = nsh_core::element::desktop::title_bar();
+                px(toolbar_side_padding(edges.left.0, edges.right.0).0)
             }
-            px(LIST_INSET)
+            #[cfg(target_arch = "wasm32")]
+            {
+                px(LIST_INSET)
+            }
         })
-        .pr_3()
-        .h(px(TOOLBAR_H))
+        .pr(move || {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let edges = nsh_core::element::desktop::title_bar();
+                px(toolbar_side_padding(edges.left.0, edges.right.0).1)
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                px(TOOLBAR_PAD_END)
+            }
+        })
+        .h(move || {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                px(toolbar_bar_height(
+                    nsh_core::element::desktop::title_bar().top.0,
+                ))
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                px(TOOLBAR_H)
+            }
+        })
         .bg(bg_chrome())
         .border_b_1()
         .border_b_color(border_strong())

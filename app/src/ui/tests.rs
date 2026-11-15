@@ -2798,3 +2798,402 @@ fn web_cached_flow_detail_publishes_loading_then_hydrates_cleanly() {
     });
     owner.dispose();
 }
+
+#[test]
+fn toolbar_side_padding_reserves_title_bar_controls_on_all_desktop_sides() {
+    assert_eq!(
+        super::toolbar_side_padding(0.0, 0.0),
+        (super::LIST_INSET, super::TOOLBAR_PAD_END)
+    );
+    assert_eq!(
+        super::toolbar_side_padding(78.0, 0.0),
+        (78.0 + super::TITLE_BAR_CONTROLS_GAP, super::TOOLBAR_PAD_END)
+    );
+    assert_eq!(
+        super::toolbar_side_padding(0.0, 104.0),
+        (super::LIST_INSET, 104.0 + super::TITLE_BAR_CONTROLS_GAP)
+    );
+    assert_eq!(
+        super::toolbar_side_padding(0.0, 138.0),
+        (super::LIST_INSET, 138.0 + super::TITLE_BAR_CONTROLS_GAP)
+    );
+    assert_eq!(
+        super::toolbar_side_padding(36.0, 104.0),
+        (
+            36.0 + super::TITLE_BAR_CONTROLS_GAP,
+            104.0 + super::TITLE_BAR_CONTROLS_GAP
+        )
+    );
+    assert_eq!(
+        super::toolbar_side_padding(4.0, 4.0),
+        (super::LIST_INSET, super::TOOLBAR_PAD_END)
+    );
+    assert_eq!(super::toolbar_bar_height(0.0), super::TOOLBAR_H);
+    assert_eq!(super::toolbar_bar_height(42.0), 42.0);
+    assert_eq!(super::toolbar_bar_height(48.0), 48.0);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
+    use nsh_core::element::Environment;
+    use nsh_core::geometry::Edges;
+    use nsh_core::prelude::*;
+    use nsh_core::{
+        ApproxTextEngine, Core, EventKind, EventPayload, MountItem, NodeId, Op, PressEvent, Prop,
+        ROOT_ID, Tag, ViewKind,
+    };
+    use std::cell::RefCell;
+
+    #[derive(Default)]
+    struct ToggleTrace {
+        running: bool,
+        toggles: usize,
+    }
+
+    thread_local! {
+        static TRACE: RefCell<ToggleTrace> = RefCell::new(ToggleTrace::default());
+    }
+
+    TRACE.with(|cell| *cell.borrow_mut() = ToggleTrace::default());
+
+    #[component]
+    fn ToolbarTitleBarHarness() -> impl IntoElement {
+        provide_context(signal(Some(crate::i18n::Lang::En)));
+        super::provide_mono_font(false);
+
+        let dir = std::env::temp_dir().join(format!(
+            "zniff-toolbar-titlebar-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(crate::ca::Ca::open(&dir).expect("ca"));
+        let hub = Arc::new(Hub::new(ca).expect("hub"));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let controls = Arc::new(Controls {
+            hub,
+            capture: Mutex::new(None),
+            status: Mutex::new(StatusMsg::Idle),
+            running: Mutex::new(false),
+            listen: Mutex::new(String::new()),
+            listen_port: Mutex::new(8895),
+            ca_status: Mutex::new(crate::ca::CaStatus::NotInstalled),
+            use_system_proxy: Mutex::new(false),
+            proxy_applied: Mutex::new(false),
+            ops: Mutex::new(()),
+            listen_all: Mutex::new(false),
+            update_state: Mutex::new(UpdateState::default()),
+            redact_export: Mutex::new(false),
+            redact_strict: Mutex::new(false),
+            redact_fields: Mutex::new(String::new()),
+            relay_url: Mutex::new(String::new()),
+            relay_token: Mutex::new(String::new()),
+            relay_push: Mutex::new(None),
+            toast_seq: std::sync::atomic::AtomicU64::new(0),
+            toast_queue: Mutex::new(Vec::new()),
+            config_error: Mutex::new(None),
+            config_path: Mutex::new(String::new()),
+        });
+
+        let status = signal(StatusMsg::Idle);
+        let running = signal(false);
+        let ca_status = signal(crate::ca::CaStatus::NotInstalled);
+        let use_system_proxy = signal(false);
+        let rows = signal(Vec::<Arc<RowLine>>::new());
+        let flow_total = signal(0_usize);
+        let filter = signal(String::new());
+        let pretty = signal(true);
+        let shown_phase = signal(Phase::Empty);
+        let share_id = signal(String::new());
+        let selected = signal(None::<u64>);
+        let update_state = signal(UpdateState::default());
+
+        let profiles = ProfileSignals {
+            saved: signal(Vec::new()),
+            history: signal(Vec::new()),
+            name: signal(String::new()),
+            filter,
+            bypass: signal(String::new()),
+            rules: signal(String::new()),
+            upstream: signal(String::new()),
+            rules_on: signal(true),
+            breaks_on: signal(true),
+            show_tunnels: signal(false),
+            proxy_auth: signal(String::new()),
+            relay_url: signal(String::new()),
+            relay_accept: signal(false),
+            list_width: signal(660.0),
+            panel_open: signal(false),
+            machine_settings_open: signal(false),
+            deselect_rev: signal(0),
+        };
+        let compose = Compose {
+            composing: signal(false),
+            response: signal(false),
+            method: signal(String::new()),
+            url: signal(String::new()),
+            headers: signal(String::new()),
+            body: signal(String::new()),
+            status: signal(String::new()),
+        };
+        let seq_diagram = signal(present::SequenceDiagramData::default());
+        let seq_viewport_w = signal(0.0_f32);
+        let seq_builder = SeqBuilder {
+            open: signal(false),
+            items: signal(Vec::new()),
+            include_response: signal(true),
+            include_query: signal(false),
+            output: signal(String::new()),
+            diagram: seq_diagram,
+            view_mode: signal(0),
+            source_flowchart: signal(false),
+            hover_bar: signal(None),
+            redact_open: signal(false),
+            redact_export: signal(false),
+            redact_strict: signal(false),
+            redact_fields: signal(String::new()),
+            redact_flow_id: signal(None),
+            viewport_w: seq_viewport_w,
+            track_w: signal(0.0_f32),
+            layout: computed(move || {
+                seq_diagram.with(|d| swimlane_layout(d, seq_viewport_w.get()))
+            }),
+            flat_rows: computed(move || seq_diagram.with(build_dep_flat_rows)),
+        };
+
+        let bar = super::toolbar(
+            status,
+            running,
+            ca_status,
+            use_system_proxy,
+            || {},
+            || {},
+            || {},
+            || {},
+            || {},
+            || {},
+            || {},
+            move || {
+                let next = !running.get();
+                running.set(next);
+                TRACE.with(|cell| {
+                    let mut trace = cell.borrow_mut();
+                    trace.running = next;
+                    trace.toggles += 1;
+                });
+            },
+            controls,
+            rows,
+            flow_total,
+            filter,
+            pretty,
+            shown_phase,
+            share_id,
+            profiles,
+            compose,
+            seq_builder,
+            selected,
+            update_state,
+        );
+
+        view().w(px(800.0)).h(px(500.0)).child(bar)
+    }
+
+    let mut core = Core::new(ApproxTextEngine, Size::new(px(800.0), px(500.0)));
+    let mut registry = Registry::new();
+    registry.register::<ToolbarTitleBarHarness>();
+    core.set_components(registry);
+    for op in [
+        Op::Create {
+            id: 2,
+            tag: Tag::View,
+        },
+        Op::SetProp {
+            id: 2,
+            prop: Prop::Component(std::any::type_name::<ToolbarTitleBarHarness>().into()),
+        },
+        Op::Insert {
+            parent: ROOT_ID,
+            child: 2,
+            before: None,
+        },
+    ] {
+        core.apply(op).expect("apply op");
+    }
+
+    struct MountedToolbar {
+        kinds: HashMap<NodeId, ViewKind>,
+        children: HashMap<NodeId, Vec<NodeId>>,
+        frames: HashMap<NodeId, Bounds<Points>>,
+        window_drag: HashMap<NodeId, Option<bool>>,
+    }
+
+    let mut tree = MountedToolbar {
+        kinds: HashMap::new(),
+        children: HashMap::new(),
+        frames: HashMap::new(),
+        window_drag: HashMap::new(),
+    };
+
+    let pump = |core: &mut Core<ApproxTextEngine>, tree: &mut MountedToolbar| {
+        let mut evs = Vec::new();
+        for _ in 0..12 {
+            let batch = core.commit();
+            if let Some(b) = &batch {
+                for item in &b.items {
+                    match item {
+                        MountItem::Create { id, kind } => {
+                            tree.kinds.insert(*id, *kind);
+                        }
+                        MountItem::Insert {
+                            parent,
+                            child,
+                            before,
+                        } => {
+                            let list = tree.children.entry(*parent).or_default();
+                            list.retain(|c| c != child);
+                            match before.and_then(|b| list.iter().position(|c| *c == b)) {
+                                Some(pos) => list.insert(pos, *child),
+                                None => list.push(*child),
+                            }
+                        }
+                        MountItem::Frame { id, frame } => {
+                            tree.frames.insert(*id, *frame);
+                        }
+                        MountItem::ViewProps { id, props } => {
+                            tree.window_drag.insert(*id, props.window_drag);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            evs.clear();
+            core.take_events(&mut evs);
+            let mut any = false;
+            for ev in evs.drain(..) {
+                if let nsh_core::element::JsEvent::Event(id, kind, payload) = ev {
+                    any |= core.component_event(id, kind, &payload);
+                }
+            }
+            if batch.is_none() && !any {
+                break;
+            }
+        }
+    };
+
+    pump(&mut core, &mut tree);
+
+    let toolbar_id = tree.children[&2][0];
+    assert_eq!(tree.kinds.get(&toolbar_id), Some(&ViewKind::View));
+    assert_eq!(tree.window_drag.get(&toolbar_id), Some(&Some(true)));
+
+    let toolbar_kids = &tree.children[&toolbar_id];
+    let brand_id = toolbar_kids[0];
+    let start_btn_id = *toolbar_kids.last().expect("Start button child");
+    assert_eq!(
+        tree.window_drag.get(&start_btn_id),
+        Some(&Some(false)),
+        "Start/Stop button must opt out of window_drag"
+    );
+
+    // 1. Default environment (`title_bar` = 0): standard edge insets.
+    assert!((tree.frames[&brand_id].origin.x.0 - super::LIST_INSET).abs() < 0.5);
+    let default_btn = tree.frames[&start_btn_id];
+    assert!(
+        (default_btn.origin.x.0 + default_btn.size.width.0 - (800.0 - super::TOOLBAR_PAD_END))
+            .abs()
+            < 0.5
+    );
+
+    // 2. Simulate Linux GTK4 asynchronous `WindowControls` measurement (`right = 104pt` at 800x500).
+    let mut env = Environment {
+        window: Size::new(px(800.0), px(500.0)),
+        title_bar: Edges {
+            top: Points(42.0),
+            right: Points(104.0),
+            bottom: Points(0.0),
+            left: Points(0.0),
+        },
+        ..Default::default()
+    };
+    core.set_environment(env);
+    pump(&mut core, &mut tree);
+
+    let linux_toolbar = tree.frames[&toolbar_id];
+    let linux_btn = tree.frames[&start_btn_id];
+    let linux_btn_right = linux_toolbar.origin.x.0 + linux_btn.origin.x.0 + linux_btn.size.width.0;
+    assert!(
+        linux_btn_right <= 800.0 - 104.0 - super::TITLE_BAR_CONTROLS_GAP + 0.5,
+        "Linux Start button right edge ({linux_btn_right}) must stay strictly clear of overlaid GTK WindowControls [696.0, 800.0]"
+    );
+    assert!(
+        (tree.frames[&brand_id].origin.x.0 - super::LIST_INSET).abs() < 0.5,
+        "left edge stays at LIST_INSET when title_bar.left is 0"
+    );
+
+    // 3. Simulate Windows caption buttons (`right = 138pt`).
+    env.title_bar = Edges {
+        top: Points(42.0),
+        right: Points(138.0),
+        bottom: Points(0.0),
+        left: Points(0.0),
+    };
+    core.set_environment(env);
+    pump(&mut core, &mut tree);
+
+    let win_btn = tree.frames[&start_btn_id];
+    let win_btn_right = win_btn.origin.x.0 + win_btn.size.width.0;
+    assert!(
+        win_btn_right <= 800.0 - 138.0 - super::TITLE_BAR_CONTROLS_GAP + 0.5,
+        "Windows Start button right edge ({win_btn_right}) must clear caption buttons"
+    );
+
+    // 4. Simulate macOS traffic lights (`left = 78pt`, `right = 0pt`) and tall bar (`top = 48pt`).
+    env.title_bar = Edges {
+        top: Points(48.0),
+        right: Points(0.0),
+        bottom: Points(0.0),
+        left: Points(78.0),
+    };
+    core.set_environment(env);
+    pump(&mut core, &mut tree);
+
+    assert!(
+        (tree.frames[&toolbar_id].size.height.0 - 48.0).abs() < 0.5,
+        "toolbar height expands to cover taller native title bar"
+    );
+    assert!(
+        tree.frames[&brand_id].origin.x.0 >= 78.0 + super::TITLE_BAR_CONTROLS_GAP - 0.5,
+        "brand must clear macOS traffic lights on the left"
+    );
+    let mac_btn = tree.frames[&start_btn_id];
+    assert!(
+        (mac_btn.origin.x.0 + mac_btn.size.width.0 - (800.0 - super::TOOLBAR_PAD_END)).abs() < 0.5
+    );
+
+    // 5. Pressing Start/Stop button node toggles capture state twice cleanly.
+    assert!(core.component_event(
+        start_btn_id,
+        EventKind::Press,
+        &EventPayload::Press(PressEvent::default()),
+    ));
+    pump(&mut core, &mut tree);
+    TRACE.with(|cell| {
+        let trace = cell.borrow();
+        assert!(trace.running);
+        assert_eq!(trace.toggles, 1);
+    });
+
+    assert!(core.component_event(
+        start_btn_id,
+        EventKind::Press,
+        &EventPayload::Press(PressEvent::default()),
+    ));
+    pump(&mut core, &mut tree);
+    TRACE.with(|cell| {
+        let trace = cell.borrow();
+        assert!(!trace.running);
+        assert_eq!(trace.toggles, 2);
+    });
+}
