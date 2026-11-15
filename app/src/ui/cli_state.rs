@@ -200,6 +200,7 @@ pub(crate) struct UpdateState {
     pub(crate) phase: UpdatePhase,
     pub(crate) nudge: Option<String>,
     pub(crate) ignored: Option<String>,
+    pub(crate) notes: Option<String>,
 }
 
 impl UpdateState {
@@ -209,6 +210,7 @@ impl UpdateState {
             phase: UpdatePhase::Idle,
             nudge: updater::nudge(),
             ignored: updater::ignored(),
+            notes: updater::nudge_notes(),
         }
     }
 

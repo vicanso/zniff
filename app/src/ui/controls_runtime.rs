@@ -158,11 +158,12 @@ pub(crate) fn auto_check_update(controls: Arc<Controls>) {
         return;
     }
     std::thread::spawn(move || {
-        let outcome = updater::check();
+        let outcome = updater::check_with_skipped();
         updater::record_outcome(clock::now(), &outcome);
         with_update_state(&controls, |st| {
             st.nudge = updater::nudge();
             st.ignored = updater::ignored();
+            st.notes = updater::nudge_notes();
         });
     });
 }
@@ -202,6 +203,7 @@ pub(crate) fn check_update_manual(controls: Arc<Controls>) {
             st.phase = UpdatePhase::Idle;
             st.nudge = updater::nudge();
             st.ignored = updater::ignored();
+            st.notes = updater::nudge_notes();
         });
     });
 }
@@ -212,6 +214,7 @@ pub(crate) fn skip_update(controls: &Controls, version: &str) {
     with_update_state(controls, |st| {
         st.nudge = updater::nudge();
         st.ignored = updater::ignored();
+        st.notes = updater::nudge_notes();
     });
 }
 
@@ -221,6 +224,7 @@ pub(crate) fn unskip_update(controls: &Controls) {
     with_update_state(controls, |st| {
         st.nudge = updater::nudge();
         st.ignored = updater::ignored();
+        st.notes = updater::nudge_notes();
     });
 }
 
@@ -345,6 +349,7 @@ pub(crate) fn shutdown_capture_for_exit(controls: &Controls) {
     }
     relay::shutdown_relay_push();
     controls.hub.end_share();
+    ca::clear_ios_simulator_proxies();
     if lock_bool(&controls.proxy_applied) {
         set_bool(&controls.proxy_applied, false);
         let _ = sysproxy::disable();

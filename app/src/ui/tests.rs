@@ -3197,3 +3197,42 @@ fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
         assert_eq!(trace.toggles, 2);
     });
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn update_pill_tooltip_shows_release_notes_and_truncates_cleanly() {
+    let with_notes = UpdateState {
+        phase: UpdatePhase::Idle,
+        nudge: Some("v0.2.0".into()),
+        ignored: None,
+        notes: Some("- Fix download\n- Auto restart".into()),
+    };
+    let zh = super::format_update_tooltip(&with_notes, Lang::Zh);
+    assert!(zh.contains("v0.2.0"));
+    assert!(zh.contains("- Fix download\n- Auto restart"));
+
+    let no_notes = UpdateState {
+        phase: UpdatePhase::Idle,
+        nudge: Some("v0.2.0".into()),
+        ignored: None,
+        notes: None,
+    };
+    assert_eq!(
+        super::format_update_tooltip(&no_notes, Lang::En),
+        "New version v0.2.0 · Click to update and restart"
+    );
+
+    let many_lines = (1..=25)
+        .map(|i| format!("- item {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let full = super::format_update_tooltip(
+        &UpdateState {
+            notes: Some(many_lines),
+            ..with_notes
+        },
+        Lang::En,
+    );
+    assert!(full.contains("- item 1"));
+    assert!(full.contains("- item 25"));
+}

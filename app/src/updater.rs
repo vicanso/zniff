@@ -1,10 +1,11 @@
-//! Check GitHub Releases (with Gitee mirror fallback) for a newer version,
-//! download, verify against `SHA256SUMS`, install in place, and relaunch.
+//! Check GitHub Releases for a newer version, download, verify against
+//! `SHA256SUMS`, install in place, and relaunch.
 //!
 //! Follows the same design as `zstats.app`:
 //! - Silent periodic check every two days (`AUTO_CHECK_EVERY`), persisted in
 //!   `update-check.toml` inside the user data directory.
-//! - GitHub first, Gitee mirror second (`REACH_TIMEOUT` = 10s per host).
+//! - Direct GitHub Releases check and download (`REACH_TIMEOUT` = 10s), with
+//!   automatic retry on transient asset transfer failures.
 //! - SHA-256 verification against the release's `SHA256SUMS` before touching
 //!   the standing install.
 //! - On macOS, mounts the DMG silently (`hdiutil attach -nobrowse -noverify -plist`),
@@ -41,12 +42,11 @@ use crate::{ca, config};
 
 const LATEST_URL: &str = "https://api.github.com/repos/vicanso/zniff/releases/latest";
 const LIST_URL: &str = "https://api.github.com/repos/vicanso/zniff/releases";
-const GITEE_API: &str = "https://gitee.com/api/v5/repos/vicanso/zniff";
-const GITEE_REPO_URL: &str = "https://gitee.com/vicanso/zniff";
 
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 const REACH_TIMEOUT: Duration = Duration::from_secs(10);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+const DOWNLOAD_RETRIES: usize = 3;
 const MAX_DOWNLOAD: u64 = 512 * 1024 * 1024;
 const MAX_REDIRECTS: usize = 8;
 const HISTORY_PAGE: usize = 30;
@@ -89,10 +89,6 @@ pub fn asset_name() -> Option<&'static str> {
 
 fn release_download_url(tag: &str, name: &str) -> String {
     format!("https://github.com/vicanso/zniff/releases/download/{tag}/{name}")
-}
-
-fn gitee_download_url(tag: &str, name: &str) -> String {
-    format!("{GITEE_REPO_URL}/releases/download/{tag}/{name}")
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -227,6 +223,8 @@ fn parse_upstream_proxy_with_auth(
         &raw[7..]
     } else if raw.len() >= 8 && raw[..8].eq_ignore_ascii_case("https://") {
         &raw[8..]
+    } else if raw.contains("://") {
+        return None;
     } else {
         raw
     };
@@ -276,9 +274,38 @@ fn parse_upstream_proxy(raw: &str, listen_port: u16) -> Option<(String, u16)> {
     parse_upstream_proxy_with_auth(raw, listen_port).map(|(h, p, _)| (h, p))
 }
 
+fn resolve_updater_proxy(
+    configured: &str,
+    listen_port: u16,
+    env_candidates: &[Option<&str>],
+) -> Option<(String, u16, Option<String>)> {
+    if let Some(proxy) = parse_upstream_proxy_with_auth(configured, listen_port) {
+        return Some(proxy);
+    }
+    for candidate in env_candidates.iter().flatten() {
+        if let Some(proxy) = parse_upstream_proxy_with_auth(candidate, listen_port) {
+            return Some(proxy);
+        }
+    }
+    None
+}
+
 fn configured_upstream_proxy() -> Option<(String, u16, Option<String>)> {
     let cfg = config::load_mode(&ca::data_dir(), config::is_dev_mode());
-    parse_upstream_proxy_with_auth(&cfg.upstream_proxy, cfg.listen_port)
+    let https_upper = env::var("HTTPS_PROXY").ok();
+    let https_lower = env::var("https_proxy").ok();
+    let all_upper = env::var("ALL_PROXY").ok();
+    let all_lower = env::var("all_proxy").ok();
+    resolve_updater_proxy(
+        &cfg.upstream_proxy,
+        cfg.listen_port,
+        &[
+            https_upper.as_deref(),
+            https_lower.as_deref(),
+            all_upper.as_deref(),
+            all_lower.as_deref(),
+        ],
+    )
 }
 
 async fn open_tcp_to(host: &str, port: u16) -> Result<TcpStream, String> {
@@ -347,6 +374,17 @@ fn tls_connector() -> TlsConnector {
     TlsConnector::from(std::sync::Arc::new(config))
 }
 
+fn format_error_chain(err: &dyn std::error::Error) -> String {
+    let mut out = err.to_string();
+    let mut cur = err.source();
+    while let Some(src) = cur {
+        out.push_str(": ");
+        out.push_str(&src.to_string());
+        cur = src.source();
+    }
+    out
+}
+
 async fn fetch_url_streaming(
     initial_url: &str,
     accept: Option<&str>,
@@ -373,8 +411,7 @@ async fn fetch_url_streaming(
             .method("GET")
             .uri(&parsed.path_and_query)
             .header("Host", &host_header)
-            .header("User-Agent", format!("zniff/{}", version()))
-            .header("Connection", "close");
+            .header("User-Agent", format!("zniff/{}", version()));
         if let Some(acc) = accept {
             req_builder = req_builder.header("Accept", acc);
         }
@@ -395,14 +432,14 @@ async fn fetch_url_streaming(
             )
             .await
             .map_err(|_| "HTTP handshake timeout".to_string())?
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| format_error_chain(&e))?;
             tokio::spawn(async move {
                 let _ = conn.await;
             });
             timeout(reach_timeout, sender.send_request(req))
                 .await
                 .map_err(|_| format!("response timeout from {}", parsed.host))?
-                .map_err(|e| e.to_string())?
+                .map_err(|e| format_error_chain(&e))?
         } else {
             let (mut sender, conn) = timeout(
                 reach_timeout,
@@ -410,14 +447,14 @@ async fn fetch_url_streaming(
             )
             .await
             .map_err(|_| "HTTP handshake timeout".to_string())?
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| format_error_chain(&e))?;
             tokio::spawn(async move {
                 let _ = conn.await;
             });
             timeout(reach_timeout, sender.send_request(req))
                 .await
                 .map_err(|_| format!("response timeout from {}", parsed.host))?
-                .map_err(|e| e.to_string())?
+                .map_err(|e| format_error_chain(&e))?
         };
 
         let status = response.status().as_u16();
@@ -444,7 +481,7 @@ async fn fetch_url_streaming(
         let mut out = Vec::with_capacity(total.min(16 * 1024 * 1024) as usize);
         on_progress(0, total);
         while let Some(frame) = body.frame().await {
-            let frame = frame.map_err(|e| e.to_string())?;
+            let frame = frame.map_err(|e| format_error_chain(&e))?;
             if let Ok(chunk) = frame.into_data() {
                 out.extend_from_slice(&chunk);
                 if out.len() as u64 > MAX_DOWNLOAD {
@@ -452,6 +489,12 @@ async fn fetch_url_streaming(
                 }
                 on_progress(out.len() as u64, total);
             }
+        }
+        if total > 0 && (out.len() as u64) < total {
+            return Err(format!(
+                "truncated response body: received {} of {total} bytes",
+                out.len()
+            ));
         }
         return Ok(out);
     }
@@ -485,31 +528,32 @@ fn fetch_text(url: &str, accept: Option<&str>) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|e| e.to_string())
 }
 
+fn fetch_asset_bytes_from_url(
+    url: &str,
+    mut on_progress: impl FnMut(u64, u64),
+) -> Result<Vec<u8>, String> {
+    let mut last_err = String::new();
+    for attempt in 1..=DOWNLOAD_RETRIES {
+        match fetch_bytes_blocking(url, None, REACH_TIMEOUT, DOWNLOAD_TIMEOUT, &mut on_progress) {
+            Ok(bytes) => return Ok(bytes),
+            Err(err) => {
+                last_err = err;
+                if attempt < DOWNLOAD_RETRIES {
+                    std::thread::sleep(Duration::from_millis(300 * attempt as u64));
+                }
+            }
+        }
+    }
+    Err(last_err)
+}
+
 fn fetch_asset_bytes(
     tag: &str,
     name: &str,
-    mut on_progress: impl FnMut(u64, u64),
+    on_progress: impl FnMut(u64, u64),
 ) -> Result<Vec<u8>, String> {
     let github_url = release_download_url(tag, name);
-    let direct_err = match fetch_bytes_blocking(
-        &github_url,
-        None,
-        REACH_TIMEOUT,
-        DOWNLOAD_TIMEOUT,
-        &mut on_progress,
-    ) {
-        Ok(bytes) => return Ok(bytes),
-        Err(err) => err,
-    };
-    let gitee_url = gitee_download_url(tag, name);
-    fetch_bytes_blocking(
-        &gitee_url,
-        None,
-        REACH_TIMEOUT,
-        DOWNLOAD_TIMEOUT,
-        &mut on_progress,
-    )
-    .map_err(|mirror| format!("{direct_err}; mirror: {mirror}"))
+    fetch_asset_bytes_from_url(&github_url, on_progress)
 }
 
 /// Download `tag`'s release asset for this platform/arch and verify its SHA-256
@@ -1096,24 +1140,16 @@ pub fn sweep_installer_mounts() {}
 
 // ---- Release check & notes stitching -----------------------------------
 
-/// Ask GitHub (or the Gitee mirror) for the latest release and compare it to
-/// this build. Blocking — call on a background thread.
-pub fn check() -> UpdateCheck {
-    check_latest()
-}
-
-/// [`check`] plus any intermediate release notes between `version()` and the
-/// latest release.
+/// Ask GitHub Releases for the latest release plus any intermediate release
+/// notes between `version()` and the latest release.
+/// Blocking — call on a background thread.
 pub fn check_with_skipped() -> UpdateCheck {
     let (latest_ver, latest_notes) = match check_latest() {
         UpdateCheck::Newer { version, notes } => (version, notes),
         other => return other,
     };
     let github = format!("{LIST_URL}?per_page={HISTORY_PAGE}");
-    let gitee = format!("{GITEE_API}/releases?per_page={HISTORY_PAGE}&direction=desc");
-    let list = fetch_text(&github, Some("application/vnd.github+json")).or_else(|origin| {
-        fetch_text(&gitee, None).map_err(|mirror| format!("{origin}; mirror: {mirror}"))
-    });
+    let list = fetch_text(&github, Some("application/vnd.github+json"));
     let notes = match list {
         Ok(list) => notes_through(&list, version(), &latest_ver, &latest_notes),
         Err(err) => {
@@ -1130,10 +1166,7 @@ pub fn check_with_skipped() -> UpdateCheck {
 fn check_latest() -> UpdateCheck {
     let body = match fetch_text(LATEST_URL, Some("application/vnd.github+json")) {
         Ok(body) => body,
-        Err(origin) => match fetch_text(&format!("{GITEE_API}/releases/latest"), None) {
-            Ok(body) => body,
-            Err(mirror) => return UpdateCheck::Failed(format!("{origin}; mirror: {mirror}")),
-        },
+        Err(err) => return UpdateCheck::Failed(err),
     };
     let Some(tag) = json_str_field(&body, "tag_name") else {
         return UpdateCheck::Failed("no tag_name in response".into());
@@ -1295,6 +1328,7 @@ struct CheckFile {
     checked_unix: u64,
     latest: Option<String>,
     ignored: Option<String>,
+    notes: Option<String>,
 }
 
 fn read_check_in(dir: &Path) -> CheckFile {
@@ -1313,18 +1347,27 @@ fn read_check_in(dir: &Path) -> CheckFile {
             .max(0) as u64,
         latest: get("latest"),
         ignored: get("ignored"),
+        notes: get("notes"),
     }
 }
 
 fn write_check_in(dir: &Path, file: &CheckFile) {
-    let clean = |v: &str| v.replace(['\\', '"'], "");
-    let mut out = format!("checked_unix = {}\n", file.checked_unix);
+    let mut table = toml::Table::new();
+    table.insert(
+        "checked_unix".into(),
+        toml::Value::Integer(file.checked_unix.min(i64::MAX as u64) as i64),
+    );
     if let Some(v) = &file.latest {
-        out.push_str(&format!("latest = \"{}\"\n", clean(v)));
+        table.insert("latest".into(), toml::Value::String(v.clone()));
     }
     if let Some(v) = &file.ignored {
-        out.push_str(&format!("ignored = \"{}\"\n", clean(v)));
+        table.insert("ignored".into(), toml::Value::String(v.clone()));
     }
+    if let Some(v) = &file.notes {
+        table.insert("notes".into(), toml::Value::String(v.clone()));
+    }
+    let out = toml::to_string(&table)
+        .unwrap_or_else(|_| format!("checked_unix = {}\n", file.checked_unix));
     let _ = fs::create_dir_all(dir);
     let _ = fs::write(auto_check_path(dir), out);
 }
@@ -1334,7 +1377,11 @@ pub fn auto_check_due(now: SystemTime) -> bool {
 }
 
 fn auto_check_due_in(dir: &Path, now: SystemTime) -> bool {
-    let checked = UNIX_EPOCH + Duration::from_secs(read_check_in(dir).checked_unix);
+    let file = read_check_in(dir);
+    if file.latest.is_some() && file.notes.is_none() {
+        return true;
+    }
+    let checked = UNIX_EPOCH + Duration::from_secs(file.checked_unix);
     now.duration_since(checked)
         .map_or(true, |age| age >= AUTO_CHECK_EVERY)
 }
@@ -1350,8 +1397,14 @@ fn record_outcome_in(dir: &Path, now: SystemTime, outcome: &UpdateCheck) {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     match outcome {
-        UpdateCheck::Newer { version, .. } => file.latest = Some(version.clone()),
-        UpdateCheck::UpToDate => file.latest = None,
+        UpdateCheck::Newer { version, notes } => {
+            file.latest = Some(version.clone());
+            file.notes = Some(notes.trim().to_string());
+        }
+        UpdateCheck::UpToDate => {
+            file.latest = None;
+            file.notes = None;
+        }
         UpdateCheck::Failed(_) => {}
     }
     write_check_in(dir, &file);
@@ -1397,6 +1450,19 @@ fn nudge_in(dir: &Path, current: &str) -> Option<String> {
         return None;
     }
     is_newer(&latest, current).then_some(latest)
+}
+
+pub fn nudge_notes() -> Option<String> {
+    nudge_notes_in(&ca::data_dir(), version())
+}
+
+fn nudge_notes_in(dir: &Path, current: &str) -> Option<String> {
+    let file = read_check_in(dir);
+    let latest = file.latest?;
+    if file.ignored.as_deref() == Some(latest.as_str()) || !is_newer(&latest, current) {
+        return None;
+    }
+    file.notes.filter(|n| !n.trim().is_empty())
 }
 
 /// `v0.1.2` vs `0.1.1` — numeric segment compare, missing segments are zero.
@@ -1588,18 +1654,108 @@ mod tests {
     }
 
     #[test]
-    fn the_mirror_url_is_spelled_the_same_way_githubs_is() {
+    fn release_download_url_targets_github_only() {
         let tag = "v0.3.2";
         let name = "zniff-aarch64.dmg";
         assert_eq!(
-            gitee_download_url(tag, name),
-            "https://gitee.com/vicanso/zniff/releases/download/v0.3.2/zniff-aarch64.dmg"
+            release_download_url(tag, name),
+            "https://github.com/vicanso/zniff/releases/download/v0.3.2/zniff-aarch64.dmg"
         );
-        let tail = |url: String| url.split_once("/releases/").map(|(_, t)| t.to_string());
+    }
+
+    #[test]
+    fn format_error_chain_includes_nested_sources() {
+        #[derive(Debug)]
+        struct Outer(std::io::Error);
+        impl std::fmt::Display for Outer {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("error reading a body from connection")
+            }
+        }
+        impl std::error::Error for Outer {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+        let err = Outer(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "unexpected eof",
+        ));
         assert_eq!(
-            tail(release_download_url(tag, name)),
-            tail(gitee_download_url(tag, name)),
+            format_error_chain(&err),
+            "error reading a body from connection: unexpected eof"
         );
+    }
+
+    #[test]
+    fn resolve_updater_proxy_prefers_config_then_https_env_and_skips_socks() {
+        assert_eq!(
+            resolve_updater_proxy(
+                "http://127.0.0.1:7890",
+                8878,
+                &[Some("http://127.0.0.1:9000")]
+            ),
+            Some(("127.0.0.1".into(), 7890, None))
+        );
+        assert_eq!(
+            resolve_updater_proxy(
+                "",
+                8878,
+                &[
+                    Some("socks5://127.0.0.1:1080"),
+                    Some("http://127.0.0.1:7890")
+                ]
+            ),
+            Some(("127.0.0.1".into(), 7890, None))
+        );
+        assert_eq!(
+            resolve_updater_proxy("", 8878, &[Some("http://127.0.0.1:8878")]),
+            None
+        );
+    }
+
+    #[test]
+    fn fetch_asset_bytes_retries_truncated_body_and_uses_keepalive() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().unwrap();
+        let attempts = std::sync::Arc::new(AtomicUsize::new(0));
+        let attempts_srv = attempts.clone();
+
+        let server = std::thread::spawn(move || {
+            for i in 0..2 {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let mut req_buf = [0u8; 2048];
+                let n = stream.read(&mut req_buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&req_buf[..n]).to_ascii_lowercase();
+                assert!(
+                    !req.contains("connection: close"),
+                    "updater must not force Connection: close (attempt {i})"
+                );
+                attempts_srv.fetch_add(1, Ordering::SeqCst);
+                if i == 0 {
+                    // Truncated body: Content-Length 12 but send only 5 bytes and drop.
+                    let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\nhello");
+                } else {
+                    let _ = stream
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\nhello world!");
+                }
+                let _ = stream.flush();
+            }
+        });
+
+        let url = format!("http://{addr}/zniff.dmg");
+        let mut last_progress = (0, 0);
+        let bytes = fetch_asset_bytes_from_url(&url, |r, t| last_progress = (r, t))
+            .expect("retry should recover full body");
+        server.join().expect("server thread");
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(bytes, b"hello world!");
+        assert_eq!(last_progress, (12, 12));
     }
 
     #[test]
@@ -1825,6 +1981,59 @@ mod tests {
             "current-PID previous bundle must stay"
         );
         assert!(unrelated_dir.exists(), "unrelated .app directory must stay");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn record_outcome_persists_and_clears_multiline_notes() {
+        let dir = env::temp_dir().join(format!("zniff-update-notes-{}", process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let notes = "## v0.3.0\n- Fix \"updater\" truncation\n- Add hover release notes";
+
+        record_outcome_in(
+            &dir,
+            now,
+            &UpdateCheck::Newer {
+                version: "v0.3.0".into(),
+                notes: notes.into(),
+            },
+        );
+        assert_eq!(nudge_in(&dir, "0.2.0").as_deref(), Some("v0.3.0"));
+        assert_eq!(nudge_notes_in(&dir, "0.2.0").as_deref(), Some(notes));
+
+        ignore_in(&dir, "v0.3.0");
+        assert_eq!(nudge_notes_in(&dir, "0.2.0"), None);
+
+        unignore_in(&dir);
+        assert_eq!(nudge_notes_in(&dir, "0.2.0").as_deref(), Some(notes));
+
+        record_outcome_in(&dir, now, &UpdateCheck::UpToDate);
+        assert_eq!(nudge_notes_in(&dir, "0.2.0"), None);
+
+        // Legacy check file cached before `notes` existed must trigger a refresh
+        // even within the 48h cadence so hover release notes populate automatically.
+        write_check_in(
+            &dir,
+            &CheckFile {
+                checked_unix: 1_700_000_000,
+                latest: Some("v0.3.0".into()),
+                ignored: None,
+                notes: None,
+            },
+        );
+        assert!(auto_check_due_in(&dir, now + Duration::from_secs(60)));
+        record_outcome_in(
+            &dir,
+            now + Duration::from_secs(60),
+            &UpdateCheck::Newer {
+                version: "v0.3.0".into(),
+                notes: String::new(),
+            },
+        );
+        assert!(!auto_check_due_in(&dir, now + Duration::from_secs(120)));
+        assert_eq!(nudge_notes_in(&dir, "0.2.0"), None);
 
         let _ = fs::remove_dir_all(&dir);
     }
