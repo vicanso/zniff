@@ -5,6 +5,7 @@
   "build": 1,
   "rust": ".",
   "root": "App",
+  "icon": "assets/icon.png",
   "window": {
     "titleBar": {
       "style": "hidden",

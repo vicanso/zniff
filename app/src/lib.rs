@@ -4,6 +4,7 @@
 #![allow(clippy::too_many_arguments)]
 #![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 
+#[cfg(not(target_arch = "wasm32"))]
 mod bypass;
 #[cfg(not(target_arch = "wasm32"))]
 mod ca;
@@ -16,6 +17,7 @@ mod clock;
 mod config;
 #[cfg(not(target_arch = "wasm32"))]
 mod decompress;
+#[cfg(not(target_arch = "wasm32"))]
 mod har;
 mod i18n;
 mod icon;
@@ -27,10 +29,12 @@ mod proxy;
 #[cfg(target_arch = "wasm32")]
 #[path = "hub_web.rs"]
 mod proxy;
+mod redact;
 #[cfg(not(target_arch = "wasm32"))]
 mod relay;
 mod rules;
 mod session;
+#[cfg(not(target_arch = "wasm32"))]
 mod share;
 #[cfg(not(target_arch = "wasm32"))]
 mod sysproxy;
@@ -39,6 +43,7 @@ mod ui;
 mod updater;
 #[cfg(not(target_arch = "wasm32"))]
 mod web;
+#[cfg(not(target_arch = "wasm32"))]
 mod ws;
 
 #[cfg(not(target_arch = "wasm32"))]

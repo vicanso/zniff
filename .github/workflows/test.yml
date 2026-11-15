@@ -58,5 +58,10 @@ jobs:
         run: cargo fmt --manifest-path app/Cargo.toml --check
       - name: lint
         run: cargo clippy --manifest-path app/Cargo.toml --all-targets -- --deny=warnings
+      - name: lint wasm32
+        if: matrix.name == 'linux'
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo clippy --manifest-path app/Cargo.toml --lib --no-default-features --target wasm32-unknown-unknown -- --deny=warnings
       - name: test
         run: cargo test --manifest-path app/Cargo.toml --workspace

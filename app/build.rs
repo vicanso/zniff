@@ -1,6 +1,10 @@
-//! Compresses bundled UI font faces into `OUT_DIR` for builds that render the
-//! UI (`desktop` or `wasm32`). Headless server builds (`--no-default-features`
-//! on native targets) skip embedding the font bytes completely.
+//! Prepares bundled JetBrains Mono NL font faces for UI targets:
+//! - Desktop builds (`desktop` feature, non-`wasm32`) zlib-compress the four
+//!   `.ttf` faces into `OUT_DIR` as `*.ttf.zz`.
+//! - `wasm32` builds emit `ZNIFF_MONO_*` relative paths stamped with a 10-char
+//!   SHA-256 content digest (`fonts/<stem>.<digest>.ttf`) so `scripts/postprocess-web.sh`
+//!   serves them as separate immutable assets instead of inflating `.wasm`.
+//! - Headless server builds (`--no-default-features` on native targets) skip both.
 
 use std::env;
 use std::fs;
@@ -10,16 +14,16 @@ use std::path::PathBuf;
 use flate2::Compression;
 use flate2::write::ZlibEncoder;
 
-const FACES: [&str; 4] = [
-    "JetBrainsMonoNL-Regular.ttf",
-    "JetBrainsMonoNL-Medium.ttf",
-    "JetBrainsMonoNL-SemiBold.ttf",
-    "JetBrainsMonoNL-Bold.ttf",
+const FACES: [(&str, &str); 4] = [
+    ("JetBrainsMonoNL-Regular.ttf", "ZNIFF_MONO_REGULAR"),
+    ("JetBrainsMonoNL-Medium.ttf", "ZNIFF_MONO_MEDIUM"),
+    ("JetBrainsMonoNL-SemiBold.ttf", "ZNIFF_MONO_SEMIBOLD"),
+    ("JetBrainsMonoNL-Bold.ttf", "ZNIFF_MONO_BOLD"),
 ];
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    for name in FACES {
+    for (name, _) in FACES {
         println!("cargo:rerun-if-changed=assets/fonts/{name}");
     }
 
@@ -33,7 +37,21 @@ fn main() {
         PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
 
-    for name in FACES {
+    if is_wasm {
+        use sha2::{Digest, Sha256};
+        for (name, env_key) in FACES {
+            let src = manifest_dir.join("assets/fonts").join(name);
+            let raw = fs::read(&src)
+                .unwrap_or_else(|err| panic!("failed to read font {}: {err}", src.display()));
+            let digest = Sha256::digest(&raw);
+            let hex10: String = digest[..5].iter().map(|b| format!("{b:02x}")).collect();
+            let stem = name.strip_suffix(".ttf").unwrap_or(name);
+            println!("cargo:rustc-env={env_key}=fonts/{stem}.{hex10}.ttf");
+        }
+        return;
+    }
+
+    for (name, _) in FACES {
         let src = manifest_dir.join("assets/fonts").join(name);
         let raw = fs::read(&src)
             .unwrap_or_else(|err| panic!("failed to read font {}: {err}", src.display()));

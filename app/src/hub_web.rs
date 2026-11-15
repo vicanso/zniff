@@ -411,7 +411,7 @@ impl Hub {
         &self,
         ttl: Duration,
         filter: &str,
-        redact: crate::share::RedactOptions,
+        redact: crate::redact::RedactOptions,
     ) -> (String, SystemTime) {
         let _ = (ttl, filter, redact);
         (String::new(), crate::clock::now())
@@ -421,29 +421,6 @@ impl Hub {
         *self.share_id.lock().unwrap_or_else(|err| err.into_inner()) = None;
         self.bump();
         post_op(json!({"op": "end_share"}));
-    }
-
-    #[allow(dead_code)]
-    pub fn export_har_matching_with_redact(
-        &self,
-        filter: &str,
-        redact: &crate::share::RedactOptions,
-    ) -> Value {
-        let (matched, _) = self.matching_ids(filter);
-        let flows = self.with_session(|session| {
-            matched
-                .into_iter()
-                .filter_map(|(id, _)| session.hydrated(id))
-                .collect::<Vec<_>>()
-        });
-        crate::har::export_har_with_redact(&flows, redact)
-    }
-
-    #[allow(dead_code)]
-    pub fn import_har(&self, value: &Value) -> usize {
-        let count = crate::har::import_har(value).len();
-        post_op(json!({"op": "import_har", "value": value}));
-        count
     }
 
     pub fn replay_later<F>(self: &Arc<Self>, id: u64, edit: ReplayOverride, on_done: F)

@@ -38,7 +38,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && rustup target add wasm32-unknown-unknown
 
-ARG NSH_VERSION=v0.5.0
+ARG NSH_VERSION=v0.5.1
 RUN set -eux; \
     case "$(uname -m)" in \
       x86_64|amd64) nsh_arch="linux-x86_64" ;; \
@@ -60,6 +60,7 @@ WORKDIR /src
 COPY app/Cargo.toml app/Cargo.lock app/build.rs app/nsh.json app/
 COPY app/assets app/assets
 COPY app/src app/src
+COPY scripts/postprocess-web.sh scripts/postprocess-web.sh
 WORKDIR /src/app
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
@@ -70,14 +71,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     && /opt/nsh/bin/nsh package --target web -v /src/app -o /web-pkg \
     && mv /web-pkg/zniff /web \
     && test -f /web/index.html \
-    && wflags="--enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue --enable-simd --enable-gc --enable-tail-call --enable-extended-const" \
-    && if wasm-opt --help | grep -q -- '--enable-bulk-memory-opt'; then wflags="$wflags --enable-bulk-memory-opt"; fi \
-    && for w in /web/nsh.*.wasm; do \
-        [ -f "$w" ] || continue; \
-        wasm-opt -Oz $wflags "$w" -o "$w.opt" && mv "$w.opt" "$w"; \
-        gzip -9 -c "$w" > "$w.gz"; \
-        brotli -f -q 11 -o "$w.br" "$w"; \
-    done \
+    && sh /src/scripts/postprocess-web.sh /web /src/app/assets/fonts \
     && rm -rf /src/app/.nsh /web-pkg
 
 FROM debian:trixie-slim

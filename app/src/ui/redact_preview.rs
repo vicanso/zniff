@@ -42,13 +42,13 @@ pub(crate) fn redact_preview_panel(
             .or_else(|| rows.with(|list| list.last().map(|r| r.id)));
         let extra = seq_builder.redact_fields.get();
         let opts =
-            share::RedactOptions::new(true, &extra).with_strict(seq_builder.redact_strict.get());
+            redact::RedactOptions::new(true, &extra).with_strict(seq_builder.redact_strict.get());
         let Some(id) = flow_id else {
             return (
                 None,
                 String::new(),
                 String::new(),
-                share::RedactReport::default(),
+                redact::RedactReport::default(),
             );
         };
         let fallback_id = rows.with(|list| list.last().map(|r| r.id));
@@ -63,10 +63,10 @@ pub(crate) fn redact_preview_panel(
                 None,
                 String::new(),
                 String::new(),
-                share::RedactReport::default(),
+                redact::RedactReport::default(),
             );
         };
-        let (before, after, report) = share::format_redact_preview(&flow, &opts, zh);
+        let (before, after, report) = redact::format_redact_preview(&flow, &opts, zh);
         (
             Some((flow.id, flow.method, flow.url)),
             before,

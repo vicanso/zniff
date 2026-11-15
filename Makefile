@@ -22,7 +22,7 @@ help:
 		'debug    dev with RUST_LOG=debug' \
 		'run      same as dev' \
 		'web      shared UI at http://127.0.0.1:8080, capture stays closed' \
-		'web-ui   rebuild the shared page with nsh 0.5' \
+		'web-ui   rebuild the shared page with nsh $(NSH_VERSION)' \
 		'fmt      cargo fmt' \
 		'lint     clippy, warnings denied' \
 		'check    type-check every target (plus wasm32 when installed)' \
@@ -57,40 +57,31 @@ run: dev
 # capture port stays closed until the page starts it. The server captures
 # only clients that set this process as their HTTP proxy. Open
 # http://127.0.0.1:8080. The page is the shared App in app/.nsh/web.
-# `make web-ui` rebuilds that directory with nsh 0.5. Extra flags go in
-# ARGS, for example make web ARGS="--web-port 8090".
+# `make web-ui` rebuilds that directory with nsh $(NSH_VERSION). Extra flags
+# go in ARGS, for example make web ARGS="--web-port 8090".
+NSH_VERSION := 0.5.1
 WEB_DIR := $(CURDIR)/app/.nsh/web
-NSH_05 := $(shell if [ -x /tmp/nsh-0.5/nsh/bin/nsh ]; then printf '%s' /tmp/nsh-0.5/nsh/bin/nsh; elif command -v nsh >/dev/null 2>&1; then command -v nsh; fi)
+NSH_BIN ?= $(shell \
+	if [ -x "$(HOME)/.nsh/v$(NSH_VERSION)/nsh/bin/nsh" ]; then printf '%s' "$(HOME)/.nsh/v$(NSH_VERSION)/nsh/bin/nsh"; \
+	elif [ -x "/tmp/nsh-$(NSH_VERSION)/nsh/bin/nsh" ]; then printf '%s' "/tmp/nsh-$(NSH_VERSION)/nsh/bin/nsh"; \
+	elif command -v nsh >/dev/null 2>&1; then command -v nsh; \
+	fi)
 
 web-ui:
-	@test -n "$(NSH_05)" || { echo "需要 nsh 0.5 才能打包共用界面"; exit 1; }
-	@case "$$($(NSH_05) --version 2>/dev/null)" in \
-		*0.5*) ;; \
-		*) echo "nsh 必须是 0.5，当前是 $$($(NSH_05) --version)"; exit 1 ;; \
+	@test -n "$(NSH_BIN)" || { echo "需要 nsh $(NSH_VERSION) 才能打包共用界面"; exit 1; }
+	@case "$$($(NSH_BIN) --version 2>/dev/null)" in \
+		*$(NSH_VERSION)*) ;; \
+		*) echo "nsh 必须是 $(NSH_VERSION)，当前是 $$($(NSH_BIN) --version 2>/dev/null || printf '<none>')"; exit 1 ;; \
 	esac
 	@llvm=""; if [ -d /opt/homebrew/opt/llvm/bin ]; then llvm="/opt/homebrew/opt/llvm/bin:"; fi; \
-		PATH="$$llvm$$PATH" $(NSH_05) package --target web $(CURDIR)/app -o $(CURDIR)/app/.nsh/web-pkg
+		PATH="$$llvm$$PATH" $(NSH_BIN) package --target web $(CURDIR)/app -o $(CURDIR)/app/.nsh/web-pkg
 	rm -rf $(WEB_DIR)
 	mv $(CURDIR)/app/.nsh/web-pkg/zniff $(WEB_DIR)
-	@if command -v wasm-opt >/dev/null 2>&1; then \
-		wflags="--enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue --enable-simd --enable-gc --enable-tail-call --enable-extended-const"; \
-		if wasm-opt --help | grep -q -- '--enable-bulk-memory-opt'; then \
-			wflags="$$wflags --enable-bulk-memory-opt"; \
-		fi; \
-		for w in $(WEB_DIR)/nsh.*.wasm; do \
-			[ -f "$$w" ] || continue; \
-			wasm-opt -Oz $$wflags "$$w" -o "$$w.opt" && mv "$$w.opt" "$$w"; \
-			gzip -9 -c "$$w" > "$$w.gz"; \
-			if command -v brotli >/dev/null 2>&1; then \
-				brotli -f -q 11 -o "$$w.br" "$$w"; \
-			else \
-				rm -f "$$w.br"; \
-			fi; \
-		done; \
-	fi
+	rm -rf $(CURDIR)/app/.nsh/web-pkg
+	sh $(CURDIR)/scripts/postprocess-web.sh $(WEB_DIR) $(CURDIR)/app/assets/fonts
 
 web:
-	@if [ ! -f $(WEB_DIR)/index.html ] || find $(CURDIR)/app/src $(CURDIR)/app/assets $(CURDIR)/app/build.rs $(CURDIR)/app/Cargo.toml -newer $(WEB_DIR)/index.html -print -quit 2>/dev/null | grep -q .; then \
+	@if [ ! -f $(WEB_DIR)/index.html ] || find $(CURDIR)/app/src $(CURDIR)/app/assets $(CURDIR)/app/build.rs $(CURDIR)/app/Cargo.toml $(CURDIR)/app/nsh.json -newer $(WEB_DIR)/index.html -print -quit 2>/dev/null | grep -q .; then \
 		$(MAKE) web-ui; \
 	fi
 	ZNIFF_DEV=1 ZNIFF_WEB_ROOT=$(WEB_DIR) $(CARGO) run $(CARGO_FLAGS) -- --web $(ARGS)
@@ -111,7 +102,7 @@ check: check-wasm
 
 check-wasm:
 	@if [ -d "$$(rustc --print target-libdir --target wasm32-unknown-unknown 2>/dev/null)" ]; then \
-		RUSTFLAGS="-D warnings" $(CARGO) check $(CARGO_FLAGS) --lib --target wasm32-unknown-unknown $(ARGS); \
+		RUSTFLAGS="-D warnings" $(CARGO) check $(CARGO_FLAGS) --lib --no-default-features --target wasm32-unknown-unknown $(ARGS); \
 	fi
 
 test:

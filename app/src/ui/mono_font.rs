@@ -2,13 +2,14 @@
 //!
 //! The NL cut has no ligatures, so `!=`, `->` and `==` stay one column per
 //! character in headers, JSON and hex. The four faces cover the weights the
-//! UI draws mono text in (regular, medium, semibold, bold). `build.rs`
-//! zlib-compresses them into `OUT_DIR` (~404 KB instead of ~838 KB, skipped on
-//! headless `--no-default-features` server builds); at start each face is
-//! inflated into a temporary `Vec<u8>`, handed to `register_font`, and freed.
+//! UI draws mono text in (regular, medium, semibold, bold). Native desktop
+//! builds inflate zlib-compressed faces embedded by `build.rs`; `wasm32`
+//! builds lazily fetch hashed `fonts/*.ttf` assets when bundled mode is active.
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::io::Read;
 
+#[cfg(not(target_arch = "wasm32"))]
 use flate2::read::ZlibDecoder;
 
 #[allow(unused_imports)]
@@ -16,7 +17,7 @@ use super::*;
 
 /// Zlib-compressed JetBrains Mono NL 2.304 faces built by `build.rs`
 /// (SIL Open Font License 1.1, `assets/fonts/OFL.txt`).
-#[cfg(any(feature = "desktop", target_arch = "wasm32"))]
+#[cfg(all(feature = "desktop", not(target_arch = "wasm32")))]
 const BUNDLED_FACES_ZZ: [&[u8]; 4] = [
     include_bytes!(concat!(env!("OUT_DIR"), "/JetBrainsMonoNL-Regular.ttf.zz")),
     include_bytes!(concat!(env!("OUT_DIR"), "/JetBrainsMonoNL-Medium.ttf.zz")),
@@ -24,9 +25,18 @@ const BUNDLED_FACES_ZZ: [&[u8]; 4] = [
     include_bytes!(concat!(env!("OUT_DIR"), "/JetBrainsMonoNL-Bold.ttf.zz")),
 ];
 
-#[cfg(not(any(feature = "desktop", target_arch = "wasm32")))]
+#[cfg(all(not(feature = "desktop"), not(target_arch = "wasm32")))]
 const BUNDLED_FACES_ZZ: [&[u8]; 0] = [];
 
+#[cfg(target_arch = "wasm32")]
+const WEB_FONT_REL_PATHS: [&str; 4] = [
+    env!("ZNIFF_MONO_REGULAR"),
+    env!("ZNIFF_MONO_MEDIUM"),
+    env!("ZNIFF_MONO_SEMIBOLD"),
+    env!("ZNIFF_MONO_BOLD"),
+];
+
+#[cfg(not(target_arch = "wasm32"))]
 fn inflate_face(compressed: &[u8]) -> std::io::Result<Vec<u8>> {
     let mut decoder = ZlibDecoder::new(compressed);
     let mut out = Vec::with_capacity(compressed.len() * 2);
@@ -51,6 +61,7 @@ pub(crate) fn provide_mono_font(system: bool) -> MonoFont {
         bundled: signal(None),
     };
     provide_context(font);
+    #[cfg(not(target_arch = "wasm32"))]
     spawn_detached(async move {
         let mut family = None;
         for compressed in BUNDLED_FACES_ZZ {
@@ -70,6 +81,45 @@ pub(crate) fn provide_mono_font(system: bool) -> MonoFont {
         }
         font.bundled.set(family.map(SharedString::from));
     });
+    #[cfg(target_arch = "wasm32")]
+    {
+        let loading = Rc::new(Cell::new(false));
+        let loading_eff = Rc::clone(&loading);
+        effect(move || {
+            if font.system.get() || font.bundled.get().is_some() || loading_eff.get() {
+                return;
+            }
+            loading_eff.set(true);
+            let loading_task = Rc::clone(&loading_eff);
+            spawn_detached(async move {
+                let mut family = None;
+                for rel in WEB_FONT_REL_PATHS {
+                    let resp = match fetch(HttpRequest::get(rel)).await {
+                        Ok(resp) => resp,
+                        Err(err) => {
+                            log::warn!("加载内置等宽字体失败 ({rel}): {err}");
+                            continue;
+                        }
+                    };
+                    if !resp.ok() {
+                        log::warn!("加载内置等宽字体失败 ({rel}): HTTP {}", resp.status());
+                        continue;
+                    }
+                    match register_font(resp.body).await {
+                        Ok(name) => {
+                            family.get_or_insert(name);
+                        }
+                        Err(err) => log::warn!("注册内置等宽字体失败 ({rel}): {err}"),
+                    }
+                }
+                if let Some(name) = family {
+                    font.bundled.set(Some(SharedString::from(name)));
+                } else {
+                    loading_task.set(false);
+                }
+            });
+        });
+    }
     // Skips the first run when nothing would change, so a system-font start
     // does not replace the tokens it was given.
     let applied = Rc::new(Cell::new(false));
@@ -150,7 +200,7 @@ pub(crate) fn menu_mono_font_row(controls: Arc<Controls>) -> impl IntoElement {
 mod tests {
     use super::*;
 
-    #[cfg(any(feature = "desktop", target_arch = "wasm32"))]
+    #[cfg(all(feature = "desktop", not(target_arch = "wasm32")))]
     #[test]
     fn bundled_faces_decompress_to_truetype() {
         for compressed in BUNDLED_FACES_ZZ {
@@ -165,6 +215,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn inflate_rejects_corrupt_stream() {
         assert!(inflate_face(b"not-zlib").is_err());

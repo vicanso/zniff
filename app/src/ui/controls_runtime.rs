@@ -125,7 +125,7 @@ pub(crate) fn current_config_error(controls: &Controls) -> Option<String> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn redact_options(controls: &Controls) -> share::RedactOptions {
+pub(crate) fn redact_options(controls: &Controls) -> redact::RedactOptions {
     let enabled = lock_bool(&controls.redact_export);
     let strict = lock_bool(&controls.redact_strict);
     let extra = controls
@@ -133,7 +133,7 @@ pub(crate) fn redact_options(controls: &Controls) -> share::RedactOptions {
         .lock()
         .unwrap_or_else(|err| err.into_inner())
         .clone();
-    share::RedactOptions::new(enabled, &extra).with_strict(strict)
+    redact::RedactOptions::new(enabled, &extra).with_strict(strict)
 }
 
 pub(crate) fn lock_update_state(controls: &Controls) -> UpdateState {
