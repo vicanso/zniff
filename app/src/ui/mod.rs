@@ -45,13 +45,13 @@ pub(crate) use crate::icon::{Glyph, glyph, glyph_px};
 pub(crate) use crate::proxy::{BreakDecision, BreakSide, Capture, Hub, ReplayOverride};
 #[allow(unused_imports)]
 pub(crate) use crate::session::Direction;
-#[allow(unused_imports)]
-pub(crate) use crate::{
-    bypass, ca, clock, config, har, i18n, icon, present, proxy, rules, session, share, ws,
-};
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(unused_imports)]
-pub(crate) use crate::{client_hello, decompress, mcp, relay, sysproxy, updater, web};
+pub(crate) use crate::{
+    bypass, client_hello, decompress, har, mcp, relay, share, sysproxy, updater, web, ws,
+};
+#[allow(unused_imports)]
+pub(crate) use crate::{ca, clock, config, i18n, icon, present, proxy, redact, rules, session};
 
 /// A desktop-only child. Native stays `parent.child(child)`. The web build
 /// drops the child, so system proxy, certificates, and updates are not shown.

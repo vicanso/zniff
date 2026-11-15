@@ -456,7 +456,7 @@ pub(crate) fn begin_share(
         set_status(controls, StatusMsg::ShareNeedsCapture);
         return;
     }
-    let redact_opts = share::RedactOptions::new(
+    let redact_opts = redact::RedactOptions::new(
         lock_bool(&controls.redact_export),
         &lock_string(&controls.redact_fields),
     )

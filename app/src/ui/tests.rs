@@ -2033,16 +2033,16 @@ async fn nested_scroll_widgets_emit_scroll_content_under_content_culling() {
 
     assert_eq!(super::editor_box_height(&sample_json, 0.0), 286.0);
 
-    // 1. Reproduce the unguarded bug: `Layer::Paint` above `ed.vscroll` defaults to
-    //    `Auto` because `MountItem::ViewProps { pointer_events: None }` is never emitted!
+    // 1. Verify nsh 0.5.1+ upstream fix: even a raw editor inside a culled scroll
+    //    now emits `MountItem::ViewProps { pointer_events: None }` on `Layer::Paint`.
     let unguarded = drive_select_flow::<UnguardedRawEditorHarness>();
     let unguarded_editors = find_editor_paint_overlays(&unguarded);
     assert_eq!(unguarded_editors.len(), 1);
     let (_, _, unguarded_paint_id) = unguarded_editors[0];
-    assert_ne!(
+    assert_eq!(
         unguarded.pointer_events.get(&unguarded_paint_id),
         Some(&PointerEvents::None),
-        "unguarded editor inside culled scroll omits ViewProps(pointer_events: None) on Layer::Paint"
+        "nsh 0.5.1+ emits ViewProps(pointer_events: None) on Layer::Paint for raw editor inside culled scroll"
     );
 
     // 2. Verify our guarded setup: EVERY editor's `Layer::Paint` overlay receives

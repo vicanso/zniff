@@ -2049,7 +2049,10 @@ fn static_cache_control(rel: &str) -> &'static str {
     let segments: Vec<&str> = trimmed.split('.').collect();
     if segments.len() >= 3
         && let Some(ext) = segments.last().copied()
-        && matches!(ext, "wasm" | "js" | "css" | "bin" | "ttf" | "woff2")
+        && matches!(
+            ext,
+            "wasm" | "js" | "css" | "bin" | "ttf" | "woff2" | "png" | "svg" | "ico"
+        )
         && is_hashed_hex(segments[segments.len() - 2])
     {
         return "public, max-age=31536000, immutable";
@@ -2071,8 +2074,11 @@ fn static_mime(path: &Path) -> &'static str {
         "json" => "application/json",
         "webmanifest" => "application/manifest+json",
         "wasm" => "application/wasm",
+        "ttf" => "font/ttf",
+        "woff2" => "font/woff2",
         "svg" => "image/svg+xml",
         "png" => "image/png",
+        "ico" => "image/x-icon",
         _ => "application/octet-stream",
     }
 }
@@ -3964,6 +3970,35 @@ mod tests {
 
         drop(server);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn static_cache_and_mime_cover_hashed_fonts_and_icons() {
+        assert_eq!(
+            static_cache_control("fonts/JetBrainsMonoNL-Regular.a1b2c3d4e5.ttf"),
+            "public, max-age=31536000, immutable"
+        );
+        assert_eq!(
+            static_cache_control("fonts/JetBrainsMonoNL-Regular.a1b2c3d4e5.ttf.br"),
+            "public, max-age=31536000, immutable"
+        );
+        assert_eq!(
+            static_cache_control("icons/192.a1b2c3d4e5.png"),
+            "public, max-age=31536000, immutable"
+        );
+        assert_eq!(static_cache_control("manifest.webmanifest"), "no-store");
+        assert_eq!(static_cache_control("index.html"), "no-store");
+
+        assert_eq!(
+            static_mime(Path::new("fonts/JetBrainsMonoNL-Regular.a1b2c3d4e5.ttf")),
+            "font/ttf"
+        );
+        assert_eq!(static_mime(Path::new("font.woff2")), "font/woff2");
+        assert_eq!(static_mime(Path::new("favicon.ico")), "image/x-icon");
+        assert_eq!(
+            static_mime(Path::new("icons/192.a1b2c3d4e5.png")),
+            "image/png"
+        );
     }
 
     fn reserve_port() -> u16 {
