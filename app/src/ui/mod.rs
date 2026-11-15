@@ -70,6 +70,7 @@ macro_rules! desktop_child {
     }};
 }
 
+mod about_modal;
 mod app_shell;
 mod break_bar;
 mod cli_state;
@@ -110,6 +111,7 @@ mod theme;
 mod toolbar;
 mod web_poll;
 
+pub(crate) use self::about_modal::*;
 pub use self::app_shell::App;
 pub(crate) use self::break_bar::*;
 pub use self::cli_state::initial_window_size;

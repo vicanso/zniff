@@ -252,6 +252,7 @@ pub(crate) struct ProfileSignals {
     pub(crate) list_width: Signal<f32>,
     pub(crate) panel_open: Signal<bool>,
     pub(crate) machine_settings_open: Signal<bool>,
+    pub(crate) about_open: Signal<bool>,
     pub(crate) deselect_rev: Signal<u64>,
 }
 

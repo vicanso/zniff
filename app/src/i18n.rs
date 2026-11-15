@@ -191,6 +191,7 @@ pub enum StatusMsg {
     IosSimNoneBooted,
     IosSimFailed(String),
     CopiedLinuxCaCmd(String),
+    CopiedSystemInfo,
 }
 
 fn port_in_use(err: &str) -> bool {
@@ -627,6 +628,7 @@ impl StatusMsg {
                 Lang::Zh => format!("已复制系统证书安装命令 · {cmd}"),
                 Lang::En => format!("Copied system CA install command · {cmd}"),
             },
+            Self::CopiedSystemInfo => t(lang, "已复制系统与环境信息", "Copied system info").into(),
         }
     }
 
@@ -667,6 +669,7 @@ impl StatusMsg {
             | Self::IosSimInstalled { .. }
             | Self::ConfigReset { .. }
             | Self::CopiedConfigPath(_)
+            | Self::CopiedSystemInfo
             | Self::UpdateUpToDate(_)
             | Self::UpdateAvailable(_) => Some(false),
             Self::ExportFailed(_)
@@ -732,6 +735,7 @@ impl StatusMsg {
             | Self::SequenceGenerated { .. }
             | Self::CopiedLinuxCaCmd(_)
             | Self::CopiedConfigPath(_)
+            | Self::CopiedSystemInfo
             | Self::Shared { .. }
             | Self::RelayConnected(_) => t(lang, "已复制到剪贴板", "Copied to Clipboard"),
             Self::ConfigReset { .. } => t(lang, "配置已重置", "Config Reset"),

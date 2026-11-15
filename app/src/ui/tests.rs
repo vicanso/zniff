@@ -2926,6 +2926,7 @@ fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
             list_width: signal(660.0),
             panel_open: signal(false),
             machine_settings_open: signal(false),
+            about_open: signal(false),
             deselect_rev: signal(0),
         };
         let compose = Compose {
@@ -3235,4 +3236,19 @@ fn update_pill_tooltip_shows_release_notes_and_truncates_cleanly() {
     );
     assert!(full.contains("- item 1"));
     assert!(full.contains("- item 25"));
+}
+
+#[test]
+fn about_modal_copyright_and_system_info_include_expected_fields() {
+    assert_eq!(
+        super::copyright_notice("2026"),
+        "© 2026 Tree xie. All rights reserved."
+    );
+    assert_eq!(
+        super::copyright_notice("2027"),
+        "© 2026 - 2027 Tree xie. All rights reserved."
+    );
+    assert!(!env!("ZNIFF_GIT_SHA").is_empty());
+    assert_eq!(env!("ZNIFF_BUILD_YEAR").len(), 4);
+    assert!(super::about_logo_uri().starts_with("data:image/png;base64,"));
 }

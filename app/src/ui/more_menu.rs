@@ -152,6 +152,15 @@ pub(crate) fn more_menu(
         ));
     let items = desktop_child!(items, menu_rule());
     let items = desktop_child!(items, update_menu_section(update_state, import_controls));
+    let items = items.child(menu_rule()).child(menu_action_meta(
+        Glyph::Badge,
+        tr("关于 zniff", "About zniff"),
+        || SharedString::from(format!("v{}", env!("CARGO_PKG_VERSION"))),
+        move || {
+            open.set(false);
+            profiles.about_open.set(true);
+        },
+    ));
     view()
         .w(px(288.0))
         .max_w(move || px((window().width.0 - 16.0).max(180.0)))

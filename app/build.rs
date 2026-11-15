@@ -10,6 +10,7 @@ use std::env;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
+use std::process::Command;
 
 use flate2::Compression;
 use flate2::write::ZlibEncoder;
@@ -21,8 +22,45 @@ const FACES: [(&str, &str); 4] = [
     ("JetBrainsMonoNL-Bold.ttf", "ZNIFF_MONO_BOLD"),
 ];
 
+fn emit_git_metadata() {
+    let manifest_dir =
+        PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+    if let Some(repo_root) = manifest_dir.parent() {
+        let git_head = repo_root.join(".git/HEAD");
+        if git_head.exists() {
+            println!("cargo:rerun-if-changed={}", git_head.display());
+        }
+    }
+    let sha = Command::new("git")
+        .args(["rev-parse", "--short=8", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".to_string());
+    println!("cargo:rustc-env=ZNIFF_GIT_SHA={sha}");
+
+    let year = Command::new("git")
+        .args(["log", "-1", "--format=%cs"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .trim()
+                .split('-')
+                .next()
+                .map(str::to_string)
+        })
+        .filter(|y| y.len() == 4 && y.chars().all(|c| c.is_ascii_digit()))
+        .unwrap_or_else(|| "2026".to_string());
+    println!("cargo:rustc-env=ZNIFF_BUILD_YEAR={year}");
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    emit_git_metadata();
     for (name, _) in FACES {
         println!("cargo:rerun-if-changed=assets/fonts/{name}");
     }
