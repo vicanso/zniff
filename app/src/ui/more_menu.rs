@@ -170,6 +170,157 @@ pub(crate) fn more_menu(
         )
 }
 
+pub(crate) fn format_update_header(st: &UpdateState, lang: Lang) -> String {
+    match &st.phase {
+        UpdatePhase::Downloading {
+            version,
+            received,
+            total,
+        } => {
+            if *total > 0 {
+                format!(
+                    "{} {version} ({} / {})",
+                    t(lang, "正在下载", "Downloading"),
+                    format_bytes(*received as usize),
+                    format_bytes(*total as usize),
+                )
+            } else {
+                format!(
+                    "{} {version} ({})",
+                    t(lang, "正在下载", "Downloading"),
+                    format_bytes(*received as usize),
+                )
+            }
+        }
+        UpdatePhase::Installing { version } => {
+            format!(
+                "{} {version}…",
+                t(lang, "正在安装更新", "Installing update")
+            )
+        }
+        UpdatePhase::ReadyToRestart { version } => {
+            format!(
+                "{} {version}",
+                t(
+                    lang,
+                    "更新已就绪，点击立即重启",
+                    "Update ready, click to restart"
+                )
+            )
+        }
+        UpdatePhase::OpenedInstaller { version } => {
+            format!(
+                "{} {version}",
+                t(
+                    lang,
+                    "已打开安装包，点击退出以完成安装",
+                    "Installer opened, click to quit and finish"
+                )
+            )
+        }
+        UpdatePhase::Idle | UpdatePhase::Checking => {
+            let ver = st.nudge.as_deref().unwrap_or_default();
+            if ver.is_empty() {
+                t(lang, "检查更新", "Check for updates").to_string()
+            } else {
+                format!(
+                    "{} {ver} · {}",
+                    t(lang, "发现新版本", "New version"),
+                    t(lang, "点击更新并自动重启", "Click to update and restart")
+                )
+            }
+        }
+    }
+}
+
+pub(crate) fn format_update_notes_markdown(st: &UpdateState) -> Option<String> {
+    st.notes
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+#[cfg(test)]
+pub(crate) fn format_update_tooltip(st: &UpdateState, lang: Lang) -> String {
+    let header = format_update_header(st, lang);
+    match format_update_notes_markdown(st) {
+        Some(body) => format!("{header}\n\n{body}"),
+        None => header,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn update_hover_card(
+    trigger: impl IntoElement,
+    placement: Placement,
+    align: Align,
+    update_state: Signal<UpdateState>,
+    langs: Signal<Option<Lang>>,
+) -> impl IntoElement {
+    nsh_base::hover_card()
+        .open_delay(250.0)
+        .close_delay(250.0)
+        .placement(placement)
+        .align(align)
+        .offset(px(6.0))
+        .margin(px(10.0))
+        .trigger(trigger)
+        .child(
+            view()
+                .max_w(px(460.0))
+                .px_3()
+                .py_2p5()
+                .gap_2()
+                .rounded(px(8.0))
+                .bg(bg_card())
+                .border_1()
+                .border_color(border_strong())
+                .shadow_lg()
+                .child(
+                    text(move || format_update_header(&update_state.get(), ui_lang(langs)))
+                        .text_size(px(12.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(fg_primary()),
+                )
+                .child(when(
+                    move || {
+                        update_state
+                            .with(|st| st.notes.as_deref().is_some_and(|s| !s.trim().is_empty()))
+                    },
+                    move || {
+                        view()
+                            .w(px(436.0))
+                            .max_h(px(360.0))
+                            .pt_2()
+                            .border_t_1()
+                            .border_t_color(border_subtle())
+                            .child(
+                                scroll().w_full().max_h(px(348.0)).pr_2().child(
+                                    nsh_base::text_view::text_view()
+                                        .document(move || {
+                                            format_update_notes_markdown(&update_state.get()).map(
+                                                |md| {
+                                                    nsh_base::text_view::Parser::new().markdown(&md)
+                                                },
+                                            )
+                                        })
+                                        .selectable(true)
+                                        .render_image(|img: &nsh_base::text_view::Image| {
+                                            let label = if img.alt.is_empty() {
+                                                format!("[img: {}]", img.src)
+                                            } else {
+                                                format!("[img: {}]", img.alt)
+                                            };
+                                            mono(label).text_size(px(11.0)).text_color(fg_muted())
+                                        }),
+                                ),
+                            )
+                    },
+                )),
+        )
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn toolbar_update_pill(
     update_state: Signal<UpdateState>,
@@ -180,7 +331,7 @@ pub(crate) fn toolbar_update_pill(
         move || {
             let controls_press = controls.clone();
             let langs = ui_langs();
-            view()
+            let pill = view()
                 .window_drag(false)
                 .h(px(CONTROL_H))
                 .px_2p5()
@@ -268,13 +419,14 @@ pub(crate) fn toolbar_update_pill(
                             }
                             UpdatePhase::Idle | UpdatePhase::Checking => {
                                 let ver = st.nudge.as_deref().unwrap_or_default();
-                                format!("{} {ver}", t(lang, "升级", "Upgrade"))
+                                format!("{} {ver}", t(lang, "更新并重启", "Update & restart"))
                             }
                         };
                         SharedString::from(label)
                     })
                     .text_color(accent_blue_text()),
-                )
+                );
+            update_hover_card(pill, Placement::Bottom, Align::End, update_state, langs)
         },
     )
 }
@@ -303,24 +455,30 @@ pub(crate) fn update_menu_section(
                 let langs = ui_langs();
                 view()
                     .gap_0p5()
-                    .child(menu_action_meta(
-                        Glyph::Download,
-                        move || {
-                            let ver = update_state.get().nudge.unwrap_or_default();
-                            SharedString::from(format!(
-                                "{} {ver}",
-                                t(ui_lang(langs), "升级到", "Upgrade to")
-                            ))
-                        },
-                        move || {
-                            let ver = update_state.get().nudge.unwrap_or_default();
-                            SharedString::from(format!("v{} → {ver}", updater::version()))
-                        },
-                        move || {
-                            if let Some(ver) = update_state.get().nudge {
-                                start_upgrade(controls_up.clone(), ver);
-                            }
-                        },
+                    .child(update_hover_card(
+                        menu_action_meta(
+                            Glyph::Download,
+                            move || {
+                                let ver = update_state.get().nudge.unwrap_or_default();
+                                SharedString::from(format!(
+                                    "{} {ver}",
+                                    t(ui_lang(langs), "更新并重启", "Update & restart")
+                                ))
+                            },
+                            move || {
+                                let ver = update_state.get().nudge.unwrap_or_default();
+                                SharedString::from(format!("v{} → {ver}", updater::version()))
+                            },
+                            move || {
+                                if let Some(ver) = update_state.get().nudge {
+                                    start_upgrade(controls_up.clone(), ver);
+                                }
+                            },
+                        ),
+                        Placement::Left,
+                        Align::Start,
+                        update_state,
+                        langs,
                     ))
                     .child(menu_action_meta(
                         Glyph::Stop,
