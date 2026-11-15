@@ -18,16 +18,34 @@ pub(crate) fn publish_detail(
         shown.phase.set(Phase::Gone);
         return;
     };
-    let (diff_old, diff_new) = match baseline {
-        Some(base) if base != id => hub
-            .with_session(|session| session.hydrated(base))
-            .map(|base| {
-                (
-                    present::flow_snapshot(&base, lang),
-                    present::flow_snapshot(&flow, lang),
-                )
-            })
-            .unwrap_or_default(),
+    let unloaded = flow.detail_unloaded();
+    let pending = flow.detail_pending();
+    let req_headers_loading = unloaded || (pending && flow.request_headers.is_empty());
+    let res_headers_loading = pending
+        && flow.response_headers.is_empty()
+        && (flow.status.is_some() || flow.response_at.is_some() || flow.res_bytes() > 0);
+    let req_body_loading = pending
+        && flow.req_bytes() > 0
+        && flow.request_body.is_empty()
+        && flow.request_expired.is_none()
+        && flow.request_encoding_error.is_none();
+    let res_body_loading = pending
+        && flow.res_bytes() > 0
+        && flow.response_body.is_empty()
+        && flow.response_expired.is_none()
+        && flow.response_encoding_error.is_none();
+    let messages_loading = unloaded && flow.protocol == session::Protocol::WebSocket;
+    let base_state = baseline
+        .filter(|&base| base != id)
+        .and_then(|base| hub.with_session(|session| session.hydrated(base)));
+    let diff_loading = base_state
+        .as_ref()
+        .is_some_and(|base| unloaded || base.detail_unloaded());
+    let (diff_old, diff_new) = match base_state {
+        Some(base) if !diff_loading => (
+            present::flow_snapshot(&base, lang),
+            present::flow_snapshot(&flow, lang),
+        ),
         _ => (String::new(), String::new()),
     };
     let diff = if diff_old.is_empty() {
@@ -234,6 +252,12 @@ pub(crate) fn publish_detail(
     shown.diff.set(diff);
     shown.diff_old.set(diff_old);
     shown.diff_new.set(diff_new);
+    shown.req_headers_loading.set(req_headers_loading);
+    shown.res_headers_loading.set(res_headers_loading);
+    shown.req_body_loading.set(req_body_loading);
+    shown.res_body_loading.set(res_body_loading);
+    shown.messages_loading.set(messages_loading);
+    shown.diff_loading.set(diff_loading);
     shown.pinned.set(flow.pinned);
     shown.relay.set(
         flow.relay_source

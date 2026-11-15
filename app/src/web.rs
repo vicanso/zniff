@@ -28,6 +28,7 @@ const BODY_CAP: usize = 8 * 1024;
 const HUB_BODY_CAP: usize = 1024 * 1024;
 const LIST_CAP: usize = 400;
 const PREVIEW_CAP: usize = 256 * 1024;
+const MAX_STATE_WAIT_MS: u64 = 8_000;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 const KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(15);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -862,6 +863,43 @@ async fn route(
         }
         if path == "/api/state" {
             let lite = matches!(query_value(&head.target, "lite").as_str(), "1" | "true");
+            let since_gen =
+                query_value_opt(&head.target, "since_gen").and_then(|raw| raw.parse::<u64>().ok());
+            let since_rev =
+                query_value_opt(&head.target, "since_rev").and_then(|raw| raw.parse::<u64>().ok());
+            let wait_ms = query_value_opt(&head.target, "wait_ms")
+                .and_then(|raw| raw.parse::<u64>().ok())
+                .unwrap_or(if since_gen.is_some() && since_rev.is_some() {
+                    MAX_STATE_WAIT_MS
+                } else {
+                    0
+                })
+                .min(MAX_STATE_WAIT_MS);
+            if method.eq_ignore_ascii_case("GET")
+                && let (Some(sg), Some(sr)) = (since_gen, since_rev)
+                && wait_ms > 0
+            {
+                let mut rx = {
+                    let guard = lock(slot);
+                    guard.hub.subscribe_state()
+                };
+                let _ = tokio::time::timeout(Duration::from_millis(wait_ms), async {
+                    loop {
+                        {
+                            let guard = lock(slot);
+                            let cur_gen = guard.hub.generation();
+                            let cur_rev = guard.hub.with_session(|s| s.rev());
+                            if cur_gen != sg || cur_rev != sr {
+                                break;
+                            }
+                        }
+                        if rx.changed().await.is_err() {
+                            break;
+                        }
+                    }
+                })
+                .await;
+            }
             let slot = lock(slot);
             let value = if lite {
                 state_lite_value(&slot)
@@ -999,6 +1037,7 @@ fn set_capture(
     if on {
         if slot.prefs.no_capture {
             slot.error = "这个进程只做中继 (--no-capture)，不能开始抓包".to_string();
+            slot.hub.touch();
             return (403, state_of(slot));
         }
         if slot.capture.is_some() {
@@ -1008,6 +1047,7 @@ fn set_capture(
         }
         if let Some(0) = port {
             slot.error = "端口无效".to_string();
+            slot.hub.touch();
             return (400, state_of(slot));
         }
         if let Some(port) = port {
@@ -1025,10 +1065,12 @@ fn set_capture(
             Ok(capture) => {
                 slot.capture = Some(capture);
                 slot.error.clear();
+                slot.hub.touch();
                 (200, state_of(slot))
             }
             Err(err) => {
                 slot.error = format!("{err:#}");
+                slot.hub.touch();
                 (409, state_of(slot))
             }
         }
@@ -1041,6 +1083,7 @@ fn set_capture(
         }
         slot.hub.end_share();
         slot.error.clear();
+        slot.hub.touch();
         (200, state_of(slot))
     }
 }
@@ -1208,7 +1251,7 @@ fn flow_summary(flow: &Flow) -> Value {
         "protocol": flow.protocol.label(),
         "client_ip": flow.client_ip,
         "conn_info": conn_info_json(&flow.conn_info),
-        "response_bytes": flow.response_bytes,
+        "response_bytes": flow.res_bytes() as u64,
         "relay": flow.relay_source.as_deref().map(session::relay_short).unwrap_or_default(),
         "rev": flow.rev,
         "relay_source": flow.relay_source,
@@ -1219,7 +1262,7 @@ fn flow_summary(flow: &Flow) -> Value {
         "started_ms": unix_millis(flow.started),
         "response_ms": flow.response_at.map(unix_millis),
         "finished_ms": flow.finished_at.map(unix_millis),
-        "request_bytes": flow.request_bytes,
+        "request_bytes": flow.req_bytes() as u64,
     })
 }
 
@@ -2387,6 +2430,20 @@ fn sync_hub_op(slot: &mut Slot, op: &str, value: &Value) -> Reply {
             slot.hub.import_har(document);
         }
         _ => return json_reply(400, "Bad Request", &json!({"error": "unknown op"})),
+    }
+    if matches!(
+        op,
+        "set_relay_accept"
+            | "set_relay_token"
+            | "set_relay_url"
+            | "set_filter"
+            | "set_active_profile"
+            | "select_profile"
+            | "delete_profile"
+            | "sync_profiles"
+            | "set_redact"
+    ) {
+        slot.hub.touch();
     }
     let mut body = serde_json::to_value(state_value(slot)).unwrap_or_else(|_| json!({}));
     if let Some(err) = save_error
@@ -4046,5 +4103,86 @@ mod tests {
             .split_once("\r\n\r\n")
             .map(|(_, body)| body)
             .unwrap_or("")
+    }
+
+    #[tokio::test]
+    async fn web_state_long_poll_waits_when_idle_and_wakes_immediately_on_change() {
+        let dir = std::env::temp_dir().join(format!("zniff-web-longpoll-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+        let server = WebServer::start(
+            "127.0.0.1:0".parse().unwrap(),
+            Arc::clone(&hub),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            reserve_port(),
+        )
+        .unwrap();
+        let addr = server.addr();
+
+        // 1. Seed initial generation and session_rev immediately.
+        let (status, seed_resp) = exchange(
+            addr,
+            "GET /api/state?lite=1 HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert_eq!(status, 200);
+        let seed_json: Value = serde_json::from_str(body_of(&seed_resp)).unwrap();
+        let gen0 = seed_json["generation"].as_u64().unwrap();
+        let rev0 = seed_json["session_rev"].as_u64().unwrap();
+
+        // 2. When unchanged, GET waits roughly wait_ms and returns 200 with unchanged counters.
+        let idle_start = std::time::Instant::now();
+        let (status, idle_resp) = exchange(
+            addr,
+            &format!(
+                "GET /api/state?lite=1&since_gen={gen0}&since_rev={rev0}&wait_ms=140 HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+            ),
+        )
+        .await;
+        let idle_elapsed = idle_start.elapsed();
+        assert_eq!(status, 200);
+        assert!(
+            idle_elapsed >= Duration::from_millis(100),
+            "expected long-poll idle wait >= 100ms, got {idle_elapsed:?}"
+        );
+        let idle_json: Value = serde_json::from_str(body_of(&idle_resp)).unwrap();
+        assert_eq!(idle_json["generation"].as_u64(), Some(gen0));
+        assert_eq!(idle_json["session_rev"].as_u64(), Some(rev0));
+
+        // 3. When state changes while waiting, GET wakes up well before the 5000ms deadline.
+        let wake_hub = Arc::clone(&hub);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            wake_hub.with_session(|session| {
+                session.open(crate::session::FlowDraft {
+                    method: "GET".into(),
+                    url: "http://example.com/wake".into(),
+                    host: "example.com".into(),
+                    path: "/wake".into(),
+                    protocol: crate::session::Protocol::Http11,
+                    request_headers: Vec::new(),
+                });
+            });
+        });
+        let wake_start = std::time::Instant::now();
+        let (status, wake_resp) = exchange(
+            addr,
+            &format!(
+                "GET /api/state?lite=1&since_gen={gen0}&since_rev={rev0}&wait_ms=5000 HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+            ),
+        )
+        .await;
+        let wake_elapsed = wake_start.elapsed();
+        assert_eq!(status, 200);
+        assert!(
+            wake_elapsed < Duration::from_millis(1000),
+            "expected long-poll wakeup well below 1000ms, got {wake_elapsed:?}"
+        );
+        let wake_json: Value = serde_json::from_str(body_of(&wake_resp)).unwrap();
+        assert!(wake_json["session_rev"].as_u64().unwrap() > rev0);
+
+        drop(server);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

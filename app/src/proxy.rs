@@ -382,6 +382,7 @@ type PlainPoolMap = HashMap<(String, u16), Vec<(u64, TcpStream)>>;
 pub struct Hub {
     session: Mutex<Session>,
     generation: AtomicU64,
+    state_tx: watch::Sender<u64>,
     /// Milliseconds since [`body_clock`] of the last streaming UI bump.
     body_touch_ms: AtomicU64,
     pub ca: Arc<Ca>,
@@ -515,9 +516,11 @@ impl Hub {
         let default_client_config = ClientConfig::builder()
             .with_root_certificates(roots.clone())
             .with_no_client_auth();
+        let (state_tx, _) = watch::channel(0_u64);
         Ok(Self {
             session: Mutex::new(Session::default()),
             generation: AtomicU64::new(1),
+            state_tx,
             body_touch_ms: AtomicU64::new(0),
             ca,
             roots,
@@ -1596,12 +1599,26 @@ impl Hub {
     }
 
     pub fn with_session<R>(&self, f: impl FnOnce(&mut Session) -> R) -> R {
-        let mut session = self.session.lock().unwrap_or_else(|err| err.into_inner());
-        f(&mut session)
+        let (out, rev_changed) = {
+            let mut session = self.session.lock().unwrap_or_else(|err| err.into_inner());
+            let before = session.rev();
+            let out = f(&mut session);
+            let after = session.rev();
+            (out, after != before)
+        };
+        if rev_changed {
+            self.state_tx.send_modify(|v| *v = v.wrapping_add(1));
+        }
+        out
     }
 
-    fn touch(&self) {
+    pub fn subscribe_state(&self) -> watch::Receiver<u64> {
+        self.state_tx.subscribe()
+    }
+
+    pub(crate) fn touch(&self) {
         self.generation.fetch_add(1, Ordering::Relaxed);
+        self.state_tx.send_modify(|v| *v = v.wrapping_add(1));
     }
 
     /// At most one list refresh per [`BODY_UI_TOUCH`] while a body is streaming.

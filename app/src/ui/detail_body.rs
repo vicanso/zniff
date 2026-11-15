@@ -19,6 +19,7 @@ pub(crate) fn body_section(
     baseline: Signal<Option<u64>>,
     folded: Signal<u8>,
     bit: u8,
+    loading: Signal<bool>,
 ) -> impl IntoElement {
     let (preview_flag, json, tree_flag, side) = if embed_image {
         (
@@ -42,7 +43,8 @@ pub(crate) fn body_section(
         doc_on() || tree_on() || image_on() || !form.with(Vec::is_empty) || !body.get().is_empty()
     };
     let can_search = move || {
-        !card_folded(folded, bit)
+        !loading.get()
+            && !card_folded(folded, bit)
             && !doc_on()
             && (tree_on() || !form.with(Vec::is_empty) || !body.get().is_empty())
     };
@@ -92,76 +94,89 @@ pub(crate) fn body_section(
                         .child(section_title(tr(zh, en))),
                 )
                 .child(
-                    view()
-                        .flex_row()
-                        .flex_wrap()
-                        .items_center()
-                        .gap_1p5()
-                        .child(when(
-                            move || {
-                                if tree_on() {
-                                    return false;
-                                }
-                                let window = if embed_image {
-                                    shown.response_window.get()
-                                } else {
-                                    shown.request_window.get()
-                                };
-                                window.has_prev() || window.has_more()
-                            },
-                            {
-                                let controls = nav_controls;
+                    when(
+                        move || loading.get(),
+                        || {
+                            view()
+                                .py(px(2.0))
+                                .child(muted_line(tr("加载中…", "Loading…")))
+                        },
+                    )
+                    .otherwise(move || {
+                        let nav_controls = nav_controls.clone();
+                        let switch_controls = switch_controls.clone();
+                        view()
+                            .flex_row()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_1p5()
+                            .child(when(
+                                move || {
+                                    if tree_on() {
+                                        return false;
+                                    }
+                                    let window = if embed_image {
+                                        shown.response_window.get()
+                                    } else {
+                                        shown.request_window.get()
+                                    };
+                                    window.has_prev() || window.has_more()
+                                },
                                 move || {
                                     body_window_nav(
                                         embed_image,
                                         shown,
-                                        controls.clone(),
+                                        nav_controls.clone(),
                                         selected,
                                         baseline,
                                     )
-                                }
-                            },
-                        ))
-                        .child(when(can_search, move || {
-                            let is_paged = move || {
-                                if tree_on() {
-                                    return false;
-                                }
-                                let window = if embed_image {
-                                    shown.response_window.get()
-                                } else {
-                                    shown.request_window.get()
+                                },
+                            ))
+                            .child(when(can_search, move || {
+                                let is_paged = move || {
+                                    if tree_on() {
+                                        return false;
+                                    }
+                                    let window = if embed_image {
+                                        shown.response_window.get()
+                                    } else {
+                                        shown.request_window.get()
+                                    };
+                                    window.has_prev() || window.has_more()
                                 };
-                                window.has_prev() || window.has_more()
-                            };
-                            body_search_box(
-                                search,
-                                body,
-                                hex,
-                                form,
+                                body_search_box(
+                                    search,
+                                    body,
+                                    hex,
+                                    form,
+                                    json,
+                                    tree_flag,
+                                    shown.pane_width,
+                                    is_paged,
+                                )
+                            }))
+                            .child(when(
+                                move || doc.with(Option::is_some),
+                                move || doc_preview_chip(preview_flag),
+                            ))
+                            .child(pretty_switch(
+                                shown,
+                                preview_flag,
                                 json,
                                 tree_flag,
-                                shown.pane_width,
-                                is_paged,
-                            )
-                        }))
-                        .child(when(
-                            move || doc.with(Option::is_some),
-                            move || doc_preview_chip(preview_flag),
-                        ))
-                        .child(pretty_switch(
-                            shown,
-                            preview_flag,
-                            json,
-                            tree_flag,
-                            switch_controls,
-                            selected,
-                            baseline,
-                        )),
+                                switch_controls,
+                                selected,
+                                baseline,
+                            ))
+                    }),
                 ),
         )
         .child(when(
-            move || !card_folded(folded, bit) && !note.get().is_empty(),
+            move || !card_folded(folded, bit) && loading.get(),
+            detail_loading_box,
+        ))
+        .child(when(
+            move || !card_folded(folded, bit) && !loading.get() && !note.get().is_empty(),
             move || {
                 view()
                     .px_3()
@@ -184,7 +199,7 @@ pub(crate) fn body_section(
             },
         ))
         .child(when(
-            move || !card_folded(folded, bit) && doc_on(),
+            move || !card_folded(folded, bit) && !loading.get() && doc_on(),
             move || {
                 let divided = !note.get().is_empty();
                 view()
@@ -204,18 +219,23 @@ pub(crate) fn body_section(
                     )
             },
         ))
-        .child(when(move || !card_folded(folded, bit) && tree_on(), {
-            let tree_controls = tree_controls.clone();
-            move || {
-                let divided = !note.get().is_empty();
-                view()
-                    .border_t(move || if divided { px(1.0) } else { px(0.0) })
-                    .border_t_color(border_subtle())
-                    .child(json_tree_body(json, search, side, tree_controls.clone()))
-            }
-        }))
         .child(when(
-            move || !card_folded(folded, bit) && !doc_on() && !tree_on() && image_on(),
+            move || !card_folded(folded, bit) && !loading.get() && tree_on(),
+            {
+                let tree_controls = tree_controls.clone();
+                move || {
+                    let divided = !note.get().is_empty();
+                    view()
+                        .border_t(move || if divided { px(1.0) } else { px(0.0) })
+                        .border_t_color(border_subtle())
+                        .child(json_tree_body(json, search, side, tree_controls.clone()))
+                }
+            },
+        ))
+        .child(when(
+            move || {
+                !card_folded(folded, bit) && !loading.get() && !doc_on() && !tree_on() && image_on()
+            },
             move || {
                 view()
                     .px_3()
@@ -251,6 +271,7 @@ pub(crate) fn body_section(
         .child(when(
             move || {
                 !card_folded(folded, bit)
+                    && !loading.get()
                     && !doc_on()
                     && !tree_on()
                     && form.with(Vec::is_empty)
@@ -311,6 +332,7 @@ pub(crate) fn body_section(
         .child(when(
             move || {
                 !card_folded(folded, bit)
+                    && !loading.get()
                     && !doc_on()
                     && !tree_on()
                     && form.with(Vec::is_empty)
@@ -327,7 +349,11 @@ pub(crate) fn body_section(
         ))
         .child(when(
             move || {
-                !card_folded(folded, bit) && !doc_on() && !tree_on() && !form.with(Vec::is_empty)
+                !card_folded(folded, bit)
+                    && !loading.get()
+                    && !doc_on()
+                    && !tree_on()
+                    && !form.with(Vec::is_empty)
             },
             move || {
                 each(

@@ -2432,21 +2432,369 @@ async fn json_tree_panel_mounts_inside_culled_detail_scroll_with_overflow() {
 }
 
 #[test]
-fn web_poll_delay_scales_by_capture_and_idle_streak() {
-    use crate::ui::controls_runtime::web_poll_delay_ms;
+fn web_poll_delay_and_long_poll_url_behave_cleanly() {
+    use crate::ui::web_poll::{
+        WEB_ACTIVE_FLOOR_MS, WEB_LONG_POLL_WAIT_MS, build_web_state_url, web_poll_delay_ms,
+    };
 
-    // Capturing mode starts snappy and backs off smoothly during quiet periods.
-    assert_eq!(web_poll_delay_ms(true, 0), 450);
-    assert_eq!(web_poll_delay_ms(true, 1), 750);
-    assert_eq!(web_poll_delay_ms(true, 2), 750);
-    assert_eq!(web_poll_delay_ms(true, 3), 1200);
-    assert_eq!(web_poll_delay_ms(true, 6), 2100);
-    assert!(web_poll_delay_ms(true, 100) == 2100);
+    assert_eq!(build_web_state_url(false, None, false), "api/state");
+    assert_eq!(build_web_state_url(true, None, false), "api/state?lite=1");
+    assert_eq!(
+        build_web_state_url(true, Some((3, 9)), true),
+        "api/state?lite=1"
+    );
+    assert_eq!(
+        build_web_state_url(true, Some((3, 9)), false),
+        format!("api/state?lite=1&since_gen=3&since_rev=9&wait_ms={WEB_LONG_POLL_WAIT_MS}")
+    );
 
-    // Stopped mode backs off more aggressively up to 3 seconds.
-    assert_eq!(web_poll_delay_ms(false, 0), 750);
-    assert_eq!(web_poll_delay_ms(false, 1), 1500);
-    assert_eq!(web_poll_delay_ms(false, 2), 1500);
-    assert_eq!(web_poll_delay_ms(false, 3), 3000);
-    assert!(web_poll_delay_ms(false, 50) > web_poll_delay_ms(true, 50));
+    // State changes enforce the 400ms minimum floor; long-poll idle waits settle cleanly;
+    // network errors back off 1s -> 2s -> 4s.
+    assert_eq!(web_poll_delay_ms(true, true, true, 0), WEB_ACTIVE_FLOOR_MS);
+    assert_eq!(web_poll_delay_ms(false, true, true, 5), WEB_ACTIVE_FLOOR_MS);
+    assert_eq!(web_poll_delay_ms(true, false, true, 0), 500);
+    assert_eq!(web_poll_delay_ms(false, false, true, 0), 1_500);
+    assert_eq!(web_poll_delay_ms(true, false, false, 0), 1_000);
+    assert_eq!(web_poll_delay_ms(true, false, false, 1), 1_000);
+    assert_eq!(web_poll_delay_ms(true, false, false, 2), 2_000);
+    assert_eq!(web_poll_delay_ms(true, false, false, 4), 4_000);
+}
+
+#[test]
+fn unified_error_filter_matches_4xx_5xx_and_transport_err_while_fail_stays_transport_only() {
+    use crate::session::{FlowDraft, Protocol, Session};
+
+    let mut session = Session::default();
+    let ok_id = session.open(FlowDraft {
+        method: "GET".into(),
+        url: "http://example.com/ok".into(),
+        host: "example.com".into(),
+        path: "/ok".into(),
+        protocol: Protocol::Http11,
+        request_headers: Vec::new(),
+    });
+    session.set_response(ok_id, 200, Vec::new(), None);
+    let client_err_id = session.open(FlowDraft {
+        method: "GET".into(),
+        url: "http://example.com/missing".into(),
+        host: "example.com".into(),
+        path: "/missing".into(),
+        protocol: Protocol::Http11,
+        request_headers: Vec::new(),
+    });
+    session.set_response(client_err_id, 404, Vec::new(), None);
+    let server_err_id = session.open(FlowDraft {
+        method: "GET".into(),
+        url: "http://example.com/gw".into(),
+        host: "example.com".into(),
+        path: "/gw".into(),
+        protocol: Protocol::Http11,
+        request_headers: Vec::new(),
+    });
+    session.set_response(server_err_id, 502, Vec::new(), None);
+    let transport_err_id = session.open(FlowDraft {
+        method: "GET".into(),
+        url: "http://example.com/down".into(),
+        host: "example.com".into(),
+        path: "/down".into(),
+        protocol: Protocol::Http11,
+        request_headers: Vec::new(),
+    });
+    session.set_error(transport_err_id, "connection refused");
+
+    assert_eq!(
+        session.ids_matching("status:4xx|5xx|err"),
+        vec![client_err_id, server_err_id, transport_err_id]
+    );
+    assert_eq!(session.ids_matching("失败"), vec![transport_err_id]);
+    assert_eq!(session.ids_matching("err"), vec![transport_err_id]);
+}
+
+#[test]
+fn web_cached_flow_detail_publishes_loading_then_hydrates_cleanly() {
+    use nsh_core::element::{Runtime, create_root};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, SystemTime};
+
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("zniff-ui-detail-test-{}-{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let ca = Arc::new(crate::ca::Ca::open(&dir).unwrap());
+    let hub = Hub::new(ca).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let t0 = SystemTime::UNIX_EPOCH + Duration::from_millis(10_000);
+    let post_view = crate::session::CachedFlowView {
+        id: 1,
+        rev: 3,
+        protocol: Protocol::Http11,
+        method: "POST".into(),
+        host: "172.18.0.1:19876".into(),
+        path: "/api/v1/orders".into(),
+        url: "http://172.18.0.1:19876/api/v1/orders".into(),
+        client_ip: "127.0.0.1".into(),
+        conn_info: crate::session::ConnInfo::default(),
+        status: Some(201),
+        error: None,
+        started: t0,
+        response_at: Some(t0 + Duration::from_millis(1)),
+        finished_at: Some(t0 + Duration::from_millis(2)),
+        request_bytes: 38,
+        response_bytes: 61,
+        pinned: false,
+        rule_hit: String::new(),
+        comment: String::new(),
+        relay_source: None,
+    };
+    let inflight_v1 = crate::session::CachedFlowView {
+        id: 2,
+        rev: 10,
+        protocol: Protocol::Http11,
+        method: "POST".into(),
+        host: "172.18.0.1:19876".into(),
+        path: "/upload".into(),
+        url: "http://172.18.0.1:19876/upload".into(),
+        client_ip: "127.0.0.1".into(),
+        conn_info: crate::session::ConnInfo::default(),
+        status: None,
+        error: None,
+        started: t0,
+        response_at: None,
+        finished_at: None,
+        request_bytes: 16,
+        response_bytes: 0,
+        pinned: false,
+        rule_hit: String::new(),
+        comment: String::new(),
+        relay_source: None,
+    };
+    let empty_view = crate::session::CachedFlowView {
+        id: 3,
+        rev: 1,
+        protocol: Protocol::Http11,
+        method: "DELETE".into(),
+        host: "172.18.0.1:19876".into(),
+        path: "/api/v1/orders/1".into(),
+        url: "http://172.18.0.1:19876/api/v1/orders/1".into(),
+        client_ip: "127.0.0.1".into(),
+        conn_info: crate::session::ConnInfo::default(),
+        status: Some(204),
+        error: None,
+        started: t0,
+        response_at: Some(t0 + Duration::from_millis(1)),
+        finished_at: Some(t0 + Duration::from_millis(1)),
+        request_bytes: 0,
+        response_bytes: 0,
+        pinned: false,
+        rule_hit: String::new(),
+        comment: String::new(),
+        relay_source: None,
+    };
+    hub.with_session(|session| {
+        session.replace_cached_views(vec![post_view.clone(), inflight_v1.clone(), empty_view]);
+    });
+
+    let runtime = Runtime::default();
+    let _entered = runtime.enter();
+    let (owner, ()) = create_root(move || {
+        let shown = super::Shown {
+            phase: signal(super::Phase::Empty),
+            method: signal(String::new()),
+            url: signal(String::new()),
+            protocol: signal(String::new()),
+            rules: signal(String::new()),
+            status: signal(None),
+            error: signal(String::new()),
+            request_headers: signal(Vec::new()),
+            response_headers: signal(Vec::new()),
+            request_body: signal(String::new()),
+            response_body: signal(String::new()),
+            request_hex: signal(Vec::new()),
+            response_hex: signal(Vec::new()),
+            pane_width: signal(0.0),
+            request_language: signal(String::new()),
+            response_language: signal(String::new()),
+            request_doc: signal(None),
+            response_doc: signal(None),
+            req_doc_preview: signal(false),
+            res_doc_preview: signal(false),
+            request_json: signal(None),
+            response_json: signal(None),
+            req_json_tree: signal(false),
+            res_json_tree: signal(false),
+            request_form: signal(Vec::new()),
+            request_note: signal(String::new()),
+            response_note: signal(String::new()),
+            metrics: signal(String::new()),
+            timing_bar: signal(crate::present::TimingBreakdown::default()),
+            query: signal(Vec::new()),
+            preview: signal(String::new()),
+            preview_w: signal(0.0),
+            preview_h: signal(0.0),
+            image_caption: signal(String::new()),
+            pretty: signal(true),
+            messages: signal(Vec::new()),
+            diff: signal(String::new()),
+            diff_old: signal(String::new()),
+            diff_new: signal(String::new()),
+            pinned: signal(false),
+            comment: signal(String::new()),
+            editing_comment: signal(false),
+            repeating: signal(false),
+            repeat_count: signal("1".into()),
+            repeat_interval: signal("0".into()),
+            repeat_concurrency: signal("1".into()),
+            req_search: signal(String::new()),
+            res_search: signal(String::new()),
+            msg_search: signal(String::new()),
+            msg_dir: signal(0),
+            msg_kind: signal(0),
+            relay: signal(String::new()),
+            request_offset: signal(0),
+            response_offset: signal(0),
+            request_window: signal(super::TextWindow::default()),
+            response_window: signal(super::TextWindow::default()),
+            req_headers_loading: signal(false),
+            res_headers_loading: signal(false),
+            req_body_loading: signal(false),
+            res_body_loading: signal(false),
+            messages_loading: signal(false),
+            diff_loading: signal(false),
+        };
+
+        // 1. Before detail arrives for POST 201 (req 38 B, res 61 B), loading flags are on.
+        super::publish_detail(&shown, &hub, Some(1), Lang::En, None);
+        assert!(shown.phase.get() == super::Phase::Ready);
+        assert!(shown.req_headers_loading.get());
+        assert!(shown.res_headers_loading.get());
+        assert!(shown.req_body_loading.get());
+        assert!(shown.res_body_loading.get());
+        assert!(!shown.messages_loading.get());
+        assert!(!shown.diff_loading.get());
+
+        // 2. After fill_cached_detail, loading clears and bodies + headers populate.
+        hub.with_session(|session| {
+            session.fill_cached_detail(crate::session::CachedFlowDetail {
+                id: 1,
+                rev: 3,
+                request_headers: vec![("Content-Type".into(), "application/json".into())],
+                response_headers: vec![("Content-Type".into(), "application/json".into())],
+                request_body: br#"{"item":"book"}"#.to_vec(),
+                response_body: br#"{"ok":true}"#.to_vec(),
+                request_truncated: false,
+                response_truncated: false,
+                request_encoding_error: None,
+                response_encoding_error: None,
+                request_expired: None,
+                response_expired: None,
+                messages: Vec::new(),
+                messages_truncated: false,
+            });
+        });
+        super::publish_detail(&shown, &hub, Some(1), Lang::En, None);
+        assert!(!shown.req_headers_loading.get());
+        assert!(!shown.res_headers_loading.get());
+        assert!(!shown.req_body_loading.get());
+        assert!(!shown.res_body_loading.get());
+        assert_eq!(shown.request_headers.with(Vec::len), 1);
+        assert_eq!(shown.response_headers.with(Vec::len), 1);
+        assert!(shown.request_body.get().contains("\"item\""));
+        assert!(shown.response_body.get().contains("\"ok\""));
+
+        // 3. In-flight flow hydrated with request detail preserves request when response arrives later.
+        hub.with_session(|session| {
+            session.fill_cached_detail(crate::session::CachedFlowDetail {
+                id: 2,
+                rev: 10,
+                request_headers: vec![("Host".into(), "172.18.0.1:19876".into())],
+                response_headers: Vec::new(),
+                request_body: b"{\"part\":1}".to_vec(),
+                response_body: Vec::new(),
+                request_truncated: false,
+                response_truncated: false,
+                request_encoding_error: None,
+                response_encoding_error: None,
+                request_expired: None,
+                response_expired: None,
+                messages: Vec::new(),
+                messages_truncated: false,
+            });
+        });
+        super::publish_detail(&shown, &hub, Some(2), Lang::En, None);
+        assert!(!shown.req_headers_loading.get());
+        assert!(!shown.req_body_loading.get());
+        assert!(!shown.res_headers_loading.get());
+        assert!(!shown.res_body_loading.get());
+
+        let mut inflight_v2 = inflight_v1;
+        inflight_v2.rev = 12;
+        inflight_v2.status = Some(201);
+        inflight_v2.response_at = Some(t0 + Duration::from_millis(5));
+        inflight_v2.finished_at = Some(t0 + Duration::from_millis(7));
+        inflight_v2.response_bytes = 61;
+        hub.with_session(|session| {
+            let empty_v = session.get(3).unwrap();
+            let empty_summary = crate::session::CachedFlowView {
+                id: 3,
+                rev: 1,
+                protocol: empty_v.protocol,
+                method: empty_v.method.clone(),
+                host: empty_v.host.clone(),
+                path: empty_v.path.clone(),
+                url: empty_v.url.clone(),
+                client_ip: empty_v.client_ip.clone(),
+                conn_info: empty_v.conn_info.clone(),
+                status: empty_v.status,
+                error: empty_v.error.clone(),
+                started: empty_v.started,
+                response_at: empty_v.response_at,
+                finished_at: empty_v.finished_at,
+                request_bytes: empty_v.request_bytes,
+                response_bytes: empty_v.response_bytes,
+                pinned: empty_v.pinned,
+                rule_hit: empty_v.rule_hit.clone(),
+                comment: empty_v.comment.clone(),
+                relay_source: empty_v.relay_source.clone(),
+            };
+            session.replace_cached_views(vec![inflight_v2, empty_summary]);
+        });
+        super::publish_detail(&shown, &hub, Some(2), Lang::En, None);
+        assert!(!shown.req_headers_loading.get());
+        assert!(!shown.req_body_loading.get());
+        assert!(shown.res_headers_loading.get());
+        assert!(shown.res_body_loading.get());
+
+        // 4. Empty 0 B flow advances rev on empty detail payload and clears header loading flags.
+        super::publish_detail(&shown, &hub, Some(3), Lang::En, None);
+        assert!(shown.req_headers_loading.get());
+        assert!(shown.res_headers_loading.get());
+        assert!(!shown.req_body_loading.get());
+        assert!(!shown.res_body_loading.get());
+        let rev_before = hub.with_session(|session| session.get(3).unwrap().rev);
+        hub.with_session(|session| {
+            session.fill_cached_detail(crate::session::CachedFlowDetail {
+                id: 3,
+                rev: 1,
+                request_headers: Vec::new(),
+                response_headers: Vec::new(),
+                request_body: Vec::new(),
+                response_body: Vec::new(),
+                request_truncated: false,
+                response_truncated: false,
+                request_encoding_error: None,
+                response_encoding_error: None,
+                request_expired: None,
+                response_expired: None,
+                messages: Vec::new(),
+                messages_truncated: false,
+            });
+        });
+        let rev_after = hub.with_session(|session| session.get(3).unwrap().rev);
+        assert!(rev_after > rev_before);
+        super::publish_detail(&shown, &hub, Some(3), Lang::En, None);
+        assert!(!shown.req_headers_loading.get());
+        assert!(!shown.res_headers_loading.get());
+    });
+    owner.dispose();
 }

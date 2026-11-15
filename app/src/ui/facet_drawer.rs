@@ -750,6 +750,7 @@ fn drawer_quick_chip(
 }
 
 pub(crate) const JSON_ALIASES: &[&str] = &["type:json", "ct:json"];
+#[cfg(test)]
 pub(crate) const FAIL_ALIASES: &[&str] = &["失败", "fail", "err", "error"];
 pub(crate) const ERR_ALIASES: &[&str] = &[
     "status:4xx|5xx|err",
