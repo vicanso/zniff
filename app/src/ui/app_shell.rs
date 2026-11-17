@@ -41,7 +41,7 @@ pub fn App() -> impl IntoElement {
     let rows = signal(Vec::<Arc<RowLine>>::new());
     let filtered_stats = signal(session::FilteredStats::default());
     let facets = signal(session::SessionFacets::default());
-    let facets_open = signal(false);
+    let facets_open = signal(filter.with_untracked(|text| text.trim().is_empty()));
     let flow_total = signal(0_usize);
     let listen = signal(String::new());
     let saved = saved_config();
