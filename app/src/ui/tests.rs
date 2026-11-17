@@ -2994,6 +2994,8 @@ fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
             relay_url: signal(String::new()),
             relay_accept: signal(false),
             list_width: signal(660.0),
+            list_height: signal(320.0),
+            layout_mode: signal(crate::config::LayoutMode::Split),
             panel_open: signal(false),
             machine_settings_open: signal(false),
             about_open: signal(false),
@@ -3341,4 +3343,194 @@ fn about_modal_copyright_and_system_info_include_expected_fields() {
         Some("Intel Corporation UHD Graphics 770")
     );
     assert_eq!(super::parse_linux_gpu_info("   \n"), None);
+}
+
+#[test]
+fn wide_three_layout_places_request_and_response_side_by_side() {
+    use std::cell::RefCell;
+    use nsh_core::prelude::*;
+    use nsh_core::{ApproxTextEngine, Core, Op, Prop, ROOT_ID, Tag};
+
+    thread_local! {
+        static BOUNDS: RefCell<(Option<Bounds<Points>>, Option<Bounds<Points>>)> =
+            const { RefCell::new((None, None)) };
+    }
+
+    #[component]
+    fn WideThreeHarness() -> impl IntoElement {
+        let layout_mode = signal(crate::config::LayoutMode::WideThree);
+        let side_by_side = move || {
+            matches!(
+                layout_mode.get(),
+                crate::config::LayoutMode::TopBottom | crate::config::LayoutMode::WideThree
+            )
+        };
+        view().w(px(600.0)).h(px(600.0)).child(
+            scroll()
+                .w_full()
+                .h_full()
+                .child(
+                    super::uncull_nested_scroll(view())
+                        .pl_3p5()
+                        .pr_5()
+                        .py_3p5()
+                        .gap_3p5()
+                        .child(
+                            when(side_by_side, move || {
+                                view()
+                                    .w_full()
+                                    .flex_row()
+                                    .items_start()
+                                    .gap_3p5()
+                                    .child(
+                                        view()
+                                            .flex_1()
+                                            .min_w(px(0.0))
+                                            .on_layout(move |b: &Bounds<Points>| {
+                                                BOUNDS.with(|cell| cell.borrow_mut().0 = Some(*b));
+                                            })
+                                            .child(view().w_full().h(px(100.0))),
+                                    )
+                                    .child(
+                                        view()
+                                            .flex_1()
+                                            .min_w(px(0.0))
+                                            .on_layout(move |b: &Bounds<Points>| {
+                                                BOUNDS.with(|cell| cell.borrow_mut().1 = Some(*b));
+                                            })
+                                            .child(view().w_full().h(px(120.0))),
+                                    )
+                            })
+                            .otherwise(move || view().w_full().h(px(200.0))),
+                        ),
+                ),
+        )
+    }
+
+    let mut core = Core::new(ApproxTextEngine, Size::new(px(600.0), px(600.0)));
+    let mut registry = Registry::new();
+    registry.register::<WideThreeHarness>();
+    core.set_components(registry);
+    for op in [
+        Op::Create {
+            id: 2,
+            tag: Tag::View,
+        },
+        Op::SetProp {
+            id: 2,
+            prop: Prop::Component(std::any::type_name::<WideThreeHarness>().into()),
+        },
+        Op::Insert {
+            parent: ROOT_ID,
+            child: 2,
+            before: None,
+        },
+    ] {
+        core.apply(op).expect("apply op");
+    }
+
+    for _ in 0..8 {
+        let batch = core.commit();
+        let mut evs = Vec::new();
+        core.take_events(&mut evs);
+        let mut any = false;
+        for ev in evs {
+            if let nsh_core::element::JsEvent::Event(id, kind, payload) = ev {
+                any |= core.component_event(id, kind, &payload);
+            }
+        }
+        if batch.is_none() && !any {
+            break;
+        }
+    }
+
+    let (l, r) = BOUNDS.with(|cell| *cell.borrow());
+    let l = l.expect("left_bounds");
+    let r = r.expect("right_bounds");
+    assert!(
+        l.size.width.0 > 200.0 && r.size.width.0 > 200.0 && r.origin.x.0 > l.origin.x.0 + 100.0,
+        "left={l:?}, right={r:?}"
+    );
+}
+
+#[test]
+fn root_domain_and_grouping_collapse_subdomains_cleanly() {
+    assert_eq!(super::root_domain("mbd.baidu.com"), "baidu.com");
+    assert_eq!(super::root_domain("assets.msn.cn"), "msn.cn");
+    assert_eq!(
+        super::root_domain("api.example.com.cn"),
+        "example.com.cn"
+    );
+    assert_eq!(super::root_domain("127.0.0.1:8877"), "127.0.0.1");
+
+    let entries = vec![
+        crate::session::FacetEntry {
+            label: "mbd.baidu.com".into(),
+            token: "mbd.baidu.com".into(),
+            count: 5,
+            error_count: 0,
+        },
+        crate::session::FacetEntry {
+            label: "sp1.baidu.com".into(),
+            token: "sp1.baidu.com".into(),
+            count: 4,
+            error_count: 0,
+        },
+        crate::session::FacetEntry {
+            label: "assets.msn.cn".into(),
+            token: "assets.msn.cn".into(),
+            count: 22,
+            error_count: 0,
+        },
+    ];
+    let groups = super::group_domains_by_root(&entries, "");
+    assert_eq!(groups.len(), 2);
+    assert_eq!(groups[0].root, "msn.cn");
+    assert_eq!(groups[0].total_count, 22);
+    assert_eq!(groups[1].root, "baidu.com");
+    assert_eq!(groups[1].total_count, 9);
+    assert_eq!(groups[1].entries.len(), 2);
+
+    let filtered = super::group_domains_by_root(&entries, "sp1");
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].entries[0].token, "sp1.baidu.com");
+}
+
+#[test]
+fn top_bottom_layout_expands_unset_columns_to_fill_window_width() {
+    let shown = super::ListColumns::from_config(&crate::config::Config::default());
+    let mut custom = std::collections::HashMap::new();
+    custom.insert("path".to_string(), 300);
+
+    let split_cols = super::flow_table_columns_for_layout(shown, &custom, false, 1200.0);
+    let split_sum: f32 = split_cols.iter().map(|c| c.width.unwrap().0).sum();
+    assert_eq!(split_sum, 648.0);
+
+    let tb_unset = super::flow_table_columns_for_layout(
+        shown,
+        &std::collections::HashMap::new(),
+        true,
+        1200.0,
+    );
+    let tb_sum: f32 = tb_unset.iter().map(|c| c.width.unwrap().0).sum();
+    assert!(tb_sum >= 1150.0 && tb_sum <= 1184.0, "tb_sum={tb_sum}");
+    let path_w = tb_unset
+        .iter()
+        .find(|c| c.key.as_ref() == "path")
+        .unwrap()
+        .width
+        .unwrap()
+        .0;
+    assert!(path_w > 500.0, "path_w={path_w}");
+
+    // Explicitly set column keeps its custom width while unset columns expand.
+    let tb_partial = super::flow_table_columns_for_layout(shown, &custom, true, 1200.0);
+    let custom_path_w = tb_partial
+        .iter()
+        .find(|c| c.key.as_ref() == "path")
+        .unwrap()
+        .width
+        .unwrap()
+        .0;
+    assert_eq!(custom_path_w, 300.0);
 }

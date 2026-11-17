@@ -378,19 +378,99 @@ impl ListColumns {
 /// the fixed left group. The rest scroll under them.
 /// Widths are the last saved drag, not a live value: the table keeps a drag
 /// until this list changes, and a changed width here would fight the drag.
+#[cfg(test)]
 pub(crate) fn flow_table_columns(
     shown: ListColumns,
     widths: &HashMap<String, u32>,
 ) -> Vec<DataTableColumn> {
-    shown
+    flow_table_columns_for_layout(shown, widths, false, 0.0)
+}
+
+pub(crate) fn flow_table_columns_for_layout(
+    shown: ListColumns,
+    widths: &HashMap<String, u32>,
+    top_bottom: bool,
+    available_w: f32,
+) -> Vec<DataTableColumn> {
+    let visible: Vec<ListColumn> = shown
         .order
         .into_iter()
         .filter(|&col| shown.on(col))
+        .collect();
+    let mut resolved: Vec<u32> = visible
+        .iter()
         .map(|col| {
+            let key = col.key();
+            let limit = config::column_width_limit(key).expect("known column");
+            widths.get(key).copied().unwrap_or(limit.default)
+        })
+        .collect();
+    if top_bottom && available_w.is_finite() && available_w > 0.0 {
+        let total: u32 = resolved.iter().sum();
+        let target = (available_w - 16.0).max(0.0) as u32;
+        if target > total {
+            let mut extra = target - total;
+            // First give ~75% of spare width to unset flexible text columns (`path`, `host`).
+            let flex_share = (extra * 3) / 4;
+            let mut flex_used = 0_u32;
+            for (idx, col) in visible.iter().enumerate() {
+                if !matches!(col, ListColumn::Path | ListColumn::Host)
+                    || widths.contains_key(col.key())
+                {
+                    continue;
+                }
+                let limit = config::column_width_limit(col.key()).expect("known column");
+                let room = limit.max.saturating_sub(resolved[idx]);
+                let add = (flex_share.saturating_sub(flex_used)).min(room);
+                resolved[idx] += add;
+                flex_used += add;
+            }
+            extra = extra.saturating_sub(flex_used);
+            // Distribute remaining extra evenly across all unset columns, then pass any leftover to `path`/`host`.
+            if extra > 0 {
+                let unset_indices: Vec<usize> = visible
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, col)| !widths.contains_key(col.key()))
+                    .map(|(i, _)| i)
+                    .collect();
+                if !unset_indices.is_empty() {
+                    let per = (extra / unset_indices.len() as u32).max(1);
+                    for &idx in &unset_indices {
+                        if extra == 0 {
+                            break;
+                        }
+                        let limit =
+                            config::column_width_limit(visible[idx].key()).expect("known column");
+                        let room = limit.max.saturating_sub(resolved[idx]);
+                        let add = per.min(room).min(extra);
+                        resolved[idx] += add;
+                        extra -= add;
+                    }
+                    if extra > 0 {
+                        for &idx in &unset_indices {
+                            if extra == 0 {
+                                break;
+                            }
+                            let limit = config::column_width_limit(visible[idx].key())
+                                .expect("known column");
+                            let room = limit.max.saturating_sub(resolved[idx]);
+                            let add = room.min(extra);
+                            resolved[idx] += add;
+                            extra -= add;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    visible
+        .into_iter()
+        .zip(resolved)
+        .map(|(col, width)| {
             let key = col.key();
             let fixed = col.is_fixed();
             let limit = config::column_width_limit(key).expect("known column");
-            let width = widths.get(key).copied().unwrap_or(limit.default);
             let mut column = DataTableColumn::default();
             column.key = key.into();
             column.width = Some(px(width as f32));

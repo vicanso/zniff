@@ -22,6 +22,9 @@ pub enum Glyph {
     Close,
     History,
     Alert,
+    LayoutSplit,
+    LayoutTopBottom,
+    LayoutThree,
 }
 
 pub fn glyph(
@@ -108,6 +111,17 @@ fn draw(kind: Glyph, paint: Hsla, size: f32) -> Painter {
             .stroke_svg("M8 2.4 L13.8 13.4 H2.2 Z")
             .stroke_svg("M8 6.4 V9.4")
             .fill_svg("M8 11.6 m-0.85 0 a0.85 0.85 0 1 0 1.7 0 a0.85 0.85 0 1 0 -1.7 0"),
+        Glyph::LayoutSplit => painter
+            .stroke_svg("M2.4 3.2 H13.6 V12.8 H2.4 Z")
+            .stroke_svg("M7.4 3.2 V12.8"),
+        Glyph::LayoutTopBottom => painter
+            .stroke_svg("M2.4 3.2 H13.6 V12.8 H2.4 Z")
+            .stroke_svg("M2.4 7.6 H13.6")
+            .stroke_svg("M8 7.6 V12.8"),
+        Glyph::LayoutThree => painter
+            .stroke_svg("M2.4 3.2 H13.6 V12.8 H2.4 Z")
+            .stroke_svg("M6.0 3.2 V12.8")
+            .stroke_svg("M9.8 3.2 V12.8"),
     };
     painter
 }

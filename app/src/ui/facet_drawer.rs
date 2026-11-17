@@ -1,12 +1,87 @@
 #[allow(unused_imports)]
 use super::*;
 
+pub(crate) fn pane_splitter(
+    width: Signal<f32>,
+    height: Signal<f32>,
+    layout_mode: Signal<config::LayoutMode>,
+    controls: Arc<Controls>,
+) -> impl IntoElement {
+    let row_controls = controls.clone();
+    let col_controls = controls;
+    when(
+        move || layout_mode.get() == config::LayoutMode::TopBottom,
+        move || row_splitter(height, row_controls.clone()),
+    )
+    .otherwise(move || column_splitter(width, col_controls.clone()))
+}
+
+pub(crate) fn row_splitter(height: Signal<f32>, controls: Arc<Controls>) -> impl IntoElement {
+    let origin = signal(0.0_f32);
+    let controls_release = controls.clone();
+    let controls_cancel = controls;
+    let hot = signal(false);
+    let dragging = signal(false);
+    view()
+        .w_full()
+        .h(px(6.0))
+        .flex_shrink_0()
+        .flex_col()
+        .justify_center()
+        .cursor(Cursor::RowResize)
+        .claim_touches(TouchClaim::on_start())
+        .keep_touches(true)
+        .on_mouse_enter(move |_: &MouseEvent| hot.set(true))
+        .on_mouse_leave(move |_: &MouseEvent| hot.set(false))
+        .on_responder_grant(move |_event: &ResponderEvent| {
+            dragging.set(true);
+            origin.set(clamp_list_height_for_window(
+                height.get(),
+                window().height.0,
+            ));
+        })
+        .on_responder_move(move |event: &ResponderEvent| {
+            height.set(clamp_list_height_for_window(
+                origin.get() + event.gesture.delta.y.0,
+                window().height.0,
+            ));
+        })
+        .on_responder_release(move |_event: &ResponderEvent| {
+            dragging.set(false);
+            store_list_height(
+                clamp_list_height_for_window(height.get(), window().height.0),
+                &controls_release,
+            );
+        })
+        .on_responder_terminate(move |_event: &ResponderEvent| {
+            dragging.set(false);
+            store_list_height(
+                clamp_list_height_for_window(height.get(), window().height.0),
+                &controls_cancel,
+            );
+        })
+        .child(
+            view()
+                .w_full()
+                .h(move || {
+                    if hot.get() || dragging.get() {
+                        px(3.0)
+                    } else {
+                        px(1.0)
+                    }
+                })
+                .bg(move || {
+                    if hot.get() || dragging.get() {
+                        accent_blue()
+                    } else {
+                        border_strong()
+                    }
+                }),
+        )
+}
+
 pub(crate) fn column_splitter(width: Signal<f32>, controls: Arc<Controls>) -> impl IntoElement {
     let origin = signal(0.0_f32);
-    let width_grant = width;
-    let width_move = width;
-    let width_release = width;
-    let width_cancel = width;
     let controls_release = controls.clone();
     let controls_cancel = controls;
     let hot = signal(false);
@@ -25,12 +100,12 @@ pub(crate) fn column_splitter(width: Signal<f32>, controls: Arc<Controls>) -> im
         .on_responder_grant(move |_event: &ResponderEvent| {
             dragging.set(true);
             origin.set(clamp_list_px_for_window(
-                width_grant.get(),
+                width.get(),
                 window().width.0,
             ));
         })
         .on_responder_move(move |event: &ResponderEvent| {
-            width_move.set(clamp_list_px_for_window(
+            width.set(clamp_list_px_for_window(
                 origin.get() + event.gesture.delta.x.0,
                 window().width.0,
             ));
@@ -38,14 +113,14 @@ pub(crate) fn column_splitter(width: Signal<f32>, controls: Arc<Controls>) -> im
         .on_responder_release(move |_event: &ResponderEvent| {
             dragging.set(false);
             store_list_width(
-                clamp_list_px_for_window(width_release.get(), window().width.0),
+                clamp_list_px_for_window(width.get(), window().width.0),
                 &controls_release,
             );
         })
         .on_responder_terminate(move |_event: &ResponderEvent| {
             dragging.set(false);
             store_list_width(
-                clamp_list_px_for_window(width_cancel.get(), window().width.0),
+                clamp_list_px_for_window(width.get(), window().width.0),
                 &controls_cancel,
             );
         })
@@ -72,6 +147,19 @@ pub(crate) fn column_splitter(width: Signal<f32>, controls: Arc<Controls>) -> im
 pub(crate) fn store_list_width(width: f32, controls: &Controls) {
     let stored = clamp_list_px(width).round() as u32;
     if let Err(err) = save_config(|config| config.list_width = stored) {
+        set_status(
+            controls,
+            StatusMsg::PrefUnsaved {
+                name: PrefName::List,
+                err: err.to_string(),
+            },
+        );
+    }
+}
+
+pub(crate) fn store_list_height(height: f32, controls: &Controls) {
+    let stored = clamp_list_height(height).round() as u32;
+    if let Err(err) = save_config(|config| config.list_height = stored) {
         set_status(
             controls,
             StatusMsg::PrefUnsaved {
@@ -114,6 +202,8 @@ pub(crate) fn flow_list(
     effective_filter: Signal<String>,
     rules_text: Signal<String>,
     width: Signal<f32>,
+    height: Signal<f32>,
+    layout_mode: Signal<config::LayoutMode>,
     columns: Signal<ListColumns>,
     sort: Signal<Option<ListSort>>,
     controls: Arc<Controls>,
@@ -129,14 +219,29 @@ pub(crate) fn flow_list(
     let menu_at = signal(Point::<Points>::default());
     let facet_tab = signal(0_u8);
     let effective_width = move || clamp_list_px_for_window(width.get(), window().width.0);
+    let effective_height = move || clamp_list_height_for_window(height.get(), window().height.0);
+    let is_top_bottom = move || layout_mode.get() == config::LayoutMode::TopBottom;
     view()
-        .w(move || px(effective_width()))
+        .w(move || -> DefiniteLength {
+            if is_top_bottom() {
+                relative(1.0)
+            } else {
+                px(effective_width()).into()
+            }
+        })
+        .h(move || -> DefiniteLength {
+            if is_top_bottom() {
+                px(effective_height()).into()
+            } else {
+                relative(1.0)
+            }
+        })
         .flex_shrink_0()
         .overflow_hidden()
         .bg(bg_list())
         .child(
             view()
-                .w(move || px(effective_width()))
+                .w_full()
                 .h(px(46.0))
                 .flex_shrink_0()
                 .flex_row()
@@ -250,30 +355,74 @@ pub(crate) fn flow_list(
                             )
                     },
                 ))
-                .child(facet_toggle_button(facets_open, list_filter))
+                .child(when(
+                    move || layout_mode.get() != config::LayoutMode::WideThree,
+                    move || facet_toggle_button(facets_open, list_filter),
+                ))
                 .child(column_menu(columns, column_controls)),
         )
         .child(when(
-            move || facets_open.get(),
-            move || facet_drawer(facets, facet_tab, list_filter, effective_width),
+            move || layout_mode.get() != config::LayoutMode::WideThree,
+            move || facet_quick_bar(facets, facets_open, facet_tab, list_filter),
         ))
-        .child(view().flex_1().min_h(px(0.0)).child(list_menu(
-            rows,
-            selected,
-            paused,
-            compose,
-            columns,
-            sort,
-            row_controls,
-            list_filter,
-            effective_filter,
-            shown,
-            baseline,
-            rules_text,
-            picked,
-            menu_open,
-            menu_at,
-        )))
+        .child(
+            view()
+                .flex_1()
+                .min_h(px(0.0))
+                .relative()
+                .child(list_menu(
+                    rows,
+                    selected,
+                    paused,
+                    compose,
+                    columns,
+                    sort,
+                    row_controls,
+                    list_filter,
+                    effective_filter,
+                    shown,
+                    baseline,
+                    rules_text,
+                    layout_mode,
+                    picked,
+                    menu_open,
+                    menu_at,
+                ))
+                .child(when(
+                    move || {
+                        layout_mode.get() != config::LayoutMode::WideThree && facets_open.get()
+                    },
+                    move || {
+                        view()
+                            .absolute()
+                            .inset_0()
+                            .child(
+                                view()
+                                    .absolute()
+                                    .inset_0()
+                                    .bg(AdaptiveColor::new(rgba(0x00000018), rgba(0x00000044)))
+                                    .on_press(move || facets_open.set(false)),
+                            )
+                            .child(
+                                view()
+                                    .absolute()
+                                    .top(px(0.0))
+                                    .left_0()
+                                    .right_0()
+                                    .bg(bg_card())
+                                    .border_b_1()
+                                    .border_b_color(border_strong())
+                                    .shadow_md()
+                                    .child(facet_drawer(
+                                        facets,
+                                        facets_open,
+                                        facet_tab,
+                                        list_filter,
+                                    )),
+                            )
+                    },
+                )),
+        )
 }
 
 pub(crate) fn facet_toggle_button(
@@ -338,42 +487,44 @@ pub(crate) fn facet_toggle_button(
         ))
 }
 
-pub(crate) fn facet_drawer(
+pub(crate) fn facet_quick_bar(
     facets: Signal<session::SessionFacets>,
+    facets_open: Signal<bool>,
     facet_tab: Signal<u8>,
     filter: Signal<String>,
-    effective_width: impl Fn() -> f32 + Copy + 'static,
 ) -> impl IntoElement {
     let tab_btn = move |idx: u8,
                         zh: &'static str,
                         en: &'static str,
                         count_fn: fn(&session::SessionFacets) -> usize| {
         let langs = ui_langs();
+        let active = move || facets_open.get() && facet_tab.get() == idx;
         view()
             .h(px(22.0))
             .px_2()
+            .flex_shrink_0()
             .rounded(px(5.0))
             .flex_row()
             .items_center()
             .gap_1()
             .bg(move || {
-                if facet_tab.get() == idx {
+                if active() {
                     accent_blue_soft()
                 } else {
-                    AdaptiveColor::TRANSPARENT
+                    bg_control()
                 }
             })
             .border_1()
             .border_color(move || {
-                if facet_tab.get() == idx {
+                if active() {
                     accent_blue_border()
                 } else {
-                    AdaptiveColor::TRANSPARENT
+                    border_control()
                 }
             })
             .hover(|style| {
                 style.bg(move || {
-                    if facet_tab.get() == idx {
+                    if active() {
                         accent_blue_soft_hover()
                     } else {
                         bg_control_hover()
@@ -382,95 +533,201 @@ pub(crate) fn facet_drawer(
             })
             .active(|style| style.opacity(0.8))
             .cursor(Cursor::Pointer)
-            .on_press(move || facet_tab.set(idx))
+            .on_press(move || {
+                if facets_open.get() && facet_tab.get() == idx {
+                    facets_open.set(false);
+                } else {
+                    facet_tab.set(idx);
+                    facets_open.set(true);
+                }
+            })
             .child(
                 control_text(move || -> SharedString {
                     let count = facets.with(count_fn);
                     format!("{} ({count})", t(ui_lang(langs), zh, en)).into()
                 })
                 .tabular_nums()
-                .text_size(px(11.5))
+                .text_size(px(11.0))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(move || {
-                    if facet_tab.get() == idx {
+                    if active() {
                         accent_blue_text()
                     } else {
                         fg_secondary()
                     }
                 }),
             )
-    };
-    let items_list = move || -> Vec<session::FacetEntry> {
-        if facet_tab.get() == 0 {
-            facets.with(|f| f.domains.clone())
-        } else {
-            facets.with(|f| f.apps.clone())
-        }
+            .child(glyph_px(
+                9.0,
+                move || {
+                    if active() {
+                        Glyph::ChevronUp
+                    } else {
+                        Glyph::Chevron
+                    }
+                },
+                move || {
+                    if active() {
+                        color(accent_blue_text())
+                    } else {
+                        color(fg_muted())
+                    }
+                },
+            ))
     };
     view()
-        .w(move || px(effective_width()))
+        .w_full()
+        .h(px(30.0))
         .flex_shrink_0()
         .bg(bg_chrome())
         .border_b_1()
         .border_b_color(border_strong())
         .pl(px(LIST_INSET))
-        .py_1p5()
+        .pr(px(LIST_PAD_END))
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .overflow_hidden()
+        .child(tab_btn(0, "域名", "Domains", |f| f.domains.len()))
+        .child(tab_btn(1, "应用", "Apps", |f| f.apps.len()))
+        .child(view().w(px(1.0)).h(px(14.0)).mx_0p5().bg(border_subtle()))
+        .child(drawer_quick_chip(
+            filter,
+            "慢请求",
+            "Slow",
+            "slow:",
+            SLOW_ALIASES,
+            "筛选耗时 ≥ 1s 或进行中的慢请求 (slow:)",
+            "Filter slow requests >= 1s (slow:)",
+        ))
+        .child(drawer_quick_chip(
+            filter,
+            "出错",
+            "Errors",
+            "status:4xx|5xx|err",
+            ERR_ALIASES,
+            "筛选 4xx / 5xx / 连接失败请求 (status:4xx|5xx|err)",
+            "Filter 4xx / 5xx / failed requests (status:4xx|5xx|err)",
+        ))
+        .child(drawer_quick_chip(
+            filter,
+            "JSON",
+            "JSON",
+            "type:json",
+            JSON_ALIASES,
+            "筛选 JSON 请求/响应 (type:json)",
+            "Filter JSON traffic (type:json)",
+        ))
+        .child(drawer_quick_chip(
+            filter,
+            "星标",
+            "Starred",
+            "pin:",
+            PIN_ALIASES,
+            "只看已星标请求 (pin:)",
+            "Show starred requests only (pin:)",
+        ))
+}
+
+pub(crate) fn facet_drawer(
+    facets: Signal<session::SessionFacets>,
+    facets_open: Signal<bool>,
+    facet_tab: Signal<u8>,
+    filter: Signal<String>,
+) -> impl IntoElement {
+    let drawer_query = signal(String::new());
+    let collapsed_roots = signal(std::collections::HashSet::<String>::new());
+    let items_list = move || -> Vec<session::FacetEntry> {
+        let q = drawer_query.get().trim().to_ascii_lowercase();
+        if facet_tab.get() == 0 {
+            facets.with(|f| {
+                f.domains
+                    .iter()
+                    .filter(|e| {
+                        q.is_empty()
+                            || e.label.to_ascii_lowercase().contains(&q)
+                            || e.token.to_ascii_lowercase().contains(&q)
+                    })
+                    .cloned()
+                    .collect()
+            })
+        } else {
+            facets.with(|f| {
+                f.apps
+                    .iter()
+                    .filter(|e| {
+                        q.is_empty()
+                            || e.label.to_ascii_lowercase().contains(&q)
+                            || e.token.to_ascii_lowercase().contains(&q)
+                    })
+                    .cloned()
+                    .collect()
+            })
+        }
+    };
+    let grouped_domains = move || -> Vec<DomainGroup> {
+        let q = drawer_query.get();
+        facets.with(|f| group_domains_by_root(&f.domains, &q))
+    };
+    view()
+        .w_full()
+        .pl(px(LIST_INSET))
+        .py_2()
         .gap_1p5()
         .child(
             view()
                 .pr(px(LIST_PAD_END))
                 .flex_row()
-                .flex_wrap()
                 .items_center()
                 .justify_between()
-                .gap_1p5()
+                .gap_2()
                 .child(
                     view()
+                        .flex_1()
                         .min_w(px(0.0))
-                        .flex_row()
-                        .flex_wrap()
-                        .items_center()
-                        .gap_1()
-                        .child(tab_btn(0, "域名", "Domains", |f| f.domains.len()))
-                        .child(tab_btn(1, "应用 / 来源", "Apps / Clients", |f| {
-                            f.apps.len()
-                        }))
-                        .child(view().w(px(1.0)).h(px(14.0)).mx_0p5().bg(border_subtle()))
-                        .child(drawer_quick_chip(
-                            filter,
-                            "慢请求",
-                            "Slow",
-                            "slow:",
-                            SLOW_ALIASES,
-                            "筛选耗时 ≥ 1s 或进行中的慢请求 (slow:)",
-                            "Filter slow requests >= 1s (slow:)",
-                        ))
-                        .child(drawer_quick_chip(
-                            filter,
-                            "出错",
-                            "Errors",
-                            "status:4xx|5xx|err",
-                            ERR_ALIASES,
-                            "筛选 4xx / 5xx / 连接失败请求 (status:4xx|5xx|err)",
-                            "Filter 4xx / 5xx / failed requests (status:4xx|5xx|err)",
-                        ))
-                        .child(drawer_quick_chip(
-                            filter,
-                            "JSON",
-                            "JSON",
-                            "type:json",
-                            JSON_ALIASES,
-                            "筛选 JSON 请求/响应 (type:json)",
-                            "Filter JSON traffic (type:json)",
-                        ))
-                        .child(drawer_quick_chip(
-                            filter,
-                            "星标",
-                            "Starred",
-                            "pin:",
-                            PIN_ALIASES,
-                            "只看已星标请求 (pin:)",
-                            "Show starred requests only (pin:)",
+                        .relative()
+                        .child(
+                            input()
+                                .value(drawer_query)
+                                .placeholder(tr("筛选域名或应用…", "Filter domains / apps…"))
+                                .placeholder_color(move || color(fg_muted()))
+                                .w_full()
+                                .h(px(24.0))
+                                .pl_2()
+                                .pr(move || {
+                                    if drawer_query.get().is_empty() {
+                                        px(6.0)
+                                    } else {
+                                        px(20.0)
+                                    }
+                                })
+                                .rounded(px(5.0))
+                                .bg(bg_code())
+                                .border_1()
+                                .border_color(border_control())
+                                .focus(|style| style.border_color(accent_blue()))
+                                .text_size(px(11.5))
+                                .text_color(fg_primary())
+                                .on_change(move |text: &str| drawer_query.set(text.to_string())),
+                        )
+                        .child(when(
+                            move || !drawer_query.get().is_empty(),
+                            move || {
+                                view()
+                                    .absolute()
+                                    .right(px(2.0))
+                                    .top(px(3.0))
+                                    .w(px(18.0))
+                                    .h(px(18.0))
+                                    .rounded(px(4.0))
+                                    .flex_row()
+                                    .items_center()
+                                    .justify_center()
+                                    .cursor(Cursor::Pointer)
+                                    .hover(|s| s.bg(bg_control_hover()))
+                                    .on_press(move || drawer_query.set(String::new()))
+                                    .child(text("×").text_size(px(12.0)).text_color(fg_muted()))
+                            },
                         )),
                 )
                 .child(
@@ -481,15 +738,30 @@ pub(crate) fn facet_drawer(
                             tr("点击按进程/来源筛选", "Click to filter by app/client")().into()
                         }
                     })
+                    .flex_shrink_0()
                     .text_size(px(11.0))
                     .text_color(fg_muted()),
+                )
+                .child(
+                    view()
+                        .w(px(22.0))
+                        .h(px(22.0))
+                        .flex_shrink_0()
+                        .rounded(px(4.0))
+                        .flex_row()
+                        .items_center()
+                        .justify_center()
+                        .cursor(Cursor::Pointer)
+                        .hover(|s| s.bg(bg_control_hover()))
+                        .on_press(move || facets_open.set(false))
+                        .child(glyph_px(10.0, || Glyph::Close, || color(fg_muted()))),
                 ),
         )
         .child(
             when(
                 move || items_list().is_empty(),
                 move || {
-                    view().pr(px(LIST_PAD_END)).py_1p5().child(
+                    view().pr(px(LIST_PAD_END)).py_2().child(
                         text(tr(
                             "暂无捕获到的域名或应用",
                             "No captured domains or apps yet",
@@ -502,179 +774,37 @@ pub(crate) fn facet_drawer(
             .otherwise(move || {
                 scroll()
                     .w_full()
-                    .max_h(move || px((window().height.0 * 0.22).round().clamp(64.0, 132.0)))
+                    .max_h(move || px((window().height.0 * 0.45).round().clamp(160.0, 320.0)))
                     .child(
                         view()
                             .w_full()
                             .pr(px(LIST_PAD_END))
-                            .flex_row()
-                            .flex_wrap()
-                            .gap_1()
-                            .child(each(
-                                items_list,
-                                move |entry| (facet_tab.get(), entry.token.clone()),
-                                move |entry, _index| {
-                                    let is_domain = move || facet_tab.get() == 0;
-                                    let is_active = move || {
-                                        let f = filter.get();
-                                        let tok = entry.with(|e| e.token.clone());
-                                        if is_domain() {
-                                            host_facet_active(&f, &tok)
-                                        } else {
-                                            app_facet_active(&f, &tok)
-                                        }
-                                    };
-                                    let is_muted = move || {
-                                        is_domain()
-                                            && mute_facet_active(
-                                                &filter.get(),
-                                                &entry.with(|e| e.token.clone()),
+                            .gap_0p5()
+                            .child(when(
+                                move || facet_tab.get() == 0,
+                                move || {
+                                    view().w_full().gap_0p5().child(each(
+                                        grouped_domains,
+                                        |group| group.root.clone(),
+                                        move |group, _| {
+                                            sidebar_domain_group_view(
+                                                group,
+                                                filter,
+                                                drawer_query,
+                                                collapsed_roots,
                                             )
-                                    };
-                                    view()
-                                        .h(px(23.0))
-                                        .max_w(move || {
-                                            px((effective_width() - LIST_INSET - LIST_PAD_END)
-                                                .max(96.0))
-                                        })
-                                        .rounded(px(5.0))
-                                        .border_1()
-                                        .border_color(move || {
-                                            if is_active() {
-                                                accent_blue_border()
-                                            } else if is_muted() {
-                                                status_err_fg()
-                                            } else {
-                                                border_control()
-                                            }
-                                        })
-                                        .bg(move || {
-                                            if is_active() {
-                                                accent_blue_soft()
-                                            } else if is_muted() {
-                                                status_err_bg()
-                                            } else {
-                                                bg_control()
-                                            }
-                                        })
-                                        .flex_row()
-                                        .items_center()
-                                        .overflow_hidden()
-                                        .child(
-                                            view()
-                                                .min_w(px(0.0))
-                                                .h_full()
-                                                .px_2()
-                                                .flex_row()
-                                                .items_center()
-                                                .gap_1()
-                                                .hover(|style| {
-                                                    style.bg(move || {
-                                                        if is_active() {
-                                                            accent_blue_soft_hover()
-                                                        } else if is_muted() {
-                                                            status_err_bg_hover()
-                                                        } else {
-                                                            bg_control_hover()
-                                                        }
-                                                    })
-                                                })
-                                                .active(|style| style.opacity(0.8))
-                                                .cursor(Cursor::Pointer)
-                                                .on_press(move || {
-                                                    let cur = filter.get();
-                                                    let tok = entry.with(|e| e.token.clone());
-                                                    let next = if is_domain() {
-                                                        toggle_host_facet(&cur, &tok)
-                                                    } else {
-                                                        toggle_app_facet(&cur, &tok)
-                                                    };
-                                                    filter.set(next);
-                                                })
-                                                .child(
-                                                    mono(move || {
-                                                        let label = entry.with(|e| e.label.clone());
-                                                        if is_muted() {
-                                                            format!("− {label}")
-                                                        } else {
-                                                            label
-                                                        }
-                                                    })
-                                                    .min_w(px(0.0))
-                                                    .number_of_lines(1)
-                                                    .text_overflow(EllipsizeMode::Middle)
-                                                    .text_size(px(11.0))
-                                                    .text_color(move || {
-                                                        if is_active() {
-                                                            accent_blue_text()
-                                                        } else if is_muted() {
-                                                            status_err_fg()
-                                                        } else {
-                                                            fg_primary()
-                                                        }
-                                                    }),
-                                                )
-                                                .child(
-                                                    mono(move || {
-                                                        entry.with(|e| format!("{}", e.count))
-                                                    })
-                                                    .flex_shrink_0()
-                                                    .tabular_nums()
-                                                    .text_size(px(11.0))
-                                                    .text_color(move || {
-                                                        if entry.with(|e| e.error_count > 0) {
-                                                            status_err_fg()
-                                                        } else {
-                                                            fg_muted()
-                                                        }
-                                                    }),
-                                                ),
-                                        )
-                                        .child(when(is_domain, move || {
-                                            view()
-                                                .w(px(24.0))
-                                                .h_full()
-                                                .flex_shrink_0()
-                                                .flex_row()
-                                                .items_center()
-                                                .justify_center()
-                                                .border_l_1()
-                                                .border_l_color(border_subtle())
-                                                .hover(|style| {
-                                                    style.bg(move || {
-                                                        if is_muted() {
-                                                            status_err_bg_hover()
-                                                        } else {
-                                                            bg_control_hover()
-                                                        }
-                                                    })
-                                                })
-                                                .active(|style| style.opacity(0.8))
-                                                .cursor(Cursor::Pointer)
-                                                .label(tr("屏蔽域名", "Mute domain"))
-                                                .tooltip(label_tip(
-                                                    "屏蔽此域名 (mute:)",
-                                                    "Mute this domain (mute:)",
-                                                ))
-                                                .on_press(move || {
-                                                    let tok = entry.with(|e| e.token.clone());
-                                                    filter.set(toggle_mute_facet(
-                                                        &filter.get(),
-                                                        &tok,
-                                                    ));
-                                                })
-                                                .child(
-                                                    control_text("×")
-                                                        .text_size(px(11.5))
-                                                        .text_color(move || {
-                                                            if is_muted() {
-                                                                status_err_fg()
-                                                            } else {
-                                                                fg_muted()
-                                                            }
-                                                        }),
-                                                )
-                                        }))
+                                        },
+                                    ))
+                                },
+                            ))
+                            .child(when(
+                                move || facet_tab.get() != 0,
+                                move || {
+                                    view().w_full().gap_0p5().child(each(
+                                        items_list,
+                                        |entry| entry.token.clone(),
+                                        move |entry, _| sidebar_app_row(entry, filter),
+                                    ))
                                 },
                             )),
                     )
@@ -683,7 +813,7 @@ pub(crate) fn facet_drawer(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn drawer_quick_chip(
+pub(crate) fn drawer_quick_chip(
     filter: Signal<String>,
     zh: &'static str,
     en: &'static str,

@@ -63,6 +63,7 @@ pub(crate) fn list_menu(
     shown: Shown,
     baseline: Signal<Option<u64>>,
     rules_text: Signal<String>,
+    layout_mode: Signal<config::LayoutMode>,
     picked: Signal<Option<u64>>,
     menu_open: Signal<bool>,
     menu_at: Signal<Point<Points>>,
@@ -85,6 +86,7 @@ pub(crate) fn list_menu(
             sort,
             controls.clone(),
             effective_filter,
+            layout_mode,
             picked,
             menu_open,
             header_menu,
@@ -141,12 +143,15 @@ pub(crate) fn flow_table(
     sort: Signal<Option<ListSort>>,
     controls: Arc<Controls>,
     filter: Signal<String>,
+    layout_mode: Signal<config::LayoutMode>,
     picked: Signal<Option<u64>>,
     menu_open: Signal<bool>,
     header_menu: Signal<bool>,
     menu_at: Signal<Point<Points>>,
 ) -> impl IntoElement {
-    let widths = signal(saved_config().column_widths);
+    let saved_cols = saved_config();
+    let widths = signal(saved_cols.column_widths);
+    let widths_top_bottom = signal(saved_cols.column_widths_top_bottom);
     let table = component_ref::<DataTable>();
     let blur_job = stored(None::<Spawned<()>>);
     // A click focuses the table, and its arrow keys would step the row again
@@ -171,6 +176,7 @@ pub(crate) fn flow_table(
     };
     let save_job = stored(None::<Spawned<()>>);
     let widths_for_cols = widths;
+    let widths_tb_for_cols = widths_top_bottom;
     let rows_for_cells = rows;
     let selected_for_cells = selected;
     let baseline_for_cells = baseline;
@@ -231,8 +237,20 @@ pub(crate) fn flow_table(
                     .columns(move || {
                         let shown = columns.get();
                         let display = effective_path_display(shown, &filter.get());
-                        let current_widths = untracked(|| widths_for_cols.get());
-                        let mut built = flow_table_columns(shown_at_mount, &current_widths);
+                        let is_tb = layout_mode.get() == config::LayoutMode::TopBottom;
+                        let current_widths = untracked(|| {
+                            if is_tb {
+                                widths_tb_for_cols.get()
+                            } else {
+                                widths_for_cols.get()
+                            }
+                        });
+                        let mut built = flow_table_columns_for_layout(
+                            shown_at_mount,
+                            &current_widths,
+                            is_tb,
+                            window().width.0,
+                        );
                         for column in &mut built {
                             let key = column.key.to_string();
                             column.title = Some(flow_column_title(&key, display).into());
@@ -358,20 +376,27 @@ pub(crate) fn flow_table(
                             return;
                         };
                         let px = (width.0.round() as u32).clamp(limit.min, limit.max);
-                        widths.update(|map| {
+                        let is_tb = layout_mode.get() == config::LayoutMode::TopBottom;
+                        let target_widths = if is_tb { widths_top_bottom } else { widths };
+                        target_widths.update(|map| {
                             if px == limit.default {
                                 map.remove(key.as_ref());
                             } else {
                                 map.insert(key.to_string(), px);
                             }
                         });
-                        let widths = widths;
                         let controls = controls.clone();
                         save_job.replace(Some(set_timeout(
                             Duration::from_millis(300),
                             move || {
-                                let map = widths.get();
-                                if let Err(err) = save_config(|config| config.column_widths = map) {
+                                let map = target_widths.get();
+                                if let Err(err) = save_config(|config| {
+                                    if is_tb {
+                                        config.column_widths_top_bottom = map;
+                                    } else {
+                                        config.column_widths = map;
+                                    }
+                                }) {
                                     set_status(
                                         &controls,
                                         StatusMsg::PrefUnsaved {

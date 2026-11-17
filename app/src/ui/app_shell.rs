@@ -41,7 +41,7 @@ pub fn App() -> impl IntoElement {
     let rows = signal(Vec::<Arc<RowLine>>::new());
     let filtered_stats = signal(session::FilteredStats::default());
     let facets = signal(session::SessionFacets::default());
-    let facets_open = signal(filter.with_untracked(|text| text.trim().is_empty()));
+    let facets_open = signal(false);
     let flow_total = signal(0_usize);
     let listen = signal(String::new());
     let saved = saved_config();
@@ -191,6 +191,8 @@ pub fn App() -> impl IntoElement {
         relay_url: relay_url_sig,
         relay_accept: relay_accept_sig,
         list_width,
+        list_height: signal(saved.list_height as f32),
+        layout_mode: signal(saved.layout_mode),
         panel_open: signal(false),
         machine_settings_open: signal(false),
         about_open: signal(false),
@@ -317,6 +319,7 @@ pub fn App() -> impl IntoElement {
     let sort_tick = sort;
     let seen_sort = stored(None::<ListSort>);
     let cols_tick = columns;
+    let layout_mode_tick = profile_signals.layout_mode;
     let seen_path_display = stored(effective_path_display(
         columns.get(),
         &effective_filter.get_untracked(),
@@ -602,6 +605,8 @@ pub fn App() -> impl IntoElement {
         let sort_now = sort_tick.get();
         let path_display_now = effective_path_display(cols_tick.get(), &effective_filter_now);
         let facets_open_now = facets_open_tick.get();
+        let layout_mode_now = layout_mode_tick.get();
+        let facets_needed = true;
         let facets_opened = facets_open_now && !seen_facets_open.get();
         seen_facets_open.replace(facets_open_now);
         let list_changed = generation != seen_gen.get()
@@ -622,7 +627,9 @@ pub fn App() -> impl IntoElement {
             seen_sort.replace(sort_now);
             seen_path_display.replace(path_display_now);
             let (matched, _) = controls_tick.hub.matching_ids(&effective_filter_now);
-            let facet_ids = if facets_open_now && filter_now != effective_filter_now {
+            let facet_ids = if (facets_open_now || layout_mode_now == config::LayoutMode::WideThree)
+                && filter_now != effective_filter_now
+            {
                 Some(controls_tick.hub.matching_ids(&filter_now).0)
             } else {
                 None
@@ -643,7 +650,7 @@ pub fn App() -> impl IntoElement {
                             matched.iter().filter_map(|(id, _)| session.get(*id)),
                         )
                     });
-                    let next_facets = facets_open_now.then(|| {
+                    let next_facets = facets_needed.then(|| {
                         let ids = facet_ids.as_ref().unwrap_or(&matched);
                         session::SessionFacets::from_flows(
                             ids.iter().filter_map(|(id, _)| session.get(*id)),
@@ -967,48 +974,77 @@ pub fn App() -> impl IntoElement {
                 )
             },
         ))
-        .child(
-            view()
-                .flex_1()
-                .flex_row()
-                .child(flow_list(
-                    rows,
-                    facets,
-                    facets_open,
-                    selected,
-                    paused,
-                    compose,
-                    filter,
-                    list_filter,
-                    effective_filter,
-                    rules_text,
-                    list_width,
-                    columns,
-                    sort,
-                    controls_list,
-                    shown,
-                    baseline,
-                    filter_focus,
-                ))
-                .child(column_splitter(list_width, controls_split))
-                .child(detail_pane(
-                    shown,
-                    controls_detail,
-                    selected,
-                    paused,
-                    compose,
-                    seq_builder,
-                    rows,
-                    list_filter,
-                    effective_filter,
-                    rules_text,
-                    baseline,
-                    folded,
-                    pane_px,
-                    filtered_stats,
-                    detail_scroll,
-                )),
-        )
+        .child({
+            let build_split: Rc<dyn Fn(bool) -> View> = Rc::new(move |vertical: bool| {
+                let controls_list = controls_list.clone();
+                let controls_split = controls_split.clone();
+                let controls_detail = controls_detail.clone();
+                let container = if vertical {
+                    view().flex_1().min_h(px(0.0)).flex_col()
+                } else {
+                    view().flex_1().min_h(px(0.0)).flex_row()
+                };
+                container
+                    .child(when(
+                        move || {
+                            profile_signals.layout_mode.get() == config::LayoutMode::WideThree
+                        },
+                        move || facet_sidebar(facets, list_filter),
+                    ))
+                    .child(flow_list(
+                        rows,
+                        facets,
+                        facets_open,
+                        selected,
+                        paused,
+                        compose,
+                        filter,
+                        list_filter,
+                        effective_filter,
+                        rules_text,
+                        list_width,
+                        profile_signals.list_height,
+                        profile_signals.layout_mode,
+                        columns,
+                        sort,
+                        controls_list,
+                        shown,
+                        baseline,
+                        filter_focus,
+                    ))
+                    .child(pane_splitter(
+                        list_width,
+                        profile_signals.list_height,
+                        profile_signals.layout_mode,
+                        controls_split,
+                    ))
+                    .child(detail_pane(
+                        shown,
+                        controls_detail,
+                        selected,
+                        paused,
+                        compose,
+                        seq_builder,
+                        rows,
+                        list_filter,
+                        effective_filter,
+                        rules_text,
+                        baseline,
+                        folded,
+                        Rc::clone(&pane_px),
+                        filtered_stats,
+                        detail_scroll,
+                        profile_signals.layout_mode,
+                    ))
+            });
+            let build_col = Rc::clone(&build_split);
+            let build_row = build_split;
+            when(
+                move || profile_signals.layout_mode.get() == config::LayoutMode::TopBottom,
+                move || build_col(true),
+            )
+            .otherwise(move || build_row(false))
+        })
         .child(footer(
             listen,
             running,

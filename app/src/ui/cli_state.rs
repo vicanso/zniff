@@ -251,6 +251,8 @@ pub(crate) struct ProfileSignals {
     pub(crate) relay_url: Signal<String>,
     pub(crate) relay_accept: Signal<bool>,
     pub(crate) list_width: Signal<f32>,
+    pub(crate) list_height: Signal<f32>,
+    pub(crate) layout_mode: Signal<config::LayoutMode>,
     pub(crate) panel_open: Signal<bool>,
     pub(crate) machine_settings_open: Signal<bool>,
     pub(crate) about_open: Signal<bool>,

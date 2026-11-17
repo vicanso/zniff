@@ -61,6 +61,7 @@ pub(crate) fn toolbar(
     let clear_unpinned = Rc::new(clear_unpinned);
     let remove = Rc::new(remove);
     let filter_controls = import_controls.clone();
+    let layout_controls = import_controls.clone();
     #[cfg(not(target_arch = "wasm32"))]
     let update_controls = import_controls.clone();
     let bar = view()
@@ -403,7 +404,8 @@ pub(crate) fn toolbar(
         });
     #[cfg(not(target_arch = "wasm32"))]
     let bar = bar.child(toolbar_update_pill(update_state, update_controls));
-    bar.child(toolbar_summary_button(
+    bar.child(toolbar_layout_switcher(profiles.layout_mode, layout_controls))
+        .child(toolbar_summary_button(
         rows,
         flow_total,
         filter,
@@ -563,6 +565,180 @@ pub(crate) fn flow_count_now(
         flow_total.get(),
         !filter.get().is_empty(),
     )
+}
+
+pub(crate) fn toolbar_layout_switcher(
+    layout_mode: Signal<config::LayoutMode>,
+    controls: Arc<Controls>,
+) -> impl IntoElement {
+    let open = signal(false);
+    let modes = [
+        (
+            config::LayoutMode::Split,
+            Glyph::LayoutSplit,
+            "左右分栏",
+            "Left / Right split",
+        ),
+        (
+            config::LayoutMode::TopBottom,
+            Glyph::LayoutTopBottom,
+            "上下分栏",
+            "Top / Bottom split",
+        ),
+        (
+            config::LayoutMode::WideThree,
+            Glyph::LayoutThree,
+            "三栏分栏",
+            "Three-column",
+        ),
+    ];
+    let current_icon = move || match layout_mode.get() {
+        config::LayoutMode::Split => Glyph::LayoutSplit,
+        config::LayoutMode::TopBottom => Glyph::LayoutTopBottom,
+        config::LayoutMode::WideThree => Glyph::LayoutThree,
+    };
+    let mut menu = view()
+        .w(px(164.0))
+        .p_1()
+        .gap_0p5()
+        .rounded(px(8.0))
+        .border_1()
+        .border_color(border_strong())
+        .bg(bg_card())
+        .shadow_md();
+    for (mode, icon, zh, en) in modes {
+        let mode_controls = controls.clone();
+        menu = menu.child(
+            view()
+                .w_full()
+                .h(px(28.0))
+                .px_2()
+                .rounded(px(5.0))
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .cursor(Cursor::Pointer)
+                .bg(move || {
+                    if layout_mode.get() == mode {
+                        accent_blue_soft()
+                    } else {
+                        bg_card()
+                    }
+                })
+                .hover(|style| {
+                    style.bg(move || {
+                        if layout_mode.get() == mode {
+                            accent_blue_soft_hover()
+                        } else {
+                            bg_control_hover()
+                        }
+                    })
+                })
+                .active(|style| style.opacity(0.8))
+                .on_press(move || {
+                    open.set(false);
+                    if layout_mode.get() == mode {
+                        return;
+                    }
+                    layout_mode.set(mode);
+                    if let Err(err) = save_config(|config| config.layout_mode = mode) {
+                        set_status(
+                            &mode_controls,
+                            StatusMsg::PrefUnsaved {
+                                name: PrefName::List,
+                                err: err.to_string(),
+                            },
+                        );
+                    }
+                })
+                .child(glyph_px(
+                    13.0,
+                    move || icon,
+                    move || {
+                        if layout_mode.get() == mode {
+                            color(accent_blue_text())
+                        } else {
+                            color(fg_muted())
+                        }
+                    },
+                ))
+                .child(
+                    text(tr(zh, en))
+                        .flex_1()
+                        .text_size(px(12.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(move || {
+                            if layout_mode.get() == mode {
+                                accent_blue_text()
+                            } else {
+                                fg_primary()
+                            }
+                        }),
+                ),
+        );
+    }
+    popover()
+        .open(move || Some(open.get()))
+        .placement(Placement::Bottom)
+        .align(Align::End)
+        .offset(px(6.0))
+        .margin(px(8.0))
+        .on_open_change(move |event: &nsh_base::PopoverEvent| {
+            if let nsh_base::PopoverEvent::OpenChange(next, _) = event {
+                open.set(*next);
+            }
+        })
+        .trigger(
+            view()
+                .window_drag(false)
+                .w(px(28.0))
+                .h(px(28.0))
+                .flex_shrink_0()
+                .flex_row()
+                .items_center()
+                .justify_center()
+                .rounded(px(6.0))
+                .border_1()
+                .border_color(move || {
+                    if open.get() {
+                        accent_blue_border()
+                    } else {
+                        border_control()
+                    }
+                })
+                .bg(move || {
+                    if open.get() {
+                        accent_blue_soft()
+                    } else {
+                        bg_control()
+                    }
+                })
+                .hover(|style| {
+                    style.bg(move || {
+                        if open.get() {
+                            accent_blue_soft_hover()
+                        } else {
+                            bg_control_hover()
+                        }
+                    })
+                })
+                .active(|style| style.opacity(0.8))
+                .cursor(Cursor::Pointer)
+                .label(tr("分栏布局", "Split layout"))
+                .tooltip(label_tip("切换分栏布局", "Switch split layout"))
+                .child(glyph_px(
+                    14.0,
+                    current_icon,
+                    move || {
+                        if open.get() {
+                            color(accent_blue_text())
+                        } else {
+                            color(fg_secondary())
+                        }
+                    },
+                )),
+        )
+        .child(menu)
 }
 
 pub(crate) fn toolbar_summary_button(

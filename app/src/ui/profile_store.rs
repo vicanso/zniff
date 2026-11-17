@@ -735,6 +735,27 @@ pub(crate) fn clamp_list_px_for_window(width: f32, window_w: f32) -> f32 {
     }
 }
 
+pub(crate) fn clamp_list_height(height: f32) -> f32 {
+    let rounded = if height.is_finite() && height > 0.0 {
+        height.round().min(u32::MAX as f32) as u32
+    } else {
+        0
+    };
+    rounded.clamp(config::LIST_HEIGHT_MIN, config::LIST_HEIGHT_MAX) as f32
+}
+
+pub(crate) fn clamp_list_height_for_window(height: f32, window_h: f32) -> f32 {
+    let base = clamp_list_height(height);
+    if window_h.is_finite() && window_h > 0.0 {
+        let max_for_win = (window_h - 240.0)
+            .round()
+            .clamp(config::LIST_HEIGHT_MIN as f32, config::LIST_HEIGHT_MAX as f32);
+        base.min(max_for_win)
+    } else {
+        base
+    }
+}
+
 pub(crate) fn adaptive_filter_panel_width(window_w: f32, list_w: f32) -> f32 {
     if window_w.is_finite() && window_w > 0.0 {
         let list_px = clamp_list_px_for_window(list_w, window_w);

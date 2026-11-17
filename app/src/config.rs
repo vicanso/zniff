@@ -71,6 +71,8 @@ pub fn runtime_proxy_auth(saved: &str) -> String {
 pub const LIST_WIDTH_DEFAULT: u32 = 660;
 pub const LIST_WIDTH_MIN: u32 = 280;
 pub const LIST_WIDTH_MAX: u32 = 1100;
+pub const LIST_HEIGHT_MIN: u32 = 160;
+pub const LIST_HEIGHT_MAX: u32 = 720;
 
 /// Window size when `config.toml` has no `window_width` / `window_height`.
 pub const WINDOW_WIDTH_DEFAULT: u32 = 1200;
@@ -195,6 +197,55 @@ impl Serialize for PathDisplay {
 }
 
 impl<'de> Deserialize<'de> for PathDisplay {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        Ok(Self::parse(&text))
+    }
+}
+
+/// Main workspace pane layout mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LayoutMode {
+    #[default]
+    Split,
+    TopBottom,
+    WideThree,
+}
+
+impl LayoutMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Split => "split",
+            Self::TopBottom => "top_bottom",
+            Self::WideThree => "wide_three",
+        }
+    }
+
+    pub fn parse(text: &str) -> Self {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "top_bottom" | "top-bottom" | "vertical" => Self::TopBottom,
+            "wide_three" | "wide-three" | "three" => Self::WideThree,
+            _ => Self::Split,
+        }
+    }
+
+    pub fn is_default(&self) -> bool {
+        *self == Self::Split
+    }
+}
+
+impl Serialize for LayoutMode {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for LayoutMode {
     fn deserialize<D: serde::Deserializer<'de>>(
         deserializer: D,
     ) -> std::result::Result<Self, D::Error> {
@@ -349,7 +400,9 @@ pub struct Config {
     pub ellipsize: ListEllipsize,
     /// False draws monospaced text in the bundled JetBrains Mono; true uses the system's.
     pub system_mono_font: bool,
+    pub layout_mode: LayoutMode,
     pub list_width: u32,
+    pub list_height: u32,
     pub window_width: u32,
     pub window_height: u32,
     /// Pretty is the body default unless the file says otherwise.
@@ -372,6 +425,7 @@ pub struct Config {
     pub profile_history: Vec<SavedProfile>,
     /// Dragged list-column widths, in points, keyed by `method`, `path`, and the rest.
     pub column_widths: HashMap<String, u32>,
+    pub column_widths_top_bottom: HashMap<String, u32>,
     /// Custom list-column order when reordered from [`DEFAULT_COLUMN_ORDER`].
     pub column_order: Vec<String>,
     /// Sanitize sensitive headers, query params, and JSON/form fields on HAR/HTML export and live share.
@@ -448,11 +502,18 @@ struct RawConfig {
     ellipsize: ListEllipsize,
     #[serde(default, skip_serializing_if = "is_false")]
     system_mono_font: bool,
+    #[serde(default, skip_serializing_if = "LayoutMode::is_default")]
+    layout_mode: LayoutMode,
     #[serde(
         default = "default_list_width",
         skip_serializing_if = "is_default_list_width"
     )]
     list_width: u32,
+    #[serde(
+        default = "default_list_height",
+        skip_serializing_if = "is_default_list_height"
+    )]
+    list_height: u32,
     #[serde(
         default = "default_window_width",
         skip_serializing_if = "is_default_window_width"
@@ -503,6 +564,8 @@ struct RawConfig {
     profile_history: Vec<SavedProfile>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     column_widths: HashMap<String, u32>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    column_widths_top_bottom: HashMap<String, u32>,
 }
 
 impl From<RawConfig> for Config {
@@ -637,7 +700,9 @@ impl From<RawConfig> for Config {
             }),
             ellipsize: raw.ellipsize,
             system_mono_font: raw.system_mono_font,
+            layout_mode: raw.layout_mode,
             list_width: raw.list_width,
+            list_height: raw.list_height,
             window_width: raw.window_width,
             window_height: raw.window_height,
             default_pretty: raw.default_pretty,
@@ -650,6 +715,7 @@ impl From<RawConfig> for Config {
             saved_profiles,
             profile_history,
             column_widths: raw.column_widths,
+            column_widths_top_bottom: raw.column_widths_top_bottom,
             column_order: raw.column_order,
             redact_export: raw.redact_export,
             redact_strict: raw.redact_strict,
@@ -738,7 +804,9 @@ impl From<Config> for RawConfig {
             path_display: (!config.path_display.is_default()).then_some(config.path_display),
             ellipsize: config.ellipsize,
             system_mono_font: config.system_mono_font,
+            layout_mode: config.layout_mode,
             list_width: config.list_width,
+            list_height: config.list_height,
             window_width: config.window_width,
             window_height: config.window_height,
             default_pretty: config.default_pretty,
@@ -761,6 +829,7 @@ impl From<Config> for RawConfig {
             saved_profiles: config.saved_profiles,
             profile_history: config.profile_history,
             column_widths: config.column_widths,
+            column_widths_top_bottom: config.column_widths_top_bottom,
         }
     }
 }
@@ -792,7 +861,9 @@ impl Default for Config {
             path_display: PathDisplay::Auto,
             ellipsize: ListEllipsize::Middle,
             system_mono_font: false,
+            layout_mode: LayoutMode::Split,
             list_width: default_list_width(),
+            list_height: default_list_height(),
             window_width: default_window_width(),
             window_height: default_window_height(),
             default_pretty: true,
@@ -805,6 +876,7 @@ impl Default for Config {
             saved_profiles: Vec::new(),
             profile_history: Vec::new(),
             column_widths: HashMap::new(),
+            column_widths_top_bottom: HashMap::new(),
             column_order: Vec::new(),
             redact_export: false,
             redact_strict: false,
@@ -978,6 +1050,10 @@ fn default_list_width() -> u32 {
     LIST_WIDTH_DEFAULT
 }
 
+fn default_list_height() -> u32 {
+    320
+}
+
 fn default_window_width() -> u32 {
     WINDOW_WIDTH_DEFAULT
 }
@@ -996,6 +1072,10 @@ fn is_false(value: &bool) -> bool {
 
 fn is_default_list_width(value: &u32) -> bool {
     *value == LIST_WIDTH_DEFAULT
+}
+
+fn is_default_list_height(value: &u32) -> bool {
+    *value == 320
 }
 
 fn is_default_window_width(value: &u32) -> bool {
@@ -1211,6 +1291,7 @@ fn normalize_for(mut config: Config, dev: bool) -> Config {
     config.window_width = clamp_window_width(config.window_width);
     config.window_height = clamp_window_height(config.window_height);
     clamp_column_widths(&mut config.column_widths);
+    clamp_column_widths(&mut config.column_widths_top_bottom);
     config.column_order = normalize_column_order(&config.column_order);
     config.relay_url = config.relay_url.trim().to_string();
     config.relay_token = config.relay_token.trim().to_string();

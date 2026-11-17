@@ -110,6 +110,7 @@ pub(crate) fn detail_pane(
     pane_px: Rc<Cell<f32>>,
     filtered_stats: Signal<session::FilteredStats>,
     detail_scroll: ElementRef,
+    layout_mode: Signal<config::LayoutMode>,
 ) -> impl IntoElement {
     let ready_controls = controls.clone();
     scroll()
@@ -138,6 +139,7 @@ pub(crate) fn detail_pane(
                         rules_text,
                         baseline,
                         folded,
+                        layout_mode,
                     )
                 },
             )
@@ -557,9 +559,13 @@ pub(crate) fn ready_detail(
     rules_text: Signal<String>,
     baseline: Signal<Option<u64>>,
     folded: Signal<u8>,
+    layout_mode: Signal<config::LayoutMode>,
 ) -> impl IntoElement {
-    let no_form = signal(Vec::<HeaderLine>::new());
-    let no_loading = signal(false);
+    let side_by_side = move || layout_mode.get() == config::LayoutMode::TopBottom;
+    let req_controls_split = controls.clone();
+    let res_controls_split = controls.clone();
+    let req_controls_stack = controls.clone();
+    let res_controls_stack = controls.clone();
     uncull_nested_scroll(view())
         .pl_3p5()
         .pr_5()
@@ -579,6 +585,73 @@ pub(crate) fn ready_detail(
             let controls = controls.clone();
             move || compose_box(compose, controls.clone(), selected, paused)
         }))
+        .child(
+            when(side_by_side, move || {
+                view()
+                    .w_full()
+                    .flex_row()
+                    .items_start()
+                    .gap_3p5()
+                    .child(
+                        view().flex_1().min_w(px(0.0)).gap_3p5().child(response_cards(
+                            shown,
+                            res_controls_split.clone(),
+                            selected,
+                            baseline,
+                            folded,
+                        )),
+                    )
+                    .child(
+                        view().flex_1().min_w(px(0.0)).gap_3p5().child(request_cards(
+                            shown,
+                            req_controls_split.clone(),
+                            selected,
+                            baseline,
+                            folded,
+                        )),
+                    )
+            })
+            .otherwise(move || {
+                view()
+                    .w_full()
+                    .gap_3p5()
+                    .child(response_cards(
+                        shown,
+                        res_controls_stack.clone(),
+                        selected,
+                        baseline,
+                        folded,
+                    ))
+                    .child(request_cards(
+                        shown,
+                        req_controls_stack.clone(),
+                        selected,
+                        baseline,
+                        folded,
+                    ))
+            }),
+        )
+        .child(when(
+            move || shown.diff_loading.get() || !shown.diff.get().is_empty(),
+            move || diff_card(shown, folded),
+        ))
+        .child(when(
+            move || shown.messages_loading.get() || !shown.messages.with(Vec::is_empty),
+            move || messages_section(shown, controls.clone(), folded),
+        ))
+}
+
+fn response_cards(
+    shown: Shown,
+    controls: Arc<Controls>,
+    selected: Signal<Option<u64>>,
+    baseline: Signal<Option<u64>>,
+    folded: Signal<u8>,
+) -> impl IntoElement {
+    let no_form = signal(Vec::<HeaderLine>::new());
+    view()
+        .w_full()
+        .gap_3p5()
         .child(when(
             move || {
                 shown.res_body_loading.get()
@@ -621,6 +694,19 @@ pub(crate) fn ready_detail(
             folded,
             FOLD_RES_HEADERS,
         ))
+}
+
+fn request_cards(
+    shown: Shown,
+    controls: Arc<Controls>,
+    selected: Signal<Option<u64>>,
+    baseline: Signal<Option<u64>>,
+    folded: Signal<u8>,
+) -> impl IntoElement {
+    let no_loading = signal(false);
+    view()
+        .w_full()
+        .gap_3p5()
         .child(when(
             move || {
                 shown.req_body_loading.get()
@@ -676,14 +762,6 @@ pub(crate) fn ready_detail(
             shown.pane_width,
             folded,
             FOLD_REQ_HEADERS,
-        ))
-        .child(when(
-            move || shown.diff_loading.get() || !shown.diff.get().is_empty(),
-            move || diff_card(shown, folded),
-        ))
-        .child(when(
-            move || shown.messages_loading.get() || !shown.messages.with(Vec::is_empty),
-            move || messages_section(shown, controls.clone(), folded),
         ))
 }
 
