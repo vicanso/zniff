@@ -2,9 +2,16 @@ use super::*;
 
 use std::net::Ipv4Addr;
 
-use super::{LanAddr, cert_url, choose_lan, usable_v4};
+use super::{LanAddr, cert_url, choose_lan, is_listening_lan, usable_v4};
 use crate::i18n::Lang;
 use crate::session::Protocol;
+
+#[test]
+fn is_listening_lan_only_matches_unspecified_ipv4() {
+    assert!(is_listening_lan("0.0.0.0:8877"));
+    assert!(!is_listening_lan("127.0.0.1:8877"));
+    assert!(!is_listening_lan(""));
+}
 
 #[test]
 fn protocol_tunnel_label_is_localized() {
@@ -2634,6 +2641,7 @@ fn web_cached_flow_detail_publishes_loading_then_hydrates_cleanly() {
             preview_h: signal(0.0),
             image_caption: signal(String::new()),
             pretty: signal(true),
+            default_json_tree: signal(false),
             messages: signal(Vec::new()),
             diff: signal(String::new()),
             diff_old: signal(String::new()),
@@ -2927,6 +2935,7 @@ fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
             panel_open: signal(false),
             machine_settings_open: signal(false),
             about_open: signal(false),
+            default_json_tree: signal(false),
             deselect_rev: signal(0),
         };
         let compose = Compose {
@@ -3251,4 +3260,23 @@ fn about_modal_copyright_and_system_info_include_expected_fields() {
     assert!(!env!("ZNIFF_GIT_SHA").is_empty());
     assert_eq!(env!("ZNIFF_BUILD_YEAR").len(), 4);
     assert!(super::about_logo_uri().starts_with("data:image/png;base64,"));
+    assert_eq!(
+        super::parse_macos_gpu_info("Graphics/Displays:\n  Chipset Model: Apple M3 Max\n")
+            .as_deref(),
+        Some("Apple M3 Max")
+    );
+    assert_eq!(super::parse_macos_gpu_info("  Chipset Model:   \n"), None);
+    assert_eq!(
+        super::parse_windows_gpu_info("Name\r\nNVIDIA GeForce RTX 4070\r\n\r\n").as_deref(),
+        Some("NVIDIA GeForce RTX 4070")
+    );
+    assert_eq!(super::parse_windows_gpu_info("Name\r\n  \r\n"), None);
+    assert_eq!(
+        super::parse_linux_gpu_info(
+            "00:02.0 VGA compatible controller: Intel Corporation UHD Graphics 770\n"
+        )
+        .as_deref(),
+        Some("Intel Corporation UHD Graphics 770")
+    );
+    assert_eq!(super::parse_linux_gpu_info("   \n"), None);
 }

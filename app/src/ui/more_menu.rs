@@ -67,6 +67,7 @@ pub(crate) fn more_menu(
             {
                 let controls = import_controls.clone();
                 move || {
+                    open.set(false);
                     begin_sequence_diagram(
                         &controls,
                         rows,
@@ -81,19 +82,28 @@ pub(crate) fn more_menu(
         .child(menu_action(
             Glyph::Prompt,
             tr("构造请求", "New request"),
-            move || begin_new_request(compose, selected),
+            move || {
+                open.set(false);
+                begin_new_request(compose, selected);
+            },
         ));
     let items = desktop_child!(
         items,
         menu_action(Glyph::List, tr("导入 HAR", "Import HAR"), {
             let controls = import_controls.clone();
-            move || prompt_import_har(controls.clone())
+            move || {
+                open.set(false);
+                prompt_import_har(controls.clone());
+            }
         })
     );
     let items = items.child(menu_action(
         Glyph::Trash,
         tr("清空未星标", "Clear unstarred"),
-        clear_unpinned,
+        move || {
+            open.set(false);
+            clear_unpinned();
+        },
     ));
     let items = desktop_child!(items, menu_rule());
     let items = desktop_child!(items, proxy_menu_item(proxy_on, toggle_proxy));
@@ -102,7 +112,7 @@ pub(crate) fn more_menu(
         menu_copy_config_row(open, copy_env, import_controls.clone())
     );
     let items = desktop_child!(items, menu_rule());
-    let items = desktop_child!(items, cert_menu_row(open, ca_status, install, remove));
+    let items = desktop_child!(items, cert_menu_row(ca_status, install, remove));
     let items = desktop_child!(items, platform_ca_extra_menu_item(&import_controls));
     let items = items
         .child(menu_rule())
@@ -115,6 +125,29 @@ pub(crate) fn more_menu(
                     let next = !pretty.get();
                     pretty.set(next);
                     if let Err(err) = save_config(|config| config.default_pretty = next) {
+                        set_status(
+                            &controls,
+                            StatusMsg::PrefUnsaved {
+                                name: PrefName::Pretty,
+                                err: err.to_string(),
+                            },
+                        );
+                    }
+                }
+            },
+        ))
+        .child(more_check_action(
+            move || profiles.default_json_tree.get(),
+            tr("JSON 默认树形", "JSON tree by default"),
+            {
+                let controls = import_controls.clone();
+                move || {
+                    let next = !profiles.default_json_tree.get();
+                    profiles.default_json_tree.set(next);
+                    if next && !pretty.get() {
+                        pretty.set(true);
+                    }
+                    if let Err(err) = save_config(|config| config.default_json_tree = next) {
                         set_status(
                             &controls,
                             StatusMsg::PrefUnsaved {
@@ -151,7 +184,10 @@ pub(crate) fn more_menu(
             },
         ));
     let items = desktop_child!(items, menu_rule());
-    let items = desktop_child!(items, update_menu_section(update_state, import_controls));
+    let items = desktop_child!(
+        items,
+        update_menu_section(open, update_state, import_controls)
+    );
     let items = items.child(menu_rule()).child(menu_action_meta(
         Glyph::Badge,
         tr("关于 zniff", "About zniff"),
@@ -442,6 +478,7 @@ pub(crate) fn toolbar_update_pill(
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn update_menu_section(
+    open: Signal<bool>,
     update_state: Signal<UpdateState>,
     controls: Arc<Controls>,
 ) -> impl IntoElement {
@@ -479,6 +516,7 @@ pub(crate) fn update_menu_section(
                                 SharedString::from(format!("v{} → {ver}", updater::version()))
                             },
                             move || {
+                                open.set(false);
                                 if let Some(ver) = update_state.get().nudge {
                                     start_upgrade(controls_up.clone(), ver);
                                 }
@@ -554,7 +592,10 @@ pub(crate) fn update_menu_section(
                         UpdatePhase::ReadyToRestart { version } => SharedString::from(version),
                         _ => SharedString::default(),
                     },
-                    move || relaunch_and_exit(&controls),
+                    move || {
+                        open.set(false);
+                        relaunch_and_exit(&controls);
+                    },
                 )
             },
         ))
@@ -574,7 +615,10 @@ pub(crate) fn update_menu_section(
                         UpdatePhase::OpenedInstaller { version } => SharedString::from(version),
                         _ => SharedString::default(),
                     },
-                    move || quit_for_manual_install(&controls),
+                    move || {
+                        open.set(false);
+                        quit_for_manual_install(&controls);
+                    },
                 )
             },
         ))

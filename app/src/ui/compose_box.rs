@@ -850,8 +850,9 @@ pub(crate) fn clear_shown(shown: Shown) {
     shown.res_doc_preview.set(false);
     shown.request_json.set(None);
     shown.response_json.set(None);
-    shown.req_json_tree.set(false);
-    shown.res_json_tree.set(false);
+    let tree_default = shown.default_json_tree.get() && shown.pretty.get();
+    shown.req_json_tree.set(tree_default);
+    shown.res_json_tree.set(tree_default);
     shown.request_form.set(Vec::new());
     shown.request_note.set(String::new());
     shown.response_note.set(String::new());

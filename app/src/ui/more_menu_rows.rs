@@ -677,7 +677,6 @@ pub(crate) fn proxy_menu_item(on: Signal<bool>, toggle: impl Fn() + 'static) -> 
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn cert_menu_row(
-    open: Signal<bool>,
     ca_status: Signal<ca::CaStatus>,
     install: Rc<impl Fn() + 'static>,
     remove: Rc<impl Fn() + 'static>,
@@ -749,7 +748,6 @@ pub(crate) fn cert_menu_row(
                             tr("信任", "Trust"),
                             || true,
                             move || {
-                                open.set(false);
                                 install.as_ref()();
                             },
                         )
@@ -764,7 +762,6 @@ pub(crate) fn cert_menu_row(
                                 tr("移除", "Remove"),
                                 || false,
                                 move || {
-                                    open.set(false);
                                     remove.as_ref()();
                                 },
                             )
@@ -776,7 +773,6 @@ pub(crate) fn cert_menu_row(
                             tr("安装", "Install"),
                             || true,
                             move || {
-                                open.set(false);
                                 install.as_ref()();
                             },
                         )

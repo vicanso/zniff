@@ -544,6 +544,33 @@ pub(crate) fn toggle_capture(controls: Arc<Controls>) {
     });
 }
 
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn switch_to_lan(controls: Arc<Controls>) {
+    set_bool(&controls.listen_all, true);
+    let port = lock_port(&controls.listen_port);
+    spawn(async move {
+        if lock_bool(&controls.running) {
+            let stop_req = HttpRequest::post("api/capture", b"{\"on\":false}".to_vec())
+                .header("content-type", "application/json");
+            let _ = fetch(stop_req).await;
+        }
+        let body = serde_json::json!({"on": true, "listen_all": true, "port": port})
+            .to_string()
+            .into_bytes();
+        let request =
+            HttpRequest::post("api/capture", body).header("content-type", "application/json");
+        match fetch(request).await {
+            Ok(response) => {
+                let value: serde_json::Value =
+                    serde_json::from_str(&response.text()).unwrap_or(serde_json::json!({}));
+                apply_capture_state(&controls, &value, response.ok());
+                proxy::notify_poll_wake();
+            }
+            Err(err) => set_status(&controls, StatusMsg::BindFailed { port, err }),
+        }
+    });
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub(crate) fn url_encode_query_component(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -712,6 +739,71 @@ pub(crate) fn stop_capture(controls: &Controls) {
         }
     }
     remember_capturing(controls, false);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn switch_to_lan(controls: Arc<Controls>) {
+    std::thread::spawn(move || {
+        let _ops = lock_ops(&controls);
+        set_bool(&controls.listen_all, true);
+        if let Err(err) = store_listen_all(true) {
+            set_status(
+                &controls,
+                StatusMsg::PrefUnsaved {
+                    name: PrefName::Lan,
+                    err: err.to_string(),
+                },
+            );
+        }
+        if !lock_bool(&controls.running) {
+            return;
+        }
+        if let Some(capture) = controls
+            .capture
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .take()
+        {
+            capture.stop();
+        }
+        let port = lock_port(&controls.listen_port);
+        let addr = SocketAddr::from(([0, 0, 0, 0], port));
+        match Capture::spawn(controls.hub.clone(), addr) {
+            Ok(capture) => {
+                let port = capture.addr.port();
+                set_port(&controls.listen_port, port);
+                *controls
+                    .listen
+                    .lock()
+                    .unwrap_or_else(|err| err.into_inner()) = capture.addr.to_string();
+                *controls
+                    .capture
+                    .lock()
+                    .unwrap_or_else(|err| err.into_inner()) = Some(capture);
+            }
+            Err(err) => {
+                ca::clear_ios_simulator_proxies();
+                *controls
+                    .listen
+                    .lock()
+                    .unwrap_or_else(|err| err.into_inner()) = String::new();
+                let applied = lock_bool(&controls.proxy_applied);
+                set_bool(&controls.proxy_applied, false);
+                set_bool(&controls.running, false);
+                if applied {
+                    let _ = sysproxy::disable();
+                }
+                set_status(
+                    &controls,
+                    StatusMsg::BindFailed {
+                        port,
+                        err: format!("{err:#}"),
+                    },
+                );
+                remember_capturing(&controls, false);
+            }
+        }
+    });
 }
 
 #[cfg(not(target_arch = "wasm32"))]

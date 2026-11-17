@@ -17,6 +17,12 @@ pub(crate) fn store_lang_pref(lang: Option<Lang>) -> std::io::Result<()> {
     save_config(|config| config.language = config::language_name(lang))
 }
 
+pub(crate) fn is_listening_lan(listen: &str) -> bool {
+    listen
+        .rsplit_once(':')
+        .is_some_and(|(host, _)| host == "0.0.0.0")
+}
+
 pub(crate) fn publish_lan(
     listen: &str,
     previous: &str,
@@ -25,10 +31,7 @@ pub(crate) fn publish_lan(
     url_out: Signal<String>,
     qr_out: Signal<String>,
 ) {
-    let host_ok = listen
-        .rsplit_once(':')
-        .is_some_and(|(host, _)| host == "0.0.0.0");
-    if !host_ok {
+    if !is_listening_lan(listen) {
         addrs_out.set(Vec::new());
         url_out.set(String::new());
         qr_out.set(String::new());
@@ -48,12 +51,12 @@ pub(crate) fn publish_lan(
 }
 
 pub(crate) fn cert_url(listen: &str, ip: Option<Ipv4Addr>) -> String {
-    let Some((host, port)) = listen.rsplit_once(':') else {
-        return String::new();
-    };
-    if host != "0.0.0.0" {
+    if !is_listening_lan(listen) {
         return String::new();
     }
+    let Some((_, port)) = listen.rsplit_once(':') else {
+        return String::new();
+    };
     let Some(ip) = ip else {
         return String::new();
     };

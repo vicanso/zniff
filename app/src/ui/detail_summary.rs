@@ -54,6 +54,7 @@ pub(crate) struct Shown {
     pub(crate) preview_h: Signal<f32>,
     pub(crate) image_caption: Signal<String>,
     pub(crate) pretty: Signal<bool>,
+    pub(crate) default_json_tree: Signal<bool>,
     pub(crate) messages: Signal<Vec<HeaderLine>>,
     pub(crate) diff: Signal<String>,
     pub(crate) diff_old: Signal<String>,

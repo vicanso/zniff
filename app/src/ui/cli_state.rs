@@ -253,6 +253,7 @@ pub(crate) struct ProfileSignals {
     pub(crate) panel_open: Signal<bool>,
     pub(crate) machine_settings_open: Signal<bool>,
     pub(crate) about_open: Signal<bool>,
+    pub(crate) default_json_tree: Signal<bool>,
     pub(crate) deselect_rev: Signal<u64>,
 }
 

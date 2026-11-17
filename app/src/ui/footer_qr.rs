@@ -17,7 +17,8 @@ pub(crate) fn footer(
     controls: Arc<Controls>,
 ) -> impl IntoElement {
     let port_controls = controls.clone();
-    let lan_controls = controls;
+    let lan_controls = controls.clone();
+    let qr_controls = controls;
     view()
         .h(px(32.0))
         .pl(px(LIST_INSET))
@@ -133,8 +134,18 @@ pub(crate) fn footer(
                 )),
         )
         .child(when(
-            move || !lan_url.get().is_empty(),
-            move || cert_qr(listen, lan_url, lan_choice, lan_addrs, qr_path),
+            move || running.get(),
+            move || {
+                cert_qr(
+                    listen,
+                    lan_url,
+                    lan_choice,
+                    lan_addrs,
+                    qr_path,
+                    listen_all,
+                    qr_controls.clone(),
+                )
+            },
         ))
         .child(when(
             move || !running.get(),
@@ -176,6 +187,8 @@ pub(crate) fn cert_qr(
     lan_choice: Signal<String>,
     lan_addrs: Signal<Vec<LanAddr>>,
     qr_path: Signal<String>,
+    listen_all: Signal<bool>,
+    controls: Arc<Controls>,
 ) -> impl IntoElement {
     let open = signal(false);
     popover()
@@ -188,11 +201,19 @@ pub(crate) fn cert_qr(
                 open.set(*next);
             }
         })
-        .trigger(qr_trigger(lan_choice, open))
-        .child(qr_panel(listen, lan_url, lan_choice, lan_addrs, qr_path))
+        .trigger(qr_trigger(listen, lan_url, lan_choice, open))
+        .child(qr_panel(
+            listen, lan_url, lan_choice, lan_addrs, qr_path, listen_all, controls,
+        ))
 }
 
-pub(crate) fn qr_trigger(choice: Signal<String>, open: Signal<bool>) -> impl IntoElement {
+pub(crate) fn qr_trigger(
+    listen: Signal<String>,
+    lan_url: Signal<String>,
+    choice: Signal<String>,
+    open: Signal<bool>,
+) -> impl IntoElement {
+    let has_lan = move || is_listening_lan(&listen.get()) && !lan_url.get().is_empty();
     view()
         .h(px(22.0))
         .px_2()
@@ -202,7 +223,13 @@ pub(crate) fn qr_trigger(choice: Signal<String>, open: Signal<bool>) -> impl Int
         .gap_1()
         .rounded(px(6.0))
         .border_1()
-        .border_color(accent_blue_border())
+        .border_color(move || {
+            if open.get() || has_lan() {
+                accent_blue_border()
+            } else {
+                border_control()
+            }
+        })
         .bg(move || {
             if open.get() {
                 accent_blue_soft()
@@ -226,13 +253,18 @@ pub(crate) fn qr_trigger(choice: Signal<String>, open: Signal<bool>) -> impl Int
                 .w(px(6.0))
                 .h(px(6.0))
                 .rounded_full()
-                .bg(accent_blue()),
+                .bg(move || if has_lan() { accent_blue() } else { fg_muted() }),
         )
         .child(
             text({
                 let langs = ui_langs();
                 move || -> SharedString {
-                    format!("{} {}", t(ui_lang(langs), "扫码", "Scan"), choice.get()).into()
+                    let label = t(ui_lang(langs), "扫码", "Scan");
+                    if has_lan() {
+                        format!("{label} {}", choice.get()).into()
+                    } else {
+                        label.into()
+                    }
                 }
             })
             .tabular_nums()
@@ -254,9 +286,18 @@ pub(crate) fn qr_panel(
     lan_choice: Signal<String>,
     lan_addrs: Signal<Vec<LanAddr>>,
     qr_path: Signal<String>,
+    listen_all: Signal<bool>,
+    controls: Arc<Controls>,
 ) -> impl IntoElement {
     view()
-        .w(move || px((window().width.0 - 20.0).clamp(280.0, 612.0)))
+        .w(move || {
+            let max_w = if is_listening_lan(&listen.get()) {
+                612.0
+            } else {
+                380.0
+            };
+            px((window().width.0 - 20.0).clamp(280.0, max_w))
+        })
         .max_h(move || px((window().height.0 - 50.0).max(200.0)))
         .rounded(px(10.0))
         .border_1()
@@ -281,34 +322,125 @@ pub(crate) fn qr_panel(
                                 .text_color(fg_secondary()),
                         )
                         .child(
-                            view()
-                                .w_full()
-                                .p_2()
-                                .rounded(px(6.0))
-                                .bg(bg_code())
-                                .border_1()
-                                .border_color(border_strong())
-                                .child(
-                                    mono(move || lan_url.get())
-                                        .selectable(true)
-                                        .number_of_lines(1)
-                                        .text_overflow(EllipsizeMode::Middle)
-                                        .text_size(px(12.0))
-                                        .text_color(fg_primary()),
-                                ),
-                        )
-                        .child(
-                            view()
-                                .w_full()
-                                .flex_row()
-                                .flex_wrap()
-                                .items_stretch()
-                                .gap_3()
-                                .child(qr_code_side(
-                                    listen, lan_url, lan_choice, lan_addrs, qr_path,
-                                ))
-                                .child(qr_phone_steps()),
+                            when(
+                                move || !is_listening_lan(&listen.get()),
+                                move || qr_local_only_notice(listen, listen_all, controls.clone()),
+                            )
+                            .otherwise(move || {
+                                view()
+                                    .w_full()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(
+                                        view()
+                                            .w_full()
+                                            .p_2()
+                                            .rounded(px(6.0))
+                                            .bg(bg_code())
+                                            .border_1()
+                                            .border_color(border_strong())
+                                            .child(
+                                                mono(move || lan_url.get())
+                                                    .selectable(true)
+                                                    .number_of_lines(1)
+                                                    .text_overflow(EllipsizeMode::Middle)
+                                                    .text_size(px(12.0))
+                                                    .text_color(fg_primary()),
+                                            ),
+                                    )
+                                    .child(
+                                        view()
+                                            .w_full()
+                                            .flex_row()
+                                            .flex_wrap()
+                                            .items_stretch()
+                                            .gap_3()
+                                            .child(qr_code_side(
+                                                listen, lan_url, lan_choice, lan_addrs, qr_path,
+                                            ))
+                                            .child(qr_phone_steps()),
+                                    )
+                            }),
                         ),
+                ),
+        )
+}
+
+pub(crate) fn qr_local_only_notice(
+    listen: Signal<String>,
+    listen_all: Signal<bool>,
+    controls: Arc<Controls>,
+) -> impl IntoElement {
+    view()
+        .w_full()
+        .gap_2p5()
+        .child(
+            view()
+                .w_full()
+                .p_3()
+                .rounded(px(8.0))
+                .bg(status_warn_bg())
+                .border_1()
+                .border_color(status_warn_fg())
+                .gap_1p5()
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_1p5()
+                        .child(glyph_px(14.0, || Glyph::Alert, || color(status_warn_fg())))
+                        .child(
+                            text(tr("当前仅监听本机", "Listening on localhost only"))
+                                .text_size(px(12.5))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(fg_primary()),
+                        ),
+                )
+                .child(
+                    text({
+                        let langs = ui_langs();
+                        move || -> SharedString {
+                            let addr = listen.get();
+                            match ui_lang(langs) {
+                                Lang::Zh => format!(
+                                    "代理当前只监听 {addr}，手机等局域网设备无法连接。请切换为「局域网监听 (0.0.0.0)」后再扫码。"
+                                )
+                                .into(),
+                                Lang::En => format!(
+                                    "The proxy is bound to {addr}, so LAN devices cannot reach it. Switch to LAN listening (0.0.0.0) to scan and connect."
+                                )
+                                .into(),
+                            }
+                        }
+                    })
+                    .text_size(px(12.0))
+                    .line_height(Points(18.0))
+                    .text_color(fg_secondary()),
+                ),
+        )
+        .child(
+            view()
+                .w_full()
+                .h(px(30.0))
+                .px_3()
+                .rounded(px(6.0))
+                .border_1()
+                .border_color(accent_blue_border())
+                .bg(accent_blue_soft())
+                .hover(|style| style.bg(accent_blue_soft_hover()))
+                .active(|style| style.opacity(0.8))
+                .cursor(Cursor::Pointer)
+                .items_center()
+                .justify_center()
+                .on_press(move || {
+                    listen_all.set(true);
+                    switch_to_lan(controls.clone());
+                })
+                .child(
+                    text(tr("切换为局域网监听", "Switch to LAN listening"))
+                        .text_size(px(12.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(accent_blue_text()),
                 ),
         )
 }

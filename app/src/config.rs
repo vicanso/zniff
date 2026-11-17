@@ -300,6 +300,8 @@ pub struct Config {
     pub window_height: u32,
     /// Pretty is the body default unless the file says otherwise.
     pub default_pretty: bool,
+    /// JSON bodies open in the interactive tree view by default when pretty is enabled.
+    pub default_json_tree: bool,
     /// Origin TLS probe failures stay out of the list unless this is on.
     pub show_tunnel_failures: bool,
     /// Restored into the filter box on the next launch.
@@ -407,6 +409,8 @@ struct RawConfig {
     window_height: u32,
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     default_pretty: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    default_json_tree: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     show_tunnel_failures: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -576,6 +580,7 @@ impl From<RawConfig> for Config {
             window_width: raw.window_width,
             window_height: raw.window_height,
             default_pretty: raw.default_pretty,
+            default_json_tree: raw.default_json_tree,
             show_tunnel_failures,
             filter,
             capturing: raw.capturing,
@@ -674,6 +679,7 @@ impl From<Config> for RawConfig {
             window_width: config.window_width,
             window_height: config.window_height,
             default_pretty: config.default_pretty,
+            default_json_tree: config.default_json_tree,
             show_tunnel_failures,
             filter,
             capturing: config.capturing,
@@ -726,6 +732,7 @@ impl Default for Config {
             window_width: default_window_width(),
             window_height: default_window_height(),
             default_pretty: true,
+            default_json_tree: false,
             show_tunnel_failures: false,
             filter: String::new(),
             capturing: false,
@@ -1622,6 +1629,20 @@ mod tests {
         update(dir.path(), |config| config.default_pretty = true).unwrap();
         let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
         assert!(!text.contains("default_pretty"), "{text}");
+    }
+
+    #[test]
+    fn default_json_tree_defaults_off_and_persists() {
+        let dir = Scratch::new();
+        fs::write(dir.path().join("config.toml"), "listen_port = 8877\n").unwrap();
+        assert!(!load(dir.path()).default_json_tree);
+        update(dir.path(), |config| config.default_json_tree = true).unwrap();
+        let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(text.contains("default_json_tree = true"), "{text}");
+        assert!(load(dir.path()).default_json_tree);
+        update(dir.path(), |config| config.default_json_tree = false).unwrap();
+        let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(!text.contains("default_json_tree"), "{text}");
     }
 
     #[test]

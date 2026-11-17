@@ -62,8 +62,8 @@ pub fn App() -> impl IntoElement {
         res_doc_preview: signal(false),
         request_json: signal(None),
         response_json: signal(None),
-        req_json_tree: signal(false),
-        res_json_tree: signal(false),
+        req_json_tree: signal(saved.default_json_tree && saved.default_pretty),
+        res_json_tree: signal(saved.default_json_tree && saved.default_pretty),
         request_form: signal(Vec::new()),
         request_note: signal(String::new()),
         response_note: signal(String::new()),
@@ -75,6 +75,7 @@ pub fn App() -> impl IntoElement {
         preview_h: signal(0.0),
         image_caption: signal(String::new()),
         pretty: signal(saved.default_pretty),
+        default_json_tree: signal(saved.default_json_tree),
         messages: signal(Vec::new()),
         diff: signal(String::new()),
         diff_old: signal(String::new()),
@@ -186,6 +187,7 @@ pub fn App() -> impl IntoElement {
         panel_open: signal(false),
         machine_settings_open: signal(false),
         about_open: signal(false),
+        default_json_tree: shown.default_json_tree,
         deselect_rev: signal(0),
     };
     let lan_url = signal(String::new());
@@ -194,6 +196,15 @@ pub fn App() -> impl IntoElement {
     let qr_path = signal(String::new());
     let controls = open_controls();
     let config_broken = signal(lock_config_error(&controls));
+    let default_json_tree_effect = shown.default_json_tree;
+    let shown_tree_effect = shown;
+    effect(move || {
+        let on = default_json_tree_effect.get();
+        let pretty_on = untracked(|| shown_tree_effect.pretty.get());
+        let active = on && pretty_on;
+        shown_tree_effect.req_json_tree.set(active);
+        shown_tree_effect.res_json_tree.set(active);
+    });
     #[cfg(target_os = "macos")]
     install_macos_application_menu(profile_signals.about_open);
     let config_broken_dismissed = signal(false);
@@ -681,8 +692,9 @@ pub fn App() -> impl IntoElement {
             seen_selected.replace(selected_now);
             shown_tick.req_doc_preview.set(false);
             shown_tick.res_doc_preview.set(false);
-            shown_tick.req_json_tree.set(false);
-            shown_tick.res_json_tree.set(false);
+            let tree_default = shown_tick.default_json_tree.get() && shown_tick.pretty.get();
+            shown_tick.req_json_tree.set(tree_default);
+            shown_tick.res_json_tree.set(tree_default);
             shown_tick.editing_comment.set(false);
             shown_tick.repeating.set(false);
             shown_tick.msg_search.set(String::new());

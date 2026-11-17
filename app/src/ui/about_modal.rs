@@ -13,6 +13,46 @@ const ISSUES_URL: &str = "https://github.com/vicanso/zniff/issues";
 #[cfg(not(target_arch = "wasm32"))]
 static GPU_INFO: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
+#[cfg_attr(
+    any(target_arch = "wasm32", not(target_os = "macos")),
+    allow(dead_code)
+)]
+pub(crate) fn parse_macos_gpu_info(info: &str) -> Option<String> {
+    for line in info.lines() {
+        if let Some(model) = line.trim().strip_prefix("Chipset Model:") {
+            let model = model.trim();
+            if !model.is_empty() {
+                return Some(model.to_string());
+            }
+        }
+    }
+    None
+}
+
+#[cfg_attr(
+    any(target_arch = "wasm32", not(target_os = "windows")),
+    allow(dead_code)
+)]
+pub(crate) fn parse_windows_gpu_info(info: &str) -> Option<String> {
+    info.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.eq_ignore_ascii_case("Name"))
+        .map(str::to_string)
+}
+
+#[cfg_attr(
+    any(target_arch = "wasm32", not(target_os = "linux")),
+    allow(dead_code)
+)]
+pub(crate) fn parse_linux_gpu_info(info: &str) -> Option<String> {
+    let trimmed = info.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let name = trimmed.rsplit(": ").next().unwrap_or(trimmed).trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn get_basic_gpu_info() -> &'static str {
     GPU_INFO
@@ -24,13 +64,8 @@ fn get_basic_gpu_info() -> &'static str {
                     .output()
                 {
                     let info = String::from_utf8_lossy(&output.stdout);
-                    for line in info.lines() {
-                        if let Some(model) = line.trim().strip_prefix("Chipset Model:") {
-                            let model = model.trim();
-                            if !model.is_empty() {
-                                return model.to_string();
-                            }
-                        }
+                    if let Some(model) = parse_macos_gpu_info(&info) {
+                        return model;
                     }
                 }
             }
@@ -41,13 +76,8 @@ fn get_basic_gpu_info() -> &'static str {
                     .output()
                 {
                     let info = String::from_utf8_lossy(&output.stdout);
-                    if let Some(name) = info
-                        .lines()
-                        .map(str::trim)
-                        .filter(|l| !l.is_empty() && !l.eq_ignore_ascii_case("Name"))
-                        .next()
-                    {
-                        return name.to_string();
+                    if let Some(name) = parse_windows_gpu_info(&info) {
+                        return name;
                     }
                 }
             }
@@ -58,14 +88,8 @@ fn get_basic_gpu_info() -> &'static str {
                     .output()
                 {
                     let info = String::from_utf8_lossy(&output.stdout);
-                    let trimmed = info.trim();
-                    if !trimmed.is_empty() {
-                        return trimmed
-                            .rsplit(": ")
-                            .next()
-                            .unwrap_or(trimmed)
-                            .trim()
-                            .to_string();
+                    if let Some(name) = parse_linux_gpu_info(&info) {
+                        return name;
                     }
                 }
             }

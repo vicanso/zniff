@@ -411,10 +411,10 @@ pub(crate) fn toolbar_menu(
     update_state: Signal<UpdateState>,
 ) -> impl IntoElement {
     let open = signal(false);
-    menu()
+    popover()
         .open(move || Some(open.get()))
-        .on_open_change(move |event: &nsh_base::MenuEvent| {
-            if let nsh_base::MenuEvent::OpenChange(next, _) = event {
+        .on_open_change(move |event: &nsh_base::PopoverEvent| {
+            if let nsh_base::PopoverEvent::OpenChange(next, _) = event {
                 open.set(*next);
             }
         })
