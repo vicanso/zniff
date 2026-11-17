@@ -119,6 +119,7 @@ pub(crate) fn deselect_active_profile(profiles: ProfileSignals, controls: &Contr
         .update(|rev| *rev = rev.wrapping_add(1));
     profiles.name.set(String::new());
     profiles.filter.set(String::new());
+    profiles.filter_enabled.set(true);
     profiles.bypass.set(String::new());
     profiles.rules.set(String::new());
     profiles.upstream.set(String::new());

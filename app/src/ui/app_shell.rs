@@ -24,10 +24,16 @@ pub fn App() -> impl IntoElement {
     let dropped = signal(0_u64);
     let saved_filter = saved_config();
     let filter = signal(saved_filter.filter.clone());
+    let filter_enabled = signal(true);
     let list_filter = signal(String::new());
     let effective_filter = signal(saved_filter.filter);
     effect(move || {
-        effective_filter.set(session::combine_filters(&filter.get(), &list_filter.get()));
+        let primary = if filter_enabled.get() {
+            filter.get()
+        } else {
+            String::new()
+        };
+        effective_filter.set(session::combine_filters(&primary, &list_filter.get()));
     });
     let saved_profiles = signal(saved_filter.saved_profiles);
     let profile_history = signal(saved_filter.profile_history);
@@ -174,6 +180,7 @@ pub fn App() -> impl IntoElement {
         history: profile_history,
         name: signal(initial_profile_name),
         filter,
+        filter_enabled,
         bypass: bypass_text,
         rules: rules_text,
         upstream: upstream_text,

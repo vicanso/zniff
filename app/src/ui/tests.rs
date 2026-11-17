@@ -2922,6 +2922,7 @@ fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
             history: signal(Vec::new()),
             name: signal(String::new()),
             filter,
+            filter_enabled: signal(true),
             bypass: signal(String::new()),
             rules: signal(String::new()),
             upstream: signal(String::new()),

@@ -181,12 +181,12 @@ pub(crate) fn more_menu(
                 profiles.machine_settings_open.set(true);
             },
         ));
-    let items = desktop_child!(items, menu_rule());
+    let items = items.child(menu_rule());
     let items = desktop_child!(
         items,
         update_menu_section(open, update_state, import_controls)
     );
-    let items = items.child(menu_rule()).child(menu_action_meta(
+    let items = items.child(menu_action_meta(
         Glyph::Badge,
         tr("关于 zniff", "About zniff"),
         || SharedString::from(format!("v{}", env!("CARGO_PKG_VERSION"))),
@@ -645,7 +645,7 @@ pub(crate) fn update_menu_section(
                     if matches!(st.phase, UpdatePhase::Checking) {
                         SharedString::from(t(ui_lang(langs), "检查中…", "Checking…"))
                     } else {
-                        SharedString::from(format!("v{}", updater::version()))
+                        SharedString::default()
                     }
                 }
             },

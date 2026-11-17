@@ -61,7 +61,6 @@ pub(crate) fn toolbar(
     let clear_unpinned = Rc::new(clear_unpinned);
     let remove = Rc::new(remove);
     let filter_controls = import_controls.clone();
-    let deselect_controls = import_controls.clone();
     #[cfg(not(target_arch = "wasm32"))]
     let update_controls = import_controls.clone();
     let bar = view()
@@ -189,9 +188,12 @@ pub(crate) fn toolbar(
                         }),
                 )
                 .child(when(
-                    move || startup_error().is_none() && active_name().is_some(),
                     move || {
-                        let deselect_controls = deselect_controls.clone();
+                        startup_error().is_none()
+                            && (active_name().is_some() || !filter.get().trim().is_empty())
+                    },
+                    move || {
+                        let enabled = move || profiles.filter_enabled.get();
                         view()
                             .window_drag(false)
                             .h(px(22.0))
@@ -202,8 +204,20 @@ pub(crate) fn toolbar(
                             .flex_row()
                             .items_center()
                             .border_1()
-                            .border_color(accent_blue_border())
-                            .bg(accent_blue_soft())
+                            .border_color(move || {
+                                if enabled() {
+                                    accent_blue_border()
+                                } else {
+                                    border_control()
+                                }
+                            })
+                            .bg(move || {
+                                if enabled() {
+                                    accent_blue_soft()
+                                } else {
+                                    bg_control()
+                                }
+                            })
                             .child(
                                 view()
                                     .h_full()
@@ -214,7 +228,15 @@ pub(crate) fn toolbar(
                                     .flex_row()
                                     .items_center()
                                     .cursor(Cursor::Pointer)
-                                    .hover(|style| style.bg(accent_blue_soft_hover()))
+                                    .hover(|style| {
+                                        style.bg(move || {
+                                            if enabled() {
+                                                accent_blue_soft_hover()
+                                            } else {
+                                                bg_control_hover()
+                                            }
+                                        })
+                                    })
                                     .active(|style| style.opacity(0.8))
                                     .tooltip(label_tip(
                                         "打开过滤与规则配置",
@@ -224,14 +246,24 @@ pub(crate) fn toolbar(
                                         profiles.panel_open.set(true);
                                     })
                                     .child(
-                                        text(move || active_name().unwrap_or_default())
-                                            .max_w(px(148.0))
-                                            .min_w(px(0.0))
-                                            .number_of_lines(1)
-                                            .text_overflow(EllipsizeMode::Tail)
-                                            .text_size(px(11.5))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(accent_blue_text()),
+                                        text(move || {
+                                            active_name().unwrap_or_else(|| {
+                                                t(ui_lang(langs), "过滤", "Filter").to_string()
+                                            })
+                                        })
+                                        .max_w(px(148.0))
+                                        .min_w(px(0.0))
+                                        .number_of_lines(1)
+                                        .text_overflow(EllipsizeMode::Tail)
+                                        .text_size(px(11.5))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(move || {
+                                            if enabled() {
+                                                accent_blue_text()
+                                            } else {
+                                                fg_muted()
+                                            }
+                                        }),
                                     ),
                             )
                             .child(
@@ -239,32 +271,80 @@ pub(crate) fn toolbar(
                                     .w(px(1.0))
                                     .h(px(12.0))
                                     .flex_shrink_0()
-                                    .bg(accent_blue_border()),
+                                    .bg(move || {
+                                        if enabled() {
+                                            accent_blue_border()
+                                        } else {
+                                            border_control()
+                                        }
+                                    }),
                             )
                             .child(
                                 view()
-                                    .w(px(20.0))
+                                    .w(px(22.0))
                                     .h(px(20.0))
                                     .flex_shrink_0()
                                     .flex_row()
                                     .items_center()
                                     .justify_center()
                                     .cursor(Cursor::Pointer)
-                                    .hover(|style| style.bg(accent_blue_soft_hover()))
+                                    .hover(|style| {
+                                        style.bg(move || {
+                                            if enabled() {
+                                                accent_blue_soft_hover()
+                                            } else {
+                                                bg_control_hover()
+                                            }
+                                        })
+                                    })
                                     .active(|style| style.opacity(0.75))
-                                    .label(tr("取消选择配置", "Deselect setup"))
-                                    .tooltip(label_tip(
-                                        "取消选择当前配置",
-                                        "Deselect current setup",
+                                    .label(tr("切换过滤生效状态", "Toggle filter active state"))
+                                    .tooltip(tooltip().child(
+                                        view()
+                                            .px_2()
+                                            .py_1()
+                                            .rounded(px(6.0))
+                                            .bg(bg_card())
+                                            .border_1()
+                                            .border_color(border_strong())
+                                            .child(
+                                                text(move || -> SharedString {
+                                                    if enabled() {
+                                                        t(
+                                                            ui_lang(langs),
+                                                            "过滤已生效，点击暂停",
+                                                            "Filter enabled — click to pause",
+                                                        )
+                                                        .into()
+                                                    } else {
+                                                        t(
+                                                            ui_lang(langs),
+                                                            "过滤已暂停，点击启用",
+                                                            "Filter paused — click to enable",
+                                                        )
+                                                        .into()
+                                                    }
+                                                })
+                                                .text_size(px(11.5))
+                                                .text_color(fg_primary()),
+                                            ),
                                     ))
                                     .on_press(move || {
-                                        deselect_active_profile(profiles, &deselect_controls);
+                                        profiles.filter_enabled.update(|on| *on = !*on);
                                     })
-                                    .child(glyph_px(
-                                        10.0,
-                                        || Glyph::Close,
-                                        || color(accent_blue_text()),
-                                    )),
+                                    .child(
+                                        view()
+                                            .w(px(6.0))
+                                            .h(px(6.0))
+                                            .rounded_full()
+                                            .bg(move || {
+                                                if enabled() {
+                                                    status_ok_fg()
+                                                } else {
+                                                    fg_muted()
+                                                }
+                                            }),
+                                    ),
                             )
                     },
                 ))
@@ -272,14 +352,30 @@ pub(crate) fn toolbar(
                     when(
                         move || startup_error().is_none() && condition_info().1,
                         move || {
-                            mono(move || condition_info().0)
-                                .flex_1()
-                                .min_w(px(0.0))
-                                .number_of_lines(1)
-                                .text_overflow(EllipsizeMode::Tail)
-                                .text_size(px(12.0))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(fg_secondary())
+                            mono(move || {
+                                let text = condition_info().0;
+                                if profiles.filter_enabled.get() {
+                                    text
+                                } else {
+                                    format!(
+                                        "({}) {text}",
+                                        t(ui_lang(langs), "已暂停", "Paused")
+                                    )
+                                }
+                            })
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .number_of_lines(1)
+                            .text_overflow(EllipsizeMode::Tail)
+                            .text_size(px(12.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(move || {
+                                if profiles.filter_enabled.get() {
+                                    fg_secondary()
+                                } else {
+                                    fg_muted()
+                                }
+                            })
                         },
                     )
                     .otherwise(move || {

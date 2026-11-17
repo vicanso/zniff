@@ -240,6 +240,7 @@ pub(crate) struct ProfileSignals {
     pub(crate) history: Signal<Vec<config::SavedProfile>>,
     pub(crate) name: Signal<String>,
     pub(crate) filter: Signal<String>,
+    pub(crate) filter_enabled: Signal<bool>,
     pub(crate) bypass: Signal<String>,
     pub(crate) rules: Signal<String>,
     pub(crate) upstream: Signal<String>,
