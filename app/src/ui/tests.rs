@@ -375,7 +375,7 @@ fn list_columns_round_trip_and_the_pane_clamps() {
         .toggle(super::ListColumn::Protocol)
         .toggle(super::ListColumn::ClientIp)
         .toggle(super::ListColumn::Size)
-        .with_full_url(true)
+        .with_path_display(crate::config::PathDisplay::FullUrl)
         .with_ellipsize(crate::config::ListEllipsize::Tail);
     columns.write(&mut config);
     assert!(config.show_protocol);
@@ -399,6 +399,7 @@ fn list_columns_round_trip_and_the_pane_clamps() {
         host: "api.example.com".to_string(),
         client_ip: "127.0.0.1".to_string(),
         path: "/v1/users".to_string(),
+        host_path: "api.example.com/v1/users".to_string(),
         url: "https://api.example.com/v1/users".to_string(),
         comment: String::new(),
         protocol: "HTTP/2".to_string(),
@@ -408,16 +409,75 @@ fn list_columns_round_trip_and_the_pane_clamps() {
         pinned: false,
         relay_short: String::new(),
     };
-    assert_eq!(super::row_target_text(&row, false), "/v1/users");
     assert_eq!(
-        super::row_target_text(&row, true),
+        super::row_target_text(&row, super::EffectivePathDisplay::PathOnly),
+        "/v1/users"
+    );
+    assert_eq!(
+        super::row_target_text(&row, super::EffectivePathDisplay::HostAndPath),
+        "api.example.com/v1/users"
+    );
+    assert_eq!(
+        super::row_target_text(&row, super::EffectivePathDisplay::FullUrl),
         "https://api.example.com/v1/users"
     );
     let empty_url_row = super::RowLine {
         url: String::new(),
         ..row
     };
-    assert_eq!(super::row_target_text(&empty_url_row, true), "/v1/users");
+    assert_eq!(
+        super::row_target_text(&empty_url_row, super::EffectivePathDisplay::FullUrl),
+        "/v1/users"
+    );
+    assert!(super::filter_has_single_host("host:api.example.com"));
+    assert!(super::filter_has_single_host("domain:api.example.com 2xx"));
+    assert!(!super::filter_has_single_host("host:a.com|b.com"));
+    assert!(!super::filter_has_single_host("host:*.example.com"));
+    assert!(!super::filter_has_single_host("-host:api.example.com"));
+    assert!(!super::filter_has_single_host("type:json status:500"));
+    assert_eq!(
+        super::list_host_path("api.example.com", "/v1/users?a=1", None, false, Lang::Zh),
+        "api.example.com/v1/users"
+    );
+    assert_eq!(
+        super::list_host_path("api.example.com", "api.example.com:443", None, false, Lang::Zh),
+        "api.example.com:443"
+    );
+    let auto_cols = super::ListColumns::from_config(&crate::config::Config::default());
+    assert_eq!(
+        super::effective_path_display(auto_cols, ""),
+        super::EffectivePathDisplay::HostAndPath
+    );
+    assert_eq!(
+        super::effective_path_display(auto_cols, "type:json"),
+        super::EffectivePathDisplay::HostAndPath
+    );
+    assert_eq!(
+        super::effective_path_display(auto_cols, "host:a.com|b.com"),
+        super::EffectivePathDisplay::HostAndPath
+    );
+    assert_eq!(
+        super::effective_path_display(auto_cols, "host:api.example.com"),
+        super::EffectivePathDisplay::PathOnly
+    );
+    assert_eq!(
+        super::effective_path_display(auto_cols.toggle(super::ListColumn::Host), ""),
+        super::EffectivePathDisplay::PathOnly
+    );
+    assert_eq!(
+        super::effective_path_display(
+            auto_cols.with_path_display(crate::config::PathDisplay::PathOnly),
+            ""
+        ),
+        super::EffectivePathDisplay::PathOnly
+    );
+    assert_eq!(
+        super::effective_path_display(
+            auto_cols.with_path_display(crate::config::PathDisplay::HostAndPath),
+            "host:api.example.com"
+        ),
+        super::EffectivePathDisplay::HostAndPath
+    );
     assert_eq!(
         super::clamp_list_px(10.0),
         crate::config::LIST_WIDTH_MIN as f32
@@ -497,7 +557,7 @@ fn flow_columns_pin_method_and_path_and_keep_a_dragged_width() {
         protocol: false,
         host: false,
         client_ip: false,
-        full_url: false,
+        path_display: crate::config::PathDisplay::Auto,
         ellipsize: crate::config::ListEllipsize::Middle,
         order: super::ListColumn::ORDERED,
         order_rev: 0,
@@ -561,7 +621,7 @@ fn flow_columns_pin_method_and_path_and_keep_a_dragged_width() {
         protocol: true,
         host: true,
         client_ip: true,
-        full_url: false,
+        path_display: crate::config::PathDisplay::Auto,
         ellipsize: crate::config::ListEllipsize::Middle,
         order: super::ListColumn::ORDERED,
         order_rev: 0,
@@ -1032,6 +1092,7 @@ fn list_sort_cycles_asc_desc_none_and_orders_rows() {
         host: host.to_string(),
         client_ip: "127.0.0.1".to_string(),
         path: path.to_string(),
+        host_path: format!("{host}{path}"),
         url: format!("https://{host}{path}"),
         comment: String::new(),
         protocol: "HTTP/1.1".to_string(),
@@ -1083,7 +1144,7 @@ fn list_sort_cycles_asc_desc_none_and_orders_rows() {
             column: super::ListColumn::Method,
             desc: false,
         },
-        false,
+        super::EffectivePathDisplay::PathOnly,
     );
     let ids: Vec<u64> = by_method_asc.iter().map(|r| r.id).collect();
     // DELETE (3), GET (2, then 4 by id tie-breaker), POST (1)
@@ -1096,7 +1157,7 @@ fn list_sort_cycles_asc_desc_none_and_orders_rows() {
             column: super::ListColumn::Size,
             desc: true,
         },
-        false,
+        super::EffectivePathDisplay::PathOnly,
     );
     let ids: Vec<u64> = by_size_desc.iter().map(|r| r.id).collect();
     assert_eq!(ids, vec![2, 4, 1, 3]);
@@ -1108,7 +1169,7 @@ fn list_sort_cycles_asc_desc_none_and_orders_rows() {
             column: super::ListColumn::Elapsed,
             desc: true,
         },
-        false,
+        super::EffectivePathDisplay::PathOnly,
     );
     let ids: Vec<u64> = by_elapsed_desc.iter().map(|r| r.id).collect();
     // Unfinished (`None`, id 3) stays at the bottom even in descending sort.

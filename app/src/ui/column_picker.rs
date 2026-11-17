@@ -107,17 +107,31 @@ pub(crate) fn column_picker_panel(
                             move || column_reset_order(columns, reset_controls.clone()),
                         ))
                         .child(menu_rule())
-                        .child(column_full_url_choice(
+                        .child(column_path_display_choice(
                             columns,
                             controls.clone(),
-                            false,
+                            config::PathDisplay::Auto,
+                            "自动 (无域名过滤时含域名)",
+                            "Auto (Host + Path when unfiltered)",
+                        ))
+                        .child(column_path_display_choice(
+                            columns,
+                            controls.clone(),
+                            config::PathDisplay::PathOnly,
                             "仅展示 Path",
                             "Path only",
                         ))
-                        .child(column_full_url_choice(
+                        .child(column_path_display_choice(
                             columns,
                             controls.clone(),
-                            true,
+                            config::PathDisplay::HostAndPath,
+                            "域名 + Path",
+                            "Host + Path",
+                        ))
+                        .child(column_path_display_choice(
+                            columns,
+                            controls.clone(),
+                            config::PathDisplay::FullUrl,
                             "完整 URL",
                             "Full URL",
                         ))
@@ -337,19 +351,19 @@ pub(crate) fn column_reset_order(
         )
 }
 
-pub(crate) fn column_full_url_choice(
+pub(crate) fn column_path_display_choice(
     columns: Signal<ListColumns>,
     controls: Arc<Controls>,
-    full_url: bool,
+    path_display: config::PathDisplay,
     zh: &'static str,
     en: &'static str,
 ) -> impl IntoElement {
     let marked = columns;
     marked_radio_stay(
-        move || marked.get().full_url == full_url,
+        move || marked.get().path_display == path_display,
         tr(zh, en),
         move || {
-            let next = columns.get().with_full_url(full_url);
+            let next = columns.get().with_path_display(path_display);
             if next == columns.get() {
                 return;
             }

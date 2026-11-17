@@ -151,6 +151,58 @@ impl<'de> Deserialize<'de> for ListEllipsize {
     }
 }
 
+/// What the Path column displays in the flow list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PathDisplay {
+    #[default]
+    Auto,
+    PathOnly,
+    HostAndPath,
+    FullUrl,
+}
+
+impl PathDisplay {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::PathOnly => "path_only",
+            Self::HostAndPath => "host_and_path",
+            Self::FullUrl => "full_url",
+        }
+    }
+
+    pub fn parse(text: &str) -> Self {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "path" | "path_only" | "path-only" => Self::PathOnly,
+            "host_path" | "host_and_path" | "host-and-path" | "domain_path" => Self::HostAndPath,
+            "full_url" | "full-url" | "url" => Self::FullUrl,
+            _ => Self::Auto,
+        }
+    }
+
+    pub fn is_default(&self) -> bool {
+        *self == Self::Auto
+    }
+}
+
+impl Serialize for PathDisplay {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for PathDisplay {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        Ok(Self::parse(&text))
+    }
+}
+
 /// One named set of proxy rules saved by the user.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedRuleSet {
@@ -291,6 +343,8 @@ pub struct Config {
     pub show_size: bool,
     /// False shows only `flow.path` in the Path column; true shows `flow.url`.
     pub show_full_url: bool,
+    /// What the Path column displays (`auto`, `path_only`, `host_and_path`, `full_url`).
+    pub path_display: PathDisplay,
     /// Where to ellipsize overflowing Path/URL and Host cells (`head`, `middle`, `tail`).
     pub ellipsize: ListEllipsize,
     /// False draws monospaced text in the bundled JetBrains Mono; true uses the system's.
@@ -388,6 +442,8 @@ struct RawConfig {
     show_size: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     show_full_url: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    path_display: Option<PathDisplay>,
     #[serde(default, skip_serializing_if = "ListEllipsize::is_default")]
     ellipsize: ListEllipsize,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -574,6 +630,11 @@ impl From<RawConfig> for Config {
             show_client_ip: raw.show_client_ip,
             show_size: raw.show_size,
             show_full_url: raw.show_full_url,
+            path_display: raw.path_display.unwrap_or(if raw.show_full_url {
+                PathDisplay::FullUrl
+            } else {
+                PathDisplay::Auto
+            }),
             ellipsize: raw.ellipsize,
             system_mono_font: raw.system_mono_font,
             list_width: raw.list_width,
@@ -672,7 +733,9 @@ impl From<Config> for RawConfig {
             show_host: config.show_host,
             show_client_ip: config.show_client_ip,
             show_size: config.show_size,
-            show_full_url: config.show_full_url,
+            show_full_url: (config.show_full_url && config.path_display == PathDisplay::Auto)
+                || config.path_display == PathDisplay::FullUrl,
+            path_display: (!config.path_display.is_default()).then_some(config.path_display),
             ellipsize: config.ellipsize,
             system_mono_font: config.system_mono_font,
             list_width: config.list_width,
@@ -726,6 +789,7 @@ impl Default for Config {
             show_client_ip: false,
             show_size: true,
             show_full_url: false,
+            path_display: PathDisplay::Auto,
             ellipsize: ListEllipsize::Middle,
             system_mono_font: false,
             list_width: default_list_width(),

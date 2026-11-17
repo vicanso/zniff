@@ -230,11 +230,12 @@ pub(crate) fn flow_table(
                     .classes(flow_table_classes())
                     .columns(move || {
                         let shown = columns.get();
+                        let display = effective_path_display(shown, &filter.get());
                         let current_widths = untracked(|| widths_for_cols.get());
                         let mut built = flow_table_columns(shown_at_mount, &current_widths);
                         for column in &mut built {
                             let key = column.key.to_string();
-                            column.title = Some(flow_column_title(&key, shown.full_url).into());
+                            column.title = Some(flow_column_title(&key, display).into());
                         }
                         built
                     })
@@ -264,6 +265,7 @@ pub(crate) fn flow_table(
                             selected_for_cells,
                             baseline_for_cells,
                             columns,
+                            filter,
                             hover,
                             cell,
                         )
@@ -271,7 +273,7 @@ pub(crate) fn flow_table(
                     .render_header_cell(move |cell: &DataTableHeaderCell| {
                         let blur_header = Rc::clone(&blur_header);
                         let column = ListColumn::from_key(cell.key.as_ref());
-                        flow_header(cell, columns, sort).on_press(move || {
+                        flow_header(cell, columns, filter, sort).on_press(move || {
                             if let Some(column) = column {
                                 sort.set(ListSort::toggle(sort.get(), column));
                             }

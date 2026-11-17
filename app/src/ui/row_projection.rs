@@ -21,6 +21,30 @@ pub(crate) fn list_path(path: &str, error: Option<&str>, failed: bool, lang: Lan
     }
 }
 
+pub(crate) fn list_host_path(
+    host: &str,
+    path: &str,
+    error: Option<&str>,
+    failed: bool,
+    lang: Lang,
+) -> String {
+    if failed {
+        return localize_error(lang, error.unwrap_or(""));
+    }
+    let clean_path = path.split('?').next().unwrap_or(path);
+    if host.is_empty() {
+        clean_path.to_string()
+    } else if clean_path.is_empty() {
+        host.to_string()
+    } else if clean_path.starts_with('/') {
+        format!("{host}{clean_path}")
+    } else if clean_path == host || clean_path.starts_with(&format!("{host}:")) {
+        clean_path.to_string()
+    } else {
+        format!("{host}/{clean_path}")
+    }
+}
+
 pub(crate) fn list_url(
     url: &str,
     path: &str,
@@ -61,7 +85,7 @@ pub(crate) fn project_rows(
     matched: &[(u64, Option<SystemTime>)],
     lang: Lang,
     sort: Option<ListSort>,
-    full_url: bool,
+    path_display: EffectivePathDisplay,
     cache: &mut RowCache,
 ) -> Vec<Arc<RowLine>> {
     if cache.lang != lang {
@@ -109,6 +133,7 @@ pub(crate) fn project_rows(
                 flow.client_ip.clone()
             },
             path: list_path(&flow.path, flow.error.as_deref(), failed, lang),
+            host_path: list_host_path(&flow.host, &flow.path, flow.error.as_deref(), failed, lang),
             url: list_url(&flow.url, &flow.path, flow.error.as_deref(), failed, lang),
             comment: flow.comment.clone(),
             protocol: flow.protocol.label_in(lang).to_string(),
@@ -134,7 +159,7 @@ pub(crate) fn project_rows(
     }
     cache.rows.retain(|id, _| keep.contains(id));
     if let Some(sort) = sort {
-        sort_row_lines(&mut lines, sort, full_url);
+        sort_row_lines(&mut lines, sort, path_display);
     }
     lines
 }
@@ -142,7 +167,7 @@ pub(crate) fn project_rows(
 pub(crate) fn sort_row_lines<T: std::borrow::Borrow<RowLine>>(
     rows: &mut [T],
     sort: ListSort,
-    full_url: bool,
+    path_display: EffectivePathDisplay,
 ) {
     rows.sort_by(|a, b| {
         let a = a.borrow();
@@ -150,9 +175,10 @@ pub(crate) fn sort_row_lines<T: std::borrow::Borrow<RowLine>>(
         let primary = match sort.column {
             ListColumn::Id => a.id.cmp(&b.id),
             ListColumn::Method => cmp_ignore_ascii_case(&a.method, &b.method),
-            ListColumn::Path => {
-                cmp_ignore_ascii_case(row_target_text(a, full_url), row_target_text(b, full_url))
-            }
+            ListColumn::Path => cmp_ignore_ascii_case(
+                row_target_text(a, path_display),
+                row_target_text(b, path_display),
+            ),
             ListColumn::Status => status_sort_rank(a).cmp(&status_sort_rank(b)),
             ListColumn::Gap => a.gap_nanos.cmp(&b.gap_nanos),
             ListColumn::Elapsed => match (a.elapsed_nanos, b.elapsed_nanos) {

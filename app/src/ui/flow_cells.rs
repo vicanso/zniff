@@ -6,6 +6,7 @@ pub(crate) fn flow_cell(
     selected: Signal<Option<u64>>,
     baseline: Signal<Option<u64>>,
     columns: Signal<ListColumns>,
+    effective_filter: Signal<String>,
     hover: CellHover,
     cell: &DataTableCell,
 ) -> AnyElement {
@@ -13,7 +14,8 @@ pub(crate) fn flow_cell(
     match cell.key.as_ref() {
         "id" => id_cell(rows, selected, baseline, columns, index).into_element(),
         "method" => method_cell(rows, selected, baseline, columns, index).into_element(),
-        "path" => path_cell(rows, selected, baseline, columns, hover, index).into_element(),
+        "path" => path_cell(rows, selected, baseline, columns, effective_filter, hover, index)
+            .into_element(),
         "status" => status_cell(rows, selected, baseline, columns, index).into_element(),
         "protocol" => protocol_cell(rows, selected, baseline, columns, index).into_element(),
         "gap" => time_cell(rows, selected, baseline, columns, hover, index).into_element(),
@@ -47,6 +49,7 @@ pub(crate) fn column_pad_right(
 pub(crate) fn flow_header(
     cell: &DataTableHeaderCell,
     columns: Signal<ListColumns>,
+    effective_filter: Signal<String>,
     sort: Signal<Option<ListSort>>,
 ) -> View {
     let key = cell.key.to_string();
@@ -72,7 +75,10 @@ pub(crate) fn flow_header(
         .overflow_hidden();
     let row = if align_right { row.justify_end() } else { row };
     row.child(
-        text(move || -> SharedString { flow_column_title(&key, columns.get().full_url).into() })
+        text(move || -> SharedString {
+            let display = effective_path_display(columns.get(), &effective_filter.get());
+            flow_column_title(&key, display).into()
+        })
             .number_of_lines(1)
             .text_size(px(11.0))
             .font_weight(FontWeight::SEMIBOLD)
@@ -543,6 +549,7 @@ pub(crate) fn path_cell(
     selected: Signal<Option<u64>>,
     baseline: Signal<Option<u64>>,
     columns: Signal<ListColumns>,
+    effective_filter: Signal<String>,
     hover: CellHover,
     index: usize,
 ) -> impl IntoElement {
@@ -592,10 +599,10 @@ pub(crate) fn path_cell(
         ))
         .child(
             mono(move || {
-                let full_url = columns.get().full_url;
+                let display = effective_path_display(columns.get(), &effective_filter.get());
                 rows.with(|rows| {
                     rows.get(index)
-                        .map(|row| row_target_display(row, full_url))
+                        .map(|row| row_target_display(row, display))
                         .unwrap_or_default()
                 })
             })
@@ -613,11 +620,11 @@ pub(crate) fn path_cell(
             }),
         )
         .on_mouse_move(move |event: &MouseEvent| {
-            let full_url = columns.get().full_url;
+            let display = effective_path_display(columns.get(), &effective_filter.get());
             let path = tip_rows.with(|rows| {
                 rows.get(index)
                     .map(|row| {
-                        let target = row_target_display(row, full_url);
+                        let target = row_target_display(row, display);
                         if row.relay_short.is_empty() {
                             target
                         } else {
@@ -635,16 +642,22 @@ pub(crate) fn path_cell(
         .on_mouse_leave(move |_: &MouseEvent| hover.text.set(None))
 }
 
-pub(crate) fn row_target_text(row: &RowLine, full_url: bool) -> &str {
-    if full_url && !row.url.is_empty() {
-        &row.url
-    } else {
-        &row.path
+pub(crate) fn row_target_text(row: &RowLine, display: EffectivePathDisplay) -> &str {
+    match display {
+        EffectivePathDisplay::PathOnly => &row.path,
+        EffectivePathDisplay::HostAndPath => &row.host_path,
+        EffectivePathDisplay::FullUrl => {
+            if !row.url.is_empty() {
+                &row.url
+            } else {
+                &row.path
+            }
+        }
     }
 }
 
-pub(crate) fn row_target_display(row: &RowLine, full_url: bool) -> String {
-    let base = row_target_text(row, full_url);
+pub(crate) fn row_target_display(row: &RowLine, display: EffectivePathDisplay) -> String {
+    let base = row_target_text(row, display);
     if row.comment.is_empty() {
         base.to_string()
     } else {

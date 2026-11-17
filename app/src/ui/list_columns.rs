@@ -23,6 +23,7 @@ pub(crate) struct RowLine {
     pub(crate) host: String,
     pub(crate) client_ip: String,
     pub(crate) path: String,
+    pub(crate) host_path: String,
     pub(crate) url: String,
     pub(crate) comment: String,
     pub(crate) protocol: String,
@@ -71,7 +72,7 @@ pub(crate) struct ListColumns {
     pub(crate) protocol: bool,
     pub(crate) host: bool,
     pub(crate) client_ip: bool,
-    pub(crate) full_url: bool,
+    pub(crate) path_display: config::PathDisplay,
     pub(crate) ellipsize: config::ListEllipsize,
     pub(crate) order: [ListColumn; 10],
     pub(crate) order_rev: u64,
@@ -89,7 +90,7 @@ impl PartialEq for ListColumns {
             && self.protocol == other.protocol
             && self.host == other.host
             && self.client_ip == other.client_ip
-            && self.full_url == other.full_url
+            && self.path_display == other.path_display
             && self.ellipsize == other.ellipsize
             && self.order == other.order
     }
@@ -200,7 +201,7 @@ impl ListColumns {
             protocol: config.show_protocol,
             host: config.show_host,
             client_ip: config.show_client_ip,
-            full_url: config.show_full_url,
+            path_display: config.path_display,
             ellipsize: config.ellipsize,
             order: ListColumn::order_from_keys(&config.column_order),
             order_rev: 0,
@@ -327,8 +328,11 @@ impl ListColumns {
         self
     }
 
-    pub(crate) fn with_full_url(self, full_url: bool) -> Self {
-        Self { full_url, ..self }
+    pub(crate) fn with_path_display(self, path_display: config::PathDisplay) -> Self {
+        Self {
+            path_display,
+            ..self
+        }
     }
 
     pub(crate) fn with_ellipsize(self, ellipsize: config::ListEllipsize) -> Self {
@@ -363,7 +367,8 @@ impl ListColumns {
         config.show_protocol = self.protocol;
         config.show_host = self.host;
         config.show_client_ip = self.client_ip;
-        config.show_full_url = self.full_url;
+        config.path_display = self.path_display;
+        config.show_full_url = self.path_display == config::PathDisplay::FullUrl;
         config.ellipsize = self.ellipsize;
         config.column_order = self.order_keys();
     }
@@ -400,19 +405,56 @@ pub(crate) fn flow_table_columns(
         .collect()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EffectivePathDisplay {
+    PathOnly,
+    HostAndPath,
+    FullUrl,
+}
+
+pub(crate) fn filter_has_single_host(filter: &str) -> bool {
+    filter.split_whitespace().any(|token| {
+        let lower = token.to_ascii_lowercase();
+        let val = lower
+            .strip_prefix("host:")
+            .or_else(|| lower.strip_prefix("domain:"));
+        val.is_some_and(|v| {
+            let v = v.trim();
+            !v.is_empty() && !v.contains('|') && !v.contains(',') && !v.contains('*')
+        })
+    })
+}
+
+pub(crate) fn effective_path_display(
+    columns: ListColumns,
+    effective_filter: &str,
+) -> EffectivePathDisplay {
+    match columns.path_display {
+        config::PathDisplay::Auto => {
+            if columns.host || filter_has_single_host(effective_filter) {
+                EffectivePathDisplay::PathOnly
+            } else {
+                EffectivePathDisplay::HostAndPath
+            }
+        }
+        config::PathDisplay::PathOnly => EffectivePathDisplay::PathOnly,
+        config::PathDisplay::HostAndPath => EffectivePathDisplay::HostAndPath,
+        config::PathDisplay::FullUrl => EffectivePathDisplay::FullUrl,
+    }
+}
+
 /// Column titles follow the same `tr` pair as the rest of the window.
 /// Called while the `.columns` prop runs, so a language change rebuilds them.
-pub(crate) fn flow_column_title(key: &str, full_url: bool) -> String {
+pub(crate) fn flow_column_title(key: &str, display: EffectivePathDisplay) -> String {
     match key {
         "method" => tr("方法", "Method")(),
         "id" => tr("序号", "#")(),
-        "path" => {
-            if full_url {
-                "URL".to_string()
-            } else {
+        "path" => match display {
+            EffectivePathDisplay::FullUrl => "URL".to_string(),
+            EffectivePathDisplay::PathOnly | EffectivePathDisplay::HostAndPath => {
                 tr("路径", "Path")()
             }
-        }
+        },
         "status" => tr("状态", "Status")(),
         "protocol" => tr("协议", "Protocol")(),
         "gap" => tr("间隔", "Gap")(),

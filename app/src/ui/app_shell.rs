@@ -317,7 +317,10 @@ pub fn App() -> impl IntoElement {
     let sort_tick = sort;
     let seen_sort = stored(None::<ListSort>);
     let cols_tick = columns;
-    let seen_full_url = stored(columns.get().full_url);
+    let seen_path_display = stored(effective_path_display(
+        columns.get(),
+        &effective_filter.get_untracked(),
+    ));
     let seen_paused = stored(None::<(u64, BreakSide)>);
     let compose_tick = compose;
     let share_id = signal(String::new());
@@ -597,7 +600,7 @@ pub fn App() -> impl IntoElement {
         let baseline_now = baseline_tick.get();
         let pretty_now = shown_tick.pretty.get();
         let sort_now = sort_tick.get();
-        let full_url_now = cols_tick.get().full_url;
+        let path_display_now = effective_path_display(cols_tick.get(), &effective_filter_now);
         let facets_open_now = facets_open_tick.get();
         let facets_opened = facets_open_now && !seen_facets_open.get();
         seen_facets_open.replace(facets_open_now);
@@ -606,7 +609,7 @@ pub fn App() -> impl IntoElement {
             || filter_now != seen_setup_filter.get()
             || lang_now != seen_lang.get()
             || sort_now != seen_sort.get()
-            || full_url_now != seen_full_url.get()
+            || path_display_now != seen_path_display.get()
             || spill_expired
             || facets_opened;
         let want_stats = selected_now.is_none();
@@ -617,7 +620,7 @@ pub fn App() -> impl IntoElement {
             seen_setup_filter.replace(filter_now.clone());
             seen_lang.replace(lang_now);
             seen_sort.replace(sort_now);
-            seen_full_url.replace(full_url_now);
+            seen_path_display.replace(path_display_now);
             let (matched, _) = controls_tick.hub.matching_ids(&effective_filter_now);
             let facet_ids = if facets_open_now && filter_now != effective_filter_now {
                 Some(controls_tick.hub.matching_ids(&filter_now).0)
@@ -632,7 +635,7 @@ pub fn App() -> impl IntoElement {
                         &matched,
                         lang_now,
                         sort_now,
-                        full_url_now,
+                        path_display_now,
                         &mut cache,
                     );
                     let stats = want_stats.then(|| {
