@@ -2477,16 +2477,45 @@ pub fn normalize_filter_pipes(filter: &str) -> String {
     tokens.join(" ")
 }
 
+fn glob_ascii_ignore_case(text: &str, pattern: &str) -> bool {
+    let t = text.as_bytes();
+    let p = pattern.as_bytes();
+    let (mut ti, mut pi) = (0, 0);
+    let (mut star_pi, mut match_ti) = (None, 0);
+    while ti < t.len() {
+        if pi < p.len() && p[pi] == b'*' {
+            star_pi = Some(pi);
+            pi += 1;
+            match_ti = ti;
+        } else if pi < p.len() && t[ti].eq_ignore_ascii_case(&p[pi]) {
+            ti += 1;
+            pi += 1;
+        } else if let Some(sp) = star_pi {
+            pi = sp + 1;
+            match_ti += 1;
+            ti = match_ti;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == b'*' {
+        pi += 1;
+    }
+    pi == p.len()
+}
+
 fn host_matches(host: &str, pattern: &str) -> bool {
     let pattern = pattern.trim();
     if pattern.is_empty() {
         return true;
     }
     if let Some(suffix) = pattern.strip_prefix("*.") {
-        host.eq_ignore_ascii_case(suffix) || ends_with_dot_suffix(host, suffix)
-    } else {
-        contains_ascii_ignore_case(host, pattern)
+        return !suffix.contains('*') && ends_with_dot_suffix(host, suffix);
     }
+    if pattern.contains('*') {
+        return glob_ascii_ignore_case(host, pattern);
+    }
+    host.eq_ignore_ascii_case(pattern)
 }
 
 fn path_prefix_matches(path: &str, prefix: &str) -> bool {
@@ -3188,13 +3217,14 @@ impl FlowStage {
             return false;
         }
         if self.excludes.iter().any(|text| {
-            host_matches(&flow.host, text) || contains_ascii_ignore_case(&flow.path, text)
+            contains_ascii_ignore_case(&flow.host, text)
+                || contains_ascii_ignore_case(&flow.path, text)
         }) {
             return false;
         }
         self.texts.iter().all(|group| {
             group.iter().any(|text| {
-                host_matches(&flow.host, text)
+                contains_ascii_ignore_case(&flow.host, text)
                     || contains_ascii_ignore_case(&flow.path, text)
                     || (!flow.client_ip.is_empty()
                         && contains_ascii_ignore_case(&flow.client_ip, text))
@@ -3489,18 +3519,53 @@ mod tests {
         session.set_response(id_c, 502, Vec::new(), None);
 
         assert_eq!(
-            session.ids_matching("host:example.com|other.org"),
+            session.ids_matching("host:*.example.com|*.other.org"),
             vec![id_a, id_b]
         );
         assert_eq!(
             session.ids_matching("host:*.example.com | *.third.net"),
             vec![id_a, id_c]
         );
+        assert!(session.ids_matching("host:example.com").is_empty());
         assert_eq!(session.ids_matching("path:/v1|/auth"), vec![id_a, id_b]);
         assert_eq!(session.ids_matching("path:/v1 | /auth"), vec![id_a, id_b]);
         assert_eq!(session.ids_matching("GET|POST"), vec![id_a, id_b]);
         assert_eq!(session.ids_matching("2xx|5xx"), vec![id_a, id_c]);
-        assert_eq!(session.ids_matching("mute:other.org|third.net"), vec![id_a]);
+        assert_eq!(
+            session.ids_matching("mute:other.org|third.net"),
+            vec![id_a]
+        );
+    }
+
+    #[test]
+    fn host_filter_uses_exact_and_wildcard_matching() {
+        let mut session = Session::default();
+        let id_root = session.open(draft("baidu.com"));
+        let id_sub = session.open(draft("api.baidu.com"));
+        let id_deep = session.open(draft("v2.api.baidu.com"));
+        let id_fake = session.open(draft("fakebaidu.com"));
+
+        assert_eq!(session.ids_matching("host:baidu.com"), vec![id_root]);
+        assert_eq!(
+            session.ids_matching("host:*.baidu.com"),
+            vec![id_sub, id_deep]
+        );
+        assert_eq!(
+            session.ids_matching("host:*baidu*"),
+            vec![id_root, id_sub, id_deep, id_fake]
+        );
+        assert_eq!(
+            session.ids_matching("host:api.*.com"),
+            vec![id_sub]
+        );
+        assert_eq!(
+            session.ids_matching("baidu"),
+            vec![id_root, id_sub, id_deep, id_fake]
+        );
+        assert_eq!(
+            session.ids_matching("-host:baidu.com"),
+            vec![id_sub, id_deep, id_fake]
+        );
     }
 
     #[test]
@@ -3989,8 +4054,8 @@ mod tests {
         assert_eq!(session.ids_matching("header:mobileapp"), vec![f1]);
 
         // Negative term exclusion (-word or mute:word)
-        assert_eq!(session.ids_matching("host:example.com -graphql"), vec![f2]);
-        assert_eq!(session.ids_matching("host:example.com mute:cdn"), vec![f1]);
+        assert_eq!(session.ids_matching("host:*.example.com -graphql"), vec![f2]);
+        assert_eq!(session.ids_matching("host:*.example.com mute:cdn"), vec![f1]);
 
         // Method and status combinations
         assert_eq!(session.ids_matching("POST 200"), vec![f1]);
