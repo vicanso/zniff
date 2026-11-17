@@ -12,13 +12,15 @@ pub(crate) fn footer(
     lan_addrs: Signal<Vec<LanAddr>>,
     qr_path: Signal<String>,
     listen_all: Signal<bool>,
+    proxy_auth: Signal<String>,
     config_broken: Signal<Option<String>>,
     config_broken_dismissed: Signal<bool>,
     controls: Arc<Controls>,
 ) -> impl IntoElement {
     let port_controls = controls.clone();
     let lan_controls = controls.clone();
-    let qr_controls = controls;
+    let qr_controls = controls.clone();
+    let auth_controls = controls;
     view()
         .h(px(32.0))
         .pl(px(LIST_INSET))
@@ -155,6 +157,7 @@ pub(crate) fn footer(
             move || !running.get(),
             move || lan_toggle(listen_all, lan_controls.clone()),
         ))
+        .child(proxy_auth_popover(proxy_auth, auth_controls))
         .child(
             view()
                 .flex_shrink_0()
@@ -177,6 +180,224 @@ pub(crate) fn footer(
                         .tabular_nums()
                         .text_size(px(11.5))
                         .text_color(fg_muted()),
+                ),
+        )
+}
+
+pub(crate) fn proxy_auth_popover(
+    proxy_auth: Signal<String>,
+    controls: Arc<Controls>,
+) -> impl IntoElement {
+    let open = signal(false);
+    let active = move || !proxy_auth.get().trim().is_empty();
+    let active_dot = active;
+    let active_badge = active;
+    let active_badge_text = active;
+    let clear_controls = controls.clone();
+    popover()
+        .placement(Placement::Top)
+        .align(Align::End)
+        .offset(px(6.0))
+        .margin(px(8.0))
+        .on_open_change(move |event: &nsh_base::PopoverEvent| {
+            if let nsh_base::PopoverEvent::OpenChange(next, _) = event {
+                open.set(*next);
+            }
+        })
+        .trigger(
+            view()
+                .h(px(22.0))
+                .px_2()
+                .flex_shrink_0()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .rounded(px(6.0))
+                .border_1()
+                .border_color(move || {
+                    if open.get() || active() {
+                        accent_blue_border()
+                    } else {
+                        border_control()
+                    }
+                })
+                .bg(move || {
+                    if open.get() {
+                        accent_blue_soft()
+                    } else {
+                        bg_control()
+                    }
+                })
+                .hover(|style| {
+                    style.bg(move || {
+                        if open.get() {
+                            accent_blue_soft_hover()
+                        } else {
+                            bg_control_hover()
+                        }
+                    })
+                })
+                .active(|style| style.opacity(0.8))
+                .cursor(Cursor::Pointer)
+                .child(
+                    view()
+                        .w(px(6.0))
+                        .h(px(6.0))
+                        .rounded_full()
+                        .bg(move || {
+                            if active_dot() {
+                                status_ok_fg()
+                            } else {
+                                fg_muted()
+                            }
+                        }),
+                )
+                .child(
+                    text(tr("认证", "Auth"))
+                        .number_of_lines(1)
+                        .text_size(px(11.5))
+                        .text_color(move || {
+                            if open.get() {
+                                accent_blue_text()
+                            } else {
+                                fg_secondary()
+                            }
+                        }),
+                ),
+        )
+        .child(
+            view()
+                .w(px(300.0))
+                .p_3()
+                .gap_2()
+                .rounded(px(10.0))
+                .border_1()
+                .border_color(border_strong())
+                .bg(bg_card())
+                .shadow_md()
+                .child(
+                    view()
+                        .w_full()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            text(tr("代理认证", "Proxy auth"))
+                                .text_size(px(12.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(fg_primary()),
+                        )
+                        .child(
+                            text({
+                                let langs = ui_langs();
+                                move || -> SharedString {
+                                    if active_badge_text() {
+                                        t(ui_lang(langs), "已开启", "Enabled").into()
+                                    } else {
+                                        t(ui_lang(langs), "未开启", "Off").into()
+                                    }
+                                }
+                            })
+                            .text_size(px(11.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(move || {
+                                if active_badge() {
+                                    status_ok_fg()
+                                } else {
+                                    fg_muted()
+                                }
+                            }),
+                        ),
+                )
+                .child(
+                    text(tr(
+                        "格式为 user:pass，留空表示不校验。修改后立即生效（证书安装页 /zniff 豁免）。",
+                        "Format: user:pass. Leave empty to disable. Takes effect immediately (/zniff is exempt).",
+                    ))
+                    .text_size(px(11.5))
+                    .line_height(Points(17.0))
+                    .text_color(fg_muted()),
+                )
+                .child(
+                    view()
+                        .w_full()
+                        .flex_row()
+                        .items_center()
+                        .gap_1p5()
+                        .child(
+                            input()
+                                .value(proxy_auth)
+                                .placeholder(tr(
+                                    "user:pass，空着不校验",
+                                    "user:pass, empty disables auth",
+                                ))
+                                .placeholder_color(move || color(fg_muted()))
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .h(px(28.0))
+                                .px_2()
+                                .rounded(px(6.0))
+                                .bg(bg_code())
+                                .border_1()
+                                .border_color(border_control())
+                                .focus(|style| style.border_color(accent_blue()))
+                                .text_size(px(12.0))
+                                .text_color(fg_primary())
+                                .on_change(move |text: &str| {
+                                    proxy_auth.set(text.to_string());
+                                    let stored = text.trim().to_string();
+                                    controls.hub.set_proxy_auth(&stored);
+                                    if let Err(err) =
+                                        save_config(|config| config.proxy_auth = stored)
+                                    {
+                                        set_status(
+                                            &controls,
+                                            StatusMsg::PrefUnsaved {
+                                                name: PrefName::ProxyAuth,
+                                                err: err.to_string(),
+                                            },
+                                        );
+                                    }
+                                }),
+                        )
+                        .child(when(
+                            move || !proxy_auth.get().is_empty(),
+                            move || {
+                                let clear_controls = clear_controls.clone();
+                                view()
+                                    .h(px(28.0))
+                                    .px_2()
+                                    .rounded(px(6.0))
+                                    .border_1()
+                                    .border_color(border_control())
+                                    .bg(bg_control())
+                                    .hover(|s| s.bg(bg_control_hover()))
+                                    .active(|s| s.opacity(0.8))
+                                    .cursor(Cursor::Pointer)
+                                    .items_center()
+                                    .justify_center()
+                                    .on_press(move || {
+                                        proxy_auth.set(String::new());
+                                        clear_controls.hub.set_proxy_auth("");
+                                        if let Err(err) =
+                                            save_config(|config| config.proxy_auth.clear())
+                                        {
+                                            set_status(
+                                                &clear_controls,
+                                                StatusMsg::PrefUnsaved {
+                                                    name: PrefName::ProxyAuth,
+                                                    err: err.to_string(),
+                                                },
+                                            );
+                                        }
+                                    })
+                                    .child(
+                                        text(tr("清空", "Clear"))
+                                            .text_size(px(11.5))
+                                            .text_color(fg_secondary()),
+                                    )
+                            },
+                        )),
                 ),
         )
 }

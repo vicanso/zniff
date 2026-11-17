@@ -9,11 +9,9 @@ pub(crate) fn machine_settings_modal(
     when(
         move || profiles.machine_settings_open.get(),
         move || {
-            let proxy_auth_text = profiles.proxy_auth;
             let relay_url_text = profiles.relay_url;
             let relay_token_text = signal(lock_string(&controls.relay_token));
             let relay_accept_on = profiles.relay_accept;
-            let proxy_auth_controls = controls.clone();
             let relay_url_controls = controls.clone();
             let relay_token_controls = controls.clone();
             let relay_accept_controls = controls.clone();
@@ -39,7 +37,7 @@ pub(crate) fn machine_settings_modal(
                     || color(accent_blue_text()),
                 ))
                 .child(
-                    text(tr("服务与中继设置", "Relay & Service Settings"))
+                    text(tr("中继设置", "Relay Settings"))
                         .flex_1()
                         .text_size(px(14.0))
                         .font_weight(FontWeight::SEMIBOLD)
@@ -188,46 +186,6 @@ pub(crate) fn machine_settings_modal(
                                 },
                             )),
                         ),
-                )
-                .child(section_heading(tr("代理接入", "Proxy Access")))
-                .child(
-                    view()
-                        .w_full()
-                        .p_3()
-                        .flex_col()
-                        .rounded(px(8.0))
-                        .border_1()
-                        .border_color(border_subtle())
-                        .bg(bg_canvas())
-                        .child(config_field(
-                            "代理认证",
-                            "Proxy auth",
-                            side_input(
-                                proxy_auth_text,
-                                tr(
-                                    "user:pass，空着不校验",
-                                    "user:pass, empty disables auth",
-                                ),
-                                30.0,
-                                false,
-                                move |text| {
-                                    proxy_auth_text.set(text.to_string());
-                                    let stored = text.trim().to_string();
-                                    proxy_auth_controls.hub.set_proxy_auth(&stored);
-                                    if let Err(err) =
-                                        save_config(|config| config.proxy_auth = stored)
-                                    {
-                                        set_status(
-                                            &proxy_auth_controls,
-                                            StatusMsg::PrefUnsaved {
-                                                name: PrefName::ProxyAuth,
-                                                err: err.to_string(),
-                                            },
-                                        );
-                                    }
-                                },
-                            ),
-                        )),
                 );
 
             let footer = view()

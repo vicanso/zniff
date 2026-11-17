@@ -1010,6 +1010,7 @@ pub fn App() -> impl IntoElement {
             lan_addrs,
             qr_path,
             listen_all,
+            profile_signals.proxy_auth,
             config_broken,
             config_broken_dismissed,
             controls.clone(),

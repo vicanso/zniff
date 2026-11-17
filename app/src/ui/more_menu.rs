@@ -163,17 +163,15 @@ pub(crate) fn more_menu(
         .child(menu_mono_font_row(import_controls.clone()))
         .child(menu_action_meta(
             Glyph::Sliders,
-            tr("服务与中继设置", "Relay & Service Settings"),
+            tr("中继设置", "Relay Settings"),
             {
                 let langs = ui_langs();
                 move || {
                     let has_relay = !profiles.relay_url.get().trim().is_empty();
-                    let has_auth = !profiles.proxy_auth.get().trim().is_empty();
-                    let label = match (has_relay, has_auth) {
-                        (true, true) => t(ui_lang(langs), "中转 · 认证", "Relay · Auth"),
-                        (true, false) => t(ui_lang(langs), "中转", "Relay"),
-                        (false, true) => t(ui_lang(langs), "认证", "Auth"),
-                        (false, false) => "",
+                    let label = if has_relay {
+                        t(ui_lang(langs), "已配置", "Configured")
+                    } else {
+                        ""
                     };
                     SharedString::from(label)
                 }
