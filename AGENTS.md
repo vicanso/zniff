@@ -21,7 +21,7 @@
 - `app/src/i18n.rs`、`app/src/icon.rs`：界面语言和单色描边图标。
 - `app/src/config.rs`：用户配置，正式版读写数据目录里的 `config.toml`，开发模式（`debug_assertions` 或 `ZNIFF_DEV=1`）读写 `config.dev.toml`（默认端口 `8878`）与 `proxy-snapshot.dev.toml`，根证书 `ca.crt`/`ca.key` 共用。
 - `docs/known-issues.md`、`docs/open-questions.md`：已经接受的缺口与涉及产品/架构取舍的待确认项。新的缺口补在 `docs/known-issues.md`，涉及交互或架构权衡的开放问题记在 `docs/open-questions.md`，不要为了绕开它停掉当前开发。
-- 依赖 nsh 0.6。edition 是 2024，`gen` 是保留字。原语从 `nsh_core::prelude` 引入，不再使用 `nsh_core::ui`。窗口位置不写入配置（`AppOptions` 仅设初始 `size`）；窗口大小（`window_width` / `window_height`，默认 `1200×760`）通过 `window()` 监听并在停半秒后写入 `config.toml`，下次启动由 `app/src/main.rs` 传入 `AppOptions::size` 恢复。
+- 依赖 nsh 0.6（后续更新 `app/Cargo.toml` 的 `nsh-*` 版本时，必须同步更新 `Makefile` 的 `NSH_VERSION` 与 `Dockerfile` 的 `ARG NSH_VERSION`）。edition 是 2024，`gen` 是保留字。原语从 `nsh_core::prelude` 引入，不再使用 `nsh_core::ui`。窗口位置不写入配置（`AppOptions` 仅设初始 `size`）；窗口大小（`window_width` / `window_height`，默认 `1200×760`）通过 `window()` 监听并在停半秒后写入 `config.toml`，下次启动由 `app/src/main.rs` 传入 `AppOptions::size` 恢复。
 - 写组件之前先看 [nsh elements](https://nsh.dev/elements.md)（完整索引见 [llms.txt](https://nsh.dev/llms.txt) 或全局 `nsh` skill 的 `references/llms-index.md`，单个组件文档用 `https://nsh.dev/elements/{name}.md`）有没有现成的。原语用 `nsh_core::prelude`，基础组件用 `nsh_base`。
 - 先核对 nsh 官方文档（`.md` 端点）和这个组件自己的行为，再决定要不要写代码。文档或组件已经提供的能力不要自己再做一套，例如滚动条、列宽、选择、虚拟列表。官方页面打不开时，以全局 `nsh` skill 文档及本机已安装的 nsh 0.6 源码为准，仍然不要另写一套替代品。
 - DataTable 自己有滚动条。竖向是滚的时候出现、停住大约一秒后淡掉的指示条；横向是列宽超出时底部那条。不要再画一条常驻竖条。也不要给固定列右缘上色：`fixed_edge` 会只在第一条可滚动列旁边留下一条竖线。

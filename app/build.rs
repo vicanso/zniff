@@ -74,11 +74,18 @@ fn main() {
     let manifest_dir =
         PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
+    // `nsh package --target web` stages the crate under `.nsh/rust/app-crates/<name>`
+    // without copying `assets/`; walk ancestors to locate the real `assets/fonts`.
+    let fonts_dir = manifest_dir
+        .ancestors()
+        .map(|dir| dir.join("assets/fonts"))
+        .find(|dir| dir.join(FACES[0].0).is_file())
+        .unwrap_or_else(|| manifest_dir.join("assets/fonts"));
 
     if is_wasm {
         use sha2::{Digest, Sha256};
         for (name, env_key) in FACES {
-            let src = manifest_dir.join("assets/fonts").join(name);
+            let src = fonts_dir.join(name);
             let raw = fs::read(&src)
                 .unwrap_or_else(|err| panic!("failed to read font {}: {err}", src.display()));
             let digest = Sha256::digest(&raw);
@@ -90,7 +97,7 @@ fn main() {
     }
 
     for (name, _) in FACES {
-        let src = manifest_dir.join("assets/fonts").join(name);
+        let src = fonts_dir.join(name);
         let raw = fs::read(&src)
             .unwrap_or_else(|err| panic!("failed to read font {}: {err}", src.display()));
         let mut encoder = ZlibEncoder::new(Vec::with_capacity(raw.len() / 2), Compression::best());
