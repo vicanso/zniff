@@ -1,3 +1,30 @@
+## [0.3.0] - 2026-11-18
+
+### 🚀 Features
+
+- *(ui)* Add rich About zniff modal with build metadata, links, and system info
+- *(macos)* Route system menu About zniff to in-app About modal
+- *(ui)* Keep QR entry in local-only mode with LAN switch prompt
+- *(ui)* Toggle active filter pill instead of clearing and clean up update/about menu
+- *(ui)* Open facet drawer by default when no primary filter is set
+- *(ui)* Add auto and host+path display modes for the path column
+- *(filter)* Use exact and wildcard matching for host/domain filters
+- *(ui)* Add split, top-bottom, and 3-column layouts with grouped domain sidebar
+- *(ui)* Upgrade to nsh 0.6.0, unify split sidebar layout, and polish proxy/MCP/UX
+
+### 🐛 Bug Fixes
+
+- *(updater)* Remove gitee fallback, fix truncated downloads, and show scrollable release notes
+- *(ui)* Gate base_app_name on macOS and tests for Linux/Windows builds
+
+### 🚜 Refactor
+
+- *(ui)* Move proxy auth popover to footer beside listening controls
+- *(ui)* Move raw filter expression input below structured filter fields
+
+### ⚙️ Miscellaneous Tasks
+
+- Version 0.2.1
 ## [0.2.1] - 2026-11-15
 
 ### 🚀 Features
