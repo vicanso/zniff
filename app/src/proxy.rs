@@ -813,6 +813,7 @@ impl Hub {
             .clone();
         rules::has_op_rules(&rules, host, path)
             || crate::rule_vars::rules_need_request_body(&rules, host, path)
+            || rules::has_request_hooks(&rules, host, path)
     }
 
     #[cfg(test)]
@@ -3379,6 +3380,57 @@ where
             }
         }
     }
+    if !break_overrode_body
+        && !request_overflowed
+        && !websocket
+        && plan.hooks.iter().any(|h| h.phase.runs_request())
+    {
+        let authority = display_authority(&host, port, scheme);
+        let cur_body = current_decoded_request_body(
+            &hub,
+            id,
+            body_override.as_deref(),
+            break_overrode_body || strip_request_encoding,
+        );
+        if let Some(hook_mut) = crate::webhook::run_request_hooks(
+            &hub,
+            id,
+            &plan.hooks,
+            &method,
+            scheme,
+            &host,
+            &authority,
+            &path,
+            &headers,
+            &cur_body,
+        )
+        .await
+        {
+            if let Some(next_path) = hook_mut.path {
+                path = next_path;
+                hub.retarget(
+                    id,
+                    host.clone(),
+                    path.clone(),
+                    format!("{scheme}://{authority}{path}"),
+                );
+            }
+            if let Some(next_headers) = hook_mut.headers {
+                headers = next_headers;
+            }
+            if let Some(next_body) = hook_mut.body {
+                body_override = Some(next_body);
+                strip_request_encoding = true;
+            }
+            let synced_body = current_decoded_request_body(
+                &hub,
+                id,
+                body_override.as_deref(),
+                strip_request_encoding,
+            );
+            hub.replace_request(id, headers.clone(), synced_body);
+        }
+    }
     if crate::rule_vars::header_ops_use_req_context(&plan.request_headers) {
         let signed_body = current_decoded_request_body(
             &hub,
@@ -3644,6 +3696,7 @@ where
         copied?;
         return Ok(());
     }
+    let has_resp_hooks = !websocket && plan.hooks.iter().any(|h| h.phase.runs_response());
     let no_resp_body = response_has_no_body(&method, status);
     let mut origin = Prefixed {
         prefix: resp_rest,
@@ -3652,10 +3705,13 @@ where
     };
     if !websocket
         && !break_response
-        && !no_resp_body
-        && (!plan.response_replaces.is_empty() || !plan.response_json_ops.is_empty())
+        && (has_resp_hooks
+            || (!no_resp_body
+                && (!plan.response_replaces.is_empty() || !plan.response_json_ops.is_empty())))
     {
-        let buffered_resp = if let Some(len) = content_length(&resp_headers) {
+        let buffered_resp = if no_resp_body {
+            Some(Vec::new())
+        } else if let Some(len) = content_length(&resp_headers) {
             if len > crate::session::BODY_CAP {
                 hub.append_comment(id, "[rule skipped: body > 1MB]");
                 None
@@ -3683,8 +3739,8 @@ where
         };
         if let Some(raw) = buffered_resp {
             let encoding = header_value(&resp_headers, "content-encoding");
-            if !raw.is_empty()
-                && let Some(next) = rewrite_body(
+            let mut next_body = if !raw.is_empty() {
+                rewrite_body(
                     &hub,
                     id,
                     &raw,
@@ -3700,7 +3756,33 @@ where
                         flow_now_ms,
                     )),
                 )
-            {
+            } else {
+                None
+            };
+            if has_resp_hooks {
+                let flow_url = format!(
+                    "{scheme}://{}{path}",
+                    display_authority(&host, port, scheme)
+                );
+                let (mutated_body, head_changed) = apply_response_hooks(
+                    &hub,
+                    id,
+                    &plan.hooks,
+                    &method,
+                    &flow_url,
+                    &raw,
+                    encoding.as_deref(),
+                    next_body,
+                    &mut status,
+                    &mut resp_headers,
+                )
+                .await;
+                next_body = mutated_body;
+                if head_changed {
+                    reason = reason_phrase(status).to_string();
+                }
+            }
+            if let Some(next) = next_body {
                 resp_headers.retain(|(name, _)| {
                     !name.eq_ignore_ascii_case("content-encoding")
                         && !name.eq_ignore_ascii_case("transfer-encoding")
@@ -4422,6 +4504,7 @@ where
         rules::ensure_cors(&mut resp_headers);
     }
     hub.set_response(id, status, resp_headers.clone(), None);
+    let has_resp_hooks = plan.hooks.iter().any(|h| h.phase.runs_response());
     let no_resp_body = response_has_no_body(method, status);
     let mut origin = Prefixed {
         prefix: resp_rest,
@@ -4429,10 +4512,13 @@ where
         inner: origin,
     };
     if !break_response
-        && !no_resp_body
-        && (!plan.response_replaces.is_empty() || !plan.response_json_ops.is_empty())
+        && (has_resp_hooks
+            || (!no_resp_body
+                && (!plan.response_replaces.is_empty() || !plan.response_json_ops.is_empty())))
     {
-        let buffered_resp = if let Some(len) = content_length(&resp_headers) {
+        let buffered_resp = if no_resp_body {
+            Some(Vec::new())
+        } else if let Some(len) = content_length(&resp_headers) {
             if len > crate::session::BODY_CAP {
                 hub.append_comment(id, "[rule skipped: body > 1MB]");
                 None
@@ -4460,8 +4546,8 @@ where
         };
         if let Some(raw) = buffered_resp {
             let encoding = header_value(&resp_headers, "content-encoding");
-            if !raw.is_empty()
-                && let Some(next) = rewrite_body(
+            let mut next_body = if !raw.is_empty() {
+                rewrite_body(
                     hub,
                     id,
                     &raw,
@@ -4470,7 +4556,30 @@ where
                     &plan.response_json_ops,
                     Some((method, host, path, &resp_headers, Some(status), flow_now_ms)),
                 )
-            {
+            } else {
+                None
+            };
+            if has_resp_hooks {
+                let flow_url = format!("https://{}{path}", display_authority(host, port, "https"));
+                let (mutated_body, head_changed) = apply_response_hooks(
+                    hub,
+                    id,
+                    &plan.hooks,
+                    method,
+                    &flow_url,
+                    &raw,
+                    encoding.as_deref(),
+                    next_body,
+                    &mut status,
+                    &mut resp_headers,
+                )
+                .await;
+                next_body = mutated_body;
+                if head_changed {
+                    reason = reason_phrase(status).to_string();
+                }
+            }
+            if let Some(next) = next_body {
                 resp_headers.retain(|(name, _)| {
                     !name.eq_ignore_ascii_case("content-encoding")
                         && !name.eq_ignore_ascii_case("transfer-encoding")
@@ -7033,6 +7142,7 @@ async fn forward_request(
     let mut req_header_ops = Vec::new();
     let mut response_replaces = Vec::new();
     let mut response_json_ops = Vec::new();
+    let mut req_hooks = Vec::new();
     let mut cors = false;
     let mut throttle_up_bps = None;
     let mut throttle_down_bps = None;
@@ -7080,6 +7190,7 @@ async fn forward_request(
         req_header_ops = plan.request_headers.clone();
         response_replaces = plan.response_replaces.clone();
         response_json_ops = plan.response_json_ops.clone();
+        req_hooks = plan.hooks.clone();
         cors = plan.cors;
         throttle_up_bps = plan.throttle_up_bps;
         throttle_down_bps = plan.throttle_down_bps;
@@ -7427,6 +7538,62 @@ async fn forward_request(
         request_recorded = true;
         body_override = Some(raw.to_vec());
     }
+    if !break_overrode_body
+        && request_prefixed.is_none()
+        && !websocket
+        && req_hooks.iter().any(|h| h.phase.runs_request())
+    {
+        let authority = display_authority(&host, port, &scheme);
+        let mut pairs = header_pairs(&parts.headers);
+        let cur_body = current_decoded_request_body(
+            &hub,
+            id,
+            body_override.as_deref(),
+            break_overrode_body || strip_request_encoding,
+        );
+        if let Some(hook_mut) = crate::webhook::run_request_hooks(
+            &hub,
+            id,
+            &req_hooks,
+            req_method.as_str(),
+            &scheme,
+            &host,
+            &authority,
+            &path,
+            &pairs,
+            &cur_body,
+        )
+        .await
+        {
+            if let Some(next_path) = hook_mut.path {
+                path = next_path;
+                hub.retarget(
+                    id,
+                    host.clone(),
+                    path.clone(),
+                    format!("{scheme}://{authority}{path}"),
+                );
+            }
+            if let Some(next_headers) = hook_mut.headers {
+                pairs = next_headers;
+                replace_header_map(&mut parts.headers, &pairs);
+                headers_replaced = true;
+            }
+            if let Some(next_body) = hook_mut.body {
+                body_override = Some(next_body);
+                strip_request_encoding = true;
+            }
+            if headers_replaced || strip_request_encoding {
+                let synced = current_decoded_request_body(
+                    &hub,
+                    id,
+                    body_override.as_deref(),
+                    strip_request_encoding,
+                );
+                hub.replace_request(id, pairs, synced);
+            }
+        }
+    }
     if crate::rule_vars::header_ops_use_req_context(&req_header_ops) {
         let mut pairs = header_pairs(&parts.headers);
         let signed_body = current_decoded_request_body(
@@ -7599,11 +7766,12 @@ async fn forward_request(
         }
         replace_header_map(&mut parts.headers, &pairs);
     }
+    let has_resp_hooks = !websocket && req_hooks.iter().any(|h| h.phase.runs_response());
     let no_resp_body = response_has_no_body(req_method.as_str(), parts.status.as_u16());
     if !websocket
         && !break_response
-        && !no_resp_body
-        && (!response_replaces.is_empty() || !response_json_ops.is_empty())
+        && (has_resp_hooks
+            || (!no_resp_body && (!response_replaces.is_empty() || !response_json_ops.is_empty())))
     {
         let known = parts
             .headers
@@ -7612,12 +7780,49 @@ async fn forward_request(
             .and_then(|text| text.parse::<usize>().ok());
         if known.is_some_and(|len| len > crate::session::BODY_CAP) {
             hub.append_comment(id, "[rule skipped: body > 1MB]");
-        } else if !body.is_end_stream() && known != Some(0) {
+        } else if no_resp_body || body.is_end_stream() || known == Some(0) {
+            if has_resp_hooks {
+                let mut status_code = parts.status.as_u16();
+                let mut resp_pairs = header_pairs(&parts.headers);
+                let flow_url = format!(
+                    "{scheme}://{}{path}",
+                    display_authority(&host, port, &scheme)
+                );
+                let (mutated_body, head_changed) = apply_response_hooks(
+                    &hub,
+                    id,
+                    &req_hooks,
+                    req_method.as_str(),
+                    &flow_url,
+                    &[],
+                    resp_encoding.as_deref(),
+                    None,
+                    &mut status_code,
+                    &mut resp_pairs,
+                )
+                .await;
+                if mutated_body.is_some() || head_changed {
+                    let next_bytes = mutated_body.unwrap_or_default();
+                    let next_status = StatusCode::from_u16(status_code).unwrap_or(parts.status);
+                    resp_pairs.retain(|(name, _)| {
+                        !name.eq_ignore_ascii_case("content-encoding")
+                            && !name.eq_ignore_ascii_case("transfer-encoding")
+                            && !name.eq_ignore_ascii_case("content-length")
+                    });
+                    if !no_resp_body || !next_bytes.is_empty() {
+                        resp_pairs.push(("Content-Length".into(), next_bytes.len().to_string()));
+                    }
+                    return synthetic_headers(&hub, id, next_status, resp_pairs, next_bytes)
+                        .map(|res| res.map(|b| b.with_throttle(throttle_down_bps)));
+                }
+            }
+        } else {
             match take_limited(body, crate::session::BODY_CAP).await? {
                 Take::Whole(raw) => {
-                    if !raw.is_empty() {
-                        let resp_pairs = header_pairs(&parts.headers);
-                        if let Some(next) = rewrite_body(
+                    let mut status_code = parts.status.as_u16();
+                    let mut resp_pairs = header_pairs(&parts.headers);
+                    let mut next_body = if !raw.is_empty() {
+                        rewrite_body(
                             &hub,
                             id,
                             &raw,
@@ -7629,26 +7834,59 @@ async fn forward_request(
                                 &host,
                                 &path,
                                 &resp_pairs,
-                                Some(parts.status.as_u16()),
+                                Some(status_code),
                                 flow_now_ms,
                             )),
-                        ) {
-                            parts.headers.remove(http::header::CONTENT_ENCODING);
-                            parts.headers.remove(http::header::TRANSFER_ENCODING);
-                            parts.headers.remove(http::header::CONTENT_LENGTH);
-                            if let Ok(value) = http::HeaderValue::from_str(&next.len().to_string())
-                            {
-                                parts.headers.insert(http::header::CONTENT_LENGTH, value);
-                            }
-                            return synthetic_headers(
-                                &hub,
-                                id,
-                                parts.status,
-                                header_pairs(&parts.headers),
-                                next,
-                            )
-                            .map(|res| res.map(|b| b.with_throttle(throttle_down_bps)));
+                        )
+                    } else {
+                        None
+                    };
+                    let mut head_changed = false;
+                    if has_resp_hooks {
+                        let flow_url = format!(
+                            "{scheme}://{}{path}",
+                            display_authority(&host, port, &scheme)
+                        );
+                        let (mutated_body, changed) = apply_response_hooks(
+                            &hub,
+                            id,
+                            &req_hooks,
+                            req_method.as_str(),
+                            &flow_url,
+                            &raw,
+                            resp_encoding.as_deref(),
+                            next_body,
+                            &mut status_code,
+                            &mut resp_pairs,
+                        )
+                        .await;
+                        next_body = mutated_body;
+                        head_changed = changed;
+                    }
+                    if let Some(next) = next_body {
+                        if head_changed {
+                            parts.status =
+                                StatusCode::from_u16(status_code).unwrap_or(parts.status);
+                            replace_header_map(&mut parts.headers, &resp_pairs);
                         }
+                        parts.headers.remove(http::header::CONTENT_ENCODING);
+                        parts.headers.remove(http::header::TRANSFER_ENCODING);
+                        parts.headers.remove(http::header::CONTENT_LENGTH);
+                        if let Ok(value) = http::HeaderValue::from_str(&next.len().to_string()) {
+                            parts.headers.insert(http::header::CONTENT_LENGTH, value);
+                        }
+                        return synthetic_headers(
+                            &hub,
+                            id,
+                            parts.status,
+                            header_pairs(&parts.headers),
+                            next,
+                        )
+                        .map(|res| res.map(|b| b.with_throttle(throttle_down_bps)));
+                    }
+                    if head_changed {
+                        parts.status = StatusCode::from_u16(status_code).unwrap_or(parts.status);
+                        replace_header_map(&mut parts.headers, &resp_pairs);
                     }
                     parts.headers.remove(http::header::TRANSFER_ENCODING);
                     parts.headers.remove(http::header::CONTENT_LENGTH);
@@ -7966,6 +8204,65 @@ fn expand_header_ops_for_flow(
         now_ms,
     };
     crate::rule_vars::expand_header_ops(ops, &ctx, only_req_context)
+}
+
+fn decode_body_for_hook(raw: &[u8], encoding: Option<&str>) -> Option<Vec<u8>> {
+    if raw.len() > crate::session::BODY_CAP {
+        return None;
+    }
+    let mut decoder = Decoder::from_header(encoding);
+    let mut decoded = decoder.push(raw);
+    decoded.extend(decoder.finish());
+    decoder.error().is_none().then_some(decoded)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn apply_response_hooks(
+    hub: &Hub,
+    id: u64,
+    specs: &[rules::HookSpec],
+    method: &str,
+    url: &str,
+    raw: &[u8],
+    encoding: Option<&str>,
+    mut rewritten: Option<Vec<u8>>,
+    status: &mut u16,
+    resp_headers: &mut Vec<(String, String)>,
+) -> (Option<Vec<u8>>, bool) {
+    if !specs.iter().any(|h| h.phase.runs_response()) {
+        return (rewritten, false);
+    }
+    let plain_for_hook = match rewritten.as_ref() {
+        Some(bytes) => bytes.clone(),
+        None => decode_body_for_hook(raw, encoding).unwrap_or_else(|| raw.to_vec()),
+    };
+    let Some(hook_mut) = crate::webhook::run_response_hooks(
+        hub,
+        id,
+        specs,
+        method,
+        url,
+        *status,
+        resp_headers,
+        &plain_for_hook,
+    )
+    .await
+    else {
+        return (rewritten, false);
+    };
+    let mut head_changed = false;
+    if let Some(next_status) = hook_mut.status {
+        *status = next_status;
+        head_changed = true;
+    }
+    if let Some(next_headers) = hook_mut.headers {
+        *resp_headers = next_headers;
+        head_changed = true;
+    }
+    if let Some(next_body) = hook_mut.body {
+        rewritten = Some(next_body);
+    }
+    (rewritten, head_changed)
 }
 
 type BodyVarInfo<'a> = (
@@ -14788,6 +15085,157 @@ mod tests {
         );
 
         origin_task.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn plain_http_webhook_mutates_request_and_response() {
+        let dir = std::env::temp_dir().join(format!("zniff-webhook-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+
+        let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        let seen_origin = Arc::new(std::sync::Mutex::new(String::new()));
+        let seen_origin_clone = Arc::clone(&seen_origin);
+        let origin_task = tokio::spawn(async move {
+            let (mut sock, _) = origin.accept().await.unwrap();
+            let raw = read_h1_message(&mut sock).await;
+            *seen_origin_clone.lock().unwrap() = String::from_utf8_lossy(&raw).into_owned();
+            let res_body = r#"{"cipher":"secret-raw"}"#;
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                res_body.len(),
+                res_body
+            );
+            sock.write_all(reply.as_bytes()).await.unwrap();
+        });
+
+        let hook_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let hook_addr = hook_listener.local_addr().unwrap();
+        let hook_task = tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = hook_listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let raw = read_h1_message(&mut sock).await;
+                    let (_, body) = raw
+                        .windows(4)
+                        .position(|w| w == b"\r\n\r\n")
+                        .map(|idx| (&raw[..idx], &raw[idx + 4..]))
+                        .unwrap_or((&raw, &[]));
+                    let req_json: serde_json::Value =
+                        serde_json::from_slice(body).unwrap_or_default();
+                    let resp_json = if req_json["phase"] == "request" {
+                        serde_json::json!({
+                            "path": "/v2/decrypted",
+                            "headers": [["X-Hooked-Req", "1"]],
+                            "body_utf8": "{\"plainReq\":true}",
+                            "comment": "req-hooked"
+                        })
+                    } else {
+                        serde_json::json!({
+                            "status": 202,
+                            "headers": {"X-Hooked-Res": "yes", "Content-Type": "application/json"},
+                            "body_utf8": "{\"decryptedRes\":true}",
+                            "comment": "res-hooked"
+                        })
+                    };
+                    let out = resp_json.to_string();
+                    let http_resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        out.len(),
+                        out
+                    );
+                    let _ = sock.write_all(http_resp.as_bytes()).await;
+                });
+            }
+        });
+
+        let dead_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_addr = dead_listener.local_addr().unwrap();
+        drop(dead_listener);
+
+        hub.set_rules(&format!(
+            "resolve api.vicanso.dev {origin_addr}\n\
+             hook api.vicanso.dev/v1 http://{hook_addr}/hook both\n\
+             hook api.vicanso.dev/v2 http://{dead_addr}/dead res timeout=300ms"
+        ));
+
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        serve_proxy(proxy, hub.clone());
+
+        let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+        let req_body = br#"{"cipherReq":1}"#;
+        let req = format!(
+            "POST http://api.vicanso.dev/v1/encrypt HTTP/1.1\r\nHost: api.vicanso.dev\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            req_body.len()
+        );
+        client.write_all(req.as_bytes()).await.unwrap();
+        client.write_all(req_body).await.unwrap();
+        let resp = read_h1_message(&mut client).await;
+        let resp_text = String::from_utf8_lossy(&resp);
+        assert!(resp_text.starts_with("HTTP/1.1 202 "), "{resp_text}");
+        assert!(
+            resp_text.to_ascii_lowercase().contains("x-hooked-res: yes"),
+            "{resp_text}"
+        );
+        assert!(resp_text.contains("{\"decryptedRes\":true}"), "{resp_text}");
+
+        let upstream = seen_origin.lock().unwrap().clone();
+        assert!(
+            upstream.starts_with("POST /v2/decrypted HTTP/1.1\r\n"),
+            "{upstream}"
+        );
+        assert!(
+            upstream.to_ascii_lowercase().contains("x-hooked-req: 1"),
+            "{upstream}"
+        );
+        assert!(upstream.contains("{\"plainReq\":true}"), "{upstream}");
+
+        let flow = hub
+            .with_session(|s| s.get(1).cloned())
+            .expect("flow recorded");
+        assert!(flow.rule_hit.contains("hook"));
+        assert!(flow.comment.contains("req-hooked"));
+        assert!(flow.comment.contains("res-hooked"));
+
+        // Verify fail-open behavior when a response hook points to a closed local port.
+        let origin2 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin2_addr = origin2.local_addr().unwrap();
+        let origin2_task = tokio::spawn(async move {
+            let (mut sock, _) = origin2.accept().await.unwrap();
+            let _ = read_h1_message(&mut sock).await;
+            sock.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
+            )
+            .await
+            .unwrap();
+        });
+        hub.set_rules(&format!(
+            "resolve api.vicanso.dev {origin2_addr}\n\
+             hook api.vicanso.dev/v2 http://{dead_addr}/dead res timeout=300ms"
+        ));
+        let mut client2 = TcpStream::connect(proxy_addr).await.unwrap();
+        client2
+            .write_all(b"GET http://api.vicanso.dev/v2/open HTTP/1.1\r\nHost: api.vicanso.dev\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let resp2 = read_h1_message(&mut client2).await;
+        let resp2_text = String::from_utf8_lossy(&resp2);
+        assert!(resp2_text.starts_with("HTTP/1.1 200 OK"), "{resp2_text}");
+        assert!(resp2_text.ends_with("hello"), "{resp2_text}");
+        let flow2 = hub
+            .with_session(|s| s.get(2).cloned())
+            .expect("flow2 recorded");
+        assert!(flow2.comment.contains("[hook failed:"), "{}", flow2.comment);
+
+        origin_task.abort();
+        origin2_task.abort();
+        hook_task.abort();
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

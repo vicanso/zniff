@@ -149,6 +149,40 @@ pub enum Rule {
         target_host: String,
         port: Option<u16>,
     },
+    /// Loopback HTTP webhook extension (`http://127.0.0.1:...` / `http://localhost:...` /
+    /// `http://[::1]:...`) that can mutate request and/or response metadata and body.
+    Hook {
+        host: String,
+        path_prefix: String,
+        url: String,
+        phase: HookPhase,
+        timeout: Duration,
+        op: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookPhase {
+    Request,
+    Response,
+    Both,
+}
+
+impl HookPhase {
+    pub fn runs_request(self) -> bool {
+        matches!(self, Self::Request | Self::Both)
+    }
+
+    pub fn runs_response(self) -> bool {
+        matches!(self, Self::Response | Self::Both)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookSpec {
+    pub url: String,
+    pub phase: HookPhase,
+    pub timeout: Duration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -210,6 +244,8 @@ pub struct Effect {
     /// Structured JSON path set/remove operations applied to JSON request/response bodies.
     pub request_json_ops: Vec<JsonOp>,
     pub response_json_ops: Vec<JsonOp>,
+    /// Local loopback webhook hooks applied during request and/or response forwarding.
+    pub hooks: Vec<HookSpec>,
 }
 
 impl Default for Effect {
@@ -227,6 +263,7 @@ impl Default for Effect {
             response_replaces: Vec::new(),
             request_json_ops: Vec::new(),
             response_json_ops: Vec::new(),
+            hooks: Vec::new(),
         }
     }
 }
@@ -266,7 +303,8 @@ impl Rule {
             | Self::Replace { op, .. }
             | Self::Json { op, .. }
             | Self::NoCache { op, .. }
-            | Self::Block { op, .. } => op.as_deref(),
+            | Self::Block { op, .. }
+            | Self::Hook { op, .. } => op.as_deref(),
             _ => None,
         }
     }
@@ -310,6 +348,9 @@ impl Rule {
                 host, path_prefix, ..
             }
             | Self::Block {
+                host, path_prefix, ..
+            }
+            | Self::Hook {
                 host, path_prefix, ..
             } => (host, path_prefix),
             Self::Cert { host, .. }
@@ -376,6 +417,14 @@ pub fn has_op_rules(rules: &[Rule], host: &str, path: &str) -> bool {
         .any(|rule| rule.op().is_some() && rule.matches_location(host, path))
 }
 
+/// Returns true when at least one `hook` rule matching `(host, path)` runs on requests.
+pub fn has_request_hooks(rules: &[Rule], host: &str, path: &str) -> bool {
+    rules.iter().any(|rule| {
+        matches!(rule, Rule::Hook { phase, .. } if phase.runs_request())
+            && rule.matches_location(host, path)
+    })
+}
+
 /// Labels of the rules that actually apply, in text order. The first terminal
 /// rule stops later terminal rules. Modifiers still count after it.
 #[cfg(test)]
@@ -407,6 +456,7 @@ pub fn hit_summary_with_ops(rules: &[Rule], host: &str, path: &str, ops: &[Strin
             Rule::NoCache { .. } => ("no-cache", false),
             Rule::Block { .. } => ("block", true),
             Rule::Resolve { .. } => ("resolve", false),
+            Rule::Hook { .. } => ("hook", false),
         };
         if terminal {
             if took_terminal {
@@ -615,6 +665,18 @@ pub fn effect_with_ops(rules: &[Rule], host: &str, path: &str, ops: &[String]) -
                 effect.action = Some(Action::Block {
                     drop_conn: *drop_conn,
                     status: *status,
+                });
+            }
+            Rule::Hook {
+                url,
+                phase,
+                timeout,
+                ..
+            } => {
+                effect.hooks.push(HookSpec {
+                    url: url.clone(),
+                    phase: *phase,
+                    timeout: *timeout,
                 });
             }
             _ => {}
@@ -1167,6 +1229,22 @@ fn parse_line(line: &str) -> Option<Rule> {
                 host,
                 target_host,
                 port,
+            })
+        }
+        "hook" | "webhook" => {
+            let tokens = rule_tokens(rest)?;
+            if tokens.is_empty() {
+                return None;
+            }
+            let url = parse_loopback_hook_url(&tokens[0])?;
+            let (phase, timeout, rule_op) = parse_hook_options(&tokens[1..])?;
+            Some(Rule::Hook {
+                host,
+                path_prefix,
+                url,
+                phase,
+                timeout,
+                op: rule_op,
             })
         }
         "header" => {
@@ -2317,6 +2395,78 @@ fn parse_delay(text: &str) -> Option<Duration> {
     }
     let ms = num.parse::<u64>().ok()?.saturating_mul(unit);
     Some(Duration::from_millis(ms.min(DELAY_CAP.as_millis() as u64)))
+}
+
+/// Validates and normalizes a local loopback HTTP webhook URL (`127.0.0.1`,
+/// `localhost`, or `[::1]`) so rules cannot accidentally exfiltrate traffic off-host.
+pub fn parse_loopback_hook_url(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let rest = trimmed
+        .strip_prefix("http://")
+        .or_else(|| trimmed.strip_prefix("HTTP://"))?;
+    if rest.is_empty() {
+        return None;
+    }
+    let (authority, path_part) = match rest.find(['/', '?', '#']) {
+        Some(idx) => (&rest[..idx], &rest[idx..]),
+        None => (rest, "/"),
+    };
+    if authority.is_empty() || authority.contains('@') {
+        return None;
+    }
+    let valid_host = if let Some(after_bracket) = authority.strip_prefix("[::1]") {
+        after_bracket.is_empty()
+            || after_bracket
+                .strip_prefix(':')
+                .and_then(|p| p.parse::<u16>().ok())
+                .is_some_and(|p| p > 0)
+    } else if let Some((h, p)) = authority.split_once(':') {
+        let lower = h.to_ascii_lowercase();
+        (lower == "127.0.0.1" || lower == "localhost")
+            && p.parse::<u16>().ok().is_some_and(|port| port > 0)
+    } else {
+        let lower = authority.to_ascii_lowercase();
+        lower == "127.0.0.1" || lower == "localhost"
+    };
+    if !valid_host {
+        return None;
+    }
+    Some(format!("http://{authority}{path_part}"))
+}
+
+fn parse_hook_options(tokens: &[String]) -> Option<(HookPhase, Duration, Option<String>)> {
+    let mut phase = HookPhase::Both;
+    let mut seen_phase = false;
+    let mut timeout = Duration::from_secs(2);
+    let mut seen_timeout = false;
+    let mut op = None;
+    for token in tokens {
+        match token.as_str() {
+            "req" | "request" if !seen_phase => {
+                phase = HookPhase::Request;
+                seen_phase = true;
+            }
+            "res" | "response" if !seen_phase => {
+                phase = HookPhase::Response;
+                seen_phase = true;
+            }
+            "both" if !seen_phase => {
+                phase = HookPhase::Both;
+                seen_phase = true;
+            }
+            t if (t.starts_with("timeout=") || t.starts_with("delay=")) && !seen_timeout => {
+                let raw = t.split_once('=').map(|(_, v)| v)?;
+                let parsed = parse_delay(raw)?;
+                timeout = parsed.clamp(Duration::from_millis(50), DELAY_CAP);
+                seen_timeout = true;
+            }
+            t if (t.starts_with("op=") || t.starts_with("operation=")) && op.is_none() => {
+                op = Some(parse_op_opt(t)?);
+            }
+            _ => return None,
+        }
+    }
+    Some((phase, timeout, op))
 }
 
 pub const THROTTLE_MIN_BPS: u64 = 512;
@@ -4271,5 +4421,58 @@ resolve a.com *
             ),
             None
         );
+    }
+
+    #[test]
+    fn hook_rules_enforce_loopback_urls_and_parse_phase_timeout_and_op() {
+        assert!(parse_rules("hook api.vicanso.dev/v1 http://evil.vicanso.dev/hook").is_empty());
+        assert!(parse_rules("hook api.vicanso.dev/v1 https://127.0.0.1:9000/hook").is_empty());
+        assert!(parse_rules("hook api.vicanso.dev/v1 http://10.0.0.1:9000/hook").is_empty());
+
+        let parsed = parse_rules(
+            "hook api.vicanso.dev/v1 http://127.0.0.1:9100/mutate req timeout=750ms op=Login\n\
+             hook api.vicanso.dev/v2 http://localhost:9200 res\n\
+             hook api.vicanso.dev/v3 http://[::1]:9300/decode",
+        );
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(
+            parsed[0],
+            Rule::Hook {
+                host: "api.vicanso.dev".into(),
+                path_prefix: "/v1".into(),
+                url: "http://127.0.0.1:9100/mutate".into(),
+                phase: HookPhase::Request,
+                timeout: Duration::from_millis(750),
+                op: Some("Login".into()),
+            }
+        );
+        assert_eq!(
+            parsed[1],
+            Rule::Hook {
+                host: "api.vicanso.dev".into(),
+                path_prefix: "/v2".into(),
+                url: "http://localhost:9200/".into(),
+                phase: HookPhase::Response,
+                timeout: Duration::from_secs(2),
+                op: None,
+            }
+        );
+        assert_eq!(
+            parsed[2],
+            Rule::Hook {
+                host: "api.vicanso.dev".into(),
+                path_prefix: "/v3".into(),
+                url: "http://[::1]:9300/decode".into(),
+                phase: HookPhase::Both,
+                timeout: Duration::from_secs(2),
+                op: None,
+            }
+        );
+        assert_eq!(
+            hit_summary_with_ops(&parsed, "api.vicanso.dev", "/v1/auth", &["Login".into()]),
+            "hook"
+        );
+        assert!(has_request_hooks(&parsed, "api.vicanso.dev", "/v1/auth"));
+        assert!(!has_request_hooks(&parsed, "api.vicanso.dev", "/v2/auth"));
     }
 }

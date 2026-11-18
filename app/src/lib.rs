@@ -50,6 +50,8 @@ mod updater;
 #[cfg(not(target_arch = "wasm32"))]
 mod web;
 #[cfg(not(target_arch = "wasm32"))]
+mod webhook;
+#[cfg(not(target_arch = "wasm32"))]
 mod ws;
 
 #[cfg(not(target_arch = "wasm32"))]

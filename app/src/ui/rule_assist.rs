@@ -340,6 +340,7 @@ pub(crate) fn fill_draft_from_rule_line(
             draft_from.set(target_host);
             draft_to.set(port.map(|p| p.to_string()).unwrap_or_default());
         }
+        Rule::Hook { .. } => return false,
     }
     true
 }
