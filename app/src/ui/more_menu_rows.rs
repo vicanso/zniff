@@ -546,7 +546,10 @@ pub(crate) fn menu_share_row(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn selected_browser_start_url(controls: &Controls, selected_id: Option<u64>) -> Option<String> {
+pub(crate) fn selected_browser_start_url(
+    controls: &Controls,
+    selected_id: Option<u64>,
+) -> Option<String> {
     let id = selected_id?;
     controls.hub.with_session(|session| {
         let flow = session.get(id)?;

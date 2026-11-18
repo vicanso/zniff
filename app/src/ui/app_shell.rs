@@ -974,8 +974,21 @@ pub fn App() -> impl IntoElement {
     let compose_esc = compose;
     let seq_esc = seq_builder;
     let shown_esc = shown;
+    let palette_open = signal(false);
+    on_key_with(
+        "mod+shift+p",
+        KeyOptions {
+            when: nsh_core::keymap::When::Always,
+            ..KeyOptions::default()
+        },
+        move |_| {
+            palette_open.set(!palette_open.get());
+        },
+    );
     on_key("escape", move |_| {
-        if profile_signals.about_open.get() {
+        if palette_open.get() {
+            palette_open.set(false);
+        } else if profile_signals.about_open.get() {
             profile_signals.about_open.set(false);
         } else if profile_signals.machine_settings_open.get() {
             profile_signals.machine_settings_open.set(false);
@@ -1170,7 +1183,22 @@ pub fn App() -> impl IntoElement {
             controls.clone(),
         ))
         .child(machine_settings_modal(profile_signals, controls.clone()))
-        .child(about_modal(profile_signals, update_state, controls))
+        .child(about_modal(profile_signals, update_state, controls.clone()))
+        .child(command_palette_modal(
+            palette_open,
+            controls,
+            running,
+            use_system_proxy,
+            rows,
+            effective_filter,
+            shown.pretty,
+            profile_signals,
+            compose,
+            seq_builder,
+            selected,
+            baseline,
+            shown,
+        ))
         .child(each(
             move || {
                 if toast_shown.with(Vec::is_empty) {

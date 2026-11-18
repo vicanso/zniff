@@ -42,7 +42,8 @@ fn main() -> impl std::process::Termination {
     zniff::apply_initial_window_options(&mut options);
     let root = platform::Root::of::<zniff::App>().main_window(options);
     platform::set_ui_sets(vec![nsh_base::registry_of([
-        nsh_base::parts::core as nsh_base::parts::Part
+        nsh_base::parts::core as nsh_base::parts::Part,
+        nsh_base::parts::command as nsh_base::parts::Part,
     ])]);
     let result = platform::run_app(
         platform::AppSource::Rust(root),

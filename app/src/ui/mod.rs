@@ -79,6 +79,7 @@ mod app_shell;
 mod break_bar;
 mod cli_state;
 mod column_picker;
+mod command_palette;
 mod compose_box;
 mod controls_actions;
 mod controls_runtime;
@@ -126,6 +127,7 @@ pub(crate) use self::cli_state::*;
 #[cfg(not(target_arch = "wasm32"))]
 pub use self::cli_state::{apply_initial_window_options, maybe_run_cli_mode};
 pub(crate) use self::column_picker::*;
+pub(crate) use self::command_palette::*;
 pub(crate) use self::compose_box::*;
 pub(crate) use self::controls_actions::*;
 pub(crate) use self::controls_runtime::*;
