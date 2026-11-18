@@ -1450,29 +1450,45 @@ pub fn parse_text_view_doc(
 }
 
 /// One block the diff view can compare: URL, both header lists, both bodies.
+#[cfg(test)]
 pub fn flow_snapshot(flow: &Flow, lang: Lang) -> String {
+    flow_snapshot_scoped(flow, lang, 0)
+}
+
+/// Scoped snapshot for the diff view (`0`: All, `1`: Bodies only, `2`: Headers & URL).
+pub fn flow_snapshot_scoped(flow: &Flow, lang: Lang, scope: u8) -> String {
     let mut out = String::new();
-    push_section(&mut out, t(lang, "URL", "URL"), &flow.url);
-    push_section(
-        &mut out,
-        t(lang, "请求头", "Request headers"),
-        &header_block(&flow.request_headers),
-    );
-    push_section(
-        &mut out,
-        t(lang, "请求 body", "Request body"),
-        &body_text(&flow.request_body),
-    );
-    push_section(
-        &mut out,
-        t(lang, "响应头", "Response headers"),
-        &header_block(&flow.response_headers),
-    );
-    push_section(
-        &mut out,
-        t(lang, "响应 body", "Response body"),
-        &body_text(&flow.response_body),
-    );
+    let include_headers = scope != 1;
+    let include_bodies = scope != 2;
+    if include_headers {
+        push_section(&mut out, t(lang, "URL", "URL"), &flow.url);
+        push_section(
+            &mut out,
+            t(lang, "请求头", "Request headers"),
+            &header_block(&flow.request_headers),
+        );
+    }
+    if include_bodies {
+        push_section(
+            &mut out,
+            t(lang, "请求 body", "Request body"),
+            &body_text(&flow.request_body),
+        );
+    }
+    if include_headers {
+        push_section(
+            &mut out,
+            t(lang, "响应头", "Response headers"),
+            &header_block(&flow.response_headers),
+        );
+    }
+    if include_bodies {
+        push_section(
+            &mut out,
+            t(lang, "响应 body", "Response body"),
+            &body_text(&flow.response_body),
+        );
+    }
     out
 }
 
@@ -5640,5 +5656,30 @@ Content-Type: image/png\r\n\r\n\
             "https://api.example.com/search?dry_run=1"
         );
         assert!(get_explicit_post.body.is_empty());
+    }
+
+    #[test]
+    fn flow_snapshot_scoped_filters_headers_and_bodies() {
+        let mut f = flow();
+        f.response_headers.push(("X-Resp".into(), "pong".into()));
+        f.response_body = br#"{"ok":true}"#.to_vec();
+
+        let all = flow_snapshot(&f, Lang::En);
+        assert!(all.contains("https://example.com/v1"));
+        assert!(all.contains("X-Resp: pong"));
+        assert!(all.contains(r#"{"a":1}"#));
+        assert!(all.contains(r#"{"ok":true}"#));
+
+        let bodies_only = flow_snapshot_scoped(&f, Lang::En, 1);
+        assert!(!bodies_only.contains("https://example.com/v1"));
+        assert!(!bodies_only.contains("X-Resp: pong"));
+        assert!(bodies_only.contains(r#"{"a":1}"#));
+        assert!(bodies_only.contains(r#"{"ok":true}"#));
+
+        let headers_only = flow_snapshot_scoped(&f, Lang::En, 2);
+        assert!(headers_only.contains("https://example.com/v1"));
+        assert!(headers_only.contains("X-Resp: pong"));
+        assert!(!headers_only.contains(r#"{"a":1}"#));
+        assert!(!headers_only.contains(r#"{"ok":true}"#));
     }
 }

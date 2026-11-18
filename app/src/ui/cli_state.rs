@@ -195,12 +195,20 @@ pub(crate) enum UpdatePhase {
     },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum UpdateCheckNotice {
+    UpToDate(String),
+    Available(String),
+    Failed(String),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub(crate) struct UpdateState {
     pub(crate) phase: UpdatePhase,
     pub(crate) nudge: Option<String>,
     pub(crate) ignored: Option<String>,
     pub(crate) notes: Option<String>,
+    pub(crate) last_check: Option<UpdateCheckNotice>,
 }
 
 impl UpdateState {
@@ -211,6 +219,7 @@ impl UpdateState {
             nudge: updater::nudge(),
             ignored: updater::ignored(),
             notes: updater::nudge_notes(),
+            last_check: None,
         }
     }
 
@@ -252,6 +261,8 @@ pub(crate) struct ProfileSignals {
     pub(crate) relay_accept: Signal<bool>,
     pub(crate) list_width: Signal<f32>,
     pub(crate) list_height: Signal<f32>,
+    pub(crate) sidebar_width: Signal<f32>,
+    pub(crate) sidebar_collapsed: Signal<bool>,
     pub(crate) layout_mode: Signal<config::LayoutMode>,
     pub(crate) panel_open: Signal<bool>,
     pub(crate) machine_settings_open: Signal<bool>,
@@ -259,6 +270,8 @@ pub(crate) struct ProfileSignals {
     pub(crate) default_json_tree: Signal<bool>,
     pub(crate) deselect_rev: Signal<u64>,
 }
+
+pub(crate) type ComposeDraft = (String, String, String, String);
 
 #[derive(Clone, Copy)]
 pub(crate) struct Compose {
@@ -270,6 +283,8 @@ pub(crate) struct Compose {
     pub(crate) headers: Signal<String>,
     pub(crate) body: Signal<String>,
     pub(crate) status: Signal<String>,
+    pub(crate) draft_saved: Signal<ComposeDraft>,
+    pub(crate) recent: Signal<Vec<ComposeDraft>>,
 }
 
 #[derive(Clone, PartialEq, Default)]

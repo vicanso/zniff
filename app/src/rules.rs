@@ -349,16 +349,17 @@ pub fn custom_resolve(rules: &[Rule], host: &str) -> Option<(String, Option<u16>
     })
 }
 
+pub fn parse_single_rule(line: &str) -> Option<Rule> {
+    let clean = strip_rule_comment(line).trim();
+    if clean.is_empty() {
+        None
+    } else {
+        parse_line(clean)
+    }
+}
+
 pub fn parse_rules(text: &str) -> Vec<Rule> {
-    text.lines()
-        .filter_map(|line| {
-            let line = strip_rule_comment(line).trim();
-            if line.is_empty() {
-                return None;
-            }
-            parse_line(line)
-        })
-        .collect()
+    text.lines().filter_map(parse_single_rule).collect()
 }
 
 /// Returns true when at least one rule matching `(host, path)` by host and path

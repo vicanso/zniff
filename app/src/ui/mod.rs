@@ -71,6 +71,7 @@ macro_rules! desktop_child {
 }
 
 mod about_modal;
+mod app_icon;
 mod app_shell;
 mod break_bar;
 mod cli_state;
@@ -104,6 +105,7 @@ mod profile_store;
 mod quick_rules;
 mod redact_preview;
 mod row_projection;
+mod rule_assist;
 mod seq_dep_waterfall;
 mod seq_panel;
 mod seq_swimlane;
@@ -113,6 +115,7 @@ mod toolbar;
 mod web_poll;
 
 pub(crate) use self::about_modal::*;
+pub(crate) use self::app_icon::*;
 pub use self::app_shell::App;
 pub(crate) use self::break_bar::*;
 pub use self::cli_state::initial_window_size;
@@ -149,6 +152,7 @@ pub(crate) use self::profile_store::*;
 pub(crate) use self::quick_rules::*;
 pub(crate) use self::redact_preview::*;
 pub(crate) use self::row_projection::*;
+pub(crate) use self::rule_assist::*;
 pub(crate) use self::seq_dep_waterfall::*;
 pub(crate) use self::seq_panel::*;
 pub(crate) use self::seq_swimlane::*;

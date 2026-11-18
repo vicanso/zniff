@@ -14,8 +14,16 @@ pub(crate) fn flow_cell(
     match cell.key.as_ref() {
         "id" => id_cell(rows, selected, baseline, columns, index).into_element(),
         "method" => method_cell(rows, selected, baseline, columns, index).into_element(),
-        "path" => path_cell(rows, selected, baseline, columns, effective_filter, hover, index)
-            .into_element(),
+        "path" => path_cell(
+            rows,
+            selected,
+            baseline,
+            columns,
+            effective_filter,
+            hover,
+            index,
+        )
+        .into_element(),
         "status" => status_cell(rows, selected, baseline, columns, index).into_element(),
         "protocol" => protocol_cell(rows, selected, baseline, columns, index).into_element(),
         "gap" => time_cell(rows, selected, baseline, columns, hover, index).into_element(),
@@ -79,16 +87,16 @@ pub(crate) fn flow_header(
             let display = effective_path_display(columns.get(), &effective_filter.get());
             flow_column_title(&key, display).into()
         })
-            .number_of_lines(1)
-            .text_size(px(11.0))
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_color(move || {
-                if is_sorted() {
-                    accent_blue_text()
-                } else {
-                    fg_muted()
-                }
-            }),
+        .number_of_lines(1)
+        .text_size(px(11.0))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(move || {
+            if is_sorted() {
+                accent_blue_text()
+            } else {
+                fg_muted()
+            }
+        }),
     )
     .child(when(is_sorted, move || {
         glyph_px(
@@ -620,11 +628,17 @@ pub(crate) fn path_cell(
             }),
         )
         .on_mouse_move(move |event: &MouseEvent| {
-            let display = effective_path_display(columns.get(), &effective_filter.get());
+            let tip_display = effective_path_hover_display(columns.get(), &effective_filter.get());
             let path = tip_rows.with(|rows| {
                 rows.get(index)
                     .map(|row| {
-                        let target = row_target_display(row, display);
+                        let effective =
+                            if tip_display == EffectivePathDisplay::FullUrl && row.url.is_empty() {
+                                EffectivePathDisplay::HostAndPath
+                            } else {
+                                tip_display
+                            };
+                        let target = row_target_display(row, effective);
                         if row.relay_short.is_empty() {
                             target
                         } else {

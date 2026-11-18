@@ -22,6 +22,8 @@ mod har;
 mod i18n;
 mod icon;
 #[cfg(not(target_arch = "wasm32"))]
+mod local_proc;
+#[cfg(not(target_arch = "wasm32"))]
 mod mcp;
 mod present;
 #[cfg(not(target_arch = "wasm32"))]

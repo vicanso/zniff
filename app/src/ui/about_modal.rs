@@ -305,7 +305,13 @@ pub(crate) fn install_macos_application_menu(about_open: Signal<bool>) {
 }
 
 /// Modal dialog displaying zniff branding, build metadata, project links, and runtime environment info.
-pub(crate) fn about_modal(profiles: ProfileSignals, controls: Arc<Controls>) -> impl IntoElement {
+pub(crate) fn about_modal(
+    profiles: ProfileSignals,
+    update_state: Signal<UpdateState>,
+    controls: Arc<Controls>,
+) -> impl IntoElement {
+    #[cfg(target_arch = "wasm32")]
+    let _ = update_state;
     when(
         move || profiles.about_open.get(),
         move || {
@@ -546,6 +552,118 @@ pub(crate) fn about_modal(profiles: ProfileSignals, controls: Arc<Controls>) -> 
                 .child(sys_card)
                 .child(copyright_line);
 
+            #[cfg(not(target_arch = "wasm32"))]
+            let body = {
+                let controls_upgrade = controls.clone();
+                body.child(when(
+                    move || {
+                        let st = update_state.get();
+                        matches!(st.phase, UpdatePhase::Checking) || st.last_check.is_some()
+                    },
+                    move || {
+                        let controls_up = controls_upgrade.clone();
+                        let st = update_state.get();
+                        let is_checking = matches!(st.phase, UpdatePhase::Checking);
+                        let (bg_col, border_col, fg_col, glyph_kind) = match &st.last_check {
+                            _ if is_checking => {
+                                (bg_code(), border_subtle(), fg_secondary(), Glyph::Download)
+                            }
+                            Some(UpdateCheckNotice::UpToDate(_)) => {
+                                (status_ok_bg(), status_ok_fg(), status_ok_fg(), Glyph::Check)
+                            }
+                            Some(UpdateCheckNotice::Available(_)) => (
+                                accent_blue_soft(),
+                                accent_blue_border(),
+                                accent_blue_text(),
+                                Glyph::Download,
+                            ),
+                            Some(UpdateCheckNotice::Failed(_)) => (
+                                status_warn_bg(),
+                                status_warn_fg(),
+                                status_warn_fg(),
+                                Glyph::Alert,
+                            ),
+                            None => (bg_code(), border_subtle(), fg_secondary(), Glyph::Download),
+                        };
+                        view()
+                            .w_full()
+                            .px_3()
+                            .py_2()
+                            .rounded(px(8.0))
+                            .border_1()
+                            .border_color(border_col)
+                            .bg(bg_col)
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .child(glyph_px(14.0, move || glyph_kind, move || color(fg_col)))
+                            .child(
+                                text(move || {
+                                    let lang = ui_lang(langs);
+                                    let cur = update_state.get();
+                                    if matches!(cur.phase, UpdatePhase::Checking) {
+                                        return StatusMsg::UpdateChecking.text(lang);
+                                    }
+                                    match cur.last_check {
+                                        Some(UpdateCheckNotice::UpToDate(v)) => {
+                                            StatusMsg::UpdateUpToDate(v).text(lang)
+                                        }
+                                        Some(UpdateCheckNotice::Available(v)) => match lang {
+                                            Lang::Zh => format!("发现新版本 {v}"),
+                                            Lang::En => format!("New version {v} available"),
+                                        },
+                                        Some(UpdateCheckNotice::Failed(err)) => {
+                                            StatusMsg::UpdateCheckFailed(err).text(lang)
+                                        }
+                                        None => String::new(),
+                                    }
+                                })
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .number_of_lines(2)
+                                .text_size(px(12.0))
+                                .text_color(fg_col),
+                            )
+                            .child(when(
+                                move || {
+                                    matches!(
+                                        update_state.get().last_check,
+                                        Some(UpdateCheckNotice::Available(_))
+                                    )
+                                },
+                                move || {
+                                    let controls_go = controls_up.clone();
+                                    view()
+                                        .h(px(24.0))
+                                        .px_2p5()
+                                        .flex_shrink_0()
+                                        .flex_row()
+                                        .items_center()
+                                        .rounded(px(5.0))
+                                        .bg(accent_blue())
+                                        .hover(|s| s.bg(accent_blue_hover()))
+                                        .cursor(Cursor::Pointer)
+                                        .on_press(move || {
+                                            if let Some(UpdateCheckNotice::Available(ver)) =
+                                                update_state.get().last_check
+                                            {
+                                                profiles.about_open.set(false);
+                                                start_upgrade(controls_go.clone(), ver);
+                                            }
+                                        })
+                                        .child(
+                                            text(tr("升级", "Upgrade"))
+                                                .number_of_lines(1)
+                                                .text_size(px(11.5))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(white()),
+                                        )
+                                },
+                            ))
+                    },
+                ))
+            };
+
             let footer = view()
                 .w_full()
                 .px_4()
@@ -569,15 +687,40 @@ pub(crate) fn about_modal(profiles: ProfileSignals, controls: Arc<Controls>) -> 
                     .border_1()
                     .border_color(border_control())
                     .bg(bg_control())
-                    .hover(|s| s.bg(bg_control_hover()))
-                    .active(|s| s.opacity(0.8))
+                    .hover(|s| {
+                        s.bg(move || {
+                            if update_state.get().is_busy() {
+                                bg_control()
+                            } else {
+                                bg_control_hover()
+                            }
+                        })
+                    })
+                    .active(|s| {
+                        s.opacity(move || {
+                            if update_state.get().is_busy() {
+                                0.5_f32
+                            } else {
+                                0.8_f32
+                            }
+                        })
+                    })
                     .cursor(Cursor::Pointer)
+                    .disabled(move || update_state.get().is_busy())
+                    .disabled_style(|s| s.opacity(0.55).cursor(Cursor::Default))
                     .on_press(move || {
-                        profiles.about_open.set(false);
                         check_update_manual(controls_check.clone());
                     })
                     .child(
-                        control_text(tr("检查更新", "Check for Updates")).text_color(fg_primary()),
+                        control_text(move || -> SharedString {
+                            let lang = ui_lang(langs);
+                            if matches!(update_state.get().phase, UpdatePhase::Checking) {
+                                t(lang, "检查中…", "Checking…").into()
+                            } else {
+                                t(lang, "检查更新", "Check for Updates").into()
+                            }
+                        })
+                        .text_color(fg_primary()),
                     ),
             );
 

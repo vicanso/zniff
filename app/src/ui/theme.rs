@@ -41,6 +41,10 @@ pub(crate) fn border_control() -> AdaptiveColor {
     AdaptiveColor::rgb(0xcbd5e1, 0x2b3448)
 }
 
+pub(crate) fn border_divider() -> AdaptiveColor {
+    AdaptiveColor::rgb(0x94a3b8, 0x475670)
+}
+
 pub(crate) fn fg_primary() -> AdaptiveColor {
     AdaptiveColor::rgb(0x0f172a, 0xf1f5f9)
 }

@@ -11,7 +11,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use crate::present;
-use crate::proxy::{Hub, ReplayOverride, replay_once};
+use crate::proxy::{BreakDecision, BreakSide, Hub, ReplayOverride, replay_once};
 use crate::rules;
 use crate::session::{FilteredStats, SessionFacets};
 
@@ -175,6 +175,50 @@ pub fn tools_list_value() -> Value {
                         }
                     }
                 }
+            },
+            {
+                "name": "clear_flows",
+                "description": "Clear captured flows from the current zniff session (all flows or only unpinned flows).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "keep_pinned": {
+                            "type": "boolean",
+                            "description": "When true, keeps pinned/starred flows and clears only unpinned flows (default false)."
+                        }
+                    }
+                }
+            },
+            {
+                "name": "manage_breaks",
+                "description": "Inspect and control requests/responses currently paused at `break` / `break-res` breakpoints.",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["action"],
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["list", "continue", "continue_all", "drop"],
+                            "description": "Breakpoint queue operation to execute."
+                        },
+                        "id": {
+                            "type": "integer",
+                            "description": "Optional paused flow id to promote to the queue head before `continue` or `drop`."
+                        },
+                        "status": {
+                            "type": "integer",
+                            "description": "Optional HTTP status code (100-599) override when continuing a response breakpoint."
+                        },
+                        "headers": {
+                            "type": ["string", "object"],
+                            "description": "Optional replacement headers (`Name: Value` lines or JSON object) when continuing."
+                        },
+                        "body": {
+                            "type": "string",
+                            "description": "Optional UTF-8 replacement body when continuing."
+                        }
+                    }
+                }
             }
         ]
     })
@@ -278,6 +322,8 @@ async fn call_tool(hub: Arc<Hub>, name: &str, args: &Value) -> Value {
         "replay_flow" => tool_replay_flow(hub, args).await,
         "get_rules" => tool_get_rules(&hub),
         "set_rules" => tool_set_rules(&hub, args),
+        "clear_flows" => tool_clear_flows(&hub, args),
+        "manage_breaks" => tool_manage_breaks(&hub, args),
         _ => tool_error(format!("Unknown tool: {name}")),
     }
 }
@@ -656,6 +702,144 @@ fn tool_set_rules(hub: &Hub, args: &Value) -> Value {
         resp["warning"] = json!(format!("Failed to persist rules to disk: {err}"));
     }
     tool_json(&resp)
+}
+
+fn break_side_label(side: BreakSide) -> &'static str {
+    match side {
+        BreakSide::Request => "request",
+        BreakSide::Response => "response",
+    }
+}
+
+fn tool_clear_flows(hub: &Hub, args: &Value) -> Value {
+    let keep_pinned = args
+        .get("keep_pinned")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let cleared = if keep_pinned {
+        hub.clear_unpinned()
+    } else {
+        let total = hub.with_session(|s| s.len());
+        hub.clear_session();
+        total
+    };
+    let remaining = hub.with_session(|s| s.len());
+    tool_json(&json!({
+        "ok": true,
+        "keep_pinned": keep_pinned,
+        "cleared": cleared,
+        "remaining": remaining,
+    }))
+}
+
+fn tool_manage_breaks(hub: &Hub, args: &Value) -> Value {
+    let Some(action) = args.get("action").and_then(Value::as_str) else {
+        return tool_error(
+            "Missing required `action` (`list`, `continue`, `continue_all`, `drop`).",
+        );
+    };
+    match action {
+        "list" => {
+            let queue = hub.paused_queue();
+            let items: Vec<Value> = hub.with_session(|session| {
+                queue
+                    .iter()
+                    .map(|&(id, side)| {
+                        let flow = session.get(id);
+                        json!({
+                            "id": id,
+                            "side": break_side_label(side),
+                            "method": flow.map(|f| f.method.as_str()).unwrap_or(""),
+                            "url": flow.map(|f| f.url.as_str()).unwrap_or(""),
+                            "status": flow.and_then(|f| f.status),
+                        })
+                    })
+                    .collect()
+            });
+            tool_json(&json!({
+                "paused_count": items.len(),
+                "queue": items,
+            }))
+        }
+        "continue_all" => {
+            let released = hub.resolve_all_breaks();
+            tool_json(&json!({
+                "ok": true,
+                "action": action,
+                "released": released,
+                "remaining": hub.paused_queue_len(),
+            }))
+        }
+        "continue" | "drop" => {
+            if args
+                .get("id")
+                .is_some_and(|v| !v.is_null() && v.as_u64().is_none())
+            {
+                return tool_error("`id` must be a non-negative integer flow ID.");
+            }
+            if let Some(id) = args.get("id").and_then(Value::as_u64)
+                && hub.paused().map(|(hid, _)| hid) != Some(id)
+                && !hub.promote_break(id)
+            {
+                return tool_error(format!(
+                    "Flow #{id} is not currently paused at a breakpoint."
+                ));
+            }
+            let Some((head_id, side)) = hub.paused() else {
+                return tool_error("No flow is currently paused at a breakpoint.");
+            };
+            let status = if action == "continue" {
+                match args.get("status") {
+                    None | Some(Value::Null) => None,
+                    Some(v) => {
+                        let Some(code) = v.as_u64().and_then(|n| u16::try_from(n).ok()) else {
+                            return tool_error("`status` must be an integer between 100 and 599.");
+                        };
+                        if !(100..=599).contains(&code) {
+                            return tool_error("`status` must be an integer between 100 and 599.");
+                        }
+                        Some(code)
+                    }
+                }
+            } else {
+                None
+            };
+            let headers = match args.get("headers") {
+                None | Some(Value::Null) => None,
+                Some(v) => match parse_headers_arg(v) {
+                    Some(parsed) => Some(parsed),
+                    None => {
+                        return tool_error(
+                            "`headers` must be a `Name: Value` multiline string or string-valued JSON object.",
+                        );
+                    }
+                },
+            };
+            let body = if action == "continue" {
+                args.get("body")
+                    .and_then(Value::as_str)
+                    .map(|s| s.as_bytes().to_vec())
+            } else {
+                None
+            };
+            let ok = hub.resolve_break(BreakDecision {
+                drop: action == "drop",
+                headers: if action == "continue" { headers } else { None },
+                body,
+                status,
+            });
+            tool_json(&json!({
+                "ok": ok,
+                "id": head_id,
+                "side": break_side_label(side),
+                "action": action,
+                "remaining": hub.paused_queue_len(),
+            }))
+        }
+        other => tool_error(format!(
+            "Unsupported `action`: {other}. Expected one of: list, continue, continue_all, drop."
+        )),
+    }
 }
 
 fn parse_headers_arg(val: &Value) -> Option<Vec<(String, String)>> {
@@ -1188,6 +1372,9 @@ resolve api.example.com 127.0.0.1:8443";
             .collect();
         assert!(names.contains(&"get_session_summary"));
         assert!(names.contains(&"annotate_flow"));
+        assert!(names.contains(&"clear_flows"));
+        assert!(names.contains(&"manage_breaks"));
+        assert_eq!(names.len(), 9);
 
         // English MCP error localization & client_cert timing metadata
         assert_eq!(
@@ -1210,5 +1397,25 @@ resolve api.example.com 127.0.0.1:8443";
         let detail = parse_tool_payload(&tool_get_flow_detail(&hub, &json!({ "id": id1 })));
         assert_eq!(detail["timing"]["client_cert"], "/tmp/mtls-client.pem");
         assert_eq!(detail["rule_hit"], "client-cert");
+
+        // manage_breaks when queue is empty
+        let listed = parse_tool_payload(&tool_manage_breaks(&hub, &json!({ "action": "list" })));
+        assert_eq!(listed["paused_count"], 0);
+        let cont_err = tool_manage_breaks(&hub, &json!({ "action": "continue" }));
+        assert_eq!(cont_err["isError"], true);
+        let cont_all = parse_tool_payload(&tool_manage_breaks(
+            &hub,
+            &json!({ "action": "continue_all" }),
+        ));
+        assert_eq!(cont_all["released"], 0);
+
+        // clear_flows with keep_pinned: true keeps pinned id2 and drops unpinned id1
+        let kept = parse_tool_payload(&tool_clear_flows(&hub, &json!({ "keep_pinned": true })));
+        assert_eq!(kept["cleared"], 1);
+        assert_eq!(kept["remaining"], 1);
+        let cleared_all =
+            parse_tool_payload(&tool_clear_flows(&hub, &json!({ "keep_pinned": false })));
+        assert_eq!(cleared_all["cleared"], 1);
+        assert_eq!(cleared_all["remaining"], 0);
     }
 }

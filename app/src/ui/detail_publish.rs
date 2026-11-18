@@ -42,10 +42,13 @@ pub(crate) fn publish_detail(
         .as_ref()
         .is_some_and(|base| unloaded || base.detail_unloaded());
     let (diff_old, diff_new) = match base_state {
-        Some(base) if !diff_loading => (
-            present::flow_snapshot(&base, lang),
-            present::flow_snapshot(&flow, lang),
-        ),
+        Some(base) if !diff_loading => {
+            let scope = shown.diff_scope.get();
+            (
+                present::flow_snapshot_scoped(&base, lang, scope),
+                present::flow_snapshot_scoped(&flow, lang, scope),
+            )
+        }
         _ => (String::new(), String::new()),
     };
     let diff = if diff_old.is_empty() {

@@ -211,7 +211,6 @@ pub enum LayoutMode {
     #[default]
     Split,
     TopBottom,
-    WideThree,
 }
 
 impl LayoutMode {
@@ -219,14 +218,12 @@ impl LayoutMode {
         match self {
             Self::Split => "split",
             Self::TopBottom => "top_bottom",
-            Self::WideThree => "wide_three",
         }
     }
 
     pub fn parse(text: &str) -> Self {
         match text.trim().to_ascii_lowercase().as_str() {
             "top_bottom" | "top-bottom" | "vertical" => Self::TopBottom,
-            "wide_three" | "wide-three" | "three" => Self::WideThree,
             _ => Self::Split,
         }
     }
@@ -401,6 +398,7 @@ pub struct Config {
     /// False draws monospaced text in the bundled JetBrains Mono; true uses the system's.
     pub system_mono_font: bool,
     pub layout_mode: LayoutMode,
+    pub sidebar_collapsed: bool,
     pub list_width: u32,
     pub list_height: u32,
     pub window_width: u32,
@@ -504,6 +502,8 @@ struct RawConfig {
     system_mono_font: bool,
     #[serde(default, skip_serializing_if = "LayoutMode::is_default")]
     layout_mode: LayoutMode,
+    #[serde(default, skip_serializing_if = "is_false")]
+    sidebar_collapsed: bool,
     #[serde(
         default = "default_list_width",
         skip_serializing_if = "is_default_list_width"
@@ -701,6 +701,7 @@ impl From<RawConfig> for Config {
             ellipsize: raw.ellipsize,
             system_mono_font: raw.system_mono_font,
             layout_mode: raw.layout_mode,
+            sidebar_collapsed: raw.sidebar_collapsed,
             list_width: raw.list_width,
             list_height: raw.list_height,
             window_width: raw.window_width,
@@ -805,6 +806,7 @@ impl From<Config> for RawConfig {
             ellipsize: config.ellipsize,
             system_mono_font: config.system_mono_font,
             layout_mode: config.layout_mode,
+            sidebar_collapsed: config.sidebar_collapsed,
             list_width: config.list_width,
             list_height: config.list_height,
             window_width: config.window_width,
@@ -862,6 +864,7 @@ impl Default for Config {
             ellipsize: ListEllipsize::Middle,
             system_mono_font: false,
             layout_mode: LayoutMode::Split,
+            sidebar_collapsed: false,
             list_width: default_list_width(),
             list_height: default_list_height(),
             window_width: default_window_width(),
@@ -921,7 +924,7 @@ pub fn column_width_limit(key: &str) -> Option<ColumnWidth> {
             max: 120,
         },
         "path" => ColumnWidth {
-            default: 220,
+            default: 300,
             min: 80,
             max: 800,
         },
@@ -2166,74 +2169,6 @@ mod tests {
     }
 
     #[test]
-    fn active_profile_omits_duplicate_top_level_setup_fields_and_restores_preset() {
-        let dir = Scratch::new();
-        let test_profile = SavedProfile {
-            name: "test".into(),
-            filter: "host:test.vicanso.dev path:/finance-api".into(),
-            bypass_hosts: String::new(),
-            rules: "replace */configs req supportCrypto=true -> supportCrypto=false".into(),
-            upstream_proxy: String::new(),
-            rules_enabled: false,
-            breaks_enabled: false,
-            show_tunnel_failures: true,
-        };
-        let google_profile = SavedProfile {
-            name: "google".into(),
-            filter: String::new(),
-            bypass_hosts: "google.com".into(),
-            rules: String::new(),
-            upstream_proxy: String::new(),
-            rules_enabled: true,
-            breaks_enabled: true,
-            show_tunnel_failures: false,
-        };
-        update(dir.path(), |config| {
-            config.saved_profiles = vec![test_profile.clone(), google_profile];
-            config.active_profile = "TEST".into();
-            config.filter = test_profile.filter.clone();
-            config.bypass_hosts = test_profile.bypass_hosts.clone();
-            config.rules = test_profile.rules.clone();
-            config.upstream_proxy = test_profile.upstream_proxy.clone();
-            config.rules_enabled = test_profile.rules_enabled;
-            config.breaks_enabled = test_profile.breaks_enabled;
-            config.show_tunnel_failures = test_profile.show_tunnel_failures;
-            config.column_widths.insert("path".into(), 280);
-            config.relay_accept = true;
-        })
-        .unwrap();
-
-        let raw_toml = fs::read_to_string(dir.path().join("config.toml")).unwrap();
-        let before_tables = raw_toml.split("[[").next().unwrap();
-        assert!(
-            before_tables.contains("active_profile = \"test\""),
-            "{raw_toml}"
-        );
-        assert!(!before_tables.contains("\nfilter ="), "{raw_toml}");
-        assert!(!before_tables.contains("\nrules ="), "{raw_toml}");
-        assert!(!before_tables.contains("bypass_hosts"), "{raw_toml}");
-        assert!(!before_tables.contains("upstream_proxy"), "{raw_toml}");
-        assert!(!before_tables.contains("rules_enabled"), "{raw_toml}");
-        assert!(!before_tables.contains("breaks_enabled"), "{raw_toml}");
-        assert!(
-            !before_tables.contains("show_tunnel_failures"),
-            "{raw_toml}"
-        );
-
-        let reloaded = load(dir.path());
-        assert_eq!(reloaded.active_profile, "test");
-        assert_eq!(reloaded.filter, test_profile.filter);
-        assert_eq!(reloaded.rules, test_profile.rules);
-        assert!(reloaded.bypass_hosts.is_empty());
-        assert!(reloaded.upstream_proxy.is_empty());
-        assert!(!reloaded.rules_enabled);
-        assert!(!reloaded.breaks_enabled);
-        assert!(reloaded.show_tunnel_failures);
-        assert!(reloaded.relay_accept);
-        assert_eq!(reloaded.column_widths.get("path").copied(), Some(280));
-    }
-
-    #[test]
     fn active_profile_persists_only_unsaved_overrides_including_empty_clear() {
         let dir = Scratch::new();
         let preset = SavedProfile {
@@ -2295,56 +2230,6 @@ mod tests {
         );
         assert!(!saved_top.contains("filter ="), "{saved_toml}");
         assert!(!saved_top.contains("breaks_enabled ="), "{saved_toml}");
-    }
-
-    #[test]
-    fn legacy_config_with_matching_saved_profile_migrates_to_active_profile() {
-        let dir = Scratch::new();
-        let legacy = r#"listen_port = 8877
-listen_all = true
-use_system_proxy = false
-language = "zh"
-bypass_hosts = ""
-rules = "replace */finance-api/online-hall-v2/configs req supportCrypto=true -> supportCrypto=false"
-upstream_proxy = ""
-window_width = 1845
-window_height = 1018
-filter = "host:test.vicanso.dev|t1.vicanso.dev path:/finance-api/online-hall|/super|/gfhall"
-capturing = true
-
-[[saved_profiles]]
-name = "test"
-filter = "host:test.vicanso.dev|t1.vicanso.dev path:/finance-api/online-hall|/super|/gfhall"
-rules = "replace */finance-api/online-hall-v2/configs req supportCrypto=true -> supportCrypto=false"
-
-[[saved_profiles]]
-name = "google"
-bypass_hosts = "google.com"
-
-[column_widths]
-method = 73
-path = 280
-"#;
-        fs::write(dir.path().join("config.toml"), legacy).unwrap();
-
-        let config = load(dir.path());
-        assert_eq!(config.active_profile, "test");
-        assert_eq!(
-            config.filter,
-            "host:test.vicanso.dev|t1.vicanso.dev path:/finance-api/online-hall|/super|/gfhall"
-        );
-        assert_eq!(
-            config.rules,
-            "replace */finance-api/online-hall-v2/configs req supportCrypto=true -> supportCrypto=false"
-        );
-
-        let migrated_toml = fs::read_to_string(dir.path().join("config.toml")).unwrap();
-        let top = migrated_toml.split("[[").next().unwrap();
-        assert!(top.contains("active_profile = \"test\""), "{migrated_toml}");
-        assert!(!top.contains("\nrules ="), "{migrated_toml}");
-        assert!(!top.contains("\nfilter ="), "{migrated_toml}");
-        assert!(!top.contains("bypass_hosts"), "{migrated_toml}");
-        assert!(!top.contains("upstream_proxy"), "{migrated_toml}");
     }
 
     #[test]

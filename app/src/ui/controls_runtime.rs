@@ -179,31 +179,34 @@ pub(crate) fn check_update_manual(controls: Arc<Controls>) {
             return;
         }
         st.phase = UpdatePhase::Checking;
+        st.last_check = None;
     }
     set_status(&controls, StatusMsg::UpdateChecking);
     std::thread::spawn(move || {
         let outcome = updater::check_with_skipped();
         updater::record_outcome(clock::now(), &outcome);
-        match &outcome {
+        let check_notice = match &outcome {
             updater::UpdateCheck::UpToDate => {
-                set_status(
-                    &controls,
-                    StatusMsg::UpdateUpToDate(updater::version().to_string()),
-                );
+                let ver = updater::version().to_string();
+                set_status(&controls, StatusMsg::UpdateUpToDate(ver.clone()));
+                UpdateCheckNotice::UpToDate(ver)
             }
             updater::UpdateCheck::Newer { version, .. } => {
                 updater::unignore();
                 set_status(&controls, StatusMsg::UpdateAvailable(version.clone()));
+                UpdateCheckNotice::Available(version.clone())
             }
             updater::UpdateCheck::Failed(err) => {
                 set_status(&controls, StatusMsg::UpdateCheckFailed(err.clone()));
+                UpdateCheckNotice::Failed(err.clone())
             }
-        }
+        };
         with_update_state(&controls, |st| {
             st.phase = UpdatePhase::Idle;
             st.nudge = updater::nudge();
             st.ignored = updater::ignored();
             st.notes = updater::nudge_notes();
+            st.last_check = Some(check_notice);
         });
     });
 }

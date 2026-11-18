@@ -86,6 +86,7 @@ pub fn App() -> impl IntoElement {
         diff: signal(String::new()),
         diff_old: signal(String::new()),
         diff_new: signal(String::new()),
+        diff_scope: signal(0_u8),
         pinned: signal(false),
         comment: signal(String::new()),
         editing_comment: signal(false),
@@ -124,7 +125,19 @@ pub fn App() -> impl IntoElement {
         headers: signal(String::new()),
         body: signal(String::new()),
         status: signal(String::new()),
+        draft_saved: signal((String::new(), String::new(), String::new(), String::new())),
+        recent: signal(Vec::new()),
     };
+    effect(move || {
+        if compose.composing.get() && !compose.response.get() && selected.get().is_none() {
+            compose.draft_saved.set((
+                compose.method.get(),
+                compose.url.get(),
+                compose.headers.get(),
+                compose.body.get(),
+            ));
+        }
+    });
     let seq_diagram = signal(present::SequenceDiagramData::default());
     let seq_viewport_w = signal(0.0_f32);
     let seq_builder = SeqBuilder {
@@ -192,6 +205,8 @@ pub fn App() -> impl IntoElement {
         relay_accept: relay_accept_sig,
         list_width,
         list_height: signal(saved.list_height as f32),
+        sidebar_width: signal(SIDEBAR_WIDTH_DEFAULT),
+        sidebar_collapsed: signal(saved.sidebar_collapsed),
         layout_mode: signal(saved.layout_mode),
         panel_open: signal(false),
         machine_settings_open: signal(false),
@@ -312,6 +327,7 @@ pub fn App() -> impl IntoElement {
         ui_lang(langs),
         (false, false),
         (false, false),
+        0_u8,
     ));
     let seen_listen = stored(String::new());
     let seen_lang = stored(ui_lang(langs));
@@ -374,10 +390,16 @@ pub fn App() -> impl IntoElement {
             let now = nsh_core::time::now();
             let next_toasts = toast_manager_tick.with(|m| {
                 for (tid, msg) in pending_toasts {
+                    let timeout_ms = match &msg {
+                        StatusMsg::UpdateUpToDate(_)
+                        | StatusMsg::UpdateAvailable(_)
+                        | StatusMsg::UpdateCheckFailed(_) => 4000,
+                        _ => 2800,
+                    };
                     m.push(
                         tid,
                         msg,
-                        ToastOptions::timeout(Some(Duration::from_millis(2800))),
+                        ToastOptions::timeout(Some(Duration::from_millis(timeout_ms))),
                         now,
                     );
                 }
@@ -627,7 +649,7 @@ pub fn App() -> impl IntoElement {
             seen_sort.replace(sort_now);
             seen_path_display.replace(path_display_now);
             let (matched, _) = controls_tick.hub.matching_ids(&effective_filter_now);
-            let facet_ids = if (facets_open_now || layout_mode_now == config::LayoutMode::WideThree)
+            let facet_ids = if (facets_open_now || layout_mode_now == config::LayoutMode::Split)
                 && filter_now != effective_filter_now
             {
                 Some(controls_tick.hub.matching_ids(&filter_now).0)
@@ -745,6 +767,7 @@ pub fn App() -> impl IntoElement {
             } else {
                 (None, true, (false, false), None, (false, false))
             };
+        let diff_scope_now = shown_tick.diff_scope.get();
         let detail_stamp = (
             false,
             selected_now,
@@ -755,6 +778,7 @@ pub fn App() -> impl IntoElement {
             lang_now,
             selected_flags,
             baseline_flags,
+            diff_scope_now,
         );
         if detail_stamp != seen_detail_stamp.get() || spill_expired {
             let prev = seen_detail_stamp.get();
@@ -986,10 +1010,15 @@ pub fn App() -> impl IntoElement {
                 };
                 container
                     .child(when(
+                        move || profile_signals.layout_mode.get() == config::LayoutMode::Split,
                         move || {
-                            profile_signals.layout_mode.get() == config::LayoutMode::WideThree
+                            facet_sidebar(
+                                facets,
+                                list_filter,
+                                profile_signals.sidebar_width,
+                                profile_signals.sidebar_collapsed,
+                            )
                         },
-                        move || facet_sidebar(facets, list_filter),
                     ))
                     .child(flow_list(
                         rows,
@@ -1005,6 +1034,8 @@ pub fn App() -> impl IntoElement {
                         list_width,
                         profile_signals.list_height,
                         profile_signals.layout_mode,
+                        profile_signals.sidebar_width,
+                        profile_signals.sidebar_collapsed,
                         columns,
                         sort,
                         controls_list,
@@ -1016,6 +1047,8 @@ pub fn App() -> impl IntoElement {
                         list_width,
                         profile_signals.list_height,
                         profile_signals.layout_mode,
+                        profile_signals.sidebar_width,
+                        profile_signals.sidebar_collapsed,
                         controls_split,
                     ))
                     .child(detail_pane(
@@ -1059,10 +1092,12 @@ pub fn App() -> impl IntoElement {
             profile_signals.proxy_auth,
             config_broken,
             config_broken_dismissed,
+            profile_signals.layout_mode,
+            profile_signals.sidebar_collapsed,
             controls.clone(),
         ))
         .child(machine_settings_modal(profile_signals, controls.clone()))
-        .child(about_modal(profile_signals, controls))
+        .child(about_modal(profile_signals, update_state, controls))
         .child(each(
             move || {
                 if toast_shown.with(Vec::is_empty) {

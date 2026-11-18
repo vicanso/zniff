@@ -132,9 +132,41 @@ pub(crate) fn toolbar(
                         .text_size(px(14.5))
                         .font_weight(FontWeight::BOLD)
                         .text_color(fg_primary()),
+                )
+                .child(
+                    view()
+                        .w(px(7.0))
+                        .h(px(7.0))
+                        .ml_0p5()
+                        .rounded_full()
+                        .flex_shrink_0()
+                        .bg(move || {
+                            let has_err = matches!(
+                                status.get(),
+                                StatusMsg::BindFailed { .. }
+                                    | StatusMsg::CaUnavailable(_)
+                                    | StatusMsg::StopRestoreFailed(_)
+                                    | StatusMsg::ProxyApplyFailed { .. }
+                                    | StatusMsg::ProxyRestoreFailed(_)
+                            );
+                            if has_err {
+                                status_warn_fg()
+                            } else if running.get() {
+                                status_ok_fg()
+                            } else {
+                                fg_muted()
+                            }
+                        }),
                 ),
         )
-        .child(view().w(px(1.0)).h(px(16.0)).bg(border_strong()))
+        .child(
+            view()
+                .w(px(1.5))
+                .h(px(18.0))
+                .rounded_full()
+                .flex_shrink_0()
+                .bg(border_divider()),
+        )
         .child({
             let langs = ui_langs();
             let startup_error = move || match status.get() {
@@ -156,8 +188,10 @@ pub(crate) fn toolbar(
                 )
             };
             let condition_info = move || {
-                toolbar_filter_conditions(
+                toolbar_status_summary(
+                    &profiles.filter.get(),
                     &filter.get(),
+                    profiles.filter_enabled.get(),
                     &profiles.bypass.get(),
                     &profiles.rules.get(),
                     &profiles.upstream.get(),
@@ -165,6 +199,7 @@ pub(crate) fn toolbar(
                     ui_lang(langs),
                 )
             };
+            let has_primary_filter = move || !profiles.filter.get().trim().is_empty();
             view()
                 .flex_1()
                 .flex_row()
@@ -172,180 +207,138 @@ pub(crate) fn toolbar(
                 .gap_2()
                 .px_1()
                 .min_w(px(0.0))
-                .child(
-                    view()
-                        .w(px(7.0))
-                        .h(px(7.0))
-                        .rounded_full()
-                        .flex_shrink_0()
-                        .bg(move || {
-                            if startup_error().is_some() {
-                                status_warn_fg()
-                            } else if running.get() {
-                                status_ok_fg()
-                            } else {
-                                fg_muted()
-                            }
-                        }),
-                )
                 .child(when(
                     move || {
                         startup_error().is_none()
-                            && (active_name().is_some() || !filter.get().trim().is_empty())
+                            && (active_name().is_some() || has_primary_filter())
                     },
                     move || {
-                        let enabled = move || profiles.filter_enabled.get();
+                        let toggle_mode = has_primary_filter;
+                        let is_active_pill =
+                            move || !toggle_mode() || profiles.filter_enabled.get();
                         view()
                             .window_drag(false)
                             .h(px(22.0))
                             .max_w(px(184.0))
                             .min_w(px(0.0))
+                            .px_2()
+                            .gap_1p5()
                             .rounded(px(5.0))
                             .overflow_hidden()
                             .flex_row()
                             .items_center()
+                            .cursor(Cursor::Pointer)
                             .border_1()
                             .border_color(move || {
-                                if enabled() {
+                                if is_active_pill() {
                                     accent_blue_border()
                                 } else {
                                     border_control()
                                 }
                             })
                             .bg(move || {
-                                if enabled() {
+                                if is_active_pill() {
                                     accent_blue_soft()
                                 } else {
                                     bg_control()
                                 }
                             })
-                            .child(
-                                view()
-                                    .h_full()
-                                    .max_w(px(162.0))
-                                    .min_w(px(0.0))
-                                    .pl_2()
-                                    .pr_1p5()
-                                    .flex_row()
-                                    .items_center()
-                                    .cursor(Cursor::Pointer)
-                                    .hover(|style| {
-                                        style.bg(move || {
-                                            if enabled() {
-                                                accent_blue_soft_hover()
-                                            } else {
-                                                bg_control_hover()
-                                            }
-                                        })
-                                    })
-                                    .active(|style| style.opacity(0.8))
-                                    .tooltip(label_tip(
-                                        "打开过滤与规则配置",
-                                        "Open filters & rules config",
-                                    ))
-                                    .on_press(move || {
-                                        profiles.panel_open.set(true);
-                                    })
-                                    .child(
-                                        text(move || {
-                                            active_name().unwrap_or_else(|| {
-                                                t(ui_lang(langs), "过滤", "Filter").to_string()
-                                            })
-                                        })
-                                        .max_w(px(148.0))
-                                        .min_w(px(0.0))
-                                        .number_of_lines(1)
-                                        .text_overflow(EllipsizeMode::Tail)
-                                        .text_size(px(11.5))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(move || {
-                                            if enabled() {
-                                                accent_blue_text()
-                                            } else {
-                                                fg_muted()
-                                            }
-                                        }),
-                                    ),
-                            )
-                            .child(
-                                view()
-                                    .w(px(1.0))
-                                    .h(px(12.0))
-                                    .flex_shrink_0()
-                                    .bg(move || {
-                                        if enabled() {
-                                            accent_blue_border()
-                                        } else {
-                                            border_control()
-                                        }
-                                    }),
-                            )
-                            .child(
-                                view()
-                                    .w(px(22.0))
-                                    .h(px(20.0))
-                                    .flex_shrink_0()
-                                    .flex_row()
-                                    .items_center()
-                                    .justify_center()
-                                    .cursor(Cursor::Pointer)
-                                    .hover(|style| {
-                                        style.bg(move || {
-                                            if enabled() {
-                                                accent_blue_soft_hover()
-                                            } else {
-                                                bg_control_hover()
-                                            }
-                                        })
-                                    })
-                                    .active(|style| style.opacity(0.75))
-                                    .label(tr("切换过滤生效状态", "Toggle filter active state"))
-                                    .tooltip(tooltip().child(
-                                        view()
-                                            .px_2()
-                                            .py_1()
-                                            .rounded(px(6.0))
-                                            .bg(bg_card())
-                                            .border_1()
-                                            .border_color(border_strong())
-                                            .child(
-                                                text(move || -> SharedString {
-                                                    if enabled() {
-                                                        t(
-                                                            ui_lang(langs),
-                                                            "过滤已生效，点击暂停",
-                                                            "Filter enabled — click to pause",
-                                                        )
-                                                        .into()
-                                                    } else {
-                                                        t(
-                                                            ui_lang(langs),
-                                                            "过滤已暂停，点击启用",
-                                                            "Filter paused — click to enable",
-                                                        )
-                                                        .into()
-                                                    }
-                                                })
-                                                .text_size(px(11.5))
-                                                .text_color(fg_primary()),
-                                            ),
-                                    ))
-                                    .on_press(move || {
-                                        profiles.filter_enabled.update(|on| *on = !*on);
-                                    })
-                                    .child(
-                                        view()
-                                            .w(px(6.0))
-                                            .h(px(6.0))
-                                            .rounded_full()
-                                            .bg(move || {
-                                                if enabled() {
-                                                    status_ok_fg()
+                            .hover(|style| {
+                                style.bg(move || {
+                                    if is_active_pill() {
+                                        accent_blue_soft_hover()
+                                    } else {
+                                        bg_control_hover()
+                                    }
+                                })
+                            })
+                            .active(|style| style.opacity(0.8))
+                            .label(tr("切换过滤生效状态", "Toggle filter active state"))
+                            .tooltip(
+                                tooltip().child(
+                                    view()
+                                        .px_2()
+                                        .py_1()
+                                        .rounded(px(6.0))
+                                        .bg(bg_card())
+                                        .border_1()
+                                        .border_color(border_strong())
+                                        .child(
+                                            text(move || -> SharedString {
+                                                let lang = ui_lang(langs);
+                                                if !toggle_mode() {
+                                                    t(
+                                                        lang,
+                                                        "当前激活规则配置 · 点击编辑",
+                                                        "Active setup · Click to edit",
+                                                    )
+                                                    .into()
+                                                } else if profiles.filter_enabled.get() {
+                                                    t(
+                                                        lang,
+                                                        "过滤已生效，点击暂停",
+                                                        "Filter enabled — click to pause",
+                                                    )
+                                                    .into()
                                                 } else {
-                                                    fg_muted()
+                                                    t(
+                                                        lang,
+                                                        "过滤已暂停，点击启用",
+                                                        "Filter paused — click to enable",
+                                                    )
+                                                    .into()
                                                 }
-                                            }),
-                                    ),
+                                            })
+                                            .text_size(px(11.5))
+                                            .text_color(fg_primary()),
+                                        ),
+                                ),
+                            )
+                            .on_press(move || {
+                                if toggle_mode() {
+                                    profiles.filter_enabled.update(|on| *on = !*on);
+                                } else {
+                                    profiles.panel_open.update(|open| *open = !*open);
+                                }
+                            })
+                            .child(glyph_px(
+                                10.5,
+                                move || {
+                                    if !toggle_mode() {
+                                        Glyph::Sliders
+                                    } else if profiles.filter_enabled.get() {
+                                        Glyph::Check
+                                    } else {
+                                        Glyph::History
+                                    }
+                                },
+                                move || {
+                                    if is_active_pill() {
+                                        color(accent_blue_text())
+                                    } else {
+                                        color(fg_muted())
+                                    }
+                                },
+                            ))
+                            .child(
+                                text(move || {
+                                    active_name().unwrap_or_else(|| {
+                                        t(ui_lang(langs), "过滤", "Filter").to_string()
+                                    })
+                                })
+                                .max_w(px(148.0))
+                                .min_w(px(0.0))
+                                .number_of_lines(1)
+                                .text_overflow(EllipsizeMode::Tail)
+                                .text_size(px(11.5))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(move || {
+                                    if is_active_pill() {
+                                        accent_blue_text()
+                                    } else {
+                                        fg_muted()
+                                    }
+                                }),
                             )
                     },
                 ))
@@ -353,30 +346,20 @@ pub(crate) fn toolbar(
                     when(
                         move || startup_error().is_none() && condition_info().1,
                         move || {
-                            mono(move || {
-                                let text = condition_info().0;
-                                if profiles.filter_enabled.get() {
-                                    text
-                                } else {
-                                    format!(
-                                        "({}) {text}",
-                                        t(ui_lang(langs), "已暂停", "Paused")
-                                    )
-                                }
-                            })
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .number_of_lines(1)
-                            .text_overflow(EllipsizeMode::Tail)
-                            .text_size(px(12.0))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(move || {
-                                if profiles.filter_enabled.get() {
-                                    fg_secondary()
-                                } else {
-                                    fg_muted()
-                                }
-                            })
+                            mono(move || condition_info().0)
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .number_of_lines(1)
+                                .text_overflow(EllipsizeMode::Tail)
+                                .text_size(px(12.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(move || {
+                                    if condition_info().2 {
+                                        fg_muted()
+                                    } else {
+                                        fg_secondary()
+                                    }
+                                })
                         },
                     )
                     .otherwise(move || {
@@ -404,8 +387,11 @@ pub(crate) fn toolbar(
         });
     #[cfg(not(target_arch = "wasm32"))]
     let bar = bar.child(toolbar_update_pill(update_state, update_controls));
-    bar.child(toolbar_layout_switcher(profiles.layout_mode, layout_controls))
-        .child(toolbar_summary_button(
+    bar.child(toolbar_layout_switcher(
+        profiles.layout_mode,
+        layout_controls,
+    ))
+    .child(toolbar_summary_button(
         rows,
         flow_total,
         filter,
@@ -585,17 +571,10 @@ pub(crate) fn toolbar_layout_switcher(
             "上下分栏",
             "Top / Bottom split",
         ),
-        (
-            config::LayoutMode::WideThree,
-            Glyph::LayoutThree,
-            "三栏分栏",
-            "Three-column",
-        ),
     ];
     let current_icon = move || match layout_mode.get() {
         config::LayoutMode::Split => Glyph::LayoutSplit,
         config::LayoutMode::TopBottom => Glyph::LayoutTopBottom,
-        config::LayoutMode::WideThree => Glyph::LayoutThree,
     };
     let mut menu = view()
         .w(px(164.0))
@@ -691,8 +670,9 @@ pub(crate) fn toolbar_layout_switcher(
         .trigger(
             view()
                 .window_drag(false)
-                .w(px(28.0))
                 .h(px(28.0))
+                .px_2()
+                .gap_1p5()
                 .flex_shrink_0()
                 .flex_row()
                 .items_center()
@@ -726,15 +706,23 @@ pub(crate) fn toolbar_layout_switcher(
                 .cursor(Cursor::Pointer)
                 .label(tr("分栏布局", "Split layout"))
                 .tooltip(label_tip("切换分栏布局", "Switch split layout"))
-                .child(glyph_px(
-                    14.0,
-                    current_icon,
+                .child(glyph_px(13.0, current_icon, move || {
+                    if open.get() {
+                        color(accent_blue_text())
+                    } else {
+                        color(fg_secondary())
+                    }
+                }))
+                .child(when(
+                    move || window().width.0 >= 860.0,
                     move || {
-                        if open.get() {
-                            color(accent_blue_text())
-                        } else {
-                            color(fg_secondary())
-                        }
+                        control_text(tr("分栏", "Layout")).text_color(move || {
+                            if open.get() {
+                                accent_blue_text()
+                            } else {
+                                fg_primary()
+                            }
+                        })
                     },
                 )),
         )

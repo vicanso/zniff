@@ -492,16 +492,14 @@ pub(crate) enum EffectivePathDisplay {
     FullUrl,
 }
 
-pub(crate) fn filter_has_single_host(filter: &str) -> bool {
-    filter.split_whitespace().any(|token| {
+pub(crate) fn filter_has_host(filter: &str) -> bool {
+    let normalized = crate::session::normalize_filter_pipes(filter);
+    normalized.split_whitespace().any(|token| {
         let lower = token.to_ascii_lowercase();
         let val = lower
             .strip_prefix("host:")
             .or_else(|| lower.strip_prefix("domain:"));
-        val.is_some_and(|v| {
-            let v = v.trim();
-            !v.is_empty() && !v.contains('|') && !v.contains(',') && !v.contains('*')
-        })
+        val.is_some_and(|v| v.split(['|', ',']).any(|part| !part.trim().is_empty()))
     })
 }
 
@@ -511,7 +509,7 @@ pub(crate) fn effective_path_display(
 ) -> EffectivePathDisplay {
     match columns.path_display {
         config::PathDisplay::Auto => {
-            if columns.host || filter_has_single_host(effective_filter) {
+            if columns.host || filter_has_host(effective_filter) {
                 EffectivePathDisplay::PathOnly
             } else {
                 EffectivePathDisplay::HostAndPath
@@ -520,6 +518,21 @@ pub(crate) fn effective_path_display(
         config::PathDisplay::PathOnly => EffectivePathDisplay::PathOnly,
         config::PathDisplay::HostAndPath => EffectivePathDisplay::HostAndPath,
         config::PathDisplay::FullUrl => EffectivePathDisplay::FullUrl,
+    }
+}
+
+pub(crate) fn effective_path_hover_display(
+    columns: ListColumns,
+    effective_filter: &str,
+) -> EffectivePathDisplay {
+    let display = effective_path_display(columns, effective_filter);
+    if columns.path_display == config::PathDisplay::Auto
+        && display == EffectivePathDisplay::PathOnly
+        && !columns.host
+    {
+        EffectivePathDisplay::FullUrl
+    } else {
+        display
     }
 }
 

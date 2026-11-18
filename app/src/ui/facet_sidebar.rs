@@ -5,6 +5,7 @@ use super::*;
 pub(crate) struct DomainGroup {
     pub(crate) root: String,
     pub(crate) total_count: usize,
+    pub(crate) total_errors: usize,
     pub(crate) entries: Vec<session::FacetEntry>,
 }
 
@@ -60,9 +61,11 @@ pub(crate) fn group_domains_by_root(
         .filter_map(|root| {
             let items = map.remove(&root)?;
             let total_count = items.iter().map(|e| e.count).sum();
+            let total_errors = items.iter().map(|e| e.error_count).sum();
             Some(DomainGroup {
                 root,
                 total_count,
+                total_errors,
                 entries: items,
             })
         })
@@ -79,11 +82,16 @@ pub(crate) fn group_domains_by_root(
 pub(crate) fn facet_sidebar(
     facets: Signal<session::SessionFacets>,
     filter: Signal<String>,
+    sidebar_width: Signal<f32>,
+    sidebar_collapsed: Signal<bool>,
 ) -> impl IntoElement {
     let side_query = signal(String::new());
     let apps_open = signal(true);
     let domains_open = signal(true);
     let collapsed_roots = signal(std::collections::HashSet::<String>::new());
+    let resize_origin = signal(SIDEBAR_WIDTH_DEFAULT);
+    let resize_hot = signal(false);
+    let resizing = signal(false);
 
     let filtered_apps = move || -> Vec<session::FacetEntry> {
         let q = side_query.get().trim().to_ascii_lowercase();
@@ -105,168 +113,229 @@ pub(crate) fn facet_sidebar(
         facets.with(|f| group_domains_by_root(&f.domains, &q))
     };
 
-    view()
-        .w(px(246.0))
-        .h_full()
-        .flex_shrink_0()
-        .bg(bg_chrome())
-        .border_r_1()
-        .border_r_color(border_strong())
-        .child(
+    when(
+        move || !sidebar_collapsed.get(),
+        move || {
             view()
-                .w_full()
-                .p_2()
-                .gap_1p5()
-                .border_b_1()
-                .border_b_color(border_subtle())
-                .child(
-                    view()
-                        .w_full()
-                        .relative()
-                        .child(
-                            input()
-                                .value(side_query)
-                                .placeholder(tr("过滤域名或应用…", "Filter domains / apps…"))
-                                .placeholder_color(move || color(fg_muted()))
-                                .w_full()
-                                .h(px(28.0))
-                                .pl_2()
-                                .pr(move || {
-                                    if side_query.get().is_empty() {
-                                        px(8.0)
-                                    } else {
-                                        px(24.0)
-                                    }
-                                })
-                                .rounded(px(6.0))
-                                .bg(bg_code())
-                                .border_1()
-                                .border_color(border_control())
-                                .focus(|style| style.border_color(accent_blue()))
-                                .text_size(px(11.5))
-                                .text_color(fg_primary())
-                                .on_change(move |text: &str| side_query.set(text.to_string())),
-                        )
-                        .child(when(
-                            move || !side_query.get().is_empty(),
-                            move || {
-                                view()
-                                    .absolute()
-                                    .right(px(3.0))
-                                    .top(px(3.0))
-                                    .w(px(22.0))
-                                    .h(px(22.0))
-                                    .rounded(px(4.0))
-                                    .flex_row()
-                                    .items_center()
-                                    .justify_center()
-                                    .cursor(Cursor::Pointer)
-                                    .hover(|s| s.bg(bg_control_hover()))
-                                    .on_press(move || side_query.set(String::new()))
-                                    .child(
-                                        text("×")
-                                            .text_size(px(13.0))
-                                            .text_color(fg_muted()),
-                                    )
-                            },
-                        )),
-                )
-                .child(
-                    view()
-                        .w_full()
-                        .flex_row()
-                        .flex_wrap()
-                        .gap_1()
-                        .child(drawer_quick_chip(
-                            filter,
-                            "慢请求",
-                            "Slow",
-                            "slow:",
-                            SLOW_ALIASES,
-                            "筛选耗时 ≥ 1s 或进行中的慢请求 (slow:)",
-                            "Filter slow requests >= 1s (slow:)",
-                        ))
-                        .child(drawer_quick_chip(
-                            filter,
-                            "出错",
-                            "Errors",
-                            "status:4xx|5xx|err",
-                            ERR_ALIASES,
-                            "筛选 4xx / 5xx / 连接失败请求 (status:4xx|5xx|err)",
-                            "Filter 4xx / 5xx / failed requests (status:4xx|5xx|err)",
-                        ))
-                        .child(drawer_quick_chip(
-                            filter,
-                            "JSON",
-                            "JSON",
-                            "type:json",
-                            JSON_ALIASES,
-                            "筛选 JSON 请求/响应 (type:json)",
-                            "Filter JSON traffic (type:json)",
-                        ))
-                        .child(drawer_quick_chip(
-                            filter,
-                            "星标",
-                            "Starred",
-                            "pin:",
-                            PIN_ALIASES,
-                            "只看已星标请求 (pin:)",
-                            "Show starred requests only (pin:)",
-                        )),
-                ),
-        )
-        .child(
-            scroll()
-                .flex_1()
-                .w_full()
-                .min_h(px(0.0))
-                .child(
-                    view()
-                        .w_full()
-                        .p_1p5()
-                        .gap_1()
-                        .child(sidebar_section_header(
-                            "应用 / 来源",
-                            "Apps",
-                            move || facets.with(|f| f.apps.len()),
-                            apps_open,
-                        ))
-                        .child(when(
-                            move || apps_open.get(),
-                            move || {
-                                view().w_full().gap_0p5().child(each(
-                                    filtered_apps,
-                                    |entry| entry.token.clone(),
-                                    move |entry, _| sidebar_app_row(entry, filter),
-                                ))
-                            },
-                        ))
-                        .child(view().h(px(4.0)))
-                        .child(sidebar_section_header(
-                            "域名",
-                            "Domains",
-                            move || facets.with(|f| f.domains.len()),
-                            domains_open,
-                        ))
-                        .child(when(
-                            move || domains_open.get(),
-                            move || {
-                                view().w_full().gap_0p5().child(each(
-                                    grouped_domains,
-                                    |group| group.root.clone(),
-                                    move |group, _| {
-                                        sidebar_domain_group_view(
-                                            group,
-                                            filter,
-                                            side_query,
-                                            collapsed_roots,
+            .w(move || px(clamp_sidebar_px(sidebar_width.get())))
+            .h_full()
+            .flex_shrink_0()
+            .flex_row()
+            .bg(bg_chrome())
+            .child(
+                view()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .h_full()
+                    .overflow_hidden()
+                    .child(
+                        view()
+                            .w_full()
+                            .p_2()
+                            .gap_1p5()
+                            .border_b_1()
+                            .border_b_color(border_subtle())
+                            .child(
+                                view().w_full().flex_row().items_center().gap_1().child(
+                                    view()
+                                        .flex_1()
+                                        .min_w(px(0.0))
+                                        .relative()
+                                        .child(
+                                            input()
+                                                .value(side_query)
+                                                .placeholder(tr(
+                                                    "过滤域名或应用…",
+                                                    "Filter domains / apps…",
+                                                ))
+                                                .placeholder_color(move || color(fg_muted()))
+                                                .w_full()
+                                                .h(px(28.0))
+                                                .pl_2()
+                                                .pr(move || {
+                                                    if side_query.get().is_empty() {
+                                                        px(8.0)
+                                                    } else {
+                                                        px(24.0)
+                                                    }
+                                                })
+                                                .rounded(px(6.0))
+                                                .bg(bg_code())
+                                                .border_1()
+                                                .border_color(border_control())
+                                                .focus(|style| style.border_color(accent_blue()))
+                                                .text_size(px(11.5))
+                                                .text_color(fg_primary())
+                                                .on_change(move |text: &str| {
+                                                    side_query.set(text.to_string())
+                                                }),
                                         )
+                                        .child(when(
+                                            move || !side_query.get().is_empty(),
+                                            move || {
+                                                view()
+                                                    .absolute()
+                                                    .right(px(3.0))
+                                                    .top(px(3.0))
+                                                    .w(px(22.0))
+                                                    .h(px(22.0))
+                                                    .rounded(px(4.0))
+                                                    .flex_row()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .cursor(Cursor::Pointer)
+                                                    .hover(|s| s.bg(bg_control_hover()))
+                                                    .on_press(move || side_query.set(String::new()))
+                                                    .child(
+                                                        text("×")
+                                                            .text_size(px(13.0))
+                                                            .text_color(fg_muted()),
+                                                    )
+                                            },
+                                        )),
+                                ),
+                            )
+                            .child(
+                                view()
+                                    .w_full()
+                                    .flex_row()
+                                    .flex_wrap()
+                                    .gap_1()
+                                    .child(drawer_quick_chip(
+                                        filter,
+                                        "慢请求",
+                                        "Slow",
+                                        "slow:",
+                                        SLOW_ALIASES,
+                                        "筛选耗时 ≥ 1s 或进行中的慢请求 (slow:)",
+                                        "Filter slow requests >= 1s (slow:)",
+                                    ))
+                                    .child(drawer_quick_chip(
+                                        filter,
+                                        "出错",
+                                        "Error",
+                                        "status:4xx|5xx|err",
+                                        ERR_ALIASES,
+                                        "筛选 4xx / 5xx / 连接失败请求 (status:4xx|5xx|err)",
+                                        "Filter 4xx / 5xx / failed requests (status:4xx|5xx|err)",
+                                    ))
+                                    .child(drawer_quick_chip(
+                                        filter,
+                                        "JSON",
+                                        "JSON",
+                                        "type:json",
+                                        JSON_ALIASES,
+                                        "筛选 JSON 请求/响应 (type:json)",
+                                        "Filter JSON traffic (type:json)",
+                                    ))
+                                    .child(drawer_quick_chip(
+                                        filter,
+                                        "星标",
+                                        "Star",
+                                        "pin:",
+                                        PIN_ALIASES,
+                                        "只看已星标请求 (pin:)",
+                                        "Show starred requests only (pin:)",
+                                    )),
+                            ),
+                    )
+                    .child(
+                        scroll().flex_1().w_full().min_h(px(0.0)).child(
+                            view()
+                                .w_full()
+                                .p_1p5()
+                                .gap_1()
+                                .child(sidebar_section_header(
+                                    "应用 / 来源",
+                                    "Apps",
+                                    move || facets.with(|f| f.apps.len()),
+                                    apps_open,
+                                ))
+                                .child(when(
+                                    move || apps_open.get(),
+                                    move || {
+                                        view().w_full().gap_0p5().child(each(
+                                            filtered_apps,
+                                            |entry| entry.token.clone(),
+                                            move |entry, _| sidebar_app_row(entry, filter),
+                                        ))
                                     },
                                 ))
-                            },
-                        )),
-                ),
-        )
+                                .child(view().h(px(4.0)))
+                                .child(sidebar_section_header(
+                                    "域名",
+                                    "Domains",
+                                    move || facets.with(|f| f.domains.len()),
+                                    domains_open,
+                                ))
+                                .child(when(
+                                    move || domains_open.get(),
+                                    move || {
+                                        view().w_full().gap_0p5().child(each(
+                                            grouped_domains,
+                                            |group| group.root.clone(),
+                                            move |group, _| {
+                                                sidebar_domain_group_view(
+                                                    group,
+                                                    filter,
+                                                    side_query,
+                                                    collapsed_roots,
+                                                )
+                                            },
+                                        ))
+                                    },
+                                )),
+                        ),
+                    ),
+            )
+            .child(
+                view()
+                    .w(px(5.0))
+                    .h_full()
+                    .flex_shrink_0()
+                    .flex_row()
+                    .justify_end()
+                    .cursor(Cursor::ColResize)
+                    .claim_touches(TouchClaim::on_start())
+                    .keep_touches(true)
+                    .on_mouse_enter(move |_: &MouseEvent| resize_hot.set(true))
+                    .on_mouse_leave(move |_: &MouseEvent| resize_hot.set(false))
+                    .on_responder_grant(move |_event: &ResponderEvent| {
+                        resizing.set(true);
+                        resize_origin.set(clamp_sidebar_px(sidebar_width.get()));
+                    })
+                    .on_responder_move(move |event: &ResponderEvent| {
+                        sidebar_width.set(clamp_sidebar_px(
+                            resize_origin.get() + event.gesture.delta.x.0,
+                        ));
+                    })
+                    .on_responder_release(move |_event: &ResponderEvent| {
+                        resizing.set(false);
+                    })
+                    .on_responder_terminate(move |_event: &ResponderEvent| {
+                        resizing.set(false);
+                    })
+                    .child(
+                        view()
+                            .w(move || {
+                                if resize_hot.get() || resizing.get() {
+                                    px(2.5)
+                                } else {
+                                    px(1.0)
+                                }
+                            })
+                            .h_full()
+                            .bg(move || {
+                                if resize_hot.get() || resizing.get() {
+                                    accent_blue()
+                                } else {
+                                    border_strong()
+                                }
+                            }),
+                    ),
+            )
+        },
+    )
 }
 
 fn sidebar_section_header(
@@ -318,14 +387,45 @@ fn sidebar_section_header(
         )
 }
 
+fn sidebar_error_pill(errors: impl Fn() -> usize + Copy + 'static) -> impl IntoElement {
+    when(
+        move || errors() > 0,
+        move || {
+            view()
+                .h(px(15.0))
+                .px_1()
+                .flex_shrink_0()
+                .rounded(px(3.5))
+                .bg(status_err_bg())
+                .flex_row()
+                .items_center()
+                .justify_center()
+                .child(
+                    mono(move || -> SharedString { errors().to_string().into() })
+                        .tabular_nums()
+                        .text_size(px(9.5))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(status_err_fg()),
+                )
+        },
+    )
+}
+
 pub(crate) fn sidebar_app_row(
     entry: ReadSignal<session::FacetEntry>,
     filter: Signal<String>,
 ) -> impl IntoElement {
+    let langs = ui_langs();
     let is_active = move || {
         let f = filter.get();
         let tok = entry.with(|e| e.token.clone());
         app_facet_active(&f, &tok)
+    };
+    let display_label = move || -> SharedString {
+        let lang = ui_lang(langs);
+        entry
+            .with(|e| session::format_client_label(&e.label, lang))
+            .into()
     };
     view()
         .w_full()
@@ -353,26 +453,30 @@ pub(crate) fn sidebar_app_row(
                 }
             })
         })
+        .tooltip(
+            tooltip().child(
+                view()
+                    .max_w(px(360.0))
+                    .px_2()
+                    .py_1()
+                    .rounded(px(6.0))
+                    .bg(bg_card())
+                    .border_1()
+                    .border_color(border_strong())
+                    .child(
+                        text(display_label)
+                            .text_size(px(11.5))
+                            .text_color(fg_primary()),
+                    ),
+            ),
+        )
         .on_press(move || {
             let tok = entry.with(|e| e.token.clone());
             filter.set(toggle_app_facet(&filter.get(), &tok));
         })
+        .child(facet_app_or_device_icon(entry, is_active))
         .child(
-            view()
-                .w(px(5.0))
-                .h(px(5.0))
-                .rounded_full()
-                .flex_shrink_0()
-                .bg(move || {
-                    if is_active() {
-                        accent_blue()
-                    } else {
-                        fg_muted()
-                    }
-                }),
-        )
-        .child(
-            text(move || -> SharedString { entry.with(|e| e.label.clone()).into() })
+            text(display_label)
                 .flex_1()
                 .min_w(px(0.0))
                 .number_of_lines(1)
@@ -386,6 +490,7 @@ pub(crate) fn sidebar_app_row(
                     }
                 }),
         )
+        .child(sidebar_error_pill(move || entry.with(|e| e.error_count)))
         .child(
             mono(move || -> SharedString { entry.with(|e| e.count.to_string()).into() })
                 .tabular_nums()
@@ -405,6 +510,16 @@ pub(crate) fn sidebar_domain_group_view(
         !side_query.get().trim().is_empty()
             || !collapsed_roots.with(|set| group.with(|g| set.contains(&g.root)))
     };
+    let root_active = move || {
+        let f = filter.get();
+        let root = group.with(|g| g.root.clone());
+        root_domain_facet_active(&f, &root)
+    };
+    let root_muted = move || {
+        let f = filter.get();
+        let root = group.with(|g| g.root.clone());
+        mute_facet_active(&f, &root)
+    };
     when(single, move || {
         let entry_opt = group.with(|g| g.entries.first().cloned());
         view()
@@ -419,50 +534,131 @@ pub(crate) fn sidebar_domain_group_view(
                 view()
                     .w_full()
                     .h(px(24.0))
-                    .pl_1p5()
-                    .pr_1p5()
+                    .pl_1()
+                    .pr_1()
                     .rounded(px(5.0))
                     .flex_row()
                     .items_center()
-                    .gap_1()
-                    .cursor(Cursor::Pointer)
-                    .hover(|s| s.bg(bg_control_hover()))
-                    .on_press(move || {
-                        let root = group.with(|g| g.root.clone());
-                        collapsed_roots.update(|set| {
-                            if !set.remove(&root) {
-                                set.insert(root);
-                            }
-                        });
+                    .gap_0p5()
+                    .bg(move || {
+                        if root_active() {
+                            accent_blue_soft()
+                        } else if root_muted() {
+                            status_err_bg()
+                        } else {
+                            AdaptiveColor::TRANSPARENT
+                        }
                     })
-                    .child(glyph_px(
-                        9.5,
-                        move || {
-                            if is_expanded() {
-                                Glyph::Chevron
+                    .hover(|s| {
+                        s.bg(move || {
+                            if root_active() {
+                                accent_blue_soft_hover()
                             } else {
-                                Glyph::ChevronRight
+                                bg_control_hover()
                             }
-                        },
-                        || color(fg_muted()),
-                    ))
+                        })
+                    })
                     .child(
-                        mono(move || -> SharedString { group.with(|g| g.root.clone()).into() })
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .number_of_lines(1)
-                            .text_overflow(EllipsizeMode::Middle)
-                            .text_size(px(11.5))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(fg_secondary()),
+                        view()
+                            .w(px(18.0))
+                            .h(px(22.0))
+                            .flex_shrink_0()
+                            .rounded(px(4.0))
+                            .flex_row()
+                            .items_center()
+                            .justify_center()
+                            .cursor(Cursor::Pointer)
+                            .hover(|s| s.bg(bg_control_hover()))
+                            .on_press(move || {
+                                let root = group.with(|g| g.root.clone());
+                                collapsed_roots.update(|set| {
+                                    if !set.remove(&root) {
+                                        set.insert(root);
+                                    }
+                                });
+                            })
+                            .child(glyph_px(
+                                9.5,
+                                move || {
+                                    if is_expanded() {
+                                        Glyph::Chevron
+                                    } else {
+                                        Glyph::ChevronRight
+                                    }
+                                },
+                                || color(fg_muted()),
+                            )),
                     )
                     .child(
-                        mono(move || -> SharedString {
-                            group.with(|g| g.total_count.to_string()).into()
-                        })
-                        .tabular_nums()
-                        .text_size(px(10.5))
-                        .text_color(fg_muted()),
+                        view()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .h_full()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .cursor(Cursor::Pointer)
+                            .tooltip(label_tip(
+                                "点击只看此根域及其子域",
+                                "Click to filter this root domain & subdomains",
+                            ))
+                            .on_press(move || {
+                                let root = group.with(|g| g.root.clone());
+                                filter.set(toggle_root_domain_facet(&filter.get(), &root));
+                            })
+                            .child(
+                                mono(move || -> SharedString {
+                                    group.with(|g| g.root.clone()).into()
+                                })
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .number_of_lines(1)
+                                .text_overflow(EllipsizeMode::Middle)
+                                .text_size(px(11.5))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(move || {
+                                    if root_active() {
+                                        accent_blue_text()
+                                    } else if root_muted() {
+                                        status_err_fg()
+                                    } else {
+                                        fg_secondary()
+                                    }
+                                }),
+                            )
+                            .child(sidebar_error_pill(move || group.with(|g| g.total_errors)))
+                            .child(
+                                mono(move || -> SharedString {
+                                    group.with(|g| g.total_count.to_string()).into()
+                                })
+                                .tabular_nums()
+                                .text_size(px(10.5))
+                                .text_color(fg_muted()),
+                            ),
+                    )
+                    .child(
+                        view()
+                            .w(px(16.0))
+                            .h(px(16.0))
+                            .flex_shrink_0()
+                            .rounded(px(3.0))
+                            .flex_row()
+                            .items_center()
+                            .justify_center()
+                            .cursor(Cursor::Pointer)
+                            .hover(|s| s.bg(bg_control_hover()))
+                            .tooltip(label_tip("屏蔽整组域名", "Mute root domain group"))
+                            .on_press(move || {
+                                let root = group.with(|g| g.root.clone());
+                                filter.set(toggle_mute_facet(&filter.get(), &root));
+                            })
+                            .child(text("×").text_size(px(11.5)).text_color(move || {
+                                if root_muted() {
+                                    status_err_fg()
+                                } else {
+                                    fg_muted()
+                                }
+                            })),
                     ),
             )
             .child(when(is_expanded, move || {
@@ -535,6 +731,25 @@ fn sidebar_domain_leaf_row_sig(
                 .items_center()
                 .gap_1p5()
                 .cursor(Cursor::Pointer)
+                .tooltip(
+                    tooltip().child(
+                        view()
+                            .max_w(px(360.0))
+                            .px_2()
+                            .py_1()
+                            .rounded(px(6.0))
+                            .bg(bg_card())
+                            .border_1()
+                            .border_color(border_strong())
+                            .child(
+                                mono(move || -> SharedString {
+                                    entry.with(|e| e.label.clone()).into()
+                                })
+                                .text_size(px(11.5))
+                                .text_color(fg_primary()),
+                            ),
+                    ),
+                )
                 .on_press(move || {
                     let tok = entry.with(|e| e.token.clone());
                     filter.set(toggle_host_facet(&filter.get(), &tok));
@@ -572,6 +787,7 @@ fn sidebar_domain_leaf_row_sig(
                             }
                         }),
                 )
+                .child(sidebar_error_pill(move || entry.with(|e| e.error_count)))
                 .child(
                     mono(move || -> SharedString { entry.with(|e| e.count.to_string()).into() })
                         .tabular_nums()
@@ -595,16 +811,12 @@ fn sidebar_domain_leaf_row_sig(
                     let tok = entry.with(|e| e.token.clone());
                     filter.set(toggle_mute_facet(&filter.get(), &tok));
                 })
-                .child(
-                    text("×")
-                        .text_size(px(11.5))
-                        .text_color(move || {
-                            if is_muted() {
-                                status_err_fg()
-                            } else {
-                                fg_muted()
-                            }
-                        }),
-                ),
+                .child(text("×").text_size(px(11.5)).text_color(move || {
+                    if is_muted() {
+                        status_err_fg()
+                    } else {
+                        fg_muted()
+                    }
+                })),
         )
 }

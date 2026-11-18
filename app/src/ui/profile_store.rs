@@ -714,6 +714,30 @@ pub(crate) fn push_saved_profile(
     next
 }
 
+pub(crate) const SIDEBAR_WIDTH_DEFAULT: f32 = 250.0;
+pub(crate) const SIDEBAR_WIDTH_MIN: f32 = 176.0;
+pub(crate) const SIDEBAR_WIDTH_MAX: f32 = 340.0;
+
+pub(crate) fn clamp_sidebar_px(width: f32) -> f32 {
+    if width.is_finite() && width > 0.0 {
+        width.round().clamp(SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX)
+    } else {
+        SIDEBAR_WIDTH_DEFAULT
+    }
+}
+
+pub(crate) fn effective_sidebar_px(
+    layout_mode: config::LayoutMode,
+    sidebar_w: f32,
+    collapsed: bool,
+) -> f32 {
+    if layout_mode == config::LayoutMode::TopBottom || collapsed {
+        0.0
+    } else {
+        clamp_sidebar_px(sidebar_w)
+    }
+}
+
 pub(crate) fn clamp_list_px(width: f32) -> f32 {
     let rounded = if width.is_finite() && width > 0.0 {
         width.round().min(u32::MAX as f32) as u32
@@ -723,16 +747,31 @@ pub(crate) fn clamp_list_px(width: f32) -> f32 {
     config::clamp_list_width(rounded) as f32
 }
 
-pub(crate) fn clamp_list_px_for_window(width: f32, window_w: f32) -> f32 {
+pub(crate) fn clamp_list_px_for_layout(
+    width: f32,
+    window_w: f32,
+    layout_mode: config::LayoutMode,
+    sidebar_px: f32,
+) -> f32 {
     let base = clamp_list_px(width);
     if window_w.is_finite() && window_w > 0.0 {
-        let max_for_win = (window_w - 340.0)
+        let reserve = if layout_mode == config::LayoutMode::Split && sidebar_px > 0.0 {
+            sidebar_px + 406.0
+        } else {
+            340.0
+        };
+        let max_for_win = (window_w - reserve)
             .round()
             .clamp(config::LIST_WIDTH_MIN as f32, config::LIST_WIDTH_MAX as f32);
         base.min(max_for_win)
     } else {
         base
     }
+}
+
+#[cfg(test)]
+pub(crate) fn clamp_list_px_for_window(width: f32, window_w: f32) -> f32 {
+    clamp_list_px_for_layout(width, window_w, config::LayoutMode::Split, 0.0)
 }
 
 pub(crate) fn clamp_list_height(height: f32) -> f32 {
@@ -747,23 +786,41 @@ pub(crate) fn clamp_list_height(height: f32) -> f32 {
 pub(crate) fn clamp_list_height_for_window(height: f32, window_h: f32) -> f32 {
     let base = clamp_list_height(height);
     if window_h.is_finite() && window_h > 0.0 {
-        let max_for_win = (window_h - 240.0)
-            .round()
-            .clamp(config::LIST_HEIGHT_MIN as f32, config::LIST_HEIGHT_MAX as f32);
+        let max_for_win = (window_h - 240.0).round().clamp(
+            config::LIST_HEIGHT_MIN as f32,
+            config::LIST_HEIGHT_MAX as f32,
+        );
         base.min(max_for_win)
     } else {
         base
     }
 }
 
+#[cfg(test)]
 pub(crate) fn adaptive_filter_panel_width(window_w: f32, list_w: f32) -> f32 {
+    adaptive_filter_panel_width_for_layout(window_w, list_w, config::LayoutMode::Split, 0.0)
+}
+
+pub(crate) fn adaptive_filter_panel_width_for_layout(
+    window_w: f32,
+    list_w: f32,
+    layout_mode: config::LayoutMode,
+    sidebar_px: f32,
+) -> f32 {
     if window_w.is_finite() && window_w > 0.0 {
-        let list_px = clamp_list_px_for_window(list_w, window_w);
         let max_w = (window_w - 20.0).max(280.0);
-        (window_w - list_px * 0.7 - 16.0)
-            .round()
-            .clamp(680.0, 1360.0)
-            .min(max_w)
+        let raw = match layout_mode {
+            config::LayoutMode::TopBottom => window_w * 0.78,
+            config::LayoutMode::Split if sidebar_px > 0.0 => {
+                let list_px = clamp_list_px_for_layout(list_w, window_w, layout_mode, sidebar_px);
+                (window_w - sidebar_px - list_px * 0.45 - 16.0).max(window_w * 0.72)
+            }
+            config::LayoutMode::Split => {
+                let list_px = clamp_list_px_for_layout(list_w, window_w, layout_mode, 0.0);
+                window_w - list_px * 0.7 - 16.0
+            }
+        };
+        raw.round().clamp(680.0, 1360.0).min(max_w)
     } else {
         760.0
     }

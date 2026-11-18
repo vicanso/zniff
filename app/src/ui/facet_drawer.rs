@@ -5,6 +5,8 @@ pub(crate) fn pane_splitter(
     width: Signal<f32>,
     height: Signal<f32>,
     layout_mode: Signal<config::LayoutMode>,
+    sidebar_width: Signal<f32>,
+    sidebar_collapsed: Signal<bool>,
     controls: Arc<Controls>,
 ) -> impl IntoElement {
     let row_controls = controls.clone();
@@ -13,7 +15,15 @@ pub(crate) fn pane_splitter(
         move || layout_mode.get() == config::LayoutMode::TopBottom,
         move || row_splitter(height, row_controls.clone()),
     )
-    .otherwise(move || column_splitter(width, col_controls.clone()))
+    .otherwise(move || {
+        column_splitter(
+            width,
+            layout_mode,
+            sidebar_width,
+            sidebar_collapsed,
+            col_controls.clone(),
+        )
+    })
 }
 
 pub(crate) fn row_splitter(height: Signal<f32>, controls: Arc<Controls>) -> impl IntoElement {
@@ -80,12 +90,23 @@ pub(crate) fn row_splitter(height: Signal<f32>, controls: Arc<Controls>) -> impl
         )
 }
 
-pub(crate) fn column_splitter(width: Signal<f32>, controls: Arc<Controls>) -> impl IntoElement {
+pub(crate) fn column_splitter(
+    width: Signal<f32>,
+    layout_mode: Signal<config::LayoutMode>,
+    sidebar_width: Signal<f32>,
+    sidebar_collapsed: Signal<bool>,
+    controls: Arc<Controls>,
+) -> impl IntoElement {
     let origin = signal(0.0_f32);
     let controls_release = controls.clone();
     let controls_cancel = controls;
     let hot = signal(false);
     let dragging = signal(false);
+    let clamped_width = move |target: f32| {
+        let mode = layout_mode.get();
+        let side = effective_sidebar_px(mode, sidebar_width.get(), sidebar_collapsed.get());
+        clamp_list_px_for_layout(target, window().width.0, mode, side)
+    };
     view()
         .w(px(6.0))
         .flex_shrink_0()
@@ -99,30 +120,18 @@ pub(crate) fn column_splitter(width: Signal<f32>, controls: Arc<Controls>) -> im
         .on_mouse_leave(move |_: &MouseEvent| hot.set(false))
         .on_responder_grant(move |_event: &ResponderEvent| {
             dragging.set(true);
-            origin.set(clamp_list_px_for_window(
-                width.get(),
-                window().width.0,
-            ));
+            origin.set(clamped_width(width.get()));
         })
         .on_responder_move(move |event: &ResponderEvent| {
-            width.set(clamp_list_px_for_window(
-                origin.get() + event.gesture.delta.x.0,
-                window().width.0,
-            ));
+            width.set(clamped_width(origin.get() + event.gesture.delta.x.0));
         })
         .on_responder_release(move |_event: &ResponderEvent| {
             dragging.set(false);
-            store_list_width(
-                clamp_list_px_for_window(width.get(), window().width.0),
-                &controls_release,
-            );
+            store_list_width(clamped_width(width.get()), &controls_release);
         })
         .on_responder_terminate(move |_event: &ResponderEvent| {
             dragging.set(false);
-            store_list_width(
-                clamp_list_px_for_window(width.get(), window().width.0),
-                &controls_cancel,
-            );
+            store_list_width(clamped_width(width.get()), &controls_cancel);
         })
         .child(
             view()
@@ -204,6 +213,8 @@ pub(crate) fn flow_list(
     width: Signal<f32>,
     height: Signal<f32>,
     layout_mode: Signal<config::LayoutMode>,
+    sidebar_width: Signal<f32>,
+    sidebar_collapsed: Signal<bool>,
     columns: Signal<ListColumns>,
     sort: Signal<Option<ListSort>>,
     controls: Arc<Controls>,
@@ -218,7 +229,11 @@ pub(crate) fn flow_list(
     let menu_open = signal(false);
     let menu_at = signal(Point::<Points>::default());
     let facet_tab = signal(0_u8);
-    let effective_width = move || clamp_list_px_for_window(width.get(), window().width.0);
+    let effective_width = move || {
+        let mode = layout_mode.get();
+        let side = effective_sidebar_px(mode, sidebar_width.get(), sidebar_collapsed.get());
+        clamp_list_px_for_layout(width.get(), window().width.0, mode, side)
+    };
     let effective_height = move || clamp_list_height_for_window(height.get(), window().height.0);
     let is_top_bottom = move || layout_mode.get() == config::LayoutMode::TopBottom;
     view()
@@ -356,13 +371,16 @@ pub(crate) fn flow_list(
                     },
                 ))
                 .child(when(
-                    move || layout_mode.get() != config::LayoutMode::WideThree,
+                    move || {
+                        layout_mode.get() == config::LayoutMode::TopBottom
+                            || sidebar_collapsed.get()
+                    },
                     move || facet_toggle_button(facets_open, list_filter),
                 ))
                 .child(column_menu(columns, column_controls)),
         )
         .child(when(
-            move || layout_mode.get() != config::LayoutMode::WideThree,
+            move || layout_mode.get() == config::LayoutMode::TopBottom || sidebar_collapsed.get(),
             move || facet_quick_bar(facets, facets_open, facet_tab, list_filter),
         ))
         .child(
@@ -390,7 +408,9 @@ pub(crate) fn flow_list(
                 ))
                 .child(when(
                     move || {
-                        layout_mode.get() != config::LayoutMode::WideThree && facets_open.get()
+                        (layout_mode.get() == config::LayoutMode::TopBottom
+                            || sidebar_collapsed.get())
+                            && facets_open.get()
                     },
                     move || {
                         view()
@@ -603,7 +623,7 @@ pub(crate) fn facet_quick_bar(
         .child(drawer_quick_chip(
             filter,
             "出错",
-            "Errors",
+            "Error",
             "status:4xx|5xx|err",
             ERR_ALIASES,
             "筛选 4xx / 5xx / 连接失败请求 (status:4xx|5xx|err)",
@@ -621,7 +641,7 @@ pub(crate) fn facet_quick_bar(
         .child(drawer_quick_chip(
             filter,
             "星标",
-            "Starred",
+            "Star",
             "pin:",
             PIN_ALIASES,
             "只看已星标请求 (pin:)",

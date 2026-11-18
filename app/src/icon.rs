@@ -10,6 +10,7 @@ pub enum Glyph {
     Stop,
     Chevron,
     ChevronUp,
+    ChevronLeft,
     ChevronRight,
     Sliders,
     Download,
@@ -24,7 +25,10 @@ pub enum Glyph {
     Alert,
     LayoutSplit,
     LayoutTopBottom,
-    LayoutThree,
+    DeviceMobile,
+    DeviceDesktop,
+    Globe,
+    AppWindow,
 }
 
 pub fn glyph(
@@ -66,6 +70,7 @@ fn draw(kind: Glyph, paint: Hsla, size: f32) -> Painter {
         Glyph::Stop => painter.fill_svg("M4.2 4.2 H11.8 V11.8 H4.2 Z"),
         Glyph::Chevron => painter.stroke_svg("M4 6.2 L8 10.2 L12 6.2"),
         Glyph::ChevronUp => painter.stroke_svg("M4 9.8 L8 5.8 L12 9.8"),
+        Glyph::ChevronLeft => painter.stroke_svg("M9.8 4 L5.8 8 L9.8 12"),
         Glyph::ChevronRight => painter.stroke_svg("M6.2 4 L10.2 8 L6.2 12"),
         Glyph::Sliders => painter
             .stroke_svg("M2.2 4.4 H3.4")
@@ -118,10 +123,21 @@ fn draw(kind: Glyph, paint: Hsla, size: f32) -> Painter {
             .stroke_svg("M2.4 3.2 H13.6 V12.8 H2.4 Z")
             .stroke_svg("M2.4 7.6 H13.6")
             .stroke_svg("M8 7.6 V12.8"),
-        Glyph::LayoutThree => painter
-            .stroke_svg("M2.4 3.2 H13.6 V12.8 H2.4 Z")
-            .stroke_svg("M6.0 3.2 V12.8")
-            .stroke_svg("M9.8 3.2 V12.8"),
+        Glyph::DeviceMobile => painter
+            .stroke_svg("M4.8 2.2 H11.2 V13.8 H4.8 Z")
+            .stroke_svg("M7.0 11.6 H9.0"),
+        Glyph::DeviceDesktop => painter
+            .stroke_svg("M2.4 3.0 H13.6 V10.6 H2.4 Z")
+            .stroke_svg("M6.0 13.2 H10.0")
+            .stroke_svg("M8.0 10.6 V13.2"),
+        Glyph::Globe => painter
+            .stroke_svg("M8 2.2 A5.8 5.8 0 1 0 8 13.8 A5.8 5.8 0 1 0 8 2.2 Z")
+            .stroke_svg("M2.4 8 H13.6")
+            .stroke_svg("M8 2.2 C10.2 4.6 10.2 11.4 8 13.8")
+            .stroke_svg("M8 2.2 C5.8 4.6 5.8 11.4 8 13.8"),
+        Glyph::AppWindow => painter
+            .stroke_svg("M2.6 3.2 H13.4 V12.8 H2.6 Z")
+            .stroke_svg("M2.6 6.2 H13.4"),
     };
     painter
 }

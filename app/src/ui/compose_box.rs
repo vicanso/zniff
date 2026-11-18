@@ -26,14 +26,43 @@ pub(crate) fn submit_compose(
         continue_break(controls, compose, selected, paused);
         return;
     }
+    let method_now = compose.method.get();
+    let url_now = compose.url.get();
+    let headers_now = compose.headers.get();
+    let body_now = compose.body.get();
+    if !url_now.trim().is_empty() {
+        let entry = (
+            if method_now.trim().is_empty() {
+                "GET".to_string()
+            } else {
+                method_now.clone()
+            },
+            url_now.clone(),
+            headers_now.clone(),
+            body_now.clone(),
+        );
+        compose.recent.update(|list| {
+            list.retain(|item| item != &entry);
+            list.insert(0, entry);
+            list.truncate(8);
+        });
+        if selected.get().is_none() {
+            compose.draft_saved.set((
+                "GET".to_string(),
+                String::new(),
+                String::new(),
+                String::new(),
+            ));
+        }
+    }
     replay_flow(
         controls,
         selected.get(),
         ReplayOverride {
-            method: Some(compose.method.get()),
-            url: Some(compose.url.get()),
-            headers: Some(parse_header_text(&compose.headers.get())),
-            body: Some(compose.body.get().into_bytes()),
+            method: Some(method_now),
+            url: Some(url_now),
+            headers: Some(parse_header_text(&headers_now)),
+            body: Some(body_now.into_bytes()),
         },
     );
 }
@@ -99,6 +128,24 @@ pub(crate) fn compose_box(
                         .flex_row()
                         .items_center()
                         .gap_1p5()
+                        .child(when(
+                            move || {
+                                !compose.response.get()
+                                    && !is_req_break()
+                                    && !compose.recent.with(Vec::is_empty)
+                            },
+                            move || compose_recent_menu(compose),
+                        ))
+                        .child(when(
+                            move || {
+                                !compose.response.get()
+                                    && !is_req_break()
+                                    && (!compose.url.get().is_empty()
+                                        || !compose.headers.get().is_empty()
+                                        || !compose.body.get().is_empty())
+                            },
+                            move || compose_clear_button(compose),
+                        ))
                         .child(
                             view()
                                 .h(px(26.0))
@@ -755,15 +802,173 @@ pub(crate) fn prompt_import_har(controls: Arc<Controls>) {
     });
 }
 
-pub(crate) fn begin_new_request(compose: Compose, selected: Signal<Option<u64>>) {
-    selected.set(None);
+fn compose_clear_button(compose: Compose) -> impl IntoElement {
+    view()
+        .h(px(26.0))
+        .px_2p5()
+        .rounded(px(6.0))
+        .border_1()
+        .border_color(border_control())
+        .bg(bg_control())
+        .hover(|style| style.bg(bg_control_hover()))
+        .active(|style| style.opacity(0.75))
+        .cursor(Cursor::Pointer)
+        .flex_row()
+        .items_center()
+        .on_press(move || {
+            compose.method.set("GET".to_string());
+            compose.url.set(String::new());
+            compose.headers.set(String::new());
+            compose.body.set(String::new());
+            compose.draft_saved.set((
+                "GET".to_string(),
+                String::new(),
+                String::new(),
+                String::new(),
+            ));
+        })
+        .child(
+            text(tr("清空", "Clear"))
+                .number_of_lines(1)
+                .text_size(px(12.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(fg_secondary()),
+        )
+}
+
+fn compose_recent_menu(compose: Compose) -> impl IntoElement {
+    let recent_open = signal(false);
+    popover()
+        .open(move || Some(recent_open.get()))
+        .on_open_change(move |event: &nsh_base::PopoverEvent| {
+            if let nsh_base::PopoverEvent::OpenChange(next, _) = event {
+                recent_open.set(*next);
+            }
+        })
+        .placement(Placement::Bottom)
+        .align(Align::End)
+        .offset(px(4.0))
+        .margin(px(8.0))
+        .trigger(
+            view()
+                .h(px(26.0))
+                .px_2()
+                .rounded(px(6.0))
+                .border_1()
+                .border_color(border_control())
+                .bg(bg_control())
+                .hover(|style| style.bg(bg_control_hover()))
+                .active(|style| style.opacity(0.75))
+                .cursor(Cursor::Pointer)
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .on_press(move || recent_open.set(!recent_open.get()))
+                .child(glyph_px(
+                    12.0,
+                    || Glyph::History,
+                    move || color(fg_secondary()),
+                ))
+                .child(
+                    text(tr("最近", "Recent"))
+                        .number_of_lines(1)
+                        .text_size(px(12.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(fg_secondary()),
+                ),
+        )
+        .child(
+            view()
+                .w(px(360.0))
+                .max_h(px(280.0))
+                .p_1()
+                .rounded(px(8.0))
+                .border_1()
+                .border_color(border_strong())
+                .bg(bg_card())
+                .shadow_md()
+                .child(
+                    scroll()
+                        .w_full()
+                        .max_h(px(268.0))
+                        .child(view().w_full().gap_0p5().child(each(
+                            compose.recent,
+                            |(m, u, h, b)| format!("{m}\t{u}\t{h}\t{b}"),
+                            move |item, _idx| {
+                                let pick = item;
+                                let read_m = item;
+                                let read_u = item;
+                                view()
+                                    .w_full()
+                                    .px_2()
+                                    .py_1p5()
+                                    .rounded(px(5.0))
+                                    .hover(|style| style.bg(bg_control_hover()))
+                                    .active(|style| style.opacity(0.75))
+                                    .cursor(Cursor::Pointer)
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .on_press(move || {
+                                        let (m, u, h, b) = pick.get();
+                                        compose.method.set(m);
+                                        compose.url.set(u);
+                                        compose.headers.set(h);
+                                        compose.body.set(b);
+                                        recent_open.set(false);
+                                    })
+                                    .child(
+                                        text(move || {
+                                            SharedString::from(read_m.with(|it| it.0.clone()))
+                                        })
+                                        .number_of_lines(1)
+                                        .flex_shrink_0()
+                                        .text_size(px(10.5))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(accent_blue()),
+                                    )
+                                    .child(
+                                        text(move || {
+                                            SharedString::from(read_u.with(|it| it.1.clone()))
+                                        })
+                                        .flex_1()
+                                        .min_w(px(0.0))
+                                        .number_of_lines(1)
+                                        .text_overflow(EllipsizeMode::Middle)
+                                        .text_size(px(11.5))
+                                        .text_color(fg_primary()),
+                                    )
+                            },
+                        ))),
+                ),
+        )
+}
+
+fn restore_or_reset_new_draft(compose: Compose) {
+    let (m, u, h, b) = compose.draft_saved.get();
+    if !(m.trim().is_empty() && u.trim().is_empty() && h.trim().is_empty() && b.trim().is_empty()) {
+        compose.method.set(if m.trim().is_empty() {
+            "GET".to_string()
+        } else {
+            m
+        });
+        compose.url.set(u);
+        compose.headers.set(h);
+        compose.body.set(b);
+    } else {
+        compose.method.set("GET".to_string());
+        compose.url.set(String::new());
+        compose.headers.set(String::new());
+        compose.body.set(String::new());
+    }
     compose.response.set(false);
-    compose.method.set("GET".to_string());
-    compose.url.set(String::new());
-    compose.headers.set(String::new());
-    compose.body.set(String::new());
     compose.status.set(String::new());
     compose.composing.set(true);
+}
+
+pub(crate) fn begin_new_request(compose: Compose, selected: Signal<Option<u64>>) {
+    selected.set(None);
+    restore_or_reset_new_draft(compose);
 }
 
 pub(crate) fn begin_compose(controls: &Controls, id: Option<u64>, compose: Compose) {
@@ -771,13 +976,7 @@ pub(crate) fn begin_compose(controls: &Controls, id: Option<u64>, compose: Compo
         return;
     }
     if id.is_none() {
-        compose.response.set(false);
-        compose.method.set("GET".to_string());
-        compose.url.set(String::new());
-        compose.headers.set(String::new());
-        compose.body.set(String::new());
-        compose.status.set(String::new());
-        compose.composing.set(true);
+        restore_or_reset_new_draft(compose);
         return;
     }
     let Some(flow) = selected_flow(controls, id) else {

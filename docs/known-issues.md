@@ -140,7 +140,7 @@ P0 到 P4 里点名的能力已经接上。下面是仍然接受的缺口，不�
    - **实现**：在请求/响应 Body 卡片标题栏右侧提供内联搜索框与命中计数角标（点击角标一键清空），实时按关键词（忽略大小写）筛选匹配行并标注 `[L0001]` 四位行号，对表单/Multipart 视图同步按字段名或值实时过滤。
 
 7. **本地客户端进程名识别（Process / App Attribution）** — ✅ 已完成
-   - **实现**：当客户端地址为本机回环（`127.0.0.1` / `::1`）时，在后台线程池（`spawn_blocking`）异步解析客户端源端口所属的本地进程名（Linux `/proc/net/tcp*` + `/proc/<pid>/fd`、macOS `lsof`、Windows `netstat`/`tasklist`）并带 15 秒端口缓存，在「来源 IP」列展示为 `127.0.0.1 (curl)` 等格式（绝不阻塞代理转发），同时过滤语法支持 `app:<进程名>` / `proc:<进程名>`。
+   - **实现**：当客户端地址为本机回环（`127.0.0.1` / `::1`）时，在后台线程池（`spawn_blocking`）异步解析客户端源端口所属的本地进程名（`local_proc.rs`：Linux `/proc/net/tcp*` + `/proc/<pid>/fd`、macOS `lsof +c 0` 完整命令名 + 按端口精准补采 + `\xHH` UTF-8 反转义、Windows `netstat`/`tasklist`），仅在持有短锁期间读取/更新 15 秒端口缓存（不跨外部命令持锁）；`Helper` 子进程自动归并到父应用分面（桌面端同步加载 `.app` 真实应用图标，Wasm 端回退单色图标），避免裸 `CFNetwork` 与孤立回环 `127.0.0.1` 误归类为移动设备；在「来源 IP」列展示为 `127.0.0.1 (curl)` 等格式并支持 `app:<进程名>` / `proc:<进程名>` 过滤。
 
 8. **断点并发队列（Breakpoint Queue）** — ✅ 已完成
    - **实现**：将断点槽位升级为最多 8 条的有界 FIFO 队列（`BREAK_QUEUE_CAP = 8`，超出时自动放行队首最旧断点以防死锁），队内等待的断点在轮到队首前自动保持 60 秒超时计时器新鲜；顶部断点栏在排队数 `> 1` 时显示 `(1 / N)` 进度并提供「全部放行」（`Continue all`）按钮，同时按队列顺序排出 `#id 请求/响应` 胶囊；点一条把它提到队首并选中，放行和编辑重发作用在队首，60 秒计时从新的队首重新计算。
@@ -184,7 +184,7 @@ P0 到 P4 里点名的能力已经接上。下面是仍然接受的缺口，不�
 16. **内置 MCP Server 与 Rust / Go 代码生成（AI 联调降维打击）** — ✅ 已完成
     - **实现**：
       - **Code Export 扩展（`present.rs`）**：在详情「更多」菜单中新增复制 **Rust (`reqwest`)** 请求代码（`present::rust_reqwest`）、**Go (`net/http`)** 请求代码（`present::go_http`），以及从响应 JSON 一键推导 **Rust `#[derive(Debug, Clone, Serialize, Deserialize)] struct`**（`present::rust_serde_struct`，自动将字段名转为 `snake_case`、处理 Rust 保留字 `r#` 与数字开头标识符并补充 `#[serde(rename = "...")]`）。
-      - **内置本地 MCP 接口（`mcp.rs` + `proxy.rs`）**：在代理监听端口新增仅限本机回环（`peer.ip().is_loopback()`）访问的 `POST /mcp` JSON-RPC 2.0 路由（不记入抓包会话列表），并支持命令行 `zniff --mcp [--port <port>]` stdio 桥接模式；暴露 `list_flows`（直接复用 `zniff` 过滤表达式）、`get_flow_detail`（含头、完整正文、连接耗时明细与 WebSocket 消息）、`replay_flow`（支持重放已有流量或构造新请求并返回新流量详情）、`get_rules` 与 `set_rules`（实时读取与校验/更新规则及直通名单）共 5 个 MCP Tool。顶栏「更多」菜单新增「复制 MCP 配置」（`Copy MCP config`）一键复制 Claude Code / Cursor / Antigravity 可直接粘贴的 `mcpServers.zniff` 配置 JSON。
+      - **内置本地 MCP 接口（`mcp.rs` + `proxy.rs`）**：在代理监听端口新增仅限本机回环（`peer.ip().is_loopback()`）访问的 `POST /mcp` JSON-RPC 2.0 路由（不记入抓包会话列表），并支持命令行 `zniff --mcp [--port <port>]` stdio 桥接模式；暴露 `list_flows`（直接复用 `zniff` 过滤表达式）、`get_flow_detail`（含头、完整正文、连接耗时明细与 WebSocket 消息）、`get_session_summary`、`annotate_flow`、`replay_flow`（支持重放已有流量或构造新请求并返回新流量详情）、`get_rules`、`set_rules`（实时读取与校验/更新规则及直通名单）、`clear_flows`（清空全部或仅清未星标）与 `manage_breaks`（查看/放行/全放行/丢弃断点队列）共 9 个 MCP Tool。顶栏「更多」菜单新增「复制 MCP 配置」（`Copy MCP config`）一键复制 Claude Code / Cursor / Antigravity 可直接粘贴的 `mcpServers.zniff` 配置 JSON。
 
 17. **快捷语义规则：`no-cache`（禁用缓存）与 `block`（阻断连接）** — ✅ 已完成
     - **实现**：
@@ -199,7 +199,7 @@ P0 到 P4 里点名的能力已经接上。下面是仍然接受的缺口，不�
 19. **可选折叠的 Domain / App 快速导航抽屉（Sidebar Tree / Filter Facets）** — ✅ 已完成
     - **实现**：
       - 在 `session::Session::facets` 中实时聚合当前会话中的「域名（`Domains`）」与「应用 / 来源（`Apps / Clients`）」（从 `127.0.0.1 (进程名)` 提取应用进程名或保留远端来源 IP，含空格进程名自动映射为下划线并在 `app:` 过滤中双向匹配），按流量条数降序排列并统计各分面的异常/报错条数。
-      - 在左栏搜索框右侧（列设置按钮旁）新增「域名与应用导航」折叠开关，展开后在列表上方显示双标签分面导航抽屉（`域名 (N)` / `应用 / 来源 (M)`）；点击分面胶囊即可一键切换/追加 `host:xxx` 或 `app:xxx` OR 过滤词，点击域名胶囊右侧 `×` 可一键切换 `mute:xxx` 屏蔽。
+      - 在左右分栏（`Split`）模式下左侧默认常驻可拖拽调宽（`176–340 px`）的持久分面侧栏（可通过底栏监听标签旁按钮一键收起/展开并写入 `sidebar_collapsed`）；当侧栏收起或处于上下分栏（`TopBottom`）模式时，自动切回列表顶部的快捷筛选条与可折叠「域名与应用导航」分面抽屉；点击分面胶囊或根域名组头即可一键切换/追加 `host:xxx`、`host:*.<root>|<root>` 或 `app:xxx` OR 过滤词，点击 `×` 可一键切换 `mute:` 屏蔽，存在失败流量时分面行同步展示红色异常数胶囊。
 
 ---
 

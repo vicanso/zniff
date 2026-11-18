@@ -665,6 +665,7 @@ pub(crate) fn messages_section(
 }
 
 pub(crate) fn diff_card(shown: Shown, folded: Signal<u8>) -> impl IntoElement {
+    let scope_sig = shown.diff_scope;
     view()
         .rounded(px(10.0))
         .border_1()
@@ -675,8 +676,10 @@ pub(crate) fn diff_card(shown: Shown, folded: Signal<u8>) -> impl IntoElement {
             view()
                 .flex_shrink_0()
                 .flex_row()
+                .flex_wrap()
                 .items_center()
-                .gap_1p5()
+                .justify_between()
+                .gap_2()
                 .px_3p5()
                 .py_2()
                 .border_b(move || {
@@ -687,12 +690,38 @@ pub(crate) fn diff_card(shown: Shown, folded: Signal<u8>) -> impl IntoElement {
                     }
                 })
                 .border_b_color(border_subtle())
-                .hover(|style| style.bg(bg_control_hover()))
-                .active(|style| style.opacity(0.85))
-                .cursor(Cursor::Pointer)
-                .on_press(move || toggle_card(folded, FOLD_DIFF))
-                .child(fold_mark(folded, FOLD_DIFF))
-                .child(section_title(tr("对比", "Diff"))),
+                .child(
+                    view()
+                        .flex_1()
+                        .min_w(px(96.0))
+                        .flex_row()
+                        .items_center()
+                        .gap_1p5()
+                        .px_1()
+                        .py_0p5()
+                        .rounded(px(5.0))
+                        .hover(|style| style.bg(bg_control_hover()))
+                        .active(|style| style.opacity(0.85))
+                        .cursor(Cursor::Pointer)
+                        .on_press(move || toggle_card(folded, FOLD_DIFF))
+                        .child(fold_mark(folded, FOLD_DIFF))
+                        .child(section_title(tr("对比", "Diff"))),
+                )
+                .child(when(
+                    move || !card_folded(folded, FOLD_DIFF),
+                    move || {
+                        view()
+                            .flex_row()
+                            .h(px(22.0))
+                            .rounded(px(6.0))
+                            .border_1()
+                            .border_color(border_control())
+                            .overflow_hidden()
+                            .child(msg_filter_chip(scope_sig, 0, "全部", "All"))
+                            .child(msg_filter_chip(scope_sig, 1, "仅正文", "Bodies"))
+                            .child(msg_filter_chip(scope_sig, 2, "仅头部", "Headers"))
+                    },
+                )),
         )
         .child(when(
             move || !card_folded(folded, FOLD_DIFF),

@@ -72,21 +72,13 @@ pub(crate) fn saved_filter_menu(
                 .cursor(Cursor::Pointer)
                 .tooltip(label_tip("过滤与规则配置", "Filters & Rules Config"))
                 .child(when(
+                    move || capture_muted(rules_on, breaks_on),
                     move || {
-                        !filter.get().trim().is_empty()
-                            || config_set(bypass_text, rules_text, upstream_text)
-                            || capture_muted(rules_on, breaks_on)
-                    },
-                    move || {
-                        view().w(px(6.0)).h(px(6.0)).rounded_full().bg(move || {
-                            if capture_muted(rules_on, breaks_on) {
-                                status_warn_fg()
-                            } else if !filter.get().trim().is_empty() {
-                                accent_blue()
-                            } else {
-                                status_ok_fg()
-                            }
-                        })
+                        view()
+                            .w(px(6.0))
+                            .h(px(6.0))
+                            .rounded_full()
+                            .bg(status_warn_fg())
                     },
                 ))
                 .child(glyph_px(
@@ -149,6 +141,9 @@ pub(crate) fn saved_filter_panel(
     let breaks_on = profiles.breaks_on;
     let show_tunnels = profiles.show_tunnels;
     let list_width = profiles.list_width;
+    let layout_mode = profiles.layout_mode;
+    let sidebar_width = profiles.sidebar_width;
+    let sidebar_collapsed = profiles.sidebar_collapsed;
     let parsed_rules_count = computed(move || crate::rules::parse_rules(&rules_text.get()).len());
     let invalid_lines = computed(move || crate::rules::invalid_rule_lines(&rules_text.get()));
     let field = filter;
@@ -177,6 +172,7 @@ pub(crate) fn saved_filter_panel(
 
     let bypass_controls = controls.clone();
     let rules_controls = controls.clone();
+    let rule_strip_controls = controls.clone();
     let rules_save_controls = controls.clone();
     let rules_clear_controls = controls.clone();
     let upstream_controls = controls.clone();
@@ -192,9 +188,13 @@ pub(crate) fn saved_filter_panel(
 
     view()
         .w(move || {
-            px(adaptive_filter_panel_width(
+            let mode = layout_mode.get();
+            let side = effective_sidebar_px(mode, sidebar_width.get(), sidebar_collapsed.get());
+            px(adaptive_filter_panel_width_for_layout(
                 window().width.0,
                 list_width.get(),
+                mode,
+                side,
             ))
         })
         .max_w(move || px((window().width.0 - 16.0).max(280.0)))
@@ -613,6 +613,17 @@ pub(crate) fn saved_filter_panel(
                                     rules_text,
                                     rules_controls.clone(),
                                     import_open,
+                                ))
+                                .child(rule_line_strip(
+                                    rules_text,
+                                    rule_strip_controls,
+                                    draft_host,
+                                    draft_path,
+                                    draft_op,
+                                    draft_from,
+                                    draft_to,
+                                    draft_modes,
+                                    draft_kind,
                                 )),
                         )
                         .child(replace_row(
@@ -738,6 +749,24 @@ pub(crate) fn redact_upstream_summary(upstream: &str) -> String {
     authority.to_string()
 }
 
+pub(crate) fn toolbar_rules_preview(rules: &str, lang: Lang) -> String {
+    let first = rules
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with('#'))
+        .unwrap_or("");
+    let count = crate::rules::parse_rules(rules).len();
+    if count > 1 {
+        let prefix = match lang {
+            Lang::Zh => "规则",
+            Lang::En => "Rules",
+        };
+        format!("{prefix}×{count}: {first}")
+    } else {
+        first.to_string()
+    }
+}
+
 pub(crate) fn toolbar_filter_conditions(
     filter: &str,
     bypass: &str,
@@ -752,7 +781,7 @@ pub(crate) fn toolbar_filter_conditions(
     }
     let mut parts = Vec::new();
     if rules_enabled {
-        let preview = rule_preset_preview(rules);
+        let preview = toolbar_rules_preview(rules, lang);
         if !preview.is_empty() {
             parts.push(preview);
         }
@@ -777,4 +806,62 @@ pub(crate) fn toolbar_filter_conditions(
         .to_string(),
         false,
     )
+}
+
+/// Computes toolbar status bar copy, distinguishing primary filter pause state from secondary list filter.
+/// Returns `(display_text, has_condition, dimmed)`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn toolbar_status_summary(
+    primary_filter: &str,
+    effective_filter: &str,
+    filter_enabled: bool,
+    bypass: &str,
+    rules: &str,
+    upstream: &str,
+    rules_enabled: bool,
+    lang: Lang,
+) -> (String, bool, bool) {
+    let primary = primary_filter.trim();
+    let effective = effective_filter.trim();
+    if !primary.is_empty() && !filter_enabled {
+        let paused_tag = match lang {
+            Lang::Zh => "已暂停",
+            Lang::En => "Paused",
+        };
+        let mut extras = Vec::new();
+        if !effective.is_empty() {
+            extras.push(effective.to_string());
+        } else {
+            if rules_enabled {
+                let preview = toolbar_rules_preview(rules, lang);
+                if !preview.is_empty() {
+                    extras.push(preview);
+                }
+            }
+            let bypass = bypass.trim();
+            if !bypass.is_empty() {
+                extras.push(format!("bypass:{bypass}"));
+            }
+            let upstream = redact_upstream_summary(upstream);
+            if !upstream.is_empty() {
+                extras.push(format!("upstream:{upstream}"));
+            }
+        }
+        return if extras.is_empty() {
+            (format!("({paused_tag}) {primary}"), true, true)
+        } else {
+            let prefix = match lang {
+                Lang::Zh => "主过滤已暂停",
+                Lang::En => "Filter paused",
+            };
+            (
+                format!("{} · ({prefix}: {primary})", extras.join(" · ")),
+                true,
+                false,
+            )
+        };
+    }
+    let (summary, has_cond) =
+        toolbar_filter_conditions(effective, bypass, rules, upstream, rules_enabled, lang);
+    (summary, has_cond, false)
 }

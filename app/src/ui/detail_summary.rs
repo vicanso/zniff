@@ -59,6 +59,7 @@ pub(crate) struct Shown {
     pub(crate) diff: Signal<String>,
     pub(crate) diff_old: Signal<String>,
     pub(crate) diff_new: Signal<String>,
+    pub(crate) diff_scope: Signal<u8>,
     pub(crate) pinned: Signal<bool>,
     pub(crate) comment: Signal<String>,
     pub(crate) editing_comment: Signal<bool>,
@@ -358,19 +359,24 @@ pub(crate) fn filtered_summary_card(
                 .child(summary_stat_tile(
                     tr("总请求", "Total requests"),
                     move || stats.with(|s| s.total_count.to_string()),
+                    || None,
+                    1.0,
+                    92.0,
                 ))
                 .child(summary_stat_tile(
                     tr("总流量", "Total transfer"),
+                    move || stats.with(|s| present::bytes(s.total_bytes)),
                     move || {
                         stats.with(|s| {
-                            format!(
-                                "{} (↑{} · ↓{})",
-                                present::bytes(s.total_bytes),
+                            Some(format!(
+                                "↑{} · ↓{}",
                                 present::bytes(s.total_req_bytes),
                                 present::bytes(s.total_res_bytes)
-                            )
+                            ))
                         })
                     },
+                    1.75,
+                    148.0,
                 ))
                 .child(summary_stat_tile(
                     tr("平均耗时", "Avg latency"),
@@ -380,6 +386,9 @@ pub(crate) fn filtered_summary_card(
                             None => "—".to_string(),
                         })
                     },
+                    || None,
+                    1.0,
+                    96.0,
                 )),
         )
         .child(
@@ -496,10 +505,18 @@ pub(crate) fn filtered_summary_card(
 pub(crate) fn summary_stat_tile(
     label: impl IntoReactive<SharedString>,
     value: impl Fn() -> String + 'static,
+    sub_value: impl Fn() -> Option<String> + 'static,
+    grow: f32,
+    min_w: f32,
 ) -> impl IntoElement {
+    let sub_read = Rc::new(sub_value);
+    let sub_show = Rc::clone(&sub_read);
+    let sub_text = Rc::clone(&sub_read);
     view()
-        .flex_1()
-        .min_w(px(128.0))
+        .flex_grow(grow)
+        .flex_shrink(1.0)
+        .basis(px(min_w))
+        .min_w(px(min_w))
         .px_3()
         .py_2()
         .gap_0p5()
@@ -514,13 +531,33 @@ pub(crate) fn summary_stat_tile(
                 .text_color(fg_muted()),
         )
         .child(
-            mono(value)
-                .tabular_nums()
-                .number_of_lines(1)
-                .text_overflow(EllipsizeMode::Tail)
-                .text_size(px(12.5))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(fg_primary()),
+            view()
+                .w_full()
+                .flex_row()
+                .flex_wrap()
+                .items_baseline()
+                .gap_x_2()
+                .gap_y_0p5()
+                .child(
+                    mono(value)
+                        .tabular_nums()
+                        .number_of_lines(1)
+                        .text_overflow(EllipsizeMode::Tail)
+                        .text_size(px(12.5))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(fg_primary()),
+                )
+                .child(when(
+                    move || sub_show().is_some(),
+                    move || {
+                        let sub = Rc::clone(&sub_text);
+                        mono(move || sub().unwrap_or_default())
+                            .tabular_nums()
+                            .number_of_lines(1)
+                            .text_size(px(11.0))
+                            .text_color(fg_muted())
+                    },
+                )),
         )
 }
 
@@ -580,6 +617,7 @@ pub(crate) fn ready_detail(
             filter,
             rules_text,
             baseline,
+            layout_mode,
         ))
         .child(when(move || compose.composing.get(), {
             let controls = controls.clone();
@@ -593,22 +631,30 @@ pub(crate) fn ready_detail(
                     .items_start()
                     .gap_3p5()
                     .child(
-                        view().flex_1().min_w(px(0.0)).gap_3p5().child(response_cards(
-                            shown,
-                            res_controls_split.clone(),
-                            selected,
-                            baseline,
-                            folded,
-                        )),
+                        view()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .gap_3p5()
+                            .child(response_cards(
+                                shown,
+                                res_controls_split.clone(),
+                                selected,
+                                baseline,
+                                folded,
+                            )),
                     )
                     .child(
-                        view().flex_1().min_w(px(0.0)).gap_3p5().child(request_cards(
-                            shown,
-                            req_controls_split.clone(),
-                            selected,
-                            baseline,
-                            folded,
-                        )),
+                        view()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .gap_3p5()
+                            .child(request_cards(
+                                shown,
+                                req_controls_split.clone(),
+                                selected,
+                                baseline,
+                                folded,
+                            )),
                     )
             })
             .otherwise(move || {
@@ -765,6 +811,7 @@ fn request_cards(
         ))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn summary(
     shown: Shown,
     controls: Arc<Controls>,
@@ -774,10 +821,13 @@ pub(crate) fn summary(
     filter: Signal<String>,
     rules_text: Signal<String>,
     baseline: Signal<Option<u64>>,
+    layout_mode: Signal<config::LayoutMode>,
 ) -> impl IntoElement {
+    let is_compact = move || layout_mode.get() == config::LayoutMode::TopBottom;
     view()
-        .p_3p5()
-        .gap_2p5()
+        .px_3p5()
+        .py(move || if is_compact() { px(9.0) } else { px(14.0) })
+        .gap(move || if is_compact() { px(7.0) } else { px(10.0) })
         .rounded(px(10.0))
         .border_1()
         .border_color(border_strong())
@@ -924,22 +974,28 @@ pub(crate) fn summary(
             },
         ))
         .child(
-            view()
-                .w_full()
-                .overflow_hidden()
-                .px_3()
-                .py_2()
-                .rounded(px(7.0))
-                .bg(bg_code())
-                .border_1()
-                .border_color(border_subtle())
-                .on_press_up(dismiss_keyboard)
-                .child(
-                    mono(move || shown.url.get())
-                        .selectable(true)
-                        .text_size(px(12.5))
-                        .text_color(fg_primary()),
-                ),
+            when(is_compact, move || {
+                view()
+                    .w_full()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2p5()
+                    .child(
+                        view()
+                            .flex_1()
+                            .min_w(px(220.0))
+                            .child(summary_url_box(shown, true)),
+                    )
+                    .child(summary_metrics_text(shown))
+            })
+            .otherwise(move || {
+                view()
+                    .w_full()
+                    .gap_2p5()
+                    .child(summary_url_box(shown, false))
+                    .child(summary_metrics_text(shown))
+            }),
         )
         .child(when(move || shown.repeating.get(), {
             let controls = controls.clone();
@@ -982,16 +1038,6 @@ pub(crate) fn summary(
                     }))
             }
         }))
-        .child(
-            mono(move || shown.metrics.get())
-                .tabular_nums()
-                .selectable(true)
-                .on_press_up(dismiss_keyboard)
-                .number_of_lines(1)
-                .text_overflow(EllipsizeMode::Tail)
-                .text_size(px(11.5))
-                .text_color(fg_muted()),
-        )
         .child(when(
             move || shown.timing_bar.with(present::TimingBreakdown::has_content),
             move || summary_timing_bar(shown.timing_bar),
@@ -1021,4 +1067,41 @@ pub(crate) fn summary(
                     )
             },
         ))
+}
+
+fn summary_url_box(shown: Shown, compact: bool) -> impl IntoElement {
+    view()
+        .w_full()
+        .overflow_hidden()
+        .px_2p5()
+        .py(if compact { px(5.0) } else { px(8.0) })
+        .rounded(px(7.0))
+        .bg(bg_code())
+        .border_1()
+        .border_color(border_subtle())
+        .on_press_up(dismiss_keyboard)
+        .child(
+            mono(move || shown.url.get())
+                .selectable(true)
+                .style_with(move |s| {
+                    if compact {
+                        s.number_of_lines(1).text_overflow(EllipsizeMode::Middle)
+                    } else {
+                        s
+                    }
+                })
+                .text_size(px(12.5))
+                .text_color(fg_primary()),
+        )
+}
+
+fn summary_metrics_text(shown: Shown) -> impl IntoElement {
+    mono(move || shown.metrics.get())
+        .tabular_nums()
+        .selectable(true)
+        .on_press_up(dismiss_keyboard)
+        .number_of_lines(1)
+        .text_overflow(EllipsizeMode::Tail)
+        .text_size(px(11.5))
+        .text_color(fg_muted())
 }

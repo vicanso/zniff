@@ -127,11 +127,7 @@ pub(crate) fn project_rows(
             elapsed_slow: flow.finished_at.is_some()
                 && present::is_slow(flow.started, flow.finished_at, clock::now()),
             host: flow.host.clone(),
-            client_ip: if flow.client_ip.is_empty() {
-                "—".to_string()
-            } else {
-                flow.client_ip.clone()
-            },
+            client_ip: session::format_client_label(&flow.client_ip, lang),
             path: list_path(&flow.path, flow.error.as_deref(), failed, lang),
             host_path: list_host_path(&flow.host, &flow.path, flow.error.as_deref(), failed, lang),
             url: list_url(&flow.url, &flow.path, flow.error.as_deref(), failed, lang),

@@ -50,6 +50,7 @@ pub(crate) fn body_section(
     };
     let pane_width = shown.pane_width;
     let nav_controls = controls.clone();
+    let search_controls = controls.clone();
     let switch_controls = controls.clone();
     let tree_controls = controls;
     view()
@@ -104,6 +105,7 @@ pub(crate) fn body_section(
                     )
                     .otherwise(move || {
                         let nav_controls = nav_controls.clone();
+                        let search_controls = search_controls.clone();
                         let switch_controls = switch_controls.clone();
                         view()
                             .flex_row()
@@ -151,7 +153,11 @@ pub(crate) fn body_section(
                                     form,
                                     json,
                                     tree_flag,
-                                    shown.pane_width,
+                                    shown,
+                                    embed_image,
+                                    search_controls.clone(),
+                                    selected,
+                                    baseline,
                                     is_paged,
                                 )
                             }))
@@ -559,6 +565,75 @@ pub(crate) fn body_search_hit_count(
     present::filter_body_lines(&source, q).0
 }
 
+pub(crate) fn next_paged_match_offset(
+    full_text: &str,
+    window: TextWindow,
+    query: &str,
+) -> Option<usize> {
+    let q = query.trim().to_ascii_lowercase();
+    if q.is_empty() || full_text.is_empty() {
+        return None;
+    }
+    let lower = full_text.to_ascii_lowercase();
+    let end = window.end.min(lower.len());
+    let start = window.offset.min(lower.len());
+    let hit = lower[end..]
+        .find(&q)
+        .map(|rel| end + rel)
+        .or_else(|| lower[..start].find(&q))?;
+    let mut page = (hit / BODY_DISPLAY_CAP) * BODY_DISPLAY_CAP;
+    if page != 0 && !full_text.is_char_boundary(page) {
+        page = full_text.floor_char_boundary(page);
+    }
+    Some(page)
+}
+
+fn jump_next_body_match(
+    shown: Shown,
+    controls: &Controls,
+    selected: Signal<Option<u64>>,
+    baseline: Signal<Option<u64>>,
+    lang: Lang,
+    response: bool,
+    query: &str,
+) {
+    let Some(id) = selected.get() else {
+        return;
+    };
+    let Some(flow) = controls.hub.with_session(|s| s.hydrated(id)) else {
+        return;
+    };
+    let (raw, headers, window) = if response {
+        (
+            &flow.response_body,
+            &flow.response_headers,
+            shown.response_window.get(),
+        )
+    } else {
+        (
+            &flow.request_body,
+            &flow.request_headers,
+            shown.request_window.get(),
+        )
+    };
+    let Ok(utf8) = std::str::from_utf8(raw) else {
+        return;
+    };
+    let full = if shown.pretty.get() {
+        present::pretty_body(present::content_type(headers), utf8)
+    } else {
+        utf8.to_string()
+    };
+    if let Some(next_offset) = next_paged_match_offset(&full, window, query) {
+        if response {
+            shown.response_offset.set(next_offset);
+        } else {
+            shown.request_offset.set(next_offset);
+        }
+        publish_detail(&shown, &controls.hub, Some(id), lang, baseline.get());
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn body_search_box(
     search: Signal<String>,
@@ -567,9 +642,15 @@ pub(crate) fn body_search_box(
     form: Signal<Vec<HeaderLine>>,
     json: Signal<Option<JsonBody>>,
     tree_flag: Signal<bool>,
-    pane_width: Signal<f32>,
+    shown: Shown,
+    response: bool,
+    controls: Arc<Controls>,
+    selected: Signal<Option<u64>>,
+    baseline: Signal<Option<u64>>,
     is_paged: impl Fn() -> bool + Copy + 'static,
 ) -> impl IntoElement {
+    let langs = ui_langs();
+    let pane_width = shown.pane_width;
     view()
         .flex_row()
         .items_center()
@@ -579,7 +660,10 @@ pub(crate) fn body_search_box(
                 .value(search)
                 .placeholder(tr("搜索…", "Search…"))
                 .placeholder_color(move || color(fg_muted()))
-                .w(px(120.0))
+                .w(move || {
+                    let w = pane_width.get();
+                    px(if w > 0.0 && w < 430.0 { 82.0 } else { 120.0 })
+                })
                 .h(px(22.0))
                 .px_2()
                 .rounded(px(6.0))
@@ -600,26 +684,42 @@ pub(crate) fn body_search_box(
         .child(when(
             move || !search.get().trim().is_empty(),
             move || {
+                let jump_controls = controls.clone();
                 view()
                     .flex_row()
                     .items_center()
                     .gap_1()
-                    .child(when(is_paged, || {
+                    .child(when(is_paged, move || {
+                        let jump_controls = jump_controls.clone();
                         view()
                             .h(px(22.0))
                             .px_1p5()
                             .rounded(px(6.0))
                             .bg(status_warn_bg())
+                            .hover(|style| style.opacity(0.9))
+                            .active(|style| style.opacity(0.75))
                             .border_1()
                             .border_color(status_warn_fg())
                             .flex_row()
                             .items_center()
+                            .cursor(Cursor::Pointer)
                             .tooltip(label_tip(
-                                "仅在当前 256 KB 分页内匹配与过滤",
-                                "Matches within the current 256 KB page only",
+                                "仅在当前 256 KB 分页内匹配；点击跳转到其它分页中的命中",
+                                "Matches current 256 KB page; click to jump to match in other pages",
                             ))
+                            .on_press(move || {
+                                jump_next_body_match(
+                                    shown,
+                                    &jump_controls,
+                                    selected,
+                                    baseline,
+                                    ui_lang(langs),
+                                    response,
+                                    &search.get(),
+                                );
+                            })
                             .child(
-                                text(tr("当前页命中", "Page matches"))
+                                text(tr("当前页 · 下一处", "Page · Next"))
                                     .number_of_lines(1)
                                     .text_size(px(10.5))
                                     .font_weight(FontWeight::MEDIUM)

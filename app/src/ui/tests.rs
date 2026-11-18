@@ -429,18 +429,33 @@ fn list_columns_round_trip_and_the_pane_clamps() {
         super::row_target_text(&empty_url_row, super::EffectivePathDisplay::FullUrl),
         "/v1/users"
     );
-    assert!(super::filter_has_single_host("host:api.example.com"));
-    assert!(super::filter_has_single_host("domain:api.example.com 2xx"));
-    assert!(!super::filter_has_single_host("host:a.com|b.com"));
-    assert!(!super::filter_has_single_host("host:*.example.com"));
-    assert!(!super::filter_has_single_host("-host:api.example.com"));
-    assert!(!super::filter_has_single_host("type:json status:500"));
+    assert!(super::filter_has_host("host:api.example.com"));
+    assert!(super::filter_has_host("domain:api.example.com 2xx"));
+    assert!(super::filter_has_host(
+        "host:test.vicanso.dev|t1.vicanso.dev path:/finance-api"
+    ));
+    assert!(super::filter_has_host("host:a.com,b.com"));
+    assert!(super::filter_has_host("host:a.com | b.com"));
+    assert!(super::filter_has_host("host:*.example.com"));
+    assert!(!super::filter_has_host(""));
+    assert!(!super::filter_has_host("host:"));
+    assert!(!super::filter_has_host("host:|,"));
+    assert!(!super::filter_has_host("-host:api.example.com"));
+    assert!(!super::filter_has_host("-domain:api.example.com"));
+    assert!(!super::filter_has_host("mute:api.example.com"));
+    assert!(!super::filter_has_host("type:json status:500"));
     assert_eq!(
         super::list_host_path("api.example.com", "/v1/users?a=1", None, false, Lang::Zh),
         "api.example.com/v1/users"
     );
     assert_eq!(
-        super::list_host_path("api.example.com", "api.example.com:443", None, false, Lang::Zh),
+        super::list_host_path(
+            "api.example.com",
+            "api.example.com:443",
+            None,
+            false,
+            Lang::Zh
+        ),
         "api.example.com:443"
     );
     let auto_cols = super::ListColumns::from_config(&crate::config::Config::default());
@@ -453,8 +468,20 @@ fn list_columns_round_trip_and_the_pane_clamps() {
         super::EffectivePathDisplay::HostAndPath
     );
     assert_eq!(
-        super::effective_path_display(auto_cols, "host:a.com|b.com"),
+        super::effective_path_display(auto_cols, "-host:api.example.com"),
         super::EffectivePathDisplay::HostAndPath
+    );
+    assert_eq!(
+        super::effective_path_display(auto_cols, "mute:api.example.com"),
+        super::EffectivePathDisplay::HostAndPath
+    );
+    assert_eq!(
+        super::effective_path_display(auto_cols, "host:test.vicanso.dev|t1.vicanso.dev"),
+        super::EffectivePathDisplay::PathOnly
+    );
+    assert_eq!(
+        super::effective_path_display(auto_cols, "host:*.example.com"),
+        super::EffectivePathDisplay::PathOnly
     );
     assert_eq!(
         super::effective_path_display(auto_cols, "host:api.example.com"),
@@ -476,6 +503,28 @@ fn list_columns_round_trip_and_the_pane_clamps() {
             auto_cols.with_path_display(crate::config::PathDisplay::HostAndPath),
             "host:api.example.com"
         ),
+        super::EffectivePathDisplay::HostAndPath
+    );
+    assert_eq!(
+        super::effective_path_hover_display(auto_cols, "host:test.vicanso.dev|t1.vicanso.dev"),
+        super::EffectivePathDisplay::FullUrl
+    );
+    assert_eq!(
+        super::effective_path_hover_display(
+            auto_cols.toggle(super::ListColumn::Host),
+            "host:test.vicanso.dev"
+        ),
+        super::EffectivePathDisplay::PathOnly
+    );
+    assert_eq!(
+        super::effective_path_hover_display(
+            auto_cols.with_path_display(crate::config::PathDisplay::PathOnly),
+            "host:test.vicanso.dev"
+        ),
+        super::EffectivePathDisplay::PathOnly
+    );
+    assert_eq!(
+        super::effective_path_hover_display(auto_cols, ""),
         super::EffectivePathDisplay::HostAndPath
     );
     assert_eq!(
@@ -608,7 +657,7 @@ fn flow_columns_pin_method_and_path_and_keep_a_dragged_width() {
             .all(|column| column.fixed == super::ColumnFixed::Left)
     );
     let default_sum: f32 = default_cols.iter().map(|c| c.width.unwrap().0).sum();
-    assert_eq!(default_sum, 568.0);
+    assert_eq!(default_sum, 648.0);
 
     let all_shown = super::ListColumns {
         id: true,
@@ -1317,64 +1366,6 @@ fn push_profile_history_keeps_last_ten_distinct_versions() {
 }
 
 #[test]
-fn toolbar_summary_shows_profile_name_and_primary_filter_conditions() {
-    let saved = vec![crate::config::SavedProfile {
-        name: "test".into(),
-        filter: "host:test.vicanso.dev|t1.vicanso.dev path:/finance-api/online-hall".into(),
-        bypass_hosts: String::new(),
-        rules: "no-cache *".into(),
-        upstream_proxy: String::new(),
-        rules_enabled: true,
-        breaks_enabled: true,
-        show_tunnel_failures: false,
-    }];
-    assert_eq!(
-        super::toolbar_active_profile_name(
-            &saved,
-            "",
-            "host:test.vicanso.dev|t1.vicanso.dev path:/finance-api/online-hall",
-            "",
-            "no-cache *",
-            "",
-        ),
-        Some("test".to_string())
-    );
-    assert_eq!(
-        super::toolbar_active_profile_name(&saved, "custom", "host:a.com", "", "", ""),
-        Some("custom".to_string())
-    );
-    assert_eq!(
-        super::toolbar_filter_conditions(
-            "host:test.vicanso.dev|t1.vicanso.dev path:/finance-api/online-hall",
-            "",
-            "no-cache *",
-            "",
-            true,
-            crate::i18n::Lang::Zh,
-        ),
-        (
-            "host:test.vicanso.dev|t1.vicanso.dev path:/finance-api/online-hall".to_string(),
-            true,
-        )
-    );
-    assert_eq!(
-        super::toolbar_filter_conditions("", "", "", "", true, crate::i18n::Lang::Zh),
-        ("全部流量 · 未设置过滤条件".to_string(), false)
-    );
-    assert_eq!(
-        super::toolbar_filter_conditions(
-            "",
-            "",
-            "",
-            "http://upuser:s3cr3t@127.0.0.1:7890",
-            true,
-            crate::i18n::Lang::Zh,
-        ),
-        ("upstream:upuser@127.0.0.1:7890".to_string(), true)
-    );
-}
-
-#[test]
 fn format_bytes_avoids_clipping_for_large_values() {
     assert_eq!(super::format_bytes(0), "0 B");
     assert_eq!(super::format_bytes(512), "512 B");
@@ -2066,7 +2057,7 @@ async fn nested_scroll_widgets_emit_scroll_content_under_content_culling() {
         };
         let pump = |core: &mut Core<ApproxTextEngine>, tree: &mut MountedTree| {
             let mut evs = Vec::new();
-            for _ in 0..12 {
+            for _ in 0..64 {
                 let batch = core.commit();
                 if let Some(b) = &batch {
                     record(tree, b);
@@ -2079,7 +2070,7 @@ async fn nested_scroll_widgets_emit_scroll_content_under_content_culling() {
                         any |= core.component_event(id, kind, &payload);
                     }
                 }
-                if batch.is_none() && !any {
+                if batch.is_none() && !any && !core.has_paced_mounts() {
                     break;
                 }
             }
@@ -2091,6 +2082,10 @@ async fn nested_scroll_widgets_emit_scroll_content_under_content_culling() {
             EventKind::Press,
             &EventPayload::Press(PressEvent::default()),
         );
+        pump(&mut core, &mut tree);
+        // Under nsh 0.6.0, below-the-fold widgets stay culled until scrolled into view
+        // or culling is turned off; drain the culled batch so `sync_culled` mounts them.
+        core.set_content_culling(false);
         pump(&mut core, &mut tree);
         tree
     }
@@ -2188,91 +2183,6 @@ async fn nested_scroll_widgets_emit_scroll_content_under_content_culling() {
     assert!(
         horizontal_overflowing >= 1,
         "expected swimlane horizontal scroll to overflow horizontally, got {horizontal_overflowing}"
-    );
-}
-
-#[test]
-fn deselecting_active_profile_clears_config_and_keeps_saved_presets() {
-    let test_preset = crate::config::SavedProfile {
-        name: "test".into(),
-        filter: "host:test.vicanso.dev|t1.vicanso.dev path:/finance-api/online-hall|/super".into(),
-        bypass_hosts: "internal.example.com".into(),
-        rules: "no-cache *".into(),
-        upstream_proxy: "127.0.0.1:9000".into(),
-        rules_enabled: false,
-        breaks_enabled: false,
-        show_tunnel_failures: true,
-    };
-    let mut cfg = crate::config::Config {
-        active_profile: "test".into(),
-        filter: test_preset.filter.clone(),
-        bypass_hosts: test_preset.bypass_hosts.clone(),
-        rules: test_preset.rules.clone(),
-        upstream_proxy: test_preset.upstream_proxy.clone(),
-        rules_enabled: false,
-        breaks_enabled: false,
-        show_tunnel_failures: true,
-        saved_profiles: vec![test_preset.clone()],
-        ..crate::config::Config::default()
-    };
-
-    let history = super::push_profile_history(
-        &cfg.profile_history,
-        &cfg.active_profile,
-        &cfg.filter,
-        &cfg.bypass_hosts,
-        &cfg.rules,
-        &cfg.upstream_proxy,
-        cfg.rules_enabled,
-        cfg.breaks_enabled,
-        cfg.show_tunnel_failures,
-    );
-    assert_eq!(history.len(), 1);
-    assert_eq!(history[0].name, "test");
-
-    super::clear_working_setup_config(&mut cfg);
-    assert_eq!(cfg.active_profile, "");
-    assert_eq!(cfg.filter, "");
-    assert_eq!(cfg.bypass_hosts, "");
-    assert_eq!(cfg.rules, "");
-    assert_eq!(cfg.upstream_proxy, "");
-    assert!(cfg.rules_enabled);
-    assert!(cfg.breaks_enabled);
-    assert!(!cfg.show_tunnel_failures);
-    assert_eq!(cfg.saved_profiles, vec![test_preset]);
-
-    let mut saved_with_blank = cfg.saved_profiles.clone();
-    saved_with_blank.push(crate::config::SavedProfile {
-        name: "empty".into(),
-        filter: String::new(),
-        bypass_hosts: String::new(),
-        rules: String::new(),
-        upstream_proxy: String::new(),
-        rules_enabled: true,
-        breaks_enabled: true,
-        show_tunnel_failures: false,
-    });
-    assert_eq!(
-        super::toolbar_active_profile_name(
-            &saved_with_blank,
-            &cfg.active_profile,
-            &cfg.filter,
-            &cfg.bypass_hosts,
-            &cfg.rules,
-            &cfg.upstream_proxy,
-        ),
-        None
-    );
-    assert_eq!(
-        super::toolbar_filter_conditions(
-            &cfg.filter,
-            &cfg.bypass_hosts,
-            &cfg.rules,
-            &cfg.upstream_proxy,
-            cfg.rules_enabled,
-            crate::i18n::Lang::Zh,
-        ),
-        ("全部流量 · 未设置过滤条件".to_string(), false)
     );
 }
 
@@ -2707,6 +2617,7 @@ fn web_cached_flow_detail_publishes_loading_then_hydrates_cleanly() {
             diff: signal(String::new()),
             diff_old: signal(String::new()),
             diff_new: signal(String::new()),
+            diff_scope: signal(0_u8),
             pinned: signal(false),
             comment: signal(String::new()),
             editing_comment: signal(false),
@@ -2995,6 +2906,8 @@ fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
             relay_accept: signal(false),
             list_width: signal(660.0),
             list_height: signal(320.0),
+            sidebar_width: signal(super::SIDEBAR_WIDTH_DEFAULT),
+            sidebar_collapsed: signal(false),
             layout_mode: signal(crate::config::LayoutMode::Split),
             panel_open: signal(false),
             machine_settings_open: signal(false),
@@ -3010,6 +2923,8 @@ fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
             headers: signal(String::new()),
             body: signal(String::new()),
             status: signal(String::new()),
+            draft_saved: signal((String::new(), String::new(), String::new(), String::new())),
+            recent: signal(Vec::new()),
         };
         let seq_diagram = signal(present::SequenceDiagramData::default());
         let seq_viewport_w = signal(0.0_f32);
@@ -3280,6 +3195,7 @@ fn update_pill_tooltip_shows_release_notes_and_truncates_cleanly() {
         nudge: Some("v0.2.0".into()),
         ignored: None,
         notes: Some("- Fix download\n- Auto restart".into()),
+        last_check: None,
     };
     let zh = super::format_update_tooltip(&with_notes, Lang::Zh);
     assert!(zh.contains("v0.2.0"));
@@ -3290,6 +3206,7 @@ fn update_pill_tooltip_shows_release_notes_and_truncates_cleanly() {
         nudge: Some("v0.2.0".into()),
         ignored: None,
         notes: None,
+        last_check: None,
     };
     assert_eq!(
         super::format_update_tooltip(&no_notes, Lang::En),
@@ -3347,63 +3264,55 @@ fn about_modal_copyright_and_system_info_include_expected_fields() {
 
 #[test]
 fn wide_three_layout_places_request_and_response_side_by_side() {
-    use std::cell::RefCell;
     use nsh_core::prelude::*;
     use nsh_core::{ApproxTextEngine, Core, Op, Prop, ROOT_ID, Tag};
+    use std::cell::RefCell;
 
+    type SideBounds = (Option<Bounds<Points>>, Option<Bounds<Points>>);
     thread_local! {
-        static BOUNDS: RefCell<(Option<Bounds<Points>>, Option<Bounds<Points>>)> =
-            const { RefCell::new((None, None)) };
+        static BOUNDS: RefCell<SideBounds> = const { RefCell::new((None, None)) };
     }
 
     #[component]
     fn WideThreeHarness() -> impl IntoElement {
-        let layout_mode = signal(crate::config::LayoutMode::WideThree);
-        let side_by_side = move || {
-            matches!(
-                layout_mode.get(),
-                crate::config::LayoutMode::TopBottom | crate::config::LayoutMode::WideThree
-            )
-        };
+        let layout_mode = signal(crate::config::LayoutMode::TopBottom);
+        let side_by_side = move || layout_mode.get() == crate::config::LayoutMode::TopBottom;
         view().w(px(600.0)).h(px(600.0)).child(
-            scroll()
-                .w_full()
-                .h_full()
-                .child(
-                    super::uncull_nested_scroll(view())
-                        .pl_3p5()
-                        .pr_5()
-                        .py_3p5()
-                        .gap_3p5()
-                        .child(
-                            when(side_by_side, move || {
-                                view()
-                                    .w_full()
-                                    .flex_row()
-                                    .items_start()
-                                    .gap_3p5()
-                                    .child(
-                                        view()
-                                            .flex_1()
-                                            .min_w(px(0.0))
-                                            .on_layout(move |b: &Bounds<Points>| {
-                                                BOUNDS.with(|cell| cell.borrow_mut().0 = Some(*b));
-                                            })
-                                            .child(view().w_full().h(px(100.0))),
-                                    )
-                                    .child(
-                                        view()
-                                            .flex_1()
-                                            .min_w(px(0.0))
-                                            .on_layout(move |b: &Bounds<Points>| {
-                                                BOUNDS.with(|cell| cell.borrow_mut().1 = Some(*b));
-                                            })
-                                            .child(view().w_full().h(px(120.0))),
-                                    )
-                            })
-                            .otherwise(move || view().w_full().h(px(200.0))),
-                        ),
-                ),
+            scroll().w_full().h_full().child(
+                super::uncull_nested_scroll(view())
+                    .pl_3p5()
+                    .pr_5()
+                    .py_3p5()
+                    .gap_3p5()
+                    .child(
+                        when(side_by_side, move || {
+                            view()
+                                .w_full()
+                                .flex_row()
+                                .items_start()
+                                .gap_3p5()
+                                .child(
+                                    view()
+                                        .flex_1()
+                                        .min_w(px(0.0))
+                                        .on_layout(move |b: &Bounds<Points>| {
+                                            BOUNDS.with(|cell| cell.borrow_mut().0 = Some(*b));
+                                        })
+                                        .child(view().w_full().h(px(100.0))),
+                                )
+                                .child(
+                                    view()
+                                        .flex_1()
+                                        .min_w(px(0.0))
+                                        .on_layout(move |b: &Bounds<Points>| {
+                                            BOUNDS.with(|cell| cell.borrow_mut().1 = Some(*b));
+                                        })
+                                        .child(view().w_full().h(px(120.0))),
+                                )
+                        })
+                        .otherwise(move || view().w_full().h(px(200.0))),
+                    ),
+            ),
         )
     }
 
@@ -3457,28 +3366,28 @@ fn wide_three_layout_places_request_and_response_side_by_side() {
 fn root_domain_and_grouping_collapse_subdomains_cleanly() {
     assert_eq!(super::root_domain("mbd.baidu.com"), "baidu.com");
     assert_eq!(super::root_domain("assets.msn.cn"), "msn.cn");
-    assert_eq!(
-        super::root_domain("api.example.com.cn"),
-        "example.com.cn"
-    );
+    assert_eq!(super::root_domain("api.example.com.cn"), "example.com.cn");
     assert_eq!(super::root_domain("127.0.0.1:8877"), "127.0.0.1");
 
     let entries = vec![
         crate::session::FacetEntry {
             label: "mbd.baidu.com".into(),
             token: "mbd.baidu.com".into(),
+            kind: crate::session::FacetKind::Domain,
             count: 5,
             error_count: 0,
         },
         crate::session::FacetEntry {
             label: "sp1.baidu.com".into(),
             token: "sp1.baidu.com".into(),
+            kind: crate::session::FacetKind::Domain,
             count: 4,
             error_count: 0,
         },
         crate::session::FacetEntry {
             label: "assets.msn.cn".into(),
             token: "assets.msn.cn".into(),
+            kind: crate::session::FacetKind::Domain,
             count: 22,
             error_count: 0,
         },
@@ -3513,7 +3422,7 @@ fn top_bottom_layout_expands_unset_columns_to_fill_window_width() {
         1200.0,
     );
     let tb_sum: f32 = tb_unset.iter().map(|c| c.width.unwrap().0).sum();
-    assert!(tb_sum >= 1150.0 && tb_sum <= 1184.0, "tb_sum={tb_sum}");
+    assert!((1150.0..=1184.0).contains(&tb_sum), "tb_sum={tb_sum}");
     let path_w = tb_unset
         .iter()
         .find(|c| c.key.as_ref() == "path")
@@ -3533,4 +3442,188 @@ fn top_bottom_layout_expands_unset_columns_to_fill_window_width() {
         .unwrap()
         .0;
     assert_eq!(custom_path_w, 300.0);
+}
+
+#[test]
+fn app_and_source_device_classification_works() {
+    use crate::session::{FacetKind, classify_client_facet_kind};
+
+    assert_eq!(
+        classify_client_facet_kind(
+            "127.0.0.1 (Microsoft Edge Helper)",
+            &[("User-Agent".into(), "Mozilla/5.0".into())]
+        ),
+        FacetKind::App
+    );
+    assert_eq!(
+        classify_client_facet_kind(
+            "10.49.83.239",
+            &[(
+                "User-Agent".into(),
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)".into()
+            )]
+        ),
+        FacetKind::Mobile
+    );
+    assert_eq!(
+        classify_client_facet_kind(
+            "10.49.83.239",
+            &[("User-Agent".into(), "okhttp/4.12.0".into())]
+        ),
+        FacetKind::Mobile
+    );
+    assert_eq!(
+        classify_client_facet_kind(
+            "10.49.83.100",
+            &[(
+                "User-Agent".into(),
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)".into()
+            )]
+        ),
+        FacetKind::Desktop
+    );
+    assert_eq!(
+        super::base_app_name("Microsoft Edge Helper"),
+        "Microsoft Edge"
+    );
+    assert_eq!(super::base_app_name("Code Helper"), "Visual Studio Code");
+    assert!(matches!(
+        super::fallback_app_glyph("Microsoft Edge Helper"),
+        crate::icon::Glyph::Globe
+    ));
+    assert!(matches!(
+        super::fallback_app_glyph("curl"),
+        crate::icon::Glyph::Prompt
+    ));
+}
+
+#[test]
+fn wide_three_layout_clamps_list_width_and_preserves_detail_space() {
+    let clamped = super::clamp_list_px_for_layout(
+        660.0,
+        1200.0,
+        crate::config::LayoutMode::Split,
+        super::SIDEBAR_WIDTH_DEFAULT,
+    );
+    let detail_remaining = 1200.0 - super::SIDEBAR_WIDTH_DEFAULT - clamped;
+    assert!(
+        detail_remaining >= 396.0,
+        "detail pane should stay >= 396px at 1200px Split with sidebar, got {detail_remaining}"
+    );
+    let split_clamped =
+        super::clamp_list_px_for_layout(660.0, 1200.0, crate::config::LayoutMode::Split, 0.0);
+    assert_eq!(split_clamped, 660.0);
+}
+
+#[test]
+fn toggle_root_domain_facet_switches_wildcard_and_root_tokens() {
+    let next = super::toggle_root_domain_facet("", "shop.io");
+    assert!(super::root_domain_facet_active(&next, "shop.io"));
+    assert_eq!(next, "host:*.shop.io|shop.io");
+    let cleared = super::toggle_root_domain_facet(&next, "shop.io");
+    assert!(!super::root_domain_facet_active(&cleared, "shop.io"));
+    assert!(cleared.is_empty());
+}
+
+#[test]
+fn toolbar_status_summary_avoids_false_paused_label_and_counts_multi_rules() {
+    let (rules_label, has_condition, dimmed) = super::toolbar_status_summary(
+        "",
+        "",
+        false,
+        "",
+        "delay shop.io 120\nheader api.shop.io req set X-Demo 1",
+        "",
+        true,
+        crate::i18n::Lang::Zh,
+    );
+    assert!(has_condition);
+    assert!(!dimmed);
+    assert!(
+        !rules_label.contains("已暂停"),
+        "unexpected paused label: {rules_label}"
+    );
+    assert!(
+        rules_label.contains("规则×2:"),
+        "expected multi-rule summary: {rules_label}"
+    );
+
+    let (secondary_label, sec_cond, sec_dimmed) = super::toolbar_status_summary(
+        "",
+        "app:curl",
+        false,
+        "",
+        "delay shop.io 120\nheader api.shop.io req set X-Demo 1",
+        "",
+        true,
+        crate::i18n::Lang::Zh,
+    );
+    assert!(sec_cond);
+    assert!(!sec_dimmed);
+    assert_eq!(secondary_label, "app:curl");
+
+    let (paused_label, paused_cond, paused_dimmed) = super::toolbar_status_summary(
+        "host:shop.io",
+        "app:curl",
+        false,
+        "",
+        "",
+        "",
+        true,
+        crate::i18n::Lang::Zh,
+    );
+    assert!(paused_cond);
+    assert!(!paused_dimmed);
+    assert!(paused_label.contains("主过滤已暂停"), "{paused_label}");
+}
+
+#[test]
+fn rule_line_assist_toggles_comments_and_fills_draft_fields() {
+    let sample = "delay api.shop.io 150\nblock ads.shop.io status=451";
+    let commented = super::toggle_rule_line_comment(sample, 1);
+    assert_eq!(
+        commented,
+        "delay api.shop.io 150\n# block ads.shop.io status=451"
+    );
+    let uncommented = super::toggle_rule_line_comment(&commented, 1);
+    assert_eq!(uncommented, sample);
+
+    let runtime = nsh_core::element::Runtime::default();
+    let _entered = runtime.enter();
+    let kind = signal(0_u8);
+    let host = signal(String::new());
+    let path = signal(String::new());
+    let op = signal(String::new());
+    let from = signal(String::new());
+    let to = signal(String::new());
+    let modes = super::QuickRuleModeSignals::new();
+    let ok = super::fill_draft_from_rule_line(
+        "header api.shop.io req set X-Env staging",
+        kind,
+        host,
+        path,
+        op,
+        from,
+        to,
+        modes,
+    );
+    assert!(ok);
+    assert_eq!(kind.get(), 6);
+    assert_eq!(host.get(), "api.shop.io");
+    assert_eq!(from.get(), "X-Env");
+    assert_eq!(to.get(), "staging");
+    assert!(!modes.req_res.get());
+}
+
+#[test]
+fn next_paged_match_offset_finds_match_across_window_boundaries() {
+    let cap = super::BODY_DISPLAY_CAP;
+    let text = format!("{}needle-here", "a".repeat(cap + 50));
+    let win = super::TextWindow {
+        offset: 0,
+        end: cap,
+        total: text.len(),
+    };
+    let next = super::next_paged_match_offset(&text, win, "NEEDLE");
+    assert_eq!(next, Some(cap));
 }

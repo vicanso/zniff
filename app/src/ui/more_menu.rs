@@ -641,15 +641,31 @@ pub(crate) fn update_menu_section(
             {
                 let langs = ui_langs();
                 move || {
+                    let lang = ui_lang(langs);
                     let st = update_state.get();
                     if matches!(st.phase, UpdatePhase::Checking) {
-                        SharedString::from(t(ui_lang(langs), "检查中…", "Checking…"))
+                        SharedString::from(t(lang, "检查中…", "Checking…"))
                     } else {
-                        SharedString::default()
+                        match st.last_check {
+                            Some(UpdateCheckNotice::UpToDate(ref ver)) => SharedString::from(
+                                t(lang, "已是最新 ", "Up to date ").to_string()
+                                    + &format!("v{ver}"),
+                            ),
+                            Some(UpdateCheckNotice::Available(ref ver)) => {
+                                SharedString::from(ver.clone())
+                            }
+                            Some(UpdateCheckNotice::Failed(_)) => {
+                                SharedString::from(t(lang, "检查失败", "Failed"))
+                            }
+                            None => SharedString::default(),
+                        }
                     }
                 }
             },
             move || !update_state.get().is_busy(),
-            move || check_update_manual(controls_check.clone()),
+            move || {
+                open.set(false);
+                check_update_manual(controls_check.clone());
+            },
         ))
 }

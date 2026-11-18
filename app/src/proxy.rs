@@ -77,295 +77,8 @@ fn current_client_ctx() -> Option<Arc<ClientConnCtx>> {
     CLIENT_CTX.try_with(Arc::clone).ok()
 }
 
-fn local_app_cache() -> &'static Mutex<HashMap<u16, (String, Instant)>> {
-    use std::sync::OnceLock;
-    static CACHE: OnceLock<Mutex<HashMap<u16, (String, Instant)>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn cached_local_app(port: u16) -> Option<String> {
-    let mut guard = local_app_cache()
-        .lock()
-        .unwrap_or_else(|err| err.into_inner());
-    if let Some((app, at)) = guard.get(&port)
-        && at.elapsed() < Duration::from_secs(15)
-    {
-        return (!app.is_empty()).then(|| app.clone());
-    }
-    if guard.len() > 256 {
-        guard.retain(|_, (_, at)| at.elapsed() < Duration::from_secs(15));
-    }
-    None
-}
-
-fn store_cached_local_app(port: u16, app: String) {
-    if app.is_empty() {
-        return;
-    }
-    let mut guard = local_app_cache()
-        .lock()
-        .unwrap_or_else(|err| err.into_inner());
-    guard.insert(port, (app, Instant::now()));
-}
-
-struct LocalPorts {
-    at: Instant,
-    map: HashMap<u16, String>,
-    ok: bool,
-}
-
-/// One process-name snapshot for every local TCP port. Callers share a scan
-/// instead of spawning `lsof` once per loopback connection.
-fn port_snapshot() -> HashMap<u16, String> {
-    use std::sync::OnceLock;
-    static SNAP: OnceLock<Mutex<LocalPorts>> = OnceLock::new();
-    let snap = SNAP.get_or_init(|| {
-        Mutex::new(LocalPorts {
-            at: Instant::now() - Duration::from_secs(60),
-            map: HashMap::new(),
-            ok: false,
-        })
-    });
-    let mut guard = snap.lock().unwrap_or_else(|err| err.into_inner());
-    // A failed scan keeps the previous map and waits out the same TTL, so one
-    // outage does not spawn `lsof` again on every new connection.
-    let stale = guard.at.elapsed() >= Duration::from_millis(1500);
-    if stale {
-        match scan_local_ports() {
-            Some(map) => {
-                guard.map = map;
-                guard.ok = true;
-                guard.at = Instant::now();
-            }
-            None => {
-                // A failed scan is not "no process". Keep the previous map, but
-                // don't retry every connection for the next 1.5s.
-                guard.ok = false;
-                guard.at = Instant::now();
-            }
-        }
-    }
-    guard.map.clone()
-}
-
-#[cfg(any(test, target_os = "macos", target_os = "windows"))]
-fn local_endpoint_port(name: &str) -> Option<u16> {
-    let local = name.split("->").next()?.trim();
-    let port = local.rsplit(':').next()?.trim();
-    if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    port.parse().ok()
-}
-
-#[cfg(test)]
-fn scan_local_ports() -> Option<HashMap<u16, String>> {
-    Some(HashMap::new())
-}
-
-#[cfg(all(not(test), target_os = "macos"))]
-fn scan_local_ports() -> Option<HashMap<u16, String>> {
-    let out = std::process::Command::new("lsof")
-        .args(["-nP", "-iTCP", "-sTCP:ESTABLISHED", "-Fpcn"])
-        .output()
-        .ok()?;
-    if !out.status.success() && out.stdout.is_empty() {
-        return None;
-    }
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let mut map = HashMap::new();
-    let mut current = String::new();
-    for line in stdout.lines() {
-        if let Some(cmd) = line.strip_prefix('c') {
-            current = clean_process_name(cmd.trim());
-        } else if let Some(net) = line.strip_prefix('n')
-            && !current.is_empty()
-            && let Some(port) = local_endpoint_port(net)
-        {
-            map.entry(port).or_insert_with(|| current.clone());
-        }
-    }
-    Some(map)
-}
-
-#[cfg(all(not(test), target_os = "linux"))]
-fn scan_local_ports() -> Option<HashMap<u16, String>> {
-    let mut inode_port: HashMap<String, u16> = HashMap::new();
-    for path in ["/proc/net/tcp", "/proc/net/tcp6"] {
-        let Ok(content) = std::fs::read_to_string(path) else {
-            continue;
-        };
-        for line in content.lines().skip(1) {
-            let mut cols = line.split_whitespace();
-            let _sl = cols.next();
-            let Some(local_addr) = cols.next() else {
-                continue;
-            };
-            let Some((_, port_hex)) = local_addr.rsplit_once(':') else {
-                continue;
-            };
-            let Ok(port) = u16::from_str_radix(port_hex, 16) else {
-                continue;
-            };
-            let Some(inode) = cols.nth(7) else {
-                continue;
-            };
-            if inode != "0" {
-                inode_port.entry(inode.to_string()).or_insert(port);
-            }
-        }
-    }
-    if inode_port.is_empty() {
-        return Some(HashMap::new());
-    }
-    let mut map = HashMap::new();
-    let entries = std::fs::read_dir("/proc").ok()?;
-    for entry in entries.flatten() {
-        let fname = entry.file_name();
-        let Some(pid_str) = fname.to_str() else {
-            continue;
-        };
-        if !pid_str.bytes().all(|byte| byte.is_ascii_digit()) {
-            continue;
-        }
-        let fd_dir = entry.path().join("fd");
-        let Ok(fds) = std::fs::read_dir(fd_dir) else {
-            continue;
-        };
-        let mut name = None;
-        for fd in fds.flatten() {
-            let Ok(link) = std::fs::read_link(fd.path()) else {
-                continue;
-            };
-            let link = link.to_string_lossy();
-            let Some(inode) = link
-                .strip_prefix("socket:[")
-                .and_then(|rest| rest.strip_suffix(']'))
-            else {
-                continue;
-            };
-            let Some(port) = inode_port.get(inode).copied() else {
-                continue;
-            };
-            if name.is_none() {
-                let comm = std::fs::read_to_string(entry.path().join("comm")).unwrap_or_default();
-                name = Some(clean_process_name(comm.trim()));
-            }
-            let Some(name) = name.as_ref() else {
-                continue;
-            };
-            if !name.is_empty() {
-                map.entry(port).or_insert_with(|| name.clone());
-            }
-        }
-    }
-    Some(map)
-}
-
-#[cfg(all(not(test), target_os = "windows"))]
-fn scan_local_ports() -> Option<HashMap<u16, String>> {
-    let out = std::process::Command::new("netstat")
-        .args(["-ano", "-p", "TCP"])
-        .output()
-        .ok()?;
-    if !out.status.success() && out.stdout.is_empty() {
-        return None;
-    }
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let mut port_pid: HashMap<u16, u32> = HashMap::new();
-    for line in stdout.lines() {
-        let mut cols = line.split_whitespace();
-        let Some(proto) = cols.next() else {
-            continue;
-        };
-        if !proto.eq_ignore_ascii_case("TCP") {
-            continue;
-        }
-        let Some(local) = cols.next() else {
-            continue;
-        };
-        let Some(_remote) = cols.next() else {
-            continue;
-        };
-        let Some(state) = cols.next() else {
-            continue;
-        };
-        let Some(pid) = cols.next().and_then(|text| text.parse::<u32>().ok()) else {
-            continue;
-        };
-        if !state.eq_ignore_ascii_case("ESTABLISHED") || pid == 0 {
-            continue;
-        }
-        if let Some(port) = local_endpoint_port(local) {
-            port_pid.entry(port).or_insert(pid);
-        }
-    }
-    let tlist = std::process::Command::new("tasklist")
-        .args(["/FO", "CSV", "/NH"])
-        .output()
-        .ok()?;
-    let t_out = String::from_utf8_lossy(&tlist.stdout);
-    let mut pid_name: HashMap<u32, String> = HashMap::new();
-    for line in t_out.lines() {
-        let mut cols = line.split(',');
-        let Some(name) = cols.next() else {
-            continue;
-        };
-        let name = name.trim().trim_matches('"');
-        let Some(pid) = cols
-            .next()
-            .map(|text| text.trim().trim_matches('"'))
-            .and_then(|text| text.parse::<u32>().ok())
-        else {
-            continue;
-        };
-        if !name.is_empty() && pid > 0 {
-            pid_name
-                .entry(pid)
-                .or_insert_with(|| clean_process_name(name));
-        }
-    }
-    let mut map = HashMap::new();
-    for (port, pid) in port_pid {
-        if let Some(name) = pid_name.get(&pid)
-            && !name.is_empty()
-        {
-            map.insert(port, name.clone());
-        }
-    }
-    Some(map)
-}
-
-#[cfg(all(
-    not(test),
-    not(any(target_os = "macos", target_os = "linux", target_os = "windows"))
-))]
-fn scan_local_ports() -> Option<HashMap<u16, String>> {
-    None
-}
-
-/// Identifies the local process name owning `peer_port` on loopback connections.
-pub fn resolve_local_process_name(peer_port: u16) -> Option<String> {
-    if peer_port == 0 {
-        return None;
-    }
-    if let Some(name) = cached_local_app(peer_port) {
-        return Some(name);
-    }
-    let map = port_snapshot();
-    let name = map.get(&peer_port)?.clone();
-    if name.is_empty() {
-        return None;
-    }
-    store_cached_local_app(peer_port, name.clone());
-    Some(name)
-}
-
-#[cfg_attr(test, allow(dead_code))]
-fn clean_process_name(raw: &str) -> String {
-    let trimmed = raw.trim().trim_end_matches(".exe");
-    trimmed.replace("\\x20", " ")
-}
+pub use crate::local_proc::resolve_local_process_name;
+use crate::local_proc::{cached_local_app, store_cached_local_app};
 
 type H2Sender = hyper::client::conn::http2::SendRequest<RecordingBody<Incoming>>;
 
@@ -3187,7 +2900,7 @@ async fn plain_http<S>(client: &mut S, head: &Head, hub: Arc<Hub>) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut client = Prefixed {
+    let client = Prefixed {
         prefix: Vec::new(),
         pos: 0,
         inner: client,
@@ -3207,10 +2920,45 @@ where
         url: format!("http://{}{path}", display_authority(&host, port, "http")),
         request_headers: sanitized_headers.clone(),
     });
-    let mut host = host;
-    let mut port = port;
-    let mut path = path;
-    let mut headers = sanitized_headers;
+    let res = plain_http_inner(
+        client,
+        head,
+        Arc::clone(&hub),
+        id,
+        method,
+        host,
+        port,
+        path,
+        sanitized_headers,
+    )
+    .await;
+    if let Err(ref err) = res {
+        let should_mark = hub.with_session(|s| {
+            s.get(id)
+                .is_some_and(|flow| flow.error.is_none() && flow.status.is_none())
+        });
+        if should_mark {
+            hub.set_error(id, explain_flow_error(err));
+        }
+    }
+    res
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn plain_http_inner<S>(
+    mut client: Prefixed<&mut S>,
+    head: &Head,
+    hub: Arc<Hub>,
+    id: u64,
+    method: String,
+    mut host: String,
+    mut port: u16,
+    mut path: String,
+    mut headers: Vec<(String, String)>,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let mut body_override: Option<Vec<u8>> = None;
     let mut request_taken = false;
     let mut request_recorded = false;
@@ -3593,12 +3341,11 @@ where
                 },
             )
         }
-        None => timeout(IO_TIMEOUT, dial_timed(&host, port, &hub, false))
-            .await
-            .context("连接源站超时")
-            .inspect_err(|err| {
-                hub.set_error(id, explain_flow_error(err));
-            })??,
+        None => match timeout(IO_TIMEOUT, dial_timed(&host, port, &hub, false)).await {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(err)) => return Err(err.context("连接源站")),
+            Err(_) => return Err(anyhow!("连接源站超时")),
+        },
     };
     origin.set_nodelay(true).ok();
     if let Some(body) = &body_override {
@@ -3660,9 +3407,12 @@ where
     }
     outbound.push_str("\r\n");
     if origin.write_all(outbound.as_bytes()).await.is_err() {
-        let (next_origin, next_info) = timeout(IO_TIMEOUT, dial_timed(&host, port, &hub, false))
-            .await
-            .context("连接源站超时")??;
+        let (next_origin, next_info) =
+            match timeout(IO_TIMEOUT, dial_timed(&host, port, &hub, false)).await {
+                Ok(Ok(pair)) => pair,
+                Ok(Err(err)) => return Err(err.context("连接源站")),
+                Err(_) => return Err(anyhow!("连接源站超时")),
+            };
         origin = next_origin;
         conn_info = next_info;
         origin.set_nodelay(true).ok();
@@ -3694,7 +3444,9 @@ where
         .await?;
         request_body_copied = true;
     }
-    let (mut resp_bytes, mut resp_rest) = read_header_block(&mut origin).await?;
+    let (mut resp_bytes, mut resp_rest) = read_header_block(&mut origin)
+        .await
+        .context("读取源站响应")?;
     let mut resp = parse_head(&resp_bytes)?;
     let (mut status, mut reason) = status_and_reason(&resp.start);
     let mut interim_count = 0;
@@ -8186,22 +7938,25 @@ mod tests {
     #[test]
     fn local_port_is_the_side_before_the_arrow() {
         assert_eq!(
-            super::local_endpoint_port("127.0.0.1:54321->1.2.3.4:443"),
+            crate::local_proc::local_endpoint_port("127.0.0.1:54321->1.2.3.4:443"),
             Some(54321)
         );
         assert_eq!(
-            super::local_endpoint_port("[::1]:54321->1.2.3.4:443"),
+            crate::local_proc::local_endpoint_port("[::1]:54321->1.2.3.4:443"),
             Some(54321)
         );
         assert_eq!(
-            super::local_endpoint_port("10.0.0.5:8080->1.2.3.4:80"),
+            crate::local_proc::local_endpoint_port("10.0.0.5:8080->1.2.3.4:80"),
             Some(8080)
         );
         assert_eq!(
-            super::local_endpoint_port("192.168.1.5:443->192.168.1.9:54321"),
+            crate::local_proc::local_endpoint_port("192.168.1.5:443->192.168.1.9:54321"),
             Some(443)
         );
-        assert_eq!(super::local_endpoint_port("127.0.0.1:443"), Some(443));
+        assert_eq!(
+            crate::local_proc::local_endpoint_port("127.0.0.1:443"),
+            Some(443)
+        );
     }
 
     #[test]
@@ -14529,6 +14284,55 @@ mod tests {
 
         upstream_task.abort();
         origin1_task.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn plain_http_connection_refused_marks_flow_failed() {
+        let dir = std::env::temp_dir().join(format!("zniff-plain-refused-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+
+        let closed_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let closed_addr = closed_listener.local_addr().unwrap();
+        drop(closed_listener);
+
+        let proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        let hub_serve = Arc::clone(&hub);
+        tokio::spawn(async move {
+            let (socket, _) = proxy.accept().await.unwrap();
+            let _ = handle_conn(socket, hub_serve).await;
+        });
+
+        let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+        let req = format!(
+            "GET http://{closed_addr}/health HTTP/1.1\r\nHost: {closed_addr}\r\nConnection: close\r\n\r\n"
+        );
+        client.write_all(req.as_bytes()).await.unwrap();
+        let mut resp = Vec::new();
+        let _ = timeout(Duration::from_secs(3), client.read_to_end(&mut resp)).await;
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let done = hub.with_session(|s| {
+                s.get(1)
+                    .is_some_and(|f| f.error.is_some() && f.finished_at.is_some())
+            });
+            if done || tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let flow = hub
+            .with_session(|s| s.get(1).cloned())
+            .expect("flow recorded");
+        assert_eq!(flow.status, None);
+        assert!(flow.finished_at.is_some());
+        let err = flow.error.as_deref().unwrap_or("");
+        assert!(err.contains("连接源站"), "unexpected error: {err}");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

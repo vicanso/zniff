@@ -584,10 +584,21 @@ impl FilteredStats {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FacetKind {
+    #[default]
+    Domain,
+    App,
+    Mobile,
+    Desktop,
+    Relay,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FacetEntry {
     pub label: String,
     pub token: String,
+    pub kind: FacetKind,
     pub count: usize,
     pub error_count: usize,
 }
@@ -611,6 +622,7 @@ impl SessionFacets {
                 let entry = domain_map.entry(key.clone()).or_insert_with(|| FacetEntry {
                     label: host.to_string(),
                     token: key,
+                    kind: FacetKind::Domain,
                     count: 0,
                     error_count: 0,
                 });
@@ -619,14 +631,38 @@ impl SessionFacets {
                     entry.error_count += 1;
                 }
             }
-            if let Some((label, token)) = extract_client_app_facet(&flow.client_ip) {
+            if let Some((mut label, token)) = extract_client_app_facet(&flow.client_ip) {
+                let flow_kind = classify_client_facet_kind(&flow.client_ip, &flow.request_headers);
+                let bare_loopback = is_bare_loopback_ip(flow.client_ip.trim());
+                if !bare_loopback
+                    && matches!(flow_kind, FacetKind::Mobile | FacetKind::Desktop)
+                    && let Some(hint) =
+                        infer_client_os_hint(request_user_agent(&flow.request_headers))
+                {
+                    label = format!("{label} · {hint}");
+                }
                 let key = token.to_ascii_lowercase();
                 let entry = app_map.entry(key).or_insert_with(|| FacetEntry {
                     label,
                     token,
+                    kind: flow_kind,
                     count: 0,
                     error_count: 0,
                 });
+                if entry.kind == FacetKind::Desktop
+                    && flow_kind == FacetKind::Mobile
+                    && !bare_loopback
+                {
+                    entry.kind = FacetKind::Mobile;
+                }
+                if matches!(entry.kind, FacetKind::Desktop | FacetKind::Mobile)
+                    && !bare_loopback
+                    && !entry.label.contains(" · ")
+                    && let Some(hint) =
+                        infer_client_os_hint(request_user_agent(&flow.request_headers))
+                {
+                    entry.label = format!("{} · {hint}", entry.label);
+                }
                 entry.count += 1;
                 if is_err {
                     entry.error_count += 1;
@@ -658,15 +694,148 @@ pub fn relay_label(id: &str) -> String {
     format!("中继 {}", relay_short(id))
 }
 
+/// Formats a client/source label for display in the requested UI language.
+pub fn format_client_label(raw: &str, lang: crate::i18n::Lang) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return "—".to_string();
+    }
+    if lang == crate::i18n::Lang::En
+        && let Some(short) = trimmed.strip_prefix("中继 ")
+    {
+        return format!("Relay {short}");
+    }
+    trimmed.to_string()
+}
+
+pub fn is_bare_loopback_ip(raw: &str) -> bool {
+    matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "127.0.0.1" | "::1" | "[::1]" | "localhost"
+    )
+}
+
+fn request_user_agent(request_headers: &[(String, String)]) -> &str {
+    request_headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
+        .map(|(_, v)| v.as_str())
+        .unwrap_or("")
+}
+
+pub fn infer_client_os_hint(ua: &str) -> Option<&'static str> {
+    let lower = ua.to_ascii_lowercase();
+    if lower.is_empty() {
+        return None;
+    }
+    if lower.contains("harmonyos") {
+        return Some("HarmonyOS");
+    }
+    if lower.contains("ipad") {
+        return Some("iPadOS");
+    }
+    if lower.contains("iphone") || lower.contains("ipod") {
+        return Some("iOS");
+    }
+    if lower.contains("android") || lower.contains("dalvik") {
+        return Some("Android");
+    }
+    if lower.contains("macintosh") || lower.contains("mac os x") || lower.contains("darwin/") {
+        return Some("macOS");
+    }
+    if lower.contains("windows nt") || lower.contains("win64") || lower.contains("win32") {
+        return Some("Windows");
+    }
+    if lower.contains("linux") {
+        return Some("Linux");
+    }
+    None
+}
+
+pub fn strip_subprocess_suffix(raw: &str) -> &str {
+    let mut name = raw.trim();
+    if name.ends_with(')')
+        && let Some(idx) = name.rfind(" Helper (")
+    {
+        let candidate = name[..idx].trim();
+        if !candidate.is_empty() {
+            return candidate;
+        }
+    }
+    for suffix in [
+        " Helper (Renderer)",
+        " Helper (GPU)",
+        " Helper (Plugin)",
+        " Helper (Alerts)",
+        " Helper (Networking)",
+        " Helper",
+        " Networking",
+        " Web Content",
+        " Graphics and Media",
+        ".exe",
+        ".EXE",
+    ] {
+        if let Some(stripped) = name.strip_suffix(suffix) {
+            name = stripped.trim();
+            break;
+        }
+    }
+    if name.is_empty() { raw.trim() } else { name }
+}
+
+pub fn is_mobile_user_agent(ua: &str) -> bool {
+    let lower = ua.to_ascii_lowercase();
+    lower.contains("iphone")
+        || lower.contains("ipad")
+        || lower.contains("ipod")
+        || lower.contains("android")
+        || lower.contains("harmonyos")
+        || lower.contains("mobile")
+        || lower.contains("dalvik")
+        || lower.contains("okhttp")
+        || lower.contains("alamofire")
+}
+
+fn extract_enclosed_proc(raw: &str) -> Option<&str> {
+    let rest = raw.strip_suffix(')')?;
+    let idx = rest.find(" (").map(|i| i + 1).or_else(|| rest.find('('))?;
+    let proc_part = rest[idx + 1..].trim();
+    if proc_part.is_empty() {
+        None
+    } else {
+        Some(proc_part)
+    }
+}
+
+pub fn classify_client_facet_kind(
+    client_ip: &str,
+    request_headers: &[(String, String)],
+) -> FacetKind {
+    let raw = client_ip.trim();
+    if raw.starts_with("中继 ") {
+        return FacetKind::Relay;
+    }
+    if extract_enclosed_proc(raw).is_some() {
+        return FacetKind::App;
+    }
+    if is_bare_loopback_ip(raw) {
+        return FacetKind::Desktop;
+    }
+    let ua = request_user_agent(request_headers);
+    if is_mobile_user_agent(ua) {
+        FacetKind::Mobile
+    } else {
+        FacetKind::Desktop
+    }
+}
+
 pub fn extract_client_app_facet(client_ip: &str) -> Option<(String, String)> {
     let raw = client_ip.trim();
     if raw.is_empty() || raw == "—" {
         return None;
     }
-    let label = if let Some(rest) = raw.strip_suffix(')')
-        && let Some(idx) = rest.rfind('(')
-    {
-        let proc_name = rest[idx + 1..].trim();
+    let label = if let Some(proc_part) = extract_enclosed_proc(raw) {
+        let proc_name = strip_subprocess_suffix(proc_part);
         if proc_name.is_empty() { raw } else { proc_name }
     } else {
         raw
@@ -3531,10 +3700,7 @@ mod tests {
         assert_eq!(session.ids_matching("path:/v1 | /auth"), vec![id_a, id_b]);
         assert_eq!(session.ids_matching("GET|POST"), vec![id_a, id_b]);
         assert_eq!(session.ids_matching("2xx|5xx"), vec![id_a, id_c]);
-        assert_eq!(
-            session.ids_matching("mute:other.org|third.net"),
-            vec![id_a]
-        );
+        assert_eq!(session.ids_matching("mute:other.org|third.net"), vec![id_a]);
     }
 
     #[test]
@@ -3554,10 +3720,7 @@ mod tests {
             session.ids_matching("host:*baidu*"),
             vec![id_root, id_sub, id_deep, id_fake]
         );
-        assert_eq!(
-            session.ids_matching("host:api.*.com"),
-            vec![id_sub]
-        );
+        assert_eq!(session.ids_matching("host:api.*.com"), vec![id_sub]);
         assert_eq!(
             session.ids_matching("baidu"),
             vec![id_root, id_sub, id_deep, id_fake]
@@ -3858,12 +4021,14 @@ mod tests {
                 FacetEntry {
                     label: "api.example.com".into(),
                     token: "api.example.com".into(),
+                    kind: FacetKind::Domain,
                     count: 2,
                     error_count: 1,
                 },
                 FacetEntry {
                     label: "cdn.example.com".into(),
                     token: "cdn.example.com".into(),
+                    kind: FacetKind::Domain,
                     count: 1,
                     error_count: 0,
                 },
@@ -3875,12 +4040,14 @@ mod tests {
                 FacetEntry {
                     label: "Google Chrome".into(),
                     token: "Google_Chrome".into(),
+                    kind: FacetKind::App,
                     count: 2,
                     error_count: 1,
                 },
                 FacetEntry {
                     label: "curl".into(),
                     token: "curl".into(),
+                    kind: FacetKind::App,
                     count: 1,
                     error_count: 0,
                 },
@@ -4054,8 +4221,14 @@ mod tests {
         assert_eq!(session.ids_matching("header:mobileapp"), vec![f1]);
 
         // Negative term exclusion (-word or mute:word)
-        assert_eq!(session.ids_matching("host:*.example.com -graphql"), vec![f2]);
-        assert_eq!(session.ids_matching("host:*.example.com mute:cdn"), vec![f1]);
+        assert_eq!(
+            session.ids_matching("host:*.example.com -graphql"),
+            vec![f2]
+        );
+        assert_eq!(
+            session.ids_matching("host:*.example.com mute:cdn"),
+            vec![f1]
+        );
 
         // Method and status combinations
         assert_eq!(session.ids_matching("POST 200"), vec![f1]);
@@ -4590,5 +4763,59 @@ mod tests {
         let facets = session.facets();
         assert_eq!(facets.domains[0].error_count, 1);
         assert_eq!(facets.apps[0].error_count, 1);
+    }
+
+    #[test]
+    fn client_facets_collapse_helpers_avoid_cfnetwork_false_positives_and_annotate_lan_os() {
+        assert!(!is_mobile_user_agent(
+            "ShopMac/1.0 CFNetwork/1568 Darwin/24.1.0"
+        ));
+        assert!(is_mobile_user_agent(
+            "App/1.0 (iPhone; iOS 18.1) CFNetwork/1568"
+        ));
+        assert_eq!(
+            classify_client_facet_kind(
+                "127.0.0.1",
+                &[("User-Agent".into(), "ShopApp/1.0 (iPhone; iOS 18.1)".into())]
+            ),
+            FacetKind::Desktop
+        );
+
+        let mut session = Session::default();
+        let a = session.open(draft("api.test"));
+        session.set_client_ip(a, "127.0.0.1 (Google Chrome Helper (Renderer))");
+        session.replace_response(a, 200, Vec::new(), Vec::new());
+
+        let b = session.open(draft("api.test"));
+        session.set_client_ip(b, "127.0.0.1 (Google Chrome Helper)");
+        session.replace_response(b, 500, Vec::new(), Vec::new());
+
+        let mut mobile_draft = draft("api.test");
+        mobile_draft.request_headers = vec![(
+            "User-Agent".into(),
+            "Shop/2.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)".into(),
+        )];
+        let c = session.open(mobile_draft);
+        session.set_client_ip(c, "10.49.83.239");
+        session.replace_response(c, 200, Vec::new(), Vec::new());
+
+        let facets = session.facets();
+        assert_eq!(facets.apps.len(), 2);
+        assert_eq!(facets.apps[0].label, "Google Chrome");
+        assert_eq!(facets.apps[0].token, "Google_Chrome");
+        assert_eq!(facets.apps[0].count, 2);
+        assert_eq!(facets.apps[0].error_count, 1);
+        assert_eq!(facets.apps[1].label, "10.49.83.239 · iOS");
+        assert_eq!(facets.apps[1].token, "10.49.83.239");
+        assert_eq!(facets.apps[1].kind, FacetKind::Mobile);
+        assert_eq!(
+            strip_subprocess_suffix("Google Chrome Helper (Aperitif)"),
+            "Google Chrome"
+        );
+
+        assert_eq!(
+            format_client_label(&relay_label("deadbeef1234"), crate::i18n::Lang::En),
+            "Relay deadbeef"
+        );
     }
 }

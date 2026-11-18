@@ -330,6 +330,27 @@ pub(crate) fn toggle_host_facet(filter: &str, host: &str) -> String {
     set_host_or(filter, &items.join(" | "))
 }
 
+pub(crate) fn root_domain_facet_active(filter: &str, root: &str) -> bool {
+    let wild = format!("*.{root}");
+    let items = split_ui_or_items(&extract_host_or(filter));
+    items.iter().any(|item| item.eq_ignore_ascii_case(&wild))
+        || items.iter().any(|item| item.eq_ignore_ascii_case(root))
+}
+
+pub(crate) fn toggle_root_domain_facet(filter: &str, root: &str) -> String {
+    let wild = format!("*.{root}");
+    let mut items = split_ui_or_items(&extract_host_or(filter));
+    let had_wild = items.iter().any(|item| item.eq_ignore_ascii_case(&wild));
+    let had_bare = items.iter().any(|item| item.eq_ignore_ascii_case(root));
+    if had_wild || had_bare {
+        items.retain(|item| !item.eq_ignore_ascii_case(&wild) && !item.eq_ignore_ascii_case(root));
+    } else {
+        items.push(wild);
+        items.push(root.to_string());
+    }
+    set_host_or(filter, &items.join(" | "))
+}
+
 pub(crate) fn app_facet_active(filter: &str, app_token: &str) -> bool {
     split_ui_or_items(&extract_app_or(filter))
         .iter()
