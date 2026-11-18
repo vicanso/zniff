@@ -299,8 +299,24 @@ pub fn App() -> impl IntoElement {
         saved.show_tunnel_failures,
     ));
     let history_since = stored(Some(clock::now()));
-    let win_pending = stored((saved.window_width, saved.window_height));
+    let win_pending = stored(WindowPlacementSnapshot {
+        width: saved.window_width,
+        height: saved.window_height,
+        x: saved.window_x,
+        y: saved.window_y,
+        display_id: saved.window_display_id.clone(),
+        mode: saved.window_mode.clone(),
+    });
     let win_since = stored(None::<SystemTime>);
+    #[cfg(not(target_arch = "wasm32"))]
+    let saved_display_id = stored(
+        saved
+            .window_display_id
+            .as_deref()
+            .and_then(config::parse_window_display_id),
+    );
+    #[cfg(not(target_arch = "wasm32"))]
+    let display_checked = stored(false);
     let selected_tick = selected;
     let rows_tick = rows;
     let stats_tick = filtered_stats;
@@ -589,16 +605,73 @@ pub fn App() -> impl IntoElement {
             });
             history_since.replace(None);
         }
-        let win_size = window();
-        if win_size.width.0.is_finite()
-            && win_size.height.0.is_finite()
-            && win_size.width.0 > 0.0
-            && win_size.height.0 > 0.0
-        {
-            let win_now = (
-                config::clamp_window_width(win_size.width.0.round() as u32),
-                config::clamp_window_height(win_size.height.0.round() as u32),
-            );
+        let win_now = {
+            #[cfg(not(target_arch = "wasm32"))]
+            let desktop_snap = {
+                let state_opt = nsh_core::element::desktop::window_state();
+                if !display_checked.get() && state_opt.is_some() {
+                    let all_displays = nsh_core::element::desktop::displays();
+                    if !all_displays.is_empty() {
+                        display_checked.replace(true);
+                        if let Some(expected_id) = saved_display_id.get()
+                            && !all_displays.iter().any(|d| d.id.0 == expected_id)
+                        {
+                            nsh_core::element::desktop::current_window().center(None);
+                        }
+                    }
+                }
+                state_opt.and_then(|st| {
+                    let b = st.placement.bounds;
+                    if b.size.width.0.is_finite()
+                        && b.size.height.0.is_finite()
+                        && b.size.width.0 > 0.0
+                        && b.size.height.0 > 0.0
+                        && b.origin.x.0.is_finite()
+                        && b.origin.y.0.is_finite()
+                    {
+                        let mode = match st.placement.mode {
+                            nsh_core::desktop::WindowMode::Maximized => "maximized".to_string(),
+                            nsh_core::desktop::WindowMode::FullScreen => "fullscreen".to_string(),
+                            nsh_core::desktop::WindowMode::Normal => String::new(),
+                        };
+                        Some(WindowPlacementSnapshot {
+                            width: config::clamp_window_width(b.size.width.0.round() as u32),
+                            height: config::clamp_window_height(b.size.height.0.round() as u32),
+                            x: Some(b.origin.x.0.round() as i32),
+                            y: Some(b.origin.y.0.round() as i32),
+                            display_id: st.display.map(|id| config::format_window_display_id(id.0)),
+                            mode,
+                        })
+                    } else {
+                        None
+                    }
+                })
+            };
+            #[cfg(target_arch = "wasm32")]
+            let desktop_snap: Option<WindowPlacementSnapshot> = None;
+
+            desktop_snap.or_else(|| {
+                let win_size = window();
+                if win_size.width.0.is_finite()
+                    && win_size.height.0.is_finite()
+                    && win_size.width.0 > 0.0
+                    && win_size.height.0 > 0.0
+                {
+                    let prev = win_pending.get();
+                    Some(WindowPlacementSnapshot {
+                        width: config::clamp_window_width(win_size.width.0.round() as u32),
+                        height: config::clamp_window_height(win_size.height.0.round() as u32),
+                        x: prev.x,
+                        y: prev.y,
+                        display_id: prev.display_id,
+                        mode: prev.mode,
+                    })
+                } else {
+                    None
+                }
+            })
+        };
+        if let Some(win_now) = win_now {
             if win_now != win_pending.get() {
                 win_pending.replace(win_now);
                 win_since.replace(Some(clock::now()));
@@ -606,7 +679,7 @@ pub fn App() -> impl IntoElement {
                 .get()
                 .is_some_and(|at| clock::elapsed(at) >= Duration::from_millis(500))
             {
-                remember_window_size(&controls_tick, win_now.0, win_now.1);
+                remember_window_placement(&controls_tick, &win_now);
                 win_since.replace(None);
             }
         }

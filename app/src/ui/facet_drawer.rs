@@ -921,15 +921,45 @@ pub(crate) fn remember_filter(controls: &Controls, current: &str) {
     });
 }
 
-pub(crate) fn remember_window_size(controls: &Controls, width: u32, height: u32) {
-    let width = config::clamp_window_width(width);
-    let height = config::clamp_window_height(height);
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct WindowPlacementSnapshot {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) x: Option<i32>,
+    pub(crate) y: Option<i32>,
+    pub(crate) display_id: Option<String>,
+    pub(crate) mode: String,
+}
+
+pub(crate) fn remember_window_placement(controls: &Controls, snap: &WindowPlacementSnapshot) {
+    let width = config::clamp_window_width(snap.width);
+    let height = config::clamp_window_height(snap.height);
+    let mode = config::normalize_window_mode(&snap.mode);
+    let display_id = snap
+        .display_id
+        .as_deref()
+        .and_then(config::parse_window_display_id)
+        .map(config::format_window_display_id);
+    let (x, y) = match (snap.x, snap.y) {
+        (Some(x), Some(y)) => (Some(x), Some(y)),
+        _ => (None, None),
+    };
     let current = saved_config();
-    if current.window_width == width && current.window_height == height {
+    if current.window_width == width
+        && current.window_height == height
+        && current.window_x == x
+        && current.window_y == y
+        && current.window_display_id == display_id
+        && current.window_mode == mode
+    {
         return;
     }
     save_config_or_notify(controls, PrefName::Window, |config| {
         config.window_width = width;
         config.window_height = height;
+        config.window_x = x;
+        config.window_y = y;
+        config.window_display_id = display_id.clone();
+        config.window_mode = mode.clone();
     });
 }

@@ -39,6 +39,7 @@ fn main() -> impl std::process::Termination {
     attributes.title_bar = Some(title_bar);
     let mut options = nsh_core::desktop::MainWindowOptions::default();
     options.attributes = attributes;
+    zniff::apply_initial_window_options(&mut options);
     let root = platform::Root::of::<zniff::App>().main_window(options);
     platform::set_ui_sets(vec![nsh_base::registry_of([
         nsh_base::parts::core as nsh_base::parts::Part

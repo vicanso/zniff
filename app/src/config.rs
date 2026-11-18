@@ -94,6 +94,26 @@ pub fn clamp_window_height(height: u32) -> u32 {
     height.clamp(WINDOW_HEIGHT_MIN, WINDOW_HEIGHT_MAX)
 }
 
+pub fn parse_window_display_id(raw: &str) -> Option<u64> {
+    let trimmed = raw.trim().trim_start_matches("0x").trim_start_matches("0X");
+    if trimmed.is_empty() || trimmed.len() > 16 {
+        return None;
+    }
+    u64::from_str_radix(trimmed, 16).ok()
+}
+
+pub fn format_window_display_id(id: u64) -> String {
+    format!("{id:016x}")
+}
+
+pub fn normalize_window_mode(raw: &str) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "maximized" => "maximized".to_string(),
+        "fullscreen" | "full_screen" | "full-screen" => "fullscreen".to_string(),
+        _ => String::new(),
+    }
+}
+
 const LEGACY: &[&str] = &[
     "listen-port",
     "listen-all",
@@ -403,6 +423,12 @@ pub struct Config {
     pub list_height: u32,
     pub window_width: u32,
     pub window_height: u32,
+    pub window_x: Option<i32>,
+    pub window_y: Option<i32>,
+    /// Persistent display identifier (16-char lowercase hex of `nsh_core::desktop::DisplayId`).
+    pub window_display_id: Option<String>,
+    /// Window mode when not normal: `""` (normal), `"maximized"`, or `"fullscreen"`.
+    pub window_mode: String,
     /// Pretty is the body default unless the file says otherwise.
     pub default_pretty: bool,
     /// JSON bodies open in the interactive tree view by default when pretty is enabled.
@@ -524,6 +550,14 @@ struct RawConfig {
         skip_serializing_if = "is_default_window_height"
     )]
     window_height: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    window_x: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    window_y: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    window_display_id: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    window_mode: String,
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     default_pretty: bool,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -706,6 +740,10 @@ impl From<RawConfig> for Config {
             list_height: raw.list_height,
             window_width: raw.window_width,
             window_height: raw.window_height,
+            window_x: raw.window_x,
+            window_y: raw.window_y,
+            window_display_id: raw.window_display_id,
+            window_mode: raw.window_mode,
             default_pretty: raw.default_pretty,
             default_json_tree: raw.default_json_tree,
             show_tunnel_failures,
@@ -811,6 +849,10 @@ impl From<Config> for RawConfig {
             list_height: config.list_height,
             window_width: config.window_width,
             window_height: config.window_height,
+            window_x: config.window_x,
+            window_y: config.window_y,
+            window_display_id: config.window_display_id,
+            window_mode: config.window_mode,
             default_pretty: config.default_pretty,
             default_json_tree: config.default_json_tree,
             show_tunnel_failures,
@@ -869,6 +911,10 @@ impl Default for Config {
             list_height: default_list_height(),
             window_width: default_window_width(),
             window_height: default_window_height(),
+            window_x: None,
+            window_y: None,
+            window_display_id: None,
+            window_mode: String::new(),
             default_pretty: true,
             default_json_tree: false,
             show_tunnel_failures: false,
@@ -1293,6 +1339,16 @@ fn normalize_for(mut config: Config, dev: bool) -> Config {
     config.list_width = clamp_list_width(config.list_width);
     config.window_width = clamp_window_width(config.window_width);
     config.window_height = clamp_window_height(config.window_height);
+    config.window_display_id = config
+        .window_display_id
+        .as_deref()
+        .and_then(parse_window_display_id)
+        .map(format_window_display_id);
+    config.window_mode = normalize_window_mode(&config.window_mode);
+    if config.window_x.is_none() || config.window_y.is_none() {
+        config.window_x = None;
+        config.window_y = None;
+    }
     clamp_column_widths(&mut config.column_widths);
     clamp_column_widths(&mut config.column_widths_top_bottom);
     config.column_order = normalize_column_order(&config.column_order);
@@ -2073,6 +2129,35 @@ mod tests {
         let clamped = load(dir.path());
         assert_eq!(clamped.window_width, WINDOW_WIDTH_MIN);
         assert_eq!(clamped.window_height, WINDOW_HEIGHT_MAX);
+
+        update(dir.path(), |config| {
+            config.window_x = Some(120);
+            config.window_y = Some(80);
+            config.window_display_id = Some("00ff11aa22bb33cc".into());
+            config.window_mode = "Maximized".into();
+        })
+        .unwrap();
+        let placed = load(dir.path());
+        assert_eq!(placed.window_x, Some(120));
+        assert_eq!(placed.window_y, Some(80));
+        assert_eq!(
+            placed.window_display_id.as_deref(),
+            Some("00ff11aa22bb33cc")
+        );
+        assert_eq!(placed.window_mode, "maximized");
+        assert_eq!(
+            parse_window_display_id("00ff11aa22bb33cc"),
+            Some(0x00ff_11aa_22bb_33cc)
+        );
+
+        update(dir.path(), |config| {
+            config.window_display_id = Some("not-hex!".into());
+            config.window_mode = "normal".into();
+        })
+        .unwrap();
+        let cleaned = load(dir.path());
+        assert_eq!(cleaned.window_display_id, None);
+        assert_eq!(cleaned.window_mode, "");
     }
 
     #[test]

@@ -70,9 +70,9 @@ use nsh_core::prelude::{Registry, native_module};
 pub use relay::shutdown_relay_push;
 #[cfg(not(target_arch = "wasm32"))]
 pub use sysproxy::restore_if_dirty;
-#[cfg(not(target_arch = "wasm32"))]
-pub use ui::maybe_run_cli_mode;
 pub use ui::{App, initial_window_size};
+#[cfg(not(target_arch = "wasm32"))]
+pub use ui::{apply_initial_window_options, maybe_run_cli_mode};
 
 /// The app's UI set (`nsh.json` `"rust"`). The web package calls this entry
 /// even though `rust_app!` also sets the root.

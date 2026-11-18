@@ -7,6 +7,34 @@ pub fn initial_window_size() -> (i32, i32) {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+pub fn apply_initial_window_options(options: &mut nsh_core::desktop::MainWindowOptions) {
+    use nsh_core::desktop::{DisplayId, WindowMode, WindowPosition};
+    let cfg = saved_config();
+    options.default_size = Some(Size {
+        width: px(cfg.window_width as f32),
+        height: px(cfg.window_height as f32),
+    });
+    if let Some(id) = cfg
+        .window_display_id
+        .as_deref()
+        .and_then(config::parse_window_display_id)
+    {
+        options.display = Some(DisplayId(id));
+    }
+    if let (Some(x), Some(y)) = (cfg.window_x, cfg.window_y) {
+        options.default_position = Some(WindowPosition::At(Point {
+            x: px(x as f32),
+            y: px(y as f32),
+        }));
+    }
+    options.default_mode = match cfg.window_mode.as_str() {
+        "maximized" => Some(WindowMode::Maximized),
+        "fullscreen" => Some(WindowMode::FullScreen),
+        _ => None,
+    };
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn cli_info_output(args: &[String]) -> Option<String> {
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         return Some(format!(
