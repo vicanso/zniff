@@ -94,7 +94,7 @@ type PlainPoolMap = HashMap<(String, u16), Vec<(u64, TcpStream)>>;
 
 pub struct Hub {
     session: Mutex<Session>,
-    generation: AtomicU64,
+    generation: Arc<AtomicU64>,
     state_tx: watch::Sender<u64>,
     /// Milliseconds since [`body_clock`] of the last streaming UI bump.
     body_touch_ms: AtomicU64,
@@ -232,7 +232,7 @@ impl Hub {
         let (state_tx, _) = watch::channel(0_u64);
         Ok(Self {
             session: Mutex::new(Session::default()),
-            generation: AtomicU64::new(1),
+            generation: Arc::new(AtomicU64::new(1)),
             state_tx,
             body_touch_ms: AtomicU64::new(0),
             ca,
@@ -1334,6 +1334,56 @@ impl Hub {
     pub(crate) fn touch(&self) {
         self.generation.fetch_add(1, Ordering::Relaxed);
         self.state_tx.send_modify(|v| *v = v.wrapping_add(1));
+    }
+
+    #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+    pub(crate) fn preview_hook_body(
+        &self,
+        flow: &crate::session::Flow,
+        is_response: bool,
+    ) -> Option<crate::webhook::PreviewLookup> {
+        if !self.rules_enabled() {
+            return None;
+        }
+        let body = if is_response {
+            &flow.response_body
+        } else {
+            &flow.request_body
+        };
+        if body.is_empty() {
+            return None;
+        }
+        let ops = crate::present::graphql_operations(&flow.path, &flow.request_body);
+        let specs = {
+            let guard = self.rules.lock().unwrap_or_else(|err| err.into_inner());
+            rules::preview_hooks_with_ops(&guard, &flow.host, &flow.path, &ops, is_response)
+        };
+        if specs.is_empty() {
+            return None;
+        }
+        let rev = self.rules_revision();
+        let headers = if is_response {
+            flow.response_headers.clone()
+        } else {
+            flow.request_headers.clone()
+        };
+        let gen_arc = Arc::clone(&self.generation);
+        let tx = self.state_tx.clone();
+        Some(crate::webhook::lookup_or_spawn_preview(
+            (flow.id, is_response, rev, body.len()),
+            specs,
+            flow.id,
+            is_response,
+            flow.method.clone(),
+            flow.url.clone(),
+            flow.status,
+            headers,
+            body.clone(),
+            move || {
+                gen_arc.fetch_add(1, Ordering::Relaxed);
+                tx.send_modify(|v| *v = v.wrapping_add(1));
+            },
+        ))
     }
 
     /// At most one list refresh per [`BODY_UI_TOUCH`] while a body is streaming.

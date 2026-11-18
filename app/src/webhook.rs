@@ -4,6 +4,7 @@
 //! direct TCP + HTTP/1.1 connection (bypassing the zniff proxy) with bounded
 //! payloads (`<= BODY_CAP`) and per-hook timeouts, failing open on errors.
 
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -16,7 +17,7 @@ use tokio::net::TcpStream;
 use tokio::time::timeout;
 
 use crate::proxy::Hub;
-use crate::rules::{HookSpec, parse_loopback_hook_url};
+use crate::rules::{HookMode, HookSpec, parse_loopback_hook_url};
 use crate::session::{BODY_CAP, base64_decode, base64_encode};
 
 #[derive(Debug, Clone)]
@@ -403,6 +404,207 @@ pub async fn run_response_hooks(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewHookResult {
+    pub body: Vec<u8>,
+    pub content_type: Option<String>,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreviewLookup {
+    Pending,
+    Ready(Option<PreviewHookResult>),
+}
+
+const PREVIEW_CACHE_CAP: usize = 64;
+
+type PreviewCacheKey = (u64, bool, u64, usize);
+
+fn preview_cache() -> &'static Mutex<Vec<(PreviewCacheKey, PreviewLookup)>> {
+    static CACHE: OnceLock<Mutex<Vec<(PreviewCacheKey, PreviewLookup)>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn preview_runtime() -> Option<&'static tokio::runtime::Runtime> {
+    static RT: OnceLock<Option<tokio::runtime::Runtime>> = OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name("zniff-hook-preview")
+            .enable_all()
+            .build()
+            .ok()
+    })
+    .as_ref()
+}
+
+fn parse_preview_body_override(
+    map: &serde_json::Map<String, Value>,
+) -> Result<(Option<Vec<u8>>, Option<String>)> {
+    let explicit_ct = map
+        .get("content_type")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    if let Some(b64) = map.get("body_b64").and_then(Value::as_str) {
+        let decoded = base64_decode(b64).context("invalid base64 in body_b64")?;
+        if decoded.len() > BODY_CAP {
+            anyhow::bail!("hook body_b64 exceeds 1 MB limit");
+        }
+        return Ok((Some(decoded), explicit_ct));
+    }
+    if let Some(body_val) = map.get("body") {
+        if let Some(text) = body_val.as_str() {
+            let bytes = text.as_bytes().to_vec();
+            if bytes.len() > BODY_CAP {
+                anyhow::bail!("hook body exceeds 1 MB limit");
+            }
+            return Ok((Some(bytes), explicit_ct));
+        }
+        if body_val.is_object() || body_val.is_array() {
+            let bytes = serde_json::to_vec_pretty(body_val).context("serialize JSON body")?;
+            if bytes.len() > BODY_CAP {
+                anyhow::bail!("hook body exceeds 1 MB limit");
+            }
+            return Ok((
+                Some(bytes),
+                explicit_ct.or_else(|| Some("application/json".to_string())),
+            ));
+        }
+    }
+    Ok((None, explicit_ct))
+}
+
+/// Runs all matching read-only `mode=preview` hooks sequentially without mutating proxied traffic.
+pub async fn run_preview_hooks(
+    specs: &[HookSpec],
+    id: u64,
+    is_response: bool,
+    method: &str,
+    url: &str,
+    status: Option<u16>,
+    headers: &[(String, String)],
+    body: &[u8],
+) -> Option<PreviewHookResult> {
+    let mut cur_body = body.to_vec();
+    let mut cur_ct: Option<String> = None;
+    let mut last_note: Option<String> = None;
+    let mut changed = false;
+
+    for spec in specs {
+        if spec.mode != HookMode::Preview {
+            continue;
+        }
+        let phase_ok = if is_response {
+            spec.phase.runs_response()
+        } else {
+            spec.phase.runs_request()
+        };
+        if !phase_ok {
+            continue;
+        }
+        let payload = json!({
+            "id": id,
+            "phase": if is_response { "res" } else { "req" },
+            "mode": "preview",
+            "method": method,
+            "url": url,
+            "status": status,
+            "headers": headers.iter().map(|(k, v)| json!([k, v])).collect::<Vec<_>>(),
+            "body_b64": base64_encode(&cur_body),
+        });
+        let Ok(bytes) = serde_json::to_vec(&payload) else {
+            continue;
+        };
+        if let Ok(Some(Value::Object(map))) = post_hook_json(&spec.url, bytes, spec.timeout).await {
+            if let Ok((Some(next_body), next_ct)) = parse_preview_body_override(&map) {
+                cur_body = next_body;
+                if next_ct.is_some() {
+                    cur_ct = next_ct;
+                }
+                changed = true;
+            }
+            if let Some(note) = map
+                .get("note")
+                .or_else(|| map.get("comment"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                last_note = Some(note.to_string());
+            }
+        }
+    }
+
+    if changed {
+        Some(PreviewHookResult {
+            body: cur_body,
+            content_type: cur_ct,
+            note: last_note,
+        })
+    } else {
+        None
+    }
+}
+
+/// Looks up cached preview-hook output or spawns a background request on the preview runtime.
+#[allow(clippy::too_many_arguments)]
+pub fn lookup_or_spawn_preview(
+    cache_key: PreviewCacheKey,
+    specs: Vec<HookSpec>,
+    id: u64,
+    is_response: bool,
+    method: String,
+    url: String,
+    status: Option<u16>,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+    on_done: impl FnOnce() + Send + 'static,
+) -> PreviewLookup {
+    {
+        let mut cache = preview_cache().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, entry)) = cache.iter().find(|(k, _)| *k == cache_key) {
+            return entry.clone();
+        }
+        if cache.len() >= PREVIEW_CACHE_CAP {
+            cache.remove(0);
+        }
+        cache.push((cache_key, PreviewLookup::Pending));
+    }
+
+    let Some(rt) = preview_runtime() else {
+        return PreviewLookup::Ready(None);
+    };
+    rt.spawn(async move {
+        let result = run_preview_hooks(
+            &specs,
+            id,
+            is_response,
+            &method,
+            &url,
+            status,
+            &headers,
+            &body,
+        )
+        .await;
+        {
+            let mut cache = preview_cache().lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((_, entry)) = cache.iter_mut().find(|(k, _)| *k == cache_key) {
+                *entry = PreviewLookup::Ready(result);
+            } else {
+                if cache.len() >= PREVIEW_CACHE_CAP {
+                    cache.remove(0);
+                }
+                cache.push((cache_key, PreviewLookup::Ready(result)));
+            }
+        }
+        on_done();
+    });
+    PreviewLookup::Pending
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -425,5 +627,52 @@ mod tests {
         assert_eq!(ep3.path_and_query, "/hook");
 
         assert!(parse_endpoint("http://api.vicanso.dev/hook").is_err());
+    }
+
+    #[tokio::test]
+    async fn preview_hook_decodes_json_object_without_mutating_origin() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                let resp_body =
+                    r#"{"body":{"decrypted":true,"host":"api.vicanso.dev"},"note":"AES-256-GCM"}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    resp_body.len(),
+                    resp_body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            }
+        });
+
+        let spec = HookSpec {
+            url: format!("http://127.0.0.1:{port}/preview"),
+            phase: crate::rules::HookPhase::Response,
+            mode: HookMode::Preview,
+            timeout: Duration::from_secs(2),
+        };
+        let decoded = run_preview_hooks(
+            &[spec],
+            7,
+            true,
+            "POST",
+            "https://api.vicanso.dev/v1/secret",
+            Some(200),
+            &[("Content-Type".into(), "application/octet-stream".into())],
+            b"\x01\x02\x03ciphertext",
+        )
+        .await
+        .expect("preview hook should return decoded body");
+        assert_eq!(decoded.content_type.as_deref(), Some("application/json"));
+        assert_eq!(decoded.note.as_deref(), Some("AES-256-GCM"));
+        let parsed: Value = serde_json::from_slice(&decoded.body).unwrap();
+        assert_eq!(parsed["decrypted"], true);
+        assert_eq!(parsed["host"], "api.vicanso.dev");
     }
 }

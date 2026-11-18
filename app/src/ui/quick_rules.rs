@@ -586,8 +586,8 @@ pub(crate) fn replace_row(
                                         .to_string(),
                                     15 => t(
                                         lang,
-                                        "超时或阶段 (可选): 3000ms / both",
-                                        "Timeout/phase (optional): 3000ms / both",
+                                        "模式/超时 (可选): preview / both / 3000ms",
+                                        "Mode/timeout (optional): preview / both / 3000ms",
                                     )
                                     .to_string(),
                                     _ => t(lang, "替换成 (to)", "Replace with (to)").to_string(),

@@ -150,15 +150,24 @@ pub enum Rule {
         port: Option<u16>,
     },
     /// Loopback HTTP webhook extension (`http://127.0.0.1:...` / `http://localhost:...` /
-    /// `http://[::1]:...`) that can mutate request and/or response metadata and body.
+    /// `http://[::1]:...`) that can mutate request/response metadata & body or run in read-only
+    /// `mode=preview` during detail inspection.
     Hook {
         host: String,
         path_prefix: String,
         url: String,
         phase: HookPhase,
+        mode: HookMode,
         timeout: Duration,
         op: Option<String>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HookMode {
+    #[default]
+    Mutate,
+    Preview,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -182,6 +191,7 @@ impl HookPhase {
 pub struct HookSpec {
     pub url: String,
     pub phase: HookPhase,
+    pub mode: HookMode,
     pub timeout: Duration,
 }
 
@@ -417,12 +427,55 @@ pub fn has_op_rules(rules: &[Rule], host: &str, path: &str) -> bool {
         .any(|rule| rule.op().is_some() && rule.matches_location(host, path))
 }
 
-/// Returns true when at least one `hook` rule matching `(host, path)` runs on requests.
+/// Returns true when at least one mutating `hook` rule matching `(host, path)` runs on requests.
 pub fn has_request_hooks(rules: &[Rule], host: &str, path: &str) -> bool {
     rules.iter().any(|rule| {
-        matches!(rule, Rule::Hook { phase, .. } if phase.runs_request())
-            && rule.matches_location(host, path)
+        matches!(
+            rule,
+            Rule::Hook {
+                phase,
+                mode: HookMode::Mutate,
+                ..
+            } if phase.runs_request()
+        ) && rule.matches_location(host, path)
     })
+}
+
+/// Returns read-only `mode=preview` hook specs matching `(host, path, ops)` for detail rendering.
+pub fn preview_hooks_with_ops(
+    rules: &[Rule],
+    host: &str,
+    path: &str,
+    ops: &[String],
+    is_response: bool,
+) -> Vec<HookSpec> {
+    let mut out = Vec::new();
+    for rule in rules {
+        let Rule::Hook {
+            url,
+            phase,
+            mode: HookMode::Preview,
+            timeout,
+            ..
+        } = rule
+        else {
+            continue;
+        };
+        let phase_ok = if is_response {
+            phase.runs_response()
+        } else {
+            phase.runs_request()
+        };
+        if phase_ok && rule.matches_with_ops(host, path, ops) {
+            out.push(HookSpec {
+                url: url.clone(),
+                phase: *phase,
+                mode: HookMode::Preview,
+                timeout: *timeout,
+            });
+        }
+    }
+    out
 }
 
 /// Labels of the rules that actually apply, in text order. The first terminal
@@ -456,6 +509,10 @@ pub fn hit_summary_with_ops(rules: &[Rule], host: &str, path: &str, ops: &[Strin
             Rule::NoCache { .. } => ("no-cache", false),
             Rule::Block { .. } => ("block", true),
             Rule::Resolve { .. } => ("resolve", false),
+            Rule::Hook {
+                mode: HookMode::Preview,
+                ..
+            } => continue,
             Rule::Hook { .. } => ("hook", false),
         };
         if terminal {
@@ -670,12 +727,14 @@ pub fn effect_with_ops(rules: &[Rule], host: &str, path: &str, ops: &[String]) -
             Rule::Hook {
                 url,
                 phase,
+                mode: HookMode::Mutate,
                 timeout,
                 ..
             } => {
                 effect.hooks.push(HookSpec {
                     url: url.clone(),
                     phase: *phase,
+                    mode: HookMode::Mutate,
                     timeout: *timeout,
                 });
             }
@@ -1237,12 +1296,13 @@ fn parse_line(line: &str) -> Option<Rule> {
                 return None;
             }
             let url = parse_loopback_hook_url(&tokens[0])?;
-            let (phase, timeout, rule_op) = parse_hook_options(&tokens[1..])?;
+            let (phase, mode, timeout, rule_op) = parse_hook_options(&tokens[1..])?;
             Some(Rule::Hook {
                 host,
                 path_prefix,
                 url,
                 phase,
+                mode,
                 timeout,
                 op: rule_op,
             })
@@ -2338,6 +2398,7 @@ pub fn append_quick_rule_with_op(
             }
             let url = parse_loopback_hook_url(from)?;
             let mut phase = if response { "res" } else { "req" };
+            let mut preview = false;
             let mut timeout_ms: Option<u128> = None;
             for tok in to.split_whitespace() {
                 if tok.eq_ignore_ascii_case("both") {
@@ -2346,6 +2407,14 @@ pub fn append_quick_rule_with_op(
                     phase = "req";
                 } else if tok.eq_ignore_ascii_case("res") || tok.eq_ignore_ascii_case("response") {
                     phase = "res";
+                } else if tok.eq_ignore_ascii_case("preview")
+                    || tok.eq_ignore_ascii_case("mode=preview")
+                {
+                    preview = true;
+                } else if tok.eq_ignore_ascii_case("mutate")
+                    || tok.eq_ignore_ascii_case("mode=mutate")
+                {
+                    preview = false;
                 } else {
                     let raw = tok
                         .strip_prefix("timeout=")
@@ -2360,6 +2429,9 @@ pub fn append_quick_rule_with_op(
                 }
             }
             let mut line = format!("hook {pattern} {} {phase}", quote_rule_token(&url));
+            if preview {
+                line.push_str(" mode=preview");
+            }
             if let Some(ms) = timeout_ms {
                 line.push_str(&format!(" timeout={ms}ms"));
             }
@@ -2473,9 +2545,13 @@ pub fn parse_loopback_hook_url(raw: &str) -> Option<String> {
     Some(format!("http://{authority}{path_part}"))
 }
 
-fn parse_hook_options(tokens: &[String]) -> Option<(HookPhase, Duration, Option<String>)> {
+fn parse_hook_options(
+    tokens: &[String],
+) -> Option<(HookPhase, HookMode, Duration, Option<String>)> {
     let mut phase = HookPhase::Both;
     let mut seen_phase = false;
+    let mut mode = HookMode::Mutate;
+    let mut seen_mode = false;
     let mut timeout = Duration::from_secs(2);
     let mut seen_timeout = false;
     let mut op = None;
@@ -2493,6 +2569,14 @@ fn parse_hook_options(tokens: &[String]) -> Option<(HookPhase, Duration, Option<
                 phase = HookPhase::Both;
                 seen_phase = true;
             }
+            "preview" | "mode=preview" if !seen_mode => {
+                mode = HookMode::Preview;
+                seen_mode = true;
+            }
+            "mutate" | "mode=mutate" if !seen_mode => {
+                mode = HookMode::Mutate;
+                seen_mode = true;
+            }
             t if (t.starts_with("timeout=") || t.starts_with("delay=")) && !seen_timeout => {
                 let raw = t.split_once('=').map(|(_, v)| v)?;
                 let parsed = parse_delay(raw)?;
@@ -2505,7 +2589,7 @@ fn parse_hook_options(tokens: &[String]) -> Option<(HookPhase, Duration, Option<
             _ => return None,
         }
     }
-    Some((phase, timeout, op))
+    Some((phase, mode, timeout, op))
 }
 
 pub const THROTTLE_MIN_BPS: u64 = 512;
@@ -4530,6 +4614,7 @@ resolve a.com *
                 path_prefix: "/v1".into(),
                 url: "http://127.0.0.1:9100/mutate".into(),
                 phase: HookPhase::Request,
+                mode: HookMode::Mutate,
                 timeout: Duration::from_millis(750),
                 op: Some("Login".into()),
             }
@@ -4541,6 +4626,7 @@ resolve a.com *
                 path_prefix: "/v2".into(),
                 url: "http://localhost:9200/".into(),
                 phase: HookPhase::Response,
+                mode: HookMode::Mutate,
                 timeout: Duration::from_secs(2),
                 op: None,
             }
@@ -4552,6 +4638,7 @@ resolve a.com *
                 path_prefix: "/v3".into(),
                 url: "http://[::1]:9300/decode".into(),
                 phase: HookPhase::Both,
+                mode: HookMode::Mutate,
                 timeout: Duration::from_secs(2),
                 op: None,
             }
@@ -4562,5 +4649,25 @@ resolve a.com *
         );
         assert!(has_request_hooks(&parsed, "api.vicanso.dev", "/v1/auth"));
         assert!(!has_request_hooks(&parsed, "api.vicanso.dev", "/v2/auth"));
+
+        let preview_rules = parse_rules(
+            "hook api.vicanso.dev/v1/enc http://127.0.0.1:9300/dec res mode=preview timeout=1500ms",
+        );
+        assert_eq!(preview_rules.len(), 1);
+        assert!(!has_request_hooks(
+            &preview_rules,
+            "api.vicanso.dev",
+            "/v1/enc"
+        ));
+        assert!(
+            effect_with_ops(&preview_rules, "api.vicanso.dev", "/v1/enc", &[])
+                .hooks
+                .is_empty()
+        );
+        let preview_hits =
+            preview_hooks_with_ops(&preview_rules, "api.vicanso.dev", "/v1/enc", &[], true);
+        assert_eq!(preview_hits.len(), 1);
+        assert_eq!(preview_hits[0].mode, HookMode::Preview);
+        assert_eq!(preview_hits[0].timeout, Duration::from_millis(1500));
     }
 }

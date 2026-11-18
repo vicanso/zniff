@@ -1,6 +1,66 @@
 #[allow(unused_imports)]
 use super::*;
 
+fn prepend_body_note(note: &mut String, extra: &str) {
+    if extra.is_empty() {
+        return;
+    }
+    if note.is_empty() {
+        *note = extra.to_string();
+    } else {
+        *note = format!("{extra} · {note}");
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn resolve_preview_hook_override(
+    hub: &Hub,
+    flow: &session::Flow,
+    is_response: bool,
+    pretty: bool,
+    lang: Lang,
+) -> (Option<Vec<u8>>, Option<String>, Option<String>) {
+    if !pretty {
+        return (None, None, None);
+    }
+    match hub.preview_hook_body(flow, is_response) {
+        Some(crate::webhook::PreviewLookup::Ready(Some(res))) => {
+            let label = match res.note {
+                Some(ref detail) => format!(
+                    "{} · {detail}",
+                    t(lang, "hook 预览解码", "Decoded by hook preview")
+                ),
+                None => t(lang, "hook 预览解码", "Decoded by hook preview").to_string(),
+            };
+            (Some(res.body), res.content_type, Some(label))
+        }
+        Some(crate::webhook::PreviewLookup::Pending) => (
+            None,
+            None,
+            Some(
+                t(
+                    lang,
+                    "正在执行 hook 预览解码…",
+                    "Running hook preview decode…",
+                )
+                .to_string(),
+            ),
+        ),
+        _ => (None, None, None),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn resolve_preview_hook_override(
+    _hub: &Hub,
+    _flow: &session::Flow,
+    _is_response: bool,
+    _pretty: bool,
+    _lang: Lang,
+) -> (Option<Vec<u8>>, Option<String>, Option<String>) {
+    (None, None, None)
+}
+
 pub(crate) fn publish_detail(
     shown: &Shown,
     hub: &Hub,
@@ -60,26 +120,40 @@ pub(crate) fn publish_detail(
     let pretty = shown.pretty.get();
     let request_type = present::content_type(&flow.request_headers);
     let response_type = present::content_type(&flow.response_headers);
-    let request = display_body(
-        &flow.request_body,
+    let (req_preview_body, req_preview_ct, req_preview_note) =
+        resolve_preview_hook_override(hub, &flow, false, pretty, lang);
+    let (res_preview_body, res_preview_ct, res_preview_note) =
+        resolve_preview_hook_override(hub, &flow, true, pretty, lang);
+    let req_body_bytes = req_preview_body.as_deref().unwrap_or(&flow.request_body);
+    let res_body_bytes = res_preview_body.as_deref().unwrap_or(&flow.response_body);
+    let req_effective_type = req_preview_ct.as_deref().or(request_type);
+    let res_effective_type = res_preview_ct.as_deref().or(response_type);
+    let mut request = display_body(
+        req_body_bytes,
         flow.request_truncated,
         flow.request_expired,
         flow.request_encoding_error.as_deref(),
-        request_type,
+        req_effective_type,
         pretty,
         lang,
         shown.request_offset.get(),
     );
-    let response = display_body(
-        &flow.response_body,
+    if let Some(extra) = req_preview_note {
+        prepend_body_note(&mut request.note, &extra);
+    }
+    let mut response = display_body(
+        res_body_bytes,
         flow.response_truncated,
         flow.response_expired,
         flow.response_encoding_error.as_deref(),
-        response_type,
+        res_effective_type,
         pretty,
         lang,
         shown.response_offset.get(),
     );
+    if let Some(extra) = res_preview_note {
+        prepend_body_note(&mut response.note, &extra);
+    }
     let response_hex = response.hex;
     let request_window = request.window;
     let response_window = response.window;
@@ -175,41 +249,41 @@ pub(crate) fn publish_detail(
     shown
         .request_language
         .set(if shown.request_form.with(Vec::is_empty) {
-            present::editor_language(request_type, &request.text)
+            present::editor_language(req_effective_type, &request.text)
                 .unwrap_or("")
                 .to_string()
         } else {
             String::new()
         });
     shown.response_language.set(
-        present::editor_language(response_type, &response.text)
+        present::editor_language(res_effective_type, &response.text)
             .unwrap_or("")
             .to_string(),
     );
     shown.request_doc.set(present::parse_text_view_doc(
-        request_type,
-        &flow.request_body,
+        req_effective_type,
+        req_body_bytes,
     ));
     shown.response_doc.set(present::parse_text_view_doc(
-        response_type,
-        &flow.response_body,
+        res_effective_type,
+        res_body_bytes,
     ));
-    let req_is_form = present::multipart_pairs(request_type, &flow.request_body).is_some()
-        || std::str::from_utf8(&flow.request_body)
+    let req_is_form = present::multipart_pairs(req_effective_type, req_body_bytes).is_some()
+        || std::str::from_utf8(req_body_bytes)
             .ok()
-            .is_some_and(|text| present::is_form(request_type, text));
+            .is_some_and(|text| present::is_form(req_effective_type, text));
     update_json_body_signal(
         shown.request_json,
         id,
-        request_type,
-        &flow.request_body,
+        req_effective_type,
+        req_body_bytes,
         req_is_form,
     );
     update_json_body_signal(
         shown.response_json,
         id,
-        response_type,
-        &flow.response_body,
+        res_effective_type,
+        res_body_bytes,
         false,
     );
     shown

@@ -345,10 +345,11 @@ pub(crate) fn fill_draft_from_rule_line(
             path_prefix,
             url,
             phase,
+            mode,
             timeout,
             op,
         } => {
-            use crate::rules::HookPhase;
+            use crate::rules::{HookMode, HookPhase};
             draft_kind.set(15);
             draft_modes
                 .req_res
@@ -360,6 +361,9 @@ pub(crate) fn fill_draft_from_rule_line(
             let mut to_parts = Vec::new();
             if matches!(phase, HookPhase::Both) {
                 to_parts.push("both".to_string());
+            }
+            if matches!(mode, HookMode::Preview) {
+                to_parts.push("preview".to_string());
             }
             let ms = timeout.as_millis();
             if ms != 2000 {
