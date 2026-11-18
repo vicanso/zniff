@@ -462,13 +462,13 @@ fn ensure_capture_port_for_launcher(controls: &Controls) -> Option<u16> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn launch_browser_action(controls: Arc<Controls>) {
+pub(crate) fn launch_browser_action(controls: Arc<Controls>, initial_url: Option<String>) {
     std::thread::spawn(move || {
         let Some(port) = ensure_capture_port_for_launcher(&controls) else {
             return;
         };
         let ca = controls.hub.ca.clone();
-        match launcher::launch_isolated_browser(&ca, port) {
+        match launcher::launch_isolated_browser(&ca, port, initial_url.as_deref()) {
             Ok(name) => set_status(&controls, StatusMsg::BrowserLaunched { name, port }),
             Err(err) => set_status(
                 &controls,
@@ -494,6 +494,20 @@ pub(crate) fn launch_terminal_action(controls: Arc<Controls>) {
             ),
         }
     });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn toggle_adb_action(controls: Arc<Controls>) {
+    if launcher::configured_adb_count() > 0 {
+        std::thread::spawn(move || {
+            let cleared = launcher::clear_android_adb_proxies();
+            if cleared > 0 {
+                set_status(&controls, StatusMsg::AdbCleared(cleared));
+            }
+        });
+        return;
+    }
+    configure_adb_action(controls);
 }
 
 #[cfg(not(target_arch = "wasm32"))]

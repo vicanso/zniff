@@ -501,9 +501,34 @@ pub(crate) fn menu_share_row(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn selected_browser_start_url(controls: &Controls, selected_id: Option<u64>) -> Option<String> {
+    let id = selected_id?;
+    controls.hub.with_session(|session| {
+        let flow = session.get(id)?;
+        if flow.protocol == session::Protocol::Tunnel {
+            return None;
+        }
+        let scheme = if flow.url.starts_with("https://") {
+            "https"
+        } else if flow.url.starts_with("http://") {
+            "http"
+        } else {
+            return None;
+        };
+        let host = flow.host.trim();
+        if host.is_empty() {
+            None
+        } else {
+            Some(format!("{scheme}://{host}"))
+        }
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn menu_quick_launch_row(
     open: Signal<bool>,
     controls: Arc<Controls>,
+    selected: Signal<Option<u64>>,
 ) -> impl IntoElement {
     let browser_controls = controls.clone();
     let term_controls = controls.clone();
@@ -531,7 +556,9 @@ pub(crate) fn menu_quick_launch_row(
                     || false,
                     move || {
                         open.set(false);
-                        launch_browser_action(browser_controls.clone());
+                        let start_url =
+                            selected_browser_start_url(&browser_controls, selected.get());
+                        launch_browser_action(browser_controls.clone(), start_url);
                     },
                 ))
                 .child(menu_inline_pill(
@@ -543,11 +570,22 @@ pub(crate) fn menu_quick_launch_row(
                     },
                 ))
                 .child(menu_inline_pill(
-                    "ADB",
-                    || false,
+                    move || {
+                        let _ = open.get();
+                        let count = launcher::configured_adb_count();
+                        if count > 0 {
+                            SharedString::from(format!("ADB · {count}"))
+                        } else {
+                            SharedString::from("ADB")
+                        }
+                    },
+                    move || {
+                        let _ = open.get();
+                        launcher::configured_adb_count() > 0
+                    },
                     move || {
                         open.set(false);
-                        configure_adb_action(adb_controls.clone());
+                        toggle_adb_action(adb_controls.clone());
                     },
                 )),
         )

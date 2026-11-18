@@ -139,8 +139,14 @@ fn detect_chromium_browser() -> Option<BrowserCandidate> {
     None
 }
 
-/// Builds Chromium CLI flags for zero-config isolated HTTPS interception.
-pub fn build_chromium_args(port: u16, spki_hashes: &[String], profile_dir: &Path) -> Vec<String> {
+/// Builds Chromium CLI flags for zero-config isolated HTTPS interception,
+/// optionally opening a specific HTTP(S) initial URL.
+pub fn build_chromium_args(
+    port: u16,
+    spki_hashes: &[String],
+    profile_dir: &Path,
+    initial_url: Option<&str>,
+) -> Vec<String> {
     let mut args = vec![
         format!("--proxy-server=http://127.0.0.1:{port}"),
         format!("--user-data-dir={}", profile_dir.display()),
@@ -153,7 +159,12 @@ pub fn build_chromium_args(port: u16, spki_hashes: &[String], profile_dir: &Path
             spki_hashes.join(",")
         ));
     }
-    args.push(format!("http://127.0.0.1:{port}/zniff"));
+    let start_url = initial_url
+        .map(str::trim)
+        .filter(|u| u.starts_with("http://") || u.starts_with("https://"))
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("http://127.0.0.1:{port}/zniff"));
+    args.push(start_url);
     args
 }
 
@@ -176,7 +187,7 @@ fn sweep_exited_browser_profiles() {
 
 /// Launches an isolated Chromium-based browser pointed at the running proxy
 /// without modifying the OS proxy or system trust store.
-pub fn launch_isolated_browser(ca: &Ca, port: u16) -> Result<String> {
+pub fn launch_isolated_browser(ca: &Ca, port: u16, initial_url: Option<&str>) -> Result<String> {
     sweep_exited_browser_profiles();
     let candidate = detect_chromium_browser()
         .context("未找到 Chrome / Edge / Brave / Chromium，请先安装或手动配置代理")?;
@@ -186,7 +197,7 @@ pub fn launch_isolated_browser(ca: &Ca, port: u16) -> Result<String> {
     fs::create_dir_all(&profile_dir)
         .with_context(|| format!("创建临时浏览器配置目录 {}", profile_dir.display()))?;
     let spki = ca.spki_hashes_base64();
-    let args = build_chromium_args(port, &spki, &profile_dir);
+    let args = build_chromium_args(port, &spki, &profile_dir, initial_url);
     let child = Command::new(&candidate.bin)
         .args(&args)
         .stdin(Stdio::null())
@@ -518,12 +529,22 @@ pub fn configure_android_adb(ca: &Ca, port: u16) -> Result<AdbOutcome> {
     })
 }
 
+/// Number of Android devices currently configured with adb reverse + global proxy by this process.
+pub fn configured_adb_count() -> usize {
+    ADB_PROXIED
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .len()
+}
+
 /// Restores global HTTP proxy and removes `adb reverse` mappings created by this process.
-pub fn clear_android_adb_proxies() {
+/// Returns the number of restored devices.
+pub fn clear_android_adb_proxies() -> usize {
     let items = {
         let mut kept = ADB_PROXIED.lock().unwrap_or_else(|err| err.into_inner());
         std::mem::take(&mut *kept)
     };
+    let count = items.len();
     for (serial, port) in items {
         let _ = Command::new("adb")
             .args(adb_clear_proxy_args(&serial))
@@ -532,11 +553,12 @@ pub fn clear_android_adb_proxies() {
             .args(adb_reverse_remove_args(&serial, port))
             .output();
     }
+    count
 }
 
 /// Process-exit / panic cleanup hook for Android proxies and exited browser temp profiles.
 pub fn cleanup_on_exit() {
-    clear_android_adb_proxies();
+    let _ = clear_android_adb_proxies();
     sweep_exited_browser_profiles();
 }
 
@@ -551,7 +573,7 @@ mod tests {
             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
             "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=".to_string(),
         ];
-        let args = build_chromium_args(8877, &spki, dir);
+        let args = build_chromium_args(8877, &spki, dir, None);
         assert!(args.contains(&"--proxy-server=http://127.0.0.1:8877".to_string()));
         assert!(args.contains(
             &"--ignore-certificate-errors-spki-list=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=,BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=".to_string()
@@ -560,6 +582,18 @@ mod tests {
         assert!(args.contains(&"--no-first-run".to_string()));
         assert_eq!(
             args.last().map(String::as_str),
+            Some("http://127.0.0.1:8877/zniff")
+        );
+
+        let custom = build_chromium_args(8877, &spki, dir, Some("https://api.vicanso.dev"));
+        assert_eq!(
+            custom.last().map(String::as_str),
+            Some("https://api.vicanso.dev")
+        );
+
+        let fallback = build_chromium_args(8877, &spki, dir, Some("javascript:alert(1)"));
+        assert_eq!(
+            fallback.last().map(String::as_str),
             Some("http://127.0.0.1:8877/zniff")
         );
     }

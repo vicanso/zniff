@@ -209,6 +209,7 @@ pub enum StatusMsg {
         port: u16,
         cert_pushed: bool,
     },
+    AdbCleared(usize),
     AdbNoneConnected,
     AdbFailed(String),
     CopiedLinuxCaCmd(String),
@@ -691,6 +692,10 @@ impl StatusMsg {
                     format!("Configured adb proxy 127.0.0.1:{port} on {count} Android device(s)")
                 }
             },
+            Self::AdbCleared(count) => match lang {
+                Lang::Zh => format!("已还原 {count} 台 Android 设备的 adb 代理"),
+                Lang::En => format!("Cleared adb proxy on {count} Android device(s)"),
+            },
             Self::AdbNoneConnected => t(
                 lang,
                 "未检测到已授权的 Android 设备，请先连接 USB/模拟器并开启调试",
@@ -748,6 +753,7 @@ impl StatusMsg {
             | Self::BrowserLaunched { .. }
             | Self::TerminalLaunched { .. }
             | Self::AdbConfigured { .. }
+            | Self::AdbCleared(_)
             | Self::ConfigReset { .. }
             | Self::CopiedConfigPath(_)
             | Self::CopiedSystemInfo
