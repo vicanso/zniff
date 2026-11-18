@@ -15,6 +15,7 @@ fn icon_in_flight() -> &'static Mutex<std::collections::HashSet<String>> {
     IN_FLIGHT.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
 }
 
+#[cfg(any(test, all(not(target_arch = "wasm32"), target_os = "macos")))]
 pub(crate) fn base_app_name(raw: &str) -> String {
     let name = session::strip_subprocess_suffix(raw);
     match name {
