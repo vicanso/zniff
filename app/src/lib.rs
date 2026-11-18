@@ -22,6 +22,9 @@ mod har;
 mod i18n;
 mod icon;
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+mod launcher;
+#[cfg(not(target_arch = "wasm32"))]
 mod local_proc;
 #[cfg(not(target_arch = "wasm32"))]
 mod mcp;
@@ -50,6 +53,8 @@ mod ws;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use ca::clear_ios_simulator_proxies;
+#[cfg(not(target_arch = "wasm32"))]
+pub use launcher::cleanup_on_exit as cleanup_launchers;
 use nsh_core::prelude::{Registry, native_module};
 #[cfg(not(target_arch = "wasm32"))]
 pub use relay::shutdown_relay_push;

@@ -106,6 +106,7 @@ pub(crate) fn more_menu(
         },
     ));
     let items = desktop_child!(items, menu_rule());
+    let items = desktop_child!(items, menu_quick_launch_row(open, import_controls.clone()));
     let items = desktop_child!(items, proxy_menu_item(proxy_on, toggle_proxy));
     let items = desktop_child!(
         items,

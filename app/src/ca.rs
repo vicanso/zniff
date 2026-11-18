@@ -56,6 +56,7 @@ pub struct Ca {
     /// inside or outside `leaves` lock.
     leaf_key: KeyPair,
     leaf_key_der: Vec<u8>,
+    leaf_spki_der: Vec<u8>,
     leaf_seq: AtomicU64,
     session_storage: Arc<dyn rustls::server::StoresServerSessions>,
     leaves: Mutex<HashMap<String, CachedLeaf>>,
@@ -176,6 +177,11 @@ impl Ca {
         let ca_name = extract_ca_common_name(&ca_der).unwrap_or_else(|| CA_NAME.to_string());
         let leaf_key = KeyPair::generate().context("生成叶子证书密钥")?;
         let leaf_key_der = leaf_key.serialize_der();
+        let leaf_spki_der = CertificateParams::default()
+            .self_signed(&leaf_key)
+            .ok()
+            .and_then(|cert| extract_spki_der(cert.der().as_ref()).map(ToOwned::to_owned))
+            .unwrap_or_default();
         Ok(Self {
             dir,
             ca_name,
@@ -183,6 +189,7 @@ impl Ca {
             ca_der,
             leaf_key,
             leaf_key_der,
+            leaf_spki_der,
             leaf_seq: AtomicU64::new(0),
             session_storage: rustls::server::ServerSessionMemoryCache::new(64),
             leaves: Mutex::new(HashMap::new()),
@@ -200,6 +207,26 @@ impl Ca {
 
     pub fn trust_status(&self) -> CaStatus {
         trust_status(self)
+    }
+
+    /// Returns Base64-encoded SHA-256 SubjectPublicKeyInfo digests for the root CA
+    /// and shared leaf keypair, suitable for Chromium's `--ignore-certificate-errors-spki-list`.
+    pub fn spki_hashes_base64(&self) -> Vec<String> {
+        let mut hashes = Vec::new();
+        for spki in [
+            extract_spki_der(self.ca_der.as_ref()),
+            (!self.leaf_spki_der.is_empty()).then_some(self.leaf_spki_der.as_slice()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let digest = ring::digest::digest(&ring::digest::SHA256, spki);
+            let encoded = crate::session::base64_encode(digest.as_ref());
+            if !hashes.contains(&encoded) {
+                hashes.push(encoded);
+            }
+        }
+        hashes
     }
 
     #[cfg(test)]
@@ -559,6 +586,31 @@ fn read_der_tlv(input: &[u8]) -> Option<(u8, &[u8], &[u8])> {
         return None;
     }
     Some((tag, &rest[..len], &rest[len..]))
+}
+
+fn extract_spki_der(cert_der: &[u8]) -> Option<&[u8]> {
+    let (cert_tag, cert_body, _) = read_der_tlv(cert_der)?;
+    if cert_tag != 0x30 {
+        return None;
+    }
+    let (tbs_tag, mut tbs_rest, _) = read_der_tlv(cert_body)?;
+    if tbs_tag != 0x30 {
+        return None;
+    }
+    if let Some((0xa0, _, next)) = read_der_tlv(tbs_rest) {
+        tbs_rest = next;
+    }
+    // Skip serialNumber, signature, issuer, validity, subject (5 TLVs).
+    for _ in 0..5 {
+        let (_, _, next) = read_der_tlv(tbs_rest)?;
+        tbs_rest = next;
+    }
+    let spki_start = tbs_rest;
+    let (spki_tag, _, after_spki) = read_der_tlv(spki_start)?;
+    if spki_tag != 0x30 {
+        return None;
+    }
+    Some(&spki_start[..spki_start.len() - after_spki.len()])
 }
 
 fn extract_ca_common_name(ca_der: &CertificateDer<'_>) -> Option<String> {
@@ -1941,6 +1993,32 @@ Cert 0: zniff CA
                 .unwrap();
         }
         assert_eq!(ca.leaves.lock().unwrap().len(), MAX_CACHED_LEAVES);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn spki_hashes_cover_root_and_minted_leaf_certificates() {
+        let dir = std::env::temp_dir().join(format!("zniff-ca-spki-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let ca = Ca::open(&dir).unwrap();
+        let hashes = ca.spki_hashes_base64();
+        assert_eq!(hashes.len(), 2, "root CA and leaf key have distinct SPKI");
+        for hash in &hashes {
+            assert_eq!(hash.len(), 44, "Base64 SHA-256 must be 44 chars: {hash}");
+        }
+
+        let leaf_entry = ca.sign_leaf_entry("api.vicanso.dev", 1).unwrap();
+        // Minted leaf shares `leaf_key`, so its DER SPKI hash must match `hashes[1]`.
+        let mut params = CertificateParams::default();
+        params.is_ca = IsCa::NoCa;
+        params.subject_alt_names = vec![san_for("api.vicanso.dev").unwrap()];
+        let signed = params.signed_by(&ca.leaf_key, &ca.issuer).unwrap();
+        let leaf_spki = extract_spki_der(signed.der().as_ref()).expect("leaf SPKI");
+        let leaf_digest = ring::digest::digest(&ring::digest::SHA256, leaf_spki);
+        let expected = crate::session::base64_encode(leaf_digest.as_ref());
+        assert_eq!(hashes[1], expected);
+        assert_eq!(leaf_entry.used_seq, 1);
+
         let _ = fs::remove_dir_all(&dir);
     }
 }

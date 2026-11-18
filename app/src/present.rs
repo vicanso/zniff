@@ -824,7 +824,9 @@ pub fn proxy_env(port: u16, cert_path: &str) -> String {
     proxy_env_with_auth(port, cert_path, "")
 }
 
-pub fn proxy_env_with_auth(port: u16, cert_path: &str, proxy_auth: &str) -> String {
+/// Returns raw environment `(NAME, VALUE)` pairs for proxying CLI tools, Node,
+/// Python, Git, Cargo, Deno, and JVM processes through zniff.
+pub fn proxy_env_vars(port: u16, cert_path: &str, proxy_auth: &str) -> Vec<(&'static str, String)> {
     let trimmed_auth = proxy_auth.trim();
     let proxy = if trimmed_auth.is_empty() {
         format!("http://127.0.0.1:{port}")
@@ -836,27 +838,50 @@ pub fn proxy_env_with_auth(port: u16, cert_path: &str, proxy_auth: &str) -> Stri
             encode_userinfo_component(pass)
         )
     };
-    let cert = shell_quote(cert_path);
-    let java_opts = shell_quote(&format!(
+    let java_opts = format!(
         "-Dhttp.proxyHost=127.0.0.1 -Dhttp.proxyPort={port} -Dhttps.proxyHost=127.0.0.1 -Dhttps.proxyPort={port}"
-    ));
-    [
-        format!("export http_proxy={proxy}"),
-        format!("export https_proxy={proxy}"),
-        format!("export all_proxy={proxy}"),
-        format!("export HTTP_PROXY={proxy}"),
-        format!("export HTTPS_PROXY={proxy}"),
-        format!("export ALL_PROXY={proxy}"),
-        format!("export SSL_CERT_FILE={cert}"),
-        format!("export NODE_EXTRA_CA_CERTS={cert}"),
-        format!("export REQUESTS_CA_BUNDLE={cert}"),
-        format!("export CURL_CA_BUNDLE={cert}"),
-        format!("export GIT_SSL_CAINFO={cert}"),
-        format!("export CARGO_HTTP_CAINFO={cert}"),
-        format!("export DENO_CERT={cert}"),
-        format!("export JAVA_TOOL_OPTIONS={java_opts}"),
+    );
+    vec![
+        ("http_proxy", proxy.clone()),
+        ("https_proxy", proxy.clone()),
+        ("all_proxy", proxy.clone()),
+        ("HTTP_PROXY", proxy.clone()),
+        ("HTTPS_PROXY", proxy.clone()),
+        ("ALL_PROXY", proxy),
+        ("SSL_CERT_FILE", cert_path.to_string()),
+        ("NODE_EXTRA_CA_CERTS", cert_path.to_string()),
+        ("REQUESTS_CA_BUNDLE", cert_path.to_string()),
+        ("CURL_CA_BUNDLE", cert_path.to_string()),
+        ("GIT_SSL_CAINFO", cert_path.to_string()),
+        ("CARGO_HTTP_CAINFO", cert_path.to_string()),
+        ("DENO_CERT", cert_path.to_string()),
+        ("JAVA_TOOL_OPTIONS", java_opts),
     ]
-    .join("\n")
+}
+
+pub fn proxy_env_with_auth(port: u16, cert_path: &str, proxy_auth: &str) -> String {
+    proxy_env_vars(port, cert_path, proxy_auth)
+        .into_iter()
+        .map(|(name, value)| {
+            let formatted = if matches!(
+                name,
+                "SSL_CERT_FILE"
+                    | "NODE_EXTRA_CA_CERTS"
+                    | "REQUESTS_CA_BUNDLE"
+                    | "CURL_CA_BUNDLE"
+                    | "GIT_SSL_CAINFO"
+                    | "CARGO_HTTP_CAINFO"
+                    | "DENO_CERT"
+                    | "JAVA_TOOL_OPTIONS"
+            ) {
+                shell_quote(&value)
+            } else {
+                value
+            };
+            format!("export {name}={formatted}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[cfg(test)]

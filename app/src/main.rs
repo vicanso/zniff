@@ -28,6 +28,7 @@ fn main() -> impl std::process::Termination {
             eprintln!("panic 时恢复系统代理失败: {err:#}");
         }
         zniff::clear_ios_simulator_proxies();
+        zniff::cleanup_launchers();
         zniff::shutdown_relay_push();
         previous(info);
     }));

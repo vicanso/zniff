@@ -190,6 +190,23 @@ pub enum StatusMsg {
     },
     IosSimNoneBooted,
     IosSimFailed(String),
+    BrowserLaunched {
+        name: String,
+        port: u16,
+    },
+    BrowserLaunchFailed(String),
+    TerminalLaunched {
+        name: String,
+        port: u16,
+    },
+    TerminalLaunchFailed(String),
+    AdbConfigured {
+        count: usize,
+        port: u16,
+        cert_pushed: bool,
+    },
+    AdbNoneConnected,
+    AdbFailed(String),
     CopiedLinuxCaCmd(String),
     CopiedSystemInfo,
 }
@@ -624,6 +641,54 @@ impl StatusMsg {
                 Lang::Zh => format!("iOS 模拟器配置失败: {err}"),
                 Lang::En => format!("iOS Simulator setup failed: {err}"),
             },
+            Self::BrowserLaunched { name, port } => match lang {
+                Lang::Zh => {
+                    format!("已启动隔离 {name}，代理 127.0.0.1:{port}（免改系统代理与证书）")
+                }
+                Lang::En => format!(
+                    "Launched isolated {name} via 127.0.0.1:{port} (no OS proxy/CA changes)"
+                ),
+            },
+            Self::BrowserLaunchFailed(err) => match lang {
+                Lang::Zh => format!("启动隔离浏览器失败: {err}"),
+                Lang::En => format!("Failed to launch isolated browser: {err}"),
+            },
+            Self::TerminalLaunched { name, port } => match lang {
+                Lang::Zh => format!("已在 {name} 中打开预注入代理终端（127.0.0.1:{port}）"),
+                Lang::En => format!("Opened proxied {name} terminal (127.0.0.1:{port})"),
+            },
+            Self::TerminalLaunchFailed(err) => match lang {
+                Lang::Zh => format!("启动代理终端失败: {err}"),
+                Lang::En => format!("Failed to launch proxied terminal: {err}"),
+            },
+            Self::AdbConfigured {
+                count,
+                port,
+                cert_pushed,
+            } => match (lang, *cert_pushed) {
+                (Lang::Zh, true) => format!(
+                    "已为 {count} 台 Android 设备配置 adb 反向代理 127.0.0.1:{port}，并推送根证书至 /sdcard/Download/zniff-ca.crt"
+                ),
+                (Lang::Zh, false) => {
+                    format!("已为 {count} 台 Android 设备配置 adb 反向代理 127.0.0.1:{port}")
+                }
+                (Lang::En, true) => format!(
+                    "Configured adb proxy 127.0.0.1:{port} on {count} Android device(s) and pushed CA to /sdcard/Download/zniff-ca.crt"
+                ),
+                (Lang::En, false) => {
+                    format!("Configured adb proxy 127.0.0.1:{port} on {count} Android device(s)")
+                }
+            },
+            Self::AdbNoneConnected => t(
+                lang,
+                "未检测到已授权的 Android 设备，请先连接 USB/模拟器并开启调试",
+                "No authorized Android device found; connect a device/emulator with USB debugging",
+            )
+            .into(),
+            Self::AdbFailed(err) => match lang {
+                Lang::Zh => format!("Android adb 配置失败: {err}"),
+                Lang::En => format!("Android adb setup failed: {err}"),
+            },
             Self::CopiedLinuxCaCmd(cmd) => match lang {
                 Lang::Zh => format!("已复制系统证书安装命令 · {cmd}"),
                 Lang::En => format!("Copied system CA install command · {cmd}"),
@@ -667,6 +732,9 @@ impl StatusMsg {
             | Self::Replayed(_)
             | Self::Repeated { .. }
             | Self::IosSimInstalled { .. }
+            | Self::BrowserLaunched { .. }
+            | Self::TerminalLaunched { .. }
+            | Self::AdbConfigured { .. }
             | Self::ConfigReset { .. }
             | Self::CopiedConfigPath(_)
             | Self::CopiedSystemInfo
@@ -700,6 +768,10 @@ impl StatusMsg {
             | Self::FlowGone
             | Self::IosSimNoneBooted
             | Self::IosSimFailed(_)
+            | Self::BrowserLaunchFailed(_)
+            | Self::TerminalLaunchFailed(_)
+            | Self::AdbNoneConnected
+            | Self::AdbFailed(_)
             | Self::UpdateCheckFailed(_)
             | Self::UpdateFailed { .. }
             | Self::ConfigBroken { .. } => Some(true),
@@ -753,6 +825,9 @@ impl StatusMsg {
             | Self::InstallFailed(_)
             | Self::RemoveFailed(_)
             | Self::IosSimFailed(_)
+            | Self::BrowserLaunchFailed(_)
+            | Self::TerminalLaunchFailed(_)
+            | Self::AdbFailed(_)
             | Self::UpdateCheckFailed(_)
             | Self::UpdateFailed { .. } => t(lang, "操作失败", "Action Failed"),
             Self::ConfigBroken { .. } => t(lang, "配置错误", "Configuration Error"),

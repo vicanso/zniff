@@ -353,6 +353,7 @@ pub(crate) fn shutdown_capture_for_exit(controls: &Controls) {
     relay::shutdown_relay_push();
     controls.hub.end_share();
     ca::clear_ios_simulator_proxies();
+    launcher::clear_android_adb_proxies();
     if lock_bool(&controls.proxy_applied) {
         set_bool(&controls.proxy_applied, false);
         let _ = sysproxy::disable();
@@ -444,6 +445,83 @@ pub(crate) fn install_ca_ios_sim(controls: Arc<Controls>) {
             Err(err) => {
                 set_status(&controls, StatusMsg::IosSimFailed(format!("{err:#}")));
             }
+        }
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn ensure_capture_port_for_launcher(controls: &Controls) -> Option<u16> {
+    if !lock_bool(&controls.running) {
+        start_capture(controls);
+    }
+    if !lock_bool(&controls.running) {
+        return None;
+    }
+    let port = lock_port(&controls.listen_port);
+    (port > 0).then_some(port)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn launch_browser_action(controls: Arc<Controls>) {
+    std::thread::spawn(move || {
+        let Some(port) = ensure_capture_port_for_launcher(&controls) else {
+            return;
+        };
+        let ca = controls.hub.ca.clone();
+        match launcher::launch_isolated_browser(&ca, port) {
+            Ok(name) => set_status(&controls, StatusMsg::BrowserLaunched { name, port }),
+            Err(err) => set_status(
+                &controls,
+                StatusMsg::BrowserLaunchFailed(format!("{err:#}")),
+            ),
+        }
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn launch_terminal_action(controls: Arc<Controls>) {
+    std::thread::spawn(move || {
+        let Some(port) = ensure_capture_port_for_launcher(&controls) else {
+            return;
+        };
+        let ca = controls.hub.ca.clone();
+        let auth = controls.hub.proxy_auth_text();
+        match launcher::launch_proxied_terminal(&ca, port, &auth) {
+            Ok(name) => set_status(&controls, StatusMsg::TerminalLaunched { name, port }),
+            Err(err) => set_status(
+                &controls,
+                StatusMsg::TerminalLaunchFailed(format!("{err:#}")),
+            ),
+        }
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn configure_adb_action(controls: Arc<Controls>) {
+    std::thread::spawn(move || {
+        let Some(port) = ensure_capture_port_for_launcher(&controls) else {
+            return;
+        };
+        let ca = controls.hub.ca.clone();
+        match launcher::configure_android_adb(&ca, port) {
+            Ok(launcher::AdbOutcome::Configured {
+                count,
+                port,
+                cert_pushed,
+            }) => {
+                set_status(
+                    &controls,
+                    StatusMsg::AdbConfigured {
+                        count,
+                        port,
+                        cert_pushed,
+                    },
+                );
+            }
+            Ok(launcher::AdbOutcome::NoneConnected) => {
+                set_status(&controls, StatusMsg::AdbNoneConnected);
+            }
+            Err(err) => set_status(&controls, StatusMsg::AdbFailed(format!("{err:#}"))),
         }
     });
 }
@@ -726,6 +804,7 @@ pub(crate) fn stop_capture(controls: &Controls) {
     stop_relay_push(controls);
     controls.hub.end_share();
     ca::clear_ios_simulator_proxies();
+    launcher::clear_android_adb_proxies();
     *controls
         .listen
         .lock()
@@ -786,6 +865,7 @@ pub(crate) fn switch_to_lan(controls: Arc<Controls>) {
             }
             Err(err) => {
                 ca::clear_ios_simulator_proxies();
+                launcher::clear_android_adb_proxies();
                 *controls
                     .listen
                     .lock()

@@ -494,6 +494,59 @@ pub(crate) fn menu_share_row(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn menu_quick_launch_row(
+    open: Signal<bool>,
+    controls: Arc<Controls>,
+) -> impl IntoElement {
+    let browser_controls = controls.clone();
+    let term_controls = controls.clone();
+    let adb_controls = controls;
+    view()
+        .h(px(32.0))
+        .px_2p5()
+        .gap_2()
+        .rounded(px(6.0))
+        .flex_row()
+        .items_center()
+        .child(glyph(|| Glyph::Globe, || color(fg_secondary())))
+        .child(
+            control_text(tr("免配抓包", "Launch"))
+                .flex_1()
+                .text_color(fg_secondary()),
+        )
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .child(menu_inline_pill(
+                    tr("浏览器", "Browser"),
+                    || false,
+                    move || {
+                        open.set(false);
+                        launch_browser_action(browser_controls.clone());
+                    },
+                ))
+                .child(menu_inline_pill(
+                    tr("终端", "Term"),
+                    || false,
+                    move || {
+                        open.set(false);
+                        launch_terminal_action(term_controls.clone());
+                    },
+                ))
+                .child(menu_inline_pill(
+                    "ADB",
+                    || false,
+                    move || {
+                        open.set(false);
+                        configure_adb_action(adb_controls.clone());
+                    },
+                )),
+        )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn menu_copy_config_row(
     open: Signal<bool>,
     copy_env: impl Fn() + 'static,
