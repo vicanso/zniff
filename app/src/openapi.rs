@@ -597,6 +597,145 @@ pub fn build_openapi_json(flows: &[Flow], redact: &RedactOptions) -> String {
         .unwrap_or_else(|_| "{}".to_string())
 }
 
+pub fn build_openapi_yaml(flows: &[Flow], redact: &RedactOptions) -> String {
+    json_value_to_yaml(&build_openapi_value(flows, redact))
+}
+
+fn yaml_needs_quotes(s: &str) -> bool {
+    if s.is_empty()
+        || s.starts_with(char::is_whitespace)
+        || s.ends_with(char::is_whitespace)
+        || matches!(
+            s.to_ascii_lowercase().as_str(),
+            "true" | "false" | "null" | "~" | "yes" | "no" | "on" | "off" | "y" | "n"
+        )
+    {
+        return true;
+    }
+    if s.parse::<f64>().is_ok() {
+        return true;
+    }
+    if let Some(first) = s.chars().next()
+        && matches!(
+            first,
+            '-' | '?'
+                | ':'
+                | ','
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '#'
+                | '&'
+                | '*'
+                | '!'
+                | '|'
+                | '>'
+                | '\''
+                | '"'
+                | '%'
+                | '@'
+                | '`'
+        )
+    {
+        return true;
+    }
+    s.chars()
+        .any(|c| c.is_control() || matches!(c, ':' | '#' | '{' | '}' | '[' | ']' | ','))
+}
+
+fn format_yaml_scalar_str(s: &str) -> String {
+    if yaml_needs_quotes(s) {
+        serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
+    } else {
+        s.to_string()
+    }
+}
+
+fn write_yaml_value(out: &mut String, value: &Value, indent: usize) {
+    let pad = " ".repeat(indent);
+    match value {
+        Value::Null => out.push_str("null"),
+        Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+        Value::Number(n) => out.push_str(&n.to_string()),
+        Value::String(s) => out.push_str(&format_yaml_scalar_str(s)),
+        Value::Array(items) => {
+            if items.is_empty() {
+                out.push_str("[]");
+                return;
+            }
+            for (idx, item) in items.iter().enumerate() {
+                if idx > 0 {
+                    out.push('\n');
+                }
+                out.push_str(&pad);
+                match item {
+                    Value::Object(map) if !map.is_empty() => {
+                        out.push_str("- ");
+                        for (k_idx, (k, v)) in map.iter().enumerate() {
+                            if k_idx > 0 {
+                                out.push('\n');
+                                out.push_str(&pad);
+                                out.push_str("  ");
+                            }
+                            write_yaml_entry(out, k, v, indent + 2);
+                        }
+                    }
+                    Value::Array(nested) if !nested.is_empty() => {
+                        out.push_str("-\n");
+                        write_yaml_value(out, item, indent + 2);
+                    }
+                    _ => {
+                        out.push_str("- ");
+                        write_yaml_value(out, item, indent + 2);
+                    }
+                }
+            }
+        }
+        Value::Object(map) => {
+            if map.is_empty() {
+                out.push_str("{}");
+                return;
+            }
+            for (idx, (k, v)) in map.iter().enumerate() {
+                if idx > 0 {
+                    out.push('\n');
+                }
+                out.push_str(&pad);
+                write_yaml_entry(out, k, v, indent);
+            }
+        }
+    }
+}
+
+fn write_yaml_entry(out: &mut String, key: &str, value: &Value, indent: usize) {
+    out.push_str(&format_yaml_scalar_str(key));
+    match value {
+        Value::Object(map) if !map.is_empty() => {
+            out.push_str(":\n");
+            write_yaml_value(out, value, indent + 2);
+        }
+        Value::Array(items) if !items.is_empty() => {
+            out.push_str(":\n");
+            write_yaml_value(out, value, indent + 2);
+        }
+        _ => {
+            out.push_str(": ");
+            write_yaml_value(out, value, indent + 2);
+        }
+    }
+}
+
+/// Converts a `serde_json::Value` (such as an OpenAPI document) into YAML 1.2 block syntax.
+pub fn json_value_to_yaml(value: &Value) -> String {
+    let mut out = String::new();
+    write_yaml_value(&mut out, value, 0);
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
 /// Returns `(path_count, operation_count)` for summary reporting.
 pub fn count_openapi_operations(doc: &Value) -> (usize, usize) {
     let Some(paths) = doc.get("paths").and_then(Value::as_object) else {
@@ -702,5 +841,27 @@ mod tests {
         assert!(!required.iter().any(|v| v == "extra"));
         // Redaction masks sensitive keys before synthesis -> `token` must be present, value masked.
         assert_eq!(schema["properties"]["token"]["type"], "string");
+    }
+
+    #[test]
+    fn yaml_export_produces_valid_block_yaml_for_openapi_document() {
+        let f = sample_flow(
+            1,
+            "POST",
+            "/v1/users/42?flag=true",
+            201,
+            br#"{"name":"alice"}"#,
+            br#"{"id":42,"ok":true}"#,
+        );
+        let yaml = build_openapi_yaml(&[f], &RedactOptions::default());
+        assert!(yaml.contains("openapi: 3.0.3\n"), "{yaml}");
+        assert!(yaml.contains("paths:\n"), "{yaml}");
+        assert!(yaml.contains("  \"/v1/users/{id}\":\n"), "{yaml}");
+        assert!(yaml.contains("    post:\n"), "{yaml}");
+        assert!(yaml.contains("      \"201\":\n"), "{yaml}");
+        assert!(
+            yaml.contains("  - url: \"https://api.vicanso.dev\"\n"),
+            "{yaml}"
+        );
     }
 }

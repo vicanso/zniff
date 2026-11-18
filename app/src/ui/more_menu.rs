@@ -36,6 +36,7 @@ pub(crate) fn more_menu(
             rows,
             filter,
         ))
+        .child(menu_openapi_row(open, import_controls.clone(), filter))
         .child(menu_redact_row(
             open,
             import_controls.clone(),

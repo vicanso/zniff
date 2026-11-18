@@ -233,6 +233,11 @@ pub fn tools_list_value() -> Value {
                         "redact": {
                             "type": "boolean",
                             "description": "When true (default false), redacts sensitive headers/tokens/fields using saved redaction settings before synthesis."
+                        },
+                        "format": {
+                            "type": "string",
+                            "enum": ["json", "yaml"],
+                            "description": "Optional output format (`json` default, or `yaml` to include a YAML string in the response)."
                         }
                     }
                 }
@@ -863,6 +868,10 @@ fn tool_manage_breaks(hub: &Hub, args: &Value) -> Value {
 fn tool_generate_openapi(hub: &Hub, args: &Value) -> Value {
     let filter = args.get("filter").and_then(Value::as_str).unwrap_or("");
     let redact_on = args.get("redact").and_then(Value::as_bool).unwrap_or(false);
+    let want_yaml = args
+        .get("format")
+        .and_then(Value::as_str)
+        .is_some_and(|s| s.eq_ignore_ascii_case("yaml"));
     let (matched, _) = hub.matching_ids(filter);
     let flows = hub.with_session(|session| {
         matched
@@ -876,11 +885,22 @@ fn tool_generate_openapi(hub: &Hub, args: &Value) -> Value {
     };
     let spec = crate::openapi::build_openapi_value(&flows, &redact);
     let (paths, operations) = crate::openapi::count_openapi_operations(&spec);
-    tool_json(&json!({
-        "paths": paths,
-        "operations": operations,
-        "spec": spec,
-    }))
+    if want_yaml {
+        let yaml = crate::openapi::json_value_to_yaml(&spec);
+        tool_json(&json!({
+            "paths": paths,
+            "operations": operations,
+            "format": "yaml",
+            "yaml": yaml,
+            "spec": spec,
+        }))
+    } else {
+        tool_json(&json!({
+            "paths": paths,
+            "operations": operations,
+            "spec": spec,
+        }))
+    }
 }
 
 fn parse_headers_arg(val: &Value) -> Option<Vec<(String, String)>> {

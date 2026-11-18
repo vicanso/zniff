@@ -349,27 +349,54 @@ pub(crate) fn export_html_file(controls: Arc<Controls>, filter: &str, zh: bool) 
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn export_openapi_file(controls: Arc<Controls>, filter: &str) {
+pub(crate) fn export_openapi_file(controls: Arc<Controls>, filter: &str, yaml: bool) {
     let flows = matched_hydrated_flows(&controls, filter);
     let redact = redact_options(&controls);
-    let json = openapi::build_openapi_json(&flows, &redact);
+    let (body, ext, label, exts): (String, &str, &str, &[&str]) = if yaml {
+        (
+            openapi::build_openapi_yaml(&flows, &redact),
+            "yaml",
+            "OpenAPI YAML",
+            &["yaml", "yml"],
+        )
+    } else {
+        (
+            openapi::build_openapi_json(&flows, &redact),
+            "json",
+            "OpenAPI JSON",
+            &["json"],
+        )
+    };
     let secs = unix_secs_now();
     let dialog = save_dialog_with_default_dir()
-        .file_name(format!("zniff-{secs}.openapi.json"))
+        .file_name(format!("zniff-{secs}.openapi.{ext}"))
         .filter(nsh_core::file_dialog::FileFilter::new(
-            "OpenAPI JSON",
-            ["json"],
+            label,
+            exts.iter().copied(),
         ));
-    spawn_export_save(controls, dialog, json.into_bytes());
+    spawn_export_save(controls, dialog, body.into_bytes());
 }
 
 #[cfg(target_arch = "wasm32")]
-pub(crate) fn export_openapi_file(controls: Arc<Controls>, filter: &str) {
-    let rel = format!(
-        "api/export.openapi.json?{}",
-        export_filter_query(&controls, filter)
-    );
-    web_export_download(controls, rel, "zniff.openapi.json");
+pub(crate) fn export_openapi_file(controls: Arc<Controls>, filter: &str, yaml: bool) {
+    let (endpoint, name) = if yaml {
+        ("api/export.openapi.yaml", "zniff.openapi.yaml")
+    } else {
+        ("api/export.openapi.json", "zniff.openapi.json")
+    };
+    let rel = format!("{endpoint}?{}", export_filter_query(&controls, filter));
+    web_export_download(controls, rel, name);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn copy_openapi_yaml(controls: &Controls, filter: &str) {
+    let flows = matched_hydrated_flows(controls, filter);
+    let redact = redact_options(controls);
+    let doc = openapi::build_openapi_value(&flows, &redact);
+    let (paths, operations) = openapi::count_openapi_operations(&doc);
+    let yaml = openapi::json_value_to_yaml(&doc);
+    set_clipboard(yaml);
+    set_status(controls, StatusMsg::CopiedOpenApi { paths, operations });
 }
 
 #[cfg(not(target_arch = "wasm32"))]

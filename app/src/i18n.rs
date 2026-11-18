@@ -128,6 +128,10 @@ pub enum StatusMsg {
         files: usize,
         hosts: usize,
     },
+    CopiedOpenApi {
+        paths: usize,
+        operations: usize,
+    },
     Shared {
         url: String,
         minutes: u64,
@@ -436,6 +440,14 @@ impl StatusMsg {
                 }
                 Lang::En => {
                     format!("Exported {files} mock file(s) and added {hosts} map-local rule(s)")
+                }
+            },
+            Self::CopiedOpenApi { paths, operations } => match lang {
+                Lang::Zh => {
+                    format!("已复制 OpenAPI 3.0 YAML · {paths} 个路径 / {operations} 个接口")
+                }
+                Lang::En => {
+                    format!("Copied OpenAPI 3.0 YAML · {paths} path(s), {operations} operation(s)")
                 }
             },
             Self::Shared {
@@ -756,6 +768,7 @@ impl StatusMsg {
             | Self::AdbCleared(_)
             | Self::ConfigReset { .. }
             | Self::CopiedConfigPath(_)
+            | Self::CopiedOpenApi { .. }
             | Self::CopiedSystemInfo
             | Self::UpdateUpToDate(_)
             | Self::UpdateAvailable(_) => Some(false),
@@ -826,6 +839,7 @@ impl StatusMsg {
             | Self::SequenceGenerated { .. }
             | Self::CopiedLinuxCaCmd(_)
             | Self::CopiedConfigPath(_)
+            | Self::CopiedOpenApi { .. }
             | Self::CopiedSystemInfo
             | Self::Shared { .. }
             | Self::RelayConnected(_) => t(lang, "已复制到剪贴板", "Copied to Clipboard"),

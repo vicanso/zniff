@@ -927,8 +927,9 @@ async fn route(
             };
             return (export_har_reply(&hub, &filter, &redact), clean_nobody);
         }
-        if path == "/api/export.openapi.json" {
+        if path == "/api/export.openapi.json" || path == "/api/export.openapi.yaml" {
             let filter = query_value(&head.target, "filter");
+            let yaml = path.ends_with(".yaml");
             let (hub, redact) = {
                 let guard = lock(slot);
                 (
@@ -936,7 +937,10 @@ async fn route(
                     redact_options_for_target(&guard.prefs, &head.target),
                 )
             };
-            return (export_openapi_reply(&hub, &filter, &redact), clean_nobody);
+            return (
+                export_openapi_reply(&hub, &filter, &redact, yaml),
+                clean_nobody,
+            );
         }
         if path == "/api/export.html" {
             let filter = query_value(&head.target, "filter");
@@ -1436,7 +1440,12 @@ fn export_har_reply(hub: &Hub, filter: &str, redact: &crate::share::RedactOption
     }
 }
 
-fn export_openapi_reply(hub: &Hub, filter: &str, redact: &crate::share::RedactOptions) -> Reply {
+fn export_openapi_reply(
+    hub: &Hub,
+    filter: &str,
+    redact: &crate::share::RedactOptions,
+    yaml: bool,
+) -> Reply {
     let (matched, _) = hub.matching_ids(filter);
     let flows = hub.with_session(|session| {
         matched
@@ -1444,7 +1453,19 @@ fn export_openapi_reply(hub: &Hub, filter: &str, redact: &crate::share::RedactOp
             .filter_map(|(id, _)| session.hydrated(id))
             .collect::<Vec<_>>()
     });
-    let json = crate::openapi::build_openapi_json(&flows, redact);
+    let (body, content_type, ext) = if yaml {
+        (
+            crate::openapi::build_openapi_yaml(&flows, redact).into_bytes(),
+            "application/yaml; charset=utf-8",
+            "yaml",
+        )
+    } else {
+        (
+            crate::openapi::build_openapi_json(&flows, redact).into_bytes(),
+            "application/json; charset=utf-8",
+            "json",
+        )
+    };
     let secs = crate::clock::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -1452,13 +1473,13 @@ fn export_openapi_reply(hub: &Hub, filter: &str, redact: &crate::share::RedactOp
     Reply {
         status: 200,
         reason: "OK",
-        content_type: std::borrow::Cow::Borrowed("application/json; charset=utf-8"),
-        attachment: Some(format!("zniff-{secs}.openapi.json")),
+        content_type: std::borrow::Cow::Borrowed(content_type),
+        attachment: Some(format!("zniff-{secs}.openapi.{ext}")),
         location: None,
         encoding: None,
         vary_encoding: false,
         cache_control: "no-store",
-        body: json.into_bytes(),
+        body,
     }
 }
 
@@ -3585,6 +3606,13 @@ mod tests {
         .await;
         assert_eq!(status, 200);
         assert!(oa_resp.contains("\"openapi\": \"3.0.3\""), "{oa_resp}");
+        let (status, oa_yaml_resp) = exchange(
+            web,
+            "GET /api/export.openapi.yaml HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert!(oa_yaml_resp.contains("openapi: 3.0.3"), "{oa_yaml_resp}");
         assert!(!oa_resp.contains("top-secret"), "{oa_resp}");
 
         drop(server);

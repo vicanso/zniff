@@ -260,8 +260,9 @@ pub(crate) fn menu_export_row(
                         export_har();
                     },
                 ))
-                .child(menu_inline_pill("HTML", || false, {
-                    let controls = controls.clone();
+                .child(menu_inline_pill(
+                    "HTML",
+                    || false,
                     move || {
                         open.set(false);
                         export_html_file(
@@ -269,17 +270,61 @@ pub(crate) fn menu_export_row(
                             &filter.get(),
                             ui_lang(langs) == Lang::Zh,
                         );
-                    }
-                }))
-                .child(menu_inline_pill(
-                    "OpenAPI",
-                    || false,
-                    move || {
-                        open.set(false);
-                        export_openapi_file(controls.clone(), &filter.get());
                     },
                 )),
         )
+}
+
+pub(crate) fn menu_openapi_row(
+    open: Signal<bool>,
+    controls: Arc<Controls>,
+    filter: Signal<String>,
+) -> impl IntoElement {
+    let json_controls = controls.clone();
+    let yaml_controls = controls.clone();
+    #[cfg(not(target_arch = "wasm32"))]
+    let copy_controls = controls;
+    let pills = view()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .child(menu_inline_pill(
+            "JSON",
+            || false,
+            move || {
+                open.set(false);
+                export_openapi_file(json_controls.clone(), &filter.get(), false);
+            },
+        ))
+        .child(menu_inline_pill(
+            "YAML",
+            || false,
+            move || {
+                open.set(false);
+                export_openapi_file(yaml_controls.clone(), &filter.get(), true);
+            },
+        ));
+    let pills = desktop_child!(
+        pills,
+        menu_inline_pill(
+            tr("复制", "Copy"),
+            || false,
+            move || {
+                open.set(false);
+                copy_openapi_yaml(&copy_controls, &filter.get());
+            }
+        )
+    );
+    view()
+        .h(px(32.0))
+        .px_2p5()
+        .gap_2()
+        .rounded(px(6.0))
+        .flex_row()
+        .items_center()
+        .child(glyph(|| Glyph::Badge, || color(fg_secondary())))
+        .child(control_text("OpenAPI").flex_1().text_color(fg_secondary()))
+        .child(pills)
 }
 
 pub(crate) fn menu_redact_row(
