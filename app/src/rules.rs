@@ -1890,6 +1890,7 @@ pub enum QuickRule {
     NoCache,
     Block,
     Resolve,
+    Hook,
 }
 
 impl QuickRule {
@@ -1910,6 +1911,7 @@ impl QuickRule {
             Self::NoCache => ("禁缓存", "No-cache"),
             Self::Block => ("阻断", "Block"),
             Self::Resolve => ("解析", "Resolve"),
+            Self::Hook => ("钩子", "Hook"),
         }
     }
 
@@ -2329,6 +2331,43 @@ pub fn append_quick_rule_with_op(
                 Some(p) => format!("resolve {host_only} {target_host}:{p}"),
                 None => format!("resolve {host_only} {target_host}"),
             }
+        }
+        QuickRule::Hook => {
+            if from.is_empty() || from.contains('\n') || to.contains('\n') {
+                return None;
+            }
+            let url = parse_loopback_hook_url(from)?;
+            let mut phase = if response { "res" } else { "req" };
+            let mut timeout_ms: Option<u128> = None;
+            for tok in to.split_whitespace() {
+                if tok.eq_ignore_ascii_case("both") {
+                    phase = "both";
+                } else if tok.eq_ignore_ascii_case("req") || tok.eq_ignore_ascii_case("request") {
+                    phase = "req";
+                } else if tok.eq_ignore_ascii_case("res") || tok.eq_ignore_ascii_case("response") {
+                    phase = "res";
+                } else {
+                    let raw = tok
+                        .strip_prefix("timeout=")
+                        .or_else(|| tok.strip_prefix("delay="))
+                        .unwrap_or(tok);
+                    let parsed = parse_delay(raw)?;
+                    timeout_ms = Some(
+                        parsed
+                            .clamp(Duration::from_millis(50), DELAY_CAP)
+                            .as_millis(),
+                    );
+                }
+            }
+            let mut line = format!("hook {pattern} {} {phase}", quote_rule_token(&url));
+            if let Some(ms) = timeout_ms {
+                line.push_str(&format!(" timeout={ms}ms"));
+            }
+            if let Some(op_val) = explicit_op {
+                line.push_str(&format!(" op={op_val}"));
+            }
+            parse_single_rule(&line)?;
+            line
         }
     };
     push_line(existing, &line)
@@ -4233,6 +4272,20 @@ break-res example.com/graphql op=anonymous
             (QuickRule::NoCache, false, "", "", "GetFeed"),
             (QuickRule::Block, false, "429", "", "RateTest"),
             (QuickRule::Block, true, "", "", "AbortOp"),
+            (
+                QuickRule::Hook,
+                false,
+                "http://127.0.0.1:9000/hook",
+                "3000ms",
+                "SignOp",
+            ),
+            (
+                QuickRule::Hook,
+                true,
+                "http://localhost:9000/mutate",
+                "both 1500ms",
+                "MutateOp",
+            ),
         ];
 
         for &(kind, response, from, to, op) in cases {
@@ -4247,6 +4300,18 @@ break-res example.com/graphql op=anonymous
         );
         let parsed = parse_rules(&acc);
         assert_eq!(parsed.len(), cases.len());
+        assert!(
+            append_quick_rule_with_op(
+                "",
+                QuickRule::Hook,
+                "api.vicanso.dev",
+                false,
+                "https://remote.vicanso.dev/hook",
+                "",
+                "",
+            )
+            .is_none()
+        );
 
         // Non-matching GraphQL op should not match any of the op-scoped rules.
         let miss = effect_with_ops(

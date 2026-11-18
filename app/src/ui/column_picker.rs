@@ -659,7 +659,7 @@ pub(crate) fn closing(open: Signal<bool>, run: impl Fn() + 'static) -> impl Fn()
 
 pub(crate) fn quick_kind(kind: u8) -> crate::rules::QuickRule {
     use crate::rules::QuickRule;
-    match kind % 15 {
+    match kind % 16 {
         0 => QuickRule::Replace,
         1 => QuickRule::Remote,
         2 => QuickRule::Local,
@@ -674,7 +674,8 @@ pub(crate) fn quick_kind(kind: u8) -> crate::rules::QuickRule {
         11 => QuickRule::Json,
         12 => QuickRule::NoCache,
         13 => QuickRule::Block,
-        _ => QuickRule::Resolve,
+        14 => QuickRule::Resolve,
+        _ => QuickRule::Hook,
     }
 }
 

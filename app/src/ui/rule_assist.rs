@@ -340,7 +340,33 @@ pub(crate) fn fill_draft_from_rule_line(
             draft_from.set(target_host);
             draft_to.set(port.map(|p| p.to_string()).unwrap_or_default());
         }
-        Rule::Hook { .. } => return false,
+        Rule::Hook {
+            host,
+            path_prefix,
+            url,
+            phase,
+            timeout,
+            op,
+        } => {
+            use crate::rules::HookPhase;
+            draft_kind.set(15);
+            draft_modes
+                .req_res
+                .set(matches!(phase, HookPhase::Response));
+            draft_host.set(host);
+            draft_path.set(clean_draft_path(&path_prefix));
+            draft_op.set(op.unwrap_or_default());
+            draft_from.set(url);
+            let mut to_parts = Vec::new();
+            if matches!(phase, HookPhase::Both) {
+                to_parts.push("both".to_string());
+            }
+            let ms = timeout.as_millis();
+            if ms != 2000 {
+                to_parts.push(format!("{ms}ms"));
+            }
+            draft_to.set(to_parts.join(" "));
+        }
     }
     true
 }

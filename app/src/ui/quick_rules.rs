@@ -241,7 +241,7 @@ pub(crate) fn replace_row(
                         .flex_wrap()
                         .items_center()
                         .gap_1()
-                        .children((0_u8..15).map(move |idx| {
+                        .children((0_u8..16).map(move |idx| {
                             let (zh, en) = quick_kind(idx).label();
                             view()
                                 .h(px(26.0))
@@ -334,7 +334,7 @@ pub(crate) fn replace_row(
                             },
                         ))
                         .child(when(
-                            move || matches!(kind.get(), 0 | 2 | 6 | 10 | 11 | 13),
+                            move || matches!(kind.get(), 0 | 2 | 6 | 10 | 11 | 13 | 15),
                             move || {
                                 view()
                                     .h(px(28.0))
@@ -490,6 +490,12 @@ pub(crate) fn replace_row(
                                         "Target IP or host: 127.0.0.1 / ::1",
                                     )
                                     .to_string(),
+                                    15 => t(
+                                        lang,
+                                        "本地回环 URL: http://127.0.0.1:9000/hook",
+                                        "Loopback URL: http://127.0.0.1:9000/hook",
+                                    )
+                                    .to_string(),
                                     _ => t(lang, "查找原文 (from)", "Find text (from)").to_string(),
                                 }
                             };
@@ -547,7 +553,7 @@ pub(crate) fn replace_row(
                         )
                     );
                     let row = row.child(when(
-                        move || matches!(kind.get(), 0 | 2 | 6 | 7 | 9 | 10 | 11 | 14),
+                        move || matches!(kind.get(), 0 | 2 | 6 | 7 | 9 | 10 | 11 | 14 | 15),
                         move || {
                             let placeholder = move || {
                                 let lang = ui_lang(langs);
@@ -578,6 +584,12 @@ pub(crate) fn replace_row(
                                     .to_string(),
                                     14 => t(lang, "端口 (可选): 8080", "Port (optional): 8080")
                                         .to_string(),
+                                    15 => t(
+                                        lang,
+                                        "超时或阶段 (可选): 3000ms / both",
+                                        "Timeout/phase (optional): 3000ms / both",
+                                    )
+                                    .to_string(),
                                     _ => t(lang, "替换成 (to)", "Replace with (to)").to_string(),
                                 }
                             };
@@ -735,8 +747,59 @@ pub(crate) fn replace_row(
                                     }),
                             ),
                     )
-                }),
+                })
+                .child(when(
+                    move || matches!(kind.get(), 0 | 6 | 7 | 11),
+                    move || quick_var_strip(to),
+                )),
         )
+}
+
+fn quick_var_strip(target: Signal<String>) -> impl IntoElement {
+    const VARS: &[(&str, &str)] = &[
+        ("{{ts_ms}}", "{{ts_ms}}"),
+        ("{{ts}}", "{{ts}}"),
+        ("{{uuid}}", "{{uuid}}"),
+        ("{{req.path}}", "{{req.path}}"),
+        ("{{req.body}}", "{{req.body}}"),
+        ("sha256", "{{sha256(req.body)}}"),
+        ("hmac_sha256", "{{hmac_sha256(\"secret\", req.body)}}"),
+    ];
+    view()
+        .w_full()
+        .flex_row()
+        .flex_wrap()
+        .items_center()
+        .gap_1()
+        .child(
+            text(tr("变量:", "Vars:"))
+                .number_of_lines(1)
+                .text_size(px(10.5))
+                .text_color(fg_muted()),
+        )
+        .children(VARS.iter().map(|&(label, snippet)| {
+            view()
+                .h(px(21.0))
+                .px_1p5()
+                .flex_shrink_0()
+                .flex_row()
+                .items_center()
+                .justify_center()
+                .rounded(px(5.0))
+                .border_1()
+                .border_color(border_control())
+                .bg(bg_control())
+                .hover(|style| style.bg(bg_control_hover()))
+                .active(|style| style.opacity(0.8))
+                .cursor(Cursor::Pointer)
+                .on_press(move || target.update(|s| s.push_str(snippet)))
+                .child(
+                    mono(label)
+                        .number_of_lines(1)
+                        .text_size(px(10.5))
+                        .text_color(fg_secondary()),
+                )
+        }))
 }
 
 pub(crate) fn config_field(

@@ -31,7 +31,7 @@ impl QuickRuleModeSignals {
     }
 
     pub(crate) fn signal_for(self, kind: u8) -> Signal<bool> {
-        match kind % 15 {
+        match kind % 16 {
             2 => self.local_fallback,
             10 => self.mitm_mtls,
             13 => self.status_drop,
@@ -52,9 +52,9 @@ pub(crate) fn effective_quick_inputs<'a>(
     from: &'a str,
     to: &'a str,
 ) -> (&'a str, &'a str) {
-    let k = kind % 15;
+    let k = kind % 16;
     let from_used = !matches!(k, 4 | 5 | 8 | 12) && !(k == 13 && mode);
-    let to_used = matches!(k, 0 | 2 | 6 | 7 | 9 | 10 | 11 | 14);
+    let to_used = matches!(k, 0 | 2 | 6 | 7 | 9 | 10 | 11 | 14 | 15);
     (
         if from_used { from } else { "" },
         if to_used { to } else { "" },
@@ -62,7 +62,7 @@ pub(crate) fn effective_quick_inputs<'a>(
 }
 
 pub(crate) fn effective_quick_path(kind: u8, path: &str) -> &str {
-    if kind % 15 == 14 { "" } else { path }
+    if kind % 16 == 14 { "" } else { path }
 }
 
 pub(crate) fn effective_quick_op(kind: u8, op: &str) -> &str {
