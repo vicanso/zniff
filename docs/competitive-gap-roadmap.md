@@ -32,7 +32,7 @@
 | **纯文本可分享规则** | ✅ 16 类快捷规则 + OR / `op=` / `#` 单行启停 / Chunked 改写 | UI 规则列表（JSON 导入导出） | UI 规则匹配器 | 重写规则 + Python 脚本 | Python 脚本 | UI Rewrite / Map |
 | **零配置单终端/单浏览器隔离** | ✅ **独立 SPKI Chromium + 预注入代理终端 + `adb` 一键反代** | ✅ 独立终端/iOS/Android 脚本 | ✅ **极佳（独立浏览器/终端/adb）** | ✅ 协同手机端 + 脚本 | ⚠️ 手配环境变量 | ❌ 主要改全局代理 |
 | **动态签名 / 自定义加解密** | ✅ **内置 `{{hmac_sha256}}` 模板变量 + 本地 HTTP `hook` 扩展** | ✅ JS 脚本钩子 | ⚠️ 收费脚本步骤 | ✅ Python 脚本 | ✅ **极强 Python 插件** | ❌ 弱 |
-| **Schema 级协议解码** | ⚠️ **Protobuf 无 Schema 编号视图**（JSON/MsgPack 已完备） | ✅ 支持 `.proto` 解析 | ✅ 支持协议拓展 | ⚠️ 基础预览 | ✅ Protobuf 插件 | ✅ 支持 `.proto` 映射 |
+| **Schema 级协议解码** | ✅ **支持 `.proto` Schema 挂载解码（零 `protoc` 依赖）+ JSON/MsgPack 树形视图** | ✅ 支持 `.proto` 解析 | ✅ 支持协议拓展 | ⚠️ 基础预览 | ✅ Protobuf 插件 | ✅ 支持 `.proto` 映射 |
 | **从抓包沉淀 Mock / OpenAPI** | ✅ **一键生成本地 Mock 目录（`fallback`）+ 导出 OpenAPI 3.0.3** | ✅ 导出 OpenAPI / Mock | ✅ 从流量建 Mock | ✅ API 集合 + Mock | ❌ 需插件 | ❌ 仅单条 Map Local |
 
 ### 小结：优势与当前进展
@@ -112,17 +112,17 @@ header api.vicanso.dev/v1 req set X-Request-Id {{uuid}}
 header api.vicanso.dev/v1 req set X-Signature {{hmac_sha256("dev-secret", req.body)}}
 ```
 
-#### 2.2 第二层：本地 HTTP Webhook 扩展钩子（`app/src/webhook.rs`） — ✅ 已落地 `mode=mutate`（`mode=preview` 可选后续演进）
+#### 2.2 第二层：本地 HTTP Webhook 扩展钩子（`app/src/webhook.rs`） — ✅ 已落地（`mode=mutate` + `mode=preview`）
 
 针对自定义 AES/SM4/RSA 加密报文、多步 OAuth/Token 刷新等重度逻辑，允许用户用熟悉的 Python / Node / Go / Rust 跑一个本地服务挂载进来：
 
 - **规则语法**：
   ```text
-  hook <主机[/路径]> <http://127.0.0.1:port/endpoint> [req|res|both] [timeout=2000ms] [op=<gql_op>]
+  hook <主机[/路径]> <http://127.0.0.1:port/endpoint> [req|res|both] [mode=mutate|preview] [timeout=2000ms] [op=<gql_op>]
   ```
 - **已落地能力**：
-  - 代理改写模式：代理将 `<= 1 MB` 有界请求/响应 JSON `{id, phase, method, url, status, headers, body_b64}` POST 到本地 hook，按返回的 `{status?, headers?, body_b64?}` 原地替换后再转发。
-  - 可选后续：`mode=preview`（仅在详情面板解密渲染而不改动转发报文）。
+  - `mode=mutate`（默认）：代理将 `<= 1 MB` 有界请求/响应 JSON `{id, phase, method, url, status, headers, body_b64}` POST 到本地 hook，按返回的 `{status?, headers?, body_b64?}` 原地替换后再转发。
+  - `mode=preview`：完全不改动转发字节，仅在详情页「美化 / 树形」视图非阻塞调用本地 hook 解密渲染并缓存结果，切回「原文」可对照原始密文。
 - **安全与稳定性护栏**：
   - 默认仅允许向本机回环地址（`127.0.0.1` / `localhost` / `[::1]`）发起 hook 请求，防止配置误写导致流量外泄；
   - hook 客户端请求直连且不进入 `zniff` 自身代理与会话列表，杜绝自环死锁；
@@ -132,7 +132,7 @@ header api.vicanso.dev/v1 req set X-Signature {{hmac_sha256("dev-secret", req.bo
 
 ### 方向三（Phase 3 / v0.6）：`.proto` Schema 解码与一键生成 Mock / OpenAPI
 
-#### 3.1 `.proto` Schema 挂载解码（`app/src/proto_schema.rs`） — 📋 待实现（下一步）
+#### 3.1 `.proto` Schema 挂载解码（`app/src/proto_schema.rs`） — ✅ 已落地
 
 - **选型方案**：采用纯 Rust 描述符解析生态（如 `protox` + `prost-reflect`），**无需本机安装 `protoc` 命令行、零 C 依赖**，Wasm/全平台均可编译。
 - **规则与挂载方式**：
@@ -161,4 +161,4 @@ header api.vicanso.dev/v1 req set X-Signature {{hmac_sha256("dev-secret", req.bo
 | **Phase 1** | **零配置接入三件套**：免证书独立 Chromium、预注入代理终端、`adb` 一键代理 | `app/src/launcher.rs`（联动 `ca.rs`、`present.rs`、`more_menu_rows.rs`） | ✅ **已落地** | 仅桌面原生构建开放；Wasm UI 自动隐藏外部进程拉起入口 | Tier 1 全通过 + SPKI/env/adb 单测覆盖 |
 | **Phase 2** | **两层轻量动态扩展**：`{{hmac_sha256}}` 等内置变量 + `hook` 本地 HTTP 钩子 | `app/src/rule_vars.rs`、`app/src/webhook.rs`（联动 `rules.rs`、`proxy.rs`） | ✅ **已落地** | 纯 Rust 规则求值全平台可用；`webhook` 限本机回环调用 | 模板求值单测 + `smoke-proxy.sh` 动态签名与 `/__hook__` 实测通过 |
 | **Phase 3a** | **抓包资产导出**：批量 Mock 目录导出（含 `.json`/`index.json` 回退）、OpenAPI 3.0.3 + 第 10 个 MCP Tool `generate_openapi` | `app/src/mock_gen.rs`、`app/src/openapi.rs`（联动 `rules.rs`、`mcp.rs`、`web.rs`、`more_menu.rs`） | ✅ **已落地** | OpenAPI 生成兼容桌面与 Wasm；Mock 批量落盘限于桌面端 | 路径归并 `{id}` / Schema 合并 / Mock 导出单测 + `smoke-proxy.sh` `/api/export.openapi.json` & `generate_openapi` 实测 + Tier 1–3 验收 |
-| **Phase 3b** | **`.proto` Schema 挂载解码** | `app/src/proto_schema.rs` | 📋 **待实现** | 计划采用纯 Rust 描述符解析 | 待下一步推进 |
+| **Phase 3b** | **`.proto` Schema 挂载解码** | `app/src/proto_schema.rs`（联动 `rules.rs`、`proxy.rs`、`detail_publish.rs`） | ✅ **已落地** | 纯 Rust 零外部依赖解析 `.proto` 与 gRPC 帧，无需安装 `protoc` | 嵌套消息/枚举/`map`/packed/gRPC RPC 单测 + Tier 1–2 全量回归通过 |

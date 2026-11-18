@@ -1386,6 +1386,30 @@ impl Hub {
         ))
     }
 
+    #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+    pub(crate) fn decode_proto_body(
+        &self,
+        flow: &crate::session::Flow,
+        is_response: bool,
+    ) -> Option<crate::proto_schema::ProtoDecodeOutput> {
+        if !self.rules_enabled() {
+            return None;
+        }
+        let body = if is_response {
+            &flow.response_body
+        } else {
+            &flow.request_body
+        };
+        if body.is_empty() {
+            return None;
+        }
+        let specs = {
+            let guard = self.rules.lock().unwrap_or_else(|err| err.into_inner());
+            rules::proto_specs(&guard, &flow.host, &flow.path)
+        };
+        crate::proto_schema::decode_with_specs(&specs, &flow.path, body, is_response)
+    }
+
     /// At most one list refresh per [`BODY_UI_TOUCH`] while a body is streaming.
     fn touch_body(&self) {
         let now = body_clock_ms();

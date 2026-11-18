@@ -161,6 +161,22 @@ pub enum Rule {
         timeout: Duration,
         op: Option<String>,
     },
+    /// `.proto` schema mount rule (`proto <host[/path]> <schema_path> [req=<Msg>] [res=<Msg>]`)
+    /// for read-only Protobuf/gRPC detail decoding.
+    Proto {
+        host: String,
+        path_prefix: String,
+        schema_path: PathBuf,
+        req_type: Option<String>,
+        res_type: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProtoSpec {
+    pub schema_path: PathBuf,
+    pub req_type: Option<String>,
+    pub res_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -362,6 +378,9 @@ impl Rule {
             }
             | Self::Hook {
                 host, path_prefix, ..
+            }
+            | Self::Proto {
+                host, path_prefix, ..
             } => (host, path_prefix),
             Self::Cert { host, .. }
             | Self::ClientCert { host, .. }
@@ -478,6 +497,28 @@ pub fn preview_hooks_with_ops(
     out
 }
 
+/// Returns `.proto` schema mount specs matching `(host, path)` for detail decoding.
+pub fn proto_specs(rules: &[Rule], host: &str, path: &str) -> Vec<ProtoSpec> {
+    let mut out = Vec::new();
+    for rule in rules {
+        if let Rule::Proto {
+            schema_path,
+            req_type,
+            res_type,
+            ..
+        } = rule
+            && rule.matches_location(host, path)
+        {
+            out.push(ProtoSpec {
+                schema_path: schema_path.clone(),
+                req_type: req_type.clone(),
+                res_type: res_type.clone(),
+            });
+        }
+    }
+    out
+}
+
 /// Labels of the rules that actually apply, in text order. The first terminal
 /// rule stops later terminal rules. Modifiers still count after it.
 #[cfg(test)]
@@ -512,7 +553,8 @@ pub fn hit_summary_with_ops(rules: &[Rule], host: &str, path: &str, ops: &[Strin
             Rule::Hook {
                 mode: HookMode::Preview,
                 ..
-            } => continue,
+            }
+            | Rule::Proto { .. } => continue,
             Rule::Hook { .. } => ("hook", false),
         };
         if terminal {
@@ -1305,6 +1347,41 @@ fn parse_line(line: &str) -> Option<Rule> {
                 mode,
                 timeout,
                 op: rule_op,
+            })
+        }
+        "proto" => {
+            let tokens = rule_tokens(rest)?;
+            if tokens.is_empty() {
+                return None;
+            }
+            let schema_path = PathBuf::from(&tokens[0]);
+            let mut req_type = None;
+            let mut res_type = None;
+            for tok in &tokens[1..] {
+                if let Some(v) = tok
+                    .strip_prefix("req=")
+                    .or_else(|| tok.strip_prefix("request="))
+                    && req_type.is_none()
+                    && !v.is_empty()
+                {
+                    req_type = Some(v.to_string());
+                } else if let Some(v) = tok
+                    .strip_prefix("res=")
+                    .or_else(|| tok.strip_prefix("response="))
+                    && res_type.is_none()
+                    && !v.is_empty()
+                {
+                    res_type = Some(v.to_string());
+                } else {
+                    return None;
+                }
+            }
+            Some(Rule::Proto {
+                host,
+                path_prefix,
+                schema_path,
+                req_type,
+                res_type,
             })
         }
         "header" => {
@@ -4669,5 +4746,27 @@ resolve a.com *
         assert_eq!(preview_hits.len(), 1);
         assert_eq!(preview_hits[0].mode, HookMode::Preview);
         assert_eq!(preview_hits[0].timeout, Duration::from_millis(1500));
+
+        let proto_rules = parse_rules(
+            "proto grpc.vicanso.dev/vicanso.user.v1.UserService \"/tmp/my protos\" req=GetUserReq res=GetUserReply",
+        );
+        assert_eq!(proto_rules.len(), 1);
+        assert!(
+            hit_summary(
+                &proto_rules,
+                "grpc.vicanso.dev",
+                "/vicanso.user.v1.UserService/GetUser"
+            )
+            .is_empty()
+        );
+        let specs = proto_specs(
+            &proto_rules,
+            "grpc.vicanso.dev",
+            "/vicanso.user.v1.UserService/GetUser",
+        );
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].schema_path, PathBuf::from("/tmp/my protos"));
+        assert_eq!(specs[0].req_type.as_deref(), Some("GetUserReq"));
+        assert_eq!(specs[0].res_type.as_deref(), Some("GetUserReply"));
     }
 }

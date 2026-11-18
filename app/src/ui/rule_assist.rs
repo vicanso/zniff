@@ -371,6 +371,7 @@ pub(crate) fn fill_draft_from_rule_line(
             }
             draft_to.set(to_parts.join(" "));
         }
+        Rule::Proto { .. } => return false,
     }
     true
 }

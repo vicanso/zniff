@@ -46,7 +46,21 @@ fn resolve_preview_hook_override(
                 .to_string(),
             ),
         ),
-        _ => (None, None, None),
+        _ => {
+            if let Some(decoded) = hub.decode_proto_body(flow, is_response) {
+                let label = format!(
+                    "{} · {}",
+                    t(lang, ".proto 解码", "Decoded via .proto"),
+                    decoded.message_name
+                );
+                return (
+                    Some(decoded.json_bytes),
+                    Some("application/json".to_string()),
+                    Some(label),
+                );
+            }
+            (None, None, None)
+        }
     }
 }
 

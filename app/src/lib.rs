@@ -34,6 +34,9 @@ mod mock_gen;
 mod openapi;
 mod present;
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+mod proto_schema;
+#[cfg(not(target_arch = "wasm32"))]
 mod proxy;
 #[cfg(target_arch = "wasm32")]
 #[path = "hub_web.rs"]

@@ -216,5 +216,10 @@ P0 到 P4 里点名的能力已经接上。下面是仍然接受的缺口，不�
 
 22. **一键导出 OpenAPI 3.0.3 与批量本地 Mock 目录生成** — ✅ 已完成
     - **实现（`openapi.rs` + `mock_gen.rs` + `rules.rs` + `web.rs` + `mcp.rs`）**：
-      - 按 `host + method + normalized_path` 自动归并纯数字与 UUID 路径段为 `{id}` 参数并合并多样本 JSON Schema，在「更多 -> 导出 `[HAR][HTML][OpenAPI]`」、Web 路由 `GET /api/export.openapi.json` 及第 10 个内置 MCP Tool `generate_openapi` 中提供导出，均遵守当前脱敏配置。
+      - 按 `host + method + normalized_path` 自动归并纯数字与 UUID 路径段为 `{id}` 参数并合并多样本 JSON Schema，在「更多 -> `OpenAPI [JSON][YAML][复制]`」、Web 路由 `GET /api/export.openapi.json` / `/api/export.openapi.yaml` 及第 10 个内置 MCP Tool `generate_openapi`（支持 `format: "json"|"yaml"`）中提供导出，均遵守当前脱敏配置。
       - 桌面端「更多 -> 生成本地 Mock…」批量将筛选结果按 `<host>/<path>[.<METHOD>].json` 导出为本地静态 Mock 目录并自动追加 `map-local <host> "<dir>" fallback` 规则，配合 `resolve_map_local_target` 新增的 `index.json` / `<seg>.json` 回退机制实现秒级离线联调。
+
+23. **`.proto` Schema 挂载解码（零 `protoc` 依赖）与 `hook mode=preview` 只读解密预览** — ✅ 已完成
+    - **实现（`proto_schema.rs` + `webhook.rs` + `rules.rs` + `detail_publish.rs`）**：
+      - 纯 Rust 零外部依赖实现 `.proto`（proto2/proto3）词法与语法解析及 Wire Format 解码，支持 `proto <host[/path]> <schema_path> [req=<pkg.Msg>] [res=<pkg.Msg>]`，按 gRPC `:path` 自动推断请求/响应消息，支持嵌套消息、枚举名、`oneof`、`map<K,V>`、`sint` ZigZag 与 packed 数组，直接接入详情页「美化 | 树形 | 原文」视图。
+      - `hook` 规则新增 `mode=preview` 只读预览模式，完全不改动实际代理转发字节，仅在详情页渲染时非阻塞调用本地回环解码服务并缓存结果，切回「原文」可随时对照原始密文。
