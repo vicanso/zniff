@@ -237,9 +237,15 @@ impl Rule {
         self.matches_with_ops(host, path, &[])
     }
 
-    pub fn matches_with_ops(&self, host: &str, path: &str, ops: &[String]) -> bool {
+    /// Returns `true` when `host` and `path` match the rule's target location
+    /// before checking any GraphQL `op=` filter.
+    pub fn matches_location(&self, host: &str, path: &str) -> bool {
         let (rule_host, prefix) = self.target();
-        if !host_matches(rule_host, host) || !path_matches(prefix, path) {
+        host_matches(rule_host, host) && path_matches(prefix, path)
+    }
+
+    pub fn matches_with_ops(&self, host: &str, path: &str, ops: &[String]) -> bool {
+        if !self.matches_location(host, path) {
             return false;
         }
         match self.op() {
@@ -365,13 +371,9 @@ pub fn parse_rules(text: &str) -> Vec<Rule> {
 /// Returns true when at least one rule matching `(host, path)` by host and path
 /// also carries a GraphQL `op=<name>` condition.
 pub fn has_op_rules(rules: &[Rule], host: &str, path: &str) -> bool {
-    rules.iter().any(|rule| {
-        if rule.op().is_none() {
-            return false;
-        }
-        let (rule_host, prefix) = rule.target();
-        host_matches(rule_host, host) && path_matches(prefix, path)
-    })
+    rules
+        .iter()
+        .any(|rule| rule.op().is_some() && rule.matches_location(host, path))
 }
 
 /// Labels of the rules that actually apply, in text order. The first terminal

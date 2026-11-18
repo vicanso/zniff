@@ -37,6 +37,7 @@ mod proxy;
 mod redact;
 #[cfg(not(target_arch = "wasm32"))]
 mod relay;
+mod rule_vars;
 mod rules;
 mod session;
 #[cfg(not(target_arch = "wasm32"))]

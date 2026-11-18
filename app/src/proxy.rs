@@ -802,7 +802,7 @@ impl Hub {
             .skips(host)
     }
 
-    fn has_op_rules(&self, host: &str, path: &str) -> bool {
+    fn needs_request_body_buffer(&self, host: &str, path: &str) -> bool {
         if !self.apply_rules.load(Ordering::Relaxed) {
             return false;
         }
@@ -812,6 +812,7 @@ impl Hub {
             .unwrap_or_else(|err| err.into_inner())
             .clone();
         rules::has_op_rules(&rules, host, path)
+            || crate::rule_vars::rules_need_request_body(&rules, host, path)
     }
 
     #[cfg(test)]
@@ -2967,6 +2968,7 @@ where
     let mut strip_request_encoding = false;
     let has_expect = header_has_expect_100_continue(&head.headers);
     let websocket = header_is_websocket(&headers);
+    let flow_now_ms = crate::rule_vars::VarContext::current_ms();
     let plan = if websocket {
         if hub.resolve_for_host(&host).is_some() {
             hub.with_session(|s| s.set_rule_hit(id, "resolve".to_string()));
@@ -2974,7 +2976,7 @@ where
         rules::Effect::default()
     } else {
         let mut ops = crate::present::graphql_operations(&path, &[]);
-        if !has_expect && hub.has_op_rules(&host, &path) {
+        if !has_expect && hub.needs_request_body_buffer(&host, &path) {
             if let Some(len) = content_length(&head.headers) {
                 if len <= crate::session::BODY_CAP && len > 0 {
                     let raw = read_exact(&mut client, len).await?;
@@ -3021,7 +3023,24 @@ where
         tokio::time::sleep(plan.delay).await;
     }
     if !plan.request_headers.is_empty() {
-        rules::apply_header_ops(&mut headers, &plan.request_headers);
+        let init_body = current_decoded_request_body(
+            &hub,
+            id,
+            body_override.as_deref(),
+            break_overrode_body || strip_request_encoding,
+        );
+        let expanded = expand_header_ops_for_flow(
+            &plan.request_headers,
+            &method,
+            &host,
+            &path,
+            &headers,
+            &init_body,
+            None,
+            flow_now_ms,
+            false,
+        );
+        rules::apply_header_ops(&mut headers, &expanded);
         let existing = hub.with_session(|s| {
             s.get(id)
                 .map(|f| f.request_body.clone())
@@ -3040,7 +3059,18 @@ where
         }
         let mut resp_headers = Vec::new();
         rules::ensure_cors(&mut resp_headers);
-        rules::apply_header_ops(&mut resp_headers, &response_ops);
+        let expanded_res = expand_header_ops_for_flow(
+            &response_ops,
+            &method,
+            &host,
+            &path,
+            &resp_headers,
+            &[],
+            Some(204),
+            flow_now_ms,
+            false,
+        );
+        rules::apply_header_ops(&mut resp_headers, &expanded_res);
         write_static(&mut client, &hub, id, 204, "No Content", &resp_headers, &[]).await?;
         return Ok(());
     }
@@ -3056,13 +3086,24 @@ where
                 if !request_taken {
                     let _ = drain_request(&mut client, &headers, &hub, id).await;
                 }
+                let expanded_res = expand_header_ops_for_flow(
+                    &response_ops,
+                    &method,
+                    &host,
+                    &path,
+                    &[],
+                    &[],
+                    Some(*status),
+                    flow_now_ms,
+                    false,
+                );
                 return write_mapped_file(
                     &mut client,
                     &hub,
                     id,
                     resolved.as_deref(),
                     *status,
-                    &response_ops,
+                    &expanded_res,
                     cors,
                     throttle_down_bps,
                 )
@@ -3164,7 +3205,18 @@ where
             if cors {
                 rules::ensure_cors(&mut resp_headers);
             }
-            rules::apply_header_ops(&mut resp_headers, &response_ops);
+            let expanded_res = expand_header_ops_for_flow(
+                &response_ops,
+                &method,
+                &host,
+                &path,
+                &resp_headers,
+                &[],
+                Some(*status),
+                flow_now_ms,
+                false,
+            );
+            rules::apply_header_ops(&mut resp_headers, &expanded_res);
             write_static(
                 &mut client,
                 &hub,
@@ -3178,29 +3230,65 @@ where
             return Ok(());
         }
     }
-    if let Some(next) = rules::apply_query_ops(&path, &plan.query_ops) {
-        path = next;
-        hub.retarget(
+    if !plan.query_ops.is_empty() {
+        let cur_body = current_decoded_request_body(
+            &hub,
             id,
-            host.clone(),
-            path.clone(),
-            format!(
-                "{scheme}://{}{path}",
-                display_authority(&host, port, scheme)
-            ),
+            body_override.as_deref(),
+            break_overrode_body || strip_request_encoding,
         );
+        let ctx = crate::rule_vars::VarContext {
+            method: &method,
+            host: &host,
+            target: &path,
+            headers: &headers,
+            body: &cur_body,
+            status: None,
+            now_ms: flow_now_ms,
+        };
+        let expanded_query = crate::rule_vars::expand_query_ops(&plan.query_ops, &ctx);
+        if let Some(next) = rules::apply_query_ops(&path, &expanded_query) {
+            path = next;
+            hub.retarget(
+                id,
+                host.clone(),
+                path.clone(),
+                format!(
+                    "{scheme}://{}{path}",
+                    display_authority(&host, port, scheme)
+                ),
+            );
+        }
     }
-    if let Some(next) = rules::replace_target(&path, &plan.request_replaces) {
-        path = next;
-        hub.retarget(
+    if !plan.request_replaces.is_empty() {
+        let cur_body = current_decoded_request_body(
+            &hub,
             id,
-            host.clone(),
-            path.clone(),
-            format!(
-                "{scheme}://{}{path}",
-                display_authority(&host, port, scheme)
-            ),
+            body_override.as_deref(),
+            break_overrode_body || strip_request_encoding,
         );
+        let ctx = crate::rule_vars::VarContext {
+            method: &method,
+            host: &host,
+            target: &path,
+            headers: &headers,
+            body: &cur_body,
+            status: None,
+            now_ms: flow_now_ms,
+        };
+        let expanded_replaces = crate::rule_vars::expand_replaces(&plan.request_replaces, &ctx);
+        if let Some(next) = rules::replace_target(&path, &expanded_replaces) {
+            path = next;
+            hub.retarget(
+                id,
+                host.clone(),
+                path.clone(),
+                format!(
+                    "{scheme}://{}{path}",
+                    display_authority(&host, port, scheme)
+                ),
+            );
+        }
     }
     if !break_overrode_body
         && (!plan.request_replaces.is_empty() || !plan.request_json_ops.is_empty())
@@ -3224,6 +3312,7 @@ where
                     encoding.as_deref(),
                     &plan.request_replaces,
                     &plan.request_json_ops,
+                    Some((&method, &host, &path, &headers, None, flow_now_ms)),
                 ) {
                     strip_request_encoding = true;
                     body_override = Some(next);
@@ -3247,6 +3336,7 @@ where
                     encoding.as_deref(),
                     &plan.request_replaces,
                     &plan.request_json_ops,
+                    Some((&method, &host, &path, &headers, None, flow_now_ms)),
                 ) {
                     strip_request_encoding = true;
                     body_override = Some(next);
@@ -3269,6 +3359,7 @@ where
                             encoding.as_deref(),
                             &plan.request_replaces,
                             &plan.request_json_ops,
+                            Some((&method, &host, &path, &headers, None, flow_now_ms)),
                         )
                     {
                         strip_request_encoding = true;
@@ -3286,6 +3377,40 @@ where
                     hub.append_comment(id, "[rule skipped: body > 1MB]");
                 }
             }
+        }
+    }
+    if crate::rule_vars::header_ops_use_req_context(&plan.request_headers) {
+        let signed_body = current_decoded_request_body(
+            &hub,
+            id,
+            body_override.as_deref(),
+            break_overrode_body || strip_request_encoding,
+        );
+        let expanded = expand_header_ops_for_flow(
+            &plan.request_headers,
+            &method,
+            &host,
+            &path,
+            &headers,
+            &signed_body,
+            None,
+            flow_now_ms,
+            true,
+        );
+        if !expanded.is_empty() {
+            rules::apply_header_ops(&mut headers, &expanded);
+            let existing = if body_override.is_some()
+                && (strip_request_encoding || break_overrode_body || !request_recorded)
+            {
+                body_override.clone().unwrap_or_default()
+            } else {
+                hub.with_session(|s| {
+                    s.get(id)
+                        .map(|f| f.request_body.clone())
+                        .unwrap_or_default()
+                })
+            };
+            hub.replace_request(id, headers.clone(), existing);
         }
     }
     if scheme == "https" {
@@ -3322,6 +3447,7 @@ where
             break_response,
             throttle_up_bps,
             throttle_down_bps,
+            flow_now_ms,
         )
         .await;
     }
@@ -3488,7 +3614,18 @@ where
     }
     let mut resp_headers = resp.headers.clone();
     if !websocket {
-        rules::apply_header_ops(&mut resp_headers, &response_ops);
+        let expanded_res = expand_header_ops_for_flow(
+            &response_ops,
+            &method,
+            &host,
+            &path,
+            &resp_headers,
+            &[],
+            Some(status),
+            flow_now_ms,
+            false,
+        );
+        rules::apply_header_ops(&mut resp_headers, &expanded_res);
         if cors {
             rules::ensure_cors(&mut resp_headers);
         }
@@ -3554,6 +3691,14 @@ where
                     encoding.as_deref(),
                     &plan.response_replaces,
                     &plan.response_json_ops,
+                    Some((
+                        &method,
+                        &host,
+                        &path,
+                        &resp_headers,
+                        Some(status),
+                        flow_now_ms,
+                    )),
                 )
             {
                 resp_headers.retain(|(name, _)| {
@@ -4205,6 +4350,7 @@ async fn exchange_tls<S>(
     break_response: bool,
     throttle_up_bps: Option<u64>,
     throttle_down_bps: Option<u64>,
+    flow_now_ms: u64,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -4260,7 +4406,18 @@ where
         reason = r;
     }
     let mut resp_headers = resp.headers.clone();
-    rules::apply_header_ops(&mut resp_headers, &plan.response_headers);
+    let expanded_res = expand_header_ops_for_flow(
+        &plan.response_headers,
+        method,
+        host,
+        path,
+        &resp_headers,
+        &[],
+        Some(status),
+        flow_now_ms,
+        false,
+    );
+    rules::apply_header_ops(&mut resp_headers, &expanded_res);
     if plan.cors {
         rules::ensure_cors(&mut resp_headers);
     }
@@ -4311,6 +4468,7 @@ where
                     encoding.as_deref(),
                     &plan.response_replaces,
                     &plan.response_json_ops,
+                    Some((method, host, path, &resp_headers, Some(status), flow_now_ms)),
                 )
             {
                 resp_headers.retain(|(name, _)| {
@@ -6870,7 +7028,9 @@ async fn forward_request(
     let mut headers_replaced = false;
     let mut mapped_remote = false;
     let mut break_response = false;
+    let flow_now_ms = crate::rule_vars::VarContext::current_ms();
     let mut response_ops = Vec::new();
+    let mut req_header_ops = Vec::new();
     let mut response_replaces = Vec::new();
     let mut response_json_ops = Vec::new();
     let mut cors = false;
@@ -6878,7 +7038,7 @@ async fn forward_request(
     let mut throttle_down_bps = None;
     if !websocket {
         let mut ops = crate::present::graphql_operations(&path, &[]);
-        if hub.has_op_rules(&host, &path) {
+        if hub.needs_request_body_buffer(&host, &path) {
             let known = parts
                 .headers
                 .get(http::header::CONTENT_LENGTH)
@@ -6917,14 +7077,32 @@ async fn forward_request(
             tokio::time::sleep(plan.delay).await;
         }
         response_ops = plan.response_headers.clone();
+        req_header_ops = plan.request_headers.clone();
         response_replaces = plan.response_replaces.clone();
         response_json_ops = plan.response_json_ops.clone();
         cors = plan.cors;
         throttle_up_bps = plan.throttle_up_bps;
         throttle_down_bps = plan.throttle_down_bps;
-        if !plan.request_headers.is_empty() {
+        if !req_header_ops.is_empty() {
             let mut pairs = header_pairs(&parts.headers);
-            rules::apply_header_ops(&mut pairs, &plan.request_headers);
+            let init_body = current_decoded_request_body(
+                &hub,
+                id,
+                body_override.as_deref(),
+                break_overrode_body || strip_request_encoding,
+            );
+            let expanded = expand_header_ops_for_flow(
+                &req_header_ops,
+                req_method.as_str(),
+                &host,
+                &path,
+                &pairs,
+                &init_body,
+                None,
+                flow_now_ms,
+                false,
+            );
+            rules::apply_header_ops(&mut pairs, &expanded);
             replace_header_map(&mut parts.headers, &pairs);
             let existing = hub.with_session(|s| {
                 s.get(id)
@@ -6940,7 +7118,18 @@ async fn forward_request(
             }
             let mut resp_headers = Vec::new();
             rules::ensure_cors(&mut resp_headers);
-            rules::apply_header_ops(&mut resp_headers, &response_ops);
+            let expanded_res = expand_header_ops_for_flow(
+                &response_ops,
+                req_method.as_str(),
+                &host,
+                &path,
+                &resp_headers,
+                &[],
+                Some(204),
+                flow_now_ms,
+                false,
+            );
+            rules::apply_header_ops(&mut resp_headers, &expanded_res);
             resp_headers.push(("Content-Length".into(), "0".into()));
             return synthetic_headers(&hub, id, StatusCode::NO_CONTENT, resp_headers, Vec::new());
         }
@@ -6955,12 +7144,23 @@ async fn forward_request(
                     if let Some(left) = incoming.take() {
                         drain_and_record_request(&hub, id, left, encoding.as_deref()).await?;
                     }
+                    let expanded_res = expand_header_ops_for_flow(
+                        &response_ops,
+                        req_method.as_str(),
+                        &host,
+                        &path,
+                        &[],
+                        &[],
+                        Some(*status),
+                        flow_now_ms,
+                        false,
+                    );
                     return mapped_file_response(
                         &hub,
                         id,
                         resolved.as_deref(),
                         *status,
-                        &response_ops,
+                        &expanded_res,
                         cors,
                     )
                     .map(|res| res.map(|b| b.with_throttle(throttle_down_bps)));
@@ -7049,30 +7249,79 @@ async fn forward_request(
                 if cors {
                     rules::ensure_cors(&mut resp_headers);
                 }
-                rules::apply_header_ops(&mut resp_headers, &response_ops);
+                let expanded_res = expand_header_ops_for_flow(
+                    &response_ops,
+                    req_method.as_str(),
+                    &host,
+                    &path,
+                    &resp_headers,
+                    &[],
+                    Some(*status),
+                    flow_now_ms,
+                    false,
+                );
+                rules::apply_header_ops(&mut resp_headers, &expanded_res);
                 return synthetic_headers(&hub, id, code, resp_headers, Vec::new());
             }
             None => {}
         }
-        if let Some(next) = rules::apply_query_ops(&path, &plan.query_ops) {
-            path = next;
-            let authority = display_authority(&host, port, &scheme);
-            hub.retarget(
+        if !plan.query_ops.is_empty() {
+            let hdrs = header_pairs(&parts.headers);
+            let cur_body = current_decoded_request_body(
+                &hub,
                 id,
-                host.clone(),
-                path.clone(),
-                format!("{scheme}://{authority}{path}"),
+                body_override.as_deref(),
+                break_overrode_body || strip_request_encoding,
             );
+            let ctx = crate::rule_vars::VarContext {
+                method: req_method.as_str(),
+                host: &host,
+                target: &path,
+                headers: &hdrs,
+                body: &cur_body,
+                status: None,
+                now_ms: flow_now_ms,
+            };
+            let expanded_query = crate::rule_vars::expand_query_ops(&plan.query_ops, &ctx);
+            if let Some(next) = rules::apply_query_ops(&path, &expanded_query) {
+                path = next;
+                let authority = display_authority(&host, port, &scheme);
+                hub.retarget(
+                    id,
+                    host.clone(),
+                    path.clone(),
+                    format!("{scheme}://{authority}{path}"),
+                );
+            }
         }
-        if let Some(next) = rules::replace_target(&path, &plan.request_replaces) {
-            path = next;
-            let authority = display_authority(&host, port, &scheme);
-            hub.retarget(
+        if !plan.request_replaces.is_empty() {
+            let hdrs = header_pairs(&parts.headers);
+            let cur_body = current_decoded_request_body(
+                &hub,
                 id,
-                host.clone(),
-                path.clone(),
-                format!("{scheme}://{authority}{path}"),
+                body_override.as_deref(),
+                break_overrode_body || strip_request_encoding,
             );
+            let ctx = crate::rule_vars::VarContext {
+                method: req_method.as_str(),
+                host: &host,
+                target: &path,
+                headers: &hdrs,
+                body: &cur_body,
+                status: None,
+                now_ms: flow_now_ms,
+            };
+            let expanded_replaces = crate::rule_vars::expand_replaces(&plan.request_replaces, &ctx);
+            if let Some(next) = rules::replace_target(&path, &expanded_replaces) {
+                path = next;
+                let authority = display_authority(&host, port, &scheme);
+                hub.retarget(
+                    id,
+                    host.clone(),
+                    path.clone(),
+                    format!("{scheme}://{authority}{path}"),
+                );
+            }
         }
         if !break_overrode_body
             && (!plan.request_replaces.is_empty() || !plan.request_json_ops.is_empty())
@@ -7083,18 +7332,29 @@ async fn forward_request(
                 .and_then(|value| value.to_str().ok())
                 .and_then(|text| text.parse::<usize>().ok());
             if let Some(taken) = body_override.take() {
-                if !taken.is_empty()
-                    && let Some(next) = rewrite_body(
+                if !taken.is_empty() {
+                    let req_hdrs = header_pairs(&parts.headers);
+                    if let Some(next) = rewrite_body(
                         &hub,
                         id,
                         &taken,
                         encoding.as_deref(),
                         &plan.request_replaces,
                         &plan.request_json_ops,
-                    )
-                {
-                    strip_request_encoding = true;
-                    body_override = Some(next);
+                        Some((
+                            req_method.as_str(),
+                            &host,
+                            &path,
+                            &req_hdrs,
+                            None,
+                            flow_now_ms,
+                        )),
+                    ) {
+                        strip_request_encoding = true;
+                        body_override = Some(next);
+                    } else {
+                        body_override = Some(taken);
+                    }
                 } else {
                     body_override = Some(taken);
                 }
@@ -7110,6 +7370,7 @@ async fn forward_request(
                 .await?
                 {
                     Take::Whole(raw) => {
+                        let req_hdrs = header_pairs(&parts.headers);
                         if !raw.is_empty()
                             && let Some(next) = rewrite_body(
                                 &hub,
@@ -7118,6 +7379,14 @@ async fn forward_request(
                                 encoding.as_deref(),
                                 &plan.request_replaces,
                                 &plan.request_json_ops,
+                                Some((
+                                    req_method.as_str(),
+                                    &host,
+                                    &path,
+                                    &req_hdrs,
+                                    None,
+                                    flow_now_ms,
+                                )),
                             )
                         {
                             strip_request_encoding = true;
@@ -7157,6 +7426,31 @@ async fn forward_request(
         .await?;
         request_recorded = true;
         body_override = Some(raw.to_vec());
+    }
+    if crate::rule_vars::header_ops_use_req_context(&req_header_ops) {
+        let mut pairs = header_pairs(&parts.headers);
+        let signed_body = current_decoded_request_body(
+            &hub,
+            id,
+            body_override.as_deref(),
+            break_overrode_body || strip_request_encoding,
+        );
+        let expanded = expand_header_ops_for_flow(
+            &req_header_ops,
+            req_method.as_str(),
+            &host,
+            &path,
+            &pairs,
+            &signed_body,
+            None,
+            flow_now_ms,
+            true,
+        );
+        if !expanded.is_empty() {
+            rules::apply_header_ops(&mut pairs, &expanded);
+            replace_header_map(&mut parts.headers, &pairs);
+            headers_replaced = true;
+        }
     }
     let outbound_body = if let Some(bytes) = body_override {
         parts.headers.remove(http::header::CONTENT_LENGTH);
@@ -7288,7 +7582,18 @@ async fn forward_request(
             .remove(HeaderName::from_static("sec-websocket-extensions"));
     } else if !response_ops.is_empty() || cors {
         let mut pairs = header_pairs(&parts.headers);
-        rules::apply_header_ops(&mut pairs, &response_ops);
+        let expanded_res = expand_header_ops_for_flow(
+            &response_ops,
+            req_method.as_str(),
+            &host,
+            &path,
+            &pairs,
+            &[],
+            Some(parts.status.as_u16()),
+            flow_now_ms,
+            false,
+        );
+        rules::apply_header_ops(&mut pairs, &expanded_res);
         if cors {
             rules::ensure_cors(&mut pairs);
         }
@@ -7310,30 +7615,40 @@ async fn forward_request(
         } else if !body.is_end_stream() && known != Some(0) {
             match take_limited(body, crate::session::BODY_CAP).await? {
                 Take::Whole(raw) => {
-                    if !raw.is_empty()
-                        && let Some(next) = rewrite_body(
+                    if !raw.is_empty() {
+                        let resp_pairs = header_pairs(&parts.headers);
+                        if let Some(next) = rewrite_body(
                             &hub,
                             id,
                             &raw,
                             resp_encoding.as_deref(),
                             &response_replaces,
                             &response_json_ops,
-                        )
-                    {
-                        parts.headers.remove(http::header::CONTENT_ENCODING);
-                        parts.headers.remove(http::header::TRANSFER_ENCODING);
-                        parts.headers.remove(http::header::CONTENT_LENGTH);
-                        if let Ok(value) = http::HeaderValue::from_str(&next.len().to_string()) {
-                            parts.headers.insert(http::header::CONTENT_LENGTH, value);
+                            Some((
+                                req_method.as_str(),
+                                &host,
+                                &path,
+                                &resp_pairs,
+                                Some(parts.status.as_u16()),
+                                flow_now_ms,
+                            )),
+                        ) {
+                            parts.headers.remove(http::header::CONTENT_ENCODING);
+                            parts.headers.remove(http::header::TRANSFER_ENCODING);
+                            parts.headers.remove(http::header::CONTENT_LENGTH);
+                            if let Ok(value) = http::HeaderValue::from_str(&next.len().to_string())
+                            {
+                                parts.headers.insert(http::header::CONTENT_LENGTH, value);
+                            }
+                            return synthetic_headers(
+                                &hub,
+                                id,
+                                parts.status,
+                                header_pairs(&parts.headers),
+                                next,
+                            )
+                            .map(|res| res.map(|b| b.with_throttle(throttle_down_bps)));
                         }
-                        return synthetic_headers(
-                            &hub,
-                            id,
-                            parts.status,
-                            header_pairs(&parts.headers),
-                            next,
-                        )
-                        .map(|res| res.map(|b| b.with_throttle(throttle_down_bps)));
                     }
                     parts.headers.remove(http::header::TRANSFER_ENCODING);
                     parts.headers.remove(http::header::CONTENT_LENGTH);
@@ -7606,6 +7921,62 @@ async fn drain_incoming(mut body: Incoming) -> Result<()> {
 
 /// Decodes `Content-Encoding`, then applies text replacements. `None` keeps
 /// the wire bytes: binary, a failed decode, or a body the pairs do not change.
+fn current_decoded_request_body(
+    hub: &Hub,
+    id: u64,
+    body_override: Option<&[u8]>,
+    override_is_decoded: bool,
+) -> Vec<u8> {
+    if override_is_decoded {
+        return body_override.map(<[u8]>::to_vec).unwrap_or_default();
+    }
+    let recorded = hub.with_session(|s| {
+        s.get(id)
+            .map(|f| f.request_body.clone())
+            .unwrap_or_default()
+    });
+    if !recorded.is_empty() {
+        recorded
+    } else {
+        body_override.map(<[u8]>::to_vec).unwrap_or_default()
+    }
+}
+
+fn expand_header_ops_for_flow(
+    ops: &[rules::HeaderOp],
+    method: &str,
+    host: &str,
+    path: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+    status: Option<u16>,
+    now_ms: u64,
+    only_req_context: bool,
+) -> Vec<rules::HeaderOp> {
+    if ops.is_empty() {
+        return Vec::new();
+    }
+    let ctx = crate::rule_vars::VarContext {
+        method,
+        host,
+        target: path,
+        headers,
+        body,
+        status,
+        now_ms,
+    };
+    crate::rule_vars::expand_header_ops(ops, &ctx, only_req_context)
+}
+
+type BodyVarInfo<'a> = (
+    &'a str,
+    &'a str,
+    &'a str,
+    &'a [(String, String)],
+    Option<u16>,
+    u64,
+);
+
 fn rewrite_body(
     hub: &Hub,
     id: u64,
@@ -7613,6 +7984,7 @@ fn rewrite_body(
     encoding: Option<&str>,
     pairs: &[(String, String)],
     json_ops: &[rules::JsonOp],
+    var_info: Option<BodyVarInfo<'_>>,
 ) -> Option<Vec<u8>> {
     if (pairs.is_empty() && json_ops.is_empty()) || raw.len() > crate::session::BODY_CAP {
         if !json_ops.is_empty() && raw.len() > crate::session::BODY_CAP {
@@ -7629,13 +8001,34 @@ fn rewrite_body(
         }
         return None;
     }
+    let (eff_pairs, eff_json_ops) =
+        if let Some((method, host, path, headers, status, now_ms)) = var_info {
+            let ctx = crate::rule_vars::VarContext {
+                method,
+                host,
+                target: path,
+                headers,
+                body: &decoded,
+                status,
+                now_ms,
+            };
+            (
+                std::borrow::Cow::Owned(crate::rule_vars::expand_replaces(pairs, &ctx)),
+                std::borrow::Cow::Owned(crate::rule_vars::expand_json_ops(json_ops, &ctx)),
+            )
+        } else {
+            (
+                std::borrow::Cow::Borrowed(pairs),
+                std::borrow::Cow::Borrowed(json_ops),
+            )
+        };
     let mut changed = false;
-    if let Some(next) = rules::apply_replaces(&decoded, pairs) {
+    if let Some(next) = rules::apply_replaces(&decoded, &eff_pairs) {
         decoded = next;
         changed = true;
     }
-    if !json_ops.is_empty() {
-        match rules::apply_json_ops(&decoded, json_ops) {
+    if !eff_json_ops.is_empty() {
+        match rules::apply_json_ops(&decoded, &eff_json_ops) {
             Ok(Some(next)) => {
                 decoded = next;
                 changed = true;
@@ -14333,6 +14726,68 @@ mod tests {
         let err = flow.error.as_deref().unwrap_or("");
         assert!(err.contains("连接源站"), "unexpected error: {err}");
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn plain_http_json_mutation_signs_hmac_sha256_on_mutated_body() {
+        let dir = std::env::temp_dir().join(format!("zniff-rule-vars-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+
+        let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        let captured_req = Arc::new(std::sync::Mutex::new(String::new()));
+        let captured_req_clone = Arc::clone(&captured_req);
+        let origin_task = tokio::spawn(async move {
+            let (mut sock, _) = origin.accept().await.unwrap();
+            let raw = read_h1_message(&mut sock).await;
+            *captured_req_clone.lock().unwrap() = String::from_utf8_lossy(&raw).into_owned();
+            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .await
+                .unwrap();
+        });
+
+        hub.set_rules(&format!(
+            "resolve api.vicanso.dev {origin_addr}\n\
+             json api.vicanso.dev/v1 req set /amount 200\n\
+             header api.vicanso.dev/v1 req set X-Signature {{{{hmac_sha256(\"dev-secret\", req.body)}}}}"
+        ));
+
+        let proxy = listen().await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        serve_proxy(proxy, hub.clone());
+
+        let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+        let body = br#"{"amount":100}"#;
+        let req = format!(
+            "POST http://api.vicanso.dev/v1/pay HTTP/1.1\r\nHost: api.vicanso.dev\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        client.write_all(req.as_bytes()).await.unwrap();
+        client.write_all(body).await.unwrap();
+        let resp = read_h1_message(&mut client).await;
+        assert!(String::from_utf8_lossy(&resp).contains("200 OK"));
+
+        let seen = captured_req.lock().unwrap().clone();
+        let (_, body_part) = seen.split_once("\r\n\r\n").expect("body separator");
+        let parsed: serde_json::Value = serde_json::from_str(body_part).unwrap();
+        assert_eq!(parsed["amount"], 200);
+
+        let expected_mac = crate::rule_vars::hmac_sha256(b"dev-secret", body_part.as_bytes());
+        let mut expected_hex = String::with_capacity(64);
+        for b in expected_mac {
+            use std::fmt::Write as _;
+            let _ = write!(&mut expected_hex, "{b:02x}");
+        }
+        assert!(
+            seen.to_ascii_lowercase()
+                .contains(&format!("x-signature: {expected_hex}")),
+            "missing updated HMAC signature in upstream request:\n{seen}"
+        );
+
+        origin_task.abort();
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
