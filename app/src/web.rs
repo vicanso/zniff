@@ -927,6 +927,17 @@ async fn route(
             };
             return (export_har_reply(&hub, &filter, &redact), clean_nobody);
         }
+        if path == "/api/export.openapi.json" {
+            let filter = query_value(&head.target, "filter");
+            let (hub, redact) = {
+                let guard = lock(slot);
+                (
+                    Arc::clone(&guard.hub),
+                    redact_options_for_target(&guard.prefs, &head.target),
+                )
+            };
+            return (export_openapi_reply(&hub, &filter, &redact), clean_nobody);
+        }
         if path == "/api/export.html" {
             let filter = query_value(&head.target, "filter");
             let zh_override = query_value(&head.target, "zh");
@@ -1422,6 +1433,32 @@ fn export_har_reply(hub: &Hub, filter: &str, redact: &crate::share::RedactOption
         vary_encoding: false,
         cache_control: "no-store",
         body,
+    }
+}
+
+fn export_openapi_reply(hub: &Hub, filter: &str, redact: &crate::share::RedactOptions) -> Reply {
+    let (matched, _) = hub.matching_ids(filter);
+    let flows = hub.with_session(|session| {
+        matched
+            .into_iter()
+            .filter_map(|(id, _)| session.hydrated(id))
+            .collect::<Vec<_>>()
+    });
+    let json = crate::openapi::build_openapi_json(&flows, redact);
+    let secs = crate::clock::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    Reply {
+        status: 200,
+        reason: "OK",
+        content_type: std::borrow::Cow::Borrowed("application/json; charset=utf-8"),
+        attachment: Some(format!("zniff-{secs}.openapi.json")),
+        location: None,
+        encoding: None,
+        vary_encoding: false,
+        cache_control: "no-store",
+        body: json.into_bytes(),
     }
 }
 
@@ -3540,6 +3577,15 @@ mod tests {
         .await;
         assert_eq!(status, 200);
         assert!(!html_resp.contains("top-secret"), "{html_resp}");
+
+        let (status, oa_resp) = exchange(
+            web,
+            "GET /api/export.openapi.json HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert!(oa_resp.contains("\"openapi\": \"3.0.3\""), "{oa_resp}");
+        assert!(!oa_resp.contains("top-secret"), "{oa_resp}");
 
         drop(server);
         let _ = std::fs::remove_dir_all(&dir);

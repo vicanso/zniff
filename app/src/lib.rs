@@ -28,6 +28,10 @@ mod launcher;
 mod local_proc;
 #[cfg(not(target_arch = "wasm32"))]
 mod mcp;
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+mod mock_gen;
+mod openapi;
 mod present;
 #[cfg(not(target_arch = "wasm32"))]
 mod proxy;

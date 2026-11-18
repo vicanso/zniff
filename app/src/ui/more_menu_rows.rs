@@ -260,9 +260,8 @@ pub(crate) fn menu_export_row(
                         export_har();
                     },
                 ))
-                .child(menu_inline_pill(
-                    "HTML",
-                    || false,
+                .child(menu_inline_pill("HTML", || false, {
+                    let controls = controls.clone();
                     move || {
                         open.set(false);
                         export_html_file(
@@ -270,6 +269,14 @@ pub(crate) fn menu_export_row(
                             &filter.get(),
                             ui_lang(langs) == Lang::Zh,
                         );
+                    }
+                }))
+                .child(menu_inline_pill(
+                    "OpenAPI",
+                    || false,
+                    move || {
+                        open.set(false);
+                        export_openapi_file(controls.clone(), &filter.get());
                     },
                 )),
         )

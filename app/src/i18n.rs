@@ -124,6 +124,10 @@ pub enum StatusMsg {
     ExportCancelled,
     ExportFailed(String),
     Exported(String),
+    MockExported {
+        files: usize,
+        hosts: usize,
+    },
     Shared {
         url: String,
         minutes: u64,
@@ -425,6 +429,14 @@ impl StatusMsg {
             Self::ExportCancelled => t(lang, "已取消导出", "Export cancelled").into(),
             Self::ExportFailed(err) => format!("{} {err}", t(lang, "导出失败:", "Export failed:")),
             Self::Exported(path) => format!("{} {path}", t(lang, "已导出", "Exported")),
+            Self::MockExported { files, hosts } => match lang {
+                Lang::Zh => {
+                    format!("已生成 {files} 个本地 Mock 文件并添加 {hosts} 条 map-local 规则")
+                }
+                Lang::En => {
+                    format!("Exported {files} mock file(s) and added {hosts} map-local rule(s)")
+                }
+            },
             Self::Shared {
                 url,
                 minutes,
@@ -706,6 +718,7 @@ impl StatusMsg {
             | Self::ProfileSaved(_)
             | Self::ProfileRestored(_)
             | Self::Exported(_)
+            | Self::MockExported { .. }
             | Self::Imported { .. }
             | Self::Saved(_)
             | Self::CopiedUrl
@@ -781,7 +794,7 @@ impl StatusMsg {
 
     pub fn toast_title(&self, lang: Lang) -> &'static str {
         match self {
-            Self::ProfilesExported { .. } | Self::Exported(_) => {
+            Self::ProfilesExported { .. } | Self::Exported(_) | Self::MockExported { .. } => {
                 t(lang, "导出成功", "Export Succeeded")
             }
             Self::ProfilesImported { .. } | Self::Imported { .. } => {

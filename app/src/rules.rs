@@ -2817,33 +2817,56 @@ pub fn resolve_map_local_target(
         }
         cur = next;
     }
-    if cur == canonical_root || suffix.ends_with('/') || cur.is_dir() {
-        cur = cur.join("index.html");
-    }
-    let meta = match std::fs::symlink_metadata(&cur) {
-        Ok(meta) => meta,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            return Err(MapLocalError::NotFound(err));
-        }
-        Err(err) => return Err(MapLocalError::Io(err)),
+    let with_json_ext = |path: &std::path::Path| -> PathBuf {
+        let mut os = path.as_os_str().to_os_string();
+        os.push(".json");
+        PathBuf::from(os)
     };
-    let canon_file = std::fs::canonicalize(&cur).map_err(|err| {
-        if meta.file_type().is_symlink() {
-            MapLocalError::Traversal
-        } else {
-            MapLocalError::Io(err)
+    let candidates: Vec<PathBuf> = if cur == canonical_root || suffix.ends_with('/') || cur.is_dir()
+    {
+        let mut list = vec![cur.join("index.html"), cur.join("index.json")];
+        if cur != canonical_root && !suffix.ends_with('/') && cur.extension().is_none() {
+            list.push(with_json_ext(&cur));
         }
-    })?;
-    if !canon_file.starts_with(&canonical_root) {
-        return Err(MapLocalError::Traversal);
+        list
+    } else if cur.extension().is_none() {
+        vec![cur.clone(), with_json_ext(&cur)]
+    } else {
+        vec![cur.clone()]
+    };
+
+    let mut last_not_found: Option<std::io::Error> = None;
+    for candidate in candidates {
+        let meta = match std::fs::symlink_metadata(&candidate) {
+            Ok(meta) => meta,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                last_not_found = Some(err);
+                continue;
+            }
+            Err(err) => return Err(MapLocalError::Io(err)),
+        };
+        let canon_file = std::fs::canonicalize(&candidate).map_err(|err| {
+            if meta.file_type().is_symlink() {
+                MapLocalError::Traversal
+            } else {
+                MapLocalError::Io(err)
+            }
+        })?;
+        if !canon_file.starts_with(&canonical_root) {
+            return Err(MapLocalError::Traversal);
+        }
+        if !canon_file.is_file() {
+            last_not_found = Some(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "resolved path is not a regular file",
+            ));
+            continue;
+        }
+        return Ok(Some(canon_file));
     }
-    if !canon_file.is_file() {
-        return Err(MapLocalError::NotFound(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "resolved path is not a regular file",
-        )));
-    }
-    Ok(Some(canon_file))
+    Err(MapLocalError::NotFound(last_not_found.unwrap_or_else(
+        || std::io::Error::new(std::io::ErrorKind::NotFound, "mock target not found"),
+    )))
 }
 
 pub fn matched_route_suffix<'a>(prefix: &str, clean_path: &'a str) -> &'a str {

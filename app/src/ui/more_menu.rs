@@ -97,6 +97,21 @@ pub(crate) fn more_menu(
             }
         })
     );
+    let items = desktop_child!(
+        items,
+        menu_action(
+            Glyph::Download,
+            tr("生成本地 Mock…", "Export Mock dir…"),
+            {
+                let controls = import_controls.clone();
+                let rules_text = profiles.rules;
+                move || {
+                    open.set(false);
+                    export_mock_dir(controls.clone(), &filter.get(), rules_text);
+                }
+            }
+        )
+    );
     let items = items.child(menu_action(
         Glyph::Trash,
         tr("清空未星标", "Clear unstarred"),
@@ -197,7 +212,7 @@ pub(crate) fn more_menu(
         },
     ));
     view()
-        .w(px(288.0))
+        .w(px(304.0))
         .max_w(move || px((window().width.0 - 16.0).max(180.0)))
         .max_h(move || px((window().height.0 - 68.0).max(180.0)))
         .overflow_hidden()

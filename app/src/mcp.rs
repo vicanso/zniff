@@ -219,6 +219,23 @@ pub fn tools_list_value() -> Value {
                         }
                     }
                 }
+            },
+            {
+                "name": "generate_openapi",
+                "description": "Synthesize an OpenAPI 3.0.3 JSON specification from captured HTTP(S) flows matching an optional zniff filter.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "filter": {
+                            "type": "string",
+                            "description": "Optional zniff filter expression (e.g. `host:api.vicanso.dev status:2xx`). Empty includes all flows."
+                        },
+                        "redact": {
+                            "type": "boolean",
+                            "description": "When true (default false), redacts sensitive headers/tokens/fields using saved redaction settings before synthesis."
+                        }
+                    }
+                }
             }
         ]
     })
@@ -324,6 +341,7 @@ async fn call_tool(hub: Arc<Hub>, name: &str, args: &Value) -> Value {
         "set_rules" => tool_set_rules(&hub, args),
         "clear_flows" => tool_clear_flows(&hub, args),
         "manage_breaks" => tool_manage_breaks(&hub, args),
+        "generate_openapi" => tool_generate_openapi(&hub, args),
         _ => tool_error(format!("Unknown tool: {name}")),
     }
 }
@@ -840,6 +858,29 @@ fn tool_manage_breaks(hub: &Hub, args: &Value) -> Value {
             "Unsupported `action`: {other}. Expected one of: list, continue, continue_all, drop."
         )),
     }
+}
+
+fn tool_generate_openapi(hub: &Hub, args: &Value) -> Value {
+    let filter = args.get("filter").and_then(Value::as_str).unwrap_or("");
+    let redact_on = args.get("redact").and_then(Value::as_bool).unwrap_or(false);
+    let (matched, _) = hub.matching_ids(filter);
+    let flows = hub.with_session(|session| {
+        matched
+            .into_iter()
+            .filter_map(|(id, _)| session.hydrated(id))
+            .collect::<Vec<_>>()
+    });
+    let redact = crate::redact::RedactOptions {
+        enabled: redact_on,
+        ..Default::default()
+    };
+    let spec = crate::openapi::build_openapi_value(&flows, &redact);
+    let (paths, operations) = crate::openapi::count_openapi_operations(&spec);
+    tool_json(&json!({
+        "paths": paths,
+        "operations": operations,
+        "spec": spec,
+    }))
 }
 
 fn parse_headers_arg(val: &Value) -> Option<Vec<(String, String)>> {
@@ -1374,7 +1415,13 @@ resolve api.example.com 127.0.0.1:8443";
         assert!(names.contains(&"annotate_flow"));
         assert!(names.contains(&"clear_flows"));
         assert!(names.contains(&"manage_breaks"));
-        assert_eq!(names.len(), 9);
+        assert!(names.contains(&"generate_openapi"));
+        assert_eq!(names.len(), 10);
+
+        let openapi_res =
+            parse_tool_payload(&tool_generate_openapi(&hub, &json!({ "filter": "" })));
+        assert_eq!(openapi_res["spec"]["openapi"], "3.0.3");
+        assert!(openapi_res["operations"].as_u64().unwrap_or(0) >= 1);
 
         // English MCP error localization & client_cert timing metadata
         assert_eq!(

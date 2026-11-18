@@ -50,10 +50,13 @@ pub(crate) use crate::session::Direction;
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(unused_imports)]
 pub(crate) use crate::{
-    bypass, client_hello, decompress, har, launcher, mcp, relay, share, sysproxy, updater, web, ws,
+    bypass, client_hello, decompress, har, launcher, mcp, mock_gen, relay, share, sysproxy,
+    updater, web, ws,
 };
 #[allow(unused_imports)]
-pub(crate) use crate::{ca, clock, config, i18n, icon, present, proxy, redact, rules, session};
+pub(crate) use crate::{
+    ca, clock, config, i18n, icon, openapi, present, proxy, redact, rules, session,
+};
 
 /// A desktop-only child. Native stays `parent.child(child)`. The web build
 /// drops the child, so system proxy, certificates, and updates are not shown.

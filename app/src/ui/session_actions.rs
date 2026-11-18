@@ -194,25 +194,30 @@ pub(crate) fn parse_header_text(text: &str) -> Vec<(String, String)> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn export_har_file(controls: Arc<Controls>, filter: &str) {
-    let redact = redact_options(&controls);
-    let value = controls
-        .hub
-        .export_har_matching_with_redact(filter, &redact);
-    let bytes = match serde_json::to_vec_pretty(&value) {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            set_status(&controls, StatusMsg::ExportFailed(err.to_string()));
-            return;
-        }
-    };
-    let secs = clock::now()
+fn unix_secs_now() -> u64 {
+    clock::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
-        .unwrap_or(0);
-    let dialog = save_dialog_with_default_dir()
-        .file_name(format!("zniff-{secs}.har"))
-        .filter(nsh_core::file_dialog::FileFilter::new("HAR", ["har"]));
+        .unwrap_or(0)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn matched_hydrated_flows(controls: &Controls, filter: &str) -> Vec<session::Flow> {
+    let (matched, _) = controls.hub.matching_ids(filter);
+    controls.hub.with_session(|session| {
+        matched
+            .into_iter()
+            .filter_map(|(id, _)| session.hydrated(id))
+            .collect::<Vec<_>>()
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn_export_save(
+    controls: Arc<Controls>,
+    dialog: nsh_core::file_dialog::SaveDialog,
+    bytes: Vec<u8>,
+) {
     spawn_detached(async move {
         match pick_save_path(dialog).await {
             Ok(Some(path)) => {
@@ -228,6 +233,26 @@ pub(crate) fn export_har_file(controls: Arc<Controls>, filter: &str) {
             Err(err) => set_status(&controls, StatusMsg::ExportFailed(err)),
         }
     });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn export_har_file(controls: Arc<Controls>, filter: &str) {
+    let redact = redact_options(&controls);
+    let value = controls
+        .hub
+        .export_har_matching_with_redact(filter, &redact);
+    let bytes = match serde_json::to_vec_pretty(&value) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            set_status(&controls, StatusMsg::ExportFailed(err.to_string()));
+            return;
+        }
+    };
+    let secs = unix_secs_now();
+    let dialog = save_dialog_with_default_dir()
+        .file_name(format!("zniff-{secs}.har"))
+        .filter(nsh_core::file_dialog::FileFilter::new("HAR", ["har"]));
+    spawn_export_save(controls, dialog, bytes);
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -257,17 +282,21 @@ pub(crate) fn export_response_web(controls: Arc<Controls>, id: Option<u64>) {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub(crate) fn export_har_file(controls: Arc<Controls>, filter: &str) {
+fn export_filter_query(controls: &Controls, filter: &str) -> String {
     let redact_on = lock_bool(&controls.redact_export);
     let redact_strict = lock_bool(&controls.redact_strict);
     let redact_fields = lock_string(&controls.redact_fields);
-    let rel = format!(
-        "api/export.har?filter={}&redact={}&redact_strict={}&redact_fields={}",
+    format!(
+        "filter={}&redact={}&redact_strict={}&redact_fields={}",
         url_encode_query_component(filter.trim()),
         if redact_on { "1" } else { "0" },
         if redact_strict { "1" } else { "0" },
         url_encode_query_component(&redact_fields),
-    );
+    )
+}
+
+#[cfg(target_arch = "wasm32")]
+fn web_export_download(controls: Arc<Controls>, rel: String, exported_name: &'static str) {
     spawn_detached(async move {
         let Some(url) = proxy::resolve_web_api_url(&rel).await else {
             set_status(
@@ -277,7 +306,7 @@ pub(crate) fn export_har_file(controls: Arc<Controls>, filter: &str) {
             return;
         };
         if open_url(url).await {
-            set_status(&controls, StatusMsg::Exported("zniff.har".into()));
+            set_status(&controls, StatusMsg::Exported(exported_name.into()));
         } else {
             set_status(
                 &controls,
@@ -287,73 +316,105 @@ pub(crate) fn export_har_file(controls: Arc<Controls>, filter: &str) {
     });
 }
 
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn export_har_file(controls: Arc<Controls>, filter: &str) {
+    let rel = format!("api/export.har?{}", export_filter_query(&controls, filter));
+    web_export_download(controls, rel, "zniff.har");
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn export_html_file(controls: Arc<Controls>, filter: &str, zh: bool) {
-    let (matched, _) = controls.hub.matching_ids(filter);
-    let flows = controls.hub.with_session(|session| {
-        matched
-            .into_iter()
-            .filter_map(|(id, _)| session.hydrated(id))
-            .collect::<Vec<_>>()
-    });
+    let flows = matched_hydrated_flows(&controls, filter);
     let redact = redact_options(&controls);
     let json = share::document_with_redact(&flows, clock::now(), filter, &redact);
     let html = share::page(&json, "", zh);
-    let secs = clock::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0);
+    let secs = unix_secs_now();
     let dialog = save_dialog_with_default_dir()
         .file_name(format!("zniff-{secs}.html"))
         .filter(nsh_core::file_dialog::FileFilter::new(
             "HTML",
             ["html", "htm"],
         ));
-    spawn_detached(async move {
-        match pick_save_path(dialog).await {
-            Ok(Some(path)) => {
-                if let Err(err) = write_export_file(&path, html.as_bytes()) {
-                    set_status(&controls, StatusMsg::ExportFailed(err.to_string()));
-                    return;
-                }
-                let text = path.display().to_string();
-                set_clipboard(text.clone());
-                set_status(&controls, StatusMsg::Exported(text));
-            }
-            Ok(None) => set_status(&controls, StatusMsg::ExportCancelled),
-            Err(err) => set_status(&controls, StatusMsg::ExportFailed(err)),
-        }
-    });
+    spawn_export_save(controls, dialog, html.into_bytes());
 }
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn export_html_file(controls: Arc<Controls>, filter: &str, zh: bool) {
-    let redact_on = lock_bool(&controls.redact_export);
-    let redact_strict = lock_bool(&controls.redact_strict);
-    let redact_fields = lock_string(&controls.redact_fields);
     let rel = format!(
-        "api/export.html?filter={}&redact={}&redact_strict={}&redact_fields={}&lang={}",
-        url_encode_query_component(filter.trim()),
-        if redact_on { "1" } else { "0" },
-        if redact_strict { "1" } else { "0" },
-        url_encode_query_component(&redact_fields),
+        "api/export.html?{}&lang={}",
+        export_filter_query(&controls, filter),
         if zh { "zh" } else { "en" },
     );
+    web_export_download(controls, rel, "zniff.html");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn export_openapi_file(controls: Arc<Controls>, filter: &str) {
+    let flows = matched_hydrated_flows(&controls, filter);
+    let redact = redact_options(&controls);
+    let json = openapi::build_openapi_json(&flows, &redact);
+    let secs = unix_secs_now();
+    let dialog = save_dialog_with_default_dir()
+        .file_name(format!("zniff-{secs}.openapi.json"))
+        .filter(nsh_core::file_dialog::FileFilter::new(
+            "OpenAPI JSON",
+            ["json"],
+        ));
+    spawn_export_save(controls, dialog, json.into_bytes());
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn export_openapi_file(controls: Arc<Controls>, filter: &str) {
+    let rel = format!(
+        "api/export.openapi.json?{}",
+        export_filter_query(&controls, filter)
+    );
+    web_export_download(controls, rel, "zniff.openapi.json");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn export_mock_dir(controls: Arc<Controls>, filter: &str, rules_text: Signal<String>) {
+    let flows = matched_hydrated_flows(&controls, filter);
+    if !flows.iter().any(|f| {
+        f.protocol != session::Protocol::Tunnel
+            && !f.method.eq_ignore_ascii_case("CONNECT")
+            && f.status.is_some()
+            && (f.url.starts_with("http://") || f.url.starts_with("https://"))
+    }) {
+        set_status(&controls, StatusMsg::EmptyResponse);
+        return;
+    }
+    let redact = redact_options(&controls);
+    let secs = unix_secs_now();
+    let dialog = save_dialog_with_default_dir().file_name(format!("zniff-mock-{secs}"));
     spawn_detached(async move {
-        let Some(url) = proxy::resolve_web_api_url(&rel).await else {
-            set_status(
-                &controls,
-                StatusMsg::ExportFailed("open_url blocked".into()),
-            );
-            return;
-        };
-        if open_url(url).await {
-            set_status(&controls, StatusMsg::Exported("zniff.html".into()));
-        } else {
-            set_status(
-                &controls,
-                StatusMsg::ExportFailed("open_url blocked".into()),
-            );
+        match pick_save_path(dialog).await {
+            Ok(Some(path)) => {
+                let summary = match mock_gen::export_mock_directory(&flows, &path, &redact) {
+                    Ok(summary) => summary,
+                    Err(err) => {
+                        set_status(&controls, StatusMsg::ExportFailed(err.to_string()));
+                        return;
+                    }
+                };
+                let next = mock_gen::append_mock_rules(&rules_text.get(), &summary.host_rules);
+                rules_text.set(next.clone());
+                controls.hub.set_rules(&next);
+                if !save_config_or_notify(&controls, PrefName::Rules, |config| config.rules = next)
+                {
+                    return;
+                }
+                set_clipboard(summary.root_dir.display().to_string());
+                set_status(
+                    &controls,
+                    StatusMsg::MockExported {
+                        files: summary.file_count,
+                        hosts: summary.host_rules.len(),
+                    },
+                );
+            }
+            Ok(None) => set_status(&controls, StatusMsg::ExportCancelled),
+            Err(err) => set_status(&controls, StatusMsg::ExportFailed(err)),
         }
     });
 }

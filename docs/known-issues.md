@@ -184,7 +184,7 @@ P0 到 P4 里点名的能力已经接上。下面是仍然接受的缺口，不�
 16. **内置 MCP Server 与 Rust / Go 代码生成（AI 联调降维打击）** — ✅ 已完成
     - **实现**：
       - **Code Export 扩展（`present.rs`）**：在详情「更多」菜单中新增复制 **Rust (`reqwest`)** 请求代码（`present::rust_reqwest`）、**Go (`net/http`)** 请求代码（`present::go_http`），以及从响应 JSON 一键推导 **Rust `#[derive(Debug, Clone, Serialize, Deserialize)] struct`**（`present::rust_serde_struct`，自动将字段名转为 `snake_case`、处理 Rust 保留字 `r#` 与数字开头标识符并补充 `#[serde(rename = "...")]`）。
-      - **内置本地 MCP 接口（`mcp.rs` + `proxy.rs`）**：在代理监听端口新增仅限本机回环（`peer.ip().is_loopback()`）访问的 `POST /mcp` JSON-RPC 2.0 路由（不记入抓包会话列表），并支持命令行 `zniff --mcp [--port <port>]` stdio 桥接模式；暴露 `list_flows`（直接复用 `zniff` 过滤表达式）、`get_flow_detail`（含头、完整正文、连接耗时明细与 WebSocket 消息）、`get_session_summary`、`annotate_flow`、`replay_flow`（支持重放已有流量或构造新请求并返回新流量详情）、`get_rules`、`set_rules`（实时读取与校验/更新规则及直通名单）、`clear_flows`（清空全部或仅清未星标）与 `manage_breaks`（查看/放行/全放行/丢弃断点队列）共 9 个 MCP Tool。顶栏「更多」菜单新增「复制 MCP 配置」（`Copy MCP config`）一键复制 Claude Code / Cursor / Antigravity 可直接粘贴的 `mcpServers.zniff` 配置 JSON。
+      - **内置本地 MCP 接口（`mcp.rs` + `proxy.rs`）**：在代理监听端口新增仅限本机回环（`peer.ip().is_loopback()`）访问的 `POST /mcp` JSON-RPC 2.0 路由（不记入抓包会话列表），并支持命令行 `zniff --mcp [--port <port>]` stdio 桥接模式；暴露 `list_flows`（直接复用 `zniff` 过滤表达式）、`get_flow_detail`（含头、完整正文、连接耗时明细与 WebSocket 消息）、`get_session_summary`、`annotate_flow`、`replay_flow`（支持重放已有流量或构造新请求并返回新流量详情）、`get_rules`、`set_rules`（实时读取与校验/更新规则及直通名单）、`clear_flows`（清空全部或仅清未星标）、`manage_breaks`（查看/放行/全放行/丢弃断点队列）与 `generate_openapi`（从当前筛选会话生成 OpenAPI 3.0.3 规范，支持 `redact` 开关）共 10 个 MCP Tool。顶栏「更多」菜单新增「复制 MCP 配置」（`Copy MCP config`）一键复制 Claude Code / Cursor / Antigravity 可直接粘贴的 `mcpServers.zniff` 配置 JSON。
 
 17. **快捷语义规则：`no-cache`（禁用缓存）与 `block`（阻断连接）** — ✅ 已完成
     - **实现**：
@@ -205,8 +205,16 @@ P0 到 P4 里点名的能力已经接上。下面是仍然接受的缺口，不�
 
 ### P5：高阶扩展方向（按需演进）
 
-20. **动态脚本改写（Scripting / Dynamic Rules）**
-    - **场景**：针对 20% 静态 DSL 无法覆盖的动态计算场景——例如修改请求 Body 后需用 `HMAC-SHA256` 动态重算请求头中的 `X-Signature` / `X-Timestamp`，或对自定义 AES/RSA 加密的请求/响应报文进行透明加解密展示。
-    - **架构评估**：为避免给主进程引入重量级运行时，可评估两种演进路径：
-      1. **轻量嵌入式引擎**：按需引入极轻量的 `rquickjs` 或 `mlua`，支持 `script <主机[/路径]> <path.js/.lua>`，在受控沙箱与超时限制内暴露 `onRequest(ctx)` / `onResponse(ctx)` 钩子及内置 `crypto`（HMAC/SHA256/AES/Base64）工具函数；
-      2. **外部 Filter 进程 / 本地 Webhook 钩子**：无需内嵌语言虚拟机，允许将匹配流量通过 stdin/stdout 或本地 Unix Socket 交给用户自己的脚本处理。
+20. **动态规则模板变量、`HMAC-SHA256` 签名与本地 HTTP Webhook 钩子（零 C 依赖动态扩展）** — ✅ 已完成
+    - **实现**：
+      - **内置动态模板变量与签名引擎（`rule_vars.rs`）**：纯 Rust 实现 RFC 6234 SHA-256 与 RFC 2104 HMAC-SHA256，支持在 `header`、`query`、`json`、`replace`、`map-local` 中动态求值 `{{uuid}}`、`{{ts}}`、`{{ts_ms}}`、`{{iso_now}}`、`{{random_int(min,max)}}`、`{{req.method}}`、`{{req.host}}`、`{{req.path}}`、`{{req.query.<k>}}`、`{{req.header.<name>}}`、`{{req.body}}`、`{{sha256(...)}}`、`{{hmac_sha256(secret,msg)}}`、`{{hmac_sha256_b64(secret,msg)}}`、`{{base64(...)}}`、`{{urlencode(...)}}`；当请求阶段同时发生 `json`/`replace` 正文改写时自动二次求值使 `HMAC` 基于最终改写后正文计算。
+      - **本地 HTTP Webhook 钩子（`webhook.rs`）**：支持规则 `hook <主机[/路径]> <http://127.0.0.1:port/endpoint> [req|res|both] [timeout=<ms>] [op=<操作名>]`，严格限定本机回环地址直连回调（不进入自身代理或会话列表），将有界 `<= 1 MB` 请求/响应 JSON POST 到本地服务并原地应用 `{status?, headers?, body_b64?}` 改写。
+
+21. **零配置单终端 / 免证书浏览器 / Android `adb` 一键抓包套件** — ✅ 已完成
+    - **实现（`launcher.rs` + `ca.rs` + `present.rs` + `more_menu_rows.rs`）**：
+      - 在顶栏「更多」新增 `快速抓包 [浏览器][终端][ADB]` 入口：自动计算根 CA 与叶子证书 ECDSA SPKI SHA-256 指纹并通过 `--ignore-certificate-errors-spki-list` + 隔离 `--user-data-dir` 拉起免系统证书信任的独立 Chromium 浏览器；一键启动预注入全套代理环境变量与 CA 路径的终端窗口；自动配置在线 Android `adb` 设备端口反向转发（`adb reverse`）与全局代理并推送根证书，停止抓包或退出应用时自动还原 `adb` 代理并清理临时浏览器目录。
+
+22. **一键导出 OpenAPI 3.0.3 与批量本地 Mock 目录生成** — ✅ 已完成
+    - **实现（`openapi.rs` + `mock_gen.rs` + `rules.rs` + `web.rs` + `mcp.rs`）**：
+      - 按 `host + method + normalized_path` 自动归并纯数字与 UUID 路径段为 `{id}` 参数并合并多样本 JSON Schema，在「更多 -> 导出 `[HAR][HTML][OpenAPI]`」、Web 路由 `GET /api/export.openapi.json` 及第 10 个内置 MCP Tool `generate_openapi` 中提供导出，均遵守当前脱敏配置。
+      - 桌面端「更多 -> 生成本地 Mock…」批量将筛选结果按 `<host>/<path>[.<METHOD>].json` 导出为本地静态 Mock 目录并自动追加 `map-local <host> "<dir>" fallback` 规则，配合 `resolve_map_local_target` 新增的 `index.json` / `<seg>.json` 回退机制实现秒级离线联调。
