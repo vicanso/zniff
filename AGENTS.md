@@ -8,10 +8,11 @@
 
 - `app/`：唯一的 crate，自带 `[workspace]`。不要把仓库根也做成包含 `app/` 的 workspace。
 - `app/nsh.json`：`root` 是 `App`。入口是 `app/src/main.rs`，根组件是 `app/src/lib.rs` 里的 `App`。
-- 单文件规模与模块拆分标准：禁止把新面板、新功能或控制器逻辑继续堆进巨型单文件（尤其是 `app/src/lib.rs` 与 `app/src/proxy.rs`）。新增独立面板、弹窗、子视图或业务域时，必须拆分为独立的子模块文件（如 `app/src/ui/*.rs` 或按职责命名的同级模块），并在 `lib.rs` 中仅保留 `App` 根壳层组装与模块重导出：
-  - 新增模块文件目标控制在 `<= 800` 行，硬性上限 `1500` 行（不含 `#[cfg(test)]` 测试模块）；单函数尽量控制在 `<= 120` 行。
-  - 触碰已超限历史大文件（如 `lib.rs`、`proxy.rs`、`share.rs`、`present.rs`）时，禁止继续向其追加成块的新组件或新子系统；每当修改其中某个独立区块（如工具栏与菜单、过滤与规则面板、流量列表与分面抽屉、详情面板与正文卡片、断点与构造请求、时序图/瀑布图面板、脱敏预览、底部状态栏与扫码页、桌面/Wasm 控制器动作），优先顺手将该内聚区块抽离为独立子模块。
-- `app/src/proxy.rs`、`app/src/local_proc.rs`：CONNECT、TLS、HTTP/1.1、HTTP/2、记录，以及本机回环源端口到进程名识别（macOS `lsof +c 0` / Linux `/proc` / Windows）。
+- 单文件规模与代码复杂度红线：禁止写出过于复杂的巨型单文件或巨型函数，新增独立面板、弹窗、子视图或业务域时，必须拆分为职责单一的独立子模块文件（如 `app/src/ui/*.rs`、`app/src/proxy/*.rs` 或按业务域命名的同级模块），并在根模块中仅保留壳层组装与重导出：
+  - **文件行数**：新增模块目标 `<= 600` 行，建议上限 `800` 行，**硬性上限 `1200` 行**（不含 `#[cfg(test)]` 测试模块；单个测试模块超过 `400` 行时拆分为独立 `tests.rs`）。
+  - **函数复杂度**：单函数目标 `<= 80` 行，**硬性上限 `120` 行**；分支/循环嵌套深度尽量控制在 `<= 4` 层（优先使用 early return、`let-else`、`?` 与语义化小函数拉平）；单函数参数不超过 `7` 个（超出则聚合为结构体，禁止为新增函数继续添加 `#[allow(clippy::too_many_arguments)]`）。
+  - **历史大文件治理**：触碰已超 `1200` 行的历史大文件（如 `present.rs`、`share.rs`、`session.rs`、`rules.rs`、`web.rs`）时，禁止继续向其追加成块的新组件或新子系统；每当修改其中某个独立区块，优先顺手将该内聚区块抽离为独立子模块。
+- `app/src/proxy/`、`app/src/local_proc.rs`：代理内核已拆分为 `mod.rs`（入口与 `Capture`）、`hub.rs` / `hub_session.rs`（`Hub` 状态、规则/断点/连接池/会话/分享）、`tls_mitm.rs`（CONNECT/MITM/H1/H2 握手）、`plain_http.rs`、`upstream_io.rs`、`local_routes.rs`（`/zniff`、`/mcp`、`/relay`、`/s/`）、`replay.rs`、`wire.rs`、`hyper_forward.rs`、`hyper_helpers.rs` 与 `tests.rs`，配合 `local_proc.rs` 完成本机回环源端口到进程名识别（macOS `lsof +c 0` / Linux `/proc` / Windows）。
 - `app/src/session.rs`：内存会话。
 - `app/src/ca.rs`：根 CA 和叶子证书。
 - `app/src/sysproxy.rs`：系统代理的记住、改写和恢复。
