@@ -376,23 +376,9 @@ pub(crate) fn fill_draft_from_rule_line(
     true
 }
 
-fn apply_rule_edit(rules_text: Signal<String>, controls: &Controls, next: String) {
-    rules_text.set(next.clone());
-    controls.hub.set_rules(&next);
-    if let Err(err) = save_config(|config| config.rules = next) {
-        set_status(
-            controls,
-            StatusMsg::PrefUnsaved {
-                name: PrefName::Rules,
-                err: err.to_string(),
-            },
-        );
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn rule_line_strip(
-    rules_text: Signal<String>,
+    target: RuleEditTarget,
     controls: Arc<Controls>,
     draft_host: Signal<String>,
     draft_path: Signal<String>,
@@ -402,7 +388,7 @@ pub(crate) fn rule_line_strip(
     draft_modes: QuickRuleModeSignals,
     draft_kind: Signal<u8>,
 ) -> impl IntoElement {
-    let items = move || collect_rule_lines(&rules_text.get());
+    let items = move || collect_rule_lines(&target.current_text());
     when(
         move || !items().is_empty(),
         move || {
@@ -459,8 +445,11 @@ pub(crate) fn rule_line_strip(
                                     ))
                                     .on_press(move || {
                                         let idx = item.with(|it| it.line_idx);
-                                        let next = toggle_rule_line_comment(&rules_text.get(), idx);
-                                        apply_rule_edit(rules_text, &tc, next);
+                                        let next = toggle_rule_line_comment(
+                                            &target.current_text_untracked(),
+                                            idx,
+                                        );
+                                        target.commit(&tc, next);
                                     })
                                     .child(
                                         mono(move || -> SharedString {
@@ -538,8 +527,9 @@ pub(crate) fn rule_line_strip(
                                     .tooltip(label_tip("删除此规则行", "Remove rule line"))
                                     .on_press(move || {
                                         let idx = item.with(|it| it.line_idx);
-                                        let next = remove_rule_line(&rules_text.get(), idx);
-                                        apply_rule_edit(rules_text, &rc, next);
+                                        let next =
+                                            remove_rule_line(&target.current_text_untracked(), idx);
+                                        target.commit(&rc, next);
                                     })
                                     .child(text("×").text_size(px(10.5)).text_color(fg_muted())),
                             )

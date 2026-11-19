@@ -24,6 +24,7 @@ pub struct Hub {
     pub(super) bypass_text: Mutex<String>,
     pub(super) rules: Mutex<Vec<Rule>>,
     pub(super) rules_text: Mutex<String>,
+    pub(super) rule_groups: Mutex<Vec<crate::config::RuleGroup>>,
     pub(super) rules_rev: AtomicU64,
     /// Session-only. Off skips every rule without rewriting the text.
     pub(super) apply_rules: AtomicBool,
@@ -102,11 +103,25 @@ pub(crate) fn spilled_flow_ids(document: &str) -> Vec<u64> {
         .collect()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpstreamKind {
+    Http,
+    Socks5 { remote_dns: bool },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Upstream {
+    pub kind: UpstreamKind,
     pub host: String,
     pub port: u16,
     pub auth_header: Option<String>,
+    pub socks5_auth: Option<(String, String)>,
+}
+
+impl Upstream {
+    pub fn is_http_proxy(&self) -> bool {
+        matches!(self.kind, UpstreamKind::Http)
+    }
 }
 
 pub(super) struct BreakSlot {
@@ -161,6 +176,7 @@ impl Hub {
             bypass_text: Mutex::new(String::new()),
             rules: Mutex::new(Vec::new()),
             rules_text: Mutex::new(String::new()),
+            rule_groups: Mutex::new(Vec::new()),
             rules_rev: AtomicU64::new(0),
             apply_rules: AtomicBool::new(true),
             apply_breaks: AtomicBool::new(true),
@@ -557,12 +573,26 @@ impl Hub {
             .clone()
     }
 
-    pub fn set_rules(&self, text: &str) {
-        *self
+    pub fn pac_script(&self, proxy_authority: &str) -> String {
+        self.bypass
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .pac_script(proxy_authority)
+    }
+
+    fn rebuild_rules(&self) {
+        let workspace = self
             .rules_text
             .lock()
-            .unwrap_or_else(|err| err.into_inner()) = text.to_string();
-        let next_rules = rules::parse_rules(text);
+            .unwrap_or_else(|err| err.into_inner())
+            .clone();
+        let groups = self
+            .rule_groups
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone();
+        let combined = rules::combine_effective_rules_text(&groups, &workspace);
+        let next_rules = rules::parse_rules(&combined);
         let origin_rules_changed = {
             let mut guard = self.rules.lock().unwrap_or_else(|err| err.into_inner());
             let changed = origin_dial_rules(&guard) != origin_dial_rules(&next_rules);
@@ -573,6 +603,37 @@ impl Hub {
         if origin_rules_changed {
             self.invalidate_origin_pools();
         }
+    }
+
+    pub fn set_rules(&self, text: &str) {
+        *self
+            .rules_text
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = text.to_string();
+        self.rebuild_rules();
+    }
+
+    pub fn set_rule_groups(&self, groups: &[crate::config::RuleGroup]) {
+        *self
+            .rule_groups
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) =
+            crate::config::sanitize_rule_groups(groups.to_vec());
+        self.rebuild_rules();
+    }
+
+    pub fn rule_groups(&self) -> Vec<crate::config::RuleGroup> {
+        self.rule_groups
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+    }
+
+    pub fn effective_rules_count(&self) -> usize {
+        self.rules
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .len()
     }
 
     pub fn rules_revision(&self) -> u64 {

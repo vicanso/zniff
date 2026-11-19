@@ -9,7 +9,8 @@ pub(super) fn pool_key(host: &str, port: u16, hub: &Hub) -> (String, u16) {
         );
     }
     match hub.upstream() {
-        Some(upstream) => (upstream.host, upstream.port),
+        Some(upstream) if upstream.is_http_proxy() => (upstream.host, upstream.port),
+        Some(_) => (format!("socks5@{host}"), port),
         None => (host.to_string(), port),
     }
 }
@@ -37,28 +38,41 @@ pub(super) async fn dial_timed(
         if let Ok(peer) = stream.peer_addr() {
             info.server_addr = peer.to_string();
         }
-        if tunnel {
-            let connect_authority = format!("{}:{port}", display_host(host));
-            let auth_line = upstream
-                .auth_header
-                .as_deref()
-                .map(|auth| format!("Proxy-Authorization: {auth}\r\n"))
-                .unwrap_or_default();
-            let req = format!(
-                "CONNECT {connect_authority} HTTP/1.1\r\nHost: {connect_authority}\r\n{auth_line}\r\n"
-            );
-            stream.write_all(req.as_bytes()).await?;
-            let (head, rest) = read_header_block(&mut stream).await?;
-            let text = String::from_utf8_lossy(&head);
-            let ok = text.starts_with("HTTP/1.1 200") || text.starts_with("HTTP/1.0 200");
-            if !ok {
-                anyhow::bail!(
-                    "上游代理拒绝 CONNECT: {}",
-                    text.lines().next().unwrap_or("").trim()
+        match upstream.kind {
+            UpstreamKind::Http if tunnel => {
+                let connect_authority = format!("{}:{port}", display_host(host));
+                let auth_line = upstream
+                    .auth_header
+                    .as_deref()
+                    .map(|auth| format!("Proxy-Authorization: {auth}\r\n"))
+                    .unwrap_or_default();
+                let req = format!(
+                    "CONNECT {connect_authority} HTTP/1.1\r\nHost: {connect_authority}\r\n{auth_line}\r\n"
                 );
+                stream.write_all(req.as_bytes()).await?;
+                let (head, rest) = read_header_block(&mut stream).await?;
+                let text = String::from_utf8_lossy(&head);
+                let ok = text.starts_with("HTTP/1.1 200") || text.starts_with("HTTP/1.0 200");
+                if !ok {
+                    anyhow::bail!(
+                        "上游代理拒绝 CONNECT: {}",
+                        text.lines().next().unwrap_or("").trim()
+                    );
+                }
+                if !rest.is_empty() {
+                    anyhow::bail!("上游 CONNECT 响应带了多余字节");
+                }
             }
-            if !rest.is_empty() {
-                anyhow::bail!("上游 CONNECT 响应带了多余字节");
+            UpstreamKind::Http => {}
+            UpstreamKind::Socks5 { remote_dns } => {
+                super::socks5::socks5_handshake(
+                    &mut stream,
+                    host,
+                    port,
+                    remote_dns,
+                    upstream.socks5_auth.as_ref(),
+                )
+                .await?;
             }
         }
         info.tcp_ms = Some(tcp_start.elapsed().as_millis() as u64);
@@ -152,45 +166,50 @@ pub(super) fn parse_upstream(text: &str) -> Option<Upstream> {
     if text.is_empty() || text.chars().any(char::is_whitespace) {
         return None;
     }
-    let rest = if text.len() >= 7 && text[..7].eq_ignore_ascii_case("http://") {
-        &text[7..]
-    } else if text.contains("://") {
-        return None;
+    let (kind, rest, default_port) = if let Some((scheme, after)) = text.split_once("://") {
+        match scheme.to_ascii_lowercase().as_str() {
+            "http" => (UpstreamKind::Http, after, 8080),
+            "socks5" => (UpstreamKind::Socks5 { remote_dns: false }, after, 1080),
+            "socks5h" => (UpstreamKind::Socks5 { remote_dns: true }, after, 1080),
+            _ => return None,
+        }
     } else {
-        text
+        (UpstreamKind::Http, text, 80)
     };
     let authority = rest.split('/').next().unwrap_or(rest);
     if authority.is_empty() || authority.contains('?') || authority.contains('#') {
         return None;
     }
-    let (auth_header, host_port) = match authority.rsplit_once('@') {
-        Some((userinfo, hp)) => {
-            if userinfo.is_empty() {
-                (None, hp)
-            } else {
-                let (u, p) = userinfo.split_once(':').unwrap_or((userinfo, ""));
-                let creds = format!(
-                    "{}:{}",
-                    decode_percent_userinfo(u),
-                    decode_percent_userinfo(p)
-                );
-                let encoded = crate::session::base64_encode(creds.as_bytes());
-                (Some(format!("Basic {encoded}")), hp)
+    let (auth_header, socks5_auth, host_port) = match authority.rsplit_once('@') {
+        Some((userinfo, hp)) if !userinfo.is_empty() => {
+            let (u, p) = userinfo.split_once(':').unwrap_or((userinfo, ""));
+            let user = decode_percent_userinfo(u);
+            let pass = decode_percent_userinfo(p);
+            match kind {
+                UpstreamKind::Http => {
+                    let creds = format!("{user}:{pass}");
+                    let encoded = crate::session::base64_encode(creds.as_bytes());
+                    (Some(format!("Basic {encoded}")), None, hp)
+                }
+                UpstreamKind::Socks5 { .. } => (None, Some((user, pass)), hp),
             }
         }
-        None => (None, authority),
+        Some((_, hp)) => (None, None, hp),
+        None => (None, None, authority),
     };
     if !host_port.starts_with('[') && host_port.matches(':').count() > 1 {
         return None;
     }
-    let (host, port) = split_host_port(host_port, 80).ok()?;
+    let (host, port) = split_host_port(host_port, default_port).ok()?;
     if host.is_empty() || port == 0 {
         return None;
     }
     Some(Upstream {
+        kind,
         host,
         port,
         auth_header,
+        socks5_auth,
     })
 }
 

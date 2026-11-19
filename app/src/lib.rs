@@ -21,9 +21,12 @@ mod decompress;
 mod har;
 mod i18n;
 mod icon;
+mod import_charles;
+mod import_whistle;
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
 mod launcher;
+mod llm_stream;
 #[cfg(not(target_arch = "wasm32"))]
 mod local_proc;
 #[cfg(not(target_arch = "wasm32"))]

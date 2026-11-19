@@ -123,8 +123,8 @@ pub(crate) fn profile_dock(
                             .gap_2()
                             .child(
                                 text(tr(
-                                    "粘贴 TOML 配置导入（支持 [[profiles]] 或单套配置）",
-                                    "Paste TOML setup to import (supports [[profiles]] or single setup)",
+                                    "粘贴 TOML / Whistle / Charles XML 导入",
+                                    "Paste TOML, Whistle, or Charles XML to import",
                                 ))
                                 .flex_1()
                                 .min_w(px(0.0))
@@ -284,8 +284,8 @@ pub(crate) fn profile_dock(
                                     .scroll_beyond_last_line(false)
                                     .placeholder(move || {
                                         SharedString::from(tr(
-                                            "在此粘贴导出的 [[profiles]] TOML 内容...",
-                                            "Paste exported [[profiles]] TOML content here...",
+                                            "粘贴 TOML 配置、Whistle 规则或 Charles XML...",
+                                            "Paste TOML setup, Whistle rules, or Charles XML...",
                                         )())
                                     })
                                     .on_change(move |text: &SharedString| {
@@ -294,6 +294,25 @@ pub(crate) fn profile_dock(
                                     .size_full(),
                             ),
                     )
+                    .child(when(
+                        {
+                            let langs = ui_langs();
+                            move || preview_rule_import(&import_text.get(), ui_lang(langs)).is_some()
+                        },
+                        {
+                            let langs = ui_langs();
+                            move || {
+                                text(move || {
+                                    SharedString::from(
+                                        preview_rule_import(&import_text.get(), ui_lang(langs))
+                                            .unwrap_or_default(),
+                                    )
+                                })
+                                .text_size(px(11.0))
+                                .text_color(accent_blue_text())
+                            }
+                        },
+                    ))
             },
         ))
         .child(

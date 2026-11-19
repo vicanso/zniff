@@ -186,6 +186,12 @@ pub(crate) fn publish_detail(
     let total = flow
         .finished_at
         .and_then(|at| at.duration_since(flow.started).ok());
+    let llm_summary = crate::llm_stream::parse_llm_sse_body(
+        &flow.response_headers,
+        &flow.response_body,
+        ttfb,
+        total,
+    );
     shown.metrics.set(present::format_timing(
         flow.started,
         ttfb,
@@ -340,6 +346,7 @@ pub(crate) fn publish_detail(
     shown.preview_h.set(box_h as f32);
     shown.image_caption.set(response.caption);
     shown.messages.set(messages);
+    shown.llm_stream.set(llm_summary);
     shown.diff.set(diff);
     shown.diff_old.set(diff_old);
     shown.diff_new.set(diff_new);

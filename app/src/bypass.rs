@@ -75,6 +75,75 @@ impl BypassRules {
             || self.suffixes.iter().any(|suffix| host.ends_with(suffix));
         if self.only { !listed } else { listed }
     }
+
+    /// Builds a dynamic `proxy.pac` script reflecting [`Self::skips`] and loopback bypasses.
+    pub fn pac_script(&self, proxy_authority: &str) -> String {
+        let authority = sanitize_pac_authority(proxy_authority);
+        let proxy_literal = serde_json::to_string(&format!("PROXY {authority}; DIRECT"))
+            .unwrap_or_else(|_| "\"PROXY 127.0.0.1:8877; DIRECT\"".to_string());
+
+        let decision_body = if self.all {
+            let result = if self.only {
+                proxy_literal.as_str()
+            } else {
+                "\"DIRECT\""
+            };
+            format!("  return {result};")
+        } else {
+            let match_expr = self.pac_match_expr();
+            if self.only {
+                format!(
+                    "  if ({match_expr}) {{\n    return {proxy_literal};\n  }}\n  return \"DIRECT\";"
+                )
+            } else {
+                format!(
+                    "  if ({match_expr}) {{\n    return \"DIRECT\";\n  }}\n  return {proxy_literal};"
+                )
+            }
+        };
+
+        format!(
+            "function FindProxyForURL(url, host) {{\n  var h = String(host || \"\").toLowerCase().replace(/^\\[|\\]$/g, \"\").replace(/\\.+$/, \"\");\n  if (!h || isPlainHostName(h) || h === \"localhost\" || h === \"127.0.0.1\" || h === \"::1\") {{\n    return \"DIRECT\";\n  }}\n{decision_body}\n}}\n"
+        )
+    }
+
+    fn pac_match_expr(&self) -> String {
+        let mut checks = Vec::new();
+        let mut exact: Vec<&str> = self.exact.iter().map(String::as_str).collect();
+        exact.sort_unstable();
+        for host in exact {
+            if let Ok(lit) = serde_json::to_string(host) {
+                checks.push(format!("h === {lit}"));
+            }
+        }
+        let mut suffixes: Vec<&str> = self.suffixes.iter().map(String::as_str).collect();
+        suffixes.sort_unstable();
+        for suffix in suffixes {
+            if let Ok(lit) = serde_json::to_string(suffix) {
+                checks.push(format!("dnsDomainIs(h, {lit})"));
+            }
+        }
+        if checks.is_empty() {
+            "false".to_string()
+        } else {
+            checks.join(" || ")
+        }
+    }
+}
+
+fn sanitize_pac_authority(raw: &str) -> String {
+    let cleaned: String = raw
+        .trim()
+        .chars()
+        .filter(|ch| {
+            !ch.is_control() && !ch.is_whitespace() && !matches!(ch, '"' | '\'' | '\\' | ';' | '/')
+        })
+        .collect();
+    if cleaned.is_empty() {
+        "127.0.0.1:8877".to_string()
+    } else {
+        cleaned
+    }
 }
 
 fn normalize_host(host: &str) -> String {
@@ -115,5 +184,33 @@ mod tests {
     fn star_tunnels_all_unless_only() {
         assert!(BypassRules::parse("*").skips("anywhere.test"));
         assert!(!BypassRules::parse("only *").skips("anywhere.test"));
+    }
+
+    #[test]
+    fn pac_script_reflects_bypass_and_only_modes_and_sanitizes_authority() {
+        let normal = BypassRules::parse("exact.vicanso.dev, *.corp.vicanso.dev");
+        let pac = normal.pac_script("127.0.0.1:8877\"; alert(1)//");
+        assert!(pac.contains("function FindProxyForURL(url, host)"), "{pac}");
+        assert!(pac.contains("isPlainHostName(h)"), "{pac}");
+        assert!(
+            pac.contains("PROXY 127.0.0.1:8877alert(1); DIRECT"),
+            "{pac}"
+        );
+        assert!(pac.contains("h === \"exact.vicanso.dev\""), "{pac}");
+        assert!(
+            pac.contains("dnsDomainIs(h, \".corp.vicanso.dev\")"),
+            "{pac}"
+        );
+        assert!(!pac.contains("\"; alert"), "{pac}");
+
+        let only = BypassRules::parse("only: api.vicanso.dev *.staging.vicanso.dev");
+        let only_pac = only.pac_script("10.0.0.2:8877");
+        assert!(only_pac.contains("h === \"api.vicanso.dev\""), "{only_pac}");
+        assert!(
+            only_pac.contains("dnsDomainIs(h, \".staging.vicanso.dev\")\n  ) {\n")
+                || only_pac
+                    .contains("return \"PROXY 10.0.0.2:8877; DIRECT\";\n  }\n  return \"DIRECT\";"),
+            "{only_pac}"
+        );
     }
 }

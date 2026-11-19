@@ -18,6 +18,7 @@ pub(crate) fn footer(
     config_broken_dismissed: Signal<bool>,
     layout_mode: Signal<config::LayoutMode>,
     sidebar_collapsed: Signal<bool>,
+    connect_hub: ConnectHubProps,
     controls: Arc<Controls>,
 ) -> impl IntoElement {
     let port_controls = controls.clone();
@@ -25,6 +26,7 @@ pub(crate) fn footer(
     let qr_controls = controls.clone();
     let sidebar_controls = controls.clone();
     let auth_controls = controls;
+    let qr_open = connect_hub.qr_open;
     view()
         .h(px(32.0))
         .pl(px(LIST_INSET))
@@ -224,6 +226,7 @@ pub(crate) fn footer(
                     lan_addrs,
                     qr_path,
                     listen_all,
+                    qr_open,
                     qr_controls.clone(),
                 )
             },
@@ -236,6 +239,7 @@ pub(crate) fn footer(
             move || !running.get(),
             move || lan_toggle(listen_all, lan_controls.clone()),
         ))
+        .child(connect_hub_popover(connect_hub))
         .child(proxy_auth_popover(proxy_auth, auth_controls))
         .child(
             view()
@@ -481,6 +485,7 @@ pub(crate) fn proxy_auth_popover(
         )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn cert_qr(
     listen: Signal<String>,
     lan_url: Signal<String>,
@@ -488,10 +493,11 @@ pub(crate) fn cert_qr(
     lan_addrs: Signal<Vec<LanAddr>>,
     qr_path: Signal<String>,
     listen_all: Signal<bool>,
+    open: Signal<bool>,
     controls: Arc<Controls>,
 ) -> impl IntoElement {
-    let open = signal(false);
     popover()
+        .open(move || Some(open.get()))
         .placement(Placement::Top)
         .align(Align::End)
         .offset(px(6.0))

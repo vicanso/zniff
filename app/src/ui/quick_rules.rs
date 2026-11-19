@@ -84,7 +84,7 @@ pub(crate) fn enable_switch(
 }
 
 pub(crate) fn rules_editor(
-    value: Signal<String>,
+    target: RuleEditTarget,
     controls: Arc<Controls>,
     import_open: Signal<bool>,
 ) -> impl IntoElement {
@@ -103,7 +103,7 @@ pub(crate) fn rules_editor(
         .overflow_hidden()
         .child(
             editor()
-                .value(move || SharedString::from(value.get()))
+                .value(move || SharedString::from(target.current_text()))
                 .language("plaintext")
                 .line_numbers(true)
                 .folding(false)
@@ -118,18 +118,7 @@ pub(crate) fn rules_editor(
                     )())
                 })
                 .on_change(move |text: &SharedString| {
-                    let text = text.to_string();
-                    value.set(text.clone());
-                    controls.hub.set_rules(&text);
-                    if let Err(err) = save_config(|config| config.rules = text) {
-                        set_status(
-                            &controls,
-                            StatusMsg::PrefUnsaved {
-                                name: PrefName::Rules,
-                                err: err.to_string(),
-                            },
-                        );
-                    }
+                    target.commit(&controls, text.to_string());
                 })
                 .size_full(),
         )
@@ -184,7 +173,7 @@ pub(crate) fn quick_side_chip(
 }
 
 pub(crate) fn replace_row(
-    rules_text: Signal<String>,
+    target: RuleEditTarget,
     controls: Arc<Controls>,
     host_pattern: Signal<String>,
     path_pattern: Signal<String>,
@@ -707,7 +696,7 @@ pub(crate) fn replace_row(
                                     eff_path,
                                 );
                                 let Some(next) = crate::rules::append_quick_rule_with_op(
-                                    &rules_text.get(),
+                                    &target.current_text_untracked(),
                                     quick_kind(kind_now),
                                     &combined_pattern,
                                     mode_now,
@@ -717,17 +706,7 @@ pub(crate) fn replace_row(
                                 ) else {
                                     return;
                                 };
-                                rules_text.set(next.clone());
-                                controls.hub.set_rules(&next);
-                                if let Err(err) = save_config(|config| config.rules = next) {
-                                    set_status(
-                                        &controls,
-                                        StatusMsg::PrefUnsaved {
-                                            name: PrefName::Rules,
-                                            err: err.to_string(),
-                                        },
-                                    );
-                                }
+                                target.commit(&controls, next);
                                 host_pattern.set(String::new());
                                 path_pattern.set(String::new());
                                 op_pattern.set(String::new());

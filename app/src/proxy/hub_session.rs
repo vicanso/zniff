@@ -628,7 +628,10 @@ impl Hub {
     }
 
     pub fn import_har(&self, value: &serde_json::Value) -> usize {
-        let items = crate::har::import_har(value);
+        self.import_flows(crate::har::import_har(value))
+    }
+
+    pub fn import_flows(&self, items: Vec<crate::har::Imported>) -> usize {
         let count = items.len();
         for item in items {
             let id = self.open(FlowDraft {

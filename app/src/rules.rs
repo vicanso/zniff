@@ -438,6 +438,27 @@ pub fn parse_rules(text: &str) -> Vec<Rule> {
     text.lines().filter_map(parse_single_rule).collect()
 }
 
+/// Combines workspace `rules` (highest precedence) with all enabled rule groups.
+pub fn combine_effective_rules_text(
+    groups: &[crate::config::RuleGroup],
+    workspace_rules: &str,
+) -> String {
+    let mut parts = Vec::new();
+    let ws = workspace_rules.trim();
+    if !ws.is_empty() {
+        parts.push(ws.to_string());
+    }
+    for group in groups {
+        if group.enabled {
+            let text = group.rules.trim();
+            if !text.is_empty() {
+                parts.push(text.to_string());
+            }
+        }
+    }
+    parts.join("\n")
+}
+
 /// Returns true when at least one rule matching `(host, path)` by host and path
 /// also carries a GraphQL `op=<name>` condition.
 pub fn has_op_rules(rules: &[Rule], host: &str, path: &str) -> bool {

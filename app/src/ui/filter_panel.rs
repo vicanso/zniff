@@ -11,10 +11,14 @@ pub(crate) fn saved_filter_menu(
     let saved = profiles.saved;
     let bypass_text = profiles.bypass;
     let rules_text = profiles.rules;
+    let rule_groups = profiles.rule_groups;
     let upstream_text = profiles.upstream;
     let rules_on = profiles.rules_on;
     let breaks_on = profiles.breaks_on;
-    let active_rules_count = computed(move || crate::rules::parse_rules(&rules_text.get()).len());
+    let active_rules_count = computed(move || {
+        let effective = effective_rules_text(&rules_text.get(), &rule_groups.get());
+        crate::rules::parse_rules(&effective).len()
+    });
     let open = profiles.panel_open;
     let is_tinted = move || open.get() || !filter.get().trim().is_empty();
     popover()
@@ -46,6 +50,7 @@ pub(crate) fn saved_filter_menu(
                         || !filter.get().trim().is_empty()
                         || !saved.with(Vec::is_empty)
                         || config_set(bypass_text, rules_text, upstream_text)
+                        || has_enabled_group_rules(&rule_groups.get())
                     {
                         accent_blue_border()
                     } else {
@@ -87,7 +92,9 @@ pub(crate) fn saved_filter_menu(
                     move || {
                         color(if capture_muted(rules_on, breaks_on) {
                             status_warn_fg()
-                        } else if is_tinted() || config_set(bypass_text, rules_text, upstream_text)
+                        } else if is_tinted()
+                            || config_set(bypass_text, rules_text, upstream_text)
+                            || has_enabled_group_rules(&rule_groups.get())
                         {
                             accent_blue_text()
                         } else {
@@ -135,7 +142,7 @@ pub(crate) fn saved_filter_panel(
     let langs = ui_langs();
     let filter = profiles.filter;
     let bypass_text = profiles.bypass;
-    let rules_text = profiles.rules;
+    let rule_target = RuleEditTarget::from_profiles(profiles);
     let upstream_text = profiles.upstream;
     let rules_on = profiles.rules_on;
     let breaks_on = profiles.breaks_on;
@@ -144,8 +151,13 @@ pub(crate) fn saved_filter_panel(
     let layout_mode = profiles.layout_mode;
     let sidebar_width = profiles.sidebar_width;
     let sidebar_collapsed = profiles.sidebar_collapsed;
-    let parsed_rules_count = computed(move || crate::rules::parse_rules(&rules_text.get()).len());
-    let invalid_lines = computed(move || crate::rules::invalid_rule_lines(&rules_text.get()));
+    let parsed_rules_count = computed(move || {
+        let effective =
+            effective_rules_text(&rule_target.workspace.get(), &rule_target.groups.get());
+        crate::rules::parse_rules(&effective).len()
+    });
+    let invalid_lines =
+        computed(move || crate::rules::invalid_rule_lines(&rule_target.current_text()));
     let field = filter;
     let reset_filter = filter;
     let host_field = signal(extract_host_or(&filter.get_untracked()));
@@ -171,6 +183,7 @@ pub(crate) fn saved_filter_panel(
     });
 
     let bypass_controls = controls.clone();
+    let rule_groups_controls = controls.clone();
     let rules_controls = controls.clone();
     let rule_strip_controls = controls.clone();
     let rules_save_controls = controls.clone();
@@ -572,7 +585,7 @@ pub(crate) fn saved_filter_panel(
                                                     },
                                                 ))
                                                 .child(when(
-                                                    move || !rules_text.get().trim().is_empty(),
+                                                    move || !rule_target.current_text().trim().is_empty(),
                                                     move || {
                                                         let clear_controls =
                                                             rules_clear_controls.clone();
@@ -592,12 +605,9 @@ pub(crate) fn saved_filter_panel(
                                                             .items_center()
                                                             .cursor(Cursor::Pointer)
                                                             .on_press(move || {
-                                                                rules_text.set(String::new());
-                                                                clear_controls.hub.set_rules("");
-                                                                save_config_or_notify(
+                                                                rule_target.commit(
                                                                     &clear_controls,
-                                                                    PrefName::Rules,
-                                                                    |config| config.rules.clear(),
+                                                                    String::new(),
                                                                 );
                                                             })
                                                             .child(
@@ -609,13 +619,14 @@ pub(crate) fn saved_filter_panel(
                                                 )),
                                         ),
                                 )
+                                .child(rule_groups_bar(rule_target, rule_groups_controls))
                                 .child(rules_editor(
-                                    rules_text,
+                                    rule_target,
                                     rules_controls.clone(),
                                     import_open,
                                 ))
                                 .child(rule_line_strip(
-                                    rules_text,
+                                    rule_target,
                                     rule_strip_controls,
                                     draft_host,
                                     draft_path,
@@ -627,7 +638,7 @@ pub(crate) fn saved_filter_panel(
                                 )),
                         )
                         .child(replace_row(
-                            rules_text,
+                            rule_target,
                             rules_controls,
                             draft_host,
                             draft_path,
@@ -643,8 +654,8 @@ pub(crate) fn saved_filter_panel(
                             side_input(
                                 upstream_text,
                                 tr(
-                                    "[user:pass@]host:port，空着直连",
-                                    "[user:pass@]host:port, empty = direct",
+                                    "http://127.0.0.1:7890 或 socks5h://127.0.0.1:1080",
+                                    "http://127.0.0.1:7890 or socks5h://127.0.0.1:1080",
                                 ),
                                 28.0,
                                 false,

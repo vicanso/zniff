@@ -535,7 +535,8 @@ where
 {
     let authority = display_authority(host, port, scheme);
     let upstream = hub.upstream_for_host(host);
-    let via_http_upstream = upstream.is_some() && scheme == "http";
+    let via_http_upstream =
+        upstream.as_ref().is_some_and(Upstream::is_http_proxy) && scheme == "http";
     let target_uri = if via_http_upstream {
         absolute_uri(scheme, &authority, path)?
     } else {

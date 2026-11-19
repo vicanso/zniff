@@ -2614,6 +2614,8 @@ fn web_cached_flow_detail_publishes_loading_then_hydrates_cleanly() {
             pretty: signal(true),
             default_json_tree: signal(false),
             messages: signal(Vec::new()),
+            llm_stream: signal(None),
+            msg_llm_view: signal(true),
             diff: signal(String::new()),
             diff_old: signal(String::new()),
             diff_new: signal(String::new()),
@@ -2897,6 +2899,8 @@ fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
             filter_enabled: signal(true),
             bypass: signal(String::new()),
             rules: signal(String::new()),
+            rule_groups: signal(Vec::new()),
+            editing_group: signal(None),
             upstream: signal(String::new()),
             rules_on: signal(true),
             breaks_on: signal(true),
@@ -3626,4 +3630,101 @@ fn next_paged_match_offset_finds_match_across_window_boundaries() {
     };
     let next = super::next_paged_match_offset(&text, win, "NEEDLE");
     assert_eq!(next, Some(cap));
+}
+
+#[test]
+fn wave1_onboarding_predicate_and_connect_hub_labels() {
+    use crate::i18n::Lang;
+
+    assert!(super::should_show_onboarding(super::Phase::Empty, 0));
+    assert!(!super::should_show_onboarding(super::Phase::Empty, 3));
+    assert!(!super::should_show_onboarding(super::Phase::Gone, 0));
+    assert!(!super::should_show_onboarding(super::Phase::Ready, 0));
+
+    assert_eq!(super::connect_hub_trigger_label(Lang::Zh, 0), "接入");
+    assert_eq!(
+        super::connect_hub_trigger_label(Lang::Zh, 2),
+        "接入 · ADB 2"
+    );
+    assert_eq!(super::connect_hub_trigger_label(Lang::En, 0), "Connect");
+    assert_eq!(
+        super::connect_hub_trigger_label(Lang::En, 1),
+        "Connect · ADB 1"
+    );
+}
+
+#[test]
+fn wave2_migration_preview_and_dropped_extensions() {
+    use crate::i18n::Lang;
+
+    assert_eq!(
+        super::dropped_ext_path("file:///tmp/session.chlsj", "chlsj").as_deref(),
+        Some("/tmp/session.chlsj")
+    );
+    assert_eq!(
+        super::dropped_ext_path("file:///tmp/charles.xml", "xml").as_deref(),
+        Some("/tmp/charles.xml")
+    );
+    assert_eq!(
+        super::dropped_ext_path("file:///tmp/whistle.txt", "txt").as_deref(),
+        Some("/tmp/whistle.txt")
+    );
+
+    let w = super::preview_rule_import("api.vicanso.dev 127.0.0.1:8080", Lang::Zh).unwrap();
+    assert!(w.contains("Whistle"), "{w}");
+    assert!(w.contains('1'), "{w}");
+
+    let c = super::preview_rule_import(
+        "<charles-export><noCaching><locations><location><host>api.vicanso.dev</host></location></locations></noCaching></charles-export>",
+        Lang::En,
+    )
+    .unwrap();
+    assert!(c.contains("Charles XML"), "{c}");
+    assert!(c.contains('1'), "{c}");
+
+    assert_eq!(
+        super::preview_rule_import("[[profiles]]\nname = \"a\"", Lang::En),
+        None
+    );
+}
+
+#[test]
+fn wave3_rule_groups_buffer_toggle_and_remove() {
+    use crate::config::RuleGroup;
+
+    let groups = vec![
+        RuleGroup {
+            name: "Dev".into(),
+            enabled: true,
+            rules: "header api.vicanso.dev req set X-Env dev".into(),
+        },
+        RuleGroup {
+            name: "Paused".into(),
+            enabled: false,
+            rules: "block test.vicanso.dev".into(),
+        },
+    ];
+
+    assert_eq!(
+        super::active_rules_buffer_text("cors api.vicanso.dev", &groups, None),
+        "cors api.vicanso.dev"
+    );
+    assert_eq!(
+        super::active_rules_buffer_text("cors api.vicanso.dev", &groups, Some("dev")),
+        "header api.vicanso.dev req set X-Env dev"
+    );
+
+    let effective = super::effective_rules_text("cors api.vicanso.dev", &groups);
+    assert!(effective.starts_with("cors api.vicanso.dev"));
+    assert!(effective.contains("X-Env dev"));
+    assert!(!effective.contains("test.vicanso.dev"));
+
+    let toggled = super::toggle_rule_group_enabled(&groups, "paused");
+    assert!(toggled[1].enabled);
+    let effective_toggled = super::effective_rules_text("cors api.vicanso.dev", &toggled);
+    assert!(effective_toggled.contains("test.vicanso.dev"));
+
+    let removed = super::remove_rule_group(&toggled, "DEV");
+    assert_eq!(removed.len(), 1);
+    assert_eq!(removed[0].name, "Paused");
 }

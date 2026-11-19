@@ -382,6 +382,109 @@ pub fn merge_imported_profiles(
     out
 }
 
+/// Maximum number of independent rule groups persisted in `config.toml`.
+pub const RULE_GROUP_CAP: usize = 32;
+
+/// One toggleable named rule group evaluated alongside workspace `rules`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuleGroup {
+    pub name: String,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub rules: String,
+}
+
+/// Trims group names, drops empty names, deduplicates case-insensitively (keeping first),
+/// and caps the list at [`RULE_GROUP_CAP`].
+pub fn sanitize_rule_groups(groups: Vec<RuleGroup>) -> Vec<RuleGroup> {
+    let mut out: Vec<RuleGroup> = Vec::new();
+    for mut group in groups {
+        group.name = group.name.trim().to_string();
+        if group.name.is_empty() {
+            continue;
+        }
+        if !out
+            .iter()
+            .any(|seen| seen.name.eq_ignore_ascii_case(&group.name))
+        {
+            out.push(group);
+        }
+        if out.len() >= RULE_GROUP_CAP {
+            break;
+        }
+    }
+    out
+}
+
+/// Inserts or updates a named [`RuleGroup`] (matching case-insensitively) and clamps at [`RULE_GROUP_CAP`].
+pub fn upsert_rule_group(
+    existing: &[RuleGroup],
+    name: &str,
+    rules: &str,
+    enabled: bool,
+) -> Vec<RuleGroup> {
+    let clean_name = name.trim();
+    if clean_name.is_empty() {
+        return sanitize_rule_groups(existing.to_vec());
+    }
+    let clean_rules = rules.trim().to_string();
+    let mut next = existing.to_vec();
+    if let Some(slot) = next
+        .iter_mut()
+        .find(|item| item.name.eq_ignore_ascii_case(clean_name))
+    {
+        slot.rules = clean_rules;
+        slot.enabled = enabled;
+    } else {
+        next.push(RuleGroup {
+            name: clean_name.to_string(),
+            enabled,
+            rules: clean_rules,
+        });
+    }
+    sanitize_rule_groups(next)
+}
+
+/// Maximum number of Compose recent requests persisted in `config.toml`.
+pub const COMPOSE_HISTORY_CAP: usize = 20;
+
+/// One persisted Compose request entry in [`Config::compose_history`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComposeHistoryItem {
+    pub method: String,
+    pub url: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub headers: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub body: String,
+}
+
+/// Trims method/url, drops blank URLs, deduplicates keeping newest first,
+/// and truncates at [`COMPOSE_HISTORY_CAP`].
+pub fn sanitize_compose_history(items: Vec<ComposeHistoryItem>) -> Vec<ComposeHistoryItem> {
+    let mut out: Vec<ComposeHistoryItem> = Vec::new();
+    for mut item in items {
+        item.url = item.url.trim().to_string();
+        if item.url.is_empty() {
+            continue;
+        }
+        let method = item.method.trim();
+        item.method = if method.is_empty() {
+            "GET".to_string()
+        } else {
+            method.to_string()
+        };
+        if !out.contains(&item) {
+            out.push(item);
+        }
+        if out.len() >= COMPOSE_HISTORY_CAP {
+            break;
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "RawConfig", into = "RawConfig")]
 pub struct Config {
@@ -447,6 +550,10 @@ pub struct Config {
     pub saved_profiles: Vec<SavedProfile>,
     /// Recent setup snapshots (up to 10, newest first) for recovering previous versions.
     pub profile_history: Vec<SavedProfile>,
+    /// Named rule groups stacked alongside workspace `rules`.
+    pub rule_groups: Vec<RuleGroup>,
+    /// Persisted recent Compose requests (up to [`COMPOSE_HISTORY_CAP`], newest first).
+    pub compose_history: Vec<ComposeHistoryItem>,
     /// Dragged list-column widths, in points, keyed by `method`, `path`, and the rest.
     pub column_widths: HashMap<String, u32>,
     pub column_widths_top_bottom: HashMap<String, u32>,
@@ -596,6 +703,10 @@ struct RawConfig {
     saved_profiles: Vec<SavedProfile>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     profile_history: Vec<SavedProfile>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    rule_groups: Vec<RuleGroup>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    compose_history: Vec<ComposeHistoryItem>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     column_widths: HashMap<String, u32>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -608,6 +719,8 @@ impl From<RawConfig> for Config {
         let mut saved_rules = raw.saved_rules;
         let mut saved_profiles = raw.saved_profiles;
         let mut profile_history = raw.profile_history;
+        let rule_groups = sanitize_rule_groups(raw.rule_groups);
+        let compose_history = sanitize_compose_history(raw.compose_history);
         clamp_saved_filters(&mut saved_filters);
         clamp_saved_rules(&mut saved_rules);
         migrate_saved_profiles_from(&saved_filters, &saved_rules, &mut saved_profiles);
@@ -753,6 +866,8 @@ impl From<RawConfig> for Config {
             saved_rules,
             saved_profiles,
             profile_history,
+            rule_groups,
+            compose_history,
             column_widths: raw.column_widths,
             column_widths_top_bottom: raw.column_widths_top_bottom,
             column_order: raw.column_order,
@@ -872,6 +987,8 @@ impl From<Config> for RawConfig {
             saved_rules: config.saved_rules,
             saved_profiles: config.saved_profiles,
             profile_history: config.profile_history,
+            rule_groups: sanitize_rule_groups(config.rule_groups),
+            compose_history: sanitize_compose_history(config.compose_history),
             column_widths: config.column_widths,
             column_widths_top_bottom: config.column_widths_top_bottom,
         }
@@ -924,6 +1041,8 @@ impl Default for Config {
             saved_rules: Vec::new(),
             saved_profiles: Vec::new(),
             profile_history: Vec::new(),
+            rule_groups: Vec::new(),
+            compose_history: Vec::new(),
             column_widths: HashMap::new(),
             column_widths_top_bottom: HashMap::new(),
             column_order: Vec::new(),
@@ -2469,5 +2588,129 @@ mod tests {
         // Subsequent saves succeed again
         update_mode(dir.path(), false, |c| c.listen_port = 9090).unwrap();
         assert_eq!(load_mode(dir.path(), false).listen_port, 9090);
+    }
+
+    #[test]
+    fn rule_groups_roundtrip_sanitize_and_upsert() {
+        let dir = Scratch::new();
+        assert!(load(dir.path()).rule_groups.is_empty());
+
+        update(dir.path(), |config| {
+            let next = upsert_rule_group(
+                &config.rule_groups,
+                " Staging ",
+                "cors api.vicanso.dev\n",
+                true,
+            );
+            let next = upsert_rule_group(
+                &next,
+                "MockAuth",
+                "header api.vicanso.dev req set X-Auth ok",
+                false,
+            );
+            config.rule_groups = next;
+        })
+        .unwrap();
+
+        let reloaded = load(dir.path());
+        assert_eq!(reloaded.rule_groups.len(), 2);
+        assert_eq!(reloaded.rule_groups[0].name, "Staging");
+        assert!(reloaded.rule_groups[0].enabled);
+        assert_eq!(reloaded.rule_groups[0].rules, "cors api.vicanso.dev");
+        assert_eq!(reloaded.rule_groups[1].name, "MockAuth");
+        assert!(!reloaded.rule_groups[1].enabled);
+
+        // Case-insensitive upsert replaces in place instead of creating duplicate
+        let updated = upsert_rule_group(
+            &reloaded.rule_groups,
+            "staging",
+            "block test.vicanso.dev",
+            false,
+        );
+        assert_eq!(updated.len(), 2);
+        assert_eq!(updated[0].rules, "block test.vicanso.dev");
+        assert!(!updated[0].enabled);
+
+        // Sanitize drops blanks, dedupes case-insensitively, and enforces cap
+        let mut noisy = vec![
+            RuleGroup {
+                name: "".into(),
+                enabled: true,
+                rules: "x".into(),
+            },
+            RuleGroup {
+                name: "Alpha".into(),
+                enabled: true,
+                rules: "r1".into(),
+            },
+            RuleGroup {
+                name: "alpha".into(),
+                enabled: false,
+                rules: "r2".into(),
+            },
+        ];
+        for i in 0..(RULE_GROUP_CAP + 5) {
+            noisy.push(RuleGroup {
+                name: format!("Group-{i}"),
+                enabled: true,
+                rules: String::new(),
+            });
+        }
+        let cleaned = sanitize_rule_groups(noisy);
+        assert_eq!(cleaned.len(), RULE_GROUP_CAP);
+        assert_eq!(cleaned[0].name, "Alpha");
+        assert!(cleaned[0].enabled);
+    }
+
+    #[test]
+    fn compose_history_roundtrip_and_cap_20() {
+        let dir = Scratch::new();
+        assert!(load(dir.path()).compose_history.is_empty());
+
+        let mut items = Vec::new();
+        for i in 0..25 {
+            items.push(ComposeHistoryItem {
+                method: "post".into(),
+                url: format!("https://api.vicanso.dev/items/{i}"),
+                headers: "Accept: application/json".into(),
+                body: format!("{{\"i\":{i}}}"),
+            });
+        }
+        // Duplicate + blank URL + whitespace method should be cleaned and capped at 20
+        items.insert(
+            0,
+            ComposeHistoryItem {
+                method: " ".into(),
+                url: "   ".into(),
+                headers: String::new(),
+                body: String::new(),
+            },
+        );
+        items.push(items[1].clone());
+
+        update(dir.path(), |config| {
+            config.compose_history = sanitize_compose_history(items);
+        })
+        .unwrap();
+
+        let reloaded = load(dir.path());
+        assert_eq!(reloaded.compose_history.len(), COMPOSE_HISTORY_CAP);
+        assert_eq!(reloaded.compose_history[0].method, "post");
+        assert_eq!(
+            reloaded.compose_history[0].url,
+            "https://api.vicanso.dev/items/0"
+        );
+        assert_eq!(
+            reloaded.compose_history[19].url,
+            "https://api.vicanso.dev/items/19"
+        );
+
+        update(dir.path(), |config| {
+            config.compose_history.clear();
+        })
+        .unwrap();
+        let raw_toml = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(!raw_toml.contains("compose_history"), "{raw_toml}");
+        assert!(load(dir.path()).compose_history.is_empty());
     }
 }

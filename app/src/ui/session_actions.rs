@@ -640,6 +640,7 @@ pub(crate) fn apply_saved_prefs(hub: &Hub) {
     let saved = saved_config();
     hub.set_bypass(&saved.bypass_hosts);
     hub.set_rules(&saved.rules);
+    hub.set_rule_groups(&saved.rule_groups);
     hub.set_upstream(&saved.upstream_proxy);
     hub.set_proxy_auth(&config::runtime_proxy_auth(&saved.proxy_auth));
     hub.set_rules_enabled(saved.rules_enabled);

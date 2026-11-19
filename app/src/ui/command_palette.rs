@@ -165,9 +165,24 @@ pub(crate) fn build_command_items(
             .keywords(["mock", "map-local", "stub", "本地", "目录"]),
         );
         items.push(
-            CommandItem::new("import_har", t(lang, "导入 HAR 文件…", "Import HAR file…"))
-                .group(g_export)
-                .keywords(["import", "har", "导入"]),
+            CommandItem::new(
+                "import_har",
+                t(lang, "导入 HAR / Charles 会话…", "Import HAR / .chlsj…"),
+            )
+            .group(g_export)
+            .keywords(["import", "har", "chlsj", "charles", "导入"]),
+        );
+        items.push(
+            CommandItem::new(
+                "import_rules",
+                t(
+                    lang,
+                    "导入 Whistle / Charles 规则…",
+                    "Import Whistle / Charles rules…",
+                ),
+            )
+            .group(g_export)
+            .keywords(["import", "whistle", "charles", "xml", "txt", "迁移", "导入"]),
         );
     }
     items.push(
@@ -444,6 +459,8 @@ pub(crate) fn command_palette_modal(
                         }
                         #[cfg(not(target_arch = "wasm32"))]
                         "import_har" => prompt_import_har(controls),
+                        #[cfg(not(target_arch = "wasm32"))]
+                        "import_rules" => prompt_import_migration(controls, profiles),
                         "sequence_diagram" => begin_sequence_diagram(
                             &controls,
                             rows,

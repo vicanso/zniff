@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/vicanso/zniff/releases"><img src="https://img.shields.io/badge/version-v0.2.0-blue.svg" alt="Version"></a>
+  <a href="https://github.com/vicanso/zniff/releases"><img src="https://img.shields.io/badge/version-v0.3.1-blue.svg" alt="Version"></a>
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-2024%20edition-orange.svg" alt="Rust 2024"></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-green.svg" alt="License"></a>
   <a href="#快速上手"><img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20%7C%20Docker-lightgrey.svg" alt="Platform"></a>
@@ -22,20 +22,20 @@ https://github.com/user-attachments/assets/15117c1d-50a0-4578-8201-a305fb0d12a3
 
 ## 核心特性
 
-- **原生轻量**：代理内核与 `nsh` GUI 编译为单个纯 Rust 二进制程序，启动迅速且内存占用低。
-- **严格协议跟随**：解析 `ClientHello` 的 ALPN 提案并直接与源站协商。支持 HTTP/2 多路复用、WebSocket（RFC 6455）与 SSE，不降级为 HTTP/1.1。
-- **深度检视**：支持 JSON（含可折叠、可搜索的 JSON 树形视图）、GraphQL（自动拆分 `operationName`、查询语句与变量）、HTML/XML、无模式 Protobuf/gRPC 与 MessagePack 解码；行内自动解码 JWT、Unix 时间戳和 Base64，支持基准行级 Diff、正文检索与连接阶段耗时拆分（DNS / TCP / TLS、连接复用）。
-- **15 项改写与解析规则及断点队列**：包含终点规则（`map-local`（支持目录映射与回源）、`map-remote`、`break`、`break-res`、`block`）、叠加修饰规则（`replace`、`json`、`delay`、`throttle`、`header`、`query`、`cors`、`no-cache`）与域名级规则（`cert` / `client-cert`、`resolve` / `dns` / `hosts`），支持 GraphQL `op=` 精准匹配与 8 槽位 FIFO 断点排队。
-- **快速定位**：丰富的过滤语法（`host:`、`path:`、`op:`、`body:`、`header:`、反向 `-host:` / `-status:` 等）、域名与应用分面抽屉、列表二次搜索、列拖拽排序，以及带历史快照的命名配置。
-- **图表、导出与协作**：一键生成瀑布图、泳道时序图、依赖流转图（`flowchart TD`）及 Mermaid 源码；可复制为 cURL、`fetch`、Python `requests`、Rust `reqwest`、Go `net/http`、TypeScript 类型或 Rust `serde` 结构体；支持导出 HAR/HTML（可选脱敏）与 `/s/{uuid}` 实时分享、`--relay` 中转。
-- **AI 原生 MCP 与网页控制台**：内置 JSON-RPC 2.0 MCP 服务（`POST /mcp` 与 `zniff --mcp`），以及无界面 WebAssembly 控制台（`zniff --web`），控制台与抓包端口均可开启 HTTP Basic 认证。
-- **自动更新**：自动检查 GitHub / Gitee 发布并原地安装更新。
+- **原生轻量**：代理内核与 `nsh 0.6` GUI 编译为单个纯 Rust 二进制程序，启动迅速、内存有界（超 16 KB 正文环形落盘），支持左右分栏（可折叠域名/应用侧栏）与上下分栏布局及多屏窗口状态记忆。
+- **零配置一键抓包与接入中心**：无流量时展示「快速开始」引导卡，底栏常驻「接入」弹窗汇总全部入口；不动全局系统代理与钥匙串即可拉起 **免证书隔离 Chromium 浏览器**（SPKI 指纹信任）、**预注入代理环境变量终端** 与 **Android `adb` 端口反代**（显示已挂接设备数并支持一键断开还原），同时提供 **动态 `/proxy.pac`** 地址复制、iOS 模拟器和手机扫码安装页。
+- **严格协议跟随与上游代理**：解析 `ClientHello` 的 ALPN 提案并直接与源站协商。支持 HTTP/2 多路复用、WebSocket（RFC 6455）与 SSE，不降级为 HTTP/1.1；上游代理除 HTTP/CONNECT 外原生支持 **`socks5://` 与 `socks5h://`**（含 RFC 1929 认证）。
+- **深度检视、AI SSE 聚合与 Schema 解码**：支持 JSON（含可折叠、可搜索的 JSON 树形视图）、GraphQL（自动拆分 `operationName`、查询语句与变量）、**LLM / AI SSE 流式聚合检视**（自动汇总 OpenAI Chat / Responses、Anthropic、Google Gemini 的 Thinking、正文输出、`tool_calls`、TTFT 与 Token/s，支持切换原始帧）、HTML/Markdown 渲染预览、XML、MessagePack，以及 **零依赖 `.proto` Schema 挂载解码**（支持 gRPC `:path` 自动推断）与无 Schema Wire 预览；行内自动解码 JWT、时间戳与 Base64，支持基准行级 Diff 与连接阶段耗时拆分（DNS / TCP / TLS / 等待 / 下载）。
+- **17 类规则、多组规则与竞品一键迁移**：支持工作区规则与 **并行多组可独立开关的规则组（`[[rule_groups]]`）**，支持拖拽或粘贴 **Whistle `.txt`、Charles `.xml` 规则及 `.chlsj` 会话** 一键转译导入；涵盖终点规则（`map-local`、`map-remote`、`break`、`break-res`、`block`）、叠加修饰（`replace`、`json`、`delay`、`throttle`、`header`、`query`、`cors`、`no-cache`）、域名级控制（`cert` / `client-cert`、`resolve`）与扩展规则（本机回环 HTTP `hook` 支持 `mutate` 改写与 `preview` 只读解密、`proto` Schema）；内置 `{{uuid}}`、`{{ts_ms}}`、`{{hmac_sha256(...)}}` 动态模板变量、GraphQL `op=` 精准匹配与 8 槽位 FIFO 断点队列。
+- **快速定位、持久化构造历史与命令面板**：结构化过滤语法（`host:`、`path:`、`op:`、`body:`、`header:`、`app:`、反向 `-host:` / `-status:` 等）、域名与应用分面侧栏、列表二次搜索、构造请求 **最近 20 条持久化历史**、全局命令面板（`Cmd/Ctrl+Shift+P`），以及带历史快照的命名配置预设。
+- **图表、OpenAPI、Mock 与协作**：一键生成瀑布图、泳道时序图、依赖流转图（`flowchart TD`）及 Mermaid 源码；可复制为 cURL、`fetch`、Python `requests`、Rust `reqwest`、Go `net/http`、TypeScript 类型或 Rust `serde` 结构体；支持导出 **OpenAPI 3.0.3（JSON / YAML / 剪贴板）**、**批量生成本地 Mock 目录**、导出 HAR/HTML（支持结构化脱敏与严格遮罩）与 `/s/{uuid}` 实时分享、`--relay` 中转。
+- **AI 原生 MCP 与网页控制台**：内置 JSON-RPC 2.0 MCP 服务（`POST /mcp` 与 `zniff --mcp`，10 个内置工具）及无界面 WebAssembly 控制台（`zniff --web`），控制台与抓包端口均可开启 HTTP Basic 认证；桌面端支持自动检查 GitHub Releases 并强制校验 `SHA256SUMS` 原地更新。
 
 ---
 
 ## 界面预览
 
-| 深度检视（GraphQL 与 JSON） | 过滤与 15 项改写规则 |
+| 深度检视（GraphQL 与 JSON） | 过滤与 17 类改写规则 |
 | :---: | :---: |
 | ![深度检视](./docs/screenshots/02_detail_json_graphql.png) | ![过滤与规则](./docs/screenshots/05_filter_rules_popup.png) |
 | **瀑布图 / 时序图与断点栏** | **自适应浅色与深色主题** |
@@ -66,14 +66,15 @@ docker run --rm -p 8080:8080 -p 8877:8877 \
 ### 2. 配置客户端与根证书
 
 1. 启动 `zniff`（默认监听 `127.0.0.1:8877`）。
-2. 在顶栏 **更多 → 复制代理环境** 获取终端环境变量：
+2. **零配置抓包（推荐）**：点击无流量引导卡、底栏 **「接入」** 弹窗或顶栏 **更多 → 免配抓包**，即可一键拉起 `[浏览器]`（免装系统证书的隔离 Chromium）、`[终端]`（预注入全套代理与 CA 环境变量）、`[ADB]`（Android USB 反代）或复制动态 `/proxy.pac` 自动代理地址。
+3. **手动配置终端环境变量**：在顶栏 **更多 → 复制代理环境** 获取：
    ```bash
    export HTTP_PROXY="http://127.0.0.1:8877"
    export HTTPS_PROXY="http://127.0.0.1:8877"
    export ALL_PROXY="http://127.0.0.1:8877"
    export SSL_CERT_FILE="$HOME/Library/Application Support/zniff/ca.crt"
    ```
-3. **信任根证书**：
+4. **信任根证书（如需抓系统全局或移动端流量）**：
    - **macOS**：**更多 → 证书 → 安装**，自动导入并信任到系统钥匙串。
    - **iOS 模拟器**：**更多 → 安装证书到 iOS 模拟器**，通过 `xcrun simctl` 为所有已开机模拟器配置证书和代理。
    - **移动真机**：点击底栏「扫码」图标，或手机访问 `http://<局域网IP>:8877/zniff`。
@@ -91,13 +92,17 @@ map-remote api.example.com/api http://127.0.0.1:3000/api
 break      api.example.com/v1/checkout
 block      ads.example.com status=403
 
-# 叠加修饰规则（按序累加）
+# 叠加修饰与动态变量（按序累加）
 json       api.example.com/v1 res set /data/is_vip true
 delay      api.example.com/graphql 2s op=Update*
-header     *.example.com res del Content-Security-Policy
+header     api.example.com/v1 req set X-Signature {{hmac_sha256("secret", req.body)}}
+
+# 本地 Webhook 扩展与 .proto Schema 解码
+hook       api.example.com/v1/cipher http://127.0.0.1:9001/decrypt res mode=preview
+proto      grpc.example.com ./protos
 ```
 
-完整语法与示例请参阅 **[规则与配置指南](./docs/rules-zh.md)**（[English Guide](./docs/rules.md)）。
+完整语法与示例请参阅 **[规则与配置指南](./docs/rules-zh.md)**（[English Guide](./docs/rules.md)），更多架构与边界说明见 **[文档索引](./docs/README.md)**。
 
 ---
 
@@ -127,7 +132,7 @@ header     *.example.com res del Content-Security-Policy
 }
 ```
 
-内置 MCP 工具：`list_flows`、`get_flow_detail`、`get_session_summary`、`annotate_flow`、`replay_flow`、`get_rules`、`set_rules`。
+内置 10 个 MCP 工具：`list_flows`、`get_flow_detail`、`get_session_summary`、`annotate_flow`、`replay_flow`、`get_rules`、`set_rules`、`clear_flows`、`manage_breaks`、`generate_openapi`。
 
 | 端口 | 认证方式 | 参数 / 环境变量 |
 | :--- | :--- | :--- |
@@ -144,6 +149,7 @@ header     *.example.com res del Content-Security-Policy
 
 | 快捷键 | 功能 |
 | :--- | :--- |
+| `Cmd/Ctrl + Shift + P` | 打开 / 关闭全局命令面板 |
 | `Cmd/Ctrl + F` | 聚焦过滤输入框 |
 | `Cmd/Ctrl + K` | 清空当前会话 |
 | `Cmd/Ctrl + R` | 重放选中流量 |

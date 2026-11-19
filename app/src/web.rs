@@ -275,6 +275,7 @@ pub fn run_cli(args: &[String], config_port: u16) -> i32 {
     }
     hub.set_bypass(&loaded.bypass_hosts);
     hub.set_rules(&loaded.rules);
+    hub.set_rule_groups(&loaded.rule_groups);
     hub.set_upstream(&loaded.upstream_proxy);
     hub.set_proxy_auth(&crate::config::runtime_proxy_auth(&loaded.proxy_auth));
     hub.set_rules_enabled(loaded.rules_enabled);
@@ -660,6 +661,8 @@ struct PausedBody {
 struct PrefsBody {
     bypass: String,
     rules: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    rule_groups: Vec<crate::config::RuleGroup>,
     upstream: String,
     proxy_auth: String,
     rules_enabled: bool,
@@ -1168,6 +1171,7 @@ fn state_of(slot: &Slot) -> StateBody {
         prefs: PrefsBody {
             bypass: slot.hub.bypass_text(),
             rules: slot.hub.rules_text(),
+            rule_groups: slot.hub.rule_groups(),
             upstream: slot.hub.upstream_text(),
             proxy_auth: slot.hub.proxy_auth_text(),
             rules_enabled: slot.hub.rules_enabled(),
@@ -2228,6 +2232,19 @@ fn sync_hub_op(slot: &mut Slot, op: &str, value: &Value) -> Reply {
             slot.hub.set_rules(&text);
             save_error = persist_slot_config(slot, |cfg| cfg.rules = text);
         }
+        "set_rule_groups" => {
+            let Some(raw_groups) = value.get("groups") else {
+                return json_reply(400, "Bad Request", &json!({"error": "need groups"}));
+            };
+            let Ok(groups) =
+                serde_json::from_value::<Vec<crate::config::RuleGroup>>(raw_groups.clone())
+            else {
+                return json_reply(400, "Bad Request", &json!({"error": "invalid groups"}));
+            };
+            let groups = crate::config::sanitize_rule_groups(groups);
+            slot.hub.set_rule_groups(&groups);
+            save_error = persist_slot_config(slot, |cfg| cfg.rule_groups = groups);
+        }
         "set_upstream" => {
             let text = json_text(value);
             slot.hub.set_upstream(&text);
@@ -2405,6 +2422,7 @@ fn sync_hub_op(slot: &mut Slot, op: &str, value: &Value) -> Reply {
                 current.listen_all = slot.capture_ip.is_unspecified();
                 current.bypass_hosts = slot.hub.bypass_text();
                 current.rules = slot.hub.rules_text();
+                current.rule_groups = slot.hub.rule_groups();
                 current.upstream_proxy = slot.hub.upstream_text();
                 current.proxy_auth = slot.hub.proxy_auth_text();
                 current.rules_enabled = slot.hub.rules_enabled();
@@ -2491,7 +2509,8 @@ fn sync_hub_op(slot: &mut Slot, op: &str, value: &Value) -> Reply {
     }
     if matches!(
         op,
-        "set_relay_accept"
+        "set_rule_groups"
+            | "set_relay_accept"
             | "set_relay_token"
             | "set_relay_url"
             | "set_filter"

@@ -188,12 +188,14 @@ pub(crate) fn toolbar(
                 )
             };
             let condition_info = move || {
+                let effective_rules =
+                    effective_rules_text(&profiles.rules.get(), &profiles.rule_groups.get());
                 toolbar_status_summary(
                     &profiles.filter.get(),
                     &filter.get(),
                     profiles.filter_enabled.get(),
                     &profiles.bypass.get(),
-                    &profiles.rules.get(),
+                    &effective_rules,
                     &profiles.upstream.get(),
                     profiles.rules_on.get(),
                     ui_lang(langs),

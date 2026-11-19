@@ -518,6 +518,14 @@ pub(crate) fn seed_web_prefs(
         cfg.rules = text.to_string();
         profiles.rules.set(text.to_string());
     }
+    if let Some(items) = prefs
+        .get("rule_groups")
+        .and_then(|v| serde_json::from_value::<Vec<config::RuleGroup>>(v.clone()).ok())
+    {
+        let clean = config::sanitize_rule_groups(items);
+        cfg.rule_groups = clean.clone();
+        profiles.rule_groups.set(clean);
+    }
     if let Some(text) = prefs.get("upstream").and_then(serde_json::Value::as_str) {
         cfg.upstream_proxy = text.to_string();
         profiles.upstream.set(text.to_string());

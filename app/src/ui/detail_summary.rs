@@ -56,6 +56,8 @@ pub(crate) struct Shown {
     pub(crate) pretty: Signal<bool>,
     pub(crate) default_json_tree: Signal<bool>,
     pub(crate) messages: Signal<Vec<HeaderLine>>,
+    pub(crate) llm_stream: Signal<Option<llm_stream::LlmStreamSummary>>,
+    pub(crate) msg_llm_view: Signal<bool>,
     pub(crate) diff: Signal<String>,
     pub(crate) diff_old: Signal<String>,
     pub(crate) diff_new: Signal<String>,
@@ -112,6 +114,7 @@ pub(crate) fn detail_pane(
     filtered_stats: Signal<session::FilteredStats>,
     detail_scroll: ElementRef,
     layout_mode: Signal<config::LayoutMode>,
+    onboarding: OnboardingProps,
 ) -> impl IntoElement {
     let ready_controls = controls.clone();
     scroll()
@@ -144,66 +147,73 @@ pub(crate) fn detail_pane(
                     )
                 },
             )
-            .otherwise(move || {
-                let compose_controls = controls.clone();
-                let seq_controls = controls.clone();
-                let summary_controls = controls.clone();
-                when(
-                    move || compose.composing.get(),
-                    move || {
-                        uncull_nested_scroll(view())
-                            .pl_3p5()
-                            .pr_5()
-                            .py_3p5()
-                            .gap_3p5()
-                            .child(compose_box(
-                                compose,
-                                compose_controls.clone(),
-                                selected,
-                                paused,
-                            ))
-                    },
-                )
-                .otherwise(move || {
-                    let seq_controls = seq_controls.clone();
-                    let summary_controls = summary_controls.clone();
+            .otherwise({
+                let onboarding_compose = onboarding.clone();
+                move || {
+                    let compose_controls = controls.clone();
+                    let seq_controls = controls.clone();
+                    let summary_controls = controls.clone();
+                    let onboarding_seq = onboarding_compose.clone();
                     when(
-                        move || seq_builder.open.get(),
+                        move || compose.composing.get(),
                         move || {
                             uncull_nested_scroll(view())
                                 .pl_3p5()
                                 .pr_5()
                                 .py_3p5()
                                 .gap_3p5()
-                                .child(sequence_diagram_panel(
-                                    seq_builder,
-                                    seq_controls.clone(),
-                                    selected,
+                                .child(compose_box(
                                     compose,
+                                    compose_controls.clone(),
+                                    selected,
+                                    paused,
                                 ))
                         },
                     )
                     .otherwise(move || {
-                        let redact_controls = summary_controls.clone();
+                        let seq_controls = seq_controls.clone();
                         let summary_controls = summary_controls.clone();
+                        let onboarding_redact = onboarding_seq.clone();
                         when(
-                            move || seq_builder.redact_open.get(),
+                            move || seq_builder.open.get(),
                             move || {
                                 uncull_nested_scroll(view())
                                     .pl_3p5()
                                     .pr_5()
                                     .py_3p5()
                                     .gap_3p5()
-                                    .child(redact_preview_panel(
+                                    .child(sequence_diagram_panel(
                                         seq_builder,
-                                        redact_controls.clone(),
-                                        rows,
-                                        effective_filter,
+                                        seq_controls.clone(),
+                                        selected,
+                                        compose,
                                     ))
                             },
                         )
                         .otherwise(move || {
+                            let redact_controls = summary_controls.clone();
                             let summary_controls = summary_controls.clone();
+                            let onboarding_empty = onboarding_redact.clone();
+                            when(
+                                move || seq_builder.redact_open.get(),
+                                move || {
+                                    uncull_nested_scroll(view())
+                                        .pl_3p5()
+                                        .pr_5()
+                                        .py_3p5()
+                                        .gap_3p5()
+                                        .child(redact_preview_panel(
+                                            seq_builder,
+                                            redact_controls.clone(),
+                                            rows,
+                                            effective_filter,
+                                        ))
+                                },
+                            )
+                            .otherwise(move || {
+                                let summary_controls = summary_controls.clone();
+                                let onboarding_now = onboarding_empty.clone();
+                                let onboarding_flow_total = onboarding_empty.flow_total;
                             uncull_nested_scroll(view())
                                 .flex_grow(1.0)
                                 .flex_shrink_0()
@@ -228,103 +238,125 @@ pub(crate) fn detail_pane(
                                     },
                                 ))
                                 .child(
-                                    view()
-                                        .flex_grow(1.0)
-                                        .flex_shrink_0()
-                                        .items_center()
-                                        .justify_center()
-                                        .gap_1p5()
-                                        .px_6()
-                                        .py_8()
-                                        .child(glyph_px(
-                                            28.0,
-                                            || Glyph::List,
-                                            || color(fg_muted()),
-                                        ))
-                                        .child(
-                                            text({
-                                                let langs = ui_langs();
-                                                move || -> SharedString {
-                                                    let lang = ui_lang(langs);
-                                                    match shown.phase.get() {
-                                                        Phase::Gone => t(
-                                                            lang,
-                                                            "这条记录已经不在了",
-                                                            "That flow is gone",
-                                                        )
-                                                        .into(),
-                                                        _ => t(
-                                                            lang,
-                                                            "还没有选择",
-                                                            "Nothing selected",
-                                                        )
-                                                        .into(),
-                                                    }
-                                                }
-                                            })
-                                            .text_center()
-                                            .text_size(px(13.5))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(fg_secondary()),
-                                        )
-                                        .child(
-                                            text({
-                                                let langs = ui_langs();
-                                                move || -> SharedString {
-                                                    let lang = ui_lang(langs);
-                                                    match shown.phase.get() {
-                                                        Phase::Gone => t(
-                                                            lang,
-                                                            "它因为内存上限被丢掉了。",
-                                                            "It was dropped because the session hit its memory cap.",
-                                                        )
-                                                        .into(),
-                                                        _ => t(
-                                                            lang,
-                                                            "从左边选一条流量，查看请求头、响应头和 body。",
-                                                            "Pick a flow on the left to see headers and the body.",
-                                                        )
-                                                        .into(),
-                                                    }
-                                                }
-                                            })
-                                            .text_center()
-                                            .text_size(px(12.0))
-                                            .text_color(fg_muted()),
-                                        )
-                                        .child(
+                                    when(
+                                        move || {
+                                            should_show_onboarding(
+                                                shown.phase.get(),
+                                                onboarding_flow_total.get(),
+                                            )
+                                        },
+                                        move || {
                                             view()
-                                                .mt_1p5()
-                                                .h(px(28.0))
-                                                .px_3()
-                                                .rounded(px(6.0))
-                                                .border_1()
-                                                .border_color(border_control())
-                                                .bg(bg_control())
-                                                .hover(|style| style.bg(bg_control_hover()))
-                                                .active(|style| style.opacity(0.8))
-                                                .cursor(Cursor::Pointer)
-                                                .flex_row()
+                                                .flex_grow(1.0)
+                                                .flex_shrink_0()
                                                 .items_center()
-                                                .gap_1p5()
-                                                .on_press(move || begin_new_request(compose, selected))
-                                                .child(glyph_px(
-                                                    13.0,
-                                                    || Glyph::Prompt,
-                                                    || color(fg_secondary()),
-                                                ))
-                                                .child(
-                                                    text(tr("构造请求", "New request"))
-                                                        .number_of_lines(1)
-                                                        .text_size(px(12.0))
-                                                        .font_weight(FontWeight::MEDIUM)
-                                                        .text_color(fg_primary()),
-                                                ),
-                                        ),
+                                                .justify_center()
+                                                .py_2()
+                                                .child(onboarding_card(onboarding_now.clone()))
+                                        },
+                                    )
+                                    .otherwise(move || {
+                                        view()
+                                            .flex_grow(1.0)
+                                            .flex_shrink_0()
+                                            .items_center()
+                                            .justify_center()
+                                            .gap_1p5()
+                                            .px_6()
+                                            .py_8()
+                                            .child(glyph_px(
+                                                28.0,
+                                                || Glyph::List,
+                                                || color(fg_muted()),
+                                            ))
+                                            .child(
+                                                text({
+                                                    let langs = ui_langs();
+                                                    move || -> SharedString {
+                                                        let lang = ui_lang(langs);
+                                                        match shown.phase.get() {
+                                                            Phase::Gone => t(
+                                                                lang,
+                                                                "这条记录已经不在了",
+                                                                "That flow is gone",
+                                                            )
+                                                            .into(),
+                                                            _ => t(
+                                                                lang,
+                                                                "还没有选择",
+                                                                "Nothing selected",
+                                                            )
+                                                            .into(),
+                                                        }
+                                                    }
+                                                })
+                                                .text_center()
+                                                .text_size(px(13.5))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(fg_secondary()),
+                                            )
+                                            .child(
+                                                text({
+                                                    let langs = ui_langs();
+                                                    move || -> SharedString {
+                                                        let lang = ui_lang(langs);
+                                                        match shown.phase.get() {
+                                                            Phase::Gone => t(
+                                                                lang,
+                                                                "它因为内存上限被丢掉了。",
+                                                                "It was dropped because the session hit its memory cap.",
+                                                            )
+                                                            .into(),
+                                                            _ => t(
+                                                                lang,
+                                                                "从左边选一条流量，查看请求头、响应头和 body。",
+                                                                "Pick a flow on the left to see headers and the body.",
+                                                            )
+                                                            .into(),
+                                                        }
+                                                    }
+                                                })
+                                                .text_center()
+                                                .text_size(px(12.0))
+                                                .text_color(fg_muted()),
+                                            )
+                                            .child(
+                                                view()
+                                                    .mt_1p5()
+                                                    .h(px(28.0))
+                                                    .px_3()
+                                                    .rounded(px(6.0))
+                                                    .border_1()
+                                                    .border_color(border_control())
+                                                    .bg(bg_control())
+                                                    .hover(|style| style.bg(bg_control_hover()))
+                                                    .active(|style| style.opacity(0.8))
+                                                    .cursor(Cursor::Pointer)
+                                                    .flex_row()
+                                                    .items_center()
+                                                    .gap_1p5()
+                                                    .on_press(move || {
+                                                        begin_new_request(compose, selected)
+                                                    })
+                                                    .child(glyph_px(
+                                                        13.0,
+                                                        || Glyph::Prompt,
+                                                        || color(fg_secondary()),
+                                                    ))
+                                                    .child(
+                                                        text(tr("构造请求", "New request"))
+                                                            .number_of_lines(1)
+                                                            .text_size(px(12.0))
+                                                            .font_weight(FontWeight::MEDIUM)
+                                                            .text_color(fg_primary()),
+                                                    ),
+                                            )
+                                    }),
                                 )
+                            })
                         })
                     })
-                })
+                }
             }),
         )
 }
@@ -682,7 +714,11 @@ pub(crate) fn ready_detail(
             move || diff_card(shown, folded),
         ))
         .child(when(
-            move || shown.messages_loading.get() || !shown.messages.with(Vec::is_empty),
+            move || {
+                shown.messages_loading.get()
+                    || !shown.messages.with(Vec::is_empty)
+                    || shown.llm_stream.with(Option::is_some)
+            },
             move || messages_section(shown, controls.clone(), folded),
         ))
 }

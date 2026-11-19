@@ -55,7 +55,8 @@ pub(crate) use crate::{
 };
 #[allow(unused_imports)]
 pub(crate) use crate::{
-    ca, clock, config, i18n, icon, openapi, present, proxy, redact, rules, session,
+    ca, clock, config, i18n, icon, import_charles, import_whistle, llm_stream, openapi, present,
+    proxy, redact, rules, session,
 };
 
 /// A desktop-only child. Native stays `parent.child(child)`. The web build
@@ -81,6 +82,7 @@ mod cli_state;
 mod column_picker;
 mod command_palette;
 mod compose_box;
+mod connect_hub;
 mod controls_actions;
 mod controls_runtime;
 mod detail_actions;
@@ -99,10 +101,12 @@ mod footer_qr;
 mod json_tree;
 mod lan_qr;
 mod list_columns;
+mod llm_view;
 mod machine_settings;
 mod mono_font;
 mod more_menu;
 mod more_menu_rows;
+mod onboarding_card;
 mod profile_dock;
 mod profile_io;
 mod profile_store;
@@ -110,6 +114,7 @@ mod quick_rules;
 mod redact_preview;
 mod row_projection;
 mod rule_assist;
+mod rule_groups;
 mod seq_dep_waterfall;
 mod seq_panel;
 mod seq_swimlane;
@@ -129,6 +134,7 @@ pub use self::cli_state::{apply_initial_window_options, maybe_run_cli_mode};
 pub(crate) use self::column_picker::*;
 pub(crate) use self::command_palette::*;
 pub(crate) use self::compose_box::*;
+pub(crate) use self::connect_hub::*;
 pub(crate) use self::controls_actions::*;
 pub(crate) use self::controls_runtime::*;
 pub(crate) use self::detail_actions::*;
@@ -147,10 +153,12 @@ pub(crate) use self::footer_qr::*;
 pub(crate) use self::json_tree::*;
 pub(crate) use self::lan_qr::*;
 pub(crate) use self::list_columns::*;
+pub(crate) use self::llm_view::*;
 pub(crate) use self::machine_settings::*;
 pub(crate) use self::mono_font::*;
 pub(crate) use self::more_menu::*;
 pub(crate) use self::more_menu_rows::*;
+pub(crate) use self::onboarding_card::*;
 pub(crate) use self::profile_dock::*;
 pub(crate) use self::profile_io::*;
 pub(crate) use self::profile_store::*;
@@ -158,6 +166,7 @@ pub(crate) use self::quick_rules::*;
 pub(crate) use self::redact_preview::*;
 pub(crate) use self::row_projection::*;
 pub(crate) use self::rule_assist::*;
+pub(crate) use self::rule_groups::*;
 pub(crate) use self::seq_dep_waterfall::*;
 pub(crate) use self::seq_panel::*;
 pub(crate) use self::seq_swimlane::*;

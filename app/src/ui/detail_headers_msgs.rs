@@ -280,7 +280,51 @@ pub(crate) fn filter_message_lines(
         .collect()
 }
 
-pub(crate) fn msg_filter_chip(
+pub(crate) fn llm_mode_chip(
+    current: Signal<bool>,
+    target: bool,
+    zh: &'static str,
+    en: &'static str,
+) -> impl IntoElement {
+    view()
+        .h(px(20.0))
+        .px_2()
+        .items_center()
+        .justify_center()
+        .cursor(Cursor::Pointer)
+        .bg(move || {
+            if current.get() == target {
+                accent_blue_soft()
+            } else {
+                bg_control()
+            }
+        })
+        .hover(|style| {
+            style.bg(move || {
+                if current.get() == target {
+                    accent_blue_soft_hover()
+                } else {
+                    bg_control_hover()
+                }
+            })
+        })
+        .on_press(move || current.set(target))
+        .child(
+            text(tr(zh, en))
+                .number_of_lines(1)
+                .text_size(px(10.5))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(move || {
+                    if current.get() == target {
+                        accent_blue_text()
+                    } else {
+                        fg_secondary()
+                    }
+                }),
+        )
+}
+
+fn msg_filter_chip(
     state: Signal<u8>,
     val: u8,
     zh: &'static str,
@@ -399,11 +443,16 @@ pub(crate) fn messages_section(
     let search = shown.msg_search;
     let dir = shown.msg_dir;
     let kind = shown.msg_kind;
+    let llm_stream = shown.llm_stream;
+    let msg_llm_view = shown.msg_llm_view;
     let pane_width = shown.pane_width;
     let copy_all_controls = controls.clone();
+    let llm_controls = controls.clone();
     let row_controls = controls;
     let has_ws_dirs =
         move || lines.with(|items| items.iter().any(|line| present::is_ws_message(&line.name)));
+    let has_llm_view = move || llm_stream.with(Option::is_some);
+    let is_llm_ai_mode = move || has_llm_view() && msg_llm_view.get();
     view()
         .rounded(px(10.0))
         .border_1()
@@ -486,7 +535,18 @@ pub(crate) fn messages_section(
                             .flex_wrap()
                             .items_center()
                             .gap_1p5()
-                            .child(when(has_ws_dirs, move || {
+                            .child(when(has_llm_view, move || {
+                                view()
+                                    .flex_row()
+                                    .h(px(22.0))
+                                    .rounded(px(6.0))
+                                    .border_1()
+                                    .border_color(border_control())
+                                    .overflow_hidden()
+                                    .child(llm_mode_chip(msg_llm_view, true, "AI 聚合", "AI Stream"))
+                                    .child(llm_mode_chip(msg_llm_view, false, "原始帧", "Raw"))
+                            }))
+                            .child(when(move || !is_llm_ai_mode() && has_ws_dirs(), move || {
                                 view()
                                     .flex_row()
                                     .h(px(22.0))
@@ -498,7 +558,7 @@ pub(crate) fn messages_section(
                                     .child(msg_filter_chip(dir, 1, "↑ 客户端", "↑ Client"))
                                     .child(msg_filter_chip(dir, 2, "↓ 源站", "↓ Origin"))
                             }))
-                            .child(when(has_ws_dirs, move || {
+                            .child(when(move || !is_llm_ai_mode() && has_ws_dirs(), move || {
                                 view()
                                     .flex_row()
                                     .h(px(22.0))
@@ -511,17 +571,21 @@ pub(crate) fn messages_section(
                                     .child(msg_filter_chip(kind, 2, "二进制", "Binary"))
                                     .child(msg_filter_chip(kind, 3, "控制", "Control"))
                             }))
-                            .child(msg_search_box(search, lines, dir, kind))
+                            .child(when(
+                                move || !is_llm_ai_mode(),
+                                move || msg_search_box(search, lines, dir, kind),
+                            ))
                             .child(when(
                                 move || {
-                                    filter_message_lines(
-                                        &lines.get(),
-                                        &search.get(),
-                                        dir.get(),
-                                        kind.get(),
-                                    )
-                                    .iter()
-                                    .any(|line| line.name != "…")
+                                    !is_llm_ai_mode()
+                                        && filter_message_lines(
+                                            &lines.get(),
+                                            &search.get(),
+                                            dir.get(),
+                                            kind.get(),
+                                        )
+                                        .iter()
+                                        .any(|line| line.name != "…")
                                 },
                                 move || {
                                     let controls = copy_all_controls.clone();
@@ -558,16 +622,23 @@ pub(crate) fn messages_section(
             move || !card_folded(folded, FOLD_MESSAGES),
             move || {
                 let row_controls = row_controls.clone();
+                let ai_controls = llm_controls.clone();
                 let filtered = move || {
                     filter_message_lines(&lines.get(), &search.get(), dir.get(), kind.get())
                 };
                 when(move || shown.messages_loading.get(), detail_loading_row).otherwise(move || {
                     let row_controls = row_controls.clone();
-                    when(
-                        move || filtered().is_empty(),
-                        || view().px_3p5().py_2p5().child(muted_line(tr("无", "None"))),
-                    )
+                    let ai_controls = ai_controls.clone();
+                    when(is_llm_ai_mode, move || {
+                        llm_stream_panel(llm_stream, ai_controls.clone())
+                    })
                     .otherwise(move || {
+                        let row_controls = row_controls.clone();
+                        when(
+                            move || filtered().is_empty(),
+                            || view().px_3p5().py_2p5().child(muted_line(tr("无", "None"))),
+                        )
+                        .otherwise(move || {
                         let row_controls = row_controls.clone();
                         each(
                             filtered,
@@ -658,6 +729,7 @@ pub(crate) fn messages_section(
                                     ))
                             },
                         )
+                    })
                     })
                 })
             },

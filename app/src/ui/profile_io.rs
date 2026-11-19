@@ -110,11 +110,139 @@ pub(crate) fn parse_profiles_from_text_or_path(
     config::parse_profiles_toml(trimmed)
 }
 
+/// Previews Whistle or Charles XML rule conversion counts while pasting in the Import box.
+pub(crate) fn preview_rule_import(raw_text: &str, lang: Lang) -> Option<String> {
+    let trimmed = raw_text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if import_charles::looks_like_charles_xml(trimmed) {
+        let rep = import_charles::convert_charles_xml(trimmed, "Charles XML");
+        return Some(match lang {
+            Lang::Zh => format!(
+                "检测到 Charles XML：预计转换 {} 条规则，保留注释/未映射 {} 条",
+                rep.converted,
+                rep.skipped_comments + rep.unmapped
+            ),
+            Lang::En => format!(
+                "Charles XML detected: {} rules to convert, {} commented/unmapped",
+                rep.converted,
+                rep.skipped_comments + rep.unmapped
+            ),
+        });
+    }
+    if import_whistle::looks_like_whistle(trimmed) {
+        let rep = import_whistle::convert_whistle_rules(trimmed, "Whistle");
+        return Some(match lang {
+            Lang::Zh => format!(
+                "检测到 Whistle 规则：预计转换 {} 条，未映射 {} 条将以 # 注释保留",
+                rep.converted, rep.unmapped
+            ),
+            Lang::En => format!(
+                "Whistle rules detected: {} to convert, {} unmapped kept as # comments",
+                rep.converted, rep.unmapped
+            ),
+        });
+    }
+    None
+}
+
+pub(crate) fn apply_rule_import_report(
+    controls: &Controls,
+    report: import_whistle::RuleImportReport,
+    profiles: ProfileSignals,
+) -> bool {
+    if report.converted == 0
+        && report.unmapped == 0
+        && report.skipped_comments == 0
+        && report.bypass_hosts.is_empty()
+    {
+        set_status(
+            controls,
+            StatusMsg::ImportFailed("no convertible rules found".to_string()),
+        );
+        return false;
+    }
+    let mut saved_ok = true;
+    if !report.rules_text.trim().is_empty() {
+        let trimmed_source = report.source_name.trim();
+        let group_name = if trimmed_source.is_empty() {
+            "Imported".to_string()
+        } else {
+            trimmed_source.to_string()
+        };
+        let next_groups = config::upsert_rule_group(
+            &profiles.rule_groups.get(),
+            &group_name,
+            &report.rules_text,
+            true,
+        );
+        let selected_name = next_groups
+            .iter()
+            .find(|item| item.name.eq_ignore_ascii_case(&group_name))
+            .map(|item| item.name.clone())
+            .unwrap_or(group_name);
+        profiles.rule_groups.set(next_groups.clone());
+        profiles.editing_group.set(Some(selected_name));
+        controls.hub.set_rule_groups(&next_groups);
+        saved_ok &= save_config_or_notify(controls, PrefName::Rules, |config| {
+            config.rule_groups = next_groups;
+        });
+    }
+    if !report.bypass_hosts.is_empty() {
+        let next_bypass = merge_bypass_hosts(&profiles.bypass.get(), &report.bypass_hosts);
+        profiles.bypass.set(next_bypass.clone());
+        controls.hub.set_bypass(&next_bypass);
+        saved_ok &= save_config_or_notify(controls, PrefName::Bypass, |config| {
+            config.bypass_hosts = next_bypass;
+        });
+    }
+    if saved_ok {
+        set_status(
+            controls,
+            StatusMsg::RulesMigrated {
+                source: report.source_name,
+                converted: report.converted,
+                unmapped: report.unmapped,
+            },
+        );
+    }
+    true
+}
+
+fn merge_bypass_hosts(existing: &str, hosts: &[String]) -> String {
+    let mut items: Vec<String> = existing
+        .split(|ch: char| ch.is_whitespace() || ch == ',' || ch == ';' || ch == '|')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    for host in hosts {
+        if !items.iter().any(|item| item.eq_ignore_ascii_case(host)) {
+            items.push(host.clone());
+        }
+    }
+    items.join(", ")
+}
+
 pub(crate) fn import_profiles_text(
     controls: &Controls,
     raw_text: &str,
     profiles: ProfileSignals,
 ) -> bool {
+    let trimmed = raw_text.trim();
+    if import_charles::looks_like_charles_xml(trimmed) {
+        let report = import_charles::convert_charles_xml(trimmed, "Charles XML");
+        return apply_rule_import_report(controls, report, profiles);
+    }
+    if let Ok(incoming) = parse_profiles_from_text_or_path(raw_text) {
+        apply_imported_profiles(controls, incoming, profiles);
+        return true;
+    }
+    if import_whistle::looks_like_whistle(trimmed) {
+        let report = import_whistle::convert_whistle_rules(trimmed, "Whistle");
+        return apply_rule_import_report(controls, report, profiles);
+    }
     match parse_profiles_from_text_or_path(raw_text) {
         Ok(incoming) => {
             apply_imported_profiles(controls, incoming, profiles);
@@ -212,9 +340,18 @@ pub(crate) fn import_dropped(
         if let Some(path) = dropped_har_path(uri) {
             found = true;
             import_har_file(controls, &path);
+        } else if let Some(path) = dropped_ext_path(uri, "chlsj") {
+            found = true;
+            import_chlsj_file(controls, &path);
         } else if let Some(path) = dropped_toml_path(uri) {
             found = true;
             import_profiles_file(controls, &path, profiles);
+        } else if let Some(path) = dropped_ext_path(uri, "xml") {
+            found = true;
+            import_charles_xml_file(controls, &path, profiles);
+        } else if let Some(path) = dropped_ext_path(uri, "txt") {
+            found = true;
+            import_whistle_file(controls, &path, profiles);
         }
     }
     if !found {
@@ -223,13 +360,115 @@ pub(crate) fn import_dropped(
             StatusMsg::ImportFailed(
                 t(
                     lang,
-                    "放下的文件不是 HAR 或 TOML 配置",
-                    "Dropped file is not a HAR or TOML setup",
+                    "仅支持拖入 .har、.chlsj、.toml、Charles .xml 或 Whistle .txt 文件",
+                    "Drop a .har, .chlsj, .toml, Charles .xml, or Whistle .txt file",
                 )
                 .to_string(),
             ),
         );
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn prompt_import_migration(controls: Arc<Controls>, profiles: ProfileSignals) {
+    spawn_detached(async move {
+        let dialog = open_dialog_with_default_dir().multiple(true).filter(
+            nsh_core::file_dialog::FileFilter::new(
+                "HAR / Charles / Whistle / TOML",
+                ["har", "chlsj", "toml", "xml", "txt"],
+            ),
+        );
+        match pick_paths(dialog).await {
+            Ok(Some(paths)) => {
+                for path in paths {
+                    let path_str = path.to_string_lossy();
+                    let ext = path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .map(str::to_ascii_lowercase)
+                        .unwrap_or_default();
+                    match ext.as_str() {
+                        "har" => import_har_file(&controls, &path_str),
+                        "chlsj" => import_chlsj_file(&controls, &path_str),
+                        "toml" => import_profiles_file(&controls, &path_str, profiles),
+                        "xml" => import_charles_xml_file(&controls, &path_str, profiles),
+                        "txt" => import_whistle_file(&controls, &path_str, profiles),
+                        _ => {}
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(err) => set_status(&controls, StatusMsg::ImportFailed(err)),
+        }
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn import_charles_xml_file(
+    controls: &Controls,
+    path_text: &str,
+    profiles: ProfileSignals,
+) {
+    let path = std::path::Path::new(path_text.trim());
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(err) => {
+            set_status(controls, StatusMsg::ImportFailed(err.to_string()));
+            return;
+        }
+    };
+    let label = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("Charles XML");
+    let report = import_charles::convert_charles_xml(&content, label);
+    let _ = apply_rule_import_report(controls, report, profiles);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn import_whistle_file(controls: &Controls, path_text: &str, profiles: ProfileSignals) {
+    let path = std::path::Path::new(path_text.trim());
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(err) => {
+            set_status(controls, StatusMsg::ImportFailed(err.to_string()));
+            return;
+        }
+    };
+    let label = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("Whistle");
+    let report = import_whistle::convert_whistle_rules(&content, label);
+    let _ = apply_rule_import_report(controls, report, profiles);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn import_chlsj_file(controls: &Controls, path_text: &str) {
+    let path = std::path::PathBuf::from(path_text.trim());
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            set_status(controls, StatusMsg::ImportFailed(err.to_string()));
+            return;
+        }
+    };
+    let value = match serde_json::from_slice::<serde_json::Value>(&bytes) {
+        Ok(value) => value,
+        Err(err) => {
+            set_status(controls, StatusMsg::ImportFailed(err.to_string()));
+            return;
+        }
+    };
+    let items = import_charles::import_charles_chlsj(&value);
+    let count = controls.hub.import_flows(items);
+    set_status(
+        controls,
+        StatusMsg::Imported {
+            count,
+            path: path.display().to_string(),
+        },
+    );
 }
 
 #[cfg(target_arch = "wasm32")]

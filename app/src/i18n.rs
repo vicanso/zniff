@@ -169,6 +169,11 @@ pub enum StatusMsg {
     ProfilesImported {
         count: usize,
     },
+    RulesMigrated {
+        source: String,
+        converted: usize,
+        unmapped: usize,
+    },
     ProfileSaved(String),
     ProfileRestored(String),
     MappedLocal(String),
@@ -579,6 +584,22 @@ impl StatusMsg {
                 Lang::Zh => format!("已导入 {count} 套配置"),
                 Lang::En => format!("Imported {count} setups"),
             },
+            Self::RulesMigrated {
+                source,
+                converted,
+                unmapped,
+            } => match (lang, *unmapped) {
+                (Lang::Zh, 0) => format!("已从 {source} 转换并应用 {converted} 条规则"),
+                (Lang::Zh, u) => {
+                    format!("已从 {source} 转换 {converted} 条规则（{u} 条未映射已保留为注释）")
+                }
+                (Lang::En, 0) => format!("Converted {converted} rules from {source}"),
+                (Lang::En, u) => {
+                    format!(
+                        "Converted {converted} rules from {source} ({u} unmapped kept as # comments)"
+                    )
+                }
+            },
             Self::ProfileSaved(name) => match lang {
                 Lang::Zh => format!("已保存配置「{name}」"),
                 Lang::En => format!("Saved setup \"{name}\""),
@@ -732,6 +753,7 @@ impl StatusMsg {
         match self {
             Self::ProfilesExported { .. }
             | Self::ProfilesImported { .. }
+            | Self::RulesMigrated { .. }
             | Self::ProfileSaved(_)
             | Self::ProfileRestored(_)
             | Self::Exported(_)
@@ -816,7 +838,7 @@ impl StatusMsg {
             Self::ProfilesExported { .. } | Self::Exported(_) | Self::MockExported { .. } => {
                 t(lang, "导出成功", "Export Succeeded")
             }
-            Self::ProfilesImported { .. } | Self::Imported { .. } => {
+            Self::ProfilesImported { .. } | Self::Imported { .. } | Self::RulesMigrated { .. } => {
                 t(lang, "导入成功", "Import Succeeded")
             }
             Self::ProfileSaved(_) | Self::Saved(_) | Self::MappedLocal(_) => {

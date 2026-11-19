@@ -1,5 +1,8 @@
 # zniff 全功能与界面细节实机检视与测试报告
 
+> [!NOTE]
+> **历史归档快照（基线 `v0.1.0` / `nsh 0.4`，2026-11-09）**：本报告为早期版本实机检视留档。当前版本（`v0.3.1` / `nsh 0.6`）在界面布局、规则引擎、扩展能力与代码结构上均已有大幅演进，最新说明请见 [文档索引](./README.md) 与 [已知限制与行为边界](./known-issues.md)。
+
 - **报告生成时间**：2026-11-09T22:58:00+08:00
 - **测试执行团队**：zniff Quality Assurance & UI Inspection Team
 - **受测软件版本**：zniff 0.1.0 (`app/Cargo.toml`, commit: current working tree)

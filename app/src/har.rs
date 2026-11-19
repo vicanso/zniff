@@ -551,7 +551,7 @@ fn body_from_content(content: &Value) -> Vec<u8> {
     }
 }
 
-fn split_url(url: &str) -> (String, String) {
+pub(crate) fn split_url(url: &str) -> (String, String) {
     let rest = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
     let (authority, path) = match (rest.find('/'), rest.find('?')) {
         (Some(slash), Some(q)) if q < slash => (&rest[..q], format!("/{}", &rest[q..])),
@@ -582,7 +582,7 @@ fn split_url(url: &str) -> (String, String) {
     (host.to_string(), path)
 }
 
-fn protocol_from(version: &str) -> Protocol {
+pub(crate) fn protocol_from(version: &str) -> Protocol {
     let version = version.trim();
     if version.eq_ignore_ascii_case("h2")
         || version.eq_ignore_ascii_case("HTTP/2")
@@ -646,7 +646,7 @@ fn parse_tz_offset_secs(tz: &str) -> Option<i64> {
     Some(sign * (hours as i64 * 3600 + mins as i64 * 60))
 }
 
-fn parse_iso(text: &str) -> Option<SystemTime> {
+pub(crate) fn parse_iso(text: &str) -> Option<SystemTime> {
     let text = text.trim();
     let sep = text.find(['T', 't', ' '])?;
     let date = &text[..sep];
@@ -763,7 +763,7 @@ fn b64(bytes: &[u8]) -> String {
     out
 }
 
-fn b64_decode(text: &str) -> Vec<u8> {
+pub(crate) fn b64_decode(text: &str) -> Vec<u8> {
     fn val(byte: u8) -> Option<u8> {
         match byte {
             b'A'..=b'Z' => Some(byte - b'A'),

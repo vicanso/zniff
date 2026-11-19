@@ -20,6 +20,7 @@ pub(super) fn parse_http_url(url: &str) -> Option<(&str, String, u16, String)> {
 pub(super) enum LocalRoute {
     Cert,
     Install,
+    Pac,
     Share(String, crate::share::SharePath),
     Relay(String, crate::share::SharePath, RelayVerb),
     Favicon,
@@ -105,6 +106,9 @@ pub(super) fn local_route_for(method: &str, target: &str, self_target: bool) -> 
     }
     if path == "/zniff-ca.crt" || path.ends_with("/zniff-ca.crt") {
         return Some(LocalRoute::Cert);
+    }
+    if direct && (path == "/proxy.pac" || path == "/zniff.pac") {
+        return Some(LocalRoute::Pac);
     }
     if path == "/zniff" || path == "/zniff/" || (direct && path == "/") {
         return Some(LocalRoute::Install);
@@ -728,7 +732,7 @@ pub(super) const INSTALL_PAGE: &str = r#"<!DOCTYPE html>
     <li>点下载，保存 <code>zniff-ca.crt</code>。</li>
     <li>打开「设置」→「安全」→「加密与凭据」→「安装证书」→「CA 证书」。</li>
   </ol>
-  <p class="note">装好后，把手机 Wi-Fi 的代理指到这台电脑的地址和端口，才能抓到手机的 HTTP(S)。</p>
+  <p class="note">装好后，把手机 Wi-Fi 的代理指到这台电脑的地址和端口（或自动代理 PAC URL <code>/proxy.pac</code>），才能抓到手机的 HTTP(S)。</p>
 </main>
 </body>
 </html>
@@ -786,7 +790,7 @@ pub(super) const INSTALL_PAGE_EN: &str = r#"<!DOCTYPE html>
     <li>Tap the download and save <code>zniff-ca.crt</code>.</li>
     <li>Open Settings → Security → Encryption &amp; credentials → Install a certificate → CA certificate.</li>
   </ol>
-  <p class="note">After it is installed, point the phone's Wi-Fi HTTP proxy at this computer's address and port to capture HTTP(S).</p>
+  <p class="note">After it is installed, point the phone's Wi-Fi HTTP proxy (or Auto Proxy PAC URL <code>/proxy.pac</code>) at this computer's address and port to capture HTTP(S).</p>
 </main>
 </body>
 </html>
@@ -848,6 +852,34 @@ where
         &[("Content-Type".into(), "application/x-x509-ca-cert".into())],
         &pem,
         None,
+        is_head,
+    )
+    .await
+}
+
+pub(super) async fn serve_pac<S>(
+    socket: &mut S,
+    local_addr: Option<SocketAddr>,
+    hub: &Hub,
+    head: &Head,
+) -> Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
+    let is_head = head_method(head).eq_ignore_ascii_case("HEAD");
+    let authority = header_value(&head.headers, "host")
+        .map(|h| h.trim().to_string())
+        .filter(|h| !h.is_empty())
+        .or_else(|| local_addr.map(|addr| addr.to_string()))
+        .unwrap_or_else(|| "127.0.0.1:8877".to_string());
+    let script = hub.pac_script(&authority);
+    write_untracked_encoded_for_method(
+        socket,
+        200,
+        "OK",
+        "application/x-ns-proxy-autoconfig; charset=utf-8",
+        None,
+        script.as_bytes(),
         is_head,
     )
     .await

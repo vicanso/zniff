@@ -638,7 +638,8 @@ where
         headers.push(("Content-Length".into(), body.len().to_string()));
     }
     let upstream = hub.upstream_for_host(&host);
-    let target = if upstream.is_some() {
+    let via_http_upstream = upstream.as_ref().is_some_and(Upstream::is_http_proxy);
+    let target = if via_http_upstream {
         format!("http://{}{path}", display_authority(&host, port, "http"))
     } else {
         path.clone()
@@ -677,7 +678,9 @@ where
             display_authority(&host, port, "http")
         ));
     }
-    if let Some(auth) = upstream.as_ref().and_then(|u| u.auth_header.as_deref()) {
+    if via_http_upstream
+        && let Some(auth) = upstream.as_ref().and_then(|u| u.auth_header.as_deref())
+    {
         outbound.push_str(&format!("Proxy-Authorization: {auth}\r\n"));
     }
     if !has_connection {

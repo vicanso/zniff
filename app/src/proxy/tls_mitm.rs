@@ -856,6 +856,12 @@ pub(super) fn flow_error_guess(err: &anyhow::Error, label: &str) -> Option<&'sta
     {
         return Some("对端在消息没收完时把连接关了。");
     }
+    if text.contains("socks5") {
+        if text.contains("认证") {
+            return Some("上游 SOCKS5 代理认证失败，请检查用户名或密码。");
+        }
+        return Some("上游 SOCKS5 代理握手或转发失败，请检查代理地址、协议或网络连通性。");
+    }
     if text.contains("nodename nor servname")
         || text.contains("name or service not known")
         || text.contains("failed to lookup")

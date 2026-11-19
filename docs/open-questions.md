@@ -1,6 +1,8 @@
 # zniff 产品与架构问题决策记录（Open Questions — 全部已决策并落地）
 
-本文档记录代码审计中涉及**用户习惯、协议语义边界与产品复杂度取舍**的 16 项问题的评估、确认结论与落地实现。常规边界说明另见 [docs/known-issues.md](known-issues.md)。
+> 返回 [文档索引](./README.md) · 常规行为边界另见 [已知限制与行为边界](known-issues.md)
+
+本文档记录代码审计中涉及**用户习惯、协议语义边界与产品复杂度取舍**的 16 项问题的评估、确认结论与落地实现。
 
 ---
 
@@ -8,7 +10,7 @@
 
 ### 1. 双层过滤（顶栏持久化 `filter` vs 左栏临时 `list_filter`）与「只看 / 屏蔽 / 分面」归属 — ✅ 已决策并落地（选项 B）
 
-- **代码位置**：`app/src/lib.rs`
+- **代码位置**：`app/src/ui/filter_tokens.rs`、`app/src/ui/facet_drawer.rs`、`app/src/ui/facet_sidebar.rs`
 - **评估选项**：
   - 选项 A：维持双层职责分离，不提供快捷合并按钮。
   - **选项 B（已采用）**：维持左栏搜索框、分面胶囊与「只看 / 屏蔽」默认写入会话级临时过滤词 `list_filter`；当 `list_filter` 非空时，在左栏搜索框右侧显示紧凑「并入主过滤」（`Merge`）按钮，一键将当前二次筛选词去重并入顶栏主过滤 `profiles.filter`、清空 `list_filter` 并触发配置保存。
@@ -17,7 +19,7 @@
 
 ### 2. 正文内搜索（`req_search` / `res_search`）的跨流保留策略与 256 KB 分页检索范围 — ✅ 已决策并落地（选项 A）
 
-- **代码位置**：`app/src/lib.rs`
+- **代码位置**：`app/src/ui/detail_body.rs`
 - **评估选项**：
   - **选项 A（已采用）**：保留 `req_search` / `res_search` 跨流切换不清空以利连续比对同类接口；当请求或响应正文存在多页（`> 256 KB` 的 `TextWindow` 分页）且搜索词非空时，在正文卡片标题栏命中计数旁显式展示「当前页命中」（`Page matches`）范围角标。
   - 选项 B：跨全部 1 MB 分页做全局检索。
@@ -26,7 +28,7 @@
 
 ### 3. 「构造请求 / 编辑重发」键盘提交快捷键 — ✅ 已决策并落地（选项 A）
 
-- **代码位置**：`app/src/lib.rs`
+- **代码位置**：`app/src/ui/compose_box.rs`、`app/src/ui/app_shell.rs`
 - **评估选项**：
   - **选项 A（已采用）**：在 `compose_box` 作用域支持 `Cmd/Ctrl+Enter`（`mod+enter`）一键触发发送或断点放行；单行 URL 输入框绑定 `Enter`（`on_submit`）提交发送，且当输入以 `curl` 开头时仅解析填充命令而不误触发送。
   - 选项 B：仅允许点击右上角按钮提交。
@@ -34,7 +36,7 @@
 
 ### 4. 左栏行右键菜单（`row_context_menu`）与详情「更多」菜单的高频项边界 — ✅ 已决策并落地（选项 B）
 
-- **代码位置**：`app/src/lib.rs`、`AGENTS.md`
+- **代码位置**：`app/src/ui/flow_table.rs`、`app/src/ui/detail_actions.rs`、`AGENTS.md`
 - **评估选项**：
   - 选项 A：维持原 11 项右键菜单不含「编辑重发」。
   - **选项 B（已采用）**：在左栏 `row_context_menu` 的「重放 / 批量重放」下方补入「编辑重发」（`Edit & resend`；若该行正处于请求/响应断点队首则动态显示「编辑请求」/「编辑响应」，中继流量置灰禁用），点击即选中该行并展开右栏 `compose_box`；「另存响应」仍留在详情菜单。
@@ -42,15 +44,15 @@
 
 ### 5. 规则快速添加面板对 `op=<GraphQL操作名>` 的 UI 覆盖范围 — ✅ 已决策并落地（选项 B）
 
-- **代码位置**：`app/src/rules.rs`、`app/src/lib.rs`
+- **代码位置**：`app/src/rules.rs`、`app/src/ui/quick_rules.rs`、`app/src/ui/filter_panel.rs`
 - **评估选项**：
   - 选项 A：仅在少数输入框较少的规则标签提示手写 `op=`。
-  - **选项 B（已采用）**：在快速添加区的 `域名 + Path` 匹配行右侧提供紧凑可选 `GraphQL op` 输入框，统一覆盖全部 11 种支持 `op=` 的规则（`替换`、`转发`、`文件`、`延迟`、`断点`、`响应断点`、`改头`、`改参`、`JSON`、`禁缓存`、`阻断`；不支持 `op=` 的 `跨域`、`限速`、`证书` 自动隐藏）。
-- **落地说明**：`rules.rs` 新增 `QuickRule::supports_graphql_op` 与 `append_quick_rule_with_op`（保留 `append_quick_rule` 兼容委托），`lib.rs` 将 `op_pattern` 完整接入添加校验、预设未保存改动检测、配置导出与新建配置重置，并精简 `from`/`to` 冗余占位提示。
+  - **选项 B（已采用）**：在快速添加区的 `域名 + Path` 匹配行右侧提供紧凑可选 `GraphQL op` 输入框，统一覆盖全部支持 `op=` 的快捷规则（当前共 12 项：`替换`、`转发`、`文件`、`延迟`、`断点`、`响应断点`、`改头`、`改参`、`JSON`、`禁缓存`、`阻断` 以及后续新增的 `Hook`；不支持 `op=` 的 `跨域`、`限速`、`证书`、`解析` 自动隐藏）。
+- **落地说明**：`rules.rs` 新增 `QuickRule::supports_graphql_op` 与 `append_quick_rule_with_op`（保留 `append_quick_rule` 兼容委托），`quick_rules.rs` / `filter_panel.rs` 将 `op_pattern` 完整接入添加校验、预设未保存改动检测、配置导出与新建配置重置，并精简 `from`/`to` 冗余占位提示。
 
 ### 6. 时序图面板与主列表联动及依赖图源码复制 — ✅ 已决策并落地（选项 A）
 
-- **代码位置**：`app/src/lib.rs`
+- **代码位置**：`app/src/ui/seq_panel.rs`、`app/src/ui/seq_dep_waterfall.rs`、`app/src/ui/seq_swimlane.rs`
 - **评估选项**：
   - **选项 A（已采用）**：点击「瀑布图 / 时序图 / 依赖图」预览中的任意请求行直接选中对应 `flow.id` 并关闭时序图面板与编辑框；「源码」标签提供 `sequenceDiagram` 与 `flowchart TD` 切换（从「依赖图」切入源码时默认选中 `flowchart TD`），且处于「依赖图」或 `flowchart TD` 源码模式时「复制 Mermaid / 复制 Markdown」复制 `flowchart_mermaid`。
   - 选项 B：保持纯只读预览与单一 `sequenceDiagram` 导出。
@@ -58,7 +60,7 @@
 
 ### 7. WebSocket / SSE 消息列表单帧复制按钮 — ✅ 已决策并落地（选项 A）
 
-- **代码位置**：`app/src/lib.rs`
+- **代码位置**：`app/src/ui/detail_headers_msgs.rs`
 - **评估选项**：
   - **选项 A（已采用）**：在「消息」卡片每条消息行右侧提供紧凑单帧复制图标按钮，并在卡片标题栏提供「复制全部」（`Copy all`）按钮一键复制当前过滤条件下的全部消息帧。
   - 选项 B：仅靠手动框选复制。
@@ -70,7 +72,7 @@
 
 ### 8. `zniff --web` Wasm 端单流完整下载与内置应急页定位 — ✅ 已决策并落地（选项 B 单流下载 + 选项 A 应急页定位）
 
-- **代码位置**：`app/src/web.rs`、`app/src/lib.rs`
+- **代码位置**：`app/src/web.rs`、`app/src/ui/detail_actions.rs`
 - **评估选项**：
   - 内置无 Wasm 产物时的 HTML 页面保持 **选项 A** 最小应急操作台定位，避免维护两套复杂前端；
   - 单条响应下载采用 **选项 B**：在 `web.rs` 新增 `GET /api/flows/{id}/body` 原文附件下载路由（自动从 `zniff-spill` 分片按需还原完整响应体、回填响应 `Content-Type` 与推荐文件扩展名，并遵守当前 `redact_export` / `redact_strict` 脱敏配置），同时在 Wasm 端详情「更多」菜单开放「另存响应…」（`Save response…`）。
@@ -94,7 +96,7 @@
 
 ### 11. 导出/分享脱敏的覆盖深度与非结构化正文策略 — ✅ 已决策并落地（选项 B）
 
-- **代码位置**：`app/src/share.rs`、`app/src/config.rs`、`app/src/lib.rs`、`app/src/web.rs`、`app/src/hub_web.rs`
+- **代码位置**：`app/src/redact.rs`、`app/src/share.rs`、`app/src/config.rs`、`app/src/ui/redact_preview.rs`、`app/src/web.rs`、`app/src/hub_web.rs`
 - **评估选项**：
   - 选项 A：对 `multipart/form-data` 与二进制正文仅保留原字节并打标记。
   - **选项 B（已采用）**：新增 `multipart/form-data; boundary=...` 字段级结构化脱敏（当分片 `name` 或 `filename` 命中敏感字段时将分片内容替换为 `[REDACTED]`，对 JSON / `x-www-form-urlencoded` 子分片递归脱敏并按原 `boundary` 重组报文），并新增可选 `redact_strict`「严格遮罩」（`Strict mask`）开关——开启后，任何无法结构化脱敏的非空二进制或非结构化正文均替换为 `[REDACTED: unstructured or binary body omitted in strict mode]`。
@@ -114,7 +116,7 @@
 
 ### 13. 断点「丢弃」（`BreakDecision { drop: true }`）的客户端响应语义与统计口径一致性 — ✅ 已决策并落地（选项 B）
 
-- **代码位置**：`app/src/proxy.rs`、`app/src/session.rs`
+- **代码位置**：`app/src/proxy/`、`app/src/session.rs`
 - **评估选项**：
   - 选项 A：维持返回 `204 No Content` 并单独修补统计口径。
   - **选项 B（已采用）**：对齐 `block <pattern> drop` 断连语义——点击断点「丢弃」时直接关闭客户端连接或重置流，不返回伪造的 HTTP 状态码（列表状态为 `ERR`，原因为 `断点丢弃`）。
@@ -130,7 +132,7 @@
 
 ### 15. 重放 / 批量重放对纯 HTTP/2 源站的 ALPN 协商兼容性 — ✅ 已决策并落地（选项 B）
 
-- **代码位置**：`app/src/proxy.rs`
+- **代码位置**：`app/src/proxy/replay.rs`
 - **评估选项**：
   - 选项 A：固定使用 `http/1.1` ALPN 重放。
   - **选项 B（已采用）**：当源流量协议为 `Protocol::Http2` 或独立构造 HTTPS 请求时，重放拨号宣告 `["h2", "http/1.1"]` ALPN；若源站协商选定 `h2`，则通过独立新建的单次 `hyper::client::conn::http2` 连接发送请求（不进入共享连接池），源站选定 `http/1.1` 时自动回退 HTTP/1.1。
@@ -138,7 +140,7 @@
 
 ### 16. Chunked 流式报文在 `op=` GraphQL 匹配与 `replace` / `json` 改写中的协议对齐 — ✅ 已决策并落地（选项 B）
 
-- **代码位置**：`app/src/proxy.rs`、`docs/known-issues.md`、`AGENTS.md`
+- **代码位置**：`app/src/proxy/plain_http.rs`、`app/src/proxy/hyper_forward.rs`、`docs/known-issues.md`、`AGENTS.md`
 - **评估选项**：
   - 选项 A：仅补齐明文 `op=` 读取与跳过备注，不改写 chunked 报文。
   - **选项 B（已采用）**：明文 HTTP 路径对齐 HTTPS 支持有界读取 `<= 1 MB` 流式请求体以提取 `op=<GraphQL操作名>`；当请求或响应明确命中至少一条 `replace` 或 `json` 规则时，对无 `Content-Length` 的 `chunked` 报文按需有界缓冲最多 `1 MB`（`BODY_CAP`）完成解压、改写并重算 `Content-Length`；未命中改写规则或超出 `1 MB` 的流量保持流式转发（超出上限时在备注记录跳过原因）。

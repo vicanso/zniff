@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/vicanso/zniff/releases"><img src="https://img.shields.io/badge/version-v0.2.0-blue.svg" alt="Version"></a>
+  <a href="https://github.com/vicanso/zniff/releases"><img src="https://img.shields.io/badge/version-v0.3.1-blue.svg" alt="Version"></a>
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-2024%20edition-orange.svg" alt="Rust 2024"></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-green.svg" alt="License"></a>
   <a href="#quick-start"><img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20%7C%20Docker-lightgrey.svg" alt="Platform"></a>
@@ -22,20 +22,20 @@ https://github.com/user-attachments/assets/15117c1d-50a0-4578-8201-a305fb0d12a3
 
 ## Features
 
-- **Native & Lightweight**: Proxy engine and `nsh` GUI compiled into a single pure-Rust binary for fast startup and low memory footprint.
-- **True Protocol Following**: Reads `ClientHello` ALPN offers and negotiates directly with origins. Supports HTTP/2 multiplexing, WebSocket frames (RFC 6455), and SSE without downgrading to HTTP/1.1.
-- **Deep Inspection**: Formats JSON (with a collapsible, searchable JSON tree view), GraphQL (splitting `operationName`, query, and variables), HTML/XML, schema-less Protobuf/gRPC, and MessagePack. Decodes JWTs, Unix timestamps, and Base64 inline, with baseline line-by-line Diff, body search, and per-connection timing breakdown (DNS / TCP / TLS, connection reuse).
-- **15 Rewrite & Resolve Rules & Breakpoints**: Terminal (`map-local` with directory mapping and upstream fallback, `map-remote`, `break`, `break-res`, `block`), additive (`replace`, `json`, `delay`, `throttle`, `header`, `query`, `cors`, `no-cache`), and per-host (`cert` / `client-cert`, `resolve` / `dns` / `hosts`) rules, with GraphQL `op=` targeting and an 8-slot FIFO breakpoint queue.
-- **Fast Navigation**: Rich filter syntax (`host:`, `path:`, `op:`, `body:`, `header:`, negated `-host:` / `-status:` …), a domain & app facet drawer, a secondary list search, column reordering, and saved setups with history.
-- **Diagrams, Export & Sharing**: Generate interactive Waterfall, Swimlane Sequence, Dependency (`flowchart TD`), and Mermaid source views. Copy flows as cURL, `fetch`, Python `requests`, Rust `reqwest`, Go `net/http`, TypeScript interfaces, or Rust `serde` structs. Export HAR/HTML (with optional redaction) or share live sessions via `/s/{uuid}` and `--relay`.
-- **AI-Native MCP & Web Console**: Built-in JSON-RPC 2.0 MCP server (`POST /mcp` and `zniff --mcp`) plus a headless WebAssembly operator console (`zniff --web`) with optional HTTP Basic auth on both console and capture port.
-- **Self-Updating**: Checks GitHub / Gitee releases and installs updates in place.
+- **Native & Lightweight**: Proxy engine and `nsh 0.6` GUI compiled into a single pure-Rust binary with bounded memory (ring-buffer spill for bodies > 16 KB), Split (collapsible domain/app sidebar) and Top-Bottom layouts, and multi-monitor window state persistence.
+- **Zero-Config Capture & Connect Hub**: Empty sessions display a quick-start onboarding card alongside a persistent footer **Connect** popover consolidating all onboarding actions: launch an **isolated Chromium browser** (SPKI cert trust, no system keychain changes), a **pre-configured proxied terminal**, or **one-click Android `adb` reverse proxy** (with active device count and automatic cleanup), copy the dynamic **`/proxy.pac`** auto-proxy URL, configure iOS simulators, or open the phone QR installer.
+- **True Protocol Following & SOCKS5 Upstream**: Reads `ClientHello` ALPN offers and negotiates directly with origins. Supports HTTP/2 multiplexing, WebSocket frames (RFC 6455), and SSE without downgrading to HTTP/1.1; upstream proxy chaining supports HTTP/CONNECT plus **`socks5://` and `socks5h://`** (with RFC 1929 auth).
+- **Deep Inspection, AI SSE Stream View & Schema Decoding**: Formats JSON (with a collapsible, searchable JSON tree view), GraphQL (splitting `operationName`, query, and variables), **LLM / AI SSE Stream Inspector** (aggregating OpenAI Chat/Responses, Anthropic Messages, and Google Gemini streams into Thinking, Output, Tool Calls, TTFT, and tok/s alongside a raw-frame toggle), HTML/Markdown live preview, XML, MessagePack, and **zero-dependency `.proto` schema decoding** alongside schema-less wire views. Decodes JWTs, Unix timestamps, and Base64 inline, with baseline line-by-line Diff and connection timing breakdown.
+- **17 Rule Types, Multi-Group Rules & Migration Import**: Stack multiple independently toggleable rule groups (`[[rule_groups]]`) with workspace rules, and migrate directly by dropping or pasting **Whistle `.txt`**, **Charles `.xml`**, or **`.chlsj`** session captures. Supports terminal (`map-local`, `map-remote`, `break`, `break-res`, `block`), additive (`replace`, `json`, `delay`, `throttle`, `header`, `query`, `cors`, `no-cache`), host-level (`cert` / `client-cert`, `resolve`), and extension rules (loopback HTTP `hook` for `mutate` or `preview`, `proto`), with `{{uuid}}`, `{{ts_ms}}`, `{{hmac_sha256(...)}}` variables, GraphQL `op=` targeting, and an 8-slot FIFO breakpoint queue.
+- **Fast Navigation, Persisted Compose History & Command Palette**: Structured filter syntax (`host:`, `path:`, `op:`, `body:`, `header:`, `app:`, negated `-host:` / `-status:` …), collapsible domain & app sidebar, secondary list search, persisted **20-item Compose history**, global Command Palette (`Cmd/Ctrl+Shift+P`), and saved setups with history.
+- **Diagrams, OpenAPI, Mock & Collaboration**: Interactive Waterfall, Swimlane Sequence, Dependency (`flowchart TD`), and Mermaid source views. Copy flows as cURL, `fetch`, Python `requests`, Rust `reqwest`, Go `net/http`, TypeScript interfaces, or Rust `serde` structs. Export **OpenAPI 3.0.3 (JSON / YAML / Clipboard)**, **generate batch Local Mock directories**, export HAR/HTML (with structured redaction & strict mask), or share live sessions via `/s/{uuid}` and `--relay`.
+- **AI-Native MCP & Web Console**: Built-in JSON-RPC 2.0 MCP server (`POST /mcp` and `zniff --mcp`, 10 built-in tools) plus a headless WebAssembly console (`zniff --web`) with optional HTTP Basic auth on both console and capture port. Desktop builds check GitHub Releases and verify `SHA256SUMS` before updating in place.
 
 ---
 
 ## Screenshots
 
-| Deep Inspection (GraphQL & JSON) | Filters & 15 Rewrite Rules |
+| Deep Inspection (GraphQL & JSON) | Filters & 17 Rewrite Rules |
 | :---: | :---: |
 | ![Deep Inspection](./docs/screenshots/02_detail_json_graphql.png) | ![Filters and Rules](./docs/screenshots/05_filter_rules_popup.png) |
 | **Waterfall / Sequence Diagrams & Breakpoints** | **Adaptive Light & Dark Mode** |
@@ -66,14 +66,15 @@ Open `http://127.0.0.1:8080` and click **Start** to bind capture port `8877`. Th
 ### 2. Configure Client & Root CA
 
 1. Launch `zniff` (default capture address: `127.0.0.1:8877`).
-2. Click **More → Copy Proxy Env** to copy terminal proxy variables:
+2. **Zero-Config Capture (Recommended)**: Click **Connect** in the footer, use the empty-state onboarding card, or open **More → Launch** to start `[Browser]` (isolated Chromium with SPKI cert trust), `[Term]` (pre-configured proxy & CA env vars), `[ADB]` (USB reverse proxy for Android devices), or copy the dynamic `/proxy.pac` URL.
+3. **Manual Terminal Setup**: Click **More → Copy Proxy Env** to copy proxy variables:
    ```bash
    export HTTP_PROXY="http://127.0.0.1:8877"
    export HTTPS_PROXY="http://127.0.0.1:8877"
    export ALL_PROXY="http://127.0.0.1:8877"
    export SSL_CERT_FILE="$HOME/Library/Application Support/zniff/ca.crt"
    ```
-3. **Trust Root CA**:
+4. **Trust Root CA (for system-wide or mobile capture)**:
    - **macOS**: **More → Certificate → Install** to trust `zniff CA` in Keychain.
    - **iOS Simulator**: **More → Install CA to iOS Simulators** to inject the cert and proxy into all booted simulators via `xcrun simctl`.
    - **Mobile Devices**: Click **QR** in the footer or visit `http://<lan-ip>:8877/zniff`.
@@ -91,13 +92,17 @@ map-remote api.example.com/api http://127.0.0.1:3000/api
 break      api.example.com/v1/checkout
 block      ads.example.com status=403
 
-# Additive modifiers (accumulate in order)
+# Additive modifiers & dynamic template variables (accumulate in order)
 json       api.example.com/v1 res set /data/is_vip true
 delay      api.example.com/graphql 2s op=Update*
-header     *.example.com res del Content-Security-Policy
+header     api.example.com/v1 req set X-Signature {{hmac_sha256("secret", req.body)}}
+
+# Local HTTP webhook extension & .proto schema decoding
+hook       api.example.com/v1/cipher http://127.0.0.1:9001/decrypt res mode=preview
+proto      grpc.example.com ./protos
 ```
 
-See the full syntax and examples in **[Rules & Configuration Guide](./docs/rules.md)** ([中文指南](./docs/rules-zh.md)).
+See the full syntax and examples in **[Rules & Configuration Guide](./docs/rules.md)** ([中文指南](./docs/rules-zh.md)), or browse the full **[Documentation Index](./docs/README.md)**.
 
 ---
 
@@ -127,7 +132,7 @@ Global flags: `--data-dir <dir>` (env `ZNIFF_DATA_DIR`) overrides the config & C
 }
 ```
 
-Available MCP tools: `list_flows`, `get_flow_detail`, `get_session_summary`, `annotate_flow`, `replay_flow`, `get_rules`, `set_rules`.
+Available MCP tools (10): `list_flows`, `get_flow_detail`, `get_session_summary`, `annotate_flow`, `replay_flow`, `get_rules`, `set_rules`, `clear_flows`, `manage_breaks`, `generate_openapi`.
 
 | Port | Auth Type | Flag / Env |
 | :--- | :--- | :--- |
@@ -144,6 +149,7 @@ Available MCP tools: `list_flows`, `get_flow_detail`, `get_session_summary`, `an
 
 | Shortcut | Action |
 | :--- | :--- |
+| `Cmd/Ctrl + Shift + P` | Toggle global Command Palette |
 | `Cmd/Ctrl + F` | Focus filter bar |
 | `Cmd/Ctrl + K` | Clear session |
 | `Cmd/Ctrl + R` | Replay selected flow |

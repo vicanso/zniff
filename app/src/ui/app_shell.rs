@@ -83,6 +83,8 @@ pub fn App() -> impl IntoElement {
         pretty: signal(saved.default_pretty),
         default_json_tree: signal(saved.default_json_tree),
         messages: signal(Vec::new()),
+        llm_stream: signal(None),
+        msg_llm_view: signal(true),
         diff: signal(String::new()),
         diff_old: signal(String::new()),
         diff_new: signal(String::new()),
@@ -126,7 +128,20 @@ pub fn App() -> impl IntoElement {
         body: signal(String::new()),
         status: signal(String::new()),
         draft_saved: signal((String::new(), String::new(), String::new(), String::new())),
-        recent: signal(Vec::new()),
+        recent: signal(
+            saved
+                .compose_history
+                .iter()
+                .map(|item| {
+                    (
+                        item.method.clone(),
+                        item.url.clone(),
+                        item.headers.clone(),
+                        item.body.clone(),
+                    )
+                })
+                .collect(),
+        ),
     };
     effect(move || {
         if compose.composing.get() && !compose.response.get() && selected.get().is_none() {
@@ -184,6 +199,8 @@ pub fn App() -> impl IntoElement {
     };
     let bypass_text = signal(saved.bypass_hosts);
     let rules_text = signal(saved.rules);
+    let rule_groups_sig = signal(saved.rule_groups);
+    let editing_group_sig = signal(None::<String>);
     let upstream_text = signal(saved.upstream_proxy);
     let proxy_auth_sig = signal(config::runtime_proxy_auth(&saved.proxy_auth));
     let relay_url_sig = signal(saved.relay_url);
@@ -196,6 +213,8 @@ pub fn App() -> impl IntoElement {
         filter_enabled,
         bypass: bypass_text,
         rules: rules_text,
+        rule_groups: rule_groups_sig,
+        editing_group: editing_group_sig,
         upstream: upstream_text,
         rules_on: signal(saved.rules_enabled),
         breaks_on: signal(saved.breaks_enabled),
@@ -218,6 +237,18 @@ pub fn App() -> impl IntoElement {
     let lan_choice = signal(String::new());
     let lan_addrs = signal(Vec::<LanAddr>::new());
     let qr_path = signal(String::new());
+    let qr_open = signal(false);
+    let pending_qr = signal(false);
+    let adb_count = signal({
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            launcher::configured_adb_count()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            0usize
+        }
+    });
     let controls = open_controls();
     let config_broken = signal(lock_config_error(&controls));
     let default_json_tree_effect = shown.default_json_tree;
@@ -481,7 +512,7 @@ pub fn App() -> impl IntoElement {
         }
         let status_now = lock_status(&controls_tick);
         if status.with(|cur| cur != &status_now) {
-            status.set(status_now);
+            status.set(status_now.clone());
         }
         let running_now = *controls_tick
             .running
@@ -489,6 +520,26 @@ pub fn App() -> impl IntoElement {
             .unwrap_or_else(|err| err.into_inner());
         if running.get_untracked() != running_now {
             running.set(running_now);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let adb_now = launcher::configured_adb_count();
+            if adb_count.get_untracked() != adb_now {
+                adb_count.set(adb_now);
+            }
+        }
+        if pending_qr.get_untracked() {
+            if running_now {
+                pending_qr.set(false);
+                qr_open.set(true);
+            } else if matches!(
+                status_now,
+                StatusMsg::BindFailed { .. } | StatusMsg::CaUnavailable(_)
+            ) {
+                pending_qr.set(false);
+            }
+        } else if !running_now && qr_open.get_untracked() {
+            qr_open.set(false);
         }
         let listen_now = lock_string(&controls_tick.listen);
         if listen.with(|cur| cur != &listen_now) {
@@ -508,6 +559,20 @@ pub fn App() -> impl IntoElement {
             let hub_rules = controls_tick.hub.rules_text();
             if hub_rules != profile_tick.rules.get_untracked() {
                 profile_tick.rules.set(hub_rules);
+            }
+            let hub_groups = controls_tick.hub.rule_groups();
+            if profile_tick
+                .rule_groups
+                .with_untracked(|cur| cur != &hub_groups)
+            {
+                if let Some(editing) = profile_tick.editing_group.get_untracked()
+                    && !hub_groups
+                        .iter()
+                        .any(|g| g.name.eq_ignore_ascii_case(&editing))
+                {
+                    profile_tick.editing_group.set(None);
+                }
+                profile_tick.rule_groups.set(hub_groups);
             }
         }
         let paused_now = controls_tick.hub.paused();
@@ -1085,10 +1150,35 @@ pub fn App() -> impl IntoElement {
             },
         ))
         .child({
+            let install_ca_cb: Rc<dyn Fn()> = {
+                let c = controls.clone();
+                Rc::new(move || install_ca(c.clone()))
+            };
+            let toggle_sys_cb: Rc<dyn Fn()> = {
+                let c = controls.clone();
+                Rc::new(move || toggle_system_proxy(c.clone()))
+            };
+            let onboarding_base = OnboardingProps {
+                controls: controls.clone(),
+                running,
+                listen,
+                ca_status,
+                use_system_proxy,
+                adb_count,
+                flow_total,
+                compose,
+                selected,
+                profiles: profile_signals,
+                install_ca: install_ca_cb,
+                toggle_system_proxy: toggle_sys_cb,
+                qr_open,
+                pending_qr,
+            };
             let build_split: Rc<dyn Fn(bool) -> View> = Rc::new(move |vertical: bool| {
                 let controls_list = controls_list.clone();
                 let controls_split = controls_split.clone();
                 let controls_detail = controls_detail.clone();
+                let onboarding_now = onboarding_base.clone();
                 let container = if vertical {
                     view().flex_1().min_h(px(0.0)).flex_col()
                 } else {
@@ -1154,6 +1244,7 @@ pub fn App() -> impl IntoElement {
                         filtered_stats,
                         detail_scroll,
                         profile_signals.layout_mode,
+                        onboarding_now,
                     ))
             });
             let build_col = Rc::clone(&build_split);
@@ -1180,6 +1271,25 @@ pub fn App() -> impl IntoElement {
             config_broken_dismissed,
             profile_signals.layout_mode,
             profile_signals.sidebar_collapsed,
+            ConnectHubProps {
+                controls: controls.clone(),
+                running,
+                listen,
+                ca_status,
+                use_system_proxy,
+                adb_count,
+                selected,
+                install_ca: {
+                    let c = controls.clone();
+                    Rc::new(move || install_ca(c.clone()))
+                },
+                toggle_system_proxy: {
+                    let c = controls.clone();
+                    Rc::new(move || toggle_system_proxy(c.clone()))
+                },
+                qr_open,
+                pending_qr,
+            },
             controls.clone(),
         ))
         .child(machine_settings_modal(profile_signals, controls.clone()))

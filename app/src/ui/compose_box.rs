@@ -44,7 +44,20 @@ pub(crate) fn submit_compose(
         compose.recent.update(|list| {
             list.retain(|item| item != &entry);
             list.insert(0, entry);
-            list.truncate(8);
+            list.truncate(config::COMPOSE_HISTORY_CAP);
+        });
+        let persisted = compose.recent.with_untracked(|list| {
+            list.iter()
+                .map(|(m, u, h, b)| config::ComposeHistoryItem {
+                    method: m.clone(),
+                    url: u.clone(),
+                    headers: h.clone(),
+                    body: b.clone(),
+                })
+                .collect()
+        });
+        let _ = save_config(|config| {
+            config.compose_history = config::sanitize_compose_history(persisted);
         });
         if selected.get().is_none() {
             compose.draft_saved.set((
@@ -787,13 +800,21 @@ pub(crate) fn lan_toggle(on: Signal<bool>, controls: Arc<Controls>) -> impl Into
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn prompt_import_har(controls: Arc<Controls>) {
     spawn_detached(async move {
-        let dialog = open_dialog_with_default_dir()
-            .multiple(true)
-            .filter(nsh_core::file_dialog::FileFilter::new("HAR", ["har"]));
+        let dialog = open_dialog_with_default_dir().multiple(true).filter(
+            nsh_core::file_dialog::FileFilter::new("HAR / Charles (.chlsj)", ["har", "chlsj"]),
+        );
         match pick_paths(dialog).await {
             Ok(Some(paths)) => {
                 for path in paths {
-                    import_har_file(&controls, &path.to_string_lossy());
+                    let text = path.to_string_lossy();
+                    if path
+                        .extension()
+                        .is_some_and(|e| e.eq_ignore_ascii_case("chlsj"))
+                    {
+                        import_chlsj_file(&controls, &text);
+                    } else {
+                        import_har_file(&controls, &text);
+                    }
                 }
             }
             Ok(None) => {}
@@ -880,7 +901,7 @@ fn compose_recent_menu(compose: Compose) -> impl IntoElement {
         .child(
             view()
                 .w(px(360.0))
-                .max_h(px(280.0))
+                .max_h(px(312.0))
                 .p_1()
                 .rounded(px(8.0))
                 .border_1()
@@ -940,7 +961,54 @@ fn compose_recent_menu(compose: Compose) -> impl IntoElement {
                                     )
                             },
                         ))),
-                ),
+                )
+                .child(when(
+                    move || !compose.recent.with(Vec::is_empty),
+                    move || {
+                        view()
+                            .w_full()
+                            .px_2()
+                            .py_1()
+                            .border_t_1()
+                            .border_color(border_subtle())
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                text(move || -> SharedString {
+                                    let count = compose.recent.with(Vec::len);
+                                    let lang = ui_lang(ui_langs());
+                                    match lang {
+                                        Lang::Zh => format!("最近 {count} 条"),
+                                        Lang::En => format!("{count} recent"),
+                                    }
+                                    .into()
+                                })
+                                .text_size(px(10.5))
+                                .text_color(fg_muted()),
+                            )
+                            .child(
+                                view()
+                                    .px_1p5()
+                                    .py_0p5()
+                                    .rounded(px(4.0))
+                                    .cursor(Cursor::Pointer)
+                                    .hover(|s| s.bg(bg_control_hover()))
+                                    .on_press(move || {
+                                        compose.recent.set(Vec::new());
+                                        let _ = save_config(|config| {
+                                            config.compose_history.clear();
+                                        });
+                                        recent_open.set(false);
+                                    })
+                                    .child(
+                                        text(tr("清空历史", "Clear history"))
+                                            .text_size(px(10.5))
+                                            .text_color(status_warn_fg()),
+                                    ),
+                            )
+                    },
+                )),
         )
 }
 
@@ -1066,6 +1134,8 @@ pub(crate) fn clear_shown(shown: Shown) {
     shown.preview_h.set(0.0);
     shown.image_caption.set(String::new());
     shown.messages.set(Vec::new());
+    shown.llm_stream.set(None);
+    shown.msg_llm_view.set(true);
     shown.diff.set(String::new());
     shown.diff_old.set(String::new());
     shown.diff_new.set(String::new());

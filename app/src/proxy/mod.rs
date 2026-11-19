@@ -89,6 +89,7 @@ mod hyper_helpers;
 mod local_routes;
 mod plain_http;
 mod replay;
+mod socks5;
 mod tls_mitm;
 mod upstream_io;
 mod wire;
@@ -98,7 +99,7 @@ mod tests;
 
 #[cfg(test)]
 pub(crate) use self::hub::spilled_flow_ids;
-pub use self::hub::{BreakDecision, BreakSide, Hub, ReplayOverride, Upstream};
+pub use self::hub::{BreakDecision, BreakSide, Hub, ReplayOverride, Upstream, UpstreamKind};
 use self::hub::{BreakSlot, PooledH2};
 pub(crate) use self::hub::{ShareExport, SharePoll};
 use self::hyper_forward::*;
@@ -260,6 +261,7 @@ async fn handle_conn_inner(mut socket: TcpStream, hub: Arc<Hub>) -> Result<()> {
     match local_route_for(&method, &target, self_target) {
         Some(LocalRoute::Cert) => return serve_ca_cert(&mut socket, &hub, &head).await,
         Some(LocalRoute::Install) => return serve_install_page(&mut socket, &hub, &head).await,
+        Some(LocalRoute::Pac) => return serve_pac(&mut socket, local_addr, &hub, &head).await,
         Some(LocalRoute::Share(id, kind)) => {
             return serve_share(&mut socket, &hub, &head, &id, kind).await;
         }

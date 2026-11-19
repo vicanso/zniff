@@ -280,6 +280,8 @@ pub(crate) struct ProfileSignals {
     pub(crate) filter_enabled: Signal<bool>,
     pub(crate) bypass: Signal<String>,
     pub(crate) rules: Signal<String>,
+    pub(crate) rule_groups: Signal<Vec<config::RuleGroup>>,
+    pub(crate) editing_group: Signal<Option<String>>,
     pub(crate) upstream: Signal<String>,
     pub(crate) rules_on: Signal<bool>,
     pub(crate) breaks_on: Signal<bool>,

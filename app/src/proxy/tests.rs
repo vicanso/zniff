@@ -1,4 +1,3 @@
-
 #[test]
 fn local_port_is_the_side_before_the_arrow() {
     assert_eq!(
@@ -5782,9 +5781,11 @@ fn parse_upstream_supports_optional_scheme_and_basic_auth() {
     assert_eq!(
         parse_upstream("127.0.0.1:7890"),
         Some(Upstream {
+            kind: UpstreamKind::Http,
             host: "127.0.0.1".into(),
             port: 7890,
             auth_header: None,
+            socks5_auth: None,
         })
     );
     let expected_auth = format!(
@@ -5794,20 +5795,44 @@ fn parse_upstream_supports_optional_scheme_and_basic_auth() {
     assert_eq!(
         parse_upstream("http://alice:p%40ss:word@127.0.0.1:7890/"),
         Some(Upstream {
+            kind: UpstreamKind::Http,
             host: "127.0.0.1".into(),
             port: 7890,
             auth_header: Some(expected_auth.clone()),
+            socks5_auth: None,
         })
     );
     assert_eq!(
         parse_upstream("alice:p@ss:word@[::1]:7890"),
         Some(Upstream {
+            kind: UpstreamKind::Http,
             host: "::1".into(),
             port: 7890,
             auth_header: Some(expected_auth),
+            socks5_auth: None,
         })
     );
-    assert_eq!(parse_upstream("socks5://127.0.0.1:1080"), None);
+    assert_eq!(
+        parse_upstream("socks5://127.0.0.1"),
+        Some(Upstream {
+            kind: UpstreamKind::Socks5 { remote_dns: false },
+            host: "127.0.0.1".into(),
+            port: 1080,
+            auth_header: None,
+            socks5_auth: None,
+        })
+    );
+    assert_eq!(
+        parse_upstream("socks5h://suser:s%40pass@127.0.0.1:1088"),
+        Some(Upstream {
+            kind: UpstreamKind::Socks5 { remote_dns: true },
+            host: "127.0.0.1".into(),
+            port: 1088,
+            auth_header: None,
+            socks5_auth: Some(("suser".into(), "s@pass".into())),
+        })
+    );
+    assert_eq!(parse_upstream("ftp://127.0.0.1:21"), None);
     assert_eq!(parse_upstream(""), None);
 }
 
@@ -6580,5 +6605,439 @@ async fn plain_http_webhook_mutates_request_and_response() {
     origin_task.abort();
     origin2_task.abort();
     hook_task.abort();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn rule_groups_stack_toggle_and_respect_workspace_precedence() {
+    use crate::config::RuleGroup;
+
+    let dir = std::env::temp_dir().join(format!("zniff-rule-groups-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let group_file = dir.join("group-ping.txt");
+    let ws_file = dir.join("ws-ping.txt");
+    std::fs::write(&group_file, "group-ping").unwrap();
+    std::fs::write(&ws_file, "ws-wins").unwrap();
+    let ca = Arc::new(Ca::open(&dir).unwrap());
+    let hub = Arc::new(Hub::new(ca).unwrap());
+
+    let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin_addr = origin.local_addr().unwrap();
+    let origin_task = tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = origin.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let raw = read_h1_message(&mut sock).await;
+                let text = String::from_utf8_lossy(&raw).into_owned();
+                let body = text;
+                let reply = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = sock.write_all(reply.as_bytes()).await;
+            });
+        }
+    });
+
+    hub.set_rule_groups(&[
+        RuleGroup {
+            name: "GroupA".into(),
+            enabled: true,
+            rules: format!(
+                "resolve api.vicanso.dev {origin_addr}\nheader api.vicanso.dev req set X-Group-A on-a"
+            ),
+        },
+        RuleGroup {
+            name: "GroupB".into(),
+            enabled: true,
+            rules: format!(
+                "header api.vicanso.dev res set X-Group-B on-b\nmap-local api.vicanso.dev/ping {} status=201",
+                group_file.display()
+            ),
+        },
+    ]);
+    assert_eq!(hub.effective_rules_count(), 4);
+
+    let proxy = listen().await.unwrap();
+    let proxy_addr = proxy.local_addr().unwrap();
+    serve_proxy(proxy, hub.clone());
+
+    let send = |path: &str| {
+        let path = path.to_string();
+        async move {
+            let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+            let req = format!(
+                "GET http://api.vicanso.dev{path} HTTP/1.1\r\nHost: api.vicanso.dev\r\nConnection: close\r\n\r\n"
+            );
+            client.write_all(req.as_bytes()).await.unwrap();
+            let resp = read_h1_message(&mut client).await;
+            String::from_utf8_lossy(&resp).into_owned()
+        }
+    };
+
+    // 1. Both groups enabled: GroupA injects X-Group-A, GroupB injects X-Group-B
+    let r1 = send("/echo").await;
+    assert!(r1.contains("HTTP/1.1 200 OK"), "{r1}");
+    assert!(r1.to_ascii_lowercase().contains("x-group-a: on-a"), "{r1}");
+    assert!(r1.to_ascii_lowercase().contains("x-group-b: on-b"), "{r1}");
+
+    // 2. Disable GroupB: GroupB's response header disappears while GroupA stays active
+    hub.set_rule_groups(&[
+        RuleGroup {
+            name: "GroupA".into(),
+            enabled: true,
+            rules: format!(
+                "resolve api.vicanso.dev {origin_addr}\nheader api.vicanso.dev req set X-Group-A on-a"
+            ),
+        },
+        RuleGroup {
+            name: "GroupB".into(),
+            enabled: false,
+            rules: format!(
+                "header api.vicanso.dev res set X-Group-B on-b\nmap-local api.vicanso.dev/ping {} status=201",
+                group_file.display()
+            ),
+        },
+    ]);
+    assert_eq!(hub.effective_rules_count(), 2);
+    let r2 = send("/echo").await;
+    assert!(r2.to_ascii_lowercase().contains("x-group-a: on-a"), "{r2}");
+    assert!(!r2.to_ascii_lowercase().contains("x-group-b"), "{r2}");
+
+    // 3. Re-enable GroupB, and add workspace terminal rule overriding GroupB's map-local
+    hub.set_rule_groups(&[
+        RuleGroup {
+            name: "GroupA".into(),
+            enabled: true,
+            rules: format!(
+                "resolve api.vicanso.dev {origin_addr}\nheader api.vicanso.dev req set X-Group-A on-a"
+            ),
+        },
+        RuleGroup {
+            name: "GroupB".into(),
+            enabled: true,
+            rules: format!(
+                "header api.vicanso.dev res set X-Group-B on-b\nmap-local api.vicanso.dev/ping {} status=201",
+                group_file.display()
+            ),
+        },
+    ]);
+    let r_group = send("/ping").await;
+    assert!(r_group.starts_with("HTTP/1.1 201 "), "{r_group}");
+    assert!(r_group.contains("group-ping"), "{r_group}");
+
+    hub.set_rules(&format!(
+        "map-local api.vicanso.dev/ping {} status=209",
+        ws_file.display()
+    ));
+    let r3 = send("/ping").await;
+    assert!(r3.starts_with("HTTP/1.1 209 "), "{r3}");
+    assert!(r3.contains("ws-wins"), "{r3}");
+
+    origin_task.abort();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn socks5_and_socks5h_upstream_plain_http_https_and_auth() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let dir = std::env::temp_dir().join(format!("zniff-socks5-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let ca = Arc::new(Ca::open(&dir).unwrap());
+
+    // 1. Plain HTTP origin (records raw request head)
+    let plain_origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let plain_addr = plain_origin.local_addr().unwrap();
+    let seen_plain: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let seen_plain_bg = Arc::clone(&seen_plain);
+    let plain_task = tokio::spawn(async move {
+        while let Ok((mut sock, _)) = plain_origin.accept().await {
+            let seen_plain_bg = Arc::clone(&seen_plain_bg);
+            tokio::spawn(async move {
+                let raw = read_h1_message(&mut sock).await;
+                seen_plain_bg
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&raw).into_owned());
+                let _ = sock
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 15\r\nConnection: close\r\n\r\nhttp-via-socks5",
+                    )
+                    .await;
+            });
+        }
+    });
+
+    // 2. HTTPS origin with leaf cert for `api.vicanso.dev`
+    let origin_ca_key = rcgen::KeyPair::generate().unwrap();
+    let mut ca_params = rcgen::CertificateParams::default();
+    ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    let origin_ca = ca_params.self_signed(&origin_ca_key).unwrap();
+    let issuer = rcgen::Issuer::from_params(&ca_params, &origin_ca_key);
+    let leaf_key = rcgen::KeyPair::generate().unwrap();
+    let mut leaf_params =
+        rcgen::CertificateParams::new(vec!["api.vicanso.dev".to_string()]).unwrap();
+    leaf_params.is_ca = rcgen::IsCa::NoCa;
+    let origin_leaf = leaf_params.signed_by(&leaf_key, &issuer).unwrap();
+    let tls_cfg = origin_tls_config(
+        &origin_ca,
+        &origin_leaf,
+        &leaf_key,
+        vec![b"http/1.1".to_vec()],
+    );
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls_cfg));
+    let tls_origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let tls_addr = tls_origin.local_addr().unwrap();
+    let tls_task = tokio::spawn(async move {
+        while let Ok((sock, _)) = tls_origin.accept().await {
+            let acceptor = acceptor.clone();
+            tokio::spawn(async move {
+                if let Ok(mut tls) = acceptor.accept(sock).await {
+                    let _ = read_header_block(&mut tls).await;
+                    let _ = tls
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 16\r\nConnection: close\r\n\r\ntls-via-socks5h!",
+                        )
+                        .await;
+                }
+            });
+        }
+    });
+
+    // 3. Mock SOCKS5 server recording ATYP, destination, and optional RFC 1929 auth
+    type SocksConnectRecord = (u8, String, u16, bool);
+    let socks_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let socks_addr = socks_listener.local_addr().unwrap();
+    let expected_auth: Arc<Mutex<Option<(String, String)>>> = Arc::new(Mutex::new(None));
+    let seen_connects: Arc<Mutex<Vec<SocksConnectRecord>>> = Arc::new(Mutex::new(Vec::new()));
+    let expected_bg = Arc::clone(&expected_auth);
+    let connects_bg = Arc::clone(&seen_connects);
+    let socks_task = tokio::spawn(async move {
+        while let Ok((mut client, _)) = socks_listener.accept().await {
+            let expected_bg = Arc::clone(&expected_bg);
+            let connects_bg = Arc::clone(&connects_bg);
+            tokio::spawn(async move {
+                let mut hdr = [0_u8; 2];
+                if client.read_exact(&mut hdr).await.is_err() || hdr[0] != 0x05 {
+                    return;
+                }
+                let mut methods = vec![0_u8; hdr[1] as usize];
+                if client.read_exact(&mut methods).await.is_err() {
+                    return;
+                }
+                let required = expected_bg.lock().unwrap().clone();
+                let used_auth = if let Some((exp_u, exp_p)) = required {
+                    if !methods.contains(&0x02) {
+                        let _ = client.write_all(&[0x05, 0xFF]).await;
+                        return;
+                    }
+                    let _ = client.write_all(&[0x05, 0x02]).await;
+                    let mut u_hdr = [0_u8; 2];
+                    if client.read_exact(&mut u_hdr).await.is_err() {
+                        return;
+                    }
+                    let mut user = vec![0_u8; u_hdr[1] as usize];
+                    let _ = client.read_exact(&mut user).await;
+                    let mut plen = [0_u8; 1];
+                    let _ = client.read_exact(&mut plen).await;
+                    let mut pass = vec![0_u8; plen[0] as usize];
+                    let _ = client.read_exact(&mut pass).await;
+                    if user != exp_u.as_bytes() || pass != exp_p.as_bytes() {
+                        let _ = client.write_all(&[0x01, 0x01]).await;
+                        return;
+                    }
+                    let _ = client.write_all(&[0x01, 0x00]).await;
+                    true
+                } else {
+                    let _ = client.write_all(&[0x05, 0x00]).await;
+                    false
+                };
+
+                let mut req = [0_u8; 4];
+                if client.read_exact(&mut req).await.is_err() || req[1] != 0x01 {
+                    return;
+                }
+                let atyp = req[3];
+                let dest = match atyp {
+                    0x01 => {
+                        let mut ip = [0_u8; 4];
+                        let _ = client.read_exact(&mut ip).await;
+                        std::net::Ipv4Addr::from(ip).to_string()
+                    }
+                    0x03 => {
+                        let mut len = [0_u8; 1];
+                        let _ = client.read_exact(&mut len).await;
+                        let mut domain = vec![0_u8; len[0] as usize];
+                        let _ = client.read_exact(&mut domain).await;
+                        String::from_utf8_lossy(&domain).into_owned()
+                    }
+                    _ => return,
+                };
+                let mut port_be = [0_u8; 2];
+                if client.read_exact(&mut port_be).await.is_err() {
+                    return;
+                }
+                let dest_port = u16::from_be_bytes(port_be);
+                connects_bg
+                    .lock()
+                    .unwrap()
+                    .push((atyp, dest.clone(), dest_port, used_auth));
+
+                let forward_addr = if atyp == 0x03 && dest == "api.vicanso.dev" {
+                    tls_addr
+                } else {
+                    std::net::SocketAddr::new(dest.parse().unwrap(), dest_port)
+                };
+                let Ok(mut upstream) = TcpStream::connect(forward_addr).await else {
+                    let _ = client
+                        .write_all(&[0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                        .await;
+                    return;
+                };
+                let _ = client
+                    .write_all(&[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0, 0])
+                    .await;
+                let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+            });
+        }
+    });
+
+    let mut hub = Hub::new(ca.clone()).unwrap();
+    hub.add_trust_anchor(origin_ca.der().clone());
+    let hub = Arc::new(hub);
+    let proxy = listen().await.unwrap();
+    let proxy_addr = proxy.local_addr().unwrap();
+    serve_proxy(proxy, hub.clone());
+
+    // Case A: socks5:// plain HTTP sends origin-form request & NO Proxy-Authorization
+    hub.set_upstream(&format!("socks5://{socks_addr}"));
+    let mut c1 = TcpStream::connect(proxy_addr).await.unwrap();
+    let req1 = format!(
+        "GET http://127.0.0.1:{}/plain HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+        plain_addr.port(),
+        plain_addr.port()
+    );
+    c1.write_all(req1.as_bytes()).await.unwrap();
+    let resp1 = read_h1_message(&mut c1).await;
+    let resp1_text = String::from_utf8_lossy(&resp1);
+    assert!(resp1_text.contains("http-via-socks5"), "{resp1_text}");
+    let plain_req = seen_plain.lock().unwrap()[0].clone();
+    assert!(
+        plain_req.starts_with("GET /plain HTTP/1.1\r\n"),
+        "{plain_req}"
+    );
+    assert!(
+        !plain_req
+            .to_ascii_lowercase()
+            .contains("proxy-authorization"),
+        "{plain_req}"
+    );
+    assert_eq!(seen_connects.lock().unwrap()[0].0, 0x01);
+
+    // Case B: socks5h:// with RFC 1929 auth sends ATYP=0x03 remote domain over TLS MITM
+    *expected_auth.lock().unwrap() = Some(("suser".into(), "s@pass".into()));
+    hub.set_upstream(&format!("socks5h://suser:s%40pass@{socks_addr}"));
+    let mut c2 = TcpStream::connect(proxy_addr).await.unwrap();
+    c2.write_all(b"CONNECT api.vicanso.dev:443 HTTP/1.1\r\nHost: api.vicanso.dev:443\r\n\r\n")
+        .await
+        .unwrap();
+    let (conn_head, _) = read_header_block(&mut c2).await.unwrap();
+    assert!(String::from_utf8_lossy(&conn_head).contains("200"));
+    let mut roots = RootCertStore::empty();
+    roots.add(hub.ca.cert_der()).unwrap();
+    let client_config = ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let tls_connector = TlsConnector::from(Arc::new(client_config));
+    let server_name = ServerName::try_from("api.vicanso.dev".to_string()).unwrap();
+    let mut tls = tls_connector.connect(server_name, c2).await.unwrap();
+    tls.write_all(b"GET /tls HTTP/1.1\r\nHost: api.vicanso.dev\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut resp2 = Vec::new();
+    let _ = tls.read_to_end(&mut resp2).await;
+    let resp2_text = String::from_utf8_lossy(&resp2);
+    assert!(resp2_text.contains("tls-via-socks5h!"), "{resp2_text}");
+    let last_conn = seen_connects.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(last_conn, (0x03, "api.vicanso.dev".into(), 443, true));
+
+    // Case C: Wrong SOCKS5 password closes connection and records authentication failure on flow
+    hub.set_upstream(&format!("socks5://suser:wrong@{socks_addr}"));
+    let mut c3 = TcpStream::connect(proxy_addr).await.unwrap();
+    c3.write_all(req1.as_bytes()).await.unwrap();
+    let mut resp3 = Vec::new();
+    let _ = timeout(Duration::from_secs(5), c3.read_to_end(&mut resp3))
+        .await
+        .unwrap();
+    assert!(
+        resp3.is_empty(),
+        "expected closed socket on SOCKS5 auth error"
+    );
+    let err3 = hub
+        .with_session(|s| s.get(3).and_then(|f| f.error.clone()))
+        .expect("expected failed flow error recorded");
+    assert!(err3.contains("SOCKS5"), "{err3}");
+
+    plain_task.abort();
+    tls_task.abort();
+    socks_task.abort();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn pac_route_serves_dynamic_script_without_proxy_auth() {
+    let dir = std::env::temp_dir().join(format!("zniff-pac-route-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let ca = Arc::new(Ca::open(&dir).unwrap());
+    let hub = Arc::new(Hub::new(ca).unwrap());
+    hub.set_proxy_auth("admin:secret");
+    hub.set_bypass("*.internal.vicanso.dev, direct.vicanso.dev");
+
+    let proxy = listen().await.unwrap();
+    let proxy_addr = proxy.local_addr().unwrap();
+    serve_proxy(proxy, hub.clone());
+
+    let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+    let req = format!(
+        "GET /proxy.pac HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+        proxy_addr.port()
+    );
+    client.write_all(req.as_bytes()).await.unwrap();
+    let resp = read_h1_message(&mut client).await;
+    let text = String::from_utf8_lossy(&resp);
+    assert!(text.starts_with("HTTP/1.1 200 OK"), "{text}");
+    assert!(
+        text.to_ascii_lowercase()
+            .contains("content-type: application/x-ns-proxy-autoconfig"),
+        "{text}"
+    );
+    assert!(text.contains("function FindProxyForURL"), "{text}");
+    assert!(
+        text.contains(&format!("PROXY 127.0.0.1:{}; DIRECT", proxy_addr.port())),
+        "{text}"
+    );
+    assert!(
+        text.contains("dnsDomainIs(h, \".internal.vicanso.dev\")"),
+        "{text}"
+    );
+    assert!(text.contains("h === \"direct.vicanso.dev\""), "{text}");
+
+    let mut head_client = TcpStream::connect(proxy_addr).await.unwrap();
+    let head_req = format!(
+        "HEAD /zniff.pac HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+        proxy_addr.port()
+    );
+    head_client.write_all(head_req.as_bytes()).await.unwrap();
+    let (head_bytes, rest) = read_header_block(&mut head_client).await.unwrap();
+    let head_text = String::from_utf8_lossy(&head_bytes);
+    assert!(head_text.starts_with("HTTP/1.1 200 OK"), "{head_text}");
+    assert!(rest.is_empty());
+
+    // /proxy.pac and /zniff.pac are untracked local routes
+    assert_eq!(hub.with_session(|s| s.len()), 0);
     let _ = std::fs::remove_dir_all(&dir);
 }

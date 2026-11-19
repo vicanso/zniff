@@ -90,13 +90,31 @@ pub(crate) fn more_menu(
         ));
     let items = desktop_child!(
         items,
-        menu_action(Glyph::List, tr("导入 HAR", "Import HAR"), {
-            let controls = import_controls.clone();
-            move || {
-                open.set(false);
-                prompt_import_har(controls.clone());
+        menu_action(
+            Glyph::List,
+            tr("导入 HAR / .chlsj", "Import HAR / .chlsj"),
+            {
+                let controls = import_controls.clone();
+                move || {
+                    open.set(false);
+                    prompt_import_har(controls.clone());
+                }
             }
-        })
+        )
+    );
+    let items = desktop_child!(
+        items,
+        menu_action(
+            Glyph::Download,
+            tr("导入 Whistle / Charles 规则…", "Import Whistle / Charles…"),
+            {
+                let controls = import_controls.clone();
+                move || {
+                    open.set(false);
+                    prompt_import_migration(controls.clone(), profiles);
+                }
+            }
+        )
     );
     let items = desktop_child!(
         items,

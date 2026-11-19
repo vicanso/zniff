@@ -165,6 +165,19 @@ pub fn tools_list_value() -> Value {
                             "type": "boolean",
                             "description": "When true, appends `rules` to existing rules instead of replacing them."
                         },
+                        "rule_groups": {
+                            "type": "array",
+                            "description": "Optional list of named toggleable rule groups (`[{name, enabled, rules}]`). Evaluated alongside workspace `rules` when enabled.",
+                            "items": {
+                                "type": "object",
+                                "required": ["name"],
+                                "properties": {
+                                    "name": { "type": "string" },
+                                    "enabled": { "type": "boolean" },
+                                    "rules": { "type": "string" }
+                                }
+                            }
+                        },
                         "rules_enabled": {
                             "type": "boolean",
                             "description": "Optional switch to enable or disable rule evaluation."
@@ -647,19 +660,56 @@ async fn tool_replay_flow(hub: Arc<Hub>, args: &Value) -> Value {
 fn tool_get_rules(hub: &Hub) -> Value {
     tool_json(&json!({
         "rules": hub.rules_text(),
+        "rule_groups": hub.rule_groups(),
+        "effective_rules_count": hub.effective_rules_count(),
         "bypass": hub.bypass_text(),
         "apply_rules": hub.rules_enabled(),
         "apply_breaks": hub.breaks_enabled(),
     }))
 }
 
+fn parse_mcp_rule_groups(args: &Value) -> Result<Option<Vec<crate::config::RuleGroup>>, Value> {
+    let Some(raw) = args.get("rule_groups") else {
+        return Ok(None);
+    };
+    let Ok(parsed) = serde_json::from_value::<Vec<crate::config::RuleGroup>>(raw.clone()) else {
+        return Err(tool_error(
+            "`rule_groups` must be an array of {name, enabled?, rules?}.",
+        ));
+    };
+    let clean = crate::config::sanitize_rule_groups(parsed);
+    for group in &clean {
+        let bad = rules::invalid_rule_lines(&group.rules);
+        if !bad.is_empty() {
+            let lines = bad
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(tool_error(format!(
+                "Invalid rule syntax in group `{}` on line(s): {lines}",
+                group.name
+            )));
+        }
+    }
+    Ok(Some(clean))
+}
+
 fn tool_set_rules(hub: &Hub, args: &Value) -> Value {
     let new_rules = args.get("rules").and_then(Value::as_str);
     let rules_enabled = args.get("rules_enabled").and_then(Value::as_bool);
     let breaks_enabled = args.get("breaks_enabled").and_then(Value::as_bool);
-    if new_rules.is_none() && rules_enabled.is_none() && breaks_enabled.is_none() {
+    let parsed_groups = match parse_mcp_rule_groups(args) {
+        Ok(groups) => groups,
+        Err(err_reply) => return err_reply,
+    };
+    if new_rules.is_none()
+        && parsed_groups.is_none()
+        && rules_enabled.is_none()
+        && breaks_enabled.is_none()
+    {
         return tool_error(
-            "Provide `rules` and/or at least one switch (`rules_enabled`, `breaks_enabled`).",
+            "Provide `rules`, `rule_groups`, and/or at least one switch (`rules_enabled`, `breaks_enabled`).",
         );
     }
     let append = args.get("append").and_then(Value::as_bool).unwrap_or(false);
@@ -693,6 +743,9 @@ fn tool_set_rules(hub: &Hub, args: &Value) -> Value {
     if let Some(ref text) = combined {
         hub.set_rules(text);
     }
+    if let Some(ref groups) = parsed_groups {
+        hub.set_rule_groups(groups);
+    }
     if let Some(enabled) = rules_enabled {
         hub.set_rules_enabled(enabled);
     }
@@ -704,6 +757,9 @@ fn tool_set_rules(hub: &Hub, args: &Value) -> Value {
         crate::config::update_mode(hub.ca.dir(), crate::config::is_dev_mode(), |config| {
             if let Some(ref text) = combined {
                 config.rules = text.clone();
+            }
+            if let Some(ref groups) = parsed_groups {
+                config.rule_groups = groups.clone();
             }
             if let Some(enabled) = rules_enabled {
                 config.rules_enabled = enabled;
@@ -717,7 +773,9 @@ fn tool_set_rules(hub: &Hub, args: &Value) -> Value {
     let mut resp = json!({
         "ok": true,
         "active_rule_count": parsed_count,
+        "effective_rules_count": hub.effective_rules_count(),
         "rules": current_rules,
+        "rule_groups": hub.rule_groups(),
         "apply_rules": hub.rules_enabled(),
         "apply_breaks": hub.breaks_enabled(),
     });
@@ -1259,6 +1317,38 @@ mod tests {
         assert_eq!(bad_res["result"]["isError"], true);
         assert!(hub.rules_enabled());
         assert_eq!(hub.rules_revision(), 1);
+
+        // Rule groups roundtrip through set_rules & get_rules
+        let group_req = serde_json::to_vec(&json!({
+            "jsonrpc": "2.0",
+            "id": 13,
+            "method": "tools/call",
+            "params": {
+                "name": "set_rules",
+                "arguments": {
+                    "rule_groups": [
+                        {"name": "Dev", "enabled": true, "rules": "header api.vicanso.dev res set X-Dev 1"},
+                        {"name": "Muted", "enabled": false, "rules": "block test.vicanso.dev"}
+                    ]
+                }
+            }
+        }))
+        .unwrap();
+        let group_res: Value =
+            serde_json::from_slice(&handle_http_jsonrpc(hub.clone(), &group_req).await.unwrap())
+                .unwrap();
+        let group_payload = parse_tool_payload(&group_res["result"]);
+        assert_eq!(group_payload["effective_rules_count"], 2);
+        assert_eq!(group_payload["rule_groups"].as_array().unwrap().len(), 2);
+
+        let get_req = br#"{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"get_rules","arguments":{}}}"#;
+        let get_res: Value =
+            serde_json::from_slice(&handle_http_jsonrpc(hub.clone(), get_req).await.unwrap())
+                .unwrap();
+        let get_payload = parse_tool_payload(&get_res["result"]);
+        assert_eq!(get_payload["effective_rules_count"], 2);
+        assert_eq!(get_payload["rule_groups"][0]["name"], "Dev");
+        assert_eq!(get_payload["rule_groups"][1]["enabled"], false);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

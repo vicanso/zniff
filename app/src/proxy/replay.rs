@@ -199,7 +199,11 @@ pub(super) async fn replay_http(
         .await
         .context("连接源站超时")??;
     hub.set_conn_info(id, conn_info);
-    let target = if hub.upstream_for_host(host).is_some() {
+    let target = if hub
+        .upstream_for_host(host)
+        .as_ref()
+        .is_some_and(Upstream::is_http_proxy)
+    {
         format!("http://{}{path}", display_authority(host, port, "http"))
     } else {
         path.to_string()
@@ -406,7 +410,10 @@ where
         ));
     }
     if scheme == "http"
-        && let Some(auth) = hub.upstream_for_host(host).and_then(|u| u.auth_header)
+        && let Some(auth) = hub
+            .upstream_for_host(host)
+            .filter(Upstream::is_http_proxy)
+            .and_then(|u| u.auth_header)
     {
         outbound.push_str(&format!("Proxy-Authorization: {auth}\r\n"));
     }

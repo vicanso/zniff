@@ -55,6 +55,7 @@ pub struct Hub {
     pub ca: Arc<Ca>,
     bypass_text: Mutex<String>,
     rules_text: Mutex<String>,
+    rule_groups: Mutex<Vec<crate::config::RuleGroup>>,
     rules_rev: AtomicU64,
     upstream_text: Mutex<String>,
     proxy_auth: Mutex<String>,
@@ -76,6 +77,7 @@ impl Hub {
             ca,
             bypass_text: Mutex::new(String::new()),
             rules_text: Mutex::new(String::new()),
+            rule_groups: Mutex::new(Vec::new()),
             rules_rev: AtomicU64::new(0),
             upstream_text: Mutex::new(String::new()),
             proxy_auth: Mutex::new(String::new()),
@@ -145,6 +147,23 @@ impl Hub {
                 .unwrap_or_else(|err| err.into_inner());
             if *guard != next {
                 *guard = next;
+                changed = true;
+            }
+        }
+        if let Some(raw_groups) = value
+            .get("prefs")
+            .and_then(|prefs| prefs.get("rule_groups"))
+            && let Ok(groups) =
+                serde_json::from_value::<Vec<crate::config::RuleGroup>>(raw_groups.clone())
+        {
+            let next = crate::config::sanitize_rule_groups(groups);
+            let mut guard = self
+                .rule_groups
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            if *guard != next {
+                *guard = next;
+                self.rules_rev.fetch_add(1, Ordering::Relaxed);
                 changed = true;
             }
         }
@@ -259,6 +278,29 @@ impl Hub {
             .unwrap_or_else(|err| err.into_inner()) = text.to_string();
         self.rules_rev.fetch_add(1, Ordering::Relaxed);
         post_op(json!({"op": "set_rules", "text": text}));
+    }
+
+    pub fn set_rule_groups(&self, groups: &[crate::config::RuleGroup]) {
+        let next = crate::config::sanitize_rule_groups(groups.to_vec());
+        *self
+            .rule_groups
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = next.clone();
+        self.rules_rev.fetch_add(1, Ordering::Relaxed);
+        post_op(json!({"op": "set_rule_groups", "groups": next}));
+    }
+
+    pub fn rule_groups(&self) -> Vec<crate::config::RuleGroup> {
+        self.rule_groups
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+    }
+
+    pub fn effective_rules_count(&self) -> usize {
+        let combined =
+            crate::rules::combine_effective_rules_text(&self.rule_groups(), &self.rules_text());
+        crate::rules::parse_rules(&combined).len()
     }
 
     pub fn rules_revision(&self) -> u64 {
