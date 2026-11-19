@@ -1,11 +1,18 @@
 //! Zero-config target launchers for isolated Chromium browsers, proxied
 //! terminal sessions, and Android `adb` devices.
 
+use std::ffi::{OsStr, OsString};
 use std::fs;
+#[cfg(unix)]
+use std::io::Read;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(unix)]
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
@@ -15,6 +22,12 @@ use crate::present;
 static LAUNCH_SEQ: AtomicU64 = AtomicU64::new(1);
 static BROWSER_PROFILES: Mutex<Vec<(Child, PathBuf)>> = Mutex::new(Vec::new());
 static ADB_PROXIED: Mutex<Vec<(String, u16)>> = Mutex::new(Vec::new());
+static LAST_ADB_BIN: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+#[cfg(windows)]
+const ADB_BIN_NAME: &str = "adb.exe";
+#[cfg(not(windows))]
+const ADB_BIN_NAME: &str = "adb";
 
 /// Outcome reported after configuring connected Android devices via `adb`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,18 +46,34 @@ pub(crate) struct BrowserCandidate {
     pub(crate) bin: PathBuf,
 }
 
-#[cfg(not(target_os = "macos"))]
-fn find_in_path(names: &[&str]) -> Option<PathBuf> {
-    let path_var = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path_var) {
+fn is_executable_file(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        fs::metadata(path)
+            .is_ok_and(|meta| meta.is_file() && (meta.permissions().mode() & 0o111) != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
+}
+
+fn find_in_path_var(path_var: &OsStr, names: &[&str]) -> Option<PathBuf> {
+    for dir in std::env::split_paths(path_var) {
         for name in names {
             let candidate = dir.join(name);
-            if candidate.is_file() {
+            if is_executable_file(&candidate) {
                 return Some(candidate);
             }
         }
     }
     None
+}
+
+#[cfg(not(target_os = "macos"))]
+fn find_in_path(names: &[&str]) -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    find_in_path_var(&path_var, names)
 }
 
 #[cfg(target_os = "macos")]
@@ -212,12 +241,14 @@ pub fn launch_isolated_browser(ca: &Ca, port: u16, initial_url: Option<&str>) ->
     Ok(candidate.name.to_string())
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn shell_quote_single(value: &str) -> String {
     let escaped = value.replace('\'', "'\\''");
     format!("'{escaped}'")
 }
 
 /// Builds a self-deleting shell bootstrap script for macOS terminal windows.
+#[cfg(any(target_os = "macos", test))]
 pub fn build_macos_terminal_script(port: u16, cert_path: &Path, proxy_auth: &str) -> String {
     let cert_str = cert_path.to_string_lossy();
     let exports = present::proxy_env_export_with_auth(port, &cert_str, proxy_auth);
@@ -229,8 +260,6 @@ pub fn build_macos_terminal_script(port: u16, cert_path: &Path, proxy_auth: &str
 
 #[cfg(target_os = "macos")]
 fn launch_terminal_platform(port: u16, cert_path: &Path, proxy_auth: &str) -> Result<String> {
-    use std::os::unix::fs::PermissionsExt;
-
     let seq = LAUNCH_SEQ.fetch_add(1, Ordering::Relaxed);
     let script_path =
         std::env::temp_dir().join(format!("zniff-term-{}-{seq}.command", std::process::id()));
@@ -423,11 +452,277 @@ pub(crate) fn adb_reverse_remove_args(serial: &str, port: u16) -> Vec<String> {
     ]
 }
 
-fn run_adb(args: &[String], action: &str) -> Result<()> {
-    let output = Command::new("adb")
+fn env_non_empty_path(key: &str) -> Option<PathBuf> {
+    let val = std::env::var_os(key)?;
+    if val.is_empty() || val.to_str().is_some_and(|s| s.trim().is_empty()) {
+        return None;
+    }
+    Some(PathBuf::from(val))
+}
+
+#[cfg(target_os = "macos")]
+fn collect_macos_etc_path_files() -> Vec<PathBuf> {
+    let mut files = vec![PathBuf::from("/etc/paths")];
+    if let Ok(entries) = fs::read_dir("/etc/paths.d") {
+        let mut extra: Vec<PathBuf> = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.is_file())
+            .collect();
+        extra.sort();
+        files.extend(extra);
+    }
+    files
+}
+
+fn default_extra_path_files() -> Vec<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        collect_macos_etc_path_files()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Vec::new()
+    }
+}
+
+fn read_path_dirs_from_files(files: &[PathBuf]) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    for file in files {
+        let Ok(content) = fs::read_to_string(file) else {
+            continue;
+        };
+        for raw in content.lines() {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            dirs.push(PathBuf::from(trimmed));
+        }
+    }
+    dirs
+}
+
+struct AdbLookupEnv {
+    override_bin: Option<PathBuf>,
+    path_var: Option<OsString>,
+    android_home: Option<PathBuf>,
+    android_sdk_root: Option<PathBuf>,
+    home_dir: Option<PathBuf>,
+    #[cfg(target_os = "windows")]
+    local_app_data: Option<PathBuf>,
+    extra_path_files: Vec<PathBuf>,
+}
+
+impl AdbLookupEnv {
+    fn from_process_env() -> Self {
+        Self {
+            override_bin: env_non_empty_path("ZNIFF_ADB"),
+            path_var: std::env::var_os("PATH").filter(|val| !val.is_empty()),
+            android_home: env_non_empty_path("ANDROID_HOME"),
+            android_sdk_root: env_non_empty_path("ANDROID_SDK_ROOT"),
+            home_dir: env_non_empty_path("HOME").or_else(|| env_non_empty_path("USERPROFILE")),
+            #[cfg(target_os = "windows")]
+            local_app_data: env_non_empty_path("LOCALAPPDATA"),
+            extra_path_files: default_extra_path_files(),
+        }
+    }
+}
+
+fn join_rel(base: &Path, parts: &[&str]) -> PathBuf {
+    parts
+        .iter()
+        .fold(base.to_path_buf(), |acc, part| acc.join(part))
+}
+
+fn well_known_adb_candidates(env: &AdbLookupEnv) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+
+    #[cfg(target_os = "macos")]
+    {
+        dirs.push(PathBuf::from("/opt/homebrew/bin"));
+        dirs.push(PathBuf::from("/usr/local/bin"));
+        if let Some(home) = &env.home_dir {
+            dirs.push(join_rel(
+                home,
+                &["Library", "Android", "sdk", "platform-tools"],
+            ));
+        }
+        dirs.push(PathBuf::from("/opt/local/bin"));
+        if let Some(home) = &env.home_dir {
+            dirs.push(join_rel(home, &[".local", "bin"]));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(home) = &env.home_dir {
+            dirs.push(join_rel(home, &["Android", "Sdk", "platform-tools"]));
+        }
+        dirs.push(PathBuf::from("/usr/local/bin"));
+        dirs.push(PathBuf::from("/usr/bin"));
+        if let Some(home) = &env.home_dir {
+            dirs.push(join_rel(home, &[".local", "bin"]));
+        }
+        dirs.push(PathBuf::from("/snap/bin"));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(local_app_data) = &env.local_app_data {
+            dirs.push(join_rel(
+                local_app_data,
+                &["Android", "Sdk", "platform-tools"],
+            ));
+        }
+        if let Some(home) = &env.home_dir {
+            dirs.push(join_rel(
+                home,
+                &["AppData", "Local", "Android", "Sdk", "platform-tools"],
+            ));
+            dirs.push(join_rel(home, &["scoop", "shims"]));
+        }
+        dirs.push(PathBuf::from(r"C:\ProgramData\chocolatey\bin"));
+    }
+
+    dirs.extend(read_path_dirs_from_files(&env.extra_path_files));
+    dirs.into_iter().map(|dir| dir.join(ADB_BIN_NAME)).collect()
+}
+
+fn resolve_adb_from_env(env: &AdbLookupEnv) -> Option<PathBuf> {
+    if let Some(override_bin) = &env.override_bin {
+        if is_executable_file(override_bin) {
+            return Some(override_bin.clone());
+        }
+        if override_bin.is_dir() {
+            let joined = override_bin.join(ADB_BIN_NAME);
+            if is_executable_file(&joined) {
+                return Some(joined);
+            }
+        }
+    }
+    if let Some(found) = env
+        .path_var
+        .as_deref()
+        .and_then(|path_var| find_in_path_var(path_var, &[ADB_BIN_NAME]))
+    {
+        return Some(found);
+    }
+    for root in [&env.android_home, &env.android_sdk_root]
+        .into_iter()
+        .flatten()
+    {
+        let candidate = root.join("platform-tools").join(ADB_BIN_NAME);
+        if is_executable_file(&candidate) {
+            return Some(candidate);
+        }
+    }
+    well_known_adb_candidates(env)
+        .into_iter()
+        .find(|candidate| is_executable_file(candidate))
+}
+
+#[cfg(unix)]
+fn parse_login_shell_path(stdout: &str) -> Option<PathBuf> {
+    stdout.lines().rev().find_map(|raw| {
+        let trimmed = raw.trim();
+        let path = Path::new(trimmed);
+        (path.is_absolute() && is_executable_file(path)).then(|| path.to_path_buf())
+    })
+}
+
+#[cfg(unix)]
+fn probe_adb_in_shell(shell: &Path, timeout: Duration) -> Option<PathBuf> {
+    let mut child = Command::new(shell)
+        .args(["-lc", "command -v adb"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let stdout = child.stdout.take();
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        if let Some(out) = stdout {
+            let _ = out.take(64 * 1024).read_to_string(&mut text);
+        }
+        text
+    });
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    drop(reader);
+                    return None;
+                }
+                let text = reader.join().unwrap_or_default();
+                return parse_login_shell_path(&text);
+            }
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Ok(None) | Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                drop(reader);
+                return None;
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn find_adb_via_login_shell() -> Option<PathBuf> {
+    let mut shells: Vec<PathBuf> = Vec::new();
+    if let Some(shell) = env_non_empty_path("SHELL") {
+        shells.push(shell);
+    }
+    for fallback in ["/bin/zsh", "/bin/bash", "/bin/sh"] {
+        let path = PathBuf::from(fallback);
+        if !shells.iter().any(|existing| existing == &path) {
+            shells.push(path);
+        }
+    }
+    shells
+        .into_iter()
+        .filter(|shell| is_executable_file(shell))
+        .find_map(|shell| probe_adb_in_shell(&shell, Duration::from_secs(2)))
+}
+
+/// Resolves the `adb` binary across overrides, PATH, SDK roots, common install dirs,
+/// and (on Unix GUI launches) a login-shell fallback.
+pub(crate) fn resolve_adb_bin() -> Option<PathBuf> {
+    if let Some(found) = resolve_adb_from_env(&AdbLookupEnv::from_process_env()) {
+        return Some(found);
+    }
+    #[cfg(unix)]
+    {
+        find_adb_via_login_shell()
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+fn cached_or_resolve_adb_bin() -> Option<PathBuf> {
+    {
+        let guard = LAST_ADB_BIN.lock().unwrap_or_else(|err| err.into_inner());
+        if let Some(cached) = guard.as_ref().filter(|path| is_executable_file(path)) {
+            return Some(cached.clone());
+        }
+    }
+    let resolved = resolve_adb_bin()?;
+    *LAST_ADB_BIN.lock().unwrap_or_else(|err| err.into_inner()) = Some(resolved.clone());
+    Some(resolved)
+}
+
+fn run_adb(adb: &Path, args: &[String], action: &str) -> Result<()> {
+    let output = Command::new(adb)
         .args(args)
         .output()
-        .with_context(|| format!("{action}: 执行 adb 失败"))?;
+        .with_context(|| format!("{action}: 执行 {} 失败", adb.display()))?;
     if output.status.success() {
         return Ok(());
     }
@@ -464,10 +759,16 @@ pub fn configure_android_adb(ca: &Ca, port: u16) -> Result<AdbOutcome> {
     if port == 0 {
         anyhow::bail!("请先启动抓包监听端口");
     }
-    let out = Command::new("adb")
+    let adb = resolve_adb_bin().ok_or_else(|| {
+        anyhow::anyhow!(
+            "未找到 adb 命令（已检查 PATH、ANDROID_HOME/ANDROID_SDK_ROOT 及常见安装路径；也可通过 ZNIFF_ADB 指定路径）"
+        )
+    })?;
+    *LAST_ADB_BIN.lock().unwrap_or_else(|err| err.into_inner()) = Some(adb.clone());
+    let out = Command::new(&adb)
         .arg("devices")
         .output()
-        .context("未找到 adb 命令，请确认已安装 Android Platform-Tools 并加入 PATH")?;
+        .with_context(|| format!("执行 {} devices 失败", adb.display()))?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
         anyhow::bail!(
@@ -491,6 +792,7 @@ pub fn configure_android_adb(ca: &Ca, port: u16) -> Result<AdbOutcome> {
 
     for serial in &serials {
         if let Err(err) = run_adb(
+            &adb,
             &adb_reverse_args(serial, port),
             &format!("为 Android 设备 {serial} 配置端口反转"),
         ) {
@@ -499,6 +801,7 @@ pub fn configure_android_adb(ca: &Ca, port: u16) -> Result<AdbOutcome> {
         }
         configured.push((serial.clone(), port));
         if let Err(err) = run_adb(
+            &adb,
             &adb_set_proxy_args(serial, port),
             &format!("为 Android 设备 {serial} 设置全局代理"),
         ) {
@@ -506,7 +809,7 @@ pub fn configure_android_adb(ca: &Ca, port: u16) -> Result<AdbOutcome> {
             return Err(err);
         }
         if cert_path.is_file()
-            && Command::new("adb")
+            && Command::new(&adb)
                 .args([
                     "-s",
                     serial.as_str(),
@@ -545,11 +848,17 @@ pub fn clear_android_adb_proxies() -> usize {
         std::mem::take(&mut *kept)
     };
     let count = items.len();
+    if items.is_empty() {
+        return 0;
+    }
+    let Some(adb) = cached_or_resolve_adb_bin() else {
+        return count;
+    };
     for (serial, port) in items {
-        let _ = Command::new("adb")
+        let _ = Command::new(&adb)
             .args(adb_clear_proxy_args(&serial))
             .output();
-        let _ = Command::new("adb")
+        let _ = Command::new(&adb)
             .args(adb_reverse_remove_args(&serial, port))
             .output();
     }
@@ -655,6 +964,181 @@ emulator-5556\tdevice
         assert_eq!(
             adb_reverse_remove_args("emulator-5554", 8877),
             vec!["-s", "emulator-5554", "reverse", "--remove", "tcp:8877"]
+        );
+    }
+
+    struct TempDirGuard(PathBuf);
+
+    impl TempDirGuard {
+        fn new(tag: &str) -> Self {
+            let seq = LAUNCH_SEQ.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!(
+                "zniff-launcher-test-{}-{}-{seq}",
+                tag,
+                std::process::id()
+            ));
+            fs::create_dir_all(&dir).expect("create temp test dir");
+            Self(dir)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn write_test_file(path: &Path, content: &str, executable: bool) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create parent dirs");
+        }
+        fs::write(path, content).expect("write test file");
+        #[cfg(unix)]
+        {
+            let mode = if executable { 0o755 } else { 0o644 };
+            let mut perms = fs::metadata(path).expect("stat test file").permissions();
+            perms.set_mode(mode);
+            fs::set_permissions(path, perms).expect("chmod test file");
+        }
+        let _ = executable;
+    }
+
+    #[test]
+    fn adb_resolver_follows_layer_priority_and_symlinks() {
+        let root = TempDirGuard::new("adb-priority");
+        let override_file = root.path().join("override-file").join(ADB_BIN_NAME);
+        let override_dir = root.path().join("override-dir");
+        let override_dir_bin = override_dir.join(ADB_BIN_NAME);
+        let path_non_exec_dir = root.path().join("path-non-exec");
+        let path_non_exec_bin = path_non_exec_dir.join(ADB_BIN_NAME);
+        let path_exec_dir = root.path().join("path-exec");
+        let path_real_target = root.path().join("caskroom").join(ADB_BIN_NAME);
+        let path_exec_bin = path_exec_dir.join(ADB_BIN_NAME);
+        let android_home = root.path().join("android-home");
+        let android_home_bin = android_home.join("platform-tools").join(ADB_BIN_NAME);
+        let sdk_root = root.path().join("sdk-root");
+        let sdk_root_bin = sdk_root.join("platform-tools").join(ADB_BIN_NAME);
+        let extra_dir = root.path().join("extra-paths-bin");
+        let extra_bin = extra_dir.join(ADB_BIN_NAME);
+        let paths_file = root.path().join("paths");
+
+        write_test_file(&override_file, "#!/bin/sh\n", true);
+        write_test_file(&override_dir_bin, "#!/bin/sh\n", true);
+        write_test_file(&path_non_exec_bin, "not executable", false);
+        write_test_file(&path_real_target, "#!/bin/sh\n", true);
+        #[cfg(unix)]
+        {
+            fs::create_dir_all(&path_exec_dir).expect("create symlink parent");
+            std::os::unix::fs::symlink(&path_real_target, &path_exec_bin)
+                .expect("create adb symlink");
+        }
+        #[cfg(not(unix))]
+        write_test_file(&path_exec_bin, "exe", true);
+        write_test_file(&android_home_bin, "#!/bin/sh\n", true);
+        write_test_file(&sdk_root_bin, "#!/bin/sh\n", true);
+        write_test_file(&extra_bin, "#!/bin/sh\n", true);
+        write_test_file(
+            &paths_file,
+            &format!("# comment\n\n  {}  \n# trailing\n", extra_dir.display()),
+            false,
+        );
+
+        let joined_path =
+            std::env::join_paths([&path_non_exec_dir, &path_exec_dir]).expect("join PATH");
+        let mut env = AdbLookupEnv {
+            override_bin: Some(override_file.clone()),
+            path_var: Some(joined_path),
+            android_home: Some(android_home),
+            android_sdk_root: Some(sdk_root),
+            home_dir: None,
+            #[cfg(target_os = "windows")]
+            local_app_data: None,
+            extra_path_files: vec![paths_file.clone(), root.path().join("missing-paths")],
+        };
+
+        assert_eq!(resolve_adb_from_env(&env), Some(override_file));
+
+        env.override_bin = Some(override_dir);
+        assert_eq!(resolve_adb_from_env(&env), Some(override_dir_bin));
+
+        env.override_bin = None;
+        assert_eq!(resolve_adb_from_env(&env), Some(path_exec_bin));
+
+        env.path_var = None;
+        assert_eq!(resolve_adb_from_env(&env), Some(android_home_bin));
+
+        env.android_home = None;
+        assert_eq!(resolve_adb_from_env(&env), Some(sdk_root_bin));
+
+        env.android_sdk_root = None;
+        assert_eq!(
+            read_path_dirs_from_files(&env.extra_path_files),
+            vec![extra_dir]
+        );
+        assert!(well_known_adb_candidates(&env).contains(&extra_bin));
+        let empty_env = AdbLookupEnv {
+            override_bin: None,
+            path_var: None,
+            android_home: None,
+            android_sdk_root: None,
+            home_dir: None,
+            #[cfg(target_os = "windows")]
+            local_app_data: None,
+            extra_path_files: Vec::new(),
+        };
+        if !well_known_adb_candidates(&empty_env)
+            .into_iter()
+            .any(|candidate| is_executable_file(&candidate))
+        {
+            assert_eq!(resolve_adb_from_env(&env), Some(extra_bin));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn adb_login_shell_output_parser_skips_noise_and_non_executables() {
+        let root = TempDirGuard::new("adb-shell-parse");
+        let valid_bin = root.path().join("bin").join("adb");
+        let non_exec = root.path().join("plain").join("adb");
+        let missing_bin = root.path().join("missing").join("adb");
+        write_test_file(&valid_bin, "#!/bin/sh\n", true);
+        write_test_file(&non_exec, "not executable", false);
+
+        let noisy = format!(
+            "Welcome banner\nalias adb='echo hi'\nadb\n{}\n{}\n{}\n",
+            valid_bin.display(),
+            missing_bin.display(),
+            non_exec.display(),
+        );
+        assert_eq!(parse_login_shell_path(&noisy), Some(valid_bin));
+        assert_eq!(
+            parse_login_shell_path(&format!(
+                "alias adb='foo'\n{}\n{}\n",
+                missing_bin.display(),
+                non_exec.display()
+            )),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn adb_login_shell_probe_enforces_timeout() {
+        let root = TempDirGuard::new("adb-shell-timeout");
+        let slow_shell = root.path().join("slow-sh");
+        write_test_file(&slow_shell, "#!/bin/sh\nexec sleep 30\n", true);
+
+        let start = Instant::now();
+        let found = probe_adb_in_shell(&slow_shell, Duration::from_millis(120));
+        assert_eq!(found, None);
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "timed out probe took too long: {:?}",
+            start.elapsed()
         );
     }
 }

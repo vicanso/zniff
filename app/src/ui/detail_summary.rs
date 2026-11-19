@@ -247,12 +247,23 @@ pub(crate) fn detail_pane(
                                         },
                                         move || {
                                             view()
+                                                .w_full()
                                                 .flex_grow(1.0)
                                                 .flex_shrink_0()
+                                                .flex_col()
                                                 .items_center()
-                                                .justify_center()
-                                                .py_2()
-                                                .child(onboarding_card(onboarding_now.clone()))
+                                                .px_2()
+                                                .child(
+                                                    view()
+                                                        .min_h(px(12.0))
+                                                        .max_h(px(64.0))
+                                                        .flex_grow(0.35),
+                                                )
+                                                .child(onboarding_card(
+                                                    onboarding_now.clone(),
+                                                    shown.pane_width,
+                                                ))
+                                                .child(view().min_h(px(16.0)).flex_grow(1.0))
                                         },
                                     )
                                     .otherwise(move || {

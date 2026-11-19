@@ -3728,3 +3728,133 @@ fn wave3_rule_groups_buffer_toggle_and_remove() {
     assert_eq!(removed.len(), 1);
     assert_eq!(removed[0].name, "Paused");
 }
+
+#[test]
+fn onboarding_grid_cols_responsive_threshold() {
+    assert_eq!(super::onboarding_grid_cols(0.0), 2);
+    assert_eq!(super::onboarding_grid_cols(396.0), 1);
+    assert_eq!(super::onboarding_grid_cols(459.0), 1);
+    assert_eq!(super::onboarding_grid_cols(460.0), 2);
+    assert_eq!(super::onboarding_grid_cols(720.0), 2);
+}
+
+#[test]
+fn onboarding_grid_aligns_columns_and_collapses_narrow() {
+    use nsh_core::prelude::*;
+    use nsh_core::{ApproxTextEngine, Core, Op, Prop, ROOT_ID, Tag};
+    use std::cell::{Cell, RefCell};
+
+    thread_local! {
+        static TEST_WIDTH: Cell<f32> = const { Cell::new(580.0) };
+        static GRID_BOUNDS: RefCell<[Option<Bounds<Points>>; 4]> = const { RefCell::new([None; 4]) };
+    }
+
+    #[component]
+    fn OnboardingGridHarness() -> impl IntoElement {
+        let w = TEST_WIDTH.with(Cell::get);
+        let tile = |idx: usize| {
+            nsh_base::button()
+                .w_full()
+                .min_w(px(0.0))
+                .h(px(56.0))
+                .on_layout(move |b: &Bounds<Points>| {
+                    GRID_BOUNDS.with(|cell| cell.borrow_mut()[idx] = Some(*b));
+                })
+                .child(text(format!("Card {idx}")))
+        };
+        view().w(px(w)).h(px(400.0)).child(
+            scroll().w_full().h_full().child(
+                super::uncull_nested_scroll(view()).w_full().p_4().child(
+                    view()
+                        .w_full()
+                        .grid()
+                        .grid_cols(super::onboarding_grid_cols(w))
+                        .gap_2p5()
+                        .child(tile(0))
+                        .child(tile(1))
+                        .child(tile(2))
+                        .child(tile(3)),
+                ),
+            ),
+        )
+    }
+
+    let measure_grid = |width: f32| -> [Bounds<Points>; 4] {
+        TEST_WIDTH.with(|cell| cell.set(width));
+        GRID_BOUNDS.with(|cell| *cell.borrow_mut() = [None; 4]);
+        let mut core = Core::new(ApproxTextEngine, Size::new(px(width), px(400.0)));
+        let mut registry = Registry::new();
+        registry.register::<OnboardingGridHarness>();
+        core.set_components(registry);
+        for op in [
+            Op::Create {
+                id: 2,
+                tag: Tag::View,
+            },
+            Op::SetProp {
+                id: 2,
+                prop: Prop::Component(std::any::type_name::<OnboardingGridHarness>().into()),
+            },
+            Op::Insert {
+                parent: ROOT_ID,
+                child: 2,
+                before: None,
+            },
+        ] {
+            core.apply(op).expect("apply op");
+        }
+        for _ in 0..8 {
+            let batch = core.commit();
+            let mut evs = Vec::new();
+            core.take_events(&mut evs);
+            let mut any = false;
+            for ev in evs {
+                if let nsh_core::element::JsEvent::Event(id, kind, payload) = ev {
+                    any |= core.component_event(id, kind, &payload);
+                }
+            }
+            if batch.is_none() && !any {
+                break;
+            }
+        }
+        GRID_BOUNDS.with(|cell| {
+            let arr = *cell.borrow();
+            [
+                arr[0].expect("card 0"),
+                arr[1].expect("card 1"),
+                arr[2].expect("card 2"),
+                arr[3].expect("card 3"),
+            ]
+        })
+    };
+
+    let wide = measure_grid(580.0);
+    assert!(
+        (wide[0].size.width.0 - wide[1].size.width.0).abs() <= 0.5
+            && (wide[0].size.width.0 - wide[2].size.width.0).abs() <= 0.5
+            && (wide[0].size.width.0 - wide[3].size.width.0).abs() <= 0.5,
+        "2x2 columns should share equal widths: {wide:?}"
+    );
+    assert!(
+        (wide[0].origin.x.0 - wide[2].origin.x.0).abs() <= 0.5
+            && (wide[1].origin.x.0 - wide[3].origin.x.0).abs() <= 0.5
+            && wide[1].origin.x.0 > wide[0].origin.x.0 + 100.0
+            && wide[2].origin.y.0 > wide[0].origin.y.0 + 40.0,
+        "2x2 items should align vertically and horizontally: {wide:?}"
+    );
+
+    let narrow = measure_grid(410.0);
+    for idx in 0..4 {
+        assert!(
+            (narrow[idx].origin.x.0 - narrow[0].origin.x.0).abs() <= 0.5
+                && narrow[idx].size.width.0 > 360.0,
+            "1-col card {idx} should fill narrow width cleanly: {narrow:?}"
+        );
+        if idx > 0 {
+            assert!(
+                narrow[idx].origin.y.0 > narrow[idx - 1].origin.y.0 + 40.0,
+                "1-col cards should stack vertically: {narrow:?}"
+            );
+        }
+    }
+}

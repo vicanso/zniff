@@ -29,6 +29,7 @@ pub enum Glyph {
     DeviceDesktop,
     Globe,
     AppWindow,
+    QrCode,
 }
 
 pub fn glyph(
@@ -138,6 +139,12 @@ fn draw(kind: Glyph, paint: Hsla, size: f32) -> Painter {
         Glyph::AppWindow => painter
             .stroke_svg("M2.6 3.2 H13.4 V12.8 H2.6 Z")
             .stroke_svg("M2.6 6.2 H13.4"),
+        Glyph::QrCode => painter
+            .stroke_svg("M2.6 2.6 H6.6 V6.6 H2.6 Z")
+            .stroke_svg("M9.4 2.6 H13.4 V6.6 H9.4 Z")
+            .stroke_svg("M2.6 9.4 H6.6 V13.4 H2.6 Z")
+            .stroke_svg("M9.4 9.4 H11.2 V11.2")
+            .stroke_svg("M13.4 9.4 V13.4 H10.2"),
     };
     painter
 }
