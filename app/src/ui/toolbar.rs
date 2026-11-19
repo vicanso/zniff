@@ -33,7 +33,7 @@ pub(crate) fn toolbar_bar_height(title_top: f32) -> f32 {
 pub(crate) fn toolbar(
     status: Signal<StatusMsg>,
     running: Signal<bool>,
-    ca_status: Signal<ca::CaStatus>,
+    ca_ui: CaSignals,
     use_system_proxy: Signal<bool>,
     install: impl Fn() + 'static,
     remove: impl Fn() + 'static,
@@ -407,7 +407,7 @@ pub(crate) fn toolbar(
         move || clear()
     }))
     .child(toolbar_menu(
-        ca_status,
+        ca_ui,
         use_system_proxy,
         install,
         remove,
@@ -476,7 +476,7 @@ pub(crate) fn toolbar_text_button(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn toolbar_menu(
-    ca_status: Signal<ca::CaStatus>,
+    ca_ui: CaSignals,
     proxy_on: Signal<bool>,
     install: Rc<impl Fn() + 'static>,
     remove: Rc<impl Fn() + 'static>,
@@ -508,10 +508,10 @@ pub(crate) fn toolbar_menu(
         .align(Align::End)
         .offset(px(6.0))
         .margin(px(8.0))
-        .trigger(more_trigger(ca_status, proxy_on, update_state, open))
+        .trigger(more_trigger(ca_ui.status, proxy_on, update_state, open))
         .child(more_menu(
             open,
-            ca_status,
+            ca_ui,
             proxy_on,
             install,
             remove,

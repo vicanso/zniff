@@ -2861,6 +2861,8 @@ fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
             listen: Mutex::new(String::new()),
             listen_port: Mutex::new(8895),
             ca_status: Mutex::new(crate::ca::CaStatus::NotInstalled),
+            active_external_ca: Mutex::new(None),
+            external_cas: Mutex::new(Vec::new()),
             use_system_proxy: Mutex::new(false),
             proxy_applied: Mutex::new(false),
             ops: Mutex::new(()),
@@ -2881,6 +2883,11 @@ fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
         let status = signal(StatusMsg::Idle);
         let running = signal(false);
         let ca_status = signal(crate::ca::CaStatus::NotInstalled);
+        let ca_ui = super::CaSignals {
+            status: ca_status,
+            active_external: signal(None),
+            detected_external: signal(Vec::new()),
+        };
         let use_system_proxy = signal(false);
         let rows = signal(Vec::<Arc<RowLine>>::new());
         let flow_total = signal(0_usize);
@@ -2958,7 +2965,7 @@ fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
         let bar = super::toolbar(
             status,
             running,
-            ca_status,
+            ca_ui,
             use_system_proxy,
             || {},
             || {},

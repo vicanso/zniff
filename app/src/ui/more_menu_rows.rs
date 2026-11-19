@@ -823,14 +823,12 @@ pub(crate) fn proxy_menu_item(on: Signal<bool>, toggle: impl Fn() + 'static) -> 
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn cert_menu_row(
-    ca_status: Signal<ca::CaStatus>,
+    ca_ui: CaSignals,
     install: Rc<impl Fn() + 'static>,
     remove: Rc<impl Fn() + 'static>,
+    switch_builtin: impl Fn() + 'static,
 ) -> impl IntoElement {
-    let dot_status = ca_status;
-    let color_status = ca_status;
-    let install_untrusted = install.clone();
-    let install_fresh = install;
+    let langs = ui_langs();
     view()
         .h(px(32.0))
         .px_2p5()
@@ -851,7 +849,7 @@ pub(crate) fn cert_menu_row(
                         .h(px(6.0))
                         .rounded_full()
                         .flex_shrink_0()
-                        .bg(move || match dot_status.get() {
+                        .bg(move || match ca_ui.status.get() {
                             ca::CaStatus::Trusted => status_ok_fg(),
                             ca::CaStatus::InstalledUntrusted | ca::CaStatus::NotInstalled => {
                                 status_warn_fg()
@@ -859,72 +857,163 @@ pub(crate) fn cert_menu_row(
                         }),
                 )
                 .child(
-                    control_text({
-                        let langs = ui_langs();
-                        move || -> SharedString {
-                            match ca_status.get() {
-                                ca::CaStatus::Trusted => {
-                                    t(ui_lang(langs), "证书：已信任", "CA: trusted").into()
-                                }
-                                ca::CaStatus::InstalledUntrusted => {
-                                    t(ui_lang(langs), "证书：未信任", "CA: untrusted").into()
-                                }
-                                ca::CaStatus::NotInstalled => {
-                                    t(ui_lang(langs), "证书：未安装", "CA: not installed").into()
-                                }
+                    control_text(move || -> SharedString {
+                        let lang = ui_lang(langs);
+                        if let Some(ext) = ca_ui.active_external.get() {
+                            return match lang {
+                                Lang::Zh => format!("证书：已复用 {}", ext.tool_name).into(),
+                                Lang::En => format!("CA: reusing {}", ext.tool_name).into(),
+                            };
+                        }
+                        match ca_ui.status.get() {
+                            ca::CaStatus::Trusted => t(lang, "证书：已信任", "CA: trusted").into(),
+                            ca::CaStatus::InstalledUntrusted => {
+                                t(lang, "证书：未信任", "CA: untrusted").into()
+                            }
+                            ca::CaStatus::NotInstalled => {
+                                t(lang, "证书：未安装", "CA: not installed").into()
                             }
                         }
                     })
-                    .text_color(move || match color_status.get() {
-                        ca::CaStatus::InstalledUntrusted => status_warn_fg(),
-                        ca::CaStatus::Trusted | ca::CaStatus::NotInstalled => fg_secondary(),
+                    .text_color(move || {
+                        if ca_ui.active_external.get().is_none()
+                            && ca_ui.status.get() == ca::CaStatus::InstalledUntrusted
+                        {
+                            status_warn_fg()
+                        } else {
+                            fg_secondary()
+                        }
                     }),
                 ),
         )
-        .child(
+        .child(cert_menu_row_actions(
+            ca_ui,
+            install,
+            remove,
+            switch_builtin,
+        ))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn cert_menu_row_actions(
+    ca_ui: CaSignals,
+    install: Rc<impl Fn() + 'static>,
+    remove: Rc<impl Fn() + 'static>,
+    switch_builtin: impl Fn() + 'static,
+) -> impl IntoElement {
+    let switch_cb = Rc::new(switch_builtin);
+    let install_untrusted = install.clone();
+    let install_fresh = install;
+
+    when(
+        move || ca_ui.active_external.get().is_some(),
+        move || {
+            let cb = Rc::clone(&switch_cb);
+            menu_inline_pill(
+                tr("切回 zniff", "Use zniff"),
+                || false,
+                move || cb.as_ref()(),
+            )
+        },
+    )
+    .otherwise(move || {
+        let install_untrusted = install_untrusted.clone();
+        let install_fresh = install_fresh.clone();
+        let remove = remove.clone();
+        view()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .child(when(
+                move || ca_ui.status.get() == ca::CaStatus::InstalledUntrusted,
+                move || {
+                    let install = install_untrusted.clone();
+                    menu_inline_pill(tr("信任", "Trust"), || true, move || install.as_ref()())
+                },
+            ))
+            .child(
+                when(
+                    move || ca_ui.status.get().is_installed(),
+                    move || {
+                        let remove = remove.clone();
+                        menu_inline_pill(tr("移除", "Remove"), || false, move || remove.as_ref()())
+                    },
+                )
+                .otherwise(move || {
+                    let install = install_fresh.clone();
+                    menu_inline_pill(tr("安装", "Install"), || true, move || install.as_ref()())
+                }),
+            )
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn external_ca_menu_row(
+    open: Signal<bool>,
+    ca_ui: CaSignals,
+    controls: Arc<Controls>,
+) -> impl IntoElement {
+    when(
+        move || ca_ui.detected_external.with(|items| !items.is_empty()),
+        move || {
+            let mut pills = view().flex_row().flex_wrap().items_center().gap_1();
+            for kind in external_ca::ExternalCaKind::ALL {
+                pills = pills.child(external_ca_pill(open, ca_ui, controls.clone(), kind));
+            }
             view()
+                .min_h(px(32.0))
+                .px_2p5()
+                .py_1()
+                .gap_2()
                 .flex_row()
                 .items_center()
-                .gap_1()
-                .child(when(
-                    move || ca_status.get() == ca::CaStatus::InstalledUntrusted,
-                    move || {
-                        let install = install_untrusted.clone();
-                        menu_inline_pill(
-                            tr("信任", "Trust"),
-                            || true,
-                            move || {
-                                install.as_ref()();
-                            },
-                        )
-                    },
+                .child(glyph(|| Glyph::Sliders, || color(fg_secondary())))
+                .child(view().flex_1().min_w(px(0.0)).child(
+                    control_text(tr("复用本机证书", "Reuse local CA")).text_color(fg_secondary()),
                 ))
-                .child(
-                    when(
-                        move || ca_status.get().is_installed(),
-                        move || {
-                            let remove = remove.clone();
-                            menu_inline_pill(
-                                tr("移除", "Remove"),
-                                || false,
-                                move || {
-                                    remove.as_ref()();
-                                },
-                            )
-                        },
-                    )
-                    .otherwise(move || {
-                        let install = install_fresh.clone();
-                        menu_inline_pill(
-                            tr("安装", "Install"),
-                            || true,
-                            move || {
-                                install.as_ref()();
-                            },
-                        )
-                    }),
-                ),
-        )
+                .child(pills)
+        },
+    )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn external_ca_pill(
+    open: Signal<bool>,
+    ca_ui: CaSignals,
+    controls: Arc<Controls>,
+    kind: external_ca::ExternalCaKind,
+) -> impl IntoElement {
+    let id = kind.id();
+    let label = kind.tool_name();
+    when(
+        move || {
+            ca_ui
+                .detected_external
+                .with(|items| items.iter().any(|item| item.id == id))
+        },
+        move || {
+            let click_controls = controls.clone();
+            menu_inline_pill(
+                label,
+                move || {
+                    ca_ui
+                        .active_external
+                        .with(|cur| cur.as_ref().is_some_and(|item| item.id == id))
+                },
+                move || {
+                    open.set(false);
+                    let already_active = ca_ui
+                        .active_external
+                        .with(|cur| cur.as_ref().is_some_and(|item| item.id == id));
+                    if already_active {
+                        use_builtin_ca(click_controls.clone());
+                    } else {
+                        use_external_ca(click_controls.clone(), id.to_string());
+                    }
+                },
+            )
+        },
+    )
 }
 
 pub(crate) fn menu_rule() -> impl IntoElement {

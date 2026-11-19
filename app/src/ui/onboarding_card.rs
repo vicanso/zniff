@@ -6,7 +6,7 @@ pub(crate) struct OnboardingProps {
     pub(crate) controls: Arc<Controls>,
     pub(crate) running: Signal<bool>,
     pub(crate) listen: Signal<String>,
-    pub(crate) ca_status: Signal<ca::CaStatus>,
+    pub(crate) ca_ui: CaSignals,
     pub(crate) use_system_proxy: Signal<bool>,
     pub(crate) adb_count: Signal<usize>,
     pub(crate) flow_total: Signal<usize>,
@@ -88,12 +88,12 @@ fn onboarding_header_status(props: &OnboardingProps) -> impl IntoElement {
     let controls = props.controls.clone();
     let running = props.running;
     let listen = props.listen;
-    let ca_status = props.ca_status;
+    let ca_ui = props.ca_ui;
     let install_ca = props.install_ca.clone();
     let langs = ui_langs();
 
     when(
-        move || running.get() && ca_status.get() == ca::CaStatus::Trusted,
+        move || running.get() && ca_ui.status.get() == ca::CaStatus::Trusted,
         move || {
             view()
                 .flex_row()
@@ -110,7 +110,14 @@ fn onboarding_header_status(props: &OnboardingProps) -> impl IntoElement {
                     mono(move || -> SharedString {
                         let lang = ui_lang(langs);
                         let addr = listen.get();
-                        let ca_label = t(lang, "根证书已信任", "CA trusted");
+                        let ca_label = if let Some(ext) = ca_ui.active_external.get() {
+                            match lang {
+                                Lang::Zh => format!("已复用 {} 证书", ext.tool_name),
+                                Lang::En => format!("Reusing {} CA", ext.tool_name),
+                            }
+                        } else {
+                            t(lang, "根证书已信任", "CA trusted").to_string()
+                        };
                         if addr.is_empty() {
                             ca_label.into()
                         } else {
@@ -125,6 +132,7 @@ fn onboarding_header_status(props: &OnboardingProps) -> impl IntoElement {
     )
     .otherwise(move || {
         let start_controls = controls.clone();
+        let ext_controls = controls.clone();
         let install_cb = install_ca.clone();
         view()
             .flex_row()
@@ -141,13 +149,43 @@ fn onboarding_header_status(props: &OnboardingProps) -> impl IntoElement {
                 },
             ))
             .child(when(
-                move || ca_status.get() != ca::CaStatus::Trusted,
+                move || {
+                    ca_ui.status.get() != ca::CaStatus::Trusted
+                        && ca_ui.detected_external.with(|items| !items.is_empty())
+                },
+                move || {
+                    let reuse_controls = ext_controls.clone();
+                    header_action_chip(
+                        move || -> SharedString {
+                            let lang = ui_lang(langs);
+                            let tool = ca_ui
+                                .detected_external
+                                .with(|items| items.first().map(|item| item.tool_name.clone()))
+                                .unwrap_or_default();
+                            match lang {
+                                Lang::Zh => format!("复用 {tool} 证书").into(),
+                                Lang::En => format!("Reuse {tool} CA").into(),
+                            }
+                        },
+                        true,
+                        move || {
+                            if let Some(first) =
+                                ca_ui.detected_external.with(|items| items.first().cloned())
+                            {
+                                use_external_ca(reuse_controls.clone(), first.id);
+                            }
+                        },
+                    )
+                },
+            ))
+            .child(when(
+                move || ca_ui.status.get() != ca::CaStatus::Trusted,
                 move || {
                     let cb = install_cb.clone();
                     header_action_chip(
                         move || -> SharedString {
                             let lang = ui_lang(langs);
-                            match ca_status.get() {
+                            match ca_ui.status.get() {
                                 ca::CaStatus::InstalledUntrusted => {
                                     t(lang, "信任根证书", "Trust CA").into()
                                 }

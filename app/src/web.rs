@@ -266,6 +266,24 @@ pub fn run_cli(args: &[String], config_port: u16) -> i32 {
     let dev_mode = crate::config::is_dev_mode();
     let data_dir = crate::ca::data_dir();
     let (loaded, config_err) = crate::config::load_mode_ext(&data_dir, dev_mode);
+    if !loaded.external_ca.is_empty() {
+        match crate::external_ca::load_trusted_candidate(&loaded.external_ca) {
+            Ok(ext) => {
+                if let Err(err) = hub.ca.switch_to_external(ext) {
+                    eprintln!(
+                        "zniff web: 复用外部证书 {} 失败，已使用内置证书: {err:#}",
+                        loaded.external_ca
+                    );
+                }
+            }
+            Err(err) => {
+                eprintln!(
+                    "zniff web: 外部证书 {} 不可用，已使用内置证书: {err:#}",
+                    loaded.external_ca
+                );
+            }
+        }
+    }
     if let Some(err) = &config_err {
         let cfg_path = crate::config::config_path_for(&data_dir, dev_mode);
         eprintln!(

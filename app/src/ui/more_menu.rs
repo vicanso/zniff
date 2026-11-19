@@ -5,7 +5,7 @@ use super::*;
 #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
 pub(crate) fn more_menu(
     open: Signal<bool>,
-    ca_status: Signal<ca::CaStatus>,
+    ca_ui: CaSignals,
     proxy_on: Signal<bool>,
     install: Rc<impl Fn() + 'static>,
     remove: Rc<impl Fn() + 'static>,
@@ -150,7 +150,17 @@ pub(crate) fn more_menu(
         menu_copy_config_row(open, copy_env, import_controls.clone())
     );
     let items = desktop_child!(items, menu_rule());
-    let items = desktop_child!(items, cert_menu_row(ca_status, install, remove));
+    let items = desktop_child!(
+        items,
+        cert_menu_row(ca_ui, install, remove, {
+            let controls = import_controls.clone();
+            move || use_builtin_ca(controls.clone())
+        })
+    );
+    let items = desktop_child!(
+        items,
+        external_ca_menu_row(open, ca_ui, import_controls.clone())
+    );
     let items = desktop_child!(items, platform_ca_extra_menu_item(&import_controls));
     let items = items
         .child(menu_rule())

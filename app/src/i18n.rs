@@ -99,6 +99,17 @@ pub enum StatusMsg {
     CopiedConfigPath(String),
     InstallFailed(String),
     RemoveFailed(String),
+    ExternalCaEnabled {
+        tool: String,
+    },
+    ExternalCaRestored,
+    ExternalCaSwitchFailed {
+        tool: String,
+        err: String,
+    },
+    ExternalCaFallback {
+        tool: String,
+    },
     CopiedUrl,
     CopiedCurl {
         binary: bool,
@@ -388,6 +399,24 @@ impl StatusMsg {
                 format!("{} {err}", t(lang, "安装失败:", "Install failed:"))
             }
             Self::RemoveFailed(err) => format!("{} {err}", t(lang, "移除失败:", "Remove failed:")),
+            Self::ExternalCaEnabled { tool } => match lang {
+                Lang::Zh => format!("已复用 {tool} 根证书"),
+                Lang::En => format!("Now reusing {tool} root CA"),
+            },
+            Self::ExternalCaRestored => t(
+                lang,
+                "已切回 zniff 根证书",
+                "Switched back to zniff root CA",
+            )
+            .into(),
+            Self::ExternalCaSwitchFailed { tool, err } => match lang {
+                Lang::Zh => format!("复用 {tool} 证书失败: {err}"),
+                Lang::En => format!("Failed to reuse {tool} CA: {err}"),
+            },
+            Self::ExternalCaFallback { tool } => match lang {
+                Lang::Zh => format!("{tool} 证书不可用，已自动切回 zniff 根证书"),
+                Lang::En => format!("{tool} CA unavailable; fell back to zniff root CA"),
+            },
             Self::CopiedUrl => t(lang, "已复制 URL", "Copied the URL").into(),
             Self::CopiedCurl { binary } => {
                 if *binary {
@@ -788,6 +817,8 @@ impl StatusMsg {
             | Self::TerminalLaunched { .. }
             | Self::AdbConfigured { .. }
             | Self::AdbCleared(_)
+            | Self::ExternalCaEnabled { .. }
+            | Self::ExternalCaRestored
             | Self::ConfigReset { .. }
             | Self::CopiedConfigPath(_)
             | Self::CopiedOpenApi { .. }
@@ -803,6 +834,8 @@ impl StatusMsg {
             | Self::ReplayFailed(_)
             | Self::InstallFailed(_)
             | Self::RemoveFailed(_)
+            | Self::ExternalCaSwitchFailed { .. }
+            | Self::ExternalCaFallback { .. }
             | Self::BindFailed { .. }
             | Self::CaUnavailable(_)
             | Self::StopRestoreFailed(_)
@@ -879,6 +912,7 @@ impl StatusMsg {
             | Self::ReplayFailed(_)
             | Self::InstallFailed(_)
             | Self::RemoveFailed(_)
+            | Self::ExternalCaSwitchFailed { .. }
             | Self::IosSimFailed(_)
             | Self::BrowserLaunchFailed(_)
             | Self::TerminalLaunchFailed(_)

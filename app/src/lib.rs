@@ -18,6 +18,9 @@ mod config;
 #[cfg(not(target_arch = "wasm32"))]
 mod decompress;
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+mod external_ca;
+#[cfg(not(target_arch = "wasm32"))]
 mod har;
 mod i18n;
 mod icon;

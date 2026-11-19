@@ -12,6 +12,8 @@ pub(crate) fn open_controls() -> Arc<Controls> {
         listen: Mutex::new(String::new()),
         listen_port: Mutex::new(load_listen_port()),
         ca_status: Mutex::new(ca::CaStatus::NotInstalled),
+        active_external_ca: Mutex::new(None),
+        external_cas: Mutex::new(Vec::new()),
         use_system_proxy: Mutex::new(false),
         proxy_applied: Mutex::new(false),
         ops: Mutex::new(()),
@@ -39,8 +41,22 @@ pub(crate) fn open_controls() -> Arc<Controls> {
     match Ca::open_default().and_then(|ca| Hub::new(Arc::new(ca))) {
         Ok(hub) => {
             apply_saved_prefs(&hub);
+            let mut fallback_tool = None;
+            if !saved.external_ca.is_empty() {
+                let res = external_ca::load_trusted_candidate(&saved.external_ca)
+                    .and_then(|ext| hub.ca.switch_to_external(ext));
+                if let Err(err) = res {
+                    let tool = external_ca::ExternalCaKind::from_id(&saved.external_ca)
+                        .map(|k| k.tool_name().to_string())
+                        .unwrap_or_else(|| saved.external_ca.clone());
+                    eprintln!("zniff: 启动时无法复用 {tool} 根证书，已自动切回内置证书: {err:#}");
+                    let _ = save_config(|cfg| cfg.external_ca.clear());
+                    fallback_tool = Some(tool);
+                }
+            }
             let ca_status = hub.ca.trust_status();
-            Arc::new(Controls {
+            let active_ext = hub.ca.external_source();
+            let controls = Arc::new(Controls {
                 hub: Arc::new(hub),
                 capture: Mutex::new(None),
                 status: Mutex::new(StatusMsg::Idle),
@@ -48,6 +64,8 @@ pub(crate) fn open_controls() -> Arc<Controls> {
                 listen: Mutex::new(String::new()),
                 listen_port: Mutex::new(load_listen_port()),
                 ca_status: Mutex::new(ca_status),
+                active_external_ca: Mutex::new(active_ext),
+                external_cas: Mutex::new(Vec::new()),
                 use_system_proxy: Mutex::new(load_use_system_proxy()),
                 proxy_applied: Mutex::new(false),
                 ops: Mutex::new(()),
@@ -63,7 +81,12 @@ pub(crate) fn open_controls() -> Arc<Controls> {
                 toast_queue: Mutex::new(Vec::new()),
                 config_error: Mutex::new(cfg_err),
                 config_path: Mutex::new(cfg_path),
-            })
+            });
+            if let Some(tool) = fallback_tool {
+                set_status(&controls, StatusMsg::ExternalCaFallback { tool });
+            }
+            refresh_external_cas(controls.clone());
+            controls
         }
         Err(err) => {
             // A hub is required for the view. If the CA cannot be created,
@@ -81,6 +104,8 @@ pub(crate) fn open_controls() -> Arc<Controls> {
                 listen: Mutex::new(String::new()),
                 listen_port: Mutex::new(load_listen_port()),
                 ca_status: Mutex::new(ca::CaStatus::NotInstalled),
+                active_external_ca: Mutex::new(None),
+                external_cas: Mutex::new(Vec::new()),
                 use_system_proxy: Mutex::new(load_use_system_proxy()),
                 proxy_applied: Mutex::new(false),
                 ops: Mutex::new(()),
@@ -379,11 +404,84 @@ pub(crate) fn quit_for_manual_install(controls: &Controls) {
 pub(crate) fn install_ca(controls: Arc<Controls>) {
     std::thread::spawn(move || {
         let ca = controls.hub.ca.clone();
+        if ca.is_external() {
+            if let Err(err) = ca.switch_to_builtin() {
+                set_status(&controls, StatusMsg::InstallFailed(format!("{err:#}")));
+                return;
+            }
+            set_active_external_ca(&controls, None);
+            let _ = save_config(|cfg| cfg.external_ca.clear());
+        }
         match ca::install(&ca) {
             Ok(_) => set_ca_status(&controls, ca::trust_status(&ca)),
             Err(err) => {
                 set_ca_status(&controls, ca::trust_status(&ca));
                 set_status(&controls, StatusMsg::InstallFailed(format!("{err:#}")));
+            }
+        }
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn refresh_external_cas(controls: Arc<Controls>) {
+    std::thread::spawn(move || {
+        let found = external_ca::detect_trusted_external_cas();
+        *controls
+            .external_cas
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = found;
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn use_external_ca(controls: Arc<Controls>, id: String) {
+    std::thread::spawn(move || {
+        let tool = external_ca::ExternalCaKind::from_id(&id)
+            .map(|k| k.tool_name().to_string())
+            .unwrap_or_else(|| id.clone());
+        let ca = controls.hub.ca.clone();
+        match external_ca::load_trusted_candidate(&id)
+            .and_then(|loaded| ca.switch_to_external(loaded))
+        {
+            Ok(()) => {
+                let source = ca.external_source();
+                let next_tool = source
+                    .as_ref()
+                    .map(|item| item.tool_name.clone())
+                    .unwrap_or(tool);
+                set_active_external_ca(&controls, source);
+                set_ca_status(&controls, ca::trust_status(&ca));
+                let _ = save_config(|cfg| cfg.external_ca = id);
+                set_status(&controls, StatusMsg::ExternalCaEnabled { tool: next_tool });
+            }
+            Err(err) => {
+                set_status(
+                    &controls,
+                    StatusMsg::ExternalCaSwitchFailed {
+                        tool,
+                        err: format!("{err:#}"),
+                    },
+                );
+                refresh_external_cas(controls);
+            }
+        }
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn use_builtin_ca(controls: Arc<Controls>) {
+    std::thread::spawn(move || {
+        let ca = controls.hub.ca.clone();
+        match ca.switch_to_builtin() {
+            Ok(()) => {
+                set_active_external_ca(&controls, None);
+                set_ca_status(&controls, ca::trust_status(&ca));
+                let _ = save_config(|cfg| cfg.external_ca.clear());
+                set_status(&controls, StatusMsg::ExternalCaRestored);
+                refresh_external_cas(controls);
+            }
+            Err(err) => {
+                set_status(&controls, StatusMsg::CaUnavailable(format!("{err:#}")));
             }
         }
     });
@@ -560,6 +658,30 @@ pub(crate) fn lock_ca_status(controls: &Controls) -> ca::CaStatus {
         .ca_status
         .lock()
         .unwrap_or_else(|err| err.into_inner())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn set_active_external_ca(controls: &Controls, active: Option<ca::ExternalCaSummary>) {
+    *controls
+        .active_external_ca
+        .lock()
+        .unwrap_or_else(|err| err.into_inner()) = active;
+}
+
+pub(crate) fn lock_active_external_ca(controls: &Controls) -> Option<ca::ExternalCaSummary> {
+    controls
+        .active_external_ca
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .clone()
+}
+
+pub(crate) fn lock_external_cas(controls: &Controls) -> Vec<ca::ExternalCaSummary> {
+    controls
+        .external_cas
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .clone()
 }
 
 pub(crate) fn set_status(controls: &Controls, message: StatusMsg) {

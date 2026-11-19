@@ -581,6 +581,19 @@ pub struct Config {
     /// Optional HTTP Basic credential (`user:pass`) required on the capture port.
     /// Belongs to this machine; omitted from saved profiles.
     pub proxy_auth: String,
+    /// Active external root CA provider id (`"whistle"`, `"mitmproxy"`, `"mkcert"`, `"proxyman"`),
+    /// or empty when using zniff's own built-in root CA.
+    pub external_ca: String,
+}
+
+pub fn normalize_external_ca(raw: &str) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "whistle" => "whistle".to_string(),
+        "mitmproxy" => "mitmproxy".to_string(),
+        "mkcert" => "mkcert".to_string(),
+        "proxyman" => "proxyman".to_string(),
+        _ => String::new(),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -695,6 +708,8 @@ struct RawConfig {
     web_auth: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     proxy_auth: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    external_ca: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     saved_filters: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -880,6 +895,7 @@ impl From<RawConfig> for Config {
             relay_view_auth: raw.relay_view_auth,
             web_auth: raw.web_auth,
             proxy_auth: raw.proxy_auth,
+            external_ca: normalize_external_ca(raw.external_ca.as_deref().unwrap_or("")),
         }
     }
 }
@@ -983,6 +999,10 @@ impl From<Config> for RawConfig {
             relay_view_auth: config.relay_view_auth,
             web_auth: config.web_auth,
             proxy_auth: config.proxy_auth,
+            external_ca: {
+                let norm = normalize_external_ca(&config.external_ca);
+                (!norm.is_empty()).then_some(norm)
+            },
             saved_filters: config.saved_filters,
             saved_rules: config.saved_rules,
             saved_profiles: config.saved_profiles,
@@ -1055,6 +1075,7 @@ impl Default for Config {
             relay_view_auth: String::new(),
             web_auth: String::new(),
             proxy_auth: String::new(),
+            external_ca: String::new(),
         }
     }
 }
@@ -1476,6 +1497,7 @@ fn normalize_for(mut config: Config, dev: bool) -> Config {
     config.relay_view_auth = config.relay_view_auth.trim().to_string();
     config.web_auth = config.web_auth.trim().to_string();
     config.proxy_auth = config.proxy_auth.trim().to_string();
+    config.external_ca = normalize_external_ca(&config.external_ca);
     clamp_saved_filters(&mut config.saved_filters);
     clamp_saved_rules(&mut config.saved_rules);
     migrate_saved_profiles(&mut config);
@@ -2174,6 +2196,28 @@ mod tests {
         );
         assert_eq!(resolve_proxy_auth(None, Some(""), "cfg:pw"), "");
         assert_eq!(resolve_proxy_auth(None, None, " cfg:pw "), "cfg:pw");
+    }
+
+    #[test]
+    fn external_ca_persists_normalized_and_omits_default_empty() {
+        let dir = Scratch::new();
+        fs::write(dir.path().join("config.toml"), "listen_port = 9\n").unwrap();
+        let cfg = load(dir.path());
+        assert_eq!(cfg.external_ca, "");
+        let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(!text.contains("external_ca"), "{text}");
+
+        update(dir.path(), |c| c.external_ca = "  Whistle ".into()).unwrap();
+        let cfg = load(dir.path());
+        assert_eq!(cfg.external_ca, "whistle");
+        let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(text.contains("external_ca = \"whistle\""), "{text}");
+
+        update(dir.path(), |c| c.external_ca = "unknown-tool".into()).unwrap();
+        let cfg = load(dir.path());
+        assert_eq!(cfg.external_ca, "");
+        let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(!text.contains("external_ca"), "{text}");
     }
 
     #[test]

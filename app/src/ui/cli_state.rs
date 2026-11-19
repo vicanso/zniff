@@ -172,6 +172,13 @@ pub fn maybe_run_cli_mode() -> Option<i32> {
     Some(mcp::run_stdio_bridge(port))
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct CaSignals {
+    pub(crate) status: Signal<ca::CaStatus>,
+    pub(crate) active_external: Signal<Option<ca::ExternalCaSummary>>,
+    pub(crate) detected_external: Signal<Vec<ca::ExternalCaSummary>>,
+}
+
 pub(crate) struct Controls {
     pub(crate) hub: Arc<Hub>,
     pub(crate) capture: Mutex<Option<Capture>>,
@@ -180,6 +187,8 @@ pub(crate) struct Controls {
     pub(crate) listen: Mutex<String>,
     pub(crate) listen_port: Mutex<u16>,
     pub(crate) ca_status: Mutex<ca::CaStatus>,
+    pub(crate) active_external_ca: Mutex<Option<ca::ExternalCaSummary>>,
+    pub(crate) external_cas: Mutex<Vec<ca::ExternalCaSummary>>,
     /// User preference. Off until they turn on 「系统代理」.
     pub(crate) use_system_proxy: Mutex<bool>,
     /// True only after this session's `sysproxy::enable` returned `Applied`.

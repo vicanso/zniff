@@ -5,6 +5,13 @@
 
 use std::path::{Path, PathBuf};
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExternalCaSummary {
+    pub id: String,
+    pub tool_name: String,
+    pub ca_name: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum CaStatus {

@@ -6,7 +6,7 @@ pub(crate) struct ConnectHubProps {
     pub(crate) controls: Arc<Controls>,
     pub(crate) running: Signal<bool>,
     pub(crate) listen: Signal<String>,
-    pub(crate) ca_status: Signal<ca::CaStatus>,
+    pub(crate) ca_ui: CaSignals,
     pub(crate) use_system_proxy: Signal<bool>,
     pub(crate) adb_count: Signal<usize>,
     pub(crate) selected: Signal<Option<u64>>,
@@ -168,7 +168,7 @@ fn connect_hub_body(props: ConnectHubProps, open: Signal<bool>) -> impl IntoElem
             props.controls.clone(),
             props.running,
             props.listen,
-            props.ca_status,
+            props.ca_ui,
             props.install_ca.clone(),
         ));
     #[cfg(not(target_arch = "wasm32"))]
@@ -204,7 +204,7 @@ fn hub_status_strip(
     controls: Arc<Controls>,
     running: Signal<bool>,
     listen: Signal<String>,
-    ca_status: Signal<ca::CaStatus>,
+    ca_ui: CaSignals,
     install_ca: Rc<dyn Fn()>,
 ) -> impl IntoElement {
     let strip = view()
@@ -216,11 +216,11 @@ fn hub_status_strip(
         .border_1()
         .border_color(border_subtle())
         .bg(bg_code())
-        .child(hub_listen_row(controls, running, listen));
+        .child(hub_listen_row(controls.clone(), running, listen));
     #[cfg(not(target_arch = "wasm32"))]
-    let strip = strip.child(hub_ca_row(ca_status, install_ca));
+    let strip = strip.child(hub_ca_row(controls, ca_ui, install_ca));
     #[cfg(target_arch = "wasm32")]
-    let _ = (ca_status, install_ca);
+    let _ = (ca_ui, install_ca);
     strip
 }
 
@@ -280,8 +280,14 @@ fn hub_listen_row(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn hub_ca_row(ca_status: Signal<ca::CaStatus>, install_ca: Rc<dyn Fn()>) -> impl IntoElement {
+fn hub_ca_row(
+    controls: Arc<Controls>,
+    ca_ui: CaSignals,
+    install_ca: Rc<dyn Fn()>,
+) -> impl IntoElement {
     let langs = ui_langs();
+    let reset_controls = controls.clone();
+    let reuse_controls = controls;
     view()
         .w_full()
         .flex_row()
@@ -295,18 +301,24 @@ fn hub_ca_row(ca_status: Signal<ca::CaStatus>, install_ca: Rc<dyn Fn()>) -> impl
                 .flex_row()
                 .items_center()
                 .gap_1p5()
-                .child(view().w(px(6.0)).h(px(6.0)).rounded_full().bg(
-                    move || match ca_status.get() {
+                .child(view().w(px(6.0)).h(px(6.0)).rounded_full().bg(move || {
+                    match ca_ui.status.get() {
                         ca::CaStatus::Trusted => status_ok_fg(),
                         ca::CaStatus::InstalledUntrusted | ca::CaStatus::NotInstalled => {
                             status_warn_fg()
                         }
-                    },
-                ))
+                    }
+                }))
                 .child(
                     text(move || -> SharedString {
                         let lang = ui_lang(langs);
-                        match ca_status.get() {
+                        if let Some(ext) = ca_ui.active_external.get() {
+                            return match lang {
+                                Lang::Zh => format!("根证书：已复用 {}", ext.tool_name).into(),
+                                Lang::En => format!("Root CA: {}", ext.tool_name).into(),
+                            };
+                        }
+                        match ca_ui.status.get() {
                             ca::CaStatus::Trusted => {
                                 t(lang, "根证书：已信任", "Root CA: Trusted").into()
                             }
@@ -321,30 +333,89 @@ fn hub_ca_row(ca_status: Signal<ca::CaStatus>, install_ca: Rc<dyn Fn()>) -> impl
                     .number_of_lines(1)
                     .text_overflow(EllipsizeMode::Tail)
                     .text_size(px(11.5))
-                    .text_color(move || match ca_status.get() {
-                        ca::CaStatus::InstalledUntrusted => status_warn_fg(),
-                        ca::CaStatus::Trusted | ca::CaStatus::NotInstalled => fg_secondary(),
+                    .text_color(move || {
+                        if ca_ui.active_external.get().is_none()
+                            && ca_ui.status.get() == ca::CaStatus::InstalledUntrusted
+                        {
+                            status_warn_fg()
+                        } else {
+                            fg_secondary()
+                        }
                     }),
                 ),
         )
-        .child(when(
-            move || ca_status.get() != ca::CaStatus::Trusted,
-            move || {
+        .child(
+            when(
+                move || ca_ui.active_external.get().is_some(),
+                move || {
+                    let cb = reset_controls.clone();
+                    menu_inline_pill(
+                        tr("切回", "Reset"),
+                        || false,
+                        move || use_builtin_ca(cb.clone()),
+                    )
+                },
+            )
+            .otherwise(move || {
+                let reuse_cb = reuse_controls.clone();
                 let install = Rc::clone(&install_ca);
-                menu_inline_pill(
+                when(
+                    move || ca_ui.status.get() != ca::CaStatus::Trusted,
                     move || {
-                        let lang = ui_lang(langs);
-                        SharedString::from(if ca_status.get() == ca::CaStatus::InstalledUntrusted {
-                            t(lang, "信任", "Trust")
-                        } else {
-                            t(lang, "安装", "Install")
-                        })
+                        let reuse_cb = reuse_cb.clone();
+                        let install = Rc::clone(&install);
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .child(when(
+                                move || ca_ui.detected_external.with(|items| !items.is_empty()),
+                                move || {
+                                    let cb = reuse_cb.clone();
+                                    menu_inline_pill(
+                                        move || -> SharedString {
+                                            let lang = ui_lang(langs);
+                                            let tool = ca_ui
+                                                .detected_external
+                                                .with(|items| {
+                                                    items.first().map(|item| item.tool_name.clone())
+                                                })
+                                                .unwrap_or_default();
+                                            match lang {
+                                                Lang::Zh => format!("复用 {tool}").into(),
+                                                Lang::En => format!("Reuse {tool}").into(),
+                                            }
+                                        },
+                                        || true,
+                                        move || {
+                                            if let Some(first) = ca_ui
+                                                .detected_external
+                                                .with(|items| items.first().cloned())
+                                            {
+                                                use_external_ca(cb.clone(), first.id);
+                                            }
+                                        },
+                                    )
+                                },
+                            ))
+                            .child(menu_inline_pill(
+                                move || {
+                                    let lang = ui_lang(langs);
+                                    SharedString::from(
+                                        if ca_ui.status.get() == ca::CaStatus::InstalledUntrusted {
+                                            t(lang, "信任", "Trust")
+                                        } else {
+                                            t(lang, "安装", "Install")
+                                        },
+                                    )
+                                },
+                                || true,
+                                move || install.as_ref()(),
+                            ))
                     },
-                    || true,
-                    move || install.as_ref()(),
                 )
-            },
-        ))
+            }),
+        )
 }
 
 #[cfg(not(target_arch = "wasm32"))]

@@ -19,6 +19,13 @@ pub fn App() -> impl IntoElement {
     let status = signal(StatusMsg::Idle);
     let running = signal(false);
     let ca_status = signal(ca::CaStatus::NotInstalled);
+    let active_external_ca = signal(None::<ca::ExternalCaSummary>);
+    let detected_external_cas = signal(Vec::<ca::ExternalCaSummary>::new());
+    let ca_ui = CaSignals {
+        status: ca_status,
+        active_external: active_external_ca,
+        detected_external: detected_external_cas,
+    };
     let use_system_proxy = signal(false);
     let memory = signal(String::from("0 B"));
     let dropped = signal(0_u64);
@@ -274,6 +281,8 @@ pub fn App() -> impl IntoElement {
     let update_state = signal(lock_update_state(&controls));
     status.set(lock_status(&controls));
     ca_status.set(lock_ca_status(&controls));
+    active_external_ca.set(lock_active_external_ca(&controls));
+    detected_external_cas.set(lock_external_cas(&controls));
     use_system_proxy.set(lock_bool(&controls.use_system_proxy));
     port_text.set(lock_port(&controls.listen_port).to_string());
     listen_all.set(lock_bool(&controls.listen_all));
@@ -548,6 +557,14 @@ pub fn App() -> impl IntoElement {
         let ca_now = lock_ca_status(&controls_tick);
         if ca_status.get_untracked() != ca_now {
             ca_status.set(ca_now);
+        }
+        let active_ext_now = lock_active_external_ca(&controls_tick);
+        if active_external_ca.with_untracked(|cur| cur != &active_ext_now) {
+            active_external_ca.set(active_ext_now);
+        }
+        let detected_ext_now = lock_external_cas(&controls_tick);
+        if detected_external_cas.with_untracked(|cur| cur != &detected_ext_now) {
+            detected_external_cas.set(detected_ext_now);
         }
         let sys_proxy_now = lock_bool(&controls_tick.use_system_proxy);
         if use_system_proxy.get_untracked() != sys_proxy_now {
@@ -1082,7 +1099,7 @@ pub fn App() -> impl IntoElement {
         .child(toolbar(
             status,
             running,
-            ca_status,
+            ca_ui,
             use_system_proxy,
             move || install_ca(controls_ca.clone()),
             move || remove_ca(controls_remove.clone()),
@@ -1162,7 +1179,7 @@ pub fn App() -> impl IntoElement {
                 controls: controls.clone(),
                 running,
                 listen,
-                ca_status,
+                ca_ui,
                 use_system_proxy,
                 adb_count,
                 flow_total,
@@ -1275,7 +1292,7 @@ pub fn App() -> impl IntoElement {
                 controls: controls.clone(),
                 running,
                 listen,
-                ca_status,
+                ca_ui,
                 use_system_proxy,
                 adb_count,
                 selected,

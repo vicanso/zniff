@@ -9,8 +9,9 @@ use std::io::Write;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
+pub use crate::external_ca::ExternalCaSummary;
 use anyhow::{Context, Result};
 use rcgen::{
     BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
@@ -44,13 +45,19 @@ struct CachedCustomCert {
     key: PrivateKeyDer<'static>,
 }
 
-pub struct Ca {
-    dir: PathBuf,
+struct ActiveRoot {
     ca_name: String,
-    /// Subject and key of the installed root. Leaf signing reads these.
-    /// The PEM on disk is what gets installed.
+    cert_path: PathBuf,
     issuer: Issuer<'static, KeyPair>,
     ca_der: CertificateDer<'static>,
+    session_storage: Arc<dyn rustls::server::StoresServerSessions>,
+    external: Option<ExternalCaSummary>,
+}
+
+pub struct Ca {
+    dir: PathBuf,
+    active: RwLock<ActiveRoot>,
+    root_epoch: AtomicU64,
     /// Shared ECDSA P-256 keypair reused across MITM leaf certificates so
     /// per-host leaf generation avoids expensive CSPRNG/keypair generation
     /// inside or outside `leaves` lock.
@@ -58,7 +65,6 @@ pub struct Ca {
     leaf_key_der: Vec<u8>,
     leaf_spki_der: Vec<u8>,
     leaf_seq: AtomicU64,
-    session_storage: Arc<dyn rustls::server::StoresServerSessions>,
     leaves: Mutex<HashMap<String, CachedLeaf>>,
     custom_certs: Mutex<Vec<CachedCustomCert>>,
 }
@@ -149,32 +155,13 @@ impl Ca {
     }
 
     fn generate(dir: &Path) -> Result<Self> {
-        let key = KeyPair::generate().context("生成根 CA 密钥")?;
-        let mut params = CertificateParams::default();
-        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        let mut name = DistinguishedName::new();
-        name.push(DnType::CommonName, default_ca_common_name());
-        name.push(DnType::OrganizationName, "zniff");
-        params.distinguished_name = name;
-        params.key_usages = vec![
-            KeyUsagePurpose::KeyCertSign,
-            KeyUsagePurpose::CrlSign,
-            KeyUsagePurpose::DigitalSignature,
-        ];
-        let cert = params.self_signed(&key).context("签发根 CA")?;
-        let cert_pem = cert.pem();
-        let key_pem = key.serialize_pem();
-        write_secret(&dir.join("ca.key"), key_pem.as_bytes())?;
-        fs::write(dir.join("ca.crt"), &cert_pem)?;
+        let (cert_pem, key_pem) = generate_ca_pem_pair(dir)?;
         Self::from_pem(dir.to_path_buf(), cert_pem, key_pem)
     }
 
     fn from_pem(dir: PathBuf, cert_pem: String, key_pem: String) -> Result<Self> {
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let issuer_key = KeyPair::from_pem(&key_pem).context("读取根 CA 私钥")?;
-        let issuer = Issuer::from_ca_cert_pem(&cert_pem, issuer_key).context("读取根 CA 证书")?;
-        let ca_der = ca_der_from_pem(&cert_pem)?;
-        let ca_name = extract_ca_common_name(&ca_der).unwrap_or_else(|| CA_NAME.to_string());
+        let active = build_builtin_root(&dir, &cert_pem, &key_pem)?;
         let leaf_key = KeyPair::generate().context("生成叶子证书密钥")?;
         let leaf_key_der = leaf_key.serialize_der();
         let leaf_spki_der = CertificateParams::default()
@@ -184,25 +171,84 @@ impl Ca {
             .unwrap_or_default();
         Ok(Self {
             dir,
-            ca_name,
-            issuer,
-            ca_der,
+            active: RwLock::new(active),
+            root_epoch: AtomicU64::new(0),
             leaf_key,
             leaf_key_der,
             leaf_spki_der,
             leaf_seq: AtomicU64::new(0),
-            session_storage: rustls::server::ServerSessionMemoryCache::new(64),
             leaves: Mutex::new(HashMap::new()),
             custom_certs: Mutex::new(Vec::new()),
         })
     }
 
-    pub fn ca_name(&self) -> &str {
-        &self.ca_name
+    pub fn ca_name(&self) -> String {
+        self.active
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .ca_name
+            .clone()
     }
 
     pub fn cert_path(&self) -> PathBuf {
-        self.dir.join("ca.crt")
+        self.active
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .cert_path
+            .clone()
+    }
+
+    pub fn is_external(&self) -> bool {
+        self.active
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .external
+            .is_some()
+    }
+
+    pub fn external_source(&self) -> Option<ExternalCaSummary> {
+        self.active
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .external
+            .clone()
+    }
+
+    /// Hot-switches leaf signing to a verified external CA, writing only its public cert to disk.
+    pub fn switch_to_external(&self, loaded: crate::external_ca::LoadedExternalCa) -> Result<()> {
+        let cert_path = self.dir.join("external-ca.crt");
+        fs::write(&cert_path, loaded.cert_only_pem.as_bytes())
+            .with_context(|| format!("写入外部证书公开文件 {}", cert_path.display()))?;
+        let next = ActiveRoot {
+            ca_name: loaded.summary.ca_name.clone(),
+            cert_path,
+            issuer: loaded.issuer,
+            ca_der: loaded.ca_der,
+            session_storage: rustls::server::ServerSessionMemoryCache::new(64),
+            external: Some(loaded.summary),
+        };
+        self.replace_active_root(next);
+        Ok(())
+    }
+
+    /// Hot-switches leaf signing back to zniff's own built-in CA.
+    pub fn switch_to_builtin(&self) -> Result<()> {
+        let next = load_or_generate_builtin_root(&self.dir)?;
+        self.replace_active_root(next);
+        let _ = fs::remove_file(self.dir.join("external-ca.crt"));
+        Ok(())
+    }
+
+    fn replace_active_root(&self, next: ActiveRoot) {
+        {
+            let mut guard = self.active.write().unwrap_or_else(|err| err.into_inner());
+            *guard = next;
+            self.root_epoch.fetch_add(1, Ordering::Release);
+        }
+        self.leaves
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clear();
     }
 
     pub fn trust_status(&self) -> CaStatus {
@@ -212,9 +258,15 @@ impl Ca {
     /// Returns Base64-encoded SHA-256 SubjectPublicKeyInfo digests for the root CA
     /// and shared leaf keypair, suitable for Chromium's `--ignore-certificate-errors-spki-list`.
     pub fn spki_hashes_base64(&self) -> Vec<String> {
+        let ca_der = self
+            .active
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .ca_der
+            .clone();
         let mut hashes = Vec::new();
         for spki in [
-            extract_spki_der(self.ca_der.as_ref()),
+            extract_spki_der(ca_der.as_ref()),
             (!self.leaf_spki_der.is_empty()).then_some(self.leaf_spki_der.as_slice()),
         ]
         .into_iter()
@@ -231,7 +283,11 @@ impl Ca {
 
     #[cfg(test)]
     pub fn cert_der(&self) -> CertificateDer<'static> {
-        self.ca_der.clone()
+        self.active
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .ca_der
+            .clone()
     }
 
     #[cfg(test)]
@@ -262,7 +318,13 @@ impl Ca {
                 .with_no_client_auth()
                 .with_single_cert(certs, key)
                 .with_context(|| format!("组装自定义证书 {}", cert_path.display()))?;
-            config.session_storage = Arc::clone(&self.session_storage);
+            config.session_storage = Arc::clone(
+                &self
+                    .active
+                    .read()
+                    .unwrap_or_else(|err| err.into_inner())
+                    .session_storage,
+            );
             config.alpn_protocols = vec![alpn.to_vec()];
             return Ok(Arc::new(config));
         }
@@ -412,8 +474,13 @@ impl Ca {
                 return Ok(select_leaf_alpn(entry, alpn));
             }
         }
+        let epoch = self.root_epoch.load(Ordering::Acquire);
         let seq = self.leaf_seq.fetch_add(1, Ordering::Relaxed) + 1;
         let built = self.sign_leaf_entry(target, seq)?;
+        let out = select_leaf_alpn(&built, alpn);
+        if self.root_epoch.load(Ordering::Acquire) != epoch {
+            return Ok(out);
+        }
         let mut guard = self.leaves.lock().unwrap_or_else(|err| err.into_inner());
         if let Some(existing) = guard.get_mut(target) {
             existing.used_seq = self.leaf_seq.fetch_add(1, Ordering::Relaxed) + 1;
@@ -430,7 +497,6 @@ impl Ca {
                 break;
             }
         }
-        let out = select_leaf_alpn(&built, alpn);
         guard.insert(target.to_string(), built);
         Ok(out)
     }
@@ -451,16 +517,18 @@ impl Ca {
         params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
         params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
         params.use_authority_key_identifier_extension = true;
+        let active = self.active.read().unwrap_or_else(|err| err.into_inner());
         let cert = params
-            .signed_by(&self.leaf_key, &self.issuer)
+            .signed_by(&self.leaf_key, &active.issuer)
             .context("签发叶子证书")?;
         let leaf_der = CertificateDer::from(cert.der().to_vec());
         let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(self.leaf_key_der.clone()));
         let mut base = ServerConfig::builder()
             .with_no_client_auth()
-            .with_single_cert(vec![leaf_der, self.ca_der.clone()], key_der)
+            .with_single_cert(vec![leaf_der, active.ca_der.clone()], key_der)
             .context("组装叶子证书")?;
-        base.session_storage = Arc::clone(&self.session_storage);
+        base.session_storage = Arc::clone(&active.session_storage);
+        drop(active);
         let mut h1_cfg = base.clone();
         h1_cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
         let mut h2_cfg = base.clone();
@@ -472,6 +540,55 @@ impl Ca {
             used_seq,
         })
     }
+}
+
+fn generate_ca_pem_pair(dir: &Path) -> Result<(String, String)> {
+    let key = KeyPair::generate().context("生成根 CA 密钥")?;
+    let mut params = CertificateParams::default();
+    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    let mut name = DistinguishedName::new();
+    name.push(DnType::CommonName, default_ca_common_name());
+    name.push(DnType::OrganizationName, "zniff");
+    params.distinguished_name = name;
+    params.key_usages = vec![
+        KeyUsagePurpose::KeyCertSign,
+        KeyUsagePurpose::CrlSign,
+        KeyUsagePurpose::DigitalSignature,
+    ];
+    let cert = params.self_signed(&key).context("签发根 CA")?;
+    let cert_pem = cert.pem();
+    let key_pem = key.serialize_pem();
+    write_secret(&dir.join("ca.key"), key_pem.as_bytes())?;
+    fs::write(dir.join("ca.crt"), &cert_pem)?;
+    Ok((cert_pem, key_pem))
+}
+
+fn build_builtin_root(dir: &Path, cert_pem: &str, key_pem: &str) -> Result<ActiveRoot> {
+    let issuer_key = KeyPair::from_pem(key_pem).context("读取根 CA 私钥")?;
+    let issuer = Issuer::from_ca_cert_pem(cert_pem, issuer_key).context("读取根 CA 证书")?;
+    let ca_der = ca_der_from_pem(cert_pem)?;
+    let ca_name = extract_ca_common_name(&ca_der).unwrap_or_else(|| CA_NAME.to_string());
+    Ok(ActiveRoot {
+        ca_name,
+        cert_path: dir.join("ca.crt"),
+        issuer,
+        ca_der,
+        session_storage: rustls::server::ServerSessionMemoryCache::new(64),
+        external: None,
+    })
+}
+
+fn load_or_generate_builtin_root(dir: &Path) -> Result<ActiveRoot> {
+    fs::create_dir_all(dir).with_context(|| format!("创建 {}", dir.display()))?;
+    let cert_path = dir.join("ca.crt");
+    let key_path = dir.join("ca.key");
+    if cert_path.exists() && key_path.exists() {
+        let cert_pem = fs::read_to_string(&cert_path)?;
+        let key_pem = fs::read_to_string(&key_path)?;
+        return build_builtin_root(dir, &cert_pem, &key_pem);
+    }
+    let (cert_pem, key_pem) = generate_ca_pem_pair(dir)?;
+    build_builtin_root(dir, &cert_pem, &key_pem)
 }
 
 fn select_leaf_alpn(entry: &CachedLeaf, alpn: &[u8]) -> Arc<ServerConfig> {
@@ -566,7 +683,7 @@ fn detect_short_hostname() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-fn read_der_tlv(input: &[u8]) -> Option<(u8, &[u8], &[u8])> {
+pub(crate) fn read_der_tlv(input: &[u8]) -> Option<(u8, &[u8], &[u8])> {
     let (&tag, rest) = input.split_first()?;
     let (&first_len, rest) = rest.split_first()?;
     let (len, rest) = if first_len & 0x80 == 0 {
@@ -588,7 +705,7 @@ fn read_der_tlv(input: &[u8]) -> Option<(u8, &[u8], &[u8])> {
     Some((tag, &rest[..len], &rest[len..]))
 }
 
-fn extract_spki_der(cert_der: &[u8]) -> Option<&[u8]> {
+pub(crate) fn extract_spki_der(cert_der: &[u8]) -> Option<&[u8]> {
     let (cert_tag, cert_body, _) = read_der_tlv(cert_der)?;
     if cert_tag != 0x30 {
         return None;
@@ -613,7 +730,7 @@ fn extract_spki_der(cert_der: &[u8]) -> Option<&[u8]> {
     Some(&spki_start[..spki_start.len() - after_spki.len()])
 }
 
-fn extract_ca_common_name(ca_der: &CertificateDer<'_>) -> Option<String> {
+pub(crate) fn extract_ca_common_name(ca_der: &CertificateDer<'_>) -> Option<String> {
     let (cert_tag, cert_body, _) = read_der_tlv(ca_der.as_ref())?;
     if cert_tag != 0x30 {
         return None;
@@ -690,7 +807,7 @@ fn load_custom_cert_pair(
     Ok((certs, key))
 }
 
-fn certs_from_pem(pem: &str) -> Result<Vec<CertificateDer<'static>>> {
+pub(crate) fn certs_from_pem(pem: &str) -> Result<Vec<CertificateDer<'static>>> {
     let mut certs = Vec::new();
     let mut current = String::new();
     let mut inside = false;
@@ -713,7 +830,7 @@ fn certs_from_pem(pem: &str) -> Result<Vec<CertificateDer<'static>>> {
     Ok(certs)
 }
 
-fn key_from_pem(pem: &str) -> Result<PrivateKeyDer<'static>> {
+pub(crate) fn key_from_pem(pem: &str) -> Result<PrivateKeyDer<'static>> {
     let mut current = String::new();
     let mut kind: Option<&str> = None;
     let mut has_encrypted_pkcs8 = false;
@@ -828,11 +945,14 @@ pub fn install(ca: &Ca) -> Result<String> {
 }
 
 pub fn remove(ca: &Ca) -> Result<String> {
+    if ca.is_external() {
+        anyhow::bail!("当前正在复用外部根证书，不能在此移除系统里的外部证书，请先切回 zniff 证书");
+    }
     let name = ca.ca_name();
     let _ = ca.cert_path();
     #[cfg(target_os = "macos")]
     {
-        let current = delete_named_cert(name)?;
+        let current = delete_named_cert(&name)?;
         let default_ca = if name != CA_NAME {
             delete_named_cert(CA_NAME)?
         } else {
@@ -847,11 +967,11 @@ pub fn remove(ca: &Ca) -> Result<String> {
     }
     #[cfg(target_os = "windows")]
     {
-        remove_windows(name)
+        remove_windows(&name)
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        remove_linux(name)
+        remove_linux(&name)
     }
 }
 
@@ -878,10 +998,52 @@ pub fn classify_trust_status(installed: bool, verified: bool) -> CaStatus {
     }
 }
 
+/// Checks whether a certificate PEM file and name are currently trusted by this OS.
+pub(crate) fn is_cert_file_trusted(cert_path: &Path, name: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let verified_by_file = cert_path
+            .to_str()
+            .map(|p| {
+                std::process::Command::new("security")
+                    .args(macos_verify_cert_args(p))
+                    .output()
+                    .map(|output| output.status.success())
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+        verified_by_file || (is_installed_anywhere_named(name) && macos_has_trust_root(name))
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = cert_path;
+        windows_has_cert(name) || windows_has_system_cert(name)
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        if is_installed_named(name) {
+            return true;
+        }
+        std::process::Command::new("openssl")
+            .arg("verify")
+            .arg(cert_path)
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    }
+}
+
 /// Best-effort: checks whether the certificate is installed and trusted in the user store.
 pub fn trust_status(ca: &Ca) -> CaStatus {
     let name = ca.ca_name();
-    let installed = is_installed_named(name);
+    if ca.is_external() {
+        let cert_path = ca.cert_path();
+        if is_cert_file_trusted(&cert_path, &name) {
+            return CaStatus::Trusted;
+        }
+        return classify_trust_status(is_installed_anywhere_named(&name), false);
+    }
+    let installed = is_installed_named(&name);
     if !installed {
         return CaStatus::NotInstalled;
     }
@@ -898,13 +1060,32 @@ pub fn trust_status(ca: &Ca) -> CaStatus {
                     .unwrap_or(false)
             })
             .unwrap_or(false)
-            || macos_has_trust_root(name);
+            || macos_has_trust_root(&name);
         classify_trust_status(installed, verified)
     }
     #[cfg(not(target_os = "macos"))]
     {
         let _ = ca;
         classify_trust_status(installed, installed)
+    }
+}
+
+fn is_installed_anywhere_named(name: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("security")
+            .args(["find-certificate", "-c", name])
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        windows_has_cert(name) || windows_has_system_cert(name)
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        is_installed_named(name)
     }
 }
 
@@ -937,6 +1118,15 @@ fn is_installed_named(name: &str) -> bool {
 fn windows_has_cert(name: &str) -> bool {
     std::process::Command::new("certutil")
         .args(windows_certutil_verify_args(name))
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_has_system_cert(name: &str) -> bool {
+    std::process::Command::new("certutil")
+        .args(["-verifystore", "Root", name])
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
@@ -1122,6 +1312,8 @@ fn install_linux(ca: &Ca) -> Result<String> {
     let _ = std::process::Command::new("mkdir")
         .args(["-p", &format!("{home}/.pki/nssdb")])
         .status();
+    let ca_name = ca.ca_name();
+    let cert_path = ca.cert_path();
     let status = std::process::Command::new("certutil")
         .args([
             "-d",
@@ -1130,9 +1322,9 @@ fn install_linux(ca: &Ca) -> Result<String> {
             "-t",
             "C,,",
             "-n",
-            ca.ca_name(),
+            &ca_name,
             "-i",
-            ca.cert_path().to_str().unwrap_or("ca.crt"),
+            cert_path.to_str().unwrap_or("ca.crt"),
         ])
         .status()
         .context("运行 certutil（NSS）")?;
@@ -2012,7 +2204,9 @@ Cert 0: zniff CA
         let mut params = CertificateParams::default();
         params.is_ca = IsCa::NoCa;
         params.subject_alt_names = vec![san_for("api.vicanso.dev").unwrap()];
-        let signed = params.signed_by(&ca.leaf_key, &ca.issuer).unwrap();
+        let signed = params
+            .signed_by(&ca.leaf_key, &ca.active.read().unwrap().issuer)
+            .unwrap();
         let leaf_spki = extract_spki_der(signed.der().as_ref()).expect("leaf SPKI");
         let leaf_digest = ring::digest::digest(&ring::digest::SHA256, leaf_spki);
         let expected = crate::session::base64_encode(leaf_digest.as_ref());

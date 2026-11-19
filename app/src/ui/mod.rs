@@ -50,8 +50,8 @@ pub(crate) use crate::session::Direction;
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(unused_imports)]
 pub(crate) use crate::{
-    bypass, client_hello, decompress, har, launcher, mcp, mock_gen, relay, share, sysproxy,
-    updater, web, ws,
+    bypass, client_hello, decompress, external_ca, har, launcher, mcp, mock_gen, relay, share,
+    sysproxy, updater, web, ws,
 };
 #[allow(unused_imports)]
 pub(crate) use crate::{

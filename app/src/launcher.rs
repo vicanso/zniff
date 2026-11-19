@@ -1028,16 +1028,19 @@ emulator-5556\tdevice
 
         write_test_file(&override_file, "#!/bin/sh\n", true);
         write_test_file(&override_dir_bin, "#!/bin/sh\n", true);
-        write_test_file(&path_non_exec_bin, "not executable", false);
         write_test_file(&path_real_target, "#!/bin/sh\n", true);
         #[cfg(unix)]
         {
+            write_test_file(&path_non_exec_bin, "not executable", false);
             fs::create_dir_all(&path_exec_dir).expect("create symlink parent");
             std::os::unix::fs::symlink(&path_real_target, &path_exec_bin)
                 .expect("create adb symlink");
         }
         #[cfg(not(unix))]
-        write_test_file(&path_exec_bin, "exe", true);
+        {
+            fs::create_dir_all(&path_non_exec_bin).expect("create blocking dir");
+            write_test_file(&path_exec_bin, "exe", true);
+        }
         write_test_file(&android_home_bin, "#!/bin/sh\n", true);
         write_test_file(&sdk_root_bin, "#!/bin/sh\n", true);
         write_test_file(&extra_bin, "#!/bin/sh\n", true);
