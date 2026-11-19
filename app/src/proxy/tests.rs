@@ -3104,7 +3104,7 @@ async fn h2_sender_cache_reuses_the_origin_connection() {
     let second = h2_get(&ca, proxy_addr, origin_addr, "/b").await;
     assert_eq!(second.0, StatusCode::OK);
     assert_eq!(&second.1[..], b"h2-/b");
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    tokio::task::yield_now().await;
     assert_eq!(accepts.load(std::sync::atomic::Ordering::SeqCst), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -3130,7 +3130,7 @@ async fn h2_sender_cache_misses_after_idle() {
     let second = h2_get(&ca, proxy_addr, origin_addr, "/b").await;
     assert_eq!(second.0, StatusCode::OK);
     assert_eq!(&second.1[..], b"h2-/b");
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    tokio::task::yield_now().await;
     assert_eq!(accepts.load(std::sync::atomic::Ordering::SeqCst), 2);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -3159,7 +3159,7 @@ async fn h2_lane_redials_on_the_same_client_connection() {
     let second = h2_send(&mut sender, "/b").await;
     assert_eq!(second.0, StatusCode::OK);
     assert_eq!(&second.1[..], b"h2-/b");
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    tokio::task::yield_now().await;
     assert_eq!(accepts.load(std::sync::atomic::Ordering::SeqCst), 2);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -3183,7 +3183,7 @@ async fn https_map_local_answers_from_the_file() {
         &leaf_key,
         vec![b"http/1.1".to_vec()],
     );
-    let (origin_addr, seen) = spawn_tls_sink(server);
+    let (origin_addr, seen_rx) = spawn_tls_sink(server);
     let proxy = listen().await.unwrap();
     let proxy_addr = proxy.local_addr().unwrap();
     serve_one(proxy, hub.clone());
@@ -3192,14 +3192,15 @@ async fn https_map_local_answers_from_the_file() {
         .await
         .unwrap();
     let resp = read_h1_message(&mut tls).await;
+    drop(tls);
     let text = String::from_utf8_lossy(&resp);
     assert!(text.contains("200"), "{text}");
     assert!(text.contains("from-file"), "{text}");
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(
-        seen.lock().unwrap().is_empty(),
-        "map local 仍把请求送到了源站"
-    );
+    let seen = timeout(Duration::from_secs(3), seen_rx)
+        .await
+        .expect("timed out waiting for sink close")
+        .unwrap();
+    assert!(seen.is_empty(), "map local 仍把请求送到了源站");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -3629,10 +3630,14 @@ fn origin_tls_config(
     server
 }
 
-fn spawn_tls_sink(server: rustls::ServerConfig) -> (std::net::SocketAddr, Arc<Mutex<Vec<u8>>>) {
+fn spawn_tls_sink(
+    server: rustls::ServerConfig,
+) -> (
+    std::net::SocketAddr,
+    tokio::sync::oneshot::Receiver<Vec<u8>>,
+) {
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server));
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let seen_task = seen.clone();
+    let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
     let origin = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     origin.set_nonblocking(true).unwrap();
     let addr = origin.local_addr().unwrap();
@@ -3644,12 +3649,11 @@ fn spawn_tls_sink(server: rustls::ServerConfig) -> (std::net::SocketAddr, Arc<Mu
         let Ok(mut tls) = acceptor.accept(sock).await else {
             return;
         };
-        let mut buf = vec![0u8; 1024];
-        if let Ok(Ok(n)) = timeout(Duration::from_millis(250), tls.read(&mut buf)).await {
-            seen_task.lock().unwrap().extend_from_slice(&buf[..n]);
-        }
+        let mut seen = Vec::new();
+        let _ = timeout(Duration::from_secs(3), tls.read_to_end(&mut seen)).await;
+        let _ = seen_tx.send(seen);
     });
-    (addr, seen)
+    (addr, seen_rx)
 }
 
 async fn connect_mitm(
@@ -4046,6 +4050,18 @@ async fn status_only_map_local_query_rewrite_and_composed_request_work() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+async fn wait_paused_len(hub: &Hub, want: usize) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while hub.paused_queue_len() < want && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    assert_eq!(
+        hub.paused_queue_len(),
+        want,
+        "timed out waiting for paused_queue_len == {want}"
+    );
+}
+
 #[tokio::test]
 async fn breakpoint_fifo_queue_and_local_app_cache_work() {
     let dir = std::env::temp_dir().join(format!("zniff-break-q-{}", std::process::id()));
@@ -4055,17 +4071,13 @@ async fn breakpoint_fifo_queue_and_local_app_cache_work() {
 
     let h1 = hub.clone();
     let w1 = tokio::spawn(async move { h1.wait_break(10, BreakSide::Request).await });
-    tokio::time::sleep(Duration::from_millis(15)).await;
+    wait_paused_len(&hub, 1).await;
     let h2 = hub.clone();
     let w2 = tokio::spawn(async move { h2.wait_break(20, BreakSide::Response).await });
+    wait_paused_len(&hub, 2).await;
     let h3 = hub.clone();
     let w3 = tokio::spawn(async move { h3.wait_break(30, BreakSide::Request).await });
-
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while hub.paused_queue_len() < 3 && Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    assert_eq!(hub.paused_queue_len(), 3);
+    wait_paused_len(&hub, 3).await;
     assert_eq!(hub.paused(), Some((10, BreakSide::Request)));
 
     assert!(hub.resolve_break(BreakDecision {
@@ -4103,17 +4115,13 @@ async fn promote_break_selects_that_slot_without_releasing_the_others() {
 
     let h1 = hub.clone();
     let w1 = tokio::spawn(async move { h1.wait_break(10, BreakSide::Request).await });
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    wait_paused_len(&hub, 1).await;
     let h2 = hub.clone();
     let w2 = tokio::spawn(async move { h2.wait_break(20, BreakSide::Response).await });
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    wait_paused_len(&hub, 2).await;
     let h3 = hub.clone();
     let mut w3 = tokio::spawn(async move { h3.wait_break(30, BreakSide::Request).await });
-
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while hub.paused_queue_len() < 3 && Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    wait_paused_len(&hub, 3).await;
     assert_eq!(
         hub.paused_queue(),
         vec![
@@ -4137,13 +4145,14 @@ async fn promote_break_selects_that_slot_without_releasing_the_others() {
     assert!(hub.promote_break(30));
     assert_eq!(hub.paused_queue()[0], (30, BreakSide::Request));
 
-    let mut w1 = w1;
-    let mut w2 = w2;
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
     assert!(
-        timeout(Duration::from_millis(80), &mut w1).await.is_err(),
+        !w1.is_finished(),
         "promoting another slot released the first"
     );
-    assert!(timeout(Duration::from_millis(80), &mut w2).await.is_err());
+    assert!(!w2.is_finished());
 
     assert!(hub.resolve_break(BreakDecision {
         drop: true,
@@ -4805,6 +4814,9 @@ async fn https_h1_redials_on_the_same_client_connection_when_origin_closes_idle(
     let origin_addr = origin.local_addr().unwrap();
     let accepts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let accepts_bg = accepts.clone();
+    let (first_closed_tx, first_closed_rx) = tokio::sync::oneshot::channel::<()>();
+    let first_closed_tx = Arc::new(Mutex::new(Some(first_closed_tx)));
+    let first_closed_bg = first_closed_tx.clone();
     tokio::spawn(async move {
         loop {
             let Ok((sock, _)) = origin.accept().await else {
@@ -4812,6 +4824,7 @@ async fn https_h1_redials_on_the_same_client_connection_when_origin_closes_idle(
             };
             let n = accepts_bg.fetch_add(1, Ordering::SeqCst) + 1;
             let acceptor = acceptor.clone();
+            let closed_tx = first_closed_bg.clone();
             tokio::spawn(async move {
                 let mut tls = acceptor.accept(sock).await.unwrap();
                 let mut buf = vec![0u8; 4096];
@@ -4823,6 +4836,12 @@ async fn https_h1_redials_on_the_same_client_connection_when_origin_closes_idle(
                 );
                 tls.write_all(resp.as_bytes()).await.unwrap();
                 tls.shutdown().await.ok();
+                drop(tls);
+                if n == 1
+                    && let Some(tx) = closed_tx.lock().unwrap().take()
+                {
+                    let _ = tx.send(());
+                }
             });
         }
     });
@@ -4868,8 +4887,11 @@ async fn https_h1_redials_on_the_same_client_connection_when_origin_closes_idle(
     let body1 = res1.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(&body1[..], b"h1-origin-1");
 
-    // Wait briefly for the first origin connection to close on EOF
-    tokio::time::sleep(Duration::from_millis(40)).await;
+    // Wait deterministically for the first origin connection handler to close cleanly
+    timeout(Duration::from_secs(2), first_closed_rx)
+        .await
+        .expect("first origin close timed out")
+        .unwrap();
 
     // Second request reuses the SAME client-to-proxy TLS connection; proxy redials origin
     sender.ready().await.unwrap();
@@ -5115,7 +5137,14 @@ async fn head_and_204_without_content_length_do_not_hang_keep_alive_and_replay_s
     assert!(r2.is_empty());
 
     // 3. Follow-up GET reuses the same parked origin TCP socket (conn-1)
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    let pool_deadline = Instant::now() + Duration::from_secs(2);
+    while hub.pool.lock().await.is_empty() && Instant::now() < pool_deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(
+        !hub.pool.lock().await.is_empty(),
+        "204 response should have parked origin socket in HTTP/1.1 pool"
+    );
     let mut s3 = TcpStream::connect(proxy_addr).await.unwrap();
     s3.write_all(
             format!("GET http://{origin_addr}/after HTTP/1.1\r\nHost: {origin_addr}\r\nConnection: close\r\n\r\n")

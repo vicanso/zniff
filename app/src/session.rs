@@ -3652,7 +3652,7 @@ mod tests {
         session.set_started(edge, now);
         session.restore_imported(edge, None, Some(now + SLOW_AFTER), None, None);
         let young = session.open(draft("young.test"));
-        session.set_started(young, crate::clock::now() - Duration::from_millis(200));
+        session.set_started(young, crate::clock::now());
         let _ = young;
         let pending = session.open(draft("pending.test"));
         session.set_started(pending, crate::clock::now() - Duration::from_secs(2));
@@ -3660,6 +3660,7 @@ mod tests {
         assert_eq!(session.ids_matching("slow:"), vec![slow, edge, pending]);
         assert_eq!(session.ids_matching("SLOW: slow.test"), vec![slow]);
         assert!(session.ids_matching("slow: fast.test").is_empty());
+        assert!(!is_slow(now, None, now + Duration::from_millis(200),));
         assert!(!is_slow(
             now,
             Some(now + Duration::from_millis(999)),

@@ -392,6 +392,11 @@ impl Hub {
         self.state_tx.subscribe()
     }
 
+    #[cfg(test)]
+    pub fn state_receiver_count(&self) -> usize {
+        self.state_tx.receiver_count()
+    }
+
     pub(crate) fn touch(&self) {
         self.generation.fetch_add(1, Ordering::Relaxed);
         self.state_tx.send_modify(|v| *v = v.wrapping_add(1));

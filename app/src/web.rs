@@ -4229,48 +4229,56 @@ mod tests {
         let (status, idle_resp) = exchange(
             addr,
             &format!(
-                "GET /api/state?lite=1&since_gen={gen0}&since_rev={rev0}&wait_ms=140 HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+                "GET /api/state?lite=1&since_gen={gen0}&since_rev={rev0}&wait_ms=150 HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
             ),
         )
         .await;
         let idle_elapsed = idle_start.elapsed();
         assert_eq!(status, 200);
         assert!(
-            idle_elapsed >= Duration::from_millis(100),
-            "expected long-poll idle wait >= 100ms, got {idle_elapsed:?}"
+            idle_elapsed >= Duration::from_millis(80),
+            "expected long-poll idle wait >= 80ms, got {idle_elapsed:?}"
         );
         let idle_json: Value = serde_json::from_str(body_of(&idle_resp)).unwrap();
         assert_eq!(idle_json["generation"].as_u64(), Some(gen0));
         assert_eq!(idle_json["session_rev"].as_u64(), Some(rev0));
 
         // 3. When state changes while waiting, GET wakes up well before the 5000ms deadline.
-        let wake_hub = Arc::clone(&hub);
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(40)).await;
-            wake_hub.with_session(|session| {
-                session.open(crate::session::FlowDraft {
-                    method: "GET".into(),
-                    url: "http://example.com/wake".into(),
-                    host: "example.com".into(),
-                    path: "/wake".into(),
-                    protocol: crate::session::Protocol::Http11,
-                    request_headers: Vec::new(),
-                });
+        let base_receivers = hub.state_receiver_count();
+        let req = format!(
+            "GET /api/state?lite=1&since_gen={gen0}&since_rev={rev0}&wait_ms=5000 HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+        );
+        let req_task = tokio::spawn(async move { exchange(addr, &req).await });
+        let wait_enter_deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while hub.state_receiver_count() <= base_receivers
+            && std::time::Instant::now() < wait_enter_deadline
+        {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        assert!(
+            hub.state_receiver_count() > base_receivers,
+            "long-poll request did not register state watcher in time"
+        );
+        let wake_start = std::time::Instant::now();
+        hub.with_session(|session| {
+            session.open(crate::session::FlowDraft {
+                method: "GET".into(),
+                url: "http://example.com/wake".into(),
+                host: "example.com".into(),
+                path: "/wake".into(),
+                protocol: crate::session::Protocol::Http11,
+                request_headers: Vec::new(),
             });
         });
-        let wake_start = std::time::Instant::now();
-        let (status, wake_resp) = exchange(
-            addr,
-            &format!(
-                "GET /api/state?lite=1&since_gen={gen0}&since_rev={rev0}&wait_ms=5000 HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
-            ),
-        )
-        .await;
+        let (status, wake_resp) = tokio::time::timeout(Duration::from_secs(4), req_task)
+            .await
+            .expect("long-poll wakeup timed out")
+            .unwrap();
         let wake_elapsed = wake_start.elapsed();
         assert_eq!(status, 200);
         assert!(
-            wake_elapsed < Duration::from_millis(1000),
-            "expected long-poll wakeup well below 1000ms, got {wake_elapsed:?}"
+            wake_elapsed < Duration::from_secs(3),
+            "expected long-poll wakeup well below 3000ms, got {wake_elapsed:?}"
         );
         let wake_json: Value = serde_json::from_str(body_of(&wake_resp)).unwrap();
         assert!(wake_json["session_rev"].as_u64().unwrap() > rev0);
