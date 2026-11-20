@@ -59,7 +59,7 @@ run: dev
 # http://127.0.0.1:8080. The page is the shared App in app/.nsh/web.
 # `make web-ui` rebuilds that directory with nsh $(NSH_VERSION). Extra flags
 # go in ARGS, for example make web ARGS="--web-port 8090".
-NSH_VERSION := 0.6.0
+NSH_VERSION := 0.6.1
 WEB_DIR := $(CURDIR)/app/.nsh/web
 NSH_BIN ?= $(shell \
 	if [ -x "$(HOME)/.nsh/v$(NSH_VERSION)/nsh/bin/nsh" ]; then printf '%s' "$(HOME)/.nsh/v$(NSH_VERSION)/nsh/bin/nsh"; \

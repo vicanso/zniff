@@ -38,7 +38,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && rustup target add wasm32-unknown-unknown
 
-ARG NSH_VERSION=v0.6.0
+ARG NSH_VERSION=v0.6.1
 RUN set -eux; \
     case "$(uname -m)" in \
       x86_64|amd64) nsh_arch="linux-x86_64" ;; \
