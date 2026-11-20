@@ -34,6 +34,9 @@ jobs:
             os: macos-latest
           - name: windows
             os: windows-latest
+          - name: windows-arm64
+            os: windows-11-arm
+            target: aarch64-pc-windows-msvc
           - name: linux
             os: ubuntu-24.04
     steps:
@@ -45,10 +48,46 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends pkg-config libgtk-4-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+      - name: Ensure Clang for ring (Windows ARM64)
+        if: matrix.os == 'windows-11-arm'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command clang -ErrorAction SilentlyContinue)) {
+            $candidates = @("C:\Program Files\LLVM\bin")
+            $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+            if (Test-Path $vswhere) {
+              $vsPath = & $vswhere -latest -products * -property installationPath
+              if ($vsPath) {
+                $candidates += (Join-Path $vsPath "VC\Tools\Llvm\ARM64\bin")
+                $candidates += (Join-Path $vsPath "VC\Tools\Llvm\x64\bin")
+              }
+            }
+            $found = $candidates | Where-Object { Test-Path (Join-Path $_ "clang.exe") } | Select-Object -First 1
+            if ($found) {
+              Add-Content -Path $env:GITHUB_PATH -Value $found
+              $env:PATH = "$found;$env:PATH"
+            } else {
+              winget install --id LLVM.LLVM -e --silent --accept-package-agreements --accept-source-agreements
+              $llvmBin = "C:\Program Files\LLVM\bin"
+              if (-not (Test-Path (Join-Path $llvmBin "clang.exe"))) {
+                choco install llvm -y --no-progress
+              }
+              Add-Content -Path $env:GITHUB_PATH -Value $llvmBin
+              $env:PATH = "$llvmBin;$env:PATH"
+            }
+          }
+          clang --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt, clippy
+      - name: Ensure target
+        if: matrix.target != ''
+        shell: pwsh
+        run: |
+          rustup target add ${{ matrix.target }}
+          Add-Content -Path $env:GITHUB_ENV -Value "CARGO_BUILD_TARGET=${{ matrix.target }}"
       - name: rust cache
         uses: Swatinem/rust-cache@v2
         with:

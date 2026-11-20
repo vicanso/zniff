@@ -48,7 +48,7 @@ https://github.com/user-attachments/assets/15117c1d-50a0-4578-8201-a305fb0d12a3
 ### 1. Install
 
 **macOS, Linux & Windows**
-Download pre-built packages from [GitHub Releases](https://github.com/vicanso/zniff/releases): signed `.dmg` for macOS (Apple Silicon / Intel), `.tar.gz` for Linux (x86_64 / aarch64) and Windows (x86_64, contains `zniff.exe`). On Linux, run the bundled `install-linux.sh` from the unpacked tarball for a user-level install (launcher entry and autostart; `--no-autostart`, `--uninstall`, `--tag vX.Y.Z`). Or build from source:
+Download pre-built packages from [GitHub Releases](https://github.com/vicanso/zniff/releases): signed `.dmg` for macOS (Apple Silicon / Intel), `.tar.gz` for Linux (x86_64 / aarch64) and Windows (x86_64 / aarch64, contains `zniff.exe`). On Linux, run the bundled `install-linux.sh` from the unpacked tarball for a user-level install (launcher entry and autostart; `--no-autostart`, `--uninstall`, `--tag vX.Y.Z`). Or build from source:
 ```bash
 cargo install --git https://github.com/vicanso/zniff
 # Or clone and package macOS .app:

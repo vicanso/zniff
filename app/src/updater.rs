@@ -56,35 +56,20 @@ pub const fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-#[cfg(target_os = "macos")]
-pub fn asset_name() -> Option<&'static str> {
-    match env::consts::ARCH {
-        "aarch64" => Some("zniff-aarch64.dmg"),
-        "x86_64" => Some("zniff-x86_64.dmg"),
+fn asset_name_for(os: &str, arch: &str) -> Option<&'static str> {
+    match (os, arch) {
+        ("macos", "aarch64") => Some("zniff-aarch64.dmg"),
+        ("macos", "x86_64") => Some("zniff-x86_64.dmg"),
+        ("linux", "x86_64") => Some("zniff-linux-x86_64.tar.gz"),
+        ("linux", "aarch64") => Some("zniff-linux-aarch64.tar.gz"),
+        ("windows", "x86_64") => Some("zniff-windows-x86_64.tar.gz"),
+        ("windows", "aarch64") => Some("zniff-windows-aarch64.tar.gz"),
         _ => None,
     }
 }
 
-#[cfg(target_os = "linux")]
 pub fn asset_name() -> Option<&'static str> {
-    match env::consts::ARCH {
-        "x86_64" => Some("zniff-linux-x86_64.tar.gz"),
-        "aarch64" => Some("zniff-linux-aarch64.tar.gz"),
-        _ => None,
-    }
-}
-
-#[cfg(target_os = "windows")]
-pub fn asset_name() -> Option<&'static str> {
-    match env::consts::ARCH {
-        "x86_64" => Some("zniff-windows-x86_64.tar.gz"),
-        _ => None,
-    }
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-pub fn asset_name() -> Option<&'static str> {
-    None
+    asset_name_for(env::consts::OS, env::consts::ARCH)
 }
 
 fn release_download_url(tag: &str, name: &str) -> String {
@@ -1661,6 +1646,32 @@ mod tests {
             release_download_url(tag, name),
             "https://github.com/vicanso/zniff/releases/download/v0.3.2/zniff-aarch64.dmg"
         );
+    }
+
+    #[test]
+    fn asset_name_maps_all_supported_os_and_arch_pairs() {
+        assert_eq!(
+            asset_name_for("macos", "aarch64"),
+            Some("zniff-aarch64.dmg")
+        );
+        assert_eq!(asset_name_for("macos", "x86_64"), Some("zniff-x86_64.dmg"));
+        assert_eq!(
+            asset_name_for("linux", "x86_64"),
+            Some("zniff-linux-x86_64.tar.gz")
+        );
+        assert_eq!(
+            asset_name_for("linux", "aarch64"),
+            Some("zniff-linux-aarch64.tar.gz")
+        );
+        assert_eq!(
+            asset_name_for("windows", "x86_64"),
+            Some("zniff-windows-x86_64.tar.gz")
+        );
+        assert_eq!(
+            asset_name_for("windows", "aarch64"),
+            Some("zniff-windows-aarch64.tar.gz")
+        );
+        assert_eq!(asset_name_for("freebsd", "x86_64"), None);
     }
 
     #[test]

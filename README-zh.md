@@ -48,7 +48,7 @@ https://github.com/user-attachments/assets/15117c1d-50a0-4578-8201-a305fb0d12a3
 ### 1. 安装
 
 **macOS、Linux 与 Windows**
-从 [GitHub Releases](https://github.com/vicanso/zniff/releases) 下载预编译安装包：macOS 为已签名的 `.dmg`（Apple Silicon / Intel），Linux（x86_64 / aarch64）与 Windows（x86_64，内含 `zniff.exe`）为 `.tar.gz`。Linux 解压后可运行包内的 `install-linux.sh` 做用户级安装（启动器图标与开机自启；支持 `--no-autostart`、`--uninstall`、`--tag vX.Y.Z`）。也可通过 Cargo 从源码安装：
+从 [GitHub Releases](https://github.com/vicanso/zniff/releases) 下载预编译安装包：macOS 为已签名的 `.dmg`（Apple Silicon / Intel），Linux（x86_64 / aarch64）与 Windows（x86_64 / aarch64，内含 `zniff.exe`）为 `.tar.gz`。Linux 解压后可运行包内的 `install-linux.sh` 做用户级安装（启动器图标与开机自启；支持 `--no-autostart`、`--uninstall`、`--tag vX.Y.Z`）。也可通过 Cargo 从源码安装：
 ```bash
 cargo install --git https://github.com/vicanso/zniff
 # 或克隆仓库后打包 macOS .app：
