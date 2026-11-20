@@ -334,13 +334,82 @@ pub(crate) fn save_dialog_with_default_dir() -> nsh_core::file_dialog::SaveDialo
     }
 }
 
+/// Builds a file-open dialog leaving the initial folder unset so the OS remembers the user's
+/// last browsed directory instead of enumerating `~/Downloads` on every import.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn open_dialog_with_default_dir() -> nsh_core::file_dialog::OpenDialog {
-    let dialog = nsh_core::file_dialog::OpenDialog::files();
-    match default_save_dir() {
-        Some(dir) => dialog.directory(dir),
-        None => dialog,
+pub(crate) fn open_files_dialog() -> nsh_core::file_dialog::OpenDialog {
+    nsh_core::file_dialog::OpenDialog::files()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+const FILE_DIALOG_PAINT_YIELD_MS: u64 = 24;
+
+#[cfg(not(target_arch = "wasm32"))]
+static FILE_DIALOG_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Guard preventing overlapping native file dialogs and releasing even if a task is dropped.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct FileDialogGuard;
+
+#[cfg(not(target_arch = "wasm32"))]
+impl FileDialogGuard {
+    pub(crate) fn try_acquire() -> Option<Self> {
+        use std::sync::atomic::Ordering;
+        FILE_DIALOG_BUSY
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| Self)
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for FileDialogGuard {
+    fn drop(&mut self) {
+        FILE_DIALOG_BUSY.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Outcome of presenting a native open or save dialog after yielding one paint frame.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) enum DialogOutcome<T> {
+    Picked(T),
+    Cancelled,
+    Busy,
+    Failed(String),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn run_dialog_after_paint<T, F>(run: impl FnOnce() -> F) -> DialogOutcome<T>
+where
+    F: std::future::Future<Output = Result<Option<T>, String>>,
+{
+    let Some(_guard) = FileDialogGuard::try_acquire() else {
+        return DialogOutcome::Busy;
+    };
+    // Yield briefly so the active UI commit (menu dismissal / press release) paints before the
+    // native panel instantiates on the main thread.
+    timer(Duration::from_millis(FILE_DIALOG_PAINT_YIELD_MS)).await;
+    match run().await {
+        Ok(Some(value)) => DialogOutcome::Picked(value),
+        Ok(None) => DialogOutcome::Cancelled,
+        Err(err) => DialogOutcome::Failed(err),
+    }
+}
+
+/// Shows an open-file dialog after giving the UI a frame to finish closing menus or pressed states.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) async fn pick_paths_after_paint(
+    dialog: nsh_core::file_dialog::OpenDialog,
+) -> DialogOutcome<Vec<std::path::PathBuf>> {
+    run_dialog_after_paint(|| pick_paths(dialog)).await
+}
+
+/// Shows a save dialog after giving the UI a frame to finish closing menus or pressed states.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) async fn pick_save_path_after_paint(
+    dialog: nsh_core::file_dialog::SaveDialog,
+) -> DialogOutcome<std::path::PathBuf> {
+    run_dialog_after_paint(|| pick_save_path(dialog)).await
 }
 
 #[cfg(any(not(target_arch = "wasm32"), test))]
@@ -373,8 +442,8 @@ pub(crate) fn export_response(controls: Arc<Controls>, id: Option<u64>) {
         ));
     let body = flow.response_body;
     spawn_detached(async move {
-        match pick_save_path(dialog).await {
-            Ok(Some(path)) => {
+        match pick_save_path_after_paint(dialog).await {
+            DialogOutcome::Picked(path) => {
                 if let Err(err) = write_export_file(&path, &body) {
                     set_status(&controls, StatusMsg::SaveFailed(err.to_string()));
                     return;
@@ -383,8 +452,9 @@ pub(crate) fn export_response(controls: Arc<Controls>, id: Option<u64>) {
                 set_clipboard(text.clone());
                 set_status(&controls, StatusMsg::Saved(text));
             }
-            Ok(None) => set_status(&controls, StatusMsg::SaveCancelled),
-            Err(err) => set_status(&controls, StatusMsg::SaveFailed(err)),
+            DialogOutcome::Cancelled => set_status(&controls, StatusMsg::SaveCancelled),
+            DialogOutcome::Busy => {}
+            DialogOutcome::Failed(err) => set_status(&controls, StatusMsg::SaveFailed(err)),
         }
     });
 }

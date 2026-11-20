@@ -219,8 +219,8 @@ fn spawn_export_save(
     bytes: Vec<u8>,
 ) {
     spawn_detached(async move {
-        match pick_save_path(dialog).await {
-            Ok(Some(path)) => {
+        match pick_save_path_after_paint(dialog).await {
+            DialogOutcome::Picked(path) => {
                 if let Err(err) = write_export_file(&path, &bytes) {
                     set_status(&controls, StatusMsg::ExportFailed(err.to_string()));
                     return;
@@ -229,8 +229,9 @@ fn spawn_export_save(
                 set_clipboard(text.clone());
                 set_status(&controls, StatusMsg::Exported(text));
             }
-            Ok(None) => set_status(&controls, StatusMsg::ExportCancelled),
-            Err(err) => set_status(&controls, StatusMsg::ExportFailed(err)),
+            DialogOutcome::Cancelled => set_status(&controls, StatusMsg::ExportCancelled),
+            DialogOutcome::Busy => {}
+            DialogOutcome::Failed(err) => set_status(&controls, StatusMsg::ExportFailed(err)),
         }
     });
 }
@@ -415,8 +416,8 @@ pub(crate) fn export_mock_dir(controls: Arc<Controls>, filter: &str, rules_text:
     let secs = unix_secs_now();
     let dialog = save_dialog_with_default_dir().file_name(format!("zniff-mock-{secs}"));
     spawn_detached(async move {
-        match pick_save_path(dialog).await {
-            Ok(Some(path)) => {
+        match pick_save_path_after_paint(dialog).await {
+            DialogOutcome::Picked(path) => {
                 let summary = match mock_gen::export_mock_directory(&flows, &path, &redact) {
                     Ok(summary) => summary,
                     Err(err) => {
@@ -440,8 +441,9 @@ pub(crate) fn export_mock_dir(controls: Arc<Controls>, filter: &str, rules_text:
                     },
                 );
             }
-            Ok(None) => set_status(&controls, StatusMsg::ExportCancelled),
-            Err(err) => set_status(&controls, StatusMsg::ExportFailed(err)),
+            DialogOutcome::Cancelled => set_status(&controls, StatusMsg::ExportCancelled),
+            DialogOutcome::Busy => {}
+            DialogOutcome::Failed(err) => set_status(&controls, StatusMsg::ExportFailed(err)),
         }
     });
 }

@@ -372,14 +372,15 @@ pub(crate) fn import_dropped(
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn prompt_import_migration(controls: Arc<Controls>, profiles: ProfileSignals) {
     spawn_detached(async move {
-        let dialog = open_dialog_with_default_dir().multiple(true).filter(
-            nsh_core::file_dialog::FileFilter::new(
-                "HAR / Charles / Whistle / TOML",
-                ["har", "chlsj", "toml", "xml", "txt"],
-            ),
-        );
-        match pick_paths(dialog).await {
-            Ok(Some(paths)) => {
+        let dialog =
+            open_files_dialog()
+                .multiple(true)
+                .filter(nsh_core::file_dialog::FileFilter::new(
+                    "HAR / Charles / Whistle / TOML",
+                    ["har", "chlsj", "toml", "xml", "txt"],
+                ));
+        match pick_paths_after_paint(dialog).await {
+            DialogOutcome::Picked(paths) => {
                 for path in paths {
                     let path_str = path.to_string_lossy();
                     let ext = path
@@ -397,8 +398,8 @@ pub(crate) fn prompt_import_migration(controls: Arc<Controls>, profiles: Profile
                     }
                 }
             }
-            Ok(None) => {}
-            Err(err) => set_status(&controls, StatusMsg::ImportFailed(err)),
+            DialogOutcome::Cancelled | DialogOutcome::Busy => {}
+            DialogOutcome::Failed(err) => set_status(&controls, StatusMsg::ImportFailed(err)),
         }
     });
 }

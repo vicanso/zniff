@@ -758,8 +758,8 @@ pub(crate) fn map_local_from_flow(
             ));
         let body = flow.response_body;
         spawn_detached(async move {
-            match pick_save_path(dialog).await {
-                Ok(Some(save_path)) => {
+            match pick_save_path_after_paint(dialog).await {
+                DialogOutcome::Picked(save_path) => {
                     if let Err(err) = write_export_file(&save_path, &body) {
                         set_status(&controls, StatusMsg::SaveFailed(err.to_string()));
                         return;
@@ -789,8 +789,9 @@ pub(crate) fn map_local_from_flow(
                     set_clipboard(file_text.clone());
                     set_status(&controls, StatusMsg::MappedLocal(file_text));
                 }
-                Ok(None) => set_status(&controls, StatusMsg::SaveCancelled),
-                Err(err) => set_status(&controls, StatusMsg::SaveFailed(err)),
+                DialogOutcome::Cancelled => set_status(&controls, StatusMsg::SaveCancelled),
+                DialogOutcome::Busy => {}
+                DialogOutcome::Failed(err) => set_status(&controls, StatusMsg::SaveFailed(err)),
             }
         });
     }

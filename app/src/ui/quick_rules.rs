@@ -518,8 +518,8 @@ pub(crate) fn replace_row(
                                     .cursor(Cursor::Pointer)
                                     .on_press(move || {
                                         spawn(async move {
-                                            if let Ok(Some(paths)) =
-                                                pick_paths(open_dialog_with_default_dir()).await
+                                            if let DialogOutcome::Picked(paths) =
+                                                pick_paths_after_paint(open_files_dialog()).await
                                                 && let Some(path) = paths.first()
                                             {
                                                 from.set(path.display().to_string());
@@ -612,8 +612,8 @@ pub(crate) fn replace_row(
                                     .cursor(Cursor::Pointer)
                                     .on_press(move || {
                                         spawn(async move {
-                                            if let Ok(Some(paths)) =
-                                                pick_paths(open_dialog_with_default_dir()).await
+                                            if let DialogOutcome::Picked(paths) =
+                                                pick_paths_after_paint(open_files_dialog()).await
                                                 && let Some(path) = paths.first()
                                             {
                                                 to.set(path.display().to_string());

@@ -800,11 +800,15 @@ pub(crate) fn lan_toggle(on: Signal<bool>, controls: Arc<Controls>) -> impl Into
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn prompt_import_har(controls: Arc<Controls>) {
     spawn_detached(async move {
-        let dialog = open_dialog_with_default_dir().multiple(true).filter(
-            nsh_core::file_dialog::FileFilter::new("HAR / Charles (.chlsj)", ["har", "chlsj"]),
-        );
-        match pick_paths(dialog).await {
-            Ok(Some(paths)) => {
+        let dialog =
+            open_files_dialog()
+                .multiple(true)
+                .filter(nsh_core::file_dialog::FileFilter::new(
+                    "HAR / Charles (.chlsj)",
+                    ["har", "chlsj"],
+                ));
+        match pick_paths_after_paint(dialog).await {
+            DialogOutcome::Picked(paths) => {
                 for path in paths {
                     let text = path.to_string_lossy();
                     if path
@@ -817,8 +821,8 @@ pub(crate) fn prompt_import_har(controls: Arc<Controls>) {
                     }
                 }
             }
-            Ok(None) => {}
-            Err(err) => set_status(&controls, StatusMsg::ImportFailed(err)),
+            DialogOutcome::Cancelled | DialogOutcome::Busy => {}
+            DialogOutcome::Failed(err) => set_status(&controls, StatusMsg::ImportFailed(err)),
         }
     });
 }

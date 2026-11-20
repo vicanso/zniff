@@ -1283,6 +1283,17 @@ fn default_save_dir_prefers_xdg_downloads_then_home_and_cwd() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn open_files_dialog_uses_system_default_dir_and_guard_prevents_reentry() {
+    assert!(super::open_files_dialog().directory.is_none());
+    let guard = super::FileDialogGuard::try_acquire();
+    assert!(guard.is_some());
+    assert!(super::FileDialogGuard::try_acquire().is_none());
+    drop(guard);
+    assert!(super::FileDialogGuard::try_acquire().is_some());
+}
+
 #[test]
 fn facet_toggles_host_app_and_mute_tokens_cleanly() {
     let f0 = "type:json";
