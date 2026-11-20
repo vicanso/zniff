@@ -3385,6 +3385,38 @@ fn wide_three_layout_places_request_and_response_side_by_side() {
 }
 
 #[test]
+fn top_bottom_detail_places_request_left_and_response_right() {
+    let src = include_str!("detail_summary.rs");
+    let start = src.find("fn ready_detail(").expect("fn ready_detail");
+    let rest = &src[start..];
+    let end = rest.find("\nfn ").unwrap_or(rest.len());
+    let body = &rest[..end];
+    let (tb_branch, split_branch) = body
+        .split_once(".otherwise(")
+        .expect("ready_detail side_by_side/otherwise branches");
+    let tb_req = tb_branch
+        .find("request_cards(")
+        .expect("request_cards in TopBottom branch");
+    let tb_res = tb_branch
+        .find("response_cards(")
+        .expect("response_cards in TopBottom branch");
+    assert!(
+        tb_req < tb_res,
+        "TopBottom detail must render request cards on the left before response cards on the right"
+    );
+    let split_res = split_branch
+        .find("response_cards(")
+        .expect("response_cards in Split branch");
+    let split_req = split_branch
+        .find("request_cards(")
+        .expect("request_cards in Split branch");
+    assert!(
+        split_res < split_req,
+        "Split detail stack order must stay response cards before request cards"
+    );
+}
+
+#[test]
 fn root_domain_and_grouping_collapse_subdomains_cleanly() {
     assert_eq!(super::root_domain("mbd.baidu.com"), "baidu.com");
     assert_eq!(super::root_domain("assets.msn.cn"), "msn.cn");

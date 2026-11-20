@@ -678,9 +678,9 @@ pub(crate) fn ready_detail(
                             .flex_1()
                             .min_w(px(0.0))
                             .gap_3p5()
-                            .child(response_cards(
+                            .child(request_cards(
                                 shown,
-                                res_controls_split.clone(),
+                                req_controls_split.clone(),
                                 selected,
                                 baseline,
                                 folded,
@@ -691,9 +691,9 @@ pub(crate) fn ready_detail(
                             .flex_1()
                             .min_w(px(0.0))
                             .gap_3p5()
-                            .child(request_cards(
+                            .child(response_cards(
                                 shown,
-                                req_controls_split.clone(),
+                                res_controls_split.clone(),
                                 selected,
                                 baseline,
                                 folded,
