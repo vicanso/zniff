@@ -452,10 +452,8 @@ pub fn App() -> impl IntoElement {
     let spill_gc_at = stored(clock::now());
     let seen_facets_open = stored(false);
     let detail_hold = stored(SystemTime::UNIX_EPOCH);
-    let row_cache_tick = Rc::new(RefCell::new(RowCache {
-        lang: ui_lang(langs),
-        rows: HashMap::new(),
-    }));
+    let row_cache_tick = Rc::new(RefCell::new(RowCache::new(ui_lang(langs))));
+    let refresh_throttle = Rc::new(RefCell::new(RefreshThrottle::default()));
     let toast_manager = stored(ToastManager::<u64, StatusMsg>::new(ToastMotion::sonner()));
     let toast_shown = signal(Vec::<(u64, StatusMsg, ToastTransitionStatus)>::new());
     let toast_state = ToastStackState::new();
@@ -849,14 +847,22 @@ pub fn App() -> impl IntoElement {
         let facets_needed = true;
         let facets_opened = facets_open_now && !seen_facets_open.get();
         seen_facets_open.replace(facets_open_now);
-        let list_changed = generation != seen_gen.get()
-            || effective_filter_now != seen_filter.get()
+        let interactive_changed = effective_filter_now != seen_filter.get()
             || filter_now != seen_setup_filter.get()
             || lang_now != seen_lang.get()
             || sort_now != seen_sort.get()
             || path_display_now != seen_path_display.get()
             || spill_expired
             || facets_opened;
+        let gen_changed = generation != seen_gen.get();
+        let refresh = refresh_throttle.borrow_mut().decide(
+            clock::now(),
+            total_tick.get_untracked(),
+            interactive_changed,
+            gen_changed,
+        );
+        let list_changed = refresh.run_list;
+        let run_secondary = refresh.run_secondary;
         let want_stats = selected_now.is_none();
         let stats_only = !list_changed && want_stats && seen_selected.get().is_some();
         if list_changed {
@@ -867,7 +873,8 @@ pub fn App() -> impl IntoElement {
             seen_sort.replace(sort_now);
             seen_path_display.replace(path_display_now);
             let (matched, _) = controls_tick.hub.matching_ids(&effective_filter_now);
-            let facet_ids = if (facets_open_now || layout_mode_now == config::LayoutMode::Split)
+            let facet_ids = if run_secondary
+                && (facets_open_now || layout_mode_now == config::LayoutMode::Split)
                 && filter_now != effective_filter_now
             {
                 Some(controls_tick.hub.matching_ids(&filter_now).0)
@@ -899,13 +906,13 @@ pub fn App() -> impl IntoElement {
                         path_display_now,
                         &mut cache,
                     );
-                    let stats = want_stats.then(|| {
+                    let stats = (want_stats && run_secondary).then(|| {
                         session::FilteredStats::from_flows(
                             matched.iter().filter_map(|(id, _)| session.get(*id)),
                         )
                     });
                     let ids = facet_ids.as_ref().unwrap_or(&matched);
-                    let next_facets = facets_needed.then(|| {
+                    let next_facets = (facets_needed && run_secondary).then(|| {
                         session::SessionFacets::from_flows(
                             ids.iter().filter_map(|(id, _)| session.get(*id)),
                         )

@@ -64,12 +64,24 @@ pub(crate) fn list_url(
 pub(crate) struct CachedRow {
     pub(crate) rev: u64,
     pub(crate) prev: Option<SystemTime>,
+    pub(crate) stamp: u64,
     pub(crate) line: Arc<RowLine>,
 }
 
 pub(crate) struct RowCache {
     pub(crate) lang: Lang,
+    pub(crate) stamp: u64,
     pub(crate) rows: HashMap<u64, CachedRow>,
+}
+
+impl RowCache {
+    pub(crate) fn new(lang: Lang) -> Self {
+        Self {
+            lang,
+            stamp: 0,
+            rows: HashMap::new(),
+        }
+    }
 }
 
 pub(crate) fn same_row_arcs(current: &[Arc<RowLine>], next: &[Arc<RowLine>]) -> bool {
@@ -92,17 +104,22 @@ pub(crate) fn project_rows(
         cache.rows.clear();
         cache.lang = lang;
     }
+    cache.stamp = cache.stamp.wrapping_add(1);
+    if cache.stamp == 0 {
+        cache.rows.clear();
+        cache.stamp = 1;
+    }
+    let stamp = cache.stamp;
     let mut lines = Vec::with_capacity(matched.len());
-    let mut keep = HashSet::with_capacity(matched.len());
     for (id, previous) in matched {
-        keep.insert(*id);
         let Some(flow) = session.get(*id) else {
             continue;
         };
-        if let Some(hit) = cache.rows.get(id)
+        if let Some(hit) = cache.rows.get_mut(id)
             && hit.rev == flow.rev
             && hit.prev == *previous
         {
+            hit.stamp = stamp;
             lines.push(Arc::clone(&hit.line));
             continue;
         }
@@ -184,12 +201,15 @@ pub(crate) fn project_rows(
             CachedRow {
                 rev: flow.rev,
                 prev: *previous,
+                stamp,
                 line: Arc::clone(&line),
             },
         );
         lines.push(line);
     }
-    cache.rows.retain(|id, _| keep.contains(id));
+    if cache.rows.len() > lines.len() {
+        cache.rows.retain(|_, row| row.stamp == stamp);
+    }
     if let Some(sort) = sort {
         sort_row_lines(&mut lines, sort, path_display);
     }

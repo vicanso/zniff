@@ -3,7 +3,6 @@
 //! Measures population, filtering, statistics, facet aggregation, row projection
 //! (cold & incremental warm +1 flow), and memory footprint at 10k / 100k flows.
 
-use std::collections::HashMap;
 use std::time::Instant;
 
 use crate::i18n::Lang;
@@ -181,10 +180,7 @@ pub fn run_benchmark(flow_count: usize, iterations: usize) -> BenchReport {
 
     let (facets_ms, facets) = measure_median(iterations, || session.facets_matching(""));
 
-    let mut cache = RowCache {
-        lang: Lang::En,
-        rows: HashMap::new(),
-    };
+    let mut cache = RowCache::new(Lang::En);
     let t_cold = Instant::now();
     let _cold_rows = project_rows(
         &session,

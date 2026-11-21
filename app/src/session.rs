@@ -647,6 +647,7 @@ impl SessionFacets {
         const FACET_CAP: usize = 64;
         let mut domain_map: HashMap<String, FacetEntry> = HashMap::new();
         let mut app_map: HashMap<String, FacetEntry> = HashMap::new();
+        let mut raw_app_cache: HashMap<&'a str, Option<(String, bool)>> = HashMap::new();
         for flow in flows {
             if flow.is_marker() {
                 continue;
@@ -654,55 +655,92 @@ impl SessionFacets {
             let is_err = flow.error.is_some() || flow.status.is_some_and(|code| code >= 400);
             let host = flow.host.trim();
             if !host.is_empty() {
-                let key = host.to_ascii_lowercase();
-                let entry = domain_map.entry(key.clone()).or_insert_with(|| FacetEntry {
-                    label: host.to_string(),
-                    token: key,
-                    kind: FacetKind::Domain,
-                    count: 0,
-                    error_count: 0,
-                });
+                let entry = if host.bytes().all(|b| !b.is_ascii_uppercase())
+                    && let Some(existing) = domain_map.get_mut(host)
+                {
+                    existing
+                } else {
+                    let key = host.to_ascii_lowercase();
+                    domain_map.entry(key.clone()).or_insert_with(|| FacetEntry {
+                        label: host.to_string(),
+                        token: key,
+                        kind: FacetKind::Domain,
+                        count: 0,
+                        error_count: 0,
+                    })
+                };
                 entry.count += 1;
                 if is_err {
                     entry.error_count += 1;
                 }
             }
-            if let Some((mut label, token)) = extract_client_app_facet(&flow.client_ip) {
-                let flow_kind = classify_client_facet_kind(&flow.client_ip, &flow.request_headers);
-                let bare_loopback = is_bare_loopback_ip(flow.client_ip.trim());
-                if !bare_loopback
-                    && matches!(flow_kind, FacetKind::Mobile | FacetKind::Desktop)
-                    && let Some(hint) =
-                        infer_client_os_hint(request_user_agent(&flow.request_headers))
-                {
-                    label = format!("{label} · {hint}");
+            let raw_client = flow.client_ip.as_str();
+            if raw_client.is_empty() {
+                continue;
+            }
+            if let Some(cached) = raw_app_cache.get(raw_client) {
+                let Some((key, bare_loopback)) = cached else {
+                    continue;
+                };
+                if let Some(entry) = app_map.get_mut(key.as_str()) {
+                    if !*bare_loopback
+                        && matches!(entry.kind, FacetKind::Desktop | FacetKind::Mobile)
+                    {
+                        if entry.kind == FacetKind::Desktop
+                            && classify_client_facet_kind(raw_client, &flow.request_headers)
+                                == FacetKind::Mobile
+                        {
+                            entry.kind = FacetKind::Mobile;
+                        }
+                        if !entry.label.contains(" · ")
+                            && let Some(hint) =
+                                infer_client_os_hint(request_user_agent(&flow.request_headers))
+                        {
+                            entry.label = format!("{} · {hint}", entry.label);
+                        }
+                    }
+                    entry.count += 1;
+                    if is_err {
+                        entry.error_count += 1;
+                    }
+                    continue;
                 }
-                let key = token.to_ascii_lowercase();
-                let entry = app_map.entry(key).or_insert_with(|| FacetEntry {
-                    label,
-                    token,
-                    kind: flow_kind,
-                    count: 0,
-                    error_count: 0,
-                });
-                if entry.kind == FacetKind::Desktop
-                    && flow_kind == FacetKind::Mobile
-                    && !bare_loopback
-                {
-                    entry.kind = FacetKind::Mobile;
-                }
-                if matches!(entry.kind, FacetKind::Desktop | FacetKind::Mobile)
-                    && !bare_loopback
-                    && !entry.label.contains(" · ")
-                    && let Some(hint) =
-                        infer_client_os_hint(request_user_agent(&flow.request_headers))
-                {
-                    entry.label = format!("{} · {hint}", entry.label);
-                }
-                entry.count += 1;
-                if is_err {
-                    entry.error_count += 1;
-                }
+            }
+            let Some((mut label, token)) = extract_client_app_facet(raw_client) else {
+                raw_app_cache.insert(raw_client, None);
+                continue;
+            };
+            let flow_kind = classify_client_facet_kind(raw_client, &flow.request_headers);
+            let bare_loopback = is_bare_loopback_ip(raw_client.trim());
+            if !bare_loopback
+                && matches!(flow_kind, FacetKind::Mobile | FacetKind::Desktop)
+                && let Some(hint) = infer_client_os_hint(request_user_agent(&flow.request_headers))
+            {
+                label = format!("{label} · {hint}");
+            }
+            let key = token.to_ascii_lowercase();
+            raw_app_cache.insert(raw_client, Some((key.clone(), bare_loopback)));
+            let entry = app_map.entry(key).or_insert_with(|| FacetEntry {
+                label,
+                token,
+                kind: flow_kind,
+                count: 0,
+                error_count: 0,
+            });
+            if entry.kind == FacetKind::Desktop && flow_kind == FacetKind::Mobile && !bare_loopback
+            {
+                entry.kind = FacetKind::Mobile;
+            }
+            if matches!(entry.kind, FacetKind::Desktop | FacetKind::Mobile)
+                && !bare_loopback
+                && !entry.label.contains(" · ")
+                && let Some(hint) = infer_client_os_hint(request_user_agent(&flow.request_headers))
+            {
+                entry.label = format!("{} · {hint}", entry.label);
+            }
+            entry.count += 1;
+            if is_err {
+                entry.error_count += 1;
             }
         }
         let sort_facets = |mut items: Vec<FacetEntry>| -> Vec<FacetEntry> {
