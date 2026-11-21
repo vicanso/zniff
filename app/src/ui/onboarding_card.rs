@@ -411,12 +411,28 @@ fn onboarding_web_section(props: &OnboardingProps, pane_width: Signal<f32>) -> i
         .child(grid)
 }
 
+/// Imports the built-in demo HAR session so users can explore zniff before configuring a proxy.
+pub(crate) fn load_sample_traffic(controls: &Controls, lang: Lang) -> usize {
+    let doc = crate::sample_har::sample_har_document();
+    let count = controls.hub.import_har(&doc);
+    set_status(
+        controls,
+        StatusMsg::Imported {
+            count,
+            path: t(lang, "内置示例流量", "Built-in sample traffic").to_string(),
+        },
+    );
+    count
+}
+
 fn onboarding_secondary_section(
     props: &OnboardingProps,
     pane_width: Signal<f32>,
 ) -> impl IntoElement {
     let compose = props.compose;
     let selected = props.selected;
+    let sample_controls = props.controls.clone();
+    let langs = ui_langs();
     #[cfg(not(target_arch = "wasm32"))]
     let import_controls = props.controls.clone();
     #[cfg(not(target_arch = "wasm32"))]
@@ -454,13 +470,26 @@ fn onboarding_secondary_section(
             },
         ));
 
+    let sample_tile = onboarding_secondary_tile(
+        Glyph::List,
+        tr("加载示例流量", "Load Sample Traffic"),
+        tr(
+            "导入内置演示会话，无需配置代理即可体验详情、规则与图表",
+            "Import demo flows to try inspector, rules & diagrams without proxy setup",
+        ),
+        move || {
+            load_sample_traffic(&sample_controls, ui_lang(langs));
+        },
+    );
+
     let section = view().w_full().flex_col().gap_2p5().child(
         view()
             .w_full()
             .flex_col()
             .gap_2()
             .child(section_title(tr("调试与更多", "Tools & More")))
-            .child(workflow_grid),
+            .child(workflow_grid)
+            .child(sample_tile),
     );
 
     #[cfg(not(target_arch = "wasm32"))]

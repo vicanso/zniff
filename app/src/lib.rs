@@ -53,6 +53,7 @@ mod redact;
 mod relay;
 mod rule_vars;
 mod rules;
+mod sample_har;
 mod session;
 #[cfg(not(target_arch = "wasm32"))]
 mod share;

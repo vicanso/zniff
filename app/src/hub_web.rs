@@ -579,6 +579,16 @@ impl Hub {
         expired
     }
 
+    pub fn import_har(&self, value: &Value) -> usize {
+        let count = value
+            .get("log")
+            .and_then(|log| log.get("entries"))
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        post_op(json!({"op": "import_har", "value": value}));
+        count
+    }
+
     pub fn clear_unpinned(&self) -> usize {
         let removed = self.with_session(|session| session.clear_unpinned());
         if removed > 0 {
