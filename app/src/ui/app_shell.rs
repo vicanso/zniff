@@ -107,6 +107,7 @@ pub fn App() -> impl IntoElement {
         diff_new: signal(String::new()),
         diff_scope: signal(0_u8),
         pinned: signal(false),
+        is_marker: signal(false),
         comment: signal(String::new()),
         editing_comment: signal(false),
         repeating: signal(false),
@@ -264,6 +265,7 @@ pub fn App() -> impl IntoElement {
         settings_open: signal(false),
         settings_tab: signal(SettingsTab::General),
         shortcuts_open: signal(false),
+        marker_modal_open: signal(false),
         about_open: signal(false),
         default_json_tree: shown.default_json_tree,
         minimize_to_tray: signal(saved.minimize_to_tray),
@@ -1150,6 +1152,10 @@ pub fn App() -> impl IntoElement {
             ReplayOverride::default(),
         );
     });
+    let marker_open_key = profile_signals.marker_modal_open;
+    on_key("mod+m", move |_| {
+        marker_open_key.set(!marker_open_key.get());
+    });
     let compose_submit_key = compose;
     let selected_submit_key = selected;
     let paused_submit_key = paused;
@@ -1251,6 +1257,8 @@ pub fn App() -> impl IntoElement {
             palette_open.set(false);
         } else if shortcuts_open.get() {
             shortcuts_open.set(false);
+        } else if profile_signals.marker_modal_open.get() {
+            profile_signals.marker_modal_open.set(false);
         } else if profile_signals.filter_panel_open.get() {
             profile_signals.filter_panel_open.set(false);
         } else if profile_signals.panel_open.get() {
@@ -1585,6 +1593,10 @@ pub fn App() -> impl IntoElement {
             shown,
         ))
         .child(shortcuts_modal(shortcuts_open))
+        .child(marker_modal(
+            profile_signals.marker_modal_open,
+            controls.clone(),
+        ))
         .child(toast_overlay(
             toast_shown,
             toast_overlay_gen,

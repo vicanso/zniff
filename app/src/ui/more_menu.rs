@@ -22,6 +22,7 @@ pub(crate) fn more_menu(
     let apple = cfg!(target_os = "macos");
     let settings_shortcut = format_shortcut_badge("mod+,", apple);
     let shortcuts_key = format_shortcut_badge("mod+/", apple);
+    let marker_shortcut = format_shortcut_badge("mod+m", apple);
 
     // Group 1: Export (<= 6 items)
     let items = view()
@@ -108,6 +109,15 @@ pub(crate) fn more_menu(
             move || {
                 open.set(false);
                 begin_new_request(compose, selected);
+            },
+        ))
+        .child(menu_action_meta(
+            Glyph::Badge,
+            tr("插入会话标记", "Insert marker"),
+            move || SharedString::from(marker_shortcut.clone()),
+            move || {
+                open.set(false);
+                profiles.marker_modal_open.set(true);
             },
         ));
     let items = desktop_child!(

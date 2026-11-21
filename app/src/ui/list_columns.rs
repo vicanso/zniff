@@ -31,6 +31,7 @@ pub(crate) struct RowLine {
     pub(crate) size_bytes: u64,
     pub(crate) failed: bool,
     pub(crate) pinned: bool,
+    pub(crate) is_marker: bool,
     /// Compact rule category icons (e.g. `✎`, `↪`, `⏸`, `⛔`, `⏱`) when rules matched.
     pub(crate) rule_marker: String,
     /// Attributed rule hit summary shown in the path cell hover bubble.

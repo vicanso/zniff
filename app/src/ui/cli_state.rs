@@ -336,6 +336,7 @@ pub(crate) struct ProfileSignals {
     pub(crate) settings_open: Signal<bool>,
     pub(crate) settings_tab: Signal<SettingsTab>,
     pub(crate) shortcuts_open: Signal<bool>,
+    pub(crate) marker_modal_open: Signal<bool>,
     pub(crate) about_open: Signal<bool>,
     pub(crate) default_json_tree: Signal<bool>,
     pub(crate) minimize_to_tray: Signal<bool>,

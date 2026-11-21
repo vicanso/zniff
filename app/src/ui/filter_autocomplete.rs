@@ -15,6 +15,7 @@ pub(crate) struct FilterSuggestionsCatalog {
     pub(crate) graphql_ops: Vec<String>,
     pub(crate) methods: Vec<String>,
     pub(crate) rule_tokens: Vec<String>,
+    pub(crate) markers: Vec<String>,
     /// Per-rule-line hit counts keyed by `(lowercase_group_name, 1-based line_no)`.
     pub(crate) rule_line_hits: HashMap<(Option<String>, usize), usize>,
 }
@@ -50,8 +51,16 @@ impl FilterSuggestionsCatalog {
         let mut op_counts: HashMap<String, usize> = HashMap::new();
         let mut rule_token_counts: HashMap<String, usize> = HashMap::new();
         let mut rule_line_hits: HashMap<(Option<String>, usize), usize> = HashMap::new();
+        let mut markers: Vec<String> = Vec::new();
 
         for flow in flows {
+            if flow.is_marker() {
+                let label = flow.path.trim();
+                if !label.is_empty() && !markers.iter().any(|m| m.eq_ignore_ascii_case(label)) {
+                    markers.push(label.to_string());
+                }
+                continue;
+            }
             if let Some(code) = flow.status {
                 *status_counts.entry(code.to_string()).or_default() += 1;
             } else if flow.error.is_some() {
@@ -102,6 +111,7 @@ impl FilterSuggestionsCatalog {
             graphql_ops: sort_counts(op_counts),
             methods: sort_counts(method_counts),
             rule_tokens: sort_counts(rule_token_counts),
+            markers,
             rule_line_hits,
         }
     }
@@ -205,6 +215,13 @@ const PREFIX_SPECS: &[PrefixMeta] = &[
         "rule:",
         "命中的规则行号或动词",
         "Matched rule line or verb",
+        false,
+        true,
+    ),
+    pmeta(
+        "mark:",
+        "会话时间标记段",
+        "Session marker section",
         false,
         true,
     ),
@@ -367,7 +384,11 @@ fn validate_single_token(token: &str, in_progress: bool) -> Option<FilterSyntaxE
         return None;
     }
     if rest.is_empty() {
-        if spec.prefix == "repeat:" || spec.prefix == "rule:" || in_progress {
+        if spec.prefix == "repeat:"
+            || spec.prefix == "rule:"
+            || spec.prefix == "mark:"
+            || in_progress
+        {
             return None;
         }
         return Some(FilterSyntaxError {
@@ -535,6 +556,10 @@ fn suggest_values(
         "op" | "gql" | "operation" => (
             catalog.graphql_ops.clone(),
             t(lang, "GraphQL 操作", "GraphQL op"),
+        ),
+        "mark" => (
+            catalog.markers.clone(),
+            t(lang, "会话标记", "Session marker"),
         ),
         "method" => (
             merge_candidates(&catalog.methods, STANDARD_METHODS),

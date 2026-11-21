@@ -1147,6 +1147,7 @@ pub(crate) fn clear_shown(shown: Shown) {
     shown.diff_old.set(String::new());
     shown.diff_new.set(String::new());
     shown.pinned.set(false);
+    shown.is_marker.set(false);
     shown.relay.set(String::new());
     shown.comment.set(String::new());
     shown.editing_comment.set(false);

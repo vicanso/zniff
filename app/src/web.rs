@@ -2616,6 +2616,21 @@ fn sync_hub_op(slot: &mut Slot, op: &str, value: &Value) -> Reply {
         "clear_unpinned" => {
             slot.hub.clear_unpinned();
         }
+        "add_marker" => {
+            slot.hub.add_marker(json_text(value));
+        }
+        "remove_marker" => {
+            let Some(id) = json_id(value) else {
+                return json_reply(400, "Bad Request", &json!({"error": "need id"}));
+            };
+            slot.hub.remove_marker(id);
+        }
+        "rename_marker" => {
+            let Some(id) = json_id(value) else {
+                return json_reply(400, "Bad Request", &json!({"error": "need id"}));
+            };
+            slot.hub.rename_marker(id, json_text(value));
+        }
         "resolve_break" => {
             slot.hub.resolve_break(BreakDecision {
                 drop: value.get("drop").and_then(Value::as_bool).unwrap_or(false),

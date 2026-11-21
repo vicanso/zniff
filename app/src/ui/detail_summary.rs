@@ -65,6 +65,7 @@ pub(crate) struct Shown {
     pub(crate) diff_new: Signal<String>,
     pub(crate) diff_scope: Signal<u8>,
     pub(crate) pinned: Signal<bool>,
+    pub(crate) is_marker: Signal<bool>,
     pub(crate) comment: Signal<String>,
     pub(crate) editing_comment: Signal<bool>,
     pub(crate) repeating: Signal<bool>,
@@ -136,17 +137,32 @@ pub(crate) fn detail_pane(
             when(
                 move || shown.phase.get() == Phase::Ready,
                 move || {
-                    ready_detail(
-                        shown,
-                        ready_controls.clone(),
-                        selected,
-                        paused,
-                        compose,
-                        list_filter,
-                        baseline,
-                        folded,
-                        ready_profiles,
+                    let marker_controls = ready_controls.clone();
+                    let flow_controls = ready_controls.clone();
+                    when(
+                        move || shown.is_marker.get(),
+                        move || {
+                            marker_detail_card(
+                                shown,
+                                marker_controls.clone(),
+                                selected,
+                                list_filter,
+                            )
+                        },
                     )
+                    .otherwise(move || {
+                        ready_detail(
+                            shown,
+                            flow_controls.clone(),
+                            selected,
+                            paused,
+                            compose,
+                            list_filter,
+                            baseline,
+                            folded,
+                            ready_profiles,
+                        )
+                    })
                 },
             )
             .otherwise({

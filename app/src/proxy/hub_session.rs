@@ -636,6 +636,28 @@ impl Hub {
         removed
     }
 
+    pub fn add_marker(&self, label: impl Into<String>) -> u64 {
+        let id = self.with_session(|session| session.add_marker(label));
+        self.touch();
+        id
+    }
+
+    pub fn remove_marker(&self, id: u64) -> bool {
+        let removed = self.with_session(|session| session.remove_marker(id));
+        if removed {
+            self.touch();
+        }
+        removed
+    }
+
+    pub fn rename_marker(&self, id: u64, label: impl Into<String>) -> bool {
+        let renamed = self.with_session(|session| session.rename_marker(id, label));
+        if renamed {
+            self.touch();
+        }
+        renamed
+    }
+
     /// Exports the flows the list is showing. An empty filter exports the session.
     pub fn export_har_matching_with_redact(
         &self,
@@ -659,6 +681,13 @@ impl Hub {
     pub fn import_flows(&self, items: Vec<crate::har::Imported>) -> usize {
         let count = items.len();
         for item in items {
+            if item.protocol == Protocol::Marker {
+                self.with_session(|session| {
+                    session.add_marker_at(item.path, item.started);
+                });
+                self.touch();
+                continue;
+            }
             let id = self.open(FlowDraft {
                 protocol: item.protocol,
                 method: item.method,
@@ -715,6 +744,10 @@ impl Hub {
             on_done(Err(anyhow!("没有这条记录")));
             return;
         };
+        if flow.is_marker() {
+            on_done(Err(anyhow!("会话标记不能重放")));
+            return;
+        }
         if flow.protocol == Protocol::Tunnel || flow.method.eq_ignore_ascii_case("CONNECT") {
             on_done(Err(anyhow!("隧道不能重放")));
             return;
@@ -755,6 +788,10 @@ impl Hub {
             on_done(Err(anyhow!("没有这条记录")));
             return;
         };
+        if flow.is_marker() {
+            on_done(Err(anyhow!("会话标记不能重放")));
+            return;
+        }
         if flow.protocol == Protocol::Tunnel || flow.method.eq_ignore_ascii_case("CONNECT") {
             on_done(Err(anyhow!("隧道不能重放")));
             return;

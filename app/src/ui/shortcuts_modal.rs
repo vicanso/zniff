@@ -55,6 +55,11 @@ pub(crate) const SHORTCUT_SECTIONS: &[ShortcutSection] = &[
                 en: "Replay selected flow",
             },
             ShortcutEntry {
+                keys: &["mod+m"],
+                zh: "插入会话时间标记",
+                en: "Insert session marker",
+            },
+            ShortcutEntry {
                 keys: &["mod+enter"],
                 zh: "在编辑重发 / 断点框内一键发送或放行",
                 en: "Send composed request or resume breakpoint",

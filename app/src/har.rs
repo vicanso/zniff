@@ -60,6 +60,19 @@ pub fn export_har_with_redact(flows: &[Flow], redact: &crate::share::RedactOptio
         "creator": {"name": "zniff", "version": env!("CARGO_PKG_VERSION")},
         "entries": entries,
     });
+    let markers: Vec<Value> = flows
+        .iter()
+        .filter(|f| f.is_marker())
+        .map(|f| {
+            json!({
+                "startedDateTime": iso_utc(f.started),
+                "label": f.path,
+            })
+        })
+        .collect();
+    if !markers.is_empty() {
+        log["_zniffMarkers"] = Value::Array(markers);
+    }
     if redact.enabled {
         log["_redacted"] = json!(true);
     }
@@ -76,6 +89,38 @@ pub fn import_har(value: &Value) -> Vec<Imported> {
 }
 
 fn entry(flow: &Flow) -> Value {
+    if flow.is_marker() {
+        return json!({
+            "_zniffMarker": true,
+            "_zniffMarkerLabel": flow.path,
+            "startedDateTime": iso_utc(flow.started),
+            "time": 0,
+            "comment": flow.path,
+            "request": {
+                "method": "MARK",
+                "url": format!("zniff://marker/{}", flow.id),
+                "httpVersion": "HTTP/1.1",
+                "cookies": [],
+                "headers": [],
+                "queryString": [],
+                "headersSize": -1,
+                "bodySize": 0,
+            },
+            "response": {
+                "status": 0,
+                "statusText": "",
+                "httpVersion": "HTTP/1.1",
+                "cookies": [],
+                "headers": [],
+                "content": {"size": 0, "mimeType": "text/plain"},
+                "redirectURL": "",
+                "headersSize": -1,
+                "bodySize": 0,
+            },
+            "cache": {},
+            "timings": {"send": 0, "wait": 0, "receive": 0},
+        });
+    }
     let wait = flow
         .response_at
         .and_then(|at| at.duration_since(flow.started).ok())
@@ -230,6 +275,43 @@ fn header_json(headers: &[(String, String)]) -> Value {
 }
 
 fn import_entry(entry: &Value) -> Option<Imported> {
+    if entry.get("_zniffMarker").and_then(Value::as_bool) == Some(true) {
+        let started = entry
+            .get("startedDateTime")
+            .and_then(Value::as_str)
+            .and_then(parse_iso)
+            .unwrap_or_else(crate::clock::now);
+        let label = entry
+            .get("_zniffMarkerLabel")
+            .or_else(|| entry.get("comment"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_string();
+        return Some(Imported {
+            protocol: Protocol::Marker,
+            method: "MARK".to_string(),
+            host: String::new(),
+            path: label,
+            url: String::new(),
+            status: None,
+            error: None,
+            request_headers: Vec::new(),
+            response_headers: Vec::new(),
+            request_body: Vec::new(),
+            response_body: Vec::new(),
+            started,
+            response_at: None,
+            finished_at: Some(started),
+            request_bytes: Some(0),
+            response_bytes: Some(0),
+            comment: None,
+            conn_info: ConnInfo::default(),
+            messages: Vec::new(),
+            messages_truncated: false,
+            message_times: Vec::new(),
+        });
+    }
     let request = entry.get("request")?;
     let url = request.get("url")?.as_str()?.to_string();
     let (host, path) = split_url(&url);
@@ -613,7 +695,7 @@ fn http_version(protocol: Protocol) -> &'static str {
         Protocol::Http2 => "HTTP/2",
         Protocol::WebSocket => "HTTP/1.1",
         Protocol::Tunnel => "HTTP/1.1",
-        Protocol::Http11 => "HTTP/1.1",
+        Protocol::Http11 | Protocol::Marker => "HTTP/1.1",
     }
 }
 
@@ -1248,5 +1330,39 @@ mod tests {
             json!({ "group": "mock-api", "line": 4, "verb": "map-local" })
         );
         assert!(entries[1].get("_zniffRules").is_none());
+    }
+
+    #[test]
+    fn har_round_trips_session_markers() {
+        let mut session = crate::session::Session::default();
+        let m_id = session.add_marker("开始测登录");
+        let f_id = session.open(FlowDraft {
+            protocol: Protocol::Http11,
+            method: "POST".into(),
+            host: "api.example.com".into(),
+            path: "/login".into(),
+            url: "https://api.example.com/login".into(),
+            request_headers: vec![],
+        });
+        let flows = vec![
+            session.get(m_id).unwrap().clone(),
+            session.get(f_id).unwrap().clone(),
+        ];
+        let exported = export_har(&flows);
+        let markers = exported["log"]["_zniffMarkers"].as_array().unwrap();
+        assert_eq!(markers.len(), 1);
+        assert_eq!(markers[0]["label"], "开始测登录");
+        let entries = exported["log"]["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["_zniffMarker"], true);
+        assert_eq!(entries[0]["_zniffMarkerLabel"], "开始测登录");
+
+        let imported = import_har(&exported);
+        assert_eq!(imported.len(), 2);
+        assert_eq!(imported[0].protocol, Protocol::Marker);
+        assert_eq!(imported[0].method, "MARK");
+        assert_eq!(imported[0].path, "开始测登录");
+        assert_eq!(imported[1].protocol, Protocol::Http11);
+        assert_eq!(imported[1].path, "/login");
     }
 }

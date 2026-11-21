@@ -18,6 +18,9 @@ impl OnboardingTraffic {
     pub(crate) fn from_flows<'a>(flows: impl IntoIterator<Item = &'a session::Flow>) -> Self {
         let mut out = Self::default();
         for flow in flows {
+            if flow.is_marker() {
+                continue;
+            }
             out.total_flows += 1;
             if is_decrypted_https_flow(flow) {
                 out.has_decrypted_https = true;
@@ -30,7 +33,7 @@ impl OnboardingTraffic {
 }
 
 fn is_decrypted_https_flow(flow: &session::Flow) -> bool {
-    if flow.error.is_some() || flow.protocol == session::Protocol::Tunnel {
+    if flow.is_marker() || flow.error.is_some() || flow.protocol == session::Protocol::Tunnel {
         return false;
     }
     flow.protocol == session::Protocol::Http2

@@ -457,14 +457,25 @@ pub(crate) fn row_context_menu(
     let quick_rule_controls = controls.clone();
     let repeat_controls = controls.clone();
     let edit_controls = controls.clone();
-    let replay_controls = controls;
+    let replay_controls = controls.clone();
+    let is_marker_check = controls.clone();
+    let is_marker = move || {
+        picked.get().is_some_and(|id| {
+            is_marker_check
+                .hub
+                .with_session(|s| s.get(id).is_some_and(session::Flow::is_marker))
+        })
+    };
+    let marker_filter_controls = controls.clone();
+    let marker_copy_controls = controls.clone();
+    let marker_del_controls = controls.clone();
     let can_local = move || {
         let controls = &local_check;
         picked.get().is_some_and(|id| {
             controls.hub.with_session(|session| {
                 session
                     .get(id)
-                    .is_some_and(|flow| flow.relay_source.is_none())
+                    .is_some_and(|flow| !flow.is_marker() && flow.relay_source.is_none())
             })
         })
     };
@@ -489,182 +500,255 @@ pub(crate) fn row_context_menu(
                 .w_full()
                 .max_h(move || px((window().height.0 - 26.0).max(158.0)))
                 .child(
-                    view()
-                        .w_full()
-                        .p_1()
-                        .gap_0p5()
-                        .child(action_item(
-                            tr("复制 URL", "Copy URL"),
-                            closing(menu_open, move || {
-                                copy_part(&copy_url, picked.get(), CopyPart::Url);
-                            }),
-                        ))
-                        .child(action_item(
-                            "cURL",
-                            closing(menu_open, move || {
-                                copy_part(&copy_curl, picked.get(), CopyPart::Curl);
-                            }),
-                        ))
-                        .child(action_item(
-                            tr("复制给 AI", "Copy for AI"),
-                            closing(menu_open, move || {
-                                copy_snippet(&copy_ai, picked.get(), Snippet::AiContext);
-                            }),
-                        ))
-                        .child(menu_rule())
-                        .child(action_item(
-                            tr("只看", "Focus"),
-                            closing(menu_open, move || {
-                                focus_host(&focus_controls, picked.get(), filter);
-                            }),
-                        ))
-                        .child(action_item(
-                            tr("屏蔽", "Mute"),
-                            closing(menu_open, move || {
-                                mute_host(&mute_controls, picked.get(), filter);
-                            }),
-                        ))
-                        .child(menu_rule())
-                        .child(marked_action(
-                            move || flow_pinned(&pin_mark, picked.get()),
-                            {
-                                let langs = ui_langs();
-                                move || -> SharedString {
-                                    if flow_pinned(&pin_label, picked.get()) {
-                                        t(ui_lang(langs), "取消星标", "Unstar").into()
-                                    } else {
-                                        t(ui_lang(langs), "星标", "Star").into()
-                                    }
-                                }
-                            },
-                            closing(menu_open, move || toggle_pin(&pin_controls, picked.get())),
-                        ))
-                        .child(marked_action(
-                            move || baseline.get().is_some_and(|id| picked.get() == Some(id)),
-                            {
-                                let langs = ui_langs();
-                                let picked_label = picked;
-                                let baseline_label = baseline;
-                                move || -> SharedString {
-                                    if baseline_label
-                                        .get()
-                                        .is_some_and(|id| picked_label.get() == Some(id))
-                                    {
-                                        t(ui_lang(langs), "取消基准", "Clear baseline").into()
-                                    } else {
-                                        t(ui_lang(langs), "基准", "Baseline").into()
-                                    }
-                                }
-                            },
-                            {
-                                let langs = ui_langs();
+                    when(is_marker, move || {
+                        let marker_filter_controls = marker_filter_controls.clone();
+                        let marker_copy_controls = marker_copy_controls.clone();
+                        let marker_del_controls = marker_del_controls.clone();
+                        view()
+                            .w_full()
+                            .p_1()
+                            .gap_0p5()
+                            .child(action_item(
+                                tr("只看此标记段", "Filter this section"),
                                 closing(menu_open, move || {
-                                    set_baseline(
-                                        &base_controls,
-                                        picked.get(),
-                                        baseline,
-                                        &shown,
-                                        ui_lang(langs),
-                                    );
-                                })
-                            },
-                        ))
-                        .child(action_item(
-                            tr("备注…", "Note…"),
-                            closing(menu_open, move || {
-                                shown.repeating.set(false);
-                                shown.editing_comment.set(true);
-                            }),
-                        ))
-                        .child(menu_rule())
-                        .child(action_item_enabled(
-                            tr("重放", "Replay"),
-                            can_replay,
-                            closing(menu_open, move || {
-                                replay_flow(
-                                    &replay_controls,
-                                    picked.get(),
-                                    ReplayOverride::default(),
-                                );
-                            }),
-                        ))
-                        .child(action_item_enabled(
-                            tr("批量重放…", "Repeat…"),
-                            can_repeat,
-                            closing(menu_open, move || {
-                                if refuse_relay(&repeat_controls, picked.get()) {
-                                    return;
-                                }
-                                shown.editing_comment.set(false);
-                                shown.repeating.set(true);
-                            }),
-                        ))
-                        .child(action_item_enabled(
-                            {
-                                let langs = ui_langs();
-                                move || -> SharedString {
-                                    edit_action_label(ui_lang(langs), picked.get(), paused.get())
-                                        .into()
-                                }
-                            },
-                            can_edit,
-                            closing(menu_open, move || {
-                                let target = picked.get();
-                                if target.is_some() {
-                                    selected.set(target);
-                                }
-                                begin_compose(&edit_controls, target, compose);
-                            }),
-                        ))
-                        .child(action_item_enabled(
-                            tr("填入断点", "Add break"),
-                            can_break,
-                            closing(menu_open, move || {
-                                fill_break_rule(&break_controls, picked.get(), rules_text);
-                            }),
-                        ))
-                        .child(action_item_enabled(
-                            {
-                                let langs = ui_langs();
-                                move || -> SharedString {
-                                    #[cfg(not(target_arch = "wasm32"))]
-                                    let saves_file = picked.get().is_some_and(|id| {
-                                        map_label_check.hub.with_session(|session| {
-                                            session
-                                                .get(id)
-                                                .is_some_and(|flow| !flow.response_body.is_empty())
-                                        })
-                                    });
-                                    #[cfg(target_arch = "wasm32")]
-                                    let saves_file = {
-                                        let _ = (&picked, &map_label_check);
-                                        false
-                                    };
-                                    if saves_file {
-                                        t(ui_lang(langs), "本地映射…", "Map local…").into()
-                                    } else {
-                                        t(ui_lang(langs), "本地映射", "Map local").into()
+                                    if let Some(id) = picked.get()
+                                        && let Some(label) = marker_filter_controls
+                                            .hub
+                                            .with_session(|s| s.get(id).map(|f| f.path.clone()))
+                                    {
+                                        filter.set(marker_filter_token(&label));
                                     }
-                                }
-                            },
-                            can_map,
-                            closing(menu_open, move || {
-                                map_local_from_flow(
-                                    map_local_controls.clone(),
+                                }),
+                            ))
+                            .child(action_item(
+                                tr("复制标记名称", "Copy marker label"),
+                                closing(menu_open, move || {
+                                    if let Some(id) = picked.get()
+                                        && let Some(label) = marker_copy_controls
+                                            .hub
+                                            .with_session(|s| s.get(id).map(|f| f.path.clone()))
+                                    {
+                                        set_clipboard(label);
+                                    }
+                                }),
+                            ))
+                            .child(menu_rule())
+                            .child(action_item(
+                                tr("删除标记", "Delete marker"),
+                                closing(menu_open, move || {
+                                    if let Some(id) = picked.get() {
+                                        marker_del_controls.hub.remove_marker(id);
+                                        if selected.get() == Some(id) {
+                                            selected.set(None);
+                                        }
+                                    }
+                                }),
+                            ))
+                    })
+                    .otherwise(move || {
+                        let copy_url = copy_url.clone();
+                        let break_controls = break_controls.clone();
+                        let copy_curl = copy_curl.clone();
+                        let copy_ai = copy_ai.clone();
+                        let focus_controls = focus_controls.clone();
+                        let mute_controls = mute_controls.clone();
+                        let pin_controls = pin_controls.clone();
+                        let pin_mark = pin_mark.clone();
+                        let pin_label = pin_label.clone();
+                        let base_controls = base_controls.clone();
+                        let map_label_check = map_label_check.clone();
+                        let map_local_controls = map_local_controls.clone();
+                        let quick_rule_controls = quick_rule_controls.clone();
+                        let repeat_controls = repeat_controls.clone();
+                        let edit_controls = edit_controls.clone();
+                        let replay_controls = replay_controls.clone();
+                        let can_replay = can_replay.clone();
+                        let can_repeat = can_repeat.clone();
+                        let can_edit = can_edit.clone();
+                        let can_break = can_break.clone();
+                        let can_map = can_map.clone();
+                        let can_quick_rule = can_quick_rule.clone();
+                        view()
+                            .w_full()
+                            .p_1()
+                            .gap_0p5()
+                            .child(action_item(
+                                tr("复制 URL", "Copy URL"),
+                                closing(menu_open, move || {
+                                    copy_part(&copy_url, picked.get(), CopyPart::Url);
+                                }),
+                            ))
+                            .child(action_item(
+                                "cURL",
+                                closing(menu_open, move || {
+                                    copy_part(&copy_curl, picked.get(), CopyPart::Curl);
+                                }),
+                            ))
+                            .child(action_item(
+                                tr("复制给 AI", "Copy for AI"),
+                                closing(menu_open, move || {
+                                    copy_snippet(&copy_ai, picked.get(), Snippet::AiContext);
+                                }),
+                            ))
+                            .child(menu_rule())
+                            .child(action_item(
+                                tr("只看", "Focus"),
+                                closing(menu_open, move || {
+                                    focus_host(&focus_controls, picked.get(), filter);
+                                }),
+                            ))
+                            .child(action_item(
+                                tr("屏蔽", "Mute"),
+                                closing(menu_open, move || {
+                                    mute_host(&mute_controls, picked.get(), filter);
+                                }),
+                            ))
+                            .child(menu_rule())
+                            .child(marked_action(
+                                move || flow_pinned(&pin_mark, picked.get()),
+                                {
+                                    let langs = ui_langs();
+                                    move || -> SharedString {
+                                        if flow_pinned(&pin_label, picked.get()) {
+                                            t(ui_lang(langs), "取消星标", "Unstar").into()
+                                        } else {
+                                            t(ui_lang(langs), "星标", "Star").into()
+                                        }
+                                    }
+                                },
+                                closing(menu_open, move || toggle_pin(&pin_controls, picked.get())),
+                            ))
+                            .child(marked_action(
+                                move || baseline.get().is_some_and(|id| picked.get() == Some(id)),
+                                {
+                                    let langs = ui_langs();
+                                    let picked_label = picked;
+                                    let baseline_label = baseline;
+                                    move || -> SharedString {
+                                        if baseline_label
+                                            .get()
+                                            .is_some_and(|id| picked_label.get() == Some(id))
+                                        {
+                                            t(ui_lang(langs), "取消基准", "Clear baseline").into()
+                                        } else {
+                                            t(ui_lang(langs), "基准", "Baseline").into()
+                                        }
+                                    }
+                                },
+                                {
+                                    let langs = ui_langs();
+                                    closing(menu_open, move || {
+                                        set_baseline(
+                                            &base_controls,
+                                            picked.get(),
+                                            baseline,
+                                            &shown,
+                                            ui_lang(langs),
+                                        );
+                                    })
+                                },
+                            ))
+                            .child(action_item(
+                                tr("备注…", "Note…"),
+                                closing(menu_open, move || {
+                                    shown.repeating.set(false);
+                                    shown.editing_comment.set(true);
+                                }),
+                            ))
+                            .child(menu_rule())
+                            .child(action_item_enabled(
+                                tr("重放", "Replay"),
+                                can_replay,
+                                closing(menu_open, move || {
+                                    replay_flow(
+                                        &replay_controls,
+                                        picked.get(),
+                                        ReplayOverride::default(),
+                                    );
+                                }),
+                            ))
+                            .child(action_item_enabled(
+                                tr("批量重放…", "Repeat…"),
+                                can_repeat,
+                                closing(menu_open, move || {
+                                    if refuse_relay(&repeat_controls, picked.get()) {
+                                        return;
+                                    }
+                                    shown.editing_comment.set(false);
+                                    shown.repeating.set(true);
+                                }),
+                            ))
+                            .child(action_item_enabled(
+                                {
+                                    let langs = ui_langs();
+                                    move || -> SharedString {
+                                        edit_action_label(
+                                            ui_lang(langs),
+                                            picked.get(),
+                                            paused.get(),
+                                        )
+                                        .into()
+                                    }
+                                },
+                                can_edit,
+                                closing(menu_open, move || {
+                                    let target = picked.get();
+                                    if target.is_some() {
+                                        selected.set(target);
+                                    }
+                                    begin_compose(&edit_controls, target, compose);
+                                }),
+                            ))
+                            .child(action_item_enabled(
+                                tr("填入断点", "Add break"),
+                                can_break,
+                                closing(menu_open, move || {
+                                    fill_break_rule(&break_controls, picked.get(), rules_text);
+                                }),
+                            ))
+                            .child(action_item_enabled(
+                                {
+                                    let langs = ui_langs();
+                                    move || -> SharedString {
+                                        #[cfg(not(target_arch = "wasm32"))]
+                                        let saves_file = picked.get().is_some_and(|id| {
+                                            map_label_check.hub.with_session(|session| {
+                                                session.get(id).is_some_and(|flow| {
+                                                    !flow.response_body.is_empty()
+                                                })
+                                            })
+                                        });
+                                        #[cfg(target_arch = "wasm32")]
+                                        let saves_file = {
+                                            let _ = (&picked, &map_label_check);
+                                            false
+                                        };
+                                        if saves_file {
+                                            t(ui_lang(langs), "本地映射…", "Map local…").into()
+                                        } else {
+                                            t(ui_lang(langs), "本地映射", "Map local").into()
+                                        }
+                                    }
+                                },
+                                can_map,
+                                closing(menu_open, move || {
+                                    map_local_from_flow(
+                                        map_local_controls.clone(),
+                                        picked.get(),
+                                        rules_text,
+                                    );
+                                }),
+                            ))
+                            .child(flow_quick_rule_section(can_quick_rule, move |action| {
+                                menu_open.set(false);
+                                open_quick_rule_for_flow(
+                                    &quick_rule_controls,
+                                    profiles,
                                     picked.get(),
-                                    rules_text,
+                                    action,
                                 );
-                            }),
-                        ))
-                        .child(flow_quick_rule_section(can_quick_rule, move |action| {
-                            menu_open.set(false);
-                            open_quick_rule_for_flow(
-                                &quick_rule_controls,
-                                profiles,
-                                picked.get(),
-                                action,
-                            );
-                        })),
+                            }))
+                    }),
                 ),
         )
 }

@@ -92,6 +92,18 @@ pub(crate) fn publish_detail(
         shown.phase.set(Phase::Gone);
         return;
     };
+    if flow.is_marker() {
+        clear_shown(*shown);
+        shown.is_marker.set(true);
+        shown.method.set(flow.method);
+        shown.url.set(flow.path);
+        shown.protocol.set(flow.protocol.label_in(lang).to_string());
+        shown.metrics.set(present::format_clock(flow.started));
+        shown.pinned.set(flow.pinned);
+        shown.phase.set(Phase::Ready);
+        return;
+    }
+    shown.is_marker.set(false);
     let unloaded = flow.detail_unloaded();
     let pending = flow.detail_pending();
     let req_headers_loading = unloaded || (pending && flow.request_headers.is_empty());

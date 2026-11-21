@@ -648,6 +648,32 @@ impl Hub {
         removed
     }
 
+    pub fn add_marker(&self, label: impl Into<String>) -> u64 {
+        let label = label.into();
+        post_op(json!({"op": "add_marker", "text": label}));
+        self.bump();
+        0
+    }
+
+    pub fn remove_marker(&self, id: u64) -> bool {
+        let removed = self.with_session(|session| session.remove_marker(id));
+        if removed {
+            self.bump();
+        }
+        post_op(json!({"op": "remove_marker", "id": id}));
+        removed
+    }
+
+    pub fn rename_marker(&self, id: u64, label: impl Into<String>) -> bool {
+        let label = label.into();
+        let renamed = self.with_session(|session| session.rename_marker(id, label.clone()));
+        if renamed {
+            self.bump();
+        }
+        post_op(json!({"op": "rename_marker", "id": id, "text": label}));
+        renamed
+    }
+
     pub fn begin_share_with_redact(
         &self,
         ttl: Duration,
@@ -740,6 +766,9 @@ impl Hub {
         let Some(flow) = flow else {
             return Err(anyhow!("没有这条记录"));
         };
+        if flow.is_marker() {
+            return Err(anyhow!("会话标记不能重放"));
+        }
         if flow.protocol == Protocol::Tunnel || flow.method.eq_ignore_ascii_case("CONNECT") {
             return Err(anyhow!("隧道不能重放"));
         }

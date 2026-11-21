@@ -52,6 +52,13 @@ pub(crate) fn build_command_items(state: CommandPaletteState) -> Vec<CommandItem
             .group(g_capture)
             .keywords(["compose", "request", "curl", "http", "构造", "请求"]),
         CommandItem::new(
+            "add_marker",
+            t(lang, "插入会话标记", "Insert session marker"),
+        )
+        .group(g_capture)
+        .shortcut("mod+m")
+        .keywords(["marker", "mark", "divider", "timeline", "标记", "分隔线"]),
+        CommandItem::new(
             "replay_selected",
             t(lang, "重放当前选中流量", "Replay selected flow"),
         )
@@ -808,6 +815,7 @@ pub(crate) fn command_palette_modal(
                         "zoom_reset" => reset_ui_zoom(&controls),
                         "open_settings" => open_settings_tab(profiles, SettingsTab::General),
                         "open_shortcuts" => shortcuts_open.set(true),
+                        "add_marker" => profiles.marker_modal_open.set(true),
                         "open_about" => profiles.about_open.set(true),
                         other => {
                             if let Some(preset) = NetworkPreset::from_command_id(other) {

@@ -306,6 +306,8 @@ struct ShareFlow {
     ttfb_ms: Option<u128>,
     total_ms: Option<u128>,
     pinned: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    is_marker: bool,
     rule_hit: String,
     comment: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -904,6 +906,7 @@ fn share_flow(
         ttfb_ms,
         total_ms,
         pinned: flow.pinned,
+        is_marker: flow.is_marker(),
         rule_hit: flow.rule_hit.clone(),
         comment: flow.comment.clone(),
         client_ip,
@@ -2657,6 +2660,11 @@ function renderList(flows) {
   const ellMode = state.cols.ellipsize;
 
   tbody.innerHTML = flows.map(flow => {
+    if (flow.is_marker) {
+      const label = flow.path || tr("标记", "Marker");
+      const at = flow.started || "";
+      return `<tr class="marker-row" data-id="${flow.id}"><td colspan="${cols.length}" style="background:rgba(37,99,235,0.08);color:var(--accent,#2563eb);font-weight:600;border-top:1px solid rgba(37,99,235,0.22);border-bottom:1px solid rgba(37,99,235,0.22);padding:5px 10px"><span class="mono" style="margin-right:8px;opacity:0.85">[MARK]</span>${esc(label)}${at ? `<span class="mono" style="float:right;font-weight:400;opacity:0.75">${esc(at)}</span>` : ""}</td></tr>`;
+    }
     const isSel = flow.id === state.selectedId;
     const isBase = flow.id === state.baselineId;
     const rowCls = [isSel ? "selected" : "", isBase ? "baseline" : ""].filter(Boolean).join(" ");
@@ -2757,6 +2765,7 @@ function renderSummaryView(visibleFlows) {
   let slowest = null;
 
   for (const f of visibleFlows) {
+    if (f.is_marker) continue;
     reqSum += Number(f.request_bytes || 0);
     resSum += Number(f.response_bytes || 0);
     const st = f.status;
@@ -4867,5 +4876,16 @@ mod tests {
         assert!(html.contains("onlyHostFilter(flow.host)"));
         assert!(html.contains(".code-viewer.hex-dump"));
         assert!(html.contains("w >= 980 ? 32 : 16"));
+    }
+
+    #[test]
+    fn html_export_renders_session_marker_rows() {
+        let mut session = crate::session::Session::default();
+        let m_id = session.add_marker("Start login");
+        let flows = vec![session.get(m_id).unwrap().clone()];
+        let html = export_html(&flows, "", &RedactOptions::default(), false);
+        assert!(html.contains("\"is_marker\":true"));
+        assert!(html.contains("Start login"));
+        assert!(html.contains("class=\"marker-row\""));
     }
 }

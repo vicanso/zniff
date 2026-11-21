@@ -119,11 +119,28 @@ pub(crate) fn row_edge_mark(
     baseline: Signal<Option<u64>>,
     index: usize,
 ) -> AdaptiveColor {
-    let id = rows.with(|rows| rows.get(index).map(|row| row.id));
-    match id {
-        Some(id) if selected.get() == Some(id) => accent_blue(),
-        Some(id) if baseline.get() == Some(id) => baseline_mark(),
+    let row = rows.with(|rows| rows.get(index).map(|row| (row.id, row.is_marker)));
+    match row {
+        Some((id, _)) if selected.get() == Some(id) => accent_blue(),
+        Some((_, true)) => accent_blue_border(),
+        Some((id, _)) if baseline.get() == Some(id) => baseline_mark(),
         _ => AdaptiveColor::TRANSPARENT,
+    }
+}
+
+fn marker_row_bg(rows: Signal<Vec<Arc<RowLine>>>, index: usize) -> AdaptiveColor {
+    if rows.with(|rows| rows.get(index).is_some_and(|row| row.is_marker)) {
+        accent_blue_soft()
+    } else {
+        AdaptiveColor::TRANSPARENT
+    }
+}
+
+fn marker_row_border(rows: Signal<Vec<Arc<RowLine>>>, index: usize) -> AdaptiveColor {
+    if rows.with(|rows| rows.get(index).is_some_and(|row| row.is_marker)) {
+        accent_blue_border()
+    } else {
+        AdaptiveColor::TRANSPARENT
     }
 }
 
@@ -138,6 +155,11 @@ pub(crate) fn method_cell(
         .w_full()
         .h_full()
         .min_w(px(0.0))
+        .bg(move || marker_row_bg(rows, index))
+        .border_t_1()
+        .border_b_1()
+        .border_t_color(move || marker_row_border(rows, index))
+        .border_b_color(move || marker_row_border(rows, index))
         .pl(px(2.0))
         .pr(move || column_pad_right(Some(ListColumn::Method), false, columns.get()))
         .border_l(px(2.0))
@@ -179,7 +201,13 @@ pub(crate) fn method_cell(
                 .bg(move || {
                     rows.with(|rows| {
                         rows.get(index)
-                            .map(|row| method_bg(&row.method))
+                            .map(|row| {
+                                if row.is_marker {
+                                    accent_blue()
+                                } else {
+                                    method_bg(&row.method)
+                                }
+                            })
                             .unwrap_or_else(bg_control)
                     })
                 })
@@ -197,7 +225,13 @@ pub(crate) fn method_cell(
                     .text_color(move || {
                         rows.with(|rows| {
                             rows.get(index)
-                                .map(|row| method_fg(&row.method))
+                                .map(|row| {
+                                    if row.is_marker {
+                                        AdaptiveColor::new(white(), white())
+                                    } else {
+                                        method_fg(&row.method)
+                                    }
+                                })
                                 .unwrap_or_else(fg_secondary)
                         })
                     }),
@@ -216,6 +250,11 @@ pub(crate) fn id_cell(
         .w_full()
         .h_full()
         .min_w(px(0.0))
+        .bg(move || marker_row_bg(rows, index))
+        .border_t_1()
+        .border_b_1()
+        .border_t_color(move || marker_row_border(rows, index))
+        .border_b_color(move || marker_row_border(rows, index))
         .pl(px(4.0))
         .pr(move || column_pad_right(Some(ListColumn::Id), false, columns.get()))
         .border_l(px(2.0))
@@ -233,7 +272,13 @@ pub(crate) fn id_cell(
             mono(move || {
                 rows.with(|rows| {
                     rows.get(index)
-                        .map(|row| row.id.to_string())
+                        .map(|row| {
+                            if row.is_marker {
+                                "—".to_string()
+                            } else {
+                                row.id.to_string()
+                            }
+                        })
                         .unwrap_or_default()
                 })
             })
@@ -258,6 +303,11 @@ pub(crate) fn status_cell(
         .w_full()
         .h_full()
         .min_w(px(0.0))
+        .bg(move || marker_row_bg(rows, index))
+        .border_t_1()
+        .border_b_1()
+        .border_t_color(move || marker_row_border(rows, index))
+        .border_b_color(move || marker_row_border(rows, index))
         .pl(move || if is_first() { px(2.0) } else { px(4.0) })
         .pr(move || column_pad_right(Some(ListColumn::Status), false, columns.get()))
         .border_l(move || if is_first() { px(2.0) } else { px(0.0) })
@@ -269,7 +319,13 @@ pub(crate) fn status_cell(
             mono(move || {
                 rows.with(|rows| {
                     rows.get(index)
-                        .map(|row| list_status(row.status, row.failed))
+                        .map(|row| {
+                            if row.is_marker {
+                                String::new()
+                            } else {
+                                list_status(row.status, row.failed)
+                            }
+                        })
                         .unwrap_or_default()
                 })
             })
@@ -303,6 +359,11 @@ pub(crate) fn time_cell(
         .w_full()
         .h_full()
         .min_w(px(0.0))
+        .bg(move || marker_row_bg(rows, index))
+        .border_t_1()
+        .border_b_1()
+        .border_t_color(move || marker_row_border(rows, index))
+        .border_b_color(move || marker_row_border(rows, index))
         .pl(move || if is_first() { px(2.0) } else { px(4.0) })
         .pr(move || column_pad_right(Some(ListColumn::Gap), true, columns.get()))
         .border_l(move || if is_first() { px(2.0) } else { px(0.0) })
@@ -349,6 +410,11 @@ pub(crate) fn elapsed_cell(
         .w_full()
         .h_full()
         .min_w(px(0.0))
+        .bg(move || marker_row_bg(rows, index))
+        .border_t_1()
+        .border_b_1()
+        .border_t_color(move || marker_row_border(rows, index))
+        .border_b_color(move || marker_row_border(rows, index))
         .pl(move || if is_first() { px(2.0) } else { px(4.0) })
         .pr(move || column_pad_right(Some(ListColumn::Elapsed), true, columns.get()))
         .border_l(move || if is_first() { px(2.0) } else { px(0.0) })
@@ -394,6 +460,11 @@ pub(crate) fn host_cell(
         .w_full()
         .h_full()
         .min_w(px(0.0))
+        .bg(move || marker_row_bg(rows, index))
+        .border_t_1()
+        .border_b_1()
+        .border_t_color(move || marker_row_border(rows, index))
+        .border_b_color(move || marker_row_border(rows, index))
         .pl(move || if is_first() { px(2.0) } else { px(4.0) })
         .pr(move || column_pad_right(Some(ListColumn::Host), false, columns.get()))
         .border_l(move || if is_first() { px(2.0) } else { px(0.0) })
@@ -441,6 +512,11 @@ pub(crate) fn client_ip_cell(
         .w_full()
         .h_full()
         .min_w(px(0.0))
+        .bg(move || marker_row_bg(rows, index))
+        .border_t_1()
+        .border_b_1()
+        .border_t_color(move || marker_row_border(rows, index))
+        .border_b_color(move || marker_row_border(rows, index))
         .pl(move || if is_first() { px(2.0) } else { px(4.0) })
         .pr(move || column_pad_right(Some(ListColumn::ClientIp), false, columns.get()))
         .border_l(move || if is_first() { px(2.0) } else { px(0.0) })
@@ -492,6 +568,11 @@ pub(crate) fn protocol_cell(
         .w_full()
         .h_full()
         .min_w(px(0.0))
+        .bg(move || marker_row_bg(rows, index))
+        .border_t_1()
+        .border_b_1()
+        .border_t_color(move || marker_row_border(rows, index))
+        .border_b_color(move || marker_row_border(rows, index))
         .pl(move || if is_first() { px(2.0) } else { px(4.0) })
         .pr(move || column_pad_right(Some(ListColumn::Protocol), false, columns.get()))
         .border_l(move || if is_first() { px(2.0) } else { px(0.0) })
@@ -527,6 +608,11 @@ pub(crate) fn size_cell(
         .w_full()
         .h_full()
         .min_w(px(0.0))
+        .bg(move || marker_row_bg(rows, index))
+        .border_t_1()
+        .border_b_1()
+        .border_t_color(move || marker_row_border(rows, index))
+        .border_b_color(move || marker_row_border(rows, index))
         .pl(move || if is_first() { px(2.0) } else { px(4.0) })
         .pr(move || column_pad_right(Some(ListColumn::Size), true, columns.get()))
         .border_l(move || if is_first() { px(2.0) } else { px(0.0) })
@@ -568,6 +654,11 @@ pub(crate) fn path_cell(
         .w_full()
         .h_full()
         .min_w(px(0.0))
+        .bg(move || marker_row_bg(rows, index))
+        .border_t_1()
+        .border_b_1()
+        .border_t_color(move || marker_row_border(rows, index))
+        .border_b_color(move || marker_row_border(rows, index))
         .pl(move || if is_first() { px(2.0) } else { px(4.0) })
         .pr(move || column_pad_right(Some(ListColumn::Path), false, columns.get()))
         .border_l(move || if is_first() { px(2.0) } else { px(0.0) })
@@ -649,11 +740,11 @@ pub(crate) fn path_cell(
             .text_overflow(move || columns.get().ellipsize_mode())
             .text_size(move || scaled_px(12.0))
             .text_color(move || {
-                if rows.with(|rows| rows.get(index).is_some_and(|row| row.failed)) {
-                    status_err_fg()
-                } else {
-                    fg_secondary()
-                }
+                rows.with(|rows| match rows.get(index) {
+                    Some(row) if row.is_marker => accent_blue_text(),
+                    Some(row) if row.failed => status_err_fg(),
+                    _ => fg_secondary(),
+                })
             }),
         )
         .on_mouse_move(move |event: &MouseEvent| {
@@ -705,6 +796,9 @@ pub(crate) fn row_target_text(row: &RowLine, display: EffectivePathDisplay) -> &
 }
 
 pub(crate) fn row_target_display(row: &RowLine, display: EffectivePathDisplay) -> String {
+    if row.is_marker {
+        return format!("── {} ──", row.path);
+    }
     let base = row_target_text(row, display);
     if row.comment.is_empty() {
         base.to_string()

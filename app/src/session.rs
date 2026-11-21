@@ -388,6 +388,7 @@ pub enum Protocol {
     Http2,
     WebSocket,
     Tunnel,
+    Marker,
 }
 
 impl Protocol {
@@ -401,6 +402,7 @@ impl Protocol {
             Self::Http2 => "HTTP/2",
             Self::WebSocket => "WebSocket",
             Self::Tunnel => crate::i18n::t(lang, "隧道", "Tunnel"),
+            Self::Marker => crate::i18n::t(lang, "标记", "Marker"),
         }
     }
 
@@ -411,6 +413,7 @@ impl Protocol {
             "HTTP/2" => Self::Http2,
             "WebSocket" => Self::WebSocket,
             "隧道" | "Tunnel" => Self::Tunnel,
+            "标记" | "Marker" => Self::Marker,
             _ => Self::Http11,
         }
     }
@@ -566,6 +569,9 @@ impl FilteredStats {
         let mut elapsed_sum_ms: u128 = 0;
         let mut elapsed_count: u64 = 0;
         for flow in flows {
+            if flow.is_marker() {
+                continue;
+            }
             stats.total_count += 1;
             match flow.status {
                 Some(200..=299) => stats.s2xx += 1,
@@ -642,6 +648,9 @@ impl SessionFacets {
         let mut domain_map: HashMap<String, FacetEntry> = HashMap::new();
         let mut app_map: HashMap<String, FacetEntry> = HashMap::new();
         for flow in flows {
+            if flow.is_marker() {
+                continue;
+            }
             let is_err = flow.error.is_some() || flow.status.is_some_and(|code| code >= 400);
             let host = flow.host.trim();
             if !host.is_empty() {
@@ -876,6 +885,9 @@ pub fn extract_client_app_facet(client_ip: &str) -> Option<(String, String)> {
 }
 
 impl Flow {
+    pub fn is_marker(&self) -> bool {
+        self.protocol == Protocol::Marker
+    }
     pub fn req_bytes(&self) -> usize {
         if self.request_bytes > 0 {
             self.request_bytes as usize
@@ -1198,6 +1210,89 @@ impl Session {
         self.flows.insert(id, flow);
         self.evict(id);
         id
+    }
+
+    pub fn add_marker(&mut self, label: impl Into<String>) -> u64 {
+        self.add_marker_at(label, crate::clock::now())
+    }
+
+    pub fn add_marker_at(&mut self, label: impl Into<String>, started: SystemTime) -> u64 {
+        let now = crate::clock::now();
+        self.spill.gc(now);
+        self.expire_clear_undo_at(now);
+        self.next_id += 1;
+        self.next_rev += 1;
+        let id = self.next_id;
+        let rev = self.next_rev;
+        let label = label.into().trim().to_string();
+        let flow = Flow {
+            id,
+            protocol: Protocol::Marker,
+            method: "MARK".to_string(),
+            host: String::new(),
+            path: label,
+            url: String::new(),
+            client_ip: String::new(),
+            conn_info: ConnInfo::default(),
+            status: None,
+            error: None,
+            request_headers: Vec::new(),
+            response_headers: Vec::new(),
+            request_body: Vec::new(),
+            response_body: Vec::new(),
+            request_spill: None,
+            response_spill: None,
+            request_expired: None,
+            response_expired: None,
+            request_truncated: false,
+            response_truncated: false,
+            request_encoding_error: None,
+            response_encoding_error: None,
+            started,
+            response_at: None,
+            finished_at: Some(started),
+            request_bytes: 0,
+            response_bytes: 0,
+            messages: Vec::new(),
+            messages_truncated: false,
+            pinned: false,
+            rule_hit: String::new(),
+            rule_hits: Vec::new(),
+            comment: String::new(),
+            relay_source: None,
+            relay_remote_id: None,
+            rev,
+            cached_view: false,
+            cached_server_rev: 0,
+            cached_detail_rev: None,
+            accounted: 0,
+        };
+        self.order.push_back(id);
+        self.flows.insert(id, flow);
+        id
+    }
+
+    pub fn remove_marker(&mut self, id: u64) -> bool {
+        if !self.flows.get(&id).is_some_and(Flow::is_marker) {
+            return false;
+        }
+        self.flows.remove(&id);
+        self.order.retain(|item| *item != id);
+        self.next_rev += 1;
+        true
+    }
+
+    pub fn rename_marker(&mut self, id: u64, label: impl Into<String>) -> bool {
+        let Some(flow) = self.flows.get_mut(&id) else {
+            return false;
+        };
+        if !flow.is_marker() {
+            return false;
+        }
+        self.next_rev += 1;
+        flow.path = label.into().trim().to_string();
+        flow.rev = self.next_rev;
+        true
     }
 
     pub fn set_client_ip(&mut self, id: u64, client_ip: impl Into<String>) {
@@ -1908,10 +2003,58 @@ impl Session {
     pub fn hydrated_matching(&self, id: u64, filter: &str) -> Option<Flow> {
         let flow = self.flows.get(&id)?;
         let query = FlowQuery::parse(filter);
-        if !query.matches(flow, &self.spill) {
+        let active_marker = if query.needs_marker() {
+            self.active_marker_for(id)
+        } else {
+            None
+        };
+        if !query.matches(flow, active_marker, &self.spill) {
             return None;
         }
         self.hydrated(id)
+    }
+
+    /// Returns the label of the active timeline marker for `target_id`
+    /// (the marker itself if `target_id` is a marker, or the most recent preceding marker).
+    pub fn active_marker_for(&self, target_id: u64) -> Option<&str> {
+        let mut current: Option<&str> = None;
+        for id in &self.order {
+            let Some(flow) = self.flows.get(id) else {
+                continue;
+            };
+            if flow.is_marker() {
+                current = Some(flow.path.as_str());
+            }
+            if *id == target_id {
+                return current;
+            }
+        }
+        None
+    }
+
+    /// Counts non-marker flows belonging to the timeline section started by marker `marker_id`.
+    pub fn flows_in_marker_section(&self, marker_id: u64) -> usize {
+        let mut inside = false;
+        let mut count = 0usize;
+        for id in &self.order {
+            let Some(flow) = self.flows.get(id) else {
+                continue;
+            };
+            if *id == marker_id {
+                if !flow.is_marker() {
+                    return 0;
+                }
+                inside = true;
+                continue;
+            }
+            if inside {
+                if flow.is_marker() {
+                    break;
+                }
+                count += 1;
+            }
+        }
+        count
     }
 
     pub fn clear(&mut self) {
@@ -2386,11 +2529,15 @@ impl Session {
         let need_body = query.needs_body();
         let need_op = query.needs_op();
         let mut items = Vec::new();
+        let mut current_marker: Option<&str> = None;
         for id in &self.order {
             let Some(flow) = self.flows.get(id) else {
                 continue;
             };
-            if !query.matches_meta(flow) {
+            if flow.is_marker() {
+                current_marker = Some(flow.path.as_str());
+            }
+            if !query.matches_meta(flow, current_marker) {
                 continue;
             }
             if !need_body && !need_op {
@@ -2487,23 +2634,41 @@ impl Session {
     #[cfg(test)]
     pub fn filtered_stats(&self, filter: &str) -> FilteredStats {
         let query = FlowQuery::parse(filter);
-        let matching = self.order.iter().filter_map(|id| {
-            let flow = self.flows.get(id)?;
-            query.matches(flow, &self.spill).then_some(flow)
-        });
+        let mut current_marker: Option<&str> = None;
+        let matching: Vec<&Flow> = self
+            .order
+            .iter()
+            .filter_map(|id| {
+                let flow = self.flows.get(id)?;
+                if flow.is_marker() {
+                    current_marker = Some(flow.path.as_str());
+                }
+                query
+                    .matches(flow, current_marker, &self.spill)
+                    .then_some(flow)
+            })
+            .collect();
         FilteredStats::from_flows(matching)
     }
 
     fn evict(&mut self, keep: u64) {
         while self.bytes > SESSION_CAP && self.order.len() > 1 {
             let front_ok = self.order.front().is_some_and(|id| {
-                *id != keep && self.flows.get(id).is_some_and(|flow| !flow.pinned)
+                *id != keep
+                    && self
+                        .flows
+                        .get(id)
+                        .is_some_and(|flow| !flow.pinned && !flow.is_marker())
             });
             let old = if front_ok {
                 self.order.pop_front()
             } else {
                 let Some(pos) = self.order.iter().position(|id| {
-                    *id != keep && self.flows.get(id).is_some_and(|flow| !flow.pinned)
+                    *id != keep
+                        && self
+                            .flows
+                            .get(id)
+                            .is_some_and(|flow| !flow.pinned && !flow.is_marker())
                 }) else {
                     break;
                 };
@@ -3031,8 +3196,16 @@ impl FlowQuery {
             .any(|stage| !stage.ops.is_empty() || !stage.neg_ops.is_empty())
     }
 
-    fn matches_meta(&self, flow: &Flow) -> bool {
-        self.stages.iter().all(|stage| stage.matches_meta(flow))
+    fn needs_marker(&self) -> bool {
+        self.stages
+            .iter()
+            .any(|stage| !stage.marks.is_empty() || !stage.neg_marks.is_empty())
+    }
+
+    fn matches_meta(&self, flow: &Flow, active_marker: Option<&str>) -> bool {
+        self.stages
+            .iter()
+            .all(|stage| stage.matches_meta(flow, active_marker))
     }
 
     fn matches_payload(&self, path: &str, req: &[u8], res: &[u8], messages: &[Message]) -> bool {
@@ -3041,8 +3214,8 @@ impl FlowQuery {
             .all(|stage| stage.matches_payload(path, req, res, messages))
     }
 
-    fn matches(&self, flow: &Flow, spill: &SpillStore) -> bool {
-        if !self.matches_meta(flow) {
+    fn matches(&self, flow: &Flow, active_marker: Option<&str>, spill: &SpillStore) -> bool {
+        if !self.matches_meta(flow, active_marker) {
             return false;
         }
         if !self.needs_body() && !self.needs_op() {
@@ -3188,10 +3361,28 @@ struct FlowStage {
     neg_ops: Vec<Vec<String>>,
     rules: Vec<Vec<String>>,
     neg_rules: Vec<Vec<String>>,
+    marks: Vec<Vec<String>>,
+    neg_marks: Vec<Vec<String>>,
     pinned_only: bool,
     unpinned_only: bool,
     slow_only: bool,
     neg_slow_only: bool,
+}
+
+fn flow_matches_mark_group(flow: &Flow, active_marker: Option<&str>, group: &[String]) -> bool {
+    if group.is_empty() {
+        return flow.is_marker();
+    }
+    let label = if flow.is_marker() {
+        Some(flow.path.as_str())
+    } else {
+        active_marker
+    };
+    label.is_some_and(|text| {
+        group
+            .iter()
+            .any(|keyword| contains_ascii_ignore_case(text, keyword))
+    })
 }
 
 impl FlowStage {
@@ -3224,6 +3415,8 @@ impl FlowStage {
             neg_ops: Vec::new(),
             rules: Vec::new(),
             neg_rules: Vec::new(),
+            marks: Vec::new(),
+            neg_marks: Vec::new(),
             pinned_only: false,
             unpinned_only: false,
             slow_only: false,
@@ -3304,6 +3497,10 @@ impl FlowStage {
                 }
                 if let Some(rest) = neg.strip_prefix("rule:") {
                     query.neg_rules.push(split_or_terms(rest));
+                    continue;
+                }
+                if let Some(rest) = neg.strip_prefix("mark:") {
+                    query.neg_marks.push(split_or_terms(rest));
                     continue;
                 }
                 if let Some(rest) = neg.strip_prefix("path:") {
@@ -3400,6 +3597,10 @@ impl FlowStage {
                 query.rules.push(split_or_terms(rest));
                 continue;
             }
+            if let Some(rest) = lower.strip_prefix("mark:") {
+                query.marks.push(split_or_terms(rest));
+                continue;
+            }
             if let Some(rest) = lower.strip_prefix("path:") {
                 query.path_prefixes.extend(split_or_terms(rest));
                 continue;
@@ -3482,7 +3683,22 @@ impl FlowStage {
         query
     }
 
-    fn matches_meta(&self, flow: &Flow) -> bool {
+    fn matches_meta(&self, flow: &Flow, active_marker: Option<&str>) -> bool {
+        if !self.marks.is_empty()
+            && !self
+                .marks
+                .iter()
+                .all(|group| flow_matches_mark_group(flow, active_marker, group))
+        {
+            return false;
+        }
+        if self
+            .neg_marks
+            .iter()
+            .any(|group| flow_matches_mark_group(flow, active_marker, group))
+        {
+            return false;
+        }
         if self.pinned_only && !flow.pinned {
             return false;
         }
@@ -5250,5 +5466,70 @@ mod tests {
         assert_eq!(s.ids_matching("rule:mock"), vec![f2]);
         assert_eq!(s.ids_matching("-rule:replace"), vec![f2, f3, f4]);
         assert_eq!(s.ids_matching("-rule:mock:2"), vec![f1, f3, f4]);
+    }
+
+    #[test]
+    fn session_markers_insert_rename_remove_stats_and_mark_filter() {
+        let mut s = Session::default();
+        let make_draft = |path: &str| FlowDraft {
+            protocol: Protocol::Http11,
+            method: "GET".into(),
+            host: "api.test".into(),
+            path: path.into(),
+            url: format!("https://api.test{path}"),
+            request_headers: vec![],
+        };
+        let f0 = s.open(make_draft("/init"));
+        let m1 = s.add_marker("  Start login test  ");
+        let f1 = s.open(make_draft("/login"));
+        s.set_response(f1, 200, vec![], None);
+        let f2 = s.open(make_draft("/me"));
+        s.set_response(f2, 500, vec![], None);
+        let m2 = s.add_marker("Checkout flow");
+        let f3 = s.open(make_draft("/order"));
+        s.set_response(f3, 201, vec![], None);
+
+        assert!(s.get(m1).unwrap().is_marker());
+        assert_eq!(s.get(m1).unwrap().path, "Start login test");
+        assert_eq!(s.flows_in_marker_section(m1), 2);
+        assert_eq!(s.flows_in_marker_section(m2), 1);
+        assert_eq!(s.active_marker_for(f0), None);
+        assert_eq!(s.active_marker_for(m1), Some("Start login test"));
+        assert_eq!(s.active_marker_for(f2), Some("Start login test"));
+        assert_eq!(s.active_marker_for(f3), Some("Checkout flow"));
+
+        // Empty filter shows all flows and markers in chronological order.
+        assert_eq!(s.ids_matching(""), vec![f0, m1, f1, f2, m2, f3]);
+        // `mark:` shows only marker rows; `-mark:` hides marker rows.
+        assert_eq!(s.ids_matching("mark:"), vec![m1, m2]);
+        assert_eq!(s.ids_matching("-mark:"), vec![f0, f1, f2, f3]);
+        // `mark:<text>` shows matching marker and flows in its section.
+        assert_eq!(s.ids_matching("mark:login"), vec![m1, f1, f2]);
+        assert_eq!(s.ids_matching("mark:checkout"), vec![m2, f3]);
+        assert_eq!(
+            s.ids_matching("mark:login|checkout"),
+            vec![m1, f1, f2, m2, f3]
+        );
+        // Combined with status filter.
+        assert_eq!(s.ids_matching("mark:login status:5xx"), vec![f2]);
+        // Negated `mark:<text>` excludes matching marker and its section.
+        assert_eq!(s.ids_matching("-mark:login"), vec![f0, m2, f3]);
+        // Stats and facets ignore marker rows.
+        let stats = s.filtered_stats("");
+        assert_eq!(stats.total_count, 4);
+        assert_eq!(stats.s2xx, 2);
+        assert_eq!(stats.s5xx, 1);
+        assert_eq!(stats.pending, 1);
+        let facets = s.facets();
+        assert_eq!(facets.domains.len(), 1);
+        assert_eq!(facets.domains[0].count, 4);
+
+        // Rename and remove markers.
+        assert!(s.rename_marker(m1, "Auth phase"));
+        assert_eq!(s.ids_matching("mark:auth"), vec![m1, f1, f2]);
+        assert!(!s.rename_marker(f1, "nope"));
+        assert!(!s.remove_marker(f1));
+        assert!(s.remove_marker(m2));
+        assert_eq!(s.ids_matching("mark:"), vec![m1]);
     }
 }

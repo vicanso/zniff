@@ -106,37 +106,71 @@ pub(crate) fn project_rows(
             lines.push(Arc::clone(&hit.line));
             continue;
         }
-        let failed = flow.error.is_some() && flow.status.is_none();
+        let is_marker = flow.is_marker();
+        let failed = !is_marker && flow.error.is_some() && flow.status.is_none();
         let gap_nanos = previous
             .and_then(|prev| flow.started.duration_since(prev).ok())
             .map(|duration| duration.as_nanos())
             .unwrap_or(0);
-        let elapsed_nanos = flow
-            .finished_at
-            .and_then(|fin| fin.duration_since(flow.started).ok())
-            .map(|duration| duration.as_nanos());
+        let elapsed_nanos = if is_marker {
+            None
+        } else {
+            flow.finished_at
+                .and_then(|fin| fin.duration_since(flow.started).ok())
+                .map(|duration| duration.as_nanos())
+        };
         let line = Arc::new(RowLine {
             id: *id,
             method: flow.method.clone(),
             status: flow.status,
-            time: present::format_gap(*previous, flow.started),
+            time: if is_marker {
+                present::format_clock(flow.started)
+            } else {
+                present::format_gap(*previous, flow.started)
+            },
             gap_nanos,
             clock: present::format_clock(flow.started),
-            elapsed: present::format_elapsed(flow.started, flow.finished_at),
+            elapsed: if is_marker {
+                String::new()
+            } else {
+                present::format_elapsed(flow.started, flow.finished_at)
+            },
             elapsed_nanos,
-            elapsed_slow: flow.finished_at.is_some()
+            elapsed_slow: !is_marker
+                && flow.finished_at.is_some()
                 && present::is_slow(flow.started, flow.finished_at, clock::now()),
             host: flow.host.clone(),
-            client_ip: session::format_client_label(&flow.client_ip, lang),
-            path: list_path(&flow.path, flow.error.as_deref(), failed, lang),
-            host_path: list_host_path(&flow.host, &flow.path, flow.error.as_deref(), failed, lang),
-            url: list_url(&flow.url, &flow.path, flow.error.as_deref(), failed, lang),
+            client_ip: if is_marker {
+                String::new()
+            } else {
+                session::format_client_label(&flow.client_ip, lang)
+            },
+            path: if is_marker {
+                flow.path.clone()
+            } else {
+                list_path(&flow.path, flow.error.as_deref(), failed, lang)
+            },
+            host_path: if is_marker {
+                flow.path.clone()
+            } else {
+                list_host_path(&flow.host, &flow.path, flow.error.as_deref(), failed, lang)
+            },
+            url: if is_marker {
+                flow.path.clone()
+            } else {
+                list_url(&flow.url, &flow.path, flow.error.as_deref(), failed, lang)
+            },
             comment: flow.comment.clone(),
             protocol: flow.protocol.label_in(lang).to_string(),
-            size: format_bytes(flow.response_bytes as usize),
+            size: if is_marker {
+                String::new()
+            } else {
+                format_bytes(flow.response_bytes as usize)
+            },
             size_bytes: flow.response_bytes,
             failed,
             pinned: flow.pinned,
+            is_marker,
             rule_marker: rule_marker_for_flow(&flow.rule_hits, &flow.rule_hit),
             rule_summary: rule_hover_summary(&flow.rule_hits, &flow.rule_hit),
             relay_short: flow
