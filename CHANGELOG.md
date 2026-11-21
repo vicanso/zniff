@@ -1,3 +1,48 @@
+## [0.4.0] - 2026-11-21
+
+### 🚀 Features
+
+- *(launcher)* Add zero-config Chromium, proxied terminal, and Android adb capture
+- *(rules)* Add dynamic template variables and HMAC-SHA256 request signing
+- *(webhook)* Add loopback HTTP hook rule for custom request/response mutation
+- *(openapi)* Add OpenAPI 3.0 & Mock dir export and generate_openapi MCP tool
+- *(ui)* Add Hook tab, rule-assist roundtrip, and template var strip to quick rules
+- *(launcher)* Show active ADB count with one-click reset and open selected flow origin in isolated browser
+- *(openapi)* Add YAML export, one-click clipboard copy, and MCP yaml format
+- *(webhook)* Add read-only mode=preview hook for detail body decryption
+- *(proto)* Add zero-dependency .proto schema parser and gRPC/Protobuf detail decoder
+- *(window)* Persist window position, mode, and display_id with multi-monitor fallback
+- *(ui)* Add Cmd/Ctrl+Shift+P command palette powered by nsh_base::command
+- Ship v0.4 onboarding, migration import, multi-group rules, SOCKS5/PAC, and LLM SSE inspector
+- Resolve adb across GUI paths and refine right-pane onboarding layout
+- Detect and reuse trusted local external root CAs
+- Add Windows ARM64 build, test, and auto-update support
+- Place request cards on left and response cards on right in top-bottom layout
+- Add proxy allow-hosts control and strict deny-all mode for docker
+
+### 🐛 Bug Fixes
+
+- Keep single-domain sidebar counts reactive and polish empty/header UI
+
+### 📚 Documentation
+
+- Update document
+
+### ⚡ Performance
+
+- Yield paint frame and preserve OS folder in native file dialogs
+
+### 🚜 Refactor
+
+- *(proxy)* Split monolithic proxy.rs into cohesive submodules and tighten complexity guidelines
+
+### 🧪 Testing
+
+- Replace fixed sleeps with deterministic synchronization in proxy, web, and session tests
+
+### ⚙️ Miscellaneous Tasks
+
+- Upgrade nsh to 0.6.1
 ## [0.3.1] - 2026-11-18
 
 ### 🚀 Features
