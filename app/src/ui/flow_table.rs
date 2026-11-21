@@ -12,6 +12,12 @@ pub(crate) struct EmptyFilterState {
     pub(crate) on_clear_primary: Option<Rc<dyn Fn()>>,
 }
 
+/// Returns whether `row` lies outside the currently visible `[start, end)` range
+/// (or the viewport has not yet reported a non-empty visible range).
+pub(crate) fn should_reveal_selected_row(row: u32, visible: DataTableRange) -> bool {
+    visible.start >= visible.end || row < visible.start || row >= visible.end
+}
+
 pub(crate) fn list_empty_subtitle(lang: Lang, filtered: bool, running: bool) -> &'static str {
     if filtered {
         t(lang, "试试调整上方的过滤关键词", "Try a different filter")
@@ -313,6 +319,32 @@ pub(crate) fn flow_table(
             && let Some(api) = table.api::<DataTableApi>()
         {
             api.clear_menu_target();
+        }
+    });
+
+    // Keep keyboard/programmatic selection inside the visible viewport.
+    // Reading `rows` untracked ensures incoming traffic does not yank manual scroll.
+    effect(move || {
+        let Some(id) = selected.get() else {
+            return;
+        };
+        let (idx, count) = rows.with_untracked(|rows| {
+            (
+                rows.iter().position(|row| row.id == id).map(|i| i as u32),
+                rows.len() as u32,
+            )
+        });
+        let Some(idx) = idx else {
+            return;
+        };
+        if let Some(api) = table.api::<DataTableApi>() {
+            let visible = api.visible_rows();
+            if should_reveal_selected_row(idx, visible) {
+                follow.replace(idx.saturating_add(1) >= count);
+            }
+            let mut selection = DataTableSelection::default();
+            selection.row = Some(idx);
+            api.select(Some(selection));
         }
     });
 

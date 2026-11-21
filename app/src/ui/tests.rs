@@ -3931,7 +3931,9 @@ impl HeadlessMountTree {
     fn pump(&mut self, core: &mut nsh_core::Core<nsh_core::ApproxTextEngine>) {
         use nsh_core::MountItem;
         let mut evs = Vec::new();
+        let mut scroll_echoes = Vec::new();
         for _ in 0..16 {
+            scroll_echoes.clear();
             let batch = core.commit();
             if let Some(b) = &batch {
                 for item in &b.items {
@@ -3980,6 +3982,12 @@ impl HeadlessMountTree {
                         MountItem::Text { id, text, .. } => {
                             self.texts.insert(*id, text.text.clone());
                         }
+                        MountItem::Command {
+                            id,
+                            command: nsh_core::Command::ScrollTo { x, y, .. },
+                        } => {
+                            scroll_echoes.push((*id, Point { x: *x, y: *y }));
+                        }
                         _ => {}
                     }
                 }
@@ -3987,6 +3995,13 @@ impl HeadlessMountTree {
             evs.clear();
             core.take_events(&mut evs);
             let mut any = false;
+            for (id, offset) in scroll_echoes.drain(..) {
+                any |= core.component_event(
+                    id,
+                    nsh_core::EventKind::Scroll,
+                    &nsh_core::EventPayload::Scroll(offset),
+                );
+            }
             for ev in evs.drain(..) {
                 if let nsh_core::element::JsEvent::Event(id, kind, payload) = ev {
                     any |= core.component_event(id, kind, &payload);
@@ -4448,6 +4463,172 @@ fn list_empty_action_buttons_pause_and_clear_filters() {
     assert_eq!(
         texts_after,
         vec!["No traffic yet", "Listening, waiting for HTTP(S) traffic"]
+    );
+}
+
+#[test]
+fn should_reveal_selected_row_detects_out_of_viewport_rows() {
+    let mut visible = DataTableRange::default();
+    visible.start = 5;
+    visible.end = 15;
+
+    assert!(super::should_reveal_selected_row(0, visible));
+    assert!(super::should_reveal_selected_row(4, visible));
+    assert!(!super::should_reveal_selected_row(5, visible));
+    assert!(!super::should_reveal_selected_row(10, visible));
+    assert!(!super::should_reveal_selected_row(14, visible));
+    assert!(super::should_reveal_selected_row(15, visible));
+    assert!(super::should_reveal_selected_row(30, visible));
+
+    // Empty / uninitialized range should always allow reveal.
+    let empty = DataTableRange::default();
+    assert!(super::should_reveal_selected_row(0, empty));
+}
+
+#[test]
+fn keyboard_step_selected_auto_scrolls_row_into_viewport() {
+    use crate::i18n::Lang;
+    use nsh_core::{EventKind, EventPayload, PressEvent};
+
+    fn sample_rows(count: u64) -> Vec<Arc<super::RowLine>> {
+        (1..=count)
+            .map(|id| {
+                Arc::new(super::RowLine {
+                    id,
+                    method: "GET".into(),
+                    status: Some(200),
+                    time: "0 ms".into(),
+                    gap_nanos: 0,
+                    clock: "12:00:00.000".into(),
+                    elapsed: "10 ms".into(),
+                    elapsed_nanos: Some(10_000_000),
+                    elapsed_slow: false,
+                    host: "api.local".into(),
+                    client_ip: "—".into(),
+                    path: format!("/item/{id}"),
+                    host_path: format!("api.local/item/{id}"),
+                    url: format!("https://api.local/item/{id}"),
+                    comment: String::new(),
+                    protocol: "HTTP/2".into(),
+                    size: "128 B".into(),
+                    size_bytes: 128,
+                    failed: false,
+                    pinned: false,
+                    relay_short: String::new(),
+                })
+            })
+            .collect()
+    }
+
+    #[component]
+    fn FlowTableScrollHarness() -> impl IntoElement {
+        provide_context(signal(Some(Lang::En)));
+        let rows = signal(sample_rows(30));
+        let selected = signal(Some(30_u64));
+        let baseline = signal(None::<u64>);
+        let compose = super::Compose {
+            composing: signal(false),
+            response: signal(false),
+            method: signal(String::new()),
+            url: signal(String::new()),
+            status: signal(String::new()),
+            headers: signal(String::new()),
+            body: signal(String::new()),
+            draft_saved: signal(super::ComposeDraft::default()),
+            recent: signal(Vec::new()),
+        };
+        let columns = signal(super::ListColumns::from_config(
+            &crate::config::Config::default(),
+        ));
+        let sort = signal(None::<super::ListSort>);
+        let controls = make_test_controls("d3-scroll");
+        let empty_state = super::EmptyFilterState {
+            effective_filter: signal(String::new()),
+            main_filter: signal(String::new()),
+            filter_enabled: signal(true),
+            list_filter: signal(String::new()),
+            diagnosis: signal(super::EmptyFilterDiagnosis::default()),
+            running: signal(false),
+            on_clear_primary: None,
+        };
+        let layout_mode = signal(crate::config::LayoutMode::Split);
+        let picked = signal(None::<u64>);
+        let menu_open = signal(false);
+        let header_menu = signal(false);
+        let menu_at = signal(Point::<Points>::default());
+
+        let step = signal(0_u8);
+        view()
+            .w(px(640.0))
+            .h(px(170.0))
+            .on_press(move || {
+                let next = step.get() + 1;
+                step.set(next);
+                match next {
+                    1 => {
+                        // Step up 25 times from row 30 to row 5 (well above the ~4-row bottom viewport).
+                        for _ in 0..25 {
+                            super::step_selected(rows, selected, compose, -1);
+                        }
+                    }
+                    _ => {
+                        // Step back down 20 times from row 5 to row 25 (well below the top viewport).
+                        for _ in 0..20 {
+                            super::step_selected(rows, selected, compose, 1);
+                        }
+                    }
+                }
+            })
+            .child(super::flow_table(
+                rows,
+                selected,
+                baseline,
+                compose,
+                columns,
+                sort,
+                controls,
+                empty_state,
+                layout_mode,
+                picked,
+                menu_open,
+                header_menu,
+                menu_at,
+            ))
+    }
+
+    let (mut core, mut tree) =
+        mount_headless_component::<FlowTableScrollHarness>(Size::new(px(640.0), px(170.0)));
+    assert!(
+        tree.collect_live_texts(2)
+            .iter()
+            .any(|t| t.contains("/item/30")),
+        "initial auto-follow viewport should render row 30"
+    );
+
+    // Step 1: navigate up to row 5 -> viewport auto-scrolls so /item/5 is rendered.
+    core.component_event(
+        2,
+        EventKind::Press,
+        &EventPayload::Press(PressEvent::default()),
+    );
+    tree.pump(&mut core);
+    let after_up = tree.collect_live_texts(2);
+    assert!(
+        after_up.iter().any(|t| t.contains("/item/5")),
+        "expected /item/5 in viewport after stepping up, got: {after_up:?}"
+    );
+
+    // Step 2: navigate back down to row 25 -> viewport auto-scrolls so /item/25 is rendered.
+    core.component_event(
+        2,
+        EventKind::Press,
+        &EventPayload::Press(PressEvent::default()),
+    );
+    tree.pump(&mut core);
+    let after_down = tree.collect_live_texts(2);
+    assert!(
+        after_down.iter().any(|t| t.contains("/item/25")),
+        "expected /item/25 in viewport after stepping down, got: {after_down:?}"
     );
 }
 
