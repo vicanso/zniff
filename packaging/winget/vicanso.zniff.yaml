@@ -1,0 +1,45 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.singleton.1.6.0.schema.json
+# Template for submitting zniff to microsoft/winget-pkgs.
+# Note: Winget portable archives require .zip assets when submitted to winget-pkgs;
+# replace the URLs and InstallerSha256 values from the corresponding GitHub Release SHA256SUMS.
+PackageIdentifier: vicanso.zniff
+PackageVersion: 0.4.0
+PackageLocale: en-US
+Publisher: vicanso
+PublisherUrl: https://github.com/vicanso
+PublisherSupportUrl: https://github.com/vicanso/zniff/issues
+PackageName: zniff
+PackageUrl: https://github.com/vicanso/zniff
+License: Apache-2.0
+LicenseUrl: https://github.com/vicanso/zniff/blob/main/LICENSE
+ShortDescription: Single-process HTTP(S) debugging proxy in pure Rust with native GUI, Web console, and MCP
+Description: >-
+  zniff is a single-process HTTP(S) debugging proxy written in pure Rust,
+  featuring a native GUI, WebAssembly console, 17 rewrite rule types,
+  zero-config capture launchers, and a built-in MCP server.
+Moniker: zniff
+Tags:
+  - proxy
+  - http
+  - https
+  - debugging
+  - mitm
+  - network
+  - mcp
+InstallerType: zip
+NestedInstallerType: portable
+NestedInstallerFiles:
+  - RelativeFilePath: zniff-windows-x86_64\zniff.exe
+    PortableCommandAlias: zniff
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/vicanso/zniff/releases/download/v0.4.0/zniff-windows-x86_64.zip
+    InstallerSha256: REPLACE_WITH_SHA256_FROM_RELEASE_SHA256SUMS_WINDOWS_X86_64_ZIP
+  - Architecture: arm64
+    InstallerUrl: https://github.com/vicanso/zniff/releases/download/v0.4.0/zniff-windows-aarch64.zip
+    InstallerSha256: REPLACE_WITH_SHA256_FROM_RELEASE_SHA256SUMS_WINDOWS_AARCH64_ZIP
+    NestedInstallerFiles:
+      - RelativeFilePath: zniff-windows-aarch64\zniff.exe
+        PortableCommandAlias: zniff
+ManifestType: singleton
+ManifestVersion: 1.6.0

@@ -1,0 +1,41 @@
+{
+  "version": "0.4.0",
+  "description": "Single-process HTTP(S) debugging proxy in pure Rust with native GUI, Web console, and MCP",
+  "homepage": "https://github.com/vicanso/zniff",
+  "license": "Apache-2.0",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/vicanso/zniff/releases/download/v0.4.0/zniff-windows-x86_64.tar.gz",
+      "hash": "REPLACE_WITH_SHA256_FROM_RELEASE_SHA256SUMS_WINDOWS_X86_64_TAR_GZ",
+      "extract_dir": "zniff-windows-x86_64"
+    },
+    "arm64": {
+      "url": "https://github.com/vicanso/zniff/releases/download/v0.4.0/zniff-windows-aarch64.tar.gz",
+      "hash": "REPLACE_WITH_SHA256_FROM_RELEASE_SHA256SUMS_WINDOWS_AARCH64_TAR_GZ",
+      "extract_dir": "zniff-windows-aarch64"
+    }
+  },
+  "bin": "zniff.exe",
+  "shortcuts": [
+    [
+      "zniff.exe",
+      "zniff"
+    ]
+  ],
+  "checkver": {
+    "github": "https://github.com/vicanso/zniff"
+  },
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/vicanso/zniff/releases/download/v$version/zniff-windows-x86_64.tar.gz"
+      },
+      "arm64": {
+        "url": "https://github.com/vicanso/zniff/releases/download/v$version/zniff-windows-aarch64.tar.gz"
+      }
+    },
+    "hash": {
+      "url": "https://github.com/vicanso/zniff/releases/download/v$version/SHA256SUMS"
+    }
+  }
+}
