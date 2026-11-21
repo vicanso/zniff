@@ -52,6 +52,8 @@ pub enum PrefName {
     Language,
     Window,
     MonoFont,
+    Theme,
+    UiZoom,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -241,6 +243,7 @@ pub enum StatusMsg {
     ClearUndone {
         count: usize,
     },
+    UiZoomChanged(u16),
 }
 
 fn port_in_use(err: &str) -> bool {
@@ -388,6 +391,8 @@ impl StatusMsg {
                     }
                     PrefName::Window => t(lang, "窗口尺寸没有记住:", "Window size was not saved:"),
                     PrefName::MonoFont => t(lang, "等宽字体没有记住:", "Mono font was not saved:"),
+                    PrefName::Theme => t(lang, "主题模式没有记住:", "Theme mode was not saved:"),
+                    PrefName::UiZoom => t(lang, "界面缩放没有记住:", "UI zoom was not saved:"),
                 };
                 format!("{name} {err}")
             }
@@ -792,6 +797,10 @@ impl StatusMsg {
                 Lang::Zh => format!("已恢复 {count} 条流量"),
                 Lang::En if *count == 1 => "Restored 1 flow".to_string(),
                 Lang::En => format!("Restored {count} flows"),
+            },
+            Self::UiZoomChanged(pct) => match lang {
+                Lang::Zh => format!("界面缩放 {pct}%"),
+                Lang::En => format!("UI zoom {pct}%"),
             },
         }
     }

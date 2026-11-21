@@ -863,6 +863,6 @@ pub(crate) fn port_field(port_text: Signal<String>, controls: Arc<Controls>) -> 
 pub(crate) fn control_text(label: impl IntoReactive<SharedString>) -> Text {
     text(label)
         .number_of_lines(1)
-        .text_size(px(CONTROL_TEXT))
+        .text_size(move || scaled_px(CONTROL_TEXT))
         .font_weight(FontWeight::MEDIUM)
 }

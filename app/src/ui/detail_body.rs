@@ -868,8 +868,8 @@ pub(crate) fn code_body(
                 .line_numbers(true)
                 .folding(true)
                 .soft_wrap(true)
-                .font_size(Points(12.0))
-                .line_height(Points(18.0))
+                .font_size(move || scaled_px(12.0))
+                .line_height(move || scaled_px(18.0))
                 .scroll_beyond_last_line(false)
                 .size_full(),
         )

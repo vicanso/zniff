@@ -123,8 +123,10 @@ pub(crate) fn provide_mono_font(system: bool) -> MonoFont {
     // Skips the first run when nothing would change, so a system-font start
     // does not replace the tokens it was given.
     let applied = Rc::new(Cell::new(false));
+    let langs = ui_langs();
     effect(move || {
-        let family = mono_family_for(font.system.get(), font.bundled.get());
+        let lang = ui_lang(langs);
+        let family = mono_family_for_lang(font.system.get(), font.bundled.get(), lang);
         if family.is_none() && !applied.get() {
             return;
         }
@@ -138,10 +140,80 @@ pub(crate) fn provide_mono_font(system: bool) -> MonoFont {
     font
 }
 
+/// Platform-appropriate CJK monospace fallback list used when the UI is in Chinese.
+pub(crate) fn cjk_mono_fallback() -> &'static str {
+    #[cfg(target_arch = "wasm32")]
+    {
+        "PingFang SC, Microsoft YaHei, Noto Sans Mono CJK SC, ui-monospace, monospace"
+    }
+    #[cfg(all(not(target_arch = "wasm32"), target_os = "macos"))]
+    {
+        "PingFang SC, Hiragino Sans GB, Menlo, monospace"
+    }
+    #[cfg(all(not(target_arch = "wasm32"), target_os = "windows"))]
+    {
+        "Cascadia Mono, Consolas, Microsoft YaHei UI, Microsoft YaHei, monospace"
+    }
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        not(target_os = "macos"),
+        not(target_os = "windows")
+    ))]
+    {
+        "Noto Sans Mono CJK SC, Sarasa Mono SC, WenQuanYi Micro Hei Mono, DejaVu Sans Mono, monospace"
+    }
+}
+
+/// System monospace stack with CJK fallback when Chinese UI uses the system mono font.
+fn system_cjk_mono_stack() -> &'static str {
+    #[cfg(target_arch = "wasm32")]
+    {
+        "ui-monospace, SFMono-Regular, Menlo, PingFang SC, Microsoft YaHei, Noto Sans Mono CJK SC, monospace"
+    }
+    #[cfg(all(not(target_arch = "wasm32"), target_os = "macos"))]
+    {
+        "Menlo, SF Mono, PingFang SC, Hiragino Sans GB, monospace"
+    }
+    #[cfg(all(not(target_arch = "wasm32"), target_os = "windows"))]
+    {
+        "Cascadia Mono, Consolas, Microsoft YaHei UI, Microsoft YaHei, monospace"
+    }
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        not(target_os = "macos"),
+        not(target_os = "windows")
+    ))]
+    {
+        "DejaVu Sans Mono, Noto Sans Mono CJK SC, Sarasa Mono SC, WenQuanYi Micro Hei Mono, monospace"
+    }
+}
+
 /// The family `font-mono` should name: the bundled one unless the user
 /// picked the system's or it has not registered.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn mono_family_for(system: bool, bundled: Option<SharedString>) -> Option<SharedString> {
-    if system { None } else { bundled }
+    mono_family_for_lang(system, bundled, Lang::En)
+}
+
+/// Language-aware `font-mono` family. In Chinese UI, appends CJK monospace
+/// fallbacks so mixed Latin + Chinese table/detail cells stay crisp and aligned.
+pub(crate) fn mono_family_for_lang(
+    system: bool,
+    bundled: Option<SharedString>,
+    lang: Lang,
+) -> Option<SharedString> {
+    let base = if system { None } else { bundled };
+    match lang {
+        Lang::En => base,
+        Lang::Zh => match base {
+            Some(family) => Some(SharedString::from(format!(
+                "{}, {}",
+                family.as_str(),
+                cjk_mono_fallback()
+            ))),
+            None => Some(SharedString::from(system_cjk_mono_stack())),
+        },
+    }
 }
 
 /// The app's [`MonoFont`].
@@ -227,5 +299,20 @@ mod tests {
         assert_eq!(mono_family_for(false, jb.clone()), jb);
         assert_eq!(mono_family_for(true, jb), None);
         assert_eq!(mono_family_for(false, None), None);
+    }
+
+    #[test]
+    fn zh_ui_appends_cjk_mono_fallback() {
+        let jb = Some(SharedString::from("JetBrains Mono NL"));
+        let bundled_zh = mono_family_for_lang(false, jb.clone(), Lang::Zh).unwrap();
+        assert!(
+            bundled_zh.starts_with("JetBrains Mono NL, "),
+            "{bundled_zh}"
+        );
+        assert!(bundled_zh.contains(cjk_mono_fallback()), "{bundled_zh}");
+
+        let system_zh = mono_family_for_lang(true, jb, Lang::Zh).unwrap();
+        assert!(!system_zh.contains("JetBrains Mono"), "{system_zh}");
+        assert!(system_zh.contains("monospace"), "{system_zh}");
     }
 }

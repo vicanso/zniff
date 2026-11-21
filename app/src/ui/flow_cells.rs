@@ -88,7 +88,7 @@ pub(crate) fn flow_header(
             flow_column_title(&key, display).into()
         })
         .number_of_lines(1)
-        .text_size(px(11.0))
+        .text_size(move || scaled_px(11.0))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(move || {
             if is_sorted() {
@@ -192,7 +192,7 @@ pub(crate) fn method_cell(
                         })
                     })
                     .number_of_lines(1)
-                    .text_size(px(10.5))
+                    .text_size(move || scaled_px(10.5))
                     .font_weight(FontWeight::BOLD)
                     .text_color(move || {
                         rows.with(|rows| {
@@ -241,7 +241,7 @@ pub(crate) fn id_cell(
             .tabular_nums()
             .number_of_lines(1)
             .text_overflow(EllipsizeMode::Tail)
-            .text_size(px(12.0))
+            .text_size(move || scaled_px(12.0))
             .text_color(fg_muted()),
         )
 }
@@ -277,7 +277,7 @@ pub(crate) fn status_cell(
             .tabular_nums()
             .number_of_lines(1)
             .text_overflow(EllipsizeMode::Tail)
-            .text_size(px(12.0))
+            .text_size(move || scaled_px(12.0))
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(move || {
                 rows.with(|rows| {
@@ -332,7 +332,7 @@ pub(crate) fn time_cell(
             .tabular_nums()
             .number_of_lines(1)
             .text_overflow(EllipsizeMode::Tail)
-            .text_size(px(12.0))
+            .text_size(move || scaled_px(12.0))
             .text_color(fg_muted()),
         )
 }
@@ -369,7 +369,7 @@ pub(crate) fn elapsed_cell(
             .tabular_nums()
             .number_of_lines(1)
             .text_overflow(EllipsizeMode::Tail)
-            .text_size(px(12.0))
+            .text_size(move || scaled_px(12.0))
             .text_color(move || {
                 if rows.with(|rows| rows.get(index).is_some_and(|row| row.elapsed_slow)) {
                     status_warn_fg()
@@ -422,7 +422,7 @@ pub(crate) fn host_cell(
             .min_w(px(0.0))
             .number_of_lines(1)
             .text_overflow(move || columns.get().ellipsize_mode())
-            .text_size(px(12.0))
+            .text_size(move || scaled_px(12.0))
             .text_color(fg_secondary()),
         )
 }
@@ -475,7 +475,7 @@ pub(crate) fn client_ip_cell(
             .min_w(px(0.0))
             .number_of_lines(1)
             .text_overflow(move || columns.get().ellipsize_mode())
-            .text_size(px(12.0))
+            .text_size(move || scaled_px(12.0))
             .text_color(fg_secondary()),
         )
 }
@@ -510,7 +510,7 @@ pub(crate) fn protocol_cell(
             .min_w(px(0.0))
             .number_of_lines(1)
             .text_overflow(EllipsizeMode::Tail)
-            .text_size(px(12.0))
+            .text_size(move || scaled_px(12.0))
             .text_color(fg_secondary()),
         )
 }
@@ -547,7 +547,7 @@ pub(crate) fn size_cell(
             .tabular_nums()
             .number_of_lines(1)
             .text_overflow(EllipsizeMode::Tail)
-            .text_size(px(12.0))
+            .text_size(move || scaled_px(12.0))
             .text_color(fg_muted()),
         )
 }
@@ -599,7 +599,7 @@ pub(crate) fn path_cell(
                             format!("{} {short}", t(ui_lang(langs), "中继", "relay"))
                         })
                         .number_of_lines(1)
-                        .text_size(px(10.5))
+                        .text_size(move || scaled_px(10.5))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(accent_blue_text()),
                     )
@@ -618,7 +618,7 @@ pub(crate) fn path_cell(
             .min_w(px(0.0))
             .number_of_lines(1)
             .text_overflow(move || columns.get().ellipsize_mode())
-            .text_size(px(12.0))
+            .text_size(move || scaled_px(12.0))
             .text_color(move || {
                 if rows.with(|rows| rows.get(index).is_some_and(|row| row.failed)) {
                     status_err_fg()
@@ -690,7 +690,7 @@ pub(crate) fn label_tip(zh: &'static str, en: &'static str) -> impl IntoTooltip 
             .border_color(border_strong())
             .child(
                 text(tr(zh, en))
-                    .text_size(px(12.0))
+                    .text_size(move || scaled_px(12.0))
                     .text_color(fg_primary()),
             ),
     )
@@ -713,7 +713,7 @@ pub(crate) fn cell_tip(full: impl Fn() -> String + 'static) -> impl IntoElement 
                 .max_w(move || px((window().width.0 - 36.0).clamp(160.0, 396.0)))
                 .number_of_lines(8)
                 .text_overflow(EllipsizeMode::Tail)
-                .text_size(px(12.0))
+                .text_size(move || scaled_px(12.0))
                 .text_color(fg_primary()),
         )
 }

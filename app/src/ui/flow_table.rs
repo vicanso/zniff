@@ -414,7 +414,7 @@ pub(crate) fn flow_table(
                     })
                     .data(DataTableRows::default())
                     .row_count(move || Some(rows.with(Vec::len) as u32))
-                    .row_height(px(34.0))
+                    .row_height(move || scaled_px(34.0))
                     .header_height(px(28.0))
                     .font_size(px(12.0))
                     .row_header(false)

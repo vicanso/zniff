@@ -76,6 +76,11 @@ pub(crate) const SHORTCUT_SECTIONS: &[ShortcutSection] = &[
                 en: "Toggle Command Palette",
             },
             ShortcutEntry {
+                keys: &["mod+=", "mod+-", "mod+0"],
+                zh: "放大 / 缩小 / 重置界面与字体缩放",
+                en: "Zoom in / out / reset UI & font size",
+            },
+            ShortcutEntry {
                 keys: &["shift+/", "mod+/"],
                 zh: "打开 / 关闭快捷键速查",
                 en: "Toggle Keyboard Shortcuts",

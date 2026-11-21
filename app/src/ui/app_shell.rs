@@ -15,7 +15,9 @@ pub fn App() -> impl IntoElement {
     }
     let langs = signal(load_lang_pref());
     provide_context(langs);
-    provide_mono_font(saved_config().system_mono_font);
+    let initial_ui_cfg = saved_config();
+    provide_appearance_prefs(initial_ui_cfg.theme_mode, initial_ui_cfg.ui_zoom);
+    provide_mono_font(initial_ui_cfg.system_mono_font);
     let status = signal(StatusMsg::Idle);
     let running = signal(false);
     let ca_status = signal(ca::CaStatus::NotInstalled);
@@ -1122,6 +1124,42 @@ pub fn App() -> impl IntoElement {
         move |_| {
             shortcuts_open.set(!shortcuts_open.get());
         },
+    );
+    let controls_zoom_in = controls.clone();
+    on_key_with(
+        "mod+=",
+        KeyOptions {
+            when: nsh_core::keymap::When::Always,
+            ..KeyOptions::default()
+        },
+        move |_| step_ui_zoom(&controls_zoom_in, config::UI_ZOOM_STEP as i16),
+    );
+    let controls_zoom_plus = controls.clone();
+    on_key_with(
+        "mod+shift+=",
+        KeyOptions {
+            when: nsh_core::keymap::When::Always,
+            ..KeyOptions::default()
+        },
+        move |_| step_ui_zoom(&controls_zoom_plus, config::UI_ZOOM_STEP as i16),
+    );
+    let controls_zoom_out = controls.clone();
+    on_key_with(
+        "mod+-",
+        KeyOptions {
+            when: nsh_core::keymap::When::Always,
+            ..KeyOptions::default()
+        },
+        move |_| step_ui_zoom(&controls_zoom_out, -(config::UI_ZOOM_STEP as i16)),
+    );
+    let controls_zoom_reset = controls.clone();
+    on_key_with(
+        "mod+0",
+        KeyOptions {
+            when: nsh_core::keymap::When::Always,
+            ..KeyOptions::default()
+        },
+        move |_| reset_ui_zoom(&controls_zoom_reset),
     );
     on_key("escape", move |_| {
         if palette_open.get() {

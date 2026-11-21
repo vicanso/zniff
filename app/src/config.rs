@@ -203,6 +203,75 @@ const LEGACY: &[&str] = &[
     "upstream-proxy",
 ];
 
+/// Color scheme preference persisted in `config.toml`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ThemeMode {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl ThemeMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Light => "light",
+            Self::Dark => "dark",
+        }
+    }
+
+    pub fn parse(text: &str) -> Self {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "light" => Self::Light,
+            "dark" => Self::Dark,
+            _ => Self::System,
+        }
+    }
+
+    pub fn is_default(&self) -> bool {
+        *self == Self::System
+    }
+}
+
+impl Serialize for ThemeMode {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ThemeMode {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        Ok(Self::parse(&text))
+    }
+}
+
+pub const UI_ZOOM_MIN: u16 = 80;
+pub const UI_ZOOM_MAX: u16 = 150;
+pub const UI_ZOOM_STEP: u16 = 10;
+pub const UI_ZOOM_DEFAULT: u16 = 100;
+
+pub fn clamp_ui_zoom(zoom: u16) -> u16 {
+    if zoom == 0 {
+        return UI_ZOOM_DEFAULT;
+    }
+    zoom.clamp(UI_ZOOM_MIN, UI_ZOOM_MAX)
+}
+
+fn default_ui_zoom() -> u16 {
+    UI_ZOOM_DEFAULT
+}
+
+fn is_default_ui_zoom(zoom: &u16) -> bool {
+    *zoom == UI_ZOOM_DEFAULT
+}
+
 /// How long paths/URLs and hosts are truncated in the flow list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ListEllipsize {
@@ -599,6 +668,10 @@ pub struct Config {
     pub ellipsize: ListEllipsize,
     /// False draws monospaced text in the bundled JetBrains Mono; true uses the system's.
     pub system_mono_font: bool,
+    /// Color scheme preference (`system`, `light`, `dark`).
+    pub theme_mode: ThemeMode,
+    /// UI and monospace font zoom percentage (`80..=150`, default `100`).
+    pub ui_zoom: u16,
     pub layout_mode: LayoutMode,
     pub sidebar_collapsed: bool,
     pub list_width: u32,
@@ -728,6 +801,13 @@ struct RawConfig {
     ellipsize: ListEllipsize,
     #[serde(default, skip_serializing_if = "is_false")]
     system_mono_font: bool,
+    #[serde(default, skip_serializing_if = "ThemeMode::is_default")]
+    theme_mode: ThemeMode,
+    #[serde(
+        default = "default_ui_zoom",
+        skip_serializing_if = "is_default_ui_zoom"
+    )]
+    ui_zoom: u16,
     #[serde(default, skip_serializing_if = "LayoutMode::is_default")]
     layout_mode: LayoutMode,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -946,6 +1026,8 @@ impl From<RawConfig> for Config {
             }),
             ellipsize: raw.ellipsize,
             system_mono_font: raw.system_mono_font,
+            theme_mode: raw.theme_mode,
+            ui_zoom: clamp_ui_zoom(raw.ui_zoom),
             layout_mode: raw.layout_mode,
             sidebar_collapsed: raw.sidebar_collapsed,
             list_width: raw.list_width,
@@ -1059,6 +1141,8 @@ impl From<Config> for RawConfig {
             path_display: (!config.path_display.is_default()).then_some(config.path_display),
             ellipsize: config.ellipsize,
             system_mono_font: config.system_mono_font,
+            theme_mode: config.theme_mode,
+            ui_zoom: clamp_ui_zoom(config.ui_zoom),
             layout_mode: config.layout_mode,
             sidebar_collapsed: config.sidebar_collapsed,
             list_width: config.list_width,
@@ -1128,6 +1212,8 @@ impl Default for Config {
             path_display: PathDisplay::Auto,
             ellipsize: ListEllipsize::Middle,
             system_mono_font: false,
+            theme_mode: ThemeMode::System,
+            ui_zoom: UI_ZOOM_DEFAULT,
             layout_mode: LayoutMode::Split,
             sidebar_collapsed: false,
             list_width: default_list_width(),
@@ -1563,6 +1649,7 @@ fn normalize_for(mut config: Config, dev: bool) -> Config {
         config.listen_port = default_listen_port(dev);
     }
     config.language = language_name(config.language.as_deref().and_then(parse_pref));
+    config.ui_zoom = clamp_ui_zoom(config.ui_zoom);
     config.list_width = clamp_list_width(config.list_width);
     config.window_width = clamp_window_width(config.window_width);
     config.window_height = clamp_window_height(config.window_height);
@@ -2181,6 +2268,46 @@ mod tests {
         update(dir.path(), |config| config.system_mono_font = false).unwrap();
         let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
         assert!(!text.contains("system_mono_font"), "{text}");
+    }
+
+    #[test]
+    fn theme_mode_and_ui_zoom_default_clamp_and_persist() {
+        let dir = Scratch::new();
+        let initial = load(dir.path());
+        assert_eq!(initial.theme_mode, ThemeMode::System);
+        assert_eq!(initial.ui_zoom, UI_ZOOM_DEFAULT);
+
+        update(dir.path(), |config| {
+            config.theme_mode = ThemeMode::Dark;
+            config.ui_zoom = 120;
+        })
+        .unwrap();
+        let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(text.contains("theme_mode = \"dark\""), "{text}");
+        assert!(text.contains("ui_zoom = 120"), "{text}");
+        let loaded = load(dir.path());
+        assert_eq!(loaded.theme_mode, ThemeMode::Dark);
+        assert_eq!(loaded.ui_zoom, 120);
+
+        update(dir.path(), |config| {
+            config.theme_mode = ThemeMode::Light;
+            config.ui_zoom = 300;
+        })
+        .unwrap();
+        let clamped = load(dir.path());
+        assert_eq!(clamped.theme_mode, ThemeMode::Light);
+        assert_eq!(clamped.ui_zoom, UI_ZOOM_MAX);
+
+        update(dir.path(), |config| {
+            config.theme_mode = ThemeMode::System;
+            config.ui_zoom = UI_ZOOM_DEFAULT;
+        })
+        .unwrap();
+        let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(!text.contains("theme_mode"), "{text}");
+        assert!(!text.contains("ui_zoom"), "{text}");
+        assert_eq!(clamp_ui_zoom(0), UI_ZOOM_DEFAULT);
+        assert_eq!(clamp_ui_zoom(50), UI_ZOOM_MIN);
     }
 
     #[test]

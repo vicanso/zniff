@@ -291,6 +291,45 @@ pub(crate) fn build_command_items(
     );
     items.push(
         CommandItem::new(
+            "theme_system",
+            t(lang, "主题：跟随系统", "Theme: Follow System"),
+        )
+        .group(g_view)
+        .keywords(["theme", "system", "appearance", "主题", "系统"]),
+    );
+    items.push(
+        CommandItem::new("theme_light", t(lang, "主题：浅色模式", "Theme: Light"))
+            .group(g_view)
+            .keywords(["theme", "light", "appearance", "主题", "浅色"]),
+    );
+    items.push(
+        CommandItem::new("theme_dark", t(lang, "主题：深色模式", "Theme: Dark"))
+            .group(g_view)
+            .keywords(["theme", "dark", "appearance", "主题", "深色"]),
+    );
+    items.push(
+        CommandItem::new("zoom_in", t(lang, "放大界面与字体", "Zoom in UI & font"))
+            .group(g_view)
+            .shortcut("mod+=")
+            .keywords(["zoom", "font", "scale", "larger", "放大", "缩放", "字体"]),
+    );
+    items.push(
+        CommandItem::new("zoom_out", t(lang, "缩小界面与字体", "Zoom out UI & font"))
+            .group(g_view)
+            .shortcut("mod+-")
+            .keywords(["zoom", "font", "scale", "smaller", "缩小", "缩放", "字体"]),
+    );
+    items.push(
+        CommandItem::new(
+            "zoom_reset",
+            t(lang, "重置界面缩放 (100%)", "Reset UI zoom (100%)"),
+        )
+        .group(g_view)
+        .shortcut("mod+0")
+        .keywords(["zoom", "reset", "100%", "重置", "缩放"]),
+    );
+    items.push(
+        CommandItem::new(
             "open_shortcuts",
             t(lang, "快捷键速查", "Keyboard shortcuts"),
         )
@@ -538,6 +577,12 @@ pub(crate) fn command_palette_modal(
                             reset_compose(compose);
                             clear_shown(shown);
                         }
+                        "theme_system" => set_theme_mode(&controls, config::ThemeMode::System),
+                        "theme_light" => set_theme_mode(&controls, config::ThemeMode::Light),
+                        "theme_dark" => set_theme_mode(&controls, config::ThemeMode::Dark),
+                        "zoom_in" => step_ui_zoom(&controls, config::UI_ZOOM_STEP as i16),
+                        "zoom_out" => step_ui_zoom(&controls, -(config::UI_ZOOM_STEP as i16)),
+                        "zoom_reset" => reset_ui_zoom(&controls),
                         "open_shortcuts" => shortcuts_open.set(true),
                         "open_about" => profiles.about_open.set(true),
                         _ => {}
