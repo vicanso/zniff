@@ -386,6 +386,7 @@ pub(crate) fn export_diagnostics_file(controls: Arc<Controls>) {
             listen_addr,
             use_system_proxy,
             config_load_error,
+            startup: None,
             ca: crate::diagnostics::CaDiagnostics {
                 status: ca_status_str.to_string(),
                 active_external_ca,
@@ -428,6 +429,7 @@ pub(crate) fn export_diagnostics_file(controls: Arc<Controls>) {
             listen_addr,
             use_system_proxy: false,
             config_load_error,
+            startup: None,
             ca: crate::diagnostics::CaDiagnostics {
                 status: "server_managed".to_string(),
                 active_external_ca: None,

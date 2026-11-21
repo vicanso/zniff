@@ -10,6 +10,7 @@ use serde::Serialize;
 use crate::config::Config;
 use crate::i18n::Lang;
 use crate::session::{Flow, Session};
+use crate::startup_metrics::StartupMetricsSnapshot;
 
 const SCHEMA_VERSION: u32 = 1;
 const MAX_RECENT_ERRORS: usize = 50;
@@ -19,6 +20,7 @@ pub struct DiagnosticsBundle {
     pub schema_version: u32,
     pub generated_at_unix_secs: u64,
     pub app: AppDiagnostics,
+    pub startup: StartupMetricsSnapshot,
     pub runtime: RuntimeDiagnostics,
     pub ca: CaDiagnostics,
     pub config: RedactedConfigSummary,
@@ -149,6 +151,7 @@ pub struct DiagnosticsInput<'a> {
     pub listen_addr: String,
     pub use_system_proxy: bool,
     pub config_load_error: Option<String>,
+    pub startup: Option<StartupMetricsSnapshot>,
     pub ca: CaDiagnostics,
     pub config: &'a Config,
     pub session: &'a Session,
@@ -212,6 +215,9 @@ pub fn build_diagnostics_bundle(input: DiagnosticsInput<'_>) -> DiagnosticsBundl
             },
             dev_mode: input.dev_mode,
         },
+        startup: input
+            .startup
+            .unwrap_or_else(crate::startup_metrics::snapshot),
         runtime: RuntimeDiagnostics {
             capturing: input.capturing,
             listen_addr: input.listen_addr,
@@ -416,6 +422,14 @@ mod tests {
             listen_addr: "127.0.0.1:8877".into(),
             use_system_proxy: false,
             config_load_error: None,
+            startup: Some(StartupMetricsSnapshot {
+                process_to_app_mount_ms: Some(32),
+                process_to_first_frame_ms: Some(95),
+                auto_capture_requested: true,
+                auto_capture_recovery_ms: Some(64),
+                process_to_capture_ready_ms: Some(112),
+                auto_capture_succeeded: Some(true),
+            }),
             ca: CaDiagnostics {
                 status: "trusted".into(),
                 active_external_ca: None,
@@ -437,5 +451,8 @@ mod tests {
         let json = bundle.to_pretty_json().unwrap();
         assert!(!json.contains("secret=xyz"));
         assert!(json.contains("\"schema_version\": 1"));
+        assert!(json.contains("\"process_to_first_frame_ms\": 95"));
+        assert!(json.contains("\"auto_capture_recovery_ms\": 64"));
+        assert!(json.contains("\"process_to_capture_ready_ms\": 112"));
     }
 }

@@ -4,6 +4,7 @@ use super::*;
 /// The root view: a flow list and the selected flow.
 #[component]
 pub fn App() -> impl IntoElement {
+    crate::startup_metrics::mark_app_mount();
     #[cfg(not(target_arch = "wasm32"))]
     {
         let mut bar = nsh_core::desktop::TitleBarOptions::default();
@@ -164,6 +165,7 @@ pub fn App() -> impl IntoElement {
         inline_mock: InlineMockSignals::new(),
     };
     effect(move || {
+        crate::startup_metrics::mark_first_frame();
         if compose.composing.get() && !compose.response.get() && selected.get().is_none() {
             compose.draft_saved.set((
                 compose.method.get(),
@@ -331,7 +333,11 @@ pub fn App() -> impl IntoElement {
         }
         if saved_config().capturing {
             let controls_boot = controls.clone();
-            std::thread::spawn(move || start_capture(&controls_boot));
+            crate::startup_metrics::mark_auto_capture_start();
+            std::thread::spawn(move || {
+                start_capture(&controls_boot);
+                crate::startup_metrics::mark_auto_capture_finish(lock_bool(&controls_boot.running));
+            });
         }
     }
     #[cfg(target_arch = "wasm32")]

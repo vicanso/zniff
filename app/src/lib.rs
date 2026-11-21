@@ -66,6 +66,7 @@ mod sample_har;
 mod session;
 #[cfg(not(target_arch = "wasm32"))]
 mod share;
+mod startup_metrics;
 #[cfg(not(target_arch = "wasm32"))]
 mod sysproxy;
 mod ui;
@@ -85,6 +86,7 @@ pub use launcher::cleanup_on_exit as cleanup_launchers;
 use nsh_core::prelude::{Registry, native_module};
 #[cfg(not(target_arch = "wasm32"))]
 pub use relay::shutdown_relay_push;
+pub use startup_metrics::mark_process_start;
 #[cfg(not(target_arch = "wasm32"))]
 pub use sysproxy::restore_if_dirty;
 pub use ui::{App, initial_window_size};

@@ -14,6 +14,7 @@ use nsh_platform_windows as platform;
     any(target_os = "linux", target_os = "macos", target_os = "windows")
 ))]
 fn main() -> impl std::process::Termination {
+    zniff::mark_process_start();
     if let Some(code) = zniff::maybe_run_cli_mode() {
         std::process::exit(code);
     }
