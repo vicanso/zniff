@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/vicanso/zniff/releases"><img src="https://img.shields.io/badge/version-v0.3.1-blue.svg" alt="Version"></a>
+  <a href="https://github.com/vicanso/zniff/releases"><img src="https://img.shields.io/badge/version-v0.4.0-blue.svg" alt="Version"></a>
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-2024%20edition-orange.svg" alt="Rust 2024"></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-green.svg" alt="License"></a>
   <a href="#quick-start"><img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20%7C%20Docker-lightgrey.svg" alt="Platform"></a>
@@ -22,14 +22,14 @@ https://github.com/user-attachments/assets/15117c1d-50a0-4578-8201-a305fb0d12a3
 
 ## Features
 
-- **Native & Lightweight**: Proxy engine and `nsh 0.6` GUI compiled into a single pure-Rust binary with bounded memory (ring-buffer spill for bodies > 16 KB), Split (collapsible domain/app sidebar) and Top-Bottom layouts, and multi-monitor window state persistence.
-- **Zero-Config Capture & Connect Hub**: Empty sessions display a quick-start onboarding card alongside a persistent footer **Connect** popover consolidating all onboarding actions: launch an **isolated Chromium browser** (SPKI cert trust, no system keychain changes), a **pre-configured proxied terminal**, or **one-click Android `adb` reverse proxy** (with active device count and automatic cleanup), copy the dynamic **`/proxy.pac`** auto-proxy URL, configure iOS simulators, or open the phone QR installer.
+- **Native & Lightweight**: Proxy engine and `nsh 0.6.1` GUI compiled into a single pure-Rust binary with bounded memory (ring-buffer spill for bodies > 16 KB), Split (collapsible domain/app sidebar) and Top-Bottom layouts (wide detail places Request cards on the left and Response cards on the right), and multi-monitor window state persistence.
+- **Zero-Config Capture & Connect Hub**: Empty sessions display a quick-start onboarding card alongside a persistent footer **Connect** popover consolidating all onboarding actions: launch an **isolated Chromium browser** (SPKI cert trust, no system keychain changes), a **pre-configured proxied terminal**, or **one-click Android `adb` reverse proxy** (with active device count and automatic cleanup), copy the dynamic **`/proxy.pac`** auto-proxy URL, configure iOS simulators, open the phone QR installer, or auto-detect and reuse existing **trusted local external root CAs** (`Whistle`, `mitmproxy`, `mkcert`, `Proxyman`) alongside built-in `zniff CA`.
 - **True Protocol Following & SOCKS5 Upstream**: Reads `ClientHello` ALPN offers and negotiates directly with origins. Supports HTTP/2 multiplexing, WebSocket frames (RFC 6455), and SSE without downgrading to HTTP/1.1; upstream proxy chaining supports HTTP/CONNECT plus **`socks5://` and `socks5h://`** (with RFC 1929 auth).
 - **Deep Inspection, AI SSE Stream View & Schema Decoding**: Formats JSON (with a collapsible, searchable JSON tree view), GraphQL (splitting `operationName`, query, and variables), **LLM / AI SSE Stream Inspector** (aggregating OpenAI Chat/Responses, Anthropic Messages, and Google Gemini streams into Thinking, Output, Tool Calls, TTFT, and tok/s alongside a raw-frame toggle), HTML/Markdown live preview, XML, MessagePack, and **zero-dependency `.proto` schema decoding** alongside schema-less wire views. Decodes JWTs, Unix timestamps, and Base64 inline, with baseline line-by-line Diff and connection timing breakdown.
 - **17 Rule Types, Multi-Group Rules & Migration Import**: Stack multiple independently toggleable rule groups (`[[rule_groups]]`) with workspace rules, and migrate directly by dropping or pasting **Whistle `.txt`**, **Charles `.xml`**, or **`.chlsj`** session captures. Supports terminal (`map-local`, `map-remote`, `break`, `break-res`, `block`), additive (`replace`, `json`, `delay`, `throttle`, `header`, `query`, `cors`, `no-cache`), host-level (`cert` / `client-cert`, `resolve`), and extension rules (loopback HTTP `hook` for `mutate` or `preview`, `proto`), with `{{uuid}}`, `{{ts_ms}}`, `{{hmac_sha256(...)}}` variables, GraphQL `op=` targeting, and an 8-slot FIFO breakpoint queue.
 - **Fast Navigation, Persisted Compose History & Command Palette**: Structured filter syntax (`host:`, `path:`, `op:`, `body:`, `header:`, `app:`, negated `-host:` / `-status:` …), collapsible domain & app sidebar, secondary list search, persisted **20-item Compose history**, global Command Palette (`Cmd/Ctrl+Shift+P`), and saved setups with history.
 - **Diagrams, OpenAPI, Mock & Collaboration**: Interactive Waterfall, Swimlane Sequence, Dependency (`flowchart TD`), and Mermaid source views. Copy flows as cURL, `fetch`, Python `requests`, Rust `reqwest`, Go `net/http`, TypeScript interfaces, or Rust `serde` structs. Export **OpenAPI 3.0.3 (JSON / YAML / Clipboard)**, **generate batch Local Mock directories**, export HAR/HTML (with structured redaction & strict mask), or share live sessions via `/s/{uuid}` and `--relay`.
-- **AI-Native MCP & Web Console**: Built-in JSON-RPC 2.0 MCP server (`POST /mcp` and `zniff --mcp`, 10 built-in tools) plus a headless WebAssembly console (`zniff --web`) with optional HTTP Basic auth on both console and capture port. Desktop builds check GitHub Releases and verify `SHA256SUMS` before updating in place.
+- **AI-Native MCP & Web Console**: Built-in JSON-RPC 2.0 MCP server (`POST /mcp` and `zniff --mcp`, 10 built-in tools) plus a headless WebAssembly console (`zniff --web`) with optional HTTP Basic auth on both console and capture port and capture-port allowed-host control (`allow_hosts`, strict deny-all default in Docker). Desktop builds check GitHub Releases and verify `SHA256SUMS` before updating in place.
 
 ---
 
@@ -77,6 +77,7 @@ Open `http://127.0.0.1:8080` and click **Start** to bind capture port `8877`. Th
    ```
 4. **Trust Root CA (for system-wide or mobile capture)**:
    - **macOS**: **More → Certificate → Install** to trust `zniff CA` in Keychain.
+   - **External Root CA Reuse (Optional)**: Auto-detects trusted local root CAs from **Whistle**, **mitmproxy**, **mkcert**, or **Proxyman** via **More → Certificate** or the footer **Connect** popover (`external_ca`).
    - **iOS Simulator**: **More → Install CA to iOS Simulators** to inject the cert and proxy into all booted simulators via `xcrun simctl`.
    - **Mobile Devices**: Click **QR** in the footer or visit `http://<lan-ip>:8877/zniff`.
 
@@ -117,10 +118,10 @@ See the full syntax and examples in **[Rules & Configuration Guide](./docs/rules
 | **Relay Server** | `zniff --relay --token <secret>` | Standalone relay for real-time `/s/{uuid}` session sharing. |
 | **MCP Bridge** | `zniff --mcp` | Stdio bridge for AI clients (also exposed over loopback `POST /mcp`). |
 
-Global flags: `--data-dir <dir>` (env `ZNIFF_DATA_DIR`) overrides the config & CA directory; `--proxy-auth <user:pass>` protects the capture port; `--web-prefix` / `--relay-prefix` mount behind a reverse-proxy path; `zniff --help` lists everything, `zniff --version` prints the version.
+Global flags: `--data-dir <dir>` (env `ZNIFF_DATA_DIR`) overrides the config & CA directory; `--proxy-auth <user:pass>` protects the capture port; `--allow-hosts <hosts>` (`ZNIFF_ALLOW_HOSTS`) and `--strict-allow-hosts` (`ZNIFF_STRICT_ALLOW_HOSTS=1`, default in Docker) restrict proxied target domains; `--web-prefix` / `--relay-prefix` mount behind a reverse-proxy path; `zniff --help` lists everything, `zniff --version` prints the version.
 
 <details>
-<summary>Claude Desktop / Cursor MCP configuration & auth flags</summary>
+<summary>Claude Desktop / Cursor MCP configuration & access flags</summary>
 
 ```json
 {
@@ -135,12 +136,13 @@ Global flags: `--data-dir <dir>` (env `ZNIFF_DATA_DIR`) overrides the config & C
 
 Available MCP tools (10): `list_flows`, `get_flow_detail`, `get_session_summary`, `annotate_flow`, `replay_flow`, `get_rules`, `set_rules`, `clear_flows`, `manage_breaks`, `generate_openapi`.
 
-| Port | Auth Type | Flag / Env |
+| Port | Control | Flag / Env |
 | :--- | :--- | :--- |
-| Console (`8080`) | HTTP Basic | `--web-auth <user:pass>` / `ZNIFF_WEB_AUTH` |
+| Console (`8080`) | HTTP Basic auth | `--web-auth <user:pass>` / `ZNIFF_WEB_AUTH` |
 | Capture (`8877`) | `Proxy-Authorization` (407) | `--proxy-auth <user:pass>` / `ZNIFF_PROXY_AUTH` |
+| Capture (`8877`) | Host allow-list (`403`, strict in Docker) | `--allow-hosts <hosts>` / `ZNIFF_ALLOW_HOSTS`, `--strict-allow-hosts` / `ZNIFF_STRICT_ALLOW_HOSTS` |
 | Relay Upload | `Authorization: Bearer` | `--token <secret>` / `relay_token` |
-| Relay View | HTTP Basic | `--view-auth <user:pass>` / `ZNIFF_RELAY_VIEW_AUTH` |
+| Relay View | HTTP Basic auth | `--view-auth <user:pass>` / `ZNIFF_RELAY_VIEW_AUTH` |
 
 </details>
 

@@ -2,7 +2,7 @@
 
 English | [简体中文](./rules-zh.md) | [Docs Index](./README.md)
 
-This guide covers where **zniff** stores configuration and certificates, how to use the traffic filter syntax, TLS bypass lists, all 17 rule types (routing, rewrites, breakpoints, host-level TLS/DNS, local HTTP webhooks, and `.proto` schema decoding), dynamic template variables with `HMAC-SHA256` signing, upstream proxy chaining, machine-wide settings, and saved setups (`.toml` presets).
+This guide covers where **zniff** stores configuration and certificates, how to use the traffic filter syntax, TLS bypass lists, proxy allowed-host restrictions (`allow_hosts`), all 17 rule types (routing, rewrites, breakpoints, host-level TLS/DNS, local HTTP webhooks, and `.proto` schema decoding), dynamic template variables with `HMAC-SHA256` signing, upstream proxy chaining, external root CA reuse, machine-wide settings, and saved setups (`.toml` presets).
 
 ---
 
@@ -47,7 +47,7 @@ Override the directory with `--data-dir <dir>` or the `ZNIFF_DATA_DIR` environme
 | `proxy-snapshot.toml` | **Production system-proxy recovery snapshot**: backs up original OS proxy settings before applying the system proxy; restored automatically on next launch after an unexpected exit. |
 | `config.dev.toml` | **Development configuration** (`make dev`, debug builds, or `ZNIFF_DEV=1`, default port `8878`): isolated from `config.toml` so dev runs never overwrite production settings. |
 | `proxy-snapshot.dev.toml` | **Development system-proxy recovery snapshot**. |
-| `ca.crt` / `ca.key` | Local `zniff CA` root certificate and private key (shared across production and dev modes). |
+| `ca.crt` / `ca.key` | Local `zniff CA` root certificate and private key (shared across production and dev modes; optionally overridden by reusing a trusted local external CA from Whistle, mitmproxy, mkcert, or Proxyman via `external_ca`). |
 | `certs/` (optional) | Directory for auto-loaded custom server certificates keyed by hostname (including `_wildcard.<domain>`). |
 
 > **Temporary Large-Body Spill Store**: Completed unpinned request/response bodies larger than `16 KB` are appended to a rotating ring buffer in the system temp directory (e.g., `$TMPDIR/zniff-spill/`, 64 MB per segment, 512 MB cap) and cleaned up on exit or after 30 minutes idle.
@@ -103,7 +103,7 @@ Evaluated against the TLS `ClientHello` SNI (or the `CONNECT` host if SNI is abs
 - **Denylist mode (default)**: Listed hosts skip TLS interception and become transparent TCP tunnels (recorded as `Bypass list, not decrypted`). Ideal for clients using certificate pinning.
 - **Allowlist mode (`only:` prefix)**: Only decrypts the listed hosts; every other host is tunneled transparently.
 - **Separators & wildcards**: Separate entries with spaces, commas `,`, semicolons `;`, or pipes `|`. Supports exact hosts, `*.example.com` (subdomains only, not apex `example.com`), and `*` (all hosts).
-- **Dynamic `/proxy.pac` endpoint**: The capture port serves `GET/HEAD /proxy.pac` (and `/zniff.pac`) reflecting `bypass_hosts` (both denylist and `only:` modes) while sending loopback addresses `DIRECT` (copyable from the footer **Connect** popover).
+- **Dynamic `/proxy.pac` endpoint**: The capture port serves `GET/HEAD /proxy.pac` (and `/zniff.pac`) reflecting both `allow_hosts` (disallowed hosts or strict deny-all always receive `DIRECT`) and `bypass_hosts` (both denylist and `only:` modes) while sending loopback addresses `DIRECT` (copyable from the footer **Connect** popover).
 
 ```text
 # Example 1: Skip TLS interception for Apple services and a pinned host
@@ -541,7 +541,9 @@ These settings belong to this machine rather than any setup. They save immediate
 
 | Setting | UI Location | `config.toml` key | Description |
 | :--- | :--- | :--- | :--- |
-| **Proxy auth** | Footer **Auth** popover | `proxy_auth` | `user:pass`. Requires HTTP Basic `Proxy-Authorization` on the capture port (`407` on failure); stripped before forwarding. `/zniff`, `/zniff-ca.crt`, `/proxy.pac`, `/zniff.pac`, `/s/{uuid}`, `/r/{uuid}`, and loopback `/mcp` are exempt. Overridden by `--proxy-auth` / `ZNIFF_PROXY_AUTH`. |
+| **Proxy auth** | Footer **Access** popover | `proxy_auth` | `user:pass`. Requires HTTP Basic `Proxy-Authorization` on the capture port (`407` on failure); stripped before forwarding. `/zniff`, `/zniff-ca.crt`, `/proxy.pac`, `/zniff.pac`, `/s/{uuid}`, `/r/{uuid}`, and loopback `/mcp` are exempt. Overridden by `--proxy-auth` / `ZNIFF_PROXY_AUTH`. |
+| **Allowed hosts** | Footer **Access** popover | `allow_hosts` | Restricts proxied domains. Supports exact host/IP/`[::1]`, `*.sub`, `*` (allow-all), `-host` exclusions (always win), and `#` comments. Precedence: `--allow-hosts` > non-empty `ZNIFF_ALLOW_HOSTS` > `config.toml` (CLI/env locks UI & `/api/hub` read-only with `403`). Non-strict empty allows all; strict mode (`--strict-allow-hosts` / `ZNIFF_STRICT_ALLOW_HOSTS=1`, default in Docker) denies all when empty (`403 Forbidden`, not recorded). Enforced on `CONNECT`/SNI, HTTP/HTTPS/H2, `map-remote`, replay, and `/proxy.pac`; local routes (`/zniff`, `/zniff-ca.crt`, `/proxy.pac`, `/zniff.pac`, `/mcp`, `/s/`, `/relay`) are exempt. |
+| **External root CA** | Top **More → Certificate** / Footer **Connect** | `external_ca` | Optional trusted local external root CA provider (`"whistle"`, `"mitmproxy"`, `"mkcert"`, `"proxyman"`); empty uses built-in `zniff CA`. |
 | **Relay URL** | Top **More → Relay Settings** | `relay_url` | Base URL of a `zniff --relay` server for live sharing (empty = local-only sharing). |
 | **Relay token** | Top **More → Relay Settings** | `relay_token` | Bearer token for uploading live sessions to the relay. |
 | **Accept relay** | Top **More → Relay Settings** | `relay_accept` | Off by default; enables receiving relayed sessions into this instance's flow list. |

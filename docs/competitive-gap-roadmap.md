@@ -1,6 +1,6 @@
 # zniff 竞品差距分析与下一阶段演进路线图
 
-- **评估基线**：`zniff v0.3.1`（`nsh 0.6.0`，单进程 Rust 桌面端 + 同构 Wasm `zniff --web` 操作台 + `zniff --relay`）
+- **评估基线**：`zniff v0.4.0`（`nsh 0.6.1`，单进程 Rust 桌面端 + 同构 Wasm `zniff --web` 操作台 + `zniff --relay`）
 - **决策来源**：基于当前源码能力盘点（见 [`docs/known-issues.md`](known-issues.md)、[`docs/open-questions.md`](open-questions.md)、[`docs/feature-optimization-analysis.md`](feature-optimization-analysis.md)）与用户对齐后的演进结论
 
 ---
@@ -23,7 +23,7 @@
 
 对比当前主流抓包与 API 调试工具：**Proxyman**、**HTTP Toolkit**、**Reqable**、**mitmproxy**、**Charles**。
 
-| 能力维度 | zniff (`v0.3.1`) | Proxyman | HTTP Toolkit | Reqable | mitmproxy | Charles |
+| 能力维度 | zniff (`v0.4.0`) | Proxyman | HTTP Toolkit | Reqable | mitmproxy | Charles |
 |---|---|---|---|---|---|---|
 | **架构与轻量度** | ✅ 原生 Rust + `nsh 0.6`（内存有界分片） | 原生 Swift（仅 macOS，Windows 另写） | Electron（体积大、内存高） | Flutter + C++ 引擎 | Python（Terminal/Web） | Java JVM（较笨重） |
 | **同构 Web / 远程操作台** | ✅ `--web` 共用同份 Rust→Wasm 界面 + `--relay` | ⚠️ 无完整同构控制台 | ❌ 本地桌面为主 | ❌ 移动端协同 app | ✅ `mitmweb` | ❌ 无 |
@@ -243,3 +243,4 @@ header api.vicanso.dev/v1 req set X-Signature {{hmac_sha256("dev-secret", req.bo
 | **Wave 2** | Whistle `.txt` + Charles `.xml` 规则转译导入 + Charles `.chlsj` 会话导入（拖拽 + 转换摘要） | `import_whistle.rs`、`import_charles.rs`、`ui/profile_io.rs` | ✅ 已落地 | 纯 Rust 解析，桌面与 Wasm 全平台可用 |
 | **Wave 3** | 多组规则并行叠加开关（`[[rule_groups]]`，兼容 `SavedProfile`、`--web` 与 MCP） | `config.rs`、`rules.rs`、`ui/rule_groups.rs`、`ui/filter_panel.rs`、`proxy/hub.rs` | ✅ 已落地 | 全平台可用，MCP `get_rules`/`set_rules` 同步兼容 |
 | **Wave 4** | 上游 `socks5://` / `socks5h://`、动态 `/proxy.pac`、LLM/AI SSE 流式聚合检视、持久化最近 20 条构造历史 | `proxy/socks5.rs`、`proxy/upstream_io.rs`、`bypass.rs`、`proxy/local_routes.rs`、`llm_stream.rs`、`ui/llm_view.rs`、`ui/compose_box.rs` | ✅ 已落地 | SOCKS5 与 PAC 仅服务端/桌面；LLM 视图与构造历史全平台可用 |
+| **v0.4 收口强化** | 外部根证书探测复用（Whistle / mitmproxy / mkcert / Proxyman）、代理域名准入控制与 Docker 严格全拒、`TopBottom` 宽屏左右并排详情、Windows ARM64 支持 | `external_ca.rs`、`allow_hosts.rs`、`ui/access_popover.rs`、`ui/detail_summary.rs` | ✅ 已落地 | `allow_hosts` 覆盖桌面 / `--web` / Docker；外部 CA 探测仅桌面 |

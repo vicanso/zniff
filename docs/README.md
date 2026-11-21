@@ -6,7 +6,7 @@
 
 ## 架构概览
 
-Desktop 与 `zniff --web` 共用同一份 Rust 界面（`nsh 0.6`）与抓包代理内核（`app/src/proxy/`）：桌面端为单进程原生应用；Web 模式将界面编为 WebAssembly 运行在浏览器中，通过 HTTP `/api` 与 `zniff --web` 进程内的 `Hub` 通信（浏览器本身不监听、不解密，也不修改系统代理）。
+Desktop 与 `zniff --web` 共用同一份 Rust 界面（`nsh 0.6.1`）与抓包代理内核（`app/src/proxy/`）：桌面端为单进程原生应用；Web 模式将界面编为 WebAssembly 运行在浏览器中，通过 HTTP `/api` 与 `zniff --web` 进程内的 `Hub` 通信（浏览器本身不监听、不解密，也不修改系统代理）。
 
 ![zniff 架构：桌面端与 Web 端代码共享示意图](./zniff-architecture.svg)
 
@@ -16,7 +16,7 @@ Desktop 与 `zniff --web` 共用同一份 Rust 界面（`nsh 0.6`）与抓包代
 
 | 文档 | 语言 | 内容摘要 |
 | :--- | :--- | :--- |
-| **[规则与配置指南](./rules-zh.md)** | 简体中文 | 数据目录与配置隔离、流量过滤语法、TLS 直通名单、17 类转发/改写/扩展规则、`{{...}}` 动态模板变量与签名、本地 HTTP `hook`、`.proto` Schema 解码、上游代理与本机设置、配置预设导入导出。 |
+| **[规则与配置指南](./rules-zh.md)** | 简体中文 | 数据目录与配置隔离、流量过滤语法、TLS 直通名单、代理域名准入控制（`allow_hosts`）、17 类转发/改写/扩展规则、`{{...}}` 动态模板变量与签名、本地 HTTP `hook`、`.proto` Schema 解码、上游代理/外部根证书与本机设置、配置预设导入导出。 |
 | **[Rules & Configuration Guide](./rules.md)** | English | Complete English counterpart of the Rules & Configuration Guide. |
 
 ---

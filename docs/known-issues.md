@@ -2,7 +2,7 @@
 
 > 返回 [文档索引](./README.md) · 产品取舍决策见 [产品与架构决策记录 (ADR)](./open-questions.md) · 规则语法见 [规则与配置指南](./rules-zh.md)
 
-本文档维护 **zniff（当前基线 `v0.3.1` / `nsh 0.6`）** 明确接受的架构边界、平台限制与关键行为约束。P0–P5 规划能力已全部落地，见文末[已落地里程碑速查](#6-已落地里程碑速查)。
+本文档维护 **zniff（当前基线 `v0.4.0` / `nsh 0.6.1`）** 明确接受的架构边界、平台限制与关键行为约束。核心阶段与 v0.4 规划能力已全部落地，见文末[已落地里程碑速查](#6-已落地里程碑速查)。
 
 ---
 
@@ -46,6 +46,7 @@
 ### 3.1 桌面系统代理与证书
 
 - **系统代理默认关闭**：仅当「更多 → 系统代理」打开时，点击「开始」才改写系统代理；若上次关闭窗口时处于抓包状态，下次启动会自动恢复抓包。
+- **外部根证书自动探测与复用（`external_ca.rs`）**：桌面端可自动探测本机已安装且受信任的 **Whistle**、**mitmproxy**、**mkcert**、**Proxyman** 根证书及私钥并在界面一键切换复用（记入 `config.toml` 的 `external_ca`）；未检测到、未受信任或选回内置证书时均回退至本地 `zniff CA`。
 - **macOS**：
   - `security add-trusted-cert` 可能需要用户弹窗确认；信任状态结合 `security find-certificate` 与 `security verify-cert -c <ca.crt> -L` 区分「未安装」「已安装但未信任」「已信任」（移除时一并清理旧名 `Snoop CA`）。
   - 带密码认证的系统代理无法经 `networksetup` 读回密码，停止抓包后密码项可能恢复不完整。
@@ -73,6 +74,7 @@
 ### 4.1 连接池、HTTP/2 与重放
 
 - **上游代理与认证**：未配 `upstream_proxy` 时直连源站（不走系统代理）；支持 HTTP/CONNECT 与 `socks5://` / `socks5h://`（RFC 1928 + RFC 1929）。配置 `proxy_auth`（或 `--proxy-auth` / `ZNIFF_PROXY_AUTH`）后，抓包端口要求 HTTP Basic `Proxy-Authorization`（失败回 `407` 且不写入会话，转发前剥离该头；`/zniff`、`/zniff-ca.crt`、`/proxy.pac`、`/zniff.pac`、`/s/{uuid}`、`/r/{uuid}` 与回环 `/mcp` 豁免）。
+- **代理域名准入控制（`allow_hosts.rs`）**：非严格模式下留空放行全部；启用 `--strict-allow-hosts` / `ZNIFF_STRICT_ALLOW_HOSTS=1`（Docker 镜像默认开启）且无正向允许项时拒绝所有代理域名。优先级为 `--allow-hosts` > 非空 `ZNIFF_ALLOW_HOSTS` > `config.toml` 的 `allow_hosts`，由 CLI 或非空环境变量传入时界面与 `/api/hub` 仅只读展示并拒绝写操作（`403`）。全链路覆盖 `CONNECT` 握手前（先于 `200` 与直通名单）、SNI、HTTP/HTTPS/H2、`map-remote` 目标主机与重放（同步过滤 `/proxy.pac`）；被拒绝请求直接回 `403 Forbidden`（不拨号、不写入会话），本地路由 `/zniff`、`/zniff-ca.crt`、`/proxy.pac`、`/zniff.pac`、`/mcp`、`/s/`、`/relay` 豁免。
 - **明文 HTTP 连接池**：客户端省略 `Connection` 时补 `Connection: keep-alive`；body 读完、双方未要求关闭且状态非 `101` 时回池（每键最多 4 条，超过 32 键清空）。HTTP/1 TLS 不进此池。
 - **HTTP/2 连接复用**：同一客户端连接复用源站连接，另外缓存最多 16 条发送端（空闲超过 45 秒或驱动结束时淘汰）；仅在请求尚未写出时自动换连重试。HTTP/2 传输层不解析底层二进制帧、HPACK 表或 trailer。
 - **重放独立建连**：重放/批量重放不走规则和断点、不进入连接池；HTTP/1.1 强制 `Connection: close`，源流为 `HTTP/2` 或新建 HTTPS 请求时宣告 `["h2", "http/1.1"]` ALPN 并按协商结果发送。
@@ -101,7 +103,7 @@
 ## 5. 界面、交互与检视边界
 
 - **布局与尺寸约束**：
-  - 支持「左右分栏（`Split`，默认，左侧含可拖宽 `176–340 px`、可通过底栏按钮折叠的域名/应用侧栏）」与「上下分栏（`TopBottom`）」。
+  - 支持「左右分栏（`Split`，默认，左侧含可拖宽 `176–340 px`、可通过底栏按钮折叠的域名/应用侧栏）」与「上下分栏（`TopBottom`，宽屏详情将请求卡片排在左侧、响应卡片排在右侧）」。
   - 左栏列表默认宽 `660`（范围 `280–1100`）；`Split` 侧栏展开时上限受 `window_w - (sidebar_px + 406)` 约束以保留详情区空间，否则受 `window_w - 340` 约束。
   - 过滤弹出层宽度按 `window_w - list_px * 0.7 - 16` 在 `680–1360` 自适应，规则编辑器高度按 `84–460` 自适应。
 - **列表列与过滤**：
@@ -131,4 +133,4 @@
 | **P1–P3 调试体验** | 右键一键「本地映射」/「填入断点」、独立「构造请求」（含 cURL 粘贴）、`query` 改参、Body 卡片内搜索与 HTML/Markdown 预览、本地回环进程名归属（`lsof +c 0` / `/proc`）、8 槽位 FIFO 断点队列、备注与「清空未星标」、并发批量重放、列表统计与瀑布/时序/依赖图 | `local_proc.rs`、`rules.rs`、`present.rs`、`ui/` |
 | **P4 差异化增强** | 连接阶段耗时分段条（DNS/TCP/TLS/Wait/Download）与复用标记、内置 JSON-RPC 2.0 MCP（10 个 Tools：`POST /mcp` 与 `--mcp`）、Rust/Go 代码与类型生成、`no-cache`/`block`/`resolve` 规则、iOS 模拟器一键配置与 Linux 系统证书指引、`Split` 可折叠分面侧栏、JSON 树形视图、单行规则辅助条、全局命令面板与多屏窗口记忆 | `mcp.rs`、`ui/json_tree.rs`、`ui/rule_assist.rs`、`ui/command_palette.rs`、`ui/facet_sidebar.rs` |
 | **P5 高阶扩展** | 零配置接入三件套（免证书 SPKI 独立 Chromium / 预注入代理终端 / Android `adb` 一键反代）、`{{...}}` 动态模板变量与 `HMAC-SHA256`、本地回环 HTTP `hook`（`mutate` + `preview`）、零依赖 `.proto` Schema 挂载解码、OpenAPI 3.0.3（JSON/YAML/复制）与批量本地 Mock 目录生成 | `launcher.rs`、`rule_vars.rs`、`webhook.rs`、`proto_schema.rs`、`openapi.rs`、`mock_gen.rs` |
-| **v0.4 迁移与接入体验（Waves 1–4）** | 无流量引导卡与底栏「接入中心」、Whistle `.txt` 与 Charles `.xml`/`.chlsj` 迁移导入、并行多组规则（`[[rule_groups]]`）、`socks5://`/`socks5h://` 上游、动态 `/proxy.pac`、LLM/AI SSE 聚合视图（OpenAI/Anthropic/Gemini）与持久化 20 条构造历史 | `import_whistle.rs`、`import_charles.rs`、`proxy/socks5.rs`、`llm_stream.rs`、`ui/onboarding_card.rs`、`ui/connect_hub.rs`、`ui/rule_groups.rs`、`ui/llm_view.rs` |
+| **v0.4 迁移、接入与安全收口** | 无流量引导卡与底栏「接入中心」、Whistle `.txt` 与 Charles `.xml`/`.chlsj` 迁移导入、并行多组规则（`[[rule_groups]]`）、`socks5://`/`socks5h://` 上游、动态 `/proxy.pac`、LLM/AI SSE 聚合视图（OpenAI/Anthropic/Gemini）、持久化 20 条构造历史、外部根证书探测复用（Whistle/mitmproxy/mkcert/Proxyman）、代理域名准入控制（`allow_hosts` + Docker 严格全拒）、`TopBottom` 宽屏左右并排详情与 Windows ARM64 构建更新 | `import_whistle.rs`、`import_charles.rs`、`proxy/socks5.rs`、`llm_stream.rs`、`external_ca.rs`、`allow_hosts.rs`、`ui/onboarding_card.rs`、`ui/connect_hub.rs`、`ui/rule_groups.rs`、`ui/llm_view.rs`、`ui/access_popover.rs` |

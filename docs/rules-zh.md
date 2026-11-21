@@ -2,7 +2,7 @@
 
 [English](./rules.md) | 简体中文 | [文档索引](./README.md)
 
-本文档系统介绍 **zniff** 的配置目录与开发隔离、流量过滤语法、TLS 直通名单（Bypass）、17 类规则（转发、改写、断点、域名级控制、本地 Webhook 与 `.proto` Schema 解码）、动态模板变量与 `HMAC-SHA256` 签名、上游代理与本机设置，以及命名配置预设（Saved Setups）的导入导出。
+本文档系统介绍 **zniff** 的配置目录与开发隔离、流量过滤语法、TLS 直通名单（Bypass）、代理域名准入控制（`allow_hosts`）、17 类规则（转发、改写、断点、域名级控制、本地 Webhook 与 `.proto` Schema 解码）、动态模板变量与 `HMAC-SHA256` 签名、上游代理、外部根证书复用与本机设置，以及命名配置预设（Saved Setups）的导入导出。
 
 ---
 
@@ -47,7 +47,7 @@
 | `proxy-snapshot.toml` | **正式版系统代理恢复快照**：开启系统代理前备份原系统网络设置；若进程异常退出，下次启动自动读取恢复。 |
 | `config.dev.toml` | **开发模式配置文件**（`make dev`、Debug 构建或 `ZNIFF_DEV=1`，默认监听端口 `8878`）：与正式版完全隔离，避免开发调试覆盖日常配置。 |
 | `proxy-snapshot.dev.toml` | **开发模式系统代理恢复快照**。 |
-| `ca.crt` / `ca.key` | 本地生成的 `zniff CA` 根证书与私钥（正式版与开发模式共用）。 |
+| `ca.crt` / `ca.key` | 本地生成的 `zniff CA` 根证书与私钥（正式版与开发模式共用；可通过 `external_ca` 切换复用本机已信任的 Whistle / mitmproxy / mkcert / Proxyman 外部根证书）。 |
 | `certs/`（可选） | 按主机名（支持 `_wildcard.<domain>`）自动加载的自定义服务端证书目录。 |
 
 > **临时大体积正文缓存**：抓包过程中超过 `16 KB` 的已完成非星标请求/响应正文会写入系统临时目录（如 `$TMPDIR/zniff-spill/`）的环形分片文件（单分片 64 MB，总上限 512 MB），退出或闲置 30 分钟后自动回收，不在配置目录中落盘。
@@ -103,7 +103,7 @@ host:api.example.com|*.staging.test path:/v1|/v2 POST type:json mute:/health
 - **黑名单模式（默认）**：列出的域名跳过 MITM 解密，直接走透明 TCP 隧道（列表中记为 `直通名单，未解密`）。适用于启用了证书钉扎（Certificate Pinning）的服务。
 - **白名单模式（`only:` 前缀）**：仅解密列出的域名，其余全部走透明 TCP 隧道直通。
 - **分隔符与通配符**：支持空格、逗号 `,`、分号 `;`、竖线 `|` 分隔；支持精确域名、`*.example.com`（仅匹配子域，不含裸根域 `example.com`）与 `*`（全部主机）。
-- **动态 `/proxy.pac` 自动配置**：抓包端口同步提供 `GET /proxy.pac`（与 `/zniff.pac`），结合 `bypass_hosts`（含黑名单与 `only:` 白名单模式）动态生成 `FindProxyForURL(url, host)` 脚本，非目标或回环地址自动直连（可在底栏 **「接入」** 弹窗一键复制 PAC URL）。
+- **动态 `/proxy.pac` 自动配置**：抓包端口同步提供 `GET /proxy.pac`（与 `/zniff.pac`），结合 `allow_hosts`（未放行或严格全拒时返回 `DIRECT`）与 `bypass_hosts`（含黑名单与 `only:` 白名单模式）动态生成 `FindProxyForURL(url, host)` 脚本，非目标或回环地址自动直连（可在底栏 **「接入」** 弹窗一键复制 PAC URL）。
 
 ```text
 # 示例 1：跳过 Apple 与指定钉扎域名的 TLS 解密
@@ -564,7 +564,9 @@ rules = "throttle api.example.com 3g"
 
 | 设置项 | 界面入口 | `config.toml` 键 | 说明 |
 | :--- | :--- | :--- | :--- |
-| **代理认证** | 底栏 **「认证」** 弹出层 | `proxy_auth` | `user:pass`。开启后抓包端口要求 HTTP Basic `Proxy-Authorization`（未通过回 `407`），转发前自动剥离该头；`/zniff`、`/zniff-ca.crt`、`/proxy.pac`、`/zniff.pac`、`/s/{uuid}`、`/r/{uuid}` 与回环 `/mcp` 豁免。可被 `--proxy-auth` / `ZNIFF_PROXY_AUTH` 覆盖。 |
+| **代理认证** | 底栏 **「安全」** 弹出层 | `proxy_auth` | `user:pass`。开启后抓包端口要求 HTTP Basic `Proxy-Authorization`（未通过回 `407`），转发前自动剥离该头；`/zniff`、`/zniff-ca.crt`、`/proxy.pac`、`/zniff.pac`、`/s/{uuid}`、`/r/{uuid}` 与回环 `/mcp` 豁免。可被 `--proxy-auth` / `ZNIFF_PROXY_AUTH` 覆盖。 |
+| **允许代理的域名** | 底栏 **「安全」** 弹出层 | `allow_hosts` | 限制允许代理的目标域名。支持精确域名/IP/`[::1]`、`*.子域`、`*`（放行全部）、`-域名` 排除（优先于允许项）与 `#` 注释。优先级为 `--allow-hosts` > 非空 `ZNIFF_ALLOW_HOSTS` > `config.toml`（由 CLI/环境变量传入时界面与 `/api/hub` 只读锁定，写操作返回 `403`）。非严格模式留空放行全部；启用严格模式（`--strict-allow-hosts` / `ZNIFF_STRICT_ALLOW_HOSTS=1`，Docker 默认开启）且无正向规则时拒绝全部（返回 `403 Forbidden` 且不写入会话）。全链路作用于 `CONNECT`/SNI、HTTP/HTTPS/H2、`map-remote`、重放与 `/proxy.pac`，豁免本地路由（`/zniff`、`/zniff-ca.crt`、`/proxy.pac`、`/zniff.pac`、`/mcp`、`/s/`、`/relay`）。 |
+| **复用外部根证书** | 顶栏 **更多 → 证书** / 底栏 **「接入」** | `external_ca` | 可选复用本机已信任外部根证书（`"whistle"`、`"mitmproxy"`、`"mkcert"`、`"proxyman"`）；留空使用内置 `zniff CA`。 |
 | **中转地址** | 顶栏 **更多 → 中继设置** | `relay_url` | 用于实时分享的 `zniff --relay` 服务地址（空着只在本机分享）。 |
 | **中转密钥** | 顶栏 **更多 → 中继设置** | `relay_token` | 上传到中继服务时使用的 Bearer 密钥。 |
 | **接收中继** | 顶栏 **更多 → 中继设置** | `relay_accept` | 默认关闭；开启后允许接收他人推来的中继会话并在本机列表中查看。 |
