@@ -49,6 +49,7 @@ pub(crate) fn settings_toggle_row(
         .items_center()
         .hover(|s| s.bg(bg_control_hover()))
         .active(|s| s.opacity(0.8))
+        .focus_visible(apply_focus_ring)
         .cursor(Cursor::Pointer)
         .on_press(on_toggle)
         .child(

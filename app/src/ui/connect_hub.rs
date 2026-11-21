@@ -102,6 +102,7 @@ fn connect_hub_trigger(
         })
         .cursor(Cursor::Pointer)
         .active(|style| style.opacity(0.75))
+        .focus_visible(apply_focus_ring)
         .tooltip(label_tip(
             "接入中心：免配浏览器 / 终端 / ADB / 手机扫码",
             "Connect Hub: Browser / Terminal / ADB / Mobile QR",
@@ -799,6 +800,7 @@ fn hub_action_row_reactive(
             })
         })
         .active(|style| style.opacity(0.8))
+        .focus_visible(apply_focus_ring)
         .cursor(Cursor::Pointer)
         .on_press(on_press)
         .child(glyph(

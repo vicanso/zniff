@@ -478,6 +478,7 @@ pub(crate) fn toolbar_text_button(
         .hover(|style| style.bg(bg_control_hover()))
         .cursor(Cursor::Pointer)
         .active(|style| style.opacity(0.8))
+        .focus_visible(apply_focus_ring)
         .tooltip(label_tip(
             "清空会话 (Cmd/Ctrl+K)",
             "Clear session (Cmd/Ctrl+K)",
@@ -789,6 +790,7 @@ pub(crate) fn toolbar_summary_button(
             })
         })
         .active(|style| style.opacity(0.8))
+        .focus_visible(apply_focus_ring)
         .cursor(Cursor::Pointer)
         .tooltip(label_tip("查看会话统计概览", "View session summary"))
         .on_press(move || {
@@ -880,6 +882,7 @@ pub(crate) fn more_trigger(
         })
         .cursor(Cursor::Pointer)
         .active(|style| style.opacity(0.75))
+        .focus_visible(apply_focus_ring)
         .child(when(
             move || {
                 #[cfg(target_arch = "wasm32")]

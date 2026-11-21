@@ -81,6 +81,11 @@ pub(crate) fn accent_blue_text() -> AdaptiveColor {
     AdaptiveColor::rgb(0x1d4ed8, 0x93c5fd)
 }
 
+/// High-contrast keyboard focus ring color (`>= 3:1` WCAG 2.1 SC 1.4.11 on all surfaces).
+pub(crate) fn focus_ring() -> AdaptiveColor {
+    AdaptiveColor::rgb(0x2563eb, 0x60a5fa)
+}
+
 /// The baseline row's leading bar. Same red as the diff view's old side.
 pub(crate) fn baseline_mark() -> AdaptiveColor {
     AdaptiveColor::rgb(0xdc2626, 0xf87171)

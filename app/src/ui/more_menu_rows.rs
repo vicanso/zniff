@@ -208,6 +208,7 @@ pub(crate) fn menu_inline_pill(
             })
         })
         .active(|style| style.opacity(0.75))
+        .focus_visible(apply_focus_ring)
         .cursor(Cursor::Pointer)
         .on_press(on_press)
         .child(control_text(label).text_size(px(11.0)).text_color(move || {
@@ -1036,6 +1037,7 @@ pub(crate) fn primary_button(
         })
         .cursor(Cursor::Pointer)
         .active(|style| style.opacity(0.8))
+        .focus_visible(apply_focus_ring)
         .on_press(on_press)
         .child(glyph(
             move || {

@@ -286,6 +286,7 @@ fn settings_sidebar(tab: Signal<SettingsTab>) -> impl IntoElement {
                     })
                 })
                 .active(|s| s.opacity(0.8))
+                .focus_visible(apply_focus_ring)
                 .cursor(Cursor::Pointer)
                 .on_press(move || tab.set(item))
                 .child(glyph_px(

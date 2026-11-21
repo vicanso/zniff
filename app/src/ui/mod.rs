@@ -74,6 +74,7 @@ macro_rules! desktop_child {
     }};
 }
 
+mod a11y;
 mod about_modal;
 mod access_popover;
 mod allow_denied_summary;
@@ -146,6 +147,7 @@ mod tray;
 mod watch_popover;
 mod web_poll;
 
+pub(crate) use self::a11y::*;
 pub(crate) use self::about_modal::*;
 pub(crate) use self::access_popover::*;
 pub(crate) use self::allow_denied_summary::*;
