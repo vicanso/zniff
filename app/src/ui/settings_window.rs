@@ -400,7 +400,7 @@ fn settings_general_tab(props: SettingsWindowProps) -> impl IntoElement {
         .child(appearance)
         .child(reading);
 
-    desktop_child!(
+    let root = desktop_child!(
         root,
         settings_card(
             "系统代理",
@@ -410,6 +410,29 @@ fn settings_general_tab(props: SettingsWindowProps) -> impl IntoElement {
                 "Manage system HTTP(S) proxy automatically",
                 move || proxy_on.get(),
                 move || (toggle_proxy)(),
+            ),
+        )
+    );
+
+    desktop_child!(
+        root,
+        settings_card(
+            "窗口与托盘",
+            "Window & Tray",
+            settings_toggle_row(
+                "关闭窗口时最小化到系统托盘",
+                "Minimize to system tray when closing window",
+                move || profiles.minimize_to_tray.get(),
+                {
+                    let c = controls.clone();
+                    move || {
+                        let next = !profiles.minimize_to_tray.get();
+                        profiles.minimize_to_tray.set(next);
+                        save_config_or_notify(&c, PrefName::Window, |cfg| {
+                            cfg.minimize_to_tray = next;
+                        });
+                    }
+                },
             ),
         )
     )

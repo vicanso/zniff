@@ -139,6 +139,7 @@ mod theme;
 mod tls_failure_banner;
 mod toast_overlay;
 mod toolbar;
+mod tray;
 mod web_poll;
 
 pub(crate) use self::about_modal::*;
@@ -209,6 +210,8 @@ pub(crate) use self::theme::*;
 pub(crate) use self::tls_failure_banner::*;
 pub(crate) use self::toast_overlay::*;
 pub(crate) use self::toolbar::*;
+#[cfg_attr(target_arch = "wasm32", allow(unused_imports))]
+pub(crate) use self::tray::*;
 #[allow(unused_imports)]
 pub(crate) use self::web_poll::*;
 

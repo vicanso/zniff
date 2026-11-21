@@ -265,6 +265,7 @@ pub fn App() -> impl IntoElement {
         shortcuts_open: signal(false),
         about_open: signal(false),
         default_json_tree: shown.default_json_tree,
+        minimize_to_tray: signal(saved.minimize_to_tray),
         deselect_rev: signal(0),
     };
     let lan_url = signal(String::new());
@@ -284,6 +285,11 @@ pub fn App() -> impl IntoElement {
         }
     });
     let controls = open_controls();
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        install_system_tray(controls.clone(), langs, running, listen, use_system_proxy);
+        install_minimize_to_tray_handler(profile_signals.minimize_to_tray);
+    }
     let config_broken = signal(lock_config_error(&controls));
     let default_json_tree_effect = shown.default_json_tree;
     let shown_tree_effect = shown;

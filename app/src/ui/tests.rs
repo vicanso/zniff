@@ -2940,6 +2940,7 @@ fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
             shortcuts_open: signal(false),
             about_open: signal(false),
             default_json_tree: signal(false),
+            minimize_to_tray: signal(false),
             deselect_rev: signal(0),
         };
         let compose = Compose {
