@@ -33,6 +33,21 @@ pub(crate) fn build_command_items(
         CommandItem::new("new_request", t(lang, "构造请求", "New request"))
             .group(g_capture)
             .keywords(["compose", "request", "curl", "http", "构造", "请求"]),
+        CommandItem::new(
+            "replay_selected",
+            t(lang, "重放当前选中流量", "Replay selected flow"),
+        )
+        .group(g_capture)
+        .shortcut("mod+r")
+        .disabled(!has_selection)
+        .keywords(["replay", "resend", "repeat", "重放", "重发"]),
+        CommandItem::new(
+            "focus_filter",
+            t(lang, "聚焦主过滤框", "Focus filter input"),
+        )
+        .group(g_capture)
+        .shortcut("mod+f")
+        .keywords(["filter", "search", "find", "过滤", "搜索"]),
         CommandItem::new("clear_all", t(lang, "清空全部流量", "Clear all flows"))
             .group(g_capture)
             .shortcut("mod+k")
@@ -270,8 +285,18 @@ pub(crate) fn build_command_items(
             t(lang, "回到当前列表统计视图", "Show filtered summary"),
         )
         .group(g_view)
+        .shortcut("escape")
         .disabled(!has_selection)
         .keywords(["summary", "stats", "统计"]),
+    );
+    items.push(
+        CommandItem::new(
+            "open_shortcuts",
+            t(lang, "快捷键速查", "Keyboard shortcuts"),
+        )
+        .group(g_view)
+        .shortcut("mod+/")
+        .keywords(["shortcut", "key", "keymap", "help", "快捷键", "帮助"]),
     );
     items.push(
         CommandItem::new("open_about", t(lang, "关于 zniff", "About zniff"))
@@ -285,6 +310,8 @@ pub(crate) fn build_command_items(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn command_palette_modal(
     open: Signal<bool>,
+    shortcuts_open: Signal<bool>,
+    filter_focus: ElementRef,
     controls: Arc<Controls>,
     running: Signal<bool>,
     proxy_on: Signal<bool>,
@@ -414,6 +441,10 @@ pub(crate) fn command_palette_modal(
                             toggle_system_proxy(controls);
                         }
                         "new_request" => begin_new_request(compose, selected),
+                        "replay_selected" => {
+                            replay_flow(&controls, selected.get(), ReplayOverride::default());
+                        }
+                        "focus_filter" => filter_focus.focus(),
                         "clear_all" => clear_captured(
                             &controls,
                             selected,
@@ -507,6 +538,7 @@ pub(crate) fn command_palette_modal(
                             reset_compose(compose);
                             clear_shown(shown);
                         }
+                        "open_shortcuts" => shortcuts_open.set(true),
                         "open_about" => profiles.about_open.set(true),
                         _ => {}
                     }
@@ -559,6 +591,19 @@ mod tests {
         assert!(ids.contains("toggle_capture"));
         assert!(ids.contains("export_openapi_yaml"));
         assert!(ids.contains("toggle_layout"));
+        assert!(ids.contains("open_shortcuts"));
+        assert!(ids.contains("focus_filter"));
+        assert!(ids.contains("replay_selected"));
+        for (id, expected_shortcut) in [
+            ("clear_all", "mod+k"),
+            ("focus_filter", "mod+f"),
+            ("replay_selected", "mod+r"),
+            ("show_summary", "escape"),
+            ("open_shortcuts", "mod+/"),
+        ] {
+            let item = items.iter().find(|it| it.id == id).unwrap();
+            assert_eq!(item.shortcut.as_deref(), Some(expected_shortcut));
+        }
         #[cfg(not(target_arch = "wasm32"))]
         {
             let adb = items.iter().find(|it| it.id == "toggle_adb").unwrap();

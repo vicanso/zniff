@@ -1099,6 +1099,7 @@ pub fn App() -> impl IntoElement {
     let seq_esc = seq_builder;
     let shown_esc = shown;
     let palette_open = signal(false);
+    let shortcuts_open = signal(false);
     on_key_with(
         "mod+shift+p",
         KeyOptions {
@@ -1109,9 +1110,24 @@ pub fn App() -> impl IntoElement {
             palette_open.set(!palette_open.get());
         },
     );
+    on_key("shift+/", move |_| {
+        shortcuts_open.set(!shortcuts_open.get());
+    });
+    on_key_with(
+        "mod+/",
+        KeyOptions {
+            when: nsh_core::keymap::When::Always,
+            ..KeyOptions::default()
+        },
+        move |_| {
+            shortcuts_open.set(!shortcuts_open.get());
+        },
+    );
     on_key("escape", move |_| {
         if palette_open.get() {
             palette_open.set(false);
+        } else if shortcuts_open.get() {
+            shortcuts_open.set(false);
         } else if profile_signals.about_open.get() {
             profile_signals.about_open.set(false);
         } else if profile_signals.machine_settings_open.get() {
@@ -1376,6 +1392,8 @@ pub fn App() -> impl IntoElement {
         .child(about_modal(profile_signals, update_state, controls.clone()))
         .child(command_palette_modal(
             palette_open,
+            shortcuts_open,
+            filter_focus,
             controls.clone(),
             running,
             use_system_proxy,
@@ -1389,6 +1407,7 @@ pub fn App() -> impl IntoElement {
             baseline,
             shown,
         ))
+        .child(shortcuts_modal(shortcuts_open))
         .child(toast_overlay(
             toast_shown,
             toast_overlay_gen,
