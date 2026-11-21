@@ -253,6 +253,8 @@ pub fn App() -> impl IntoElement {
         sidebar_collapsed: signal(saved.sidebar_collapsed),
         layout_mode: signal(saved.layout_mode),
         panel_open: signal(false),
+        filter_panel_open: signal(false),
+        preset_panel_open: signal(false),
         access_open: signal(false),
         quick_rule_prefill: signal(None),
         machine_settings_open: signal(false),
@@ -1229,6 +1231,12 @@ pub fn App() -> impl IntoElement {
             palette_open.set(false);
         } else if shortcuts_open.get() {
             shortcuts_open.set(false);
+        } else if profile_signals.filter_panel_open.get() {
+            profile_signals.filter_panel_open.set(false);
+        } else if profile_signals.panel_open.get() {
+            profile_signals.panel_open.set(false);
+        } else if profile_signals.preset_panel_open.get() {
+            profile_signals.preset_panel_open.set(false);
         } else if profile_signals.settings_open.get() {
             profile_signals.settings_open.set(false);
         } else if profile_signals.about_open.get() {

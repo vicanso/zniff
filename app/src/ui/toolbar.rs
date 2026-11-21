@@ -60,15 +60,25 @@ pub(crate) fn toolbar(
     let clear = Rc::new(clear);
     let clear_unpinned = Rc::new(clear_unpinned);
     let remove = Rc::new(remove);
-    let filter_controls = import_controls.clone();
+    let preset_controls = import_controls.clone();
+    let rules_controls = import_controls.clone();
     let layout_controls = import_controls.clone();
+    let shared_rule_draft = QuickRuleDraftSignals {
+        kind: signal(0_u8),
+        host: signal(String::new()),
+        path: signal(String::new()),
+        op: signal(String::new()),
+        from: signal(String::new()),
+        to: signal(String::new()),
+        modes: QuickRuleModeSignals::new(),
+    };
     #[cfg(not(target_arch = "wasm32"))]
     let update_controls = import_controls.clone();
     let bar = view()
         .window_drag(true)
         .flex_row()
         .items_center()
-        .gap_2()
+        .gap_1()
         .pl(move || {
             #[cfg(not(target_arch = "wasm32"))]
             {
@@ -177,16 +187,6 @@ pub(crate) fn toolbar(
                 | StatusMsg::ProxyRestoreFailed(_)) => Some(msg.text(ui_lang(langs))),
                 _ => None,
             };
-            let active_name = move || {
-                toolbar_active_profile_name(
-                    &profiles.saved.get(),
-                    &profiles.name.get(),
-                    &profiles.filter.get(),
-                    &profiles.bypass.get(),
-                    &profiles.rules.get(),
-                    &profiles.upstream.get(),
-                )
-            };
             let condition_info = move || {
                 let effective_rules =
                     effective_rules_text(&profiles.rules.get(), &profiles.rule_groups.get());
@@ -206,27 +206,37 @@ pub(crate) fn toolbar(
                 .flex_1()
                 .flex_row()
                 .items_center()
-                .gap_2()
+                .gap_1p5()
                 .px_1()
                 .min_w(px(0.0))
+                .overflow_hidden()
                 .child(when(
+                    move || startup_error().is_none(),
                     move || {
-                        startup_error().is_none()
-                            && (active_name().is_some() || has_primary_filter())
+                        view()
+                            .min_w(px(0.0))
+                            .flex_shrink(1.0)
+                            .child(preset_pill_popover(
+                                profiles,
+                                preset_controls.clone(),
+                                shared_rule_draft,
+                            ))
                     },
+                ))
+                .child(when(
+                    move || startup_error().is_none() && has_primary_filter(),
                     move || {
-                        let toggle_mode = has_primary_filter;
-                        let is_active_pill =
-                            move || !toggle_mode() || profiles.filter_enabled.get();
+                        let is_active_pill = move || profiles.filter_enabled.get();
                         view()
                             .window_drag(false)
-                            .h(px(22.0))
-                            .max_w(px(184.0))
+                            .h(px(24.0))
+                            .max_w(px(240.0))
                             .min_w(px(0.0))
                             .px_2()
-                            .gap_1p5()
-                            .rounded(px(5.0))
+                            .gap_1()
+                            .rounded(px(6.0))
                             .overflow_hidden()
+                            .flex_shrink(1.0)
                             .flex_row()
                             .items_center()
                             .cursor(Cursor::Pointer)
@@ -268,14 +278,7 @@ pub(crate) fn toolbar(
                                         .child(
                                             text(move || -> SharedString {
                                                 let lang = ui_lang(langs);
-                                                if !toggle_mode() {
-                                                    t(
-                                                        lang,
-                                                        "当前激活规则配置 · 点击编辑",
-                                                        "Active setup · Click to edit",
-                                                    )
-                                                    .into()
-                                                } else if profiles.filter_enabled.get() {
+                                                if profiles.filter_enabled.get() {
                                                     t(
                                                         lang,
                                                         "过滤已生效，点击暂停",
@@ -297,18 +300,12 @@ pub(crate) fn toolbar(
                                 ),
                             )
                             .on_press(move || {
-                                if toggle_mode() {
-                                    profiles.filter_enabled.update(|on| *on = !*on);
-                                } else {
-                                    profiles.panel_open.update(|open| *open = !*open);
-                                }
+                                profiles.filter_enabled.update(|on| *on = !*on);
                             })
                             .child(glyph_px(
                                 10.5,
                                 move || {
-                                    if !toggle_mode() {
-                                        Glyph::Sliders
-                                    } else if profiles.filter_enabled.get() {
+                                    if profiles.filter_enabled.get() {
                                         Glyph::Check
                                     } else {
                                         Glyph::History
@@ -323,17 +320,16 @@ pub(crate) fn toolbar(
                                 },
                             ))
                             .child(
-                                text(move || {
-                                    active_name().unwrap_or_else(|| {
-                                        t(ui_lang(langs), "过滤", "Filter").to_string()
-                                    })
+                                mono(move || {
+                                    let prefix = t(ui_lang(langs), "过滤: ", "Filter: ");
+                                    let expr = profiles.filter.get();
+                                    SharedString::from(format!("{prefix}{}", expr.trim()))
                                 })
-                                .max_w(px(148.0))
                                 .min_w(px(0.0))
                                 .number_of_lines(1)
                                 .text_overflow(EllipsizeMode::Tail)
                                 .text_size(px(11.5))
-                                .font_weight(FontWeight::SEMIBOLD)
+                                .font_weight(FontWeight::MEDIUM)
                                 .text_color(move || {
                                     if is_active_pill() {
                                         accent_blue_text()
@@ -344,48 +340,51 @@ pub(crate) fn toolbar(
                             )
                     },
                 ))
-                .child(
-                    when(
-                        move || startup_error().is_none() && condition_info().1,
-                        move || {
-                            mono(move || condition_info().0)
-                                .flex_1()
-                                .min_w(px(0.0))
-                                .number_of_lines(1)
-                                .text_overflow(EllipsizeMode::Tail)
-                                .text_size(px(12.0))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(move || {
-                                    if condition_info().2 {
-                                        fg_muted()
-                                    } else {
-                                        fg_secondary()
-                                    }
-                                })
-                        },
-                    )
-                    .otherwise(move || {
-                        text(move || {
-                            if let Some(err) = startup_error() {
-                                return err;
-                            }
-                            condition_info().0
+                .child(when(
+                    move || startup_error().is_some() || !has_primary_filter(),
+                    move || {
+                        when(
+                            move || startup_error().is_none() && condition_info().1,
+                            move || {
+                                mono(move || condition_info().0)
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .number_of_lines(1)
+                                    .text_overflow(EllipsizeMode::Tail)
+                                    .text_size(px(12.0))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(move || {
+                                        if condition_info().2 {
+                                            fg_muted()
+                                        } else {
+                                            fg_secondary()
+                                        }
+                                    })
+                            },
+                        )
+                        .otherwise(move || {
+                            text(move || {
+                                if let Some(err) = startup_error() {
+                                    return err;
+                                }
+                                condition_info().0
+                            })
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .number_of_lines(1)
+                            .text_overflow(EllipsizeMode::Tail)
+                            .text_size(px(12.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(move || {
+                                if startup_error().is_some() {
+                                    status_warn_fg()
+                                } else {
+                                    fg_muted()
+                                }
+                            })
                         })
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .number_of_lines(1)
-                        .text_overflow(EllipsizeMode::Tail)
-                        .text_size(px(12.0))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(move || {
-                            if startup_error().is_some() {
-                                status_warn_fg()
-                            } else {
-                                fg_muted()
-                            }
-                        })
-                    }),
-                )
+                    },
+                ))
         });
     #[cfg(not(target_arch = "wasm32"))]
     let bar = bar.child(toolbar_update_pill(update_state, update_controls));
@@ -401,7 +400,12 @@ pub(crate) fn toolbar(
         compose,
         seq_builder,
     ))
-    .child(saved_filter_menu(profiles, filter_controls))
+    .child(saved_filter_menu(profiles))
+    .child(rules_menu_popover(
+        profiles,
+        rules_controls,
+        shared_rule_draft,
+    ))
     .child(toolbar_text_button(tr("清空", "Clear"), {
         let clear = Rc::clone(&clear);
         move || clear()
@@ -453,8 +457,8 @@ pub(crate) fn toolbar_text_button(
     view()
         .window_drag(false)
         .h(px(CONTROL_H))
-        .px_2p5()
-        .gap_1p5()
+        .px_2()
+        .gap_1()
         .flex_shrink_0()
         .flex_row()
         .items_center()
@@ -744,8 +748,8 @@ pub(crate) fn toolbar_summary_button(
     view()
         .window_drag(false)
         .h(px(CONTROL_H))
-        .px_2p5()
-        .gap_1p5()
+        .px_2()
+        .gap_1()
         .flex_shrink_0()
         .flex_row()
         .items_center()
@@ -835,8 +839,8 @@ pub(crate) fn more_trigger(
     view()
         .window_drag(false)
         .h(px(CONTROL_H))
-        .px_2p5()
-        .gap_1p5()
+        .px_2()
+        .gap_1()
         .flex_shrink_0()
         .flex_row()
         .items_center()

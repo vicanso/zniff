@@ -3,28 +3,21 @@ use super::*;
 
 pub(crate) const SAVED_RULE_CAP: usize = 16;
 
-pub(crate) fn saved_filter_menu(
-    profiles: ProfileSignals,
-    controls: Arc<Controls>,
-) -> impl IntoElement {
+pub(crate) fn saved_filter_menu(profiles: ProfileSignals) -> impl IntoElement {
     let filter = profiles.filter;
-    let saved = profiles.saved;
-    let bypass_text = profiles.bypass;
-    let rules_text = profiles.rules;
-    let rule_groups = profiles.rule_groups;
-    let upstream_text = profiles.upstream;
-    let rules_on = profiles.rules_on;
-    let breaks_on = profiles.breaks_on;
-    let active_rules_count = computed(move || {
-        let effective = effective_rules_text(&rules_text.get(), &rule_groups.get());
-        crate::rules::parse_rules(&effective).len()
-    });
-    let open = profiles.panel_open;
-    let is_tinted = move || open.get() || !filter.get().trim().is_empty();
+    let filter_enabled = profiles.filter_enabled;
+    let open = profiles.filter_panel_open;
+    let has_filter = move || !filter.get().trim().is_empty();
+    let is_paused = move || has_filter() && !filter_enabled.get();
+    let is_tinted = move || open.get() || (has_filter() && filter_enabled.get());
     popover()
         .open(move || Some(open.get()))
         .on_open_change(move |event: &nsh_base::PopoverEvent| {
             if let nsh_base::PopoverEvent::OpenChange(next, _) = event {
+                if *next {
+                    profiles.panel_open.set(false);
+                    profiles.preset_panel_open.set(false);
+                }
                 open.set(*next);
             }
         })
@@ -36,7 +29,7 @@ pub(crate) fn saved_filter_menu(
             view()
                 .window_drag(false)
                 .h(px(CONTROL_H))
-                .px_3()
+                .px_2()
                 .flex_shrink_0()
                 .flex_row()
                 .items_center()
@@ -44,14 +37,9 @@ pub(crate) fn saved_filter_menu(
                 .rounded(px(CONTROL_RADIUS))
                 .border_1()
                 .border_color(move || {
-                    if capture_muted(rules_on, breaks_on) {
+                    if is_paused() {
                         status_warn_fg()
-                    } else if open.get()
-                        || !filter.get().trim().is_empty()
-                        || !saved.with(Vec::is_empty)
-                        || config_set(bypass_text, rules_text, upstream_text)
-                        || has_enabled_group_rules(&rule_groups.get())
-                    {
+                    } else if is_tinted() {
                         accent_blue_border()
                     } else {
                         border_control()
@@ -75,89 +63,42 @@ pub(crate) fn saved_filter_menu(
                 })
                 .active(|style| style.opacity(0.8))
                 .cursor(Cursor::Pointer)
-                .tooltip(label_tip("过滤与规则配置", "Filters & Rules Config"))
-                .child(when(
-                    move || capture_muted(rules_on, breaks_on),
-                    move || {
-                        view()
-                            .w(px(6.0))
-                            .h(px(6.0))
-                            .rounded_full()
-                            .bg(status_warn_fg())
-                    },
-                ))
+                .tooltip(label_tip("视图流量过滤", "Traffic view filter"))
+                .child(when(is_paused, move || {
+                    view()
+                        .w(px(6.0))
+                        .h(px(6.0))
+                        .rounded_full()
+                        .bg(status_warn_fg())
+                }))
                 .child(glyph_px(
                     13.5,
-                    || Glyph::Sliders,
+                    || Glyph::List,
                     move || {
-                        color(if capture_muted(rules_on, breaks_on) {
+                        color(if is_paused() {
                             status_warn_fg()
-                        } else if is_tinted()
-                            || config_set(bypass_text, rules_text, upstream_text)
-                            || has_enabled_group_rules(&rule_groups.get())
-                        {
+                        } else if is_tinted() {
                             accent_blue_text()
                         } else {
                             fg_secondary()
                         })
                     },
                 ))
-                .child(control_text(tr("过滤", "Filters")).text_color(move || {
-                    if capture_muted(rules_on, breaks_on) {
+                .child(control_text(tr("过滤", "Filter")).text_color(move || {
+                    if is_paused() {
                         status_warn_fg()
                     } else if is_tinted() {
                         accent_blue_text()
                     } else {
                         fg_primary()
                     }
-                }))
-                .child(when(
-                    move || active_rules_count.get() > 0,
-                    move || {
-                        view()
-                            .h(px(16.0))
-                            .px_1()
-                            .rounded(px(4.0))
-                            .flex_row()
-                            .items_center()
-                            .justify_center()
-                            .bg(accent_blue_soft())
-                            .child(
-                                mono(move || active_rules_count.get().to_string())
-                                    .tabular_nums()
-                                    .text_size(px(10.5))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(accent_blue_text()),
-                            )
-                    },
-                )),
+                })),
         )
-        .child(saved_filter_panel(profiles, controls))
+        .child(saved_filter_panel(profiles))
 }
 
-pub(crate) fn saved_filter_panel(
-    profiles: ProfileSignals,
-    controls: Arc<Controls>,
-) -> impl IntoElement {
-    let langs = ui_langs();
+pub(crate) fn saved_filter_panel(profiles: ProfileSignals) -> impl IntoElement {
     let filter = profiles.filter;
-    let bypass_text = profiles.bypass;
-    let rule_target = RuleEditTarget::from_profiles(profiles);
-    let upstream_text = profiles.upstream;
-    let rules_on = profiles.rules_on;
-    let breaks_on = profiles.breaks_on;
-    let show_tunnels = profiles.show_tunnels;
-    let list_width = profiles.list_width;
-    let layout_mode = profiles.layout_mode;
-    let sidebar_width = profiles.sidebar_width;
-    let sidebar_collapsed = profiles.sidebar_collapsed;
-    let parsed_rules_count = computed(move || {
-        let effective =
-            effective_rules_text(&rule_target.workspace.get(), &rule_target.groups.get());
-        crate::rules::parse_rules(&effective).len()
-    });
-    let invalid_lines =
-        computed(move || crate::rules::invalid_rule_lines(&rule_target.current_text()));
     let field = filter;
     let reset_filter = filter;
     let host_field = signal(extract_host_or(&filter.get_untracked()));
@@ -182,50 +123,8 @@ pub(crate) fn saved_filter_panel(
         }
     });
 
-    let bypass_controls = controls.clone();
-    let rule_groups_controls = controls.clone();
-    let rules_controls = controls.clone();
-    let rule_strip_controls = controls.clone();
-    let rules_save_controls = controls.clone();
-    let rules_clear_controls = controls.clone();
-    let upstream_controls = controls.clone();
-    let tunnel_controls = controls;
-    let draft_host = signal(String::new());
-    let draft_path = signal(String::new());
-    let draft_op = signal(String::new());
-    let draft_from = signal(String::new());
-    let draft_to = signal(String::new());
-    let draft_modes = QuickRuleModeSignals::new();
-    let draft_kind = signal(0_u8);
-    let import_open = signal(false);
-    let prefill = profiles.quick_rule_prefill;
-    let draft_signals = QuickRuleDraftSignals {
-        kind: draft_kind,
-        host: draft_host,
-        path: draft_path,
-        op: draft_op,
-        from: draft_from,
-        to: draft_to,
-        modes: draft_modes,
-    };
-    effect(move || {
-        if let Some(next) = prefill.get() {
-            apply_quick_rule_prefill(next, draft_signals);
-            prefill.set(None);
-        }
-    });
-
     view()
-        .w(move || {
-            let mode = layout_mode.get();
-            let side = effective_sidebar_px(mode, sidebar_width.get(), sidebar_collapsed.get());
-            px(adaptive_filter_panel_width_for_layout(
-                window().width.0,
-                list_width.get(),
-                mode,
-                side,
-            ))
-        })
+        .w(move || px((window().width.0 - 32.0).clamp(360.0, 480.0)))
         .max_w(move || px((window().width.0 - 16.0).max(280.0)))
         .max_h(move || px(adaptive_filter_panel_max_height(window().height.0)))
         .flex_col()
@@ -239,22 +138,14 @@ pub(crate) fn saved_filter_panel(
             scroll()
                 .w_full()
                 .max_h(move || {
-                    px(adaptive_filter_body_max_height(
-                        window().height.0,
-                        import_open.get(),
-                    ))
+                    px((adaptive_filter_panel_max_height(window().height.0) - 2.0).max(160.0))
                 })
                 .child(
-                    uncull_nested_scroll(view())
+                    view()
                         .w_full()
                         .p_3()
-                        .gap_3()
-                        .flex_row()
-                        .child(
-                    view()
-                        .flex_1()
-                        .min_w(px(0.0))
                         .gap_2()
+                        .flex_col()
                         .child(
                             view()
                                 .h(px(28.0))
@@ -412,328 +303,8 @@ pub(crate) fn saved_filter_panel(
                                 ))
                                 .child(filter_syntax_error_inline(field)),
                         )),
-                )
-                .child(view().w(px(1.0)).self_stretch().bg(border_subtle()))
-                .child(
-                    view()
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .gap_2()
-                        .child(
-                            view()
-                                .h(px(28.0))
-                                .flex_row()
-                                .items_center()
-                                .justify_between()
-                                .child(
-                                    text(tr("规则与代理配置", "Rules & Proxy Config"))
-                                        .text_size(px(13.0))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(fg_primary()),
-                                )
-                                .child(when(
-                                    move || parsed_rules_count.get() > 0,
-                                    move || {
-                                        view()
-                                            .h(px(20.0))
-                                            .px_2()
-                                            .rounded(px(99.0))
-                                            .flex_row()
-                                            .items_center()
-                                            .bg(move || {
-                                                if rules_on.get() {
-                                                    accent_blue_soft()
-                                                } else {
-                                                    status_warn_bg()
-                                                }
-                                            })
-                                            .child(
-                                                text(move || {
-                                                    let count = parsed_rules_count.get();
-                                                    let lang = ui_lang(langs);
-                                                    if rules_on.get() {
-                                                        match lang {
-                                                            Lang::Zh => {
-                                                                format!("{count} 条规则生效")
-                                                            }
-                                                            Lang::En => format!("{count} active"),
-                                                        }
-                                                    } else {
-                                                        match lang {
-                                                            Lang::Zh => {
-                                                                format!("{count} 条规则已暂停")
-                                                            }
-                                                            Lang::En => format!("{count} paused"),
-                                                        }
-                                                    }
-                                                })
-                                                .tabular_nums()
-                                                .text_size(px(11.0))
-                                                .font_weight(FontWeight::MEDIUM)
-                                                .text_color(move || {
-                                                    if rules_on.get() {
-                                                        accent_blue_text()
-                                                    } else {
-                                                        status_warn_fg()
-                                                    }
-                                                }),
-                                            )
-                                    },
-                                )),
-                        )
-                        .child(
-                            view()
-                                .w_full()
-                                .flex_row()
-                                .gap_1p5()
-                                .child(enable_switch(rules_on, "启用规则", "Rules", {
-                                    let controls = rules_controls.clone();
-                                    move |enabled| {
-                                        controls.hub.set_rules_enabled(enabled);
-                                    }
-                                }))
-                                .child(enable_switch(breaks_on, "启用断点", "Breaks", {
-                                    let controls = rules_controls.clone();
-                                    move |enabled| {
-                                        controls.hub.set_breaks_enabled(enabled);
-                                    }
-                                }))
-                                .child(enable_switch(
-                                    show_tunnels,
-                                    "隧道失败",
-                                    "Tunnel errors",
-                                    move |on| {
-                                        tunnel_controls.hub.set_show_tunnel_failures(on);
-                                        if let Err(err) =
-                                            save_config(|config| config.show_tunnel_failures = on)
-                                        {
-                                            set_status(
-                                                &tunnel_controls,
-                                                StatusMsg::PrefUnsaved {
-                                                    name: PrefName::Tunnel,
-                                                    err: err.to_string(),
-                                                },
-                                            );
-                                        }
-                                    },
-                                )),
-                        )
-                        .child(config_field(
-                            "直通名单 (不解密)",
-                            "TLS Bypass (No MITM)",
-                            side_input(
-                                bypass_text,
-                                tr(
-                                    "example.com | *.pin.dev 或 only:api.example.com",
-                                    "example.com | *.pin.dev or only:api.example.com",
-                                ),
-                                28.0,
-                                false,
-                                move |text| {
-                                    bypass_text.set(text.to_string());
-                                    bypass_controls.hub.set_bypass(text);
-                                    if let Err(err) =
-                                        save_config(|config| config.bypass_hosts = text.to_string())
-                                    {
-                                        set_status(
-                                            &bypass_controls,
-                                            StatusMsg::PrefUnsaved {
-                                                name: PrefName::Bypass,
-                                                err: err.to_string(),
-                                            },
-                                        );
-                                    }
-                                },
-                            ),
-                        ))
-                        .child(
-                            view()
-                                .gap_1()
-                                .w_full()
-                                .child(
-                                    view()
-                                        .flex_row()
-                                        .items_center()
-                                        .justify_between()
-                                        .child(
-                                            text(tr("转发与改写规则", "Rules"))
-                                                .text_size(px(11.5))
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .text_color(fg_muted()),
-                                        )
-                                        .child(
-                                            view()
-                                                .flex_row()
-                                                .items_center()
-                                                .gap_1p5()
-                                                .child(when(
-                                                    move || !invalid_lines.with(Vec::is_empty),
-                                                    move || {
-                                                        view()
-                                                            .h(px(20.0))
-                                                            .px_1p5()
-                                                            .rounded(px(4.0))
-                                                            .flex_row()
-                                                            .items_center()
-                                                            .bg(status_warn_bg())
-                                                            .child(
-                                                                text(move || {
-                                                                    let lines = invalid_lines.with(
-                                                                        |bad| {
-                                                                            bad.iter()
-                                                                                .map(
-                                                                                    usize::to_string,
-                                                                                )
-                                                                                .collect::<Vec<_>>()
-                                                                                .join(", ")
-                                                                        },
-                                                                    );
-                                                                    let lang = ui_lang(langs);
-                                                                    match lang {
-                                                                        Lang::Zh => {
-                                                                            format!("第 {lines} 行语法有误")
-                                                                        }
-                                                                        Lang::En => {
-                                                                            format!("Syntax error on line {lines}")
-                                                                        }
-                                                                    }
-                                                                })
-                                                                .text_size(px(10.5))
-                                                                .font_weight(FontWeight::MEDIUM)
-                                                                .text_color(status_warn_fg()),
-                                                            )
-                                                    },
-                                                ))
-                                                .child(when(
-                                                    move || !rule_target.current_text().trim().is_empty(),
-                                                    move || {
-                                                        let clear_controls =
-                                                            rules_clear_controls.clone();
-                                                        view()
-                                                            .h(px(24.0))
-                                                            .px_2()
-                                                            .flex_shrink_0()
-                                                            .rounded(px(6.0))
-                                                            .border_1()
-                                                            .border_color(border_control())
-                                                            .bg(bg_control())
-                                                            .hover(|style| {
-                                                                style.bg(bg_control_hover())
-                                                            })
-                                                            .active(|style| style.opacity(0.8))
-                                                            .flex_row()
-                                                            .items_center()
-                                                            .cursor(Cursor::Pointer)
-                                                            .on_press(move || {
-                                                                rule_target.commit(
-                                                                    &clear_controls,
-                                                                    String::new(),
-                                                                );
-                                                            })
-                                                            .child(
-                                                                text(tr("清空", "Clear"))
-                                                                    .text_size(px(11.5))
-                                                                    .text_color(fg_secondary()),
-                                                            )
-                                                    },
-                                                )),
-                                        ),
-                                )
-                                .child(rule_groups_bar(rule_target, rule_groups_controls))
-                                .child(rules_editor(
-                                    rule_target,
-                                    rules_controls.clone(),
-                                    import_open,
-                                ))
-                                .child(rule_line_strip(
-                                    rule_target,
-                                    rule_strip_controls,
-                                    draft_host,
-                                    draft_path,
-                                    draft_op,
-                                    draft_from,
-                                    draft_to,
-                                    draft_modes,
-                                    draft_kind,
-                                ))
-                                .child(rule_dry_run_strip(
-                                    rule_target,
-                                    rules_controls.clone(),
-                                    move || {
-                                        let kind = draft_kind.get();
-                                        let response = draft_modes.mode_for(kind);
-                                        let line = draft_rules_with_op(
-                                            "",
-                                            &draft_host.get(),
-                                            &draft_path.get(),
-                                            &draft_op.get(),
-                                            &draft_from.get(),
-                                            &draft_to.get(),
-                                            response,
-                                            kind,
-                                        );
-                                        if line.trim().is_empty() {
-                                            None
-                                        } else {
-                                            Some(line)
-                                        }
-                                    },
-                                )),
-                        )
-                        .child(replace_row(
-                            rule_target,
-                            rules_controls,
-                            draft_host,
-                            draft_path,
-                            draft_op,
-                            draft_from,
-                            draft_to,
-                            draft_modes,
-                            draft_kind,
-                        ))
-                        .child(config_field(
-                            "上游代理",
-                            "Upstream Proxy",
-                            side_input(
-                                upstream_text,
-                                tr(
-                                    "http://127.0.0.1:7890 或 socks5h://127.0.0.1:1080",
-                                    "http://127.0.0.1:7890 or socks5h://127.0.0.1:1080",
-                                ),
-                                28.0,
-                                false,
-                                move |text| {
-                                    upstream_text.set(text.to_string());
-                                    upstream_controls.hub.set_upstream(text);
-                                    if let Err(err) = save_config(|config| {
-                                        config.upstream_proxy = text.to_string()
-                                    }) {
-                                        set_status(
-                                            &upstream_controls,
-                                            StatusMsg::PrefUnsaved {
-                                                name: PrefName::Upstream,
-                                                err: err.to_string(),
-                                            },
-                                        );
-                                    }
-                                },
-                            ),
-                        )),
-                ),
                 ),
         )
-        .child(profile_dock(
-            profiles,
-            draft_host,
-            draft_path,
-            draft_op,
-            draft_from,
-            draft_to,
-            draft_modes,
-            draft_kind,
-            import_open,
-            rules_save_controls,
-        ))
 }
 
 pub(crate) fn matched_saved_profile(

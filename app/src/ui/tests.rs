@@ -1614,100 +1614,68 @@ fn auto_height_popover_scroll_containers_never_use_flex_1() {
         }
     }
 
-    let bundled_ui_src = concat!(
+    let ui_sources: &[&str] = &[
         include_str!("app_shell.rs"),
-        "\n",
         include_str!("access_popover.rs"),
-        "\n",
         include_str!("break_bar.rs"),
-        "\n",
         include_str!("cli_state.rs"),
-        "\n",
         include_str!("column_picker.rs"),
-        "\n",
         include_str!("compose_box.rs"),
-        "\n",
         include_str!("controls_actions.rs"),
-        "\n",
         include_str!("controls_runtime.rs"),
-        "\n",
         include_str!("detail_actions.rs"),
-        "\n",
         include_str!("detail_body.rs"),
-        "\n",
         include_str!("detail_headers_msgs.rs"),
-        "\n",
         include_str!("detail_publish.rs"),
-        "\n",
         include_str!("detail_summary.rs"),
-        "\n",
         include_str!("detail_timing.rs"),
-        "\n",
         include_str!("facet_drawer.rs"),
-        "\n",
         include_str!("filter_autocomplete.rs"),
-        "\n",
         include_str!("filter_diagnose.rs"),
-        "\n",
         include_str!("filter_panel.rs"),
-        "\n",
         include_str!("filter_tokens.rs"),
-        "\n",
         include_str!("flow_cells.rs"),
-        "\n",
         include_str!("flow_table.rs"),
-        "\n",
         include_str!("footer_qr.rs"),
-        "\n",
         include_str!("json_tree.rs"),
-        "\n",
         include_str!("lan_qr.rs"),
-        "\n",
         include_str!("list_columns.rs"),
-        "\n",
         include_str!("machine_settings.rs"),
-        "\n",
         include_str!("more_menu.rs"),
-        "\n",
         include_str!("more_menu_rows.rs"),
-        "\n",
         include_str!("profile_dock.rs"),
-        "\n",
         include_str!("profile_io.rs"),
-        "\n",
         include_str!("profile_store.rs"),
-        "\n",
         include_str!("quick_rules.rs"),
-        "\n",
         include_str!("redact_preview.rs"),
-        "\n",
         include_str!("row_projection.rs"),
-        "\n",
+        include_str!("rules_panel.rs"),
         include_str!("seq_dep_waterfall.rs"),
-        "\n",
         include_str!("seq_panel.rs"),
-        "\n",
         include_str!("seq_swimlane.rs"),
-        "\n",
         include_str!("session_actions.rs"),
-        "\n",
         include_str!("settings_tabs.rs"),
-        "\n",
         include_str!("settings_window.rs"),
-        "\n",
         include_str!("theme.rs"),
-        "\n",
         include_str!("toolbar.rs"),
-    );
+    ];
+    let bundled_ui_src = ui_sources
+        .iter()
+        .map(|src| {
+            let norm = src.replace("\r\n", "\n");
+            norm.split("\n#[cfg(test)]\nmod tests")
+                .next()
+                .unwrap_or(&norm)
+                .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     for raw_src in [
-        std::borrow::Cow::Borrowed(bundled_ui_src),
-        std::borrow::Cow::Owned(bundled_ui_src.replace("\r\n", "\n").replace('\n', "\r\n")),
+        std::borrow::Cow::Borrowed(bundled_ui_src.as_str()),
+        std::borrow::Cow::Owned(bundled_ui_src.replace('\n', "\r\n")),
     ] {
         let normalized = raw_src.replace("\r\n", "\n");
-        let prod_src = normalized
-            .split("\n#[cfg(test)]\nmod tests")
-            .next()
-            .expect("ui production source before mod tests");
+        let prod_src = normalized.as_str();
         assert!(
             !prod_src.contains("fn auto_height_popover_scroll_containers_never_use_flex_1"),
             "prod_src must exclude #[cfg(test)] mod tests on both LF and CRLF checkouts"
@@ -1736,16 +1704,21 @@ fn auto_height_popover_scroll_containers_never_use_flex_1() {
                 .unwrap_or_else(|| panic!("{name} source"))
         };
 
-        let filter_panel_src = fn_body("fn saved_filter_panel(");
-        let filter_outer_and_scroll = filter_panel_src
+        let rules_panel_src = fn_body("fn rules_panel(");
+        let rules_outer_and_scroll = rules_panel_src
             .split(
                 "uncull_nested_scroll(view())\n                        .w_full()\n                        .p_3()",
             )
             .next()
-            .expect("saved_filter_panel outer scroll header before uncull_nested_scroll");
+            .expect("rules_panel outer scroll header before uncull_nested_scroll");
         assert!(
-            filter_outer_and_scroll.contains(".max_h(")
-                && !filter_outer_and_scroll.contains(".flex_1()"),
+            rules_outer_and_scroll.contains(".max_h(")
+                && !rules_outer_and_scroll.contains(".flex_1()"),
+            "rules_panel outer auto-height view + scroll() must not use .flex_1()"
+        );
+        let filter_panel_src = fn_body("fn saved_filter_panel(");
+        assert!(
+            filter_panel_src.contains(".max_h(") && !filter_panel_src.contains("scroll().flex_1()"),
             "saved_filter_panel outer auto-height view + scroll() must not use .flex_1()"
         );
 
@@ -2956,6 +2929,8 @@ fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
             sidebar_collapsed: signal(false),
             layout_mode: signal(crate::config::LayoutMode::Split),
             panel_open: signal(false),
+            filter_panel_open: signal(false),
+            preset_panel_open: signal(false),
             access_open: signal(false),
             quick_rule_prefill: signal(None),
             machine_settings_open: signal(false),

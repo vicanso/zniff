@@ -948,7 +948,7 @@ pub(crate) fn primary_button(
     view()
         .window_drag(false)
         .h(px(CONTROL_H))
-        .px_3p5()
+        .px_2p5()
         .gap_1p5()
         .flex_shrink_0()
         .flex_row()

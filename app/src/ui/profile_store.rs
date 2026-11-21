@@ -801,6 +801,7 @@ pub(crate) fn adaptive_filter_panel_width(window_w: f32, list_w: f32) -> f32 {
     adaptive_filter_panel_width_for_layout(window_w, list_w, config::LayoutMode::Split, 0.0)
 }
 
+#[cfg(test)]
 pub(crate) fn adaptive_filter_panel_width_for_layout(
     window_w: f32,
     list_w: f32,
