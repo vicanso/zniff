@@ -31,6 +31,8 @@ mod icon;
 mod import_charles;
 mod import_whistle;
 #[cfg(not(target_arch = "wasm32"))]
+mod ios_guide;
+#[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
 mod launcher;
 mod llm_stream;

@@ -747,7 +747,81 @@ const INSTALL_PAGE_STYLE: &str = r#"  body { margin: 0; background: #0d1017; col
   .copy-btn:active { opacity: 0.75; }
   pre { margin: 0; padding: 0.65rem; overflow-x: auto; font-size: 0.8rem; line-height: 1.45; color: #e2e8f0; }"#;
 
+pub(super) const TLS_PROBE_HOST: &str = "zniff.local";
+const TLS_PROBE_BODY: &[u8] = br#"{"ok":true,"host":"zniff.local","tls":"trusted"}"#;
+
+pub(super) fn is_tls_probe_host(host: &str) -> bool {
+    host.trim()
+        .trim_end_matches('.')
+        .eq_ignore_ascii_case(TLS_PROBE_HOST)
+}
+
+/// Terminates TLS for `https://zniff.local/probe` using the active zniff CA so
+/// mobile devices on `/zniff` can verify that Full Trust is enabled.
+pub(super) async fn serve_tls_probe<S>(
+    client: S,
+    client_hello: Vec<u8>,
+    host: &str,
+    hub: Arc<Hub>,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let config = hub
+        .server_config_for_host(host, b"http/1.1")
+        .context("probe leaf cert")?;
+    let acceptor = tokio_rustls::TlsAcceptor::from(config);
+    let rewound = Prefixed {
+        prefix: client_hello,
+        pos: 0,
+        inner: client,
+    };
+    let mut client_tls = timeout(IO_TIMEOUT, acceptor.accept(rewound))
+        .await
+        .context("probe TLS timeout")?
+        .context("probe TLS accept")?;
+    let (head_bytes, _) = timeout(IO_TIMEOUT, read_header_block(&mut client_tls))
+        .await
+        .context("probe request timeout")??;
+    let head = parse_head(&head_bytes)?;
+    let mut parts = head.start.split_whitespace();
+    let method = parts.next().unwrap_or("GET");
+    let target = parts.next().unwrap_or("/");
+    let path = target.split('?').next().unwrap_or(target);
+    let is_head = method.eq_ignore_ascii_case("HEAD");
+    if method.eq_ignore_ascii_case("OPTIONS") {
+        let resp = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, OPTIONS\r\nAccess-Control-Max-Age: 60\r\nCache-Control: no-store\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+        client_tls.write_all(resp.as_bytes()).await?;
+    } else if (method.eq_ignore_ascii_case("GET") || is_head)
+        && (path == "/probe" || path == "/probe/" || path == "/")
+    {
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-store\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+            TLS_PROBE_BODY.len()
+        );
+        client_tls.write_all(resp.as_bytes()).await?;
+        if !is_head {
+            client_tls.write_all(TLS_PROBE_BODY).await?;
+        }
+    } else {
+        let body = b"Not Found";
+        let resp = format!(
+            "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-store\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        client_tls.write_all(resp.as_bytes()).await?;
+        if !is_head {
+            client_tls.write_all(body).await?;
+        }
+    }
+    client_tls.flush().await?;
+    Ok(())
+}
+
 fn build_install_page(zh: bool) -> String {
+    let ios_checklist = crate::ios_guide::install_page_ios_checklist(zh);
+    let ios_style = crate::ios_guide::IOS_CHECKLIST_STYLE;
+    let ios_script = crate::ios_guide::IOS_PROBE_SCRIPT;
     let android_section = crate::android_guide::install_page_android_section(zh);
     let copy_script = crate::android_guide::INSTALL_PAGE_COPY_SCRIPT;
     if zh {
@@ -761,6 +835,7 @@ fn build_install_page(zh: bool) -> String {
 <title>安装 zniff 根证书</title>
 <style>
 {INSTALL_PAGE_STYLE}
+{ios_style}
 </style>
 </head>
 <body>
@@ -774,6 +849,7 @@ fn build_install_page(zh: bool) -> String {
     <li>打开「设置」→「已下载描述文件」（或「设置」→「通用」→「VPN 与设备管理」），安装 zniff CA。</li>
     <li>安装完成后，才会在「设置」→「通用」→「关于本机」→「证书信任设置」里看到 zniff CA，打开它的完全信任。</li>
   </ol>
+{ios_checklist}
   <h2>Android</h2>
   <ol>
     <li>点下载，保存 <code>zniff-ca.crt</code>。</li>
@@ -783,6 +859,7 @@ fn build_install_page(zh: bool) -> String {
   <p class="note">装好后，把手机 Wi-Fi 的代理指到这台电脑的地址和端口（或自动代理 PAC URL <code>/proxy.pac</code>），才能抓到手机的 HTTP(S)。</p>
 </main>
 {copy_script}
+{ios_script}
 </body>
 </html>
 "#
@@ -798,6 +875,7 @@ fn build_install_page(zh: bool) -> String {
 <title>Install the zniff root certificate</title>
 <style>
 {INSTALL_PAGE_STYLE}
+{ios_style}
 </style>
 </head>
 <body>
@@ -811,6 +889,7 @@ fn build_install_page(zh: bool) -> String {
     <li>Open Settings → Profile Downloaded (or Settings → General → VPN &amp; Device Management) and install zniff CA.</li>
     <li>Once installed, zniff CA appears in Settings → General → About → Certificate Trust Settings. Enable full trust for it.</li>
   </ol>
+{ios_checklist}
   <h2>Android</h2>
   <ol>
     <li>Tap the download and save <code>zniff-ca.crt</code>.</li>
@@ -820,6 +899,7 @@ fn build_install_page(zh: bool) -> String {
   <p class="note">After it is installed, point the phone's Wi-Fi HTTP proxy (or Auto Proxy PAC URL <code>/proxy.pac</code>) at this computer's address and port to capture HTTP(S).</p>
 </main>
 {copy_script}
+{ios_script}
 </body>
 </html>
 "#

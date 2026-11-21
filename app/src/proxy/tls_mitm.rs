@@ -31,6 +31,9 @@ where
             .map(|_| ());
     };
     let sni_host = hello.sni.clone().unwrap_or_else(|| host.to_string());
+    if is_tls_probe_host(&sni_host) {
+        return serve_tls_probe(client, hello.raw, &sni_host, hub).await;
+    }
     if !hub.host_allowed(&sni_host) {
         hub.record_allow_denied(&sni_host);
         return Ok(());

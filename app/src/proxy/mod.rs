@@ -294,7 +294,7 @@ async fn handle_conn_inner(mut socket: TcpStream, hub: Arc<Hub>) -> Result<()> {
     }
     if method.eq_ignore_ascii_case("CONNECT") {
         let (host, port) = split_host_port(&target, 443)?;
-        if !hub.host_allowed(&host) {
+        if !is_tls_probe_host(&host) && !hub.host_allowed(&host) {
             hub.record_allow_denied(&host);
             return write_host_not_allowed(&mut socket, &host, false).await;
         }

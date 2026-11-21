@@ -871,6 +871,120 @@ fn install_page_includes_android_network_security_config_guidance() {
     }
 }
 
+#[test]
+fn install_page_includes_ios_verification_checklist_and_probe() {
+    for (lang, expect_heading, expect_step) in [
+        (
+            Some("zh-CN"),
+            "iOS 证书生效分步检测",
+            "已在「证书信任设置」开启完全信任",
+        ),
+        (
+            Some("en-US"),
+            "iOS Certificate Verification",
+            "Full Trust enabled in Certificate Trust Settings",
+        ),
+    ] {
+        let html = super::install_page_for(lang);
+        assert!(html.contains(expect_heading));
+        assert!(html.contains(expect_step));
+        assert!(html.contains("https://zniff.local/probe"));
+        assert!(html.contains("id=\"step-profile\""));
+        assert!(html.contains("id=\"step-trust\""));
+        assert!(html.contains("id=\"ios-probe-btn\""));
+    }
+}
+
+#[tokio::test]
+async fn tls_probe_endpoint_verifies_ca_trust_and_bypasses_allow_hosts() {
+    let dir = std::env::temp_dir().join(format!(
+        "zniff-tls-probe-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let ca = Arc::new(Ca::open(&dir).unwrap());
+    let hub = Arc::new(Hub::new(ca.clone()).unwrap());
+    // Even when allow_hosts restricts proxied domains, zniff.local probe must work.
+    hub.set_allow_hosts("only.example.com").unwrap();
+
+    let proxy = listen().await.unwrap();
+    let proxy_addr = proxy.local_addr().unwrap();
+    let (tx, rx) = watch::channel(false);
+    let server = tokio::spawn(serve(proxy, hub.clone(), rx));
+
+    // Build a rustls client trusting our test CA.
+    let mut roots = RootCertStore::empty();
+    roots.add(ca.cert_der()).unwrap();
+    let client_cfg =
+        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+
+    let mut sock = TcpStream::connect(proxy_addr).await.unwrap();
+    sock.write_all(b"CONNECT zniff.local:443 HTTP/1.1\r\nHost: zniff.local:443\r\n\r\n")
+        .await
+        .unwrap();
+    let mut resp_buf = [0_u8; 256];
+    let n = sock.read(&mut resp_buf).await.unwrap();
+    let connect_reply = String::from_utf8_lossy(&resp_buf[..n]);
+    assert!(
+        connect_reply.starts_with("HTTP/1.1 200"),
+        "expected 200 Connection Established, got: {connect_reply}"
+    );
+
+    let connector = TlsConnector::from(Arc::new(client_cfg));
+    let name = ServerName::try_from("zniff.local".to_string()).unwrap();
+    let mut tls = connector.connect(name, sock).await.unwrap();
+    tls.write_all(b"GET /probe HTTP/1.1\r\nHost: zniff.local\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut out = Vec::new();
+    let _ = tls.read_to_end(&mut out).await;
+    let text = String::from_utf8_lossy(&out);
+    assert!(text.starts_with("HTTP/1.1 200 OK\r\n"), "got: {text}");
+    assert!(text.contains("Access-Control-Allow-Origin: *"));
+    assert!(text.contains(r#"{"ok":true,"host":"zniff.local","tls":"trusted"}"#));
+    assert_eq!(
+        hub.with_session(|session| session.len()),
+        0,
+        "probe should stay untracked"
+    );
+
+    // A client without our CA in its trust store must fail TLS verification.
+    let empty_cfg =
+        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(RootCertStore::empty())
+            .with_no_client_auth();
+    let mut sock2 = TcpStream::connect(proxy_addr).await.unwrap();
+    sock2
+        .write_all(b"CONNECT zniff.local:443 HTTP/1.1\r\nHost: zniff.local:443\r\n\r\n")
+        .await
+        .unwrap();
+    let _ = sock2.read(&mut resp_buf).await.unwrap();
+    let untrusted = TlsConnector::from(Arc::new(empty_cfg))
+        .connect(
+            ServerName::try_from("zniff.local".to_string()).unwrap(),
+            sock2,
+        )
+        .await;
+    assert!(
+        untrusted.is_err(),
+        "untrusted CA client must fail TLS probe"
+    );
+
+    let _ = tx.send(true);
+    let _ = server.await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 use super::*;
 
 #[tokio::test]
