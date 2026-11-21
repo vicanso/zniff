@@ -29,6 +29,51 @@ pub(crate) fn toolbar_bar_height(title_top: f32) -> f32 {
     }
 }
 
+/// Formats the hover tooltip for the toolbar primary filter pill, preserving the
+/// full untruncated filter expression (and any active secondary filter) plus the
+/// click-to-toggle hint.
+pub(crate) fn format_filter_pill_tooltip(
+    primary_filter: &str,
+    effective_filter: &str,
+    filter_enabled: bool,
+    lang: Lang,
+) -> String {
+    let primary = primary_filter.trim();
+    let effective = effective_filter.trim();
+    let secondary = if filter_enabled {
+        if !effective.is_empty() && effective != primary {
+            effective
+                .strip_prefix(primary)
+                .map(str::trim)
+                .filter(|rest| !rest.is_empty())
+                .unwrap_or(effective)
+        } else {
+            ""
+        }
+    } else {
+        effective
+    };
+    let hint = if filter_enabled {
+        t(lang, "点击暂停主过滤", "Click to pause primary filter")
+    } else {
+        t(
+            lang,
+            "主过滤已暂停 · 点击启用",
+            "Primary filter paused · Click to enable",
+        )
+    };
+    let mut lines = Vec::with_capacity(3);
+    if !primary.is_empty() {
+        lines.push(primary.to_string());
+    }
+    if !secondary.is_empty() {
+        let prefix = t(lang, "二次过滤: ", "Secondary filter: ");
+        lines.push(format!("{prefix}{secondary}"));
+    }
+    lines.push(hint.to_string());
+    lines.join("\n")
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn toolbar(
     status: Signal<StatusMsg>,
@@ -278,30 +323,22 @@ pub(crate) fn toolbar(
                             .tooltip(
                                 tooltip().child(
                                     view()
-                                        .px_2()
-                                        .py_1()
+                                        .max_w(px(420.0))
+                                        .px_2p5()
+                                        .py_1p5()
                                         .rounded(px(6.0))
                                         .bg(bg_card())
                                         .border_1()
                                         .border_color(border_strong())
                                         .child(
                                             text(move || -> SharedString {
-                                                let lang = ui_lang(langs);
-                                                if profiles.filter_enabled.get() {
-                                                    t(
-                                                        lang,
-                                                        "过滤已生效，点击暂停",
-                                                        "Filter enabled — click to pause",
-                                                    )
-                                                    .into()
-                                                } else {
-                                                    t(
-                                                        lang,
-                                                        "过滤已暂停，点击启用",
-                                                        "Filter paused — click to enable",
-                                                    )
-                                                    .into()
-                                                }
+                                                format_filter_pill_tooltip(
+                                                    &profiles.filter.get(),
+                                                    &filter.get(),
+                                                    profiles.filter_enabled.get(),
+                                                    ui_lang(langs),
+                                                )
+                                                .into()
                                             })
                                             .text_size(px(11.5))
                                             .text_color(fg_primary()),
@@ -335,6 +372,7 @@ pub(crate) fn toolbar(
                                     SharedString::from(format!("{prefix}{}", expr.trim()))
                                 })
                                 .min_w(px(0.0))
+                                .flex_shrink(1.0)
                                 .number_of_lines(1)
                                 .text_overflow(EllipsizeMode::Tail)
                                 .text_size(px(11.5))

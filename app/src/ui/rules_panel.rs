@@ -25,6 +25,58 @@ pub(crate) fn format_rules_indicator(
     }
 }
 
+/// Formats the full hover tooltip for the top-bar rules button.
+pub(crate) fn format_rules_pill_tooltip(
+    rule_count: usize,
+    enabled_groups: usize,
+    rules_on: bool,
+    lang: Lang,
+) -> String {
+    let hint = t(
+        lang,
+        "规则、分组、直通与上游代理",
+        "Rules, groups, TLS bypass & upstream",
+    );
+    if rule_count == 0 && enabled_groups == 0 {
+        return hint.to_string();
+    }
+    let summary = match (rules_on, enabled_groups > 0, lang) {
+        (true, true, Lang::Zh) => {
+            format!("已启用 {rule_count} 条规则 · {enabled_groups} 个分组")
+        }
+        (true, false, Lang::Zh) => format!("已启用 {rule_count} 条规则"),
+        (false, true, Lang::Zh) => {
+            format!("规则已暂停（{rule_count} 条规则 · {enabled_groups} 个分组）")
+        }
+        (false, false, Lang::Zh) => format!("规则已暂停（{rule_count} 条规则）"),
+        (true, true, Lang::En) => {
+            format!("{rule_count} active rules · {enabled_groups} groups")
+        }
+        (true, false, Lang::En) => format!("{rule_count} active rules"),
+        (false, true, Lang::En) => {
+            format!("Rules paused ({rule_count} rules · {enabled_groups} groups)")
+        }
+        (false, false, Lang::En) => format!("Rules paused ({rule_count} rules)"),
+    };
+    format!("{summary}\n{hint}")
+}
+
+/// Formats the full hover tooltip for the top-bar preset pill.
+pub(crate) fn format_preset_pill_tooltip(active_name: Option<&str>, lang: Lang) -> String {
+    let hint = t(
+        lang,
+        "切换或保存配置预设（包含过滤与规则）",
+        "Switch or save presets (filter + rules)",
+    );
+    match active_name.map(str::trim).filter(|name| !name.is_empty()) {
+        Some(name) => {
+            let prefix = t(lang, "当前预设: ", "Active preset: ");
+            format!("{prefix}{name}\n{hint}")
+        }
+        None => hint.to_string(),
+    }
+}
+
 /// Top-bar `规则` / `Rules` popover entry hosting rule groups, editor, quick add, TLS bypass, and upstream.
 pub(crate) fn rules_menu_popover(
     profiles: ProfileSignals,
@@ -104,10 +156,31 @@ pub(crate) fn rules_menu_popover(
                 })
                 .active(|style| style.opacity(0.8))
                 .cursor(Cursor::Pointer)
-                .tooltip(label_tip(
-                    "规则、分组、直通与上游代理",
-                    "Rules, groups, TLS bypass & upstream",
-                ))
+                .tooltip(
+                    tooltip().child(
+                        view()
+                            .max_w(px(360.0))
+                            .px_2p5()
+                            .py_1p5()
+                            .rounded(px(6.0))
+                            .bg(bg_card())
+                            .border_1()
+                            .border_color(border_strong())
+                            .child(
+                                text(move || -> SharedString {
+                                    format_rules_pill_tooltip(
+                                        active_rules_count.get(),
+                                        enabled_groups_count.get(),
+                                        rules_on.get(),
+                                        ui_lang(langs),
+                                    )
+                                    .into()
+                                })
+                                .text_size(px(11.5))
+                                .text_color(fg_primary()),
+                            ),
+                    ),
+                )
                 .child(when(
                     move || capture_muted(rules_on, breaks_on),
                     move || {
@@ -145,8 +218,10 @@ pub(crate) fn rules_menu_popover(
                     move || {
                         view()
                             .h(px(16.0))
+                            .max_w(px(120.0))
                             .px_1p5()
                             .rounded(px(4.0))
+                            .overflow_hidden()
                             .flex_row()
                             .items_center()
                             .justify_center()
@@ -165,6 +240,10 @@ pub(crate) fn rules_menu_popover(
                                         ui_lang(langs),
                                     ))
                                 })
+                                .min_w(px(0.0))
+                                .flex_shrink(1.0)
+                                .number_of_lines(1)
+                                .text_overflow(EllipsizeMode::Tail)
                                 .tabular_nums()
                                 .text_size(px(10.5))
                                 .font_weight(FontWeight::SEMIBOLD)
@@ -604,10 +683,29 @@ pub(crate) fn preset_pill_popover(
                     })
                 })
                 .active(|style| style.opacity(0.8))
-                .tooltip(label_tip(
-                    "切换或保存配置预设（包含过滤与规则）",
-                    "Switch or save presets (filter + rules)",
-                ))
+                .tooltip(
+                    tooltip().child(
+                        view()
+                            .max_w(px(360.0))
+                            .px_2p5()
+                            .py_1p5()
+                            .rounded(px(6.0))
+                            .bg(bg_card())
+                            .border_1()
+                            .border_color(border_strong())
+                            .child(
+                                text(move || -> SharedString {
+                                    format_preset_pill_tooltip(
+                                        active_name().as_deref(),
+                                        ui_lang(langs),
+                                    )
+                                    .into()
+                                })
+                                .text_size(px(11.5))
+                                .text_color(fg_primary()),
+                            ),
+                    ),
+                )
                 .child(glyph_px(
                     10.5,
                     move || {
@@ -630,8 +728,8 @@ pub(crate) fn preset_pill_popover(
                         active_name()
                             .unwrap_or_else(|| t(ui_lang(langs), "预设", "Presets").to_string())
                     })
-                    .max_w(px(124.0))
                     .min_w(px(0.0))
+                    .flex_shrink(1.0)
                     .number_of_lines(1)
                     .text_overflow(EllipsizeMode::Tail)
                     .text_size(px(11.5))

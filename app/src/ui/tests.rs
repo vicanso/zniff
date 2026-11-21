@@ -5331,3 +5331,64 @@ fn all_app_shell_on_key_bindings_are_non_reserved_and_mount_cleanly() {
 
     let _ = mount_headless_component::<OnKeyAuditHarness>(Size::new(px(200.0), px(100.0)));
 }
+
+#[test]
+fn toolbar_pill_tooltips_show_full_untruncated_content() {
+    let long_filter = "host:www.baidu.com|baidu.com|api.example.org path:/v1/search status:200";
+
+    // Filter pill: CN & EN, active & paused, with and without secondary filter
+    assert_eq!(
+        super::format_filter_pill_tooltip(long_filter, long_filter, true, Lang::Zh),
+        format!("{long_filter}\n点击暂停主过滤")
+    );
+    assert_eq!(
+        super::format_filter_pill_tooltip(long_filter, long_filter, true, Lang::En),
+        format!("{long_filter}\nClick to pause primary filter")
+    );
+    assert_eq!(
+        super::format_filter_pill_tooltip(long_filter, "", false, Lang::Zh),
+        format!("{long_filter}\n主过滤已暂停 · 点击启用")
+    );
+    assert_eq!(
+        super::format_filter_pill_tooltip(long_filter, "", false, Lang::En),
+        format!("{long_filter}\nPrimary filter paused · Click to enable")
+    );
+
+    let combined = format!("{long_filter} app:curl");
+    let zh_with_secondary =
+        super::format_filter_pill_tooltip(long_filter, &combined, true, Lang::Zh);
+    assert!(zh_with_secondary.contains(long_filter));
+    assert!(zh_with_secondary.contains("二次过滤: app:curl"));
+    assert!(zh_with_secondary.ends_with("点击暂停主过滤"));
+
+    let en_paused_with_secondary =
+        super::format_filter_pill_tooltip(long_filter, "app:curl", false, Lang::En);
+    assert!(en_paused_with_secondary.contains(long_filter));
+    assert!(en_paused_with_secondary.contains("Secondary filter: app:curl"));
+    assert!(en_paused_with_secondary.ends_with("Primary filter paused · Click to enable"));
+
+    // Preset pill: full preset name preserved on hover
+    let long_preset = "production-baidu-search-checkout-debug-profile";
+    assert!(
+        super::format_preset_pill_tooltip(Some(long_preset), Lang::Zh)
+            .starts_with(&format!("当前预设: {long_preset}\n"))
+    );
+    assert!(
+        super::format_preset_pill_tooltip(Some(long_preset), Lang::En)
+            .starts_with(&format!("Active preset: {long_preset}\n"))
+    );
+    assert_eq!(
+        super::format_preset_pill_tooltip(None, Lang::En),
+        "Switch or save presets (filter + rules)"
+    );
+
+    // Rules pill: full rules & groups summary preserved on hover
+    assert!(
+        super::format_rules_pill_tooltip(12, 3, true, Lang::Zh)
+            .starts_with("已启用 12 条规则 · 3 个分组\n")
+    );
+    assert!(
+        super::format_rules_pill_tooltip(12, 3, false, Lang::En)
+            .starts_with("Rules paused (12 rules · 3 groups)\n")
+    );
+}
