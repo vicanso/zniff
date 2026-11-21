@@ -366,6 +366,7 @@ pub(crate) fn flow_list(
             move || layout_mode.get() == config::LayoutMode::TopBottom || sidebar_collapsed.get(),
             move || facet_quick_bar(facets, facets_open, facet_tab, list_filter),
         ))
+        .child(tls_failure_banner_from_context())
         .child(
             view()
                 .flex_1()

@@ -56,6 +56,8 @@ pub fn App() -> impl IntoElement {
     let facets_open = signal(false);
     let flow_total = signal(0_usize);
     let onboarding_traffic = signal(OnboardingTraffic::default());
+    let tls_failure_burst = signal(TlsFailureBurst::default());
+    let tls_banner_dismissed = signal(false);
     let listen = signal(String::new());
     let saved = saved_config();
     let shown = Shown {
@@ -385,6 +387,8 @@ pub fn App() -> impl IntoElement {
     let facets_open_tick = facets_open;
     let total_tick = flow_total;
     let onboarding_traffic_tick = onboarding_traffic;
+    let tls_burst_tick = tls_failure_burst;
+    let tls_dismissed_tick = tls_banner_dismissed;
     let shown_tick = shown;
     let seen_gen = stored(0_u64);
     let seen_filter = stored(String::new());
@@ -852,11 +856,13 @@ pub fn App() -> impl IntoElement {
                 next_catalog,
                 next_total,
                 next_onboarding_traffic,
+                next_tls_burst,
                 next_mem,
                 next_dropped,
                 diag_plan,
             ) = {
                 let mut cache = row_cache_tick.borrow_mut();
+                let burst_now = clock::now();
                 controls_tick.hub.with_session(|session| {
                     let lines = project_rows(
                         session,
@@ -895,6 +901,7 @@ pub fn App() -> impl IntoElement {
                         )
                     });
                     let next_onboarding_traffic = OnboardingTraffic::from_flows(session.iter());
+                    let next_tls_burst = TlsFailureBurst::from_flows(session.iter(), burst_now);
                     (
                         lines,
                         stats,
@@ -902,6 +909,7 @@ pub fn App() -> impl IntoElement {
                         next_catalog,
                         session.len(),
                         next_onboarding_traffic,
+                        next_tls_burst,
                         format_bytes(session.memory_bytes()),
                         session.dropped(),
                         diag_plan,
@@ -924,6 +932,12 @@ pub fn App() -> impl IntoElement {
             }
             if onboarding_traffic_tick.get_untracked() != next_onboarding_traffic {
                 onboarding_traffic_tick.set(next_onboarding_traffic);
+            }
+            if next_total == 0 && tls_dismissed_tick.get_untracked() {
+                tls_dismissed_tick.set(false);
+            }
+            if tls_burst_tick.get_untracked() != next_tls_burst {
+                tls_burst_tick.set(next_tls_burst);
             }
             if let Some(next_facets) = next_facets
                 && facets_tick.with(|cur| cur != &next_facets)
@@ -1302,6 +1316,14 @@ pub fn App() -> impl IntoElement {
                 let c = controls.clone();
                 Rc::new(move || install_ca(c.clone()))
             };
+            provide_context(TlsFailureBannerSignals {
+                burst: tls_failure_burst,
+                dismissed: tls_banner_dismissed,
+                ca_status,
+                controls: controls.clone(),
+                selected,
+                install_ca: Rc::clone(&install_ca_cb),
+            });
             let toggle_sys_cb: Rc<dyn Fn()> = {
                 let c = controls.clone();
                 Rc::new(move || toggle_system_proxy(c.clone()))

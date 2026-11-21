@@ -129,6 +129,7 @@ mod seq_swimlane;
 mod session_actions;
 mod shortcuts_modal;
 mod theme;
+mod tls_failure_banner;
 mod toast_overlay;
 mod toolbar;
 mod web_poll;
@@ -191,6 +192,7 @@ pub(crate) use self::seq_swimlane::*;
 pub(crate) use self::session_actions::*;
 pub(crate) use self::shortcuts_modal::*;
 pub(crate) use self::theme::*;
+pub(crate) use self::tls_failure_banner::*;
 pub(crate) use self::toast_overlay::*;
 pub(crate) use self::toolbar::*;
 #[allow(unused_imports)]
