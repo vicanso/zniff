@@ -728,7 +728,31 @@ pub(super) fn gzip_bytes(body: &[u8]) -> Option<Vec<u8>> {
     encoder.finish().ok()
 }
 
-pub(super) const INSTALL_PAGE: &str = r#"<!DOCTYPE html>
+const INSTALL_PAGE_STYLE: &str = r#"  body { margin: 0; background: #0d1017; color: #f1f5f9; font: 16px/1.55 -apple-system, BlinkMacSystemFont, sans-serif; }
+  main { max-width: 32rem; margin: 0 auto; padding: 1.5rem 1.25rem 2.5rem; }
+  h1 { font-size: 1.35rem; margin: 0 0 0.6rem; }
+  h2 { font-size: 1rem; margin: 1.4rem 0 0.4rem; }
+  p { margin: 0.4rem 0; }
+  a.btn { display: block; margin: 1rem 0 0.4rem; padding: 0.85rem 1rem; border-radius: 10px; background: #2563eb; color: #fff; font-weight: 600; text-align: center; text-decoration: none; }
+  ol { margin: 0.3rem 0; padding-left: 1.2rem; }
+  code { font-family: "JetBrains Mono", "JetBrains Mono NL", ui-monospace, Menlo, monospace; font-size: 0.88em; }
+  .note { color: #94a3b8; font-size: 0.9rem; }
+  details.card { margin: 0.9rem 0; padding: 0.75rem 0.9rem; border-radius: 10px; border: 1px solid #1e293b; background: #131926; }
+  details.card > summary { cursor: pointer; font-weight: 600; font-size: 0.95rem; }
+  details.sub-card { margin-top: 0.75rem; padding-top: 0.65rem; border-top: 1px solid #1e293b; }
+  details.sub-card > summary { cursor: pointer; font-size: 0.9rem; color: #cbd5e1; }
+  .snippet { margin: 0.65rem 0; border-radius: 8px; border: 1px solid #1e293b; background: #0b0f19; overflow: hidden; }
+  .snippet-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; padding: 0.4rem 0.65rem; border-bottom: 1px solid #1e293b; font-size: 0.82rem; color: #cbd5e1; }
+  .copy-btn { border: 1px solid #334155; background: #1e293b; color: #f8fafc; border-radius: 6px; padding: 0.25rem 0.6rem; font-size: 0.78rem; cursor: pointer; flex-shrink: 0; }
+  .copy-btn:active { opacity: 0.75; }
+  pre { margin: 0; padding: 0.65rem; overflow-x: auto; font-size: 0.8rem; line-height: 1.45; color: #e2e8f0; }"#;
+
+fn build_install_page(zh: bool) -> String {
+    let android_section = crate::android_guide::install_page_android_section(zh);
+    let copy_script = crate::android_guide::INSTALL_PAGE_COPY_SCRIPT;
+    if zh {
+        format!(
+            r#"<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
@@ -736,15 +760,7 @@ pub(super) const INSTALL_PAGE: &str = r#"<!DOCTYPE html>
 <link rel="icon" href="data:,">
 <title>安装 zniff 根证书</title>
 <style>
-  body { margin: 0; background: #0d1017; color: #f1f5f9; font: 16px/1.55 -apple-system, BlinkMacSystemFont, sans-serif; }
-  main { max-width: 28rem; margin: 0 auto; padding: 1.5rem 1.25rem 2.5rem; }
-  h1 { font-size: 1.35rem; margin: 0 0 0.6rem; }
-  h2 { font-size: 1rem; margin: 1.4rem 0 0.4rem; }
-  p { margin: 0.4rem 0; }
-  a.btn { display: block; margin: 1rem 0 0.4rem; padding: 0.85rem 1rem; border-radius: 10px; background: #2563eb; color: #fff; font-weight: 600; text-align: center; text-decoration: none; }
-  ol { margin: 0.3rem 0; padding-left: 1.2rem; }
-  code { font-family: "JetBrains Mono", "JetBrains Mono NL", ui-monospace, Menlo, monospace; }
-  .note { color: #94a3b8; font-size: 0.9rem; }
+{INSTALL_PAGE_STYLE}
 </style>
 </head>
 <body>
@@ -763,30 +779,17 @@ pub(super) const INSTALL_PAGE: &str = r#"<!DOCTYPE html>
     <li>点下载，保存 <code>zniff-ca.crt</code>。</li>
     <li>打开「设置」→「安全」→「加密与凭据」→「安装证书」→「CA 证书」。</li>
   </ol>
+{android_section}
   <p class="note">装好后，把手机 Wi-Fi 的代理指到这台电脑的地址和端口（或自动代理 PAC URL <code>/proxy.pac</code>），才能抓到手机的 HTTP(S)。</p>
 </main>
+{copy_script}
 </body>
 </html>
-"#;
-
-pub(super) fn install_page_for(accept_language: Option<&str>) -> &'static str {
-    let primary = accept_language
-        .unwrap_or("")
-        .split(',')
-        .next()
-        .unwrap_or("")
-        .split(';')
-        .next()
-        .unwrap_or("")
-        .trim();
-    if primary.is_empty() || primary.to_ascii_lowercase().starts_with("zh") {
-        INSTALL_PAGE
+"#
+        )
     } else {
-        INSTALL_PAGE_EN
-    }
-}
-
-pub(super) const INSTALL_PAGE_EN: &str = r#"<!DOCTYPE html>
+        format!(
+            r#"<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -794,15 +797,7 @@ pub(super) const INSTALL_PAGE_EN: &str = r#"<!DOCTYPE html>
 <link rel="icon" href="data:,">
 <title>Install the zniff root certificate</title>
 <style>
-  body { margin: 0; background: #0d1017; color: #f1f5f9; font: 16px/1.55 -apple-system, BlinkMacSystemFont, sans-serif; }
-  main { max-width: 28rem; margin: 0 auto; padding: 1.5rem 1.25rem 2.5rem; }
-  h1 { font-size: 1.35rem; margin: 0 0 0.6rem; }
-  h2 { font-size: 1rem; margin: 1.4rem 0 0.4rem; }
-  p { margin: 0.4rem 0; }
-  a.btn { display: block; margin: 1rem 0 0.4rem; padding: 0.85rem 1rem; border-radius: 10px; background: #2563eb; color: #fff; font-weight: 600; text-align: center; text-decoration: none; }
-  ol { margin: 0.3rem 0; padding-left: 1.2rem; }
-  code { font-family: "JetBrains Mono", "JetBrains Mono NL", ui-monospace, Menlo, monospace; }
-  .note { color: #94a3b8; font-size: 0.9rem; }
+{INSTALL_PAGE_STYLE}
 </style>
 </head>
 <body>
@@ -821,11 +816,35 @@ pub(super) const INSTALL_PAGE_EN: &str = r#"<!DOCTYPE html>
     <li>Tap the download and save <code>zniff-ca.crt</code>.</li>
     <li>Open Settings → Security → Encryption &amp; credentials → Install a certificate → CA certificate.</li>
   </ol>
+{android_section}
   <p class="note">After it is installed, point the phone's Wi-Fi HTTP proxy (or Auto Proxy PAC URL <code>/proxy.pac</code>) at this computer's address and port to capture HTTP(S).</p>
 </main>
+{copy_script}
 </body>
 </html>
-"#;
+"#
+        )
+    }
+}
+
+pub(super) fn install_page_for(accept_language: Option<&str>) -> &'static str {
+    static PAGE_ZH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    static PAGE_EN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let primary = accept_language
+        .unwrap_or("")
+        .split(',')
+        .next()
+        .unwrap_or("")
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim();
+    if primary.is_empty() || primary.to_ascii_lowercase().starts_with("zh") {
+        PAGE_ZH.get_or_init(|| build_install_page(true)).as_str()
+    } else {
+        PAGE_EN.get_or_init(|| build_install_page(false)).as_str()
+    }
+}
 
 pub(super) async fn serve_install_page<S>(socket: &mut S, hub: &Hub, head: &Head) -> Result<()>
 where

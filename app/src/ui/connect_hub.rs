@@ -500,7 +500,8 @@ fn hub_mobile_section(props: &ConnectHubProps, open: Signal<bool>) -> impl IntoE
                 open.set(false);
                 toggle_adb_action(adb_controls.clone());
             },
-        ));
+        ))
+        .child(hub_android_cert_guide(props.controls.clone()));
 
     #[cfg(target_os = "macos")]
     let sec = {
@@ -543,6 +544,139 @@ fn hub_mobile_section(props: &ConnectHubProps, open: Signal<bool>) -> impl IntoE
         move || sys_proxy_on.get(),
         move || toggle_sys.as_ref()(),
     ))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn hub_android_cert_guide(controls: Arc<Controls>) -> impl IntoElement {
+    let expanded = signal(false);
+    view()
+        .w_full()
+        .flex_col()
+        .rounded(px(7.0))
+        .border_1()
+        .border_color(border_subtle())
+        .bg(bg_code())
+        .overflow_hidden()
+        .child(hub_android_cert_guide_header(expanded))
+        .child(when(
+            move || expanded.get(),
+            move || hub_android_cert_guide_body(controls.clone()),
+        ))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn hub_android_cert_guide_header(expanded: Signal<bool>) -> impl IntoElement {
+    view()
+        .w_full()
+        .px_2p5()
+        .py_1p5()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .cursor(Cursor::Pointer)
+        .hover(|style| style.bg(bg_control_hover()))
+        .on_press(move || expanded.set(!expanded.get_untracked()))
+        .child(
+            view()
+                .flex_1()
+                .min_w(px(0.0))
+                .flex_row()
+                .items_center()
+                .gap_1p5()
+                .child(glyph_px(11.5, || Glyph::Shield, || color(fg_secondary())))
+                .child(
+                    text(tr(
+                        "Android 7+ 证书配置 (network_security_config)",
+                        "Android 7+ Cert Guide (network_security_config)",
+                    ))
+                    .number_of_lines(1)
+                    .text_overflow(EllipsizeMode::Tail)
+                    .text_size(px(11.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(fg_secondary()),
+                ),
+        )
+        .child(glyph_px(
+            11.0,
+            move || {
+                if expanded.get() {
+                    Glyph::ChevronUp
+                } else {
+                    Glyph::Chevron
+                }
+            },
+            || color(fg_muted()),
+        ))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn hub_android_cert_guide_body(controls: Arc<Controls>) -> impl IntoElement {
+    let langs = ui_langs();
+    let xml_cb = controls.clone();
+    let all_cb = controls;
+    view()
+        .w_full()
+        .px_2p5()
+        .pb_2()
+        .pt_1()
+        .gap_1p5()
+        .flex_col()
+        .border_t_1()
+        .border_color(border_subtle())
+        .child(
+            text(tr(
+                "Android 7+ 应用默认忽略用户 CA。在 Debug 构建添加 res/xml/network_security_config.xml 并在 AndroidManifest.xml 引用：",
+                "Android 7+ apps ignore user CAs by default. Add res/xml/network_security_config.xml for debug builds and reference it in AndroidManifest.xml:",
+            ))
+            .text_size(px(10.5))
+            .text_color(fg_muted()),
+        )
+        .child(
+            view()
+                .w_full()
+                .p_2()
+                .rounded(px(6.0))
+                .border_1()
+                .border_color(border_subtle())
+                .bg(bg_card())
+                .child(
+                    mono(crate::android_guide::connect_hub_preview())
+                        .text_size(px(10.0))
+                        .text_color(fg_primary()),
+                ),
+        )
+        .child(
+            mono(crate::android_guide::MANIFEST_APPLICATION_ATTR)
+                .text_size(px(10.0))
+                .text_color(fg_secondary()),
+        )
+        .child(
+            view()
+                .w_full()
+                .flex_row()
+                .items_center()
+                .gap_1p5()
+                .child(menu_inline_pill(
+                    tr("复制 XML", "Copy XML"),
+                    || true,
+                    move || {
+                        set_clipboard(
+                            crate::android_guide::NETWORK_SECURITY_CONFIG_XML.to_string(),
+                        );
+                        set_status(&xml_cb, StatusMsg::CopiedAndroidCertGuide);
+                    },
+                ))
+                .child(menu_inline_pill(
+                    tr("复制完整指引（含模拟器命令）", "Copy Full Guide (+ Emulator)"),
+                    || false,
+                    move || {
+                        let guide = crate::android_guide::full_clipboard_guide(ui_lang(langs));
+                        set_clipboard(guide);
+                        set_status(&all_cb, StatusMsg::CopiedAndroidCertGuide);
+                    },
+                )),
+        )
 }
 
 #[cfg(target_arch = "wasm32")]

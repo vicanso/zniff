@@ -844,6 +844,33 @@ fn install_page_follows_accept_language() {
     assert!(super::install_page_for(Some("fr")).contains("Install the zniff"));
 }
 
+#[test]
+fn install_page_includes_android_network_security_config_guidance() {
+    for (lang, expect_heading, expect_copy) in [
+        (Some("zh-CN"), "Android 7+ 应用抓包配置", "复制 XML"),
+        (Some("en-US"), "Android 7+ app capture setup", "Copy XML"),
+    ] {
+        let html = super::install_page_for(lang);
+        assert!(
+            html.contains(expect_heading),
+            "missing Android heading for {lang:?}"
+        );
+        assert!(
+            html.contains(expect_copy),
+            "missing copy button for {lang:?}"
+        );
+        assert!(html.contains("res/xml/network_security_config.xml"));
+        assert!(html.contains("&lt;network-security-config&gt;"));
+        assert!(html.contains("&lt;debug-overrides&gt;"));
+        assert!(html.contains("&lt;certificates src=&quot;user&quot; /&gt;"));
+        assert!(
+            html.contains("android:networkSecurityConfig=&quot;@xml/network_security_config&quot;")
+        );
+        assert!(html.contains("subject_hash_old"));
+        assert!(html.contains("data-copy=\"nsc-xml\""));
+    }
+}
+
 use super::*;
 
 #[tokio::test]

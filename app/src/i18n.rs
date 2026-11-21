@@ -236,6 +236,7 @@ pub enum StatusMsg {
     AdbNoneConnected,
     AdbFailed(String),
     CopiedLinuxCaCmd(String),
+    CopiedAndroidCertGuide,
     CopiedSystemInfo,
     ClearedFlows {
         count: usize,
@@ -787,6 +788,12 @@ impl StatusMsg {
                 Lang::Zh => format!("已复制系统证书安装命令 · {cmd}"),
                 Lang::En => format!("Copied system CA install command · {cmd}"),
             },
+            Self::CopiedAndroidCertGuide => t(
+                lang,
+                "已复制 Android 7+ 证书配置",
+                "Copied Android 7+ certificate config",
+            )
+            .into(),
             Self::CopiedSystemInfo => t(lang, "已复制系统与环境信息", "Copied system info").into(),
             Self::ClearedFlows { count } => match lang {
                 Lang::Zh => format!("已清空 {count} 条流量"),
@@ -833,6 +840,7 @@ impl StatusMsg {
             | Self::CopiedMermaidMarkdown
             | Self::SequenceGenerated { .. }
             | Self::CopiedLinuxCaCmd(_)
+            | Self::CopiedAndroidCertGuide
             | Self::Shared { .. }
             | Self::ShareStopped
             | Self::RelayConnected(_)
@@ -923,6 +931,7 @@ impl StatusMsg {
             | Self::CopiedMermaidMarkdown
             | Self::SequenceGenerated { .. }
             | Self::CopiedLinuxCaCmd(_)
+            | Self::CopiedAndroidCertGuide
             | Self::CopiedConfigPath(_)
             | Self::CopiedOpenApi { .. }
             | Self::CopiedSystemInfo

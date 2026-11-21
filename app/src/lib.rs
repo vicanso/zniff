@@ -5,6 +5,7 @@
 #![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 
 mod allow_hosts;
+mod android_guide;
 #[cfg(not(target_arch = "wasm32"))]
 mod bypass;
 #[cfg(not(target_arch = "wasm32"))]
