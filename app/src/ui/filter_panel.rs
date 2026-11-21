@@ -655,6 +655,29 @@ pub(crate) fn saved_filter_panel(
                                     draft_to,
                                     draft_modes,
                                     draft_kind,
+                                ))
+                                .child(rule_dry_run_strip(
+                                    rule_target,
+                                    rules_controls.clone(),
+                                    move || {
+                                        let kind = draft_kind.get();
+                                        let response = draft_modes.mode_for(kind);
+                                        let line = draft_rules_with_op(
+                                            "",
+                                            &draft_host.get(),
+                                            &draft_path.get(),
+                                            &draft_op.get(),
+                                            &draft_from.get(),
+                                            &draft_to.get(),
+                                            response,
+                                            kind,
+                                        );
+                                        if line.trim().is_empty() {
+                                            None
+                                        } else {
+                                            Some(line)
+                                        }
+                                    },
                                 )),
                         )
                         .child(replace_row(

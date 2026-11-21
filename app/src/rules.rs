@@ -650,6 +650,57 @@ pub fn hit_details_with_ops(
     (labels.join(" "), hits)
 }
 
+/// Result of offline dry-run evaluation of a rule text against session flows (B3).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DryRunSummary {
+    /// Number of valid parsed rules in the evaluated text.
+    pub rule_count: usize,
+    /// Total session flows inspected.
+    pub total_flows: usize,
+    /// Number of distinct flows matched by at least one rule.
+    pub matched_flows: usize,
+    /// Up to 3 sample matched flow targets (`host/path`) for preview tooltips.
+    pub sample_targets: Vec<String>,
+}
+
+/// Evaluates `rules_text` offline against `flows` without mutating any state.
+pub fn dry_run_rules<'a>(
+    rules_text: &str,
+    flows: impl IntoIterator<Item = &'a crate::session::Flow>,
+) -> DryRunSummary {
+    let rules = parse_rules(rules_text);
+    let mut summary = DryRunSummary {
+        rule_count: rules.len(),
+        ..Default::default()
+    };
+    if rules.is_empty() {
+        return summary;
+    }
+    let needs_ops = rules.iter().any(|rule| rule.op().is_some());
+    for flow in flows {
+        summary.total_flows += 1;
+        let matched = if needs_ops && has_op_rules(&rules, &flow.host, &flow.path) {
+            let ops = crate::present::graphql_operations(&flow.path, &flow.request_body);
+            rules
+                .iter()
+                .any(|rule| rule.matches_with_ops(&flow.host, &flow.path, &ops))
+        } else {
+            rules
+                .iter()
+                .any(|rule| rule.matches_with_ops(&flow.host, &flow.path, &[]))
+        };
+        if matched {
+            summary.matched_flows += 1;
+            if summary.sample_targets.len() < 3 {
+                summary
+                    .sample_targets
+                    .push(format!("{}{}", flow.host, flow.path));
+            }
+        }
+    }
+    summary
+}
+
 /// Finds the first matching `resolve` rule for `host` with its source attribution.
 pub fn matching_resolve_hit(
     rules: &[AttributedRule],
@@ -4967,5 +5018,65 @@ resolve a.com *
         assert_eq!(many_hits.len(), crate::session::MAX_RULE_HITS);
         assert_eq!(many_hits[0].line_no, 1);
         assert_eq!(many_hits[7].line_no, 8);
+    }
+
+    #[test]
+    fn dry_run_rules_counts_matching_flows_including_graphql_ops_and_samples() {
+        let mut session = crate::session::Session::default();
+        let open_flow = |s: &mut crate::session::Session, host: &str, path: &str, body: &[u8]| {
+            let id = s.open(crate::session::FlowDraft {
+                protocol: crate::session::Protocol::Http11,
+                method: "POST".into(),
+                host: host.into(),
+                path: path.into(),
+                url: format!("https://{host}{path}"),
+                request_headers: vec![("Content-Type".into(), "application/json".into())],
+            });
+            if !body.is_empty() {
+                s.append_body(id, crate::session::Direction::Request, body);
+            }
+            id
+        };
+        open_flow(&mut session, "api.example.com", "/v1/a", b"");
+        open_flow(&mut session, "api.example.com", "/v1/b", b"");
+        open_flow(&mut session, "api.example.com", "/v1/c", b"");
+        open_flow(&mut session, "api.example.com", "/v1/d", b"");
+        open_flow(
+            &mut session,
+            "gql.example.com",
+            "/graphql",
+            br#"{"operationName":"GetUser","query":"query GetUser { user { id } }"}"#,
+        );
+
+        let matched = dry_run_rules("delay api.example.com/v1 200ms", session.iter());
+        assert_eq!(matched.rule_count, 1);
+        assert_eq!(matched.total_flows, 5);
+        assert_eq!(matched.matched_flows, 4);
+        assert_eq!(
+            matched.sample_targets,
+            vec![
+                "api.example.com/v1/a",
+                "api.example.com/v1/b",
+                "api.example.com/v1/c",
+            ]
+        );
+
+        let gql = dry_run_rules(
+            "header gql.example.com/graphql res set X-Gql 1 op=GetUser",
+            session.iter(),
+        );
+        assert_eq!(gql.matched_flows, 1);
+        assert_eq!(gql.sample_targets, vec!["gql.example.com/graphql"]);
+
+        let none = dry_run_rules("block missing.example.com 403", session.iter());
+        assert_eq!(none.rule_count, 1);
+        assert_eq!(none.total_flows, 5);
+        assert_eq!(none.matched_flows, 0);
+        assert!(none.sample_targets.is_empty());
+
+        let empty = dry_run_rules("# only comment", session.iter());
+        assert_eq!(empty.rule_count, 0);
+        assert_eq!(empty.total_flows, 0);
+        assert_eq!(empty.matched_flows, 0);
     }
 }
