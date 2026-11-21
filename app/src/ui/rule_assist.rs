@@ -377,6 +377,13 @@ pub(crate) fn fill_draft_from_rule_line(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(crate) fn rule_filter_token_for_line(group_name: Option<&str>, line_no: usize) -> String {
+    match group_name {
+        Some(group) if !group.trim().is_empty() => format!("rule:{group}:{line_no}"),
+        _ => format!("rule:{line_no}"),
+    }
+}
+
 pub(crate) fn rule_line_strip(
     target: RuleEditTarget,
     controls: Arc<Controls>,
@@ -388,6 +395,7 @@ pub(crate) fn rule_line_strip(
     draft_modes: QuickRuleModeSignals,
     draft_kind: Signal<u8>,
 ) -> impl IntoElement {
+    let catalog = filter_catalog_context();
     let items = move || collect_rule_lines(&target.current_text());
     when(
         move || !items().is_empty(),
@@ -401,9 +409,16 @@ pub(crate) fn rule_line_strip(
                     move |item, _| {
                         let tc = toggle_controls.clone();
                         let rc = remove_controls.clone();
+                        let hit_count = move || {
+                            let line_no = item.with(|it| it.line_idx + 1);
+                            let group = target.editing.get();
+                            catalog.with(|cat| cat.hits_for_rule_line(group.as_deref(), line_no))
+                        };
+                        let is_zero_hit =
+                            move || item.with(|it| !it.commented && it.valid) && hit_count() == 0;
                         view()
                             .h(px(22.0))
-                            .max_w(px(280.0))
+                            .max_w(px(300.0))
                             .pl_1p5()
                             .pr_1()
                             .rounded(px(5.0))
@@ -414,7 +429,7 @@ pub(crate) fn rule_line_strip(
                                     status_warn_fg()
                                 } else if item.with(|it| !it.commented && !it.valid) {
                                     status_err_fg()
-                                } else if item.with(|it| it.commented) {
+                                } else if item.with(|it| it.commented) || is_zero_hit() {
                                     border_control()
                                 } else {
                                     accent_blue_border()
@@ -424,7 +439,7 @@ pub(crate) fn rule_line_strip(
                                 let line_no = item.with(|it| it.line_idx + 1);
                                 if target.is_line_focused(line_no) {
                                     status_warn_bg()
-                                } else if item.with(|it| it.commented) {
+                                } else if item.with(|it| it.commented) || is_zero_hit() {
                                     bg_control()
                                 } else if item.with(|it| !it.valid) {
                                     status_err_bg()
@@ -432,6 +447,7 @@ pub(crate) fn rule_line_strip(
                                     accent_blue_soft()
                                 }
                             })
+                            .opacity(move || if is_zero_hit() { 0.72_f32 } else { 1.0_f32 })
                             .flex_row()
                             .items_center()
                             .gap_1()
@@ -469,7 +485,7 @@ pub(crate) fn rule_line_strip(
                                         .font_weight(FontWeight::BOLD)
                                         .text_color(
                                             move || {
-                                                if item.with(|it| it.commented) {
+                                                if item.with(|it| it.commented) || is_zero_hit() {
                                                     fg_muted()
                                                 } else {
                                                     accent_blue_text()
@@ -503,14 +519,17 @@ pub(crate) fn rule_line_strip(
                                     })
                                     .child(
                                         mono(move || -> SharedString {
-                                            item.with(|it| it.preview.clone()).into()
+                                            item.with(|it| {
+                                                format!("#{} {}", it.line_idx + 1, it.preview)
+                                            })
+                                            .into()
                                         })
                                         .number_of_lines(1)
                                         .text_overflow(EllipsizeMode::Tail)
                                         .text_size(px(10.5))
                                         .text_color(
                                             move || {
-                                                if item.with(|it| it.commented) {
+                                                if item.with(|it| it.commented) || is_zero_hit() {
                                                     fg_muted()
                                                 } else if item.with(|it| !it.valid) {
                                                     status_err_fg()
@@ -521,6 +540,54 @@ pub(crate) fn rule_line_strip(
                                         ),
                                     ),
                             )
+                            .child(when(
+                                move || item.with(|it| !it.commented && it.valid),
+                                move || {
+                                    view()
+                                        .px_1()
+                                        .h(px(15.0))
+                                        .flex_shrink_0()
+                                        .rounded(px(3.0))
+                                        .items_center()
+                                        .justify_center()
+                                        .cursor(Cursor::Pointer)
+                                        .hover(|s| s.bg(bg_control_hover()))
+                                        .tooltip(label_tip(
+                                            "本会话命中次数（点击按此规则行过滤）",
+                                            "Session hit count (click to filter by this rule line)",
+                                        ))
+                                        .on_press(move || {
+                                            let line_no = item.with(|it| it.line_idx + 1);
+                                            let group = target.editing.get_untracked();
+                                            let token = rule_filter_token_for_line(
+                                                group.as_deref(),
+                                                line_no,
+                                            );
+                                            target.filter.set(token);
+                                            target.filter_enabled.set(true);
+                                        })
+                                        .child(
+                                            mono(move || -> SharedString {
+                                                let count = hit_count();
+                                                if count > 0 {
+                                                    format!("×{count}").into()
+                                                } else {
+                                                    "0".into()
+                                                }
+                                            })
+                                            .tabular_nums()
+                                            .text_size(px(9.5))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(move || {
+                                                if hit_count() > 0 {
+                                                    accent_blue_text()
+                                                } else {
+                                                    fg_muted()
+                                                }
+                                            }),
+                                        )
+                                },
+                            ))
                             .child(
                                 view()
                                     .w(px(14.0))

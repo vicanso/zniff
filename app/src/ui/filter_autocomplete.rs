@@ -14,9 +14,20 @@ pub(crate) struct FilterSuggestionsCatalog {
     pub(crate) apps: Vec<String>,
     pub(crate) graphql_ops: Vec<String>,
     pub(crate) methods: Vec<String>,
+    pub(crate) rule_tokens: Vec<String>,
+    /// Per-rule-line hit counts keyed by `(lowercase_group_name, 1-based line_no)`.
+    pub(crate) rule_line_hits: HashMap<(Option<String>, usize), usize>,
 }
 
 impl FilterSuggestionsCatalog {
+    pub(crate) fn hits_for_rule_line(&self, group_name: Option<&str>, line_no: usize) -> usize {
+        if line_no == 0 {
+            return 0;
+        }
+        let key = (group_name.map(str::to_ascii_lowercase), line_no);
+        self.rule_line_hits.get(&key).copied().unwrap_or(0)
+    }
+
     pub(crate) fn from_flows<'a>(
         flows: impl IntoIterator<Item = &'a session::Flow>,
         facets: &session::SessionFacets,
@@ -37,6 +48,8 @@ impl FilterSuggestionsCatalog {
         let mut status_counts: HashMap<String, usize> = HashMap::new();
         let mut method_counts: HashMap<String, usize> = HashMap::new();
         let mut op_counts: HashMap<String, usize> = HashMap::new();
+        let mut rule_token_counts: HashMap<String, usize> = HashMap::new();
+        let mut rule_line_hits: HashMap<(Option<String>, usize), usize> = HashMap::new();
 
         for flow in flows {
             if let Some(code) = flow.status {
@@ -57,6 +70,29 @@ impl FilterSuggestionsCatalog {
                     }
                 }
             }
+            if !flow.rule_hits.is_empty() {
+                for hit in &flow.rule_hits {
+                    if !hit.verb.is_empty() {
+                        *rule_token_counts.entry(hit.verb.clone()).or_default() += 1;
+                    }
+                    if hit.line_no > 0 {
+                        let key = (
+                            hit.group_name.as_deref().map(str::to_ascii_lowercase),
+                            hit.line_no,
+                        );
+                        *rule_line_hits.entry(key).or_default() += 1;
+                        let line_tok = match hit.group_name.as_deref() {
+                            Some(g) => format!("{g}:{}", hit.line_no),
+                            None => hit.line_no.to_string(),
+                        };
+                        *rule_token_counts.entry(line_tok).or_default() += 1;
+                    }
+                }
+            } else if !flow.rule_hit.is_empty() {
+                for verb in flow.rule_hit.split_whitespace() {
+                    *rule_token_counts.entry(verb.to_string()).or_default() += 1;
+                }
+            }
         }
 
         Self {
@@ -65,6 +101,8 @@ impl FilterSuggestionsCatalog {
             apps,
             graphql_ops: sort_counts(op_counts),
             methods: sort_counts(method_counts),
+            rule_tokens: sort_counts(rule_token_counts),
+            rule_line_hits,
         }
     }
 }
@@ -163,6 +201,13 @@ const PREFIX_SPECS: &[PrefixMeta] = &[
         false,
         true,
     ),
+    pmeta(
+        "rule:",
+        "命中的规则行号或动词",
+        "Matched rule line or verb",
+        false,
+        true,
+    ),
     pmeta("pin:", "仅看星标流量", "Pinned flows only", true, true),
     pmeta(
         "slow:",
@@ -192,6 +237,17 @@ const STANDARD_STATUSES: &[&str] = &["2xx", "3xx", "4xx", "5xx", "err", "200", "
 const STANDARD_METHODS: &[&str] = &["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"];
 const STANDARD_TYPES: &[&str] = &[
     "json", "html", "xml", "text", "js", "css", "image", "grpc", "protobuf", "ws", "sse",
+];
+const STANDARD_RULE_VERBS: &[&str] = &[
+    "replace",
+    "map-local",
+    "map-remote",
+    "header",
+    "break",
+    "break-res",
+    "block",
+    "delay",
+    "cors",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -311,7 +367,7 @@ fn validate_single_token(token: &str, in_progress: bool) -> Option<FilterSyntaxE
         return None;
     }
     if rest.is_empty() {
-        if spec.prefix == "repeat:" || in_progress {
+        if spec.prefix == "repeat:" || spec.prefix == "rule:" || in_progress {
             return None;
         }
         return Some(FilterSyntaxError {
@@ -487,6 +543,10 @@ fn suggest_values(
         "type" | "ct" => (
             STANDARD_TYPES.iter().map(|s| (*s).to_string()).collect(),
             t(lang, "内容类型", "Content-Type"),
+        ),
+        "rule" => (
+            merge_candidates(&catalog.rule_tokens, STANDARD_RULE_VERBS),
+            t(lang, "命中规则", "Matched rule"),
         ),
         _ => return Vec::new(),
     };

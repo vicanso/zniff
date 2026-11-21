@@ -7,6 +7,8 @@ pub(crate) struct RuleEditTarget {
     pub(crate) groups: Signal<Vec<config::RuleGroup>>,
     pub(crate) editing: Signal<Option<String>>,
     pub(crate) focused_line: Signal<Option<(Option<String>, usize)>>,
+    pub(crate) filter: Signal<String>,
+    pub(crate) filter_enabled: Signal<bool>,
 }
 
 impl RuleEditTarget {
@@ -16,6 +18,8 @@ impl RuleEditTarget {
             groups: profiles.rule_groups,
             editing: profiles.editing_group,
             focused_line: profiles.focused_rule_line,
+            filter: profiles.filter,
+            filter_enabled: profiles.filter_enabled,
         }
     }
 

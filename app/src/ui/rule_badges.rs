@@ -257,4 +257,74 @@ mod tests {
             "client-cert"
         );
     }
+
+    #[test]
+    fn rule_line_hit_counts_and_filter_autocomplete_work() {
+        let mut s = session::Session::default();
+        let f1 = s.open(session::FlowDraft {
+            protocol: session::Protocol::Http11,
+            method: "GET".into(),
+            host: "api.test".into(),
+            path: "/a".into(),
+            url: "https://api.test/a".into(),
+            request_headers: vec![],
+        });
+        let f2 = s.open(session::FlowDraft {
+            protocol: session::Protocol::Http11,
+            method: "GET".into(),
+            host: "api.test".into(),
+            path: "/b".into(),
+            url: "https://api.test/b".into(),
+            request_headers: vec![],
+        });
+        s.set_rule_hit_details(
+            f1,
+            "replace",
+            vec![session::RuleHit {
+                group_name: None,
+                line_no: 2,
+                verb: "replace".into(),
+            }],
+        );
+        s.set_rule_hit_details(
+            f2,
+            "replace map-local",
+            vec![
+                session::RuleHit {
+                    group_name: None,
+                    line_no: 2,
+                    verb: "replace".into(),
+                },
+                session::RuleHit {
+                    group_name: Some("Mock".into()),
+                    line_no: 4,
+                    verb: "map-local".into(),
+                },
+            ],
+        );
+
+        let facets = s.facets();
+        let cat = FilterSuggestionsCatalog::from_flows(s.iter(), &facets);
+        assert_eq!(cat.hits_for_rule_line(None, 2), 2);
+        assert_eq!(cat.hits_for_rule_line(None, 1), 0);
+        assert_eq!(cat.hits_for_rule_line(Some("mock"), 4), 1);
+        assert_eq!(cat.hits_for_rule_line(Some("MOCK"), 4), 1);
+        assert_eq!(cat.hits_for_rule_line(Some("mock"), 9), 0);
+
+        // Filter syntax validation accepts `rule:`, `rule:2`, `rule:replace`, `-rule:4`
+        assert!(validate_filter_syntax("rule: ").is_empty());
+        assert!(validate_filter_syntax("rule:2 ").is_empty());
+        assert!(validate_filter_syntax("rule:replace ").is_empty());
+        assert!(validate_filter_syntax("-rule:mock:4 ").is_empty());
+
+        // Autocomplete suggests `rule:` prefix and session-derived rule tokens
+        let prefix_sugs = suggest_filter_completions("ru", &cat, Lang::En);
+        assert!(prefix_sugs.iter().any(|item| item.insert_token == "rule:"));
+        let val_sugs = suggest_filter_completions("rule:", &cat, Lang::En);
+        assert!(val_sugs.iter().any(|item| item.label == "replace"));
+        assert!(val_sugs.iter().any(|item| item.label == "2"));
+
+        assert_eq!(rule_filter_token_for_line(None, 3), "rule:3");
+        assert_eq!(rule_filter_token_for_line(Some("mock"), 2), "rule:mock:2");
+    }
 }

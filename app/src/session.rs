@@ -2907,6 +2907,37 @@ fn path_prefix_matches(path: &str, prefix: &str) -> bool {
         .is_some_and(|rest| starts_with_ignore_ascii(rest, prefix))
 }
 
+fn flow_matches_rule_term(flow: &Flow, term: &str) -> bool {
+    let clean = term.trim().trim_start_matches('#');
+    if clean.is_empty() {
+        return !flow.rule_hits.is_empty() || !flow.rule_hit.is_empty();
+    }
+    if let Ok(line_no) = clean.parse::<usize>() {
+        return line_no > 0 && flow.rule_hits.iter().any(|h| h.line_no == line_no);
+    }
+    if let Some((group, line_part)) = clean.rsplit_once(':')
+        && !group.is_empty()
+        && let Ok(line_no) = line_part.trim_start_matches('#').parse::<usize>()
+        && line_no > 0
+    {
+        return flow.rule_hits.iter().any(|h| {
+            h.line_no == line_no
+                && h.group_name
+                    .as_deref()
+                    .is_some_and(|g| g.eq_ignore_ascii_case(group))
+        });
+    }
+    flow.rule_hits.iter().any(|h| {
+        h.verb.eq_ignore_ascii_case(clean)
+            || h.group_name
+                .as_deref()
+                .is_some_and(|g| g.eq_ignore_ascii_case(clean))
+    }) || flow
+        .rule_hit
+        .split_whitespace()
+        .any(|w| w.eq_ignore_ascii_case(clean))
+}
+
 fn comment_has_repeat_id(comment: &str, id_str: &str) -> bool {
     let bytes = comment.as_bytes();
     let tag = b"repeat:";
@@ -3155,6 +3186,8 @@ struct FlowStage {
     neg_repeats: Vec<Vec<String>>,
     ops: Vec<Vec<String>>,
     neg_ops: Vec<Vec<String>>,
+    rules: Vec<Vec<String>>,
+    neg_rules: Vec<Vec<String>>,
     pinned_only: bool,
     unpinned_only: bool,
     slow_only: bool,
@@ -3189,6 +3222,8 @@ impl FlowStage {
             neg_repeats: Vec::new(),
             ops: Vec::new(),
             neg_ops: Vec::new(),
+            rules: Vec::new(),
+            neg_rules: Vec::new(),
             pinned_only: false,
             unpinned_only: false,
             slow_only: false,
@@ -3265,6 +3300,10 @@ impl FlowStage {
                     .or_else(|| neg.strip_prefix("operation:"))
                 {
                     query.neg_ops.push(split_or_terms(rest));
+                    continue;
+                }
+                if let Some(rest) = neg.strip_prefix("rule:") {
+                    query.neg_rules.push(split_or_terms(rest));
                     continue;
                 }
                 if let Some(rest) = neg.strip_prefix("path:") {
@@ -3355,6 +3394,10 @@ impl FlowStage {
                 .or_else(|| lower.strip_prefix("operation:"))
             {
                 query.ops.push(split_or_terms(rest));
+                continue;
+            }
+            if let Some(rest) = lower.strip_prefix("rule:") {
+                query.rules.push(split_or_terms(rest));
                 continue;
             }
             if let Some(rest) = lower.strip_prefix("path:") {
@@ -3541,6 +3584,26 @@ impl FlowStage {
                 group.iter().any(|target| {
                     u64_eq_digits(flow.id, target) || comment_has_repeat_id(&flow.comment, target)
                 })
+            }
+        }) {
+            return false;
+        }
+        if !self.rules.is_empty()
+            && !self.rules.iter().all(|group| {
+                if group.is_empty() {
+                    !flow.rule_hits.is_empty() || !flow.rule_hit.is_empty()
+                } else {
+                    group.iter().any(|term| flow_matches_rule_term(flow, term))
+                }
+            })
+        {
+            return false;
+        }
+        if self.neg_rules.iter().any(|group| {
+            if group.is_empty() {
+                !flow.rule_hits.is_empty() || !flow.rule_hit.is_empty()
+            } else {
+                group.iter().any(|term| flow_matches_rule_term(flow, term))
             }
         }) {
             return false;
@@ -5132,5 +5195,60 @@ mod tests {
         assert_eq!(session.clear_with_undo_at(t0, CLEAR_UNDO_TTL), 1);
         session.clear();
         assert_eq!(session.undo_clear_at(t0 + Duration::from_secs(1)), 0);
+    }
+
+    #[test]
+    fn filter_rule_token_matches_lines_groups_verbs_and_negation() {
+        let mut s = Session::default();
+        let make_draft = |path: &str| FlowDraft {
+            protocol: Protocol::Http11,
+            method: "GET".into(),
+            host: "api.test".into(),
+            path: path.into(),
+            url: format!("https://api.test{path}"),
+            request_headers: vec![],
+        };
+        let f1 = s.open(make_draft("/one"));
+        let f2 = s.open(make_draft("/two"));
+        let f3 = s.open(make_draft("/three"));
+        let f4 = s.open(make_draft("/legacy"));
+
+        s.set_rule_hit_details(
+            f1,
+            "replace header",
+            vec![
+                RuleHit {
+                    group_name: None,
+                    line_no: 2,
+                    verb: "replace".into(),
+                },
+                RuleHit {
+                    group_name: None,
+                    line_no: 5,
+                    verb: "header".into(),
+                },
+            ],
+        );
+        s.set_rule_hit_details(
+            f2,
+            "map-local",
+            vec![RuleHit {
+                group_name: Some("Mock".into()),
+                line_no: 2,
+                verb: "map-local".into(),
+            }],
+        );
+        s.set_rule_hit(f4, "delay");
+
+        assert_eq!(s.ids_matching("rule:"), vec![f1, f2, f4]);
+        assert_eq!(s.ids_matching("-rule:"), vec![f3]);
+        assert_eq!(s.ids_matching("rule:2"), vec![f1, f2]);
+        assert_eq!(s.ids_matching("rule:#5"), vec![f1]);
+        assert_eq!(s.ids_matching("rule:mock:2"), vec![f2]);
+        assert_eq!(s.ids_matching("rule:replace"), vec![f1]);
+        assert_eq!(s.ids_matching("rule:replace|delay"), vec![f1, f4]);
+        assert_eq!(s.ids_matching("rule:mock"), vec![f2]);
+        assert_eq!(s.ids_matching("-rule:replace"), vec![f2, f3, f4]);
+        assert_eq!(s.ids_matching("-rule:mock:2"), vec![f1, f3, f4]);
     }
 }

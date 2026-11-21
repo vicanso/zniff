@@ -4722,6 +4722,7 @@ fn filter_autocomplete_suggests_prefixes_and_session_values_with_or_support() {
         apps: vec!["curl".into(), "Chrome".into()],
         graphql_ops: vec!["GetUser".into(), "UpdateCart".into()],
         methods: vec!["POST".into(), "GET".into()],
+        ..Default::default()
     };
 
     // Prefix completion (including negated prefix)
