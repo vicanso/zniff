@@ -495,6 +495,39 @@ pub(crate) fn export_openapi_file(controls: Arc<Controls>, filter: &str, yaml: b
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn export_collection_file(
+    controls: Arc<Controls>,
+    filter: &str,
+    format: collections::CollectionFormat,
+) {
+    let flows = matched_hydrated_flows(&controls, filter);
+    let redact = redact_options(&controls);
+    let body = collections::build_collection(&flows, &redact, format);
+    let secs = unix_secs_now();
+    let dialog = save_dialog_with_default_dir()
+        .file_name(format!("zniff-{secs}.{}", format.file_suffix()))
+        .filter(nsh_core::file_dialog::FileFilter::new(
+            format.filter_label(),
+            format.filter_extensions().iter().copied(),
+        ));
+    spawn_export_save(controls, dialog, body.into_bytes());
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn export_collection_file(
+    controls: Arc<Controls>,
+    filter: &str,
+    format: collections::CollectionFormat,
+) {
+    let rel = format!(
+        "{}?{}",
+        format.web_endpoint(),
+        export_filter_query(&controls, filter)
+    );
+    web_export_download(controls, rel, format.web_filename());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn copy_openapi_yaml(controls: &Controls, filter: &str) {
     let flows = matched_hydrated_flows(controls, filter);
     let redact = redact_options(controls);

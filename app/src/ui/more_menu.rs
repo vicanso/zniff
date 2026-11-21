@@ -36,7 +36,8 @@ pub(crate) fn more_menu(
             rows,
             filter,
         ))
-        .child(menu_openapi_row(open, import_controls.clone(), filter));
+        .child(menu_openapi_row(open, import_controls.clone(), filter))
+        .child(menu_collections_row(open, import_controls.clone(), filter));
     let items = desktop_child!(
         items,
         menu_action(

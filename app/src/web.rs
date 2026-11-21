@@ -992,6 +992,25 @@ async fn route(
                 clean_nobody,
             );
         }
+        if let Some(format) = match path {
+            "/api/export.postman" => Some(crate::collections::CollectionFormat::Postman),
+            "/api/export.bruno" => Some(crate::collections::CollectionFormat::Bruno),
+            "/api/export.http" => Some(crate::collections::CollectionFormat::Http),
+            _ => None,
+        } {
+            let filter = query_value(&head.target, "filter");
+            let (hub, redact) = {
+                let guard = lock(slot);
+                (
+                    Arc::clone(&guard.hub),
+                    redact_options_for_target(&guard.prefs, &head.target),
+                )
+            };
+            return (
+                export_collection_reply(&hub, &filter, &redact, format),
+                clean_nobody,
+            );
+        }
         if path == "/api/export.html" {
             let filter = query_value(&head.target, "filter");
             let zh_override = query_value(&head.target, "zh");
@@ -1551,6 +1570,37 @@ fn export_openapi_reply(
         reason: "OK",
         content_type: std::borrow::Cow::Borrowed(content_type),
         attachment: Some(format!("zniff-{secs}.openapi.{ext}")),
+        location: None,
+        encoding: None,
+        vary_encoding: false,
+        cache_control: "no-store",
+        body,
+    }
+}
+
+fn export_collection_reply(
+    hub: &Hub,
+    filter: &str,
+    redact: &crate::share::RedactOptions,
+    format: crate::collections::CollectionFormat,
+) -> Reply {
+    let (matched, _) = hub.matching_ids(filter);
+    let flows = hub.with_session(|session| {
+        matched
+            .into_iter()
+            .filter_map(|(id, _)| session.hydrated(id))
+            .collect::<Vec<_>>()
+    });
+    let body = crate::collections::build_collection(&flows, redact, format).into_bytes();
+    let secs = crate::clock::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    Reply {
+        status: 200,
+        reason: "OK",
+        content_type: std::borrow::Cow::Borrowed(format.content_type()),
+        attachment: Some(format!("zniff-{secs}.{}", format.file_suffix())),
         location: None,
         encoding: None,
         vary_encoding: false,
@@ -3737,6 +3787,36 @@ mod tests {
         assert_eq!(status, 200);
         assert!(oa_yaml_resp.contains("openapi: 3.0.3"), "{oa_yaml_resp}");
         assert!(!oa_resp.contains("top-secret"), "{oa_resp}");
+
+        let (status, postman_resp) = exchange(
+            web,
+            "GET /api/export.postman HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert!(
+            postman_resp.contains("schema.getpostman.com/json/collection/v2.1.0"),
+            "{postman_resp}"
+        );
+        assert!(!postman_resp.contains("top-secret"), "{postman_resp}");
+
+        let (status, bruno_resp) = exchange(
+            web,
+            "GET /api/export.bruno HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert!(bruno_resp.contains("meta {"), "{bruno_resp}");
+        assert!(!bruno_resp.contains("top-secret"), "{bruno_resp}");
+
+        let (status, http_resp) = exchange(
+            web,
+            "GET /api/export.http HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert!(http_resp.contains("### #"), "{http_resp}");
+        assert!(!http_resp.contains("top-secret"), "{http_resp}");
 
         drop(server);
         let _ = std::fs::remove_dir_all(&dir);

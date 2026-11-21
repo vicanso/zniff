@@ -49,8 +49,8 @@ pub(crate) use crate::proxy::{BreakDecision, BreakSide, Capture, Hub, ReplayOver
 pub(crate) use crate::session::Direction;
 #[allow(unused_imports)]
 pub(crate) use crate::{
-    ai_context, allow_hosts, ca, clock, config, copy_formats, i18n, icon, import_charles,
-    import_whistle, llm_stream, openapi, present, proxy, redact, rules, session,
+    ai_context, allow_hosts, ca, clock, collections, config, copy_formats, i18n, icon,
+    import_charles, import_whistle, llm_stream, openapi, present, proxy, redact, rules, session,
 };
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(unused_imports)]

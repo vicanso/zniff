@@ -286,6 +286,46 @@ pub(crate) fn build_command_items(state: CommandPaletteState) -> Vec<CommandItem
         .group(g_export)
         .keywords(["openapi", "swagger", "yaml", "yml", "api", "导出"]),
     );
+    items.push(
+        CommandItem::new(
+            "export_postman",
+            t(
+                lang,
+                "导出 Postman Collection v2.1",
+                "Export Postman Collection v2.1",
+            ),
+        )
+        .group(g_export)
+        .keywords(["postman", "collection", "json", "api", "export", "导出"]),
+    );
+    items.push(
+        CommandItem::new(
+            "export_bruno",
+            t(lang, "导出 Bruno (.bru)", "Export Bruno (.bru)"),
+        )
+        .group(g_export)
+        .keywords(["bruno", "bru", "collection", "api", "export", "导出"]),
+    );
+    items.push(
+        CommandItem::new(
+            "export_http",
+            t(
+                lang,
+                "导出 .http (REST Client)",
+                "Export .http (REST Client)",
+            ),
+        )
+        .group(g_export)
+        .keywords([
+            "http",
+            "rest",
+            "vscode",
+            "jetbrains",
+            "collection",
+            "export",
+            "导出",
+        ]),
+    );
     #[cfg(not(target_arch = "wasm32"))]
     {
         items.push(
@@ -689,6 +729,21 @@ pub(crate) fn command_palette_modal(
                             export_openapi_file(controls, &filter.get(), false)
                         }
                         "export_openapi_yaml" => export_openapi_file(controls, &filter.get(), true),
+                        "export_postman" => export_collection_file(
+                            controls,
+                            &filter.get(),
+                            collections::CollectionFormat::Postman,
+                        ),
+                        "export_bruno" => export_collection_file(
+                            controls,
+                            &filter.get(),
+                            collections::CollectionFormat::Bruno,
+                        ),
+                        "export_http" => export_collection_file(
+                            controls,
+                            &filter.get(),
+                            collections::CollectionFormat::Http,
+                        ),
                         #[cfg(not(target_arch = "wasm32"))]
                         "copy_openapi_yaml" => copy_openapi_yaml(&controls, &filter.get()),
                         #[cfg(not(target_arch = "wasm32"))]
@@ -821,6 +876,9 @@ mod tests {
         );
         assert!(ids.contains("toggle_capture"));
         assert!(ids.contains("export_openapi_yaml"));
+        assert!(ids.contains("export_postman"));
+        assert!(ids.contains("export_bruno"));
+        assert!(ids.contains("export_http"));
         assert!(ids.contains("toggle_layout"));
         assert!(ids.contains("open_shortcuts"));
         assert!(ids.contains("focus_filter"));

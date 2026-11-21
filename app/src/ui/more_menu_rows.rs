@@ -331,6 +331,70 @@ pub(crate) fn menu_openapi_row(
         .child(pills)
 }
 
+pub(crate) fn menu_collections_row(
+    open: Signal<bool>,
+    controls: Arc<Controls>,
+    filter: Signal<String>,
+) -> impl IntoElement {
+    let postman_controls = controls.clone();
+    let bruno_controls = controls.clone();
+    let http_controls = controls;
+    let pills = view()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .child(menu_inline_pill(
+            "Postman",
+            || false,
+            move || {
+                open.set(false);
+                export_collection_file(
+                    postman_controls.clone(),
+                    &filter.get(),
+                    collections::CollectionFormat::Postman,
+                );
+            },
+        ))
+        .child(menu_inline_pill(
+            "Bruno",
+            || false,
+            move || {
+                open.set(false);
+                export_collection_file(
+                    bruno_controls.clone(),
+                    &filter.get(),
+                    collections::CollectionFormat::Bruno,
+                );
+            },
+        ))
+        .child(menu_inline_pill(
+            ".http",
+            || false,
+            move || {
+                open.set(false);
+                export_collection_file(
+                    http_controls.clone(),
+                    &filter.get(),
+                    collections::CollectionFormat::Http,
+                );
+            },
+        ));
+    view()
+        .h(px(32.0))
+        .px_2p5()
+        .gap_2()
+        .rounded(px(6.0))
+        .flex_row()
+        .items_center()
+        .child(glyph(|| Glyph::Download, || color(fg_secondary())))
+        .child(
+            control_text(tr("集合", "Collection"))
+                .flex_1()
+                .text_color(fg_secondary()),
+        )
+        .child(pills)
+}
+
 pub(crate) fn menu_redact_row(
     open: Signal<bool>,
     controls: Arc<Controls>,
