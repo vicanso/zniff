@@ -152,32 +152,33 @@
 
 > 来源：[易用性与功能增强规划](usability-roadmap-v0.5.md)。第 17–23 项已结合代码与 `nsh-core 0.6.1` API 完成评估并确认结论，后续随对应版本落地时补充落地说明。
 
-### 17. 「过滤」与「规则」是否拆成两个入口 — ✅ 已决策待实施（选项 B，v0.5）
+### 17. 「过滤」与「规则」是否拆成两个入口 — ✅ 已决策并落地（选项 B，v0.5）
 
-- **代码位置**：`app/src/ui/filter_panel.rs`、`app/src/ui/toolbar.rs`、`app/src/ui/profile_dock.rs`
+- **代码位置**：`app/src/ui/filter_panel.rs`、`app/src/ui/rules_panel.rs`、`app/src/ui/toolbar.rs`、`app/src/ui/profile_dock.rs`
 - **问题**：一个弹出层同时承载视图过滤、直通、规则、规则组、上游与配置存取，新用户分不清「看什么」和「改什么」。
 - **评估选项**：
   - 选项 A：维持现状，只在弹出层内加分区标题与说明。
   - **选项 B（已采用）**：拆成「过滤」和「规则」两个顶栏入口，配置预设（`SavedProfile`）仍同时保存两者；顶栏分别显示过滤胶囊与 `规则 N 条 · M 组`，「新建配置 / 保存配置」统一收口在预设胶囊入口中，避免双弹出层重复绘制保存栏。
   - 选项 C：右栏增加常驻「规则」页签，代替弹出层。
-- **影响**：`SavedProfile` 结构不变；需同步调整「保存」灰态判定、新建配置重置逻辑以及 `AGENTS.md` 中对过滤弹出层的描述。
+- **落地说明**（`179575b`）：`filter_panel.rs` 精简为纯视图过滤弹出层；新增 `app/src/ui/rules_panel.rs` 承载独立「规则」弹出层（规则组、编辑器、行辅助条、试跑预览、快速添加、TLS 直通与上游代理）以及顶栏「预设」胶囊（统一收口 `SavedProfile` 切换、保存、导入与导出），顶栏独立展示 `过滤: …` 开关胶囊与 `规则 N 条 · M 组` 角标。
 
-### 18. 是否新增独立「设置」窗口并迁移低频项 — ✅ 已决策待实施（选项 B，v0.5）
+### 18. 是否新增独立「设置」窗口并迁移低频项 — ✅ 已决策并落地（选项 B，v0.5）
 
-- **代码位置**：`app/src/ui/more_menu_rows.rs`、`app/src/ui/access_popover.rs`、`app/src/ui/machine_settings.rs`、`app/src/ui/connect_hub.rs`
+- **代码位置**：`app/src/ui/settings_window.rs`、`app/src/ui/settings_tabs.rs`、`app/src/ui/more_menu.rs`、`app/src/ui/more_menu_rows.rs`
 - **问题**：设置分散在「更多」、底栏「安全」、底栏「接入」三处，「更多」菜单过长。
 - **评估选项**：
   - 选项 A：维持现状，只对「更多」做分组。
   - **选项 B（已采用）**：新增分页「设置」窗口（`Cmd/Ctrl+,`），「接入中心」只保留接入动作；「更多」只保留导出、工具、帮助三组。
-- **技术核对**：`nsh-core 0.6.1` 已原生提供 `desktop::window()` 独立子窗口 API，桌面端使用独立窗口，Wasm 端复用同一份内容以模态层展示。
+- **落地说明**（`d481fac`）：新增 `settings_window.rs` 与 `settings_tabs.rs` 提供 6 个分页（通用 / 证书 / 网络与上游 / 安全 / 中继 / 更新），桌面端采用 `nsh_core::element::desktop::window()` 独立子窗口、Wasm 端采用模态层并绑定 `Cmd/Ctrl+,`；「更多」菜单瘦身为导出 / 工具 / 帮助三组（每组 ≤ 6 项）。
 
-### 19. 是否在每条流量上记录命中的规则 — ✅ 已决策待实施（选项 B，v0.5）
+### 19. 是否在每条流量上记录命中的规则 — ✅ 已决策并落地（选项 B，v0.5）
 
-- **代码位置**：`app/src/session.rs`（`Flow`）、`app/src/proxy/hub.rs`、`app/src/rules.rs`、`app/src/ui/flow_cells.rs`、`app/src/ui/detail_publish.rs`
+- **代码位置**：`app/src/session.rs`（`Flow`、`RuleHit`）、`app/src/proxy/hub.rs`、`app/src/rules.rs`、`app/src/ui/flow_cells.rs`、`app/src/ui/rule_badges.rs`、`app/src/ui/rule_assist.rs`
 - **问题**：当前 `Flow.rule_hit: String` 仅记录空格分隔的动词并在详情摘要展示，无法在列表中直观标识，也无法定位到具体规则分组/行号或统计各规则命中次数。
 - **评估选项**：
   - 选项 A：维持仅记录动词，不记录行号。
   - **选项 B（已采用）**：保留 `Flow.rule_hit` 兼容现有 Web/分享/测试，补充轻量命中明细数组（上限 8 条，记录 `group_idx / line_no / verb`，未命中规则的流量零堆分配）；列表行增加紧凑标记、规则编辑器显示命中计数并支持 `rule:` 过滤，HAR 导出写入 `_zniffRules`，MCP `get_flow_detail` 同步返回。
+- **落地说明**（`0f780e0`、`7789cf5`）：在 `Flow` 上保留 `rule_hit` 并新增 `rule_hits: Vec<RuleHit>`（上限 8 条，未命中零分配），列表中展示紧凑规则图标，详情摘要在 `rule_badges.rs` 渲染可点击跳转编辑器的规则徽章，同步输出至 HAR `_zniffRules`、MCP `get_flow_detail` 与 `/api/flows`；`rule_assist.rs` 展示规则行本会话命中次数（0 次置灰、点击按 `rule:<行号>` 过滤），`session.rs` 与 `filter_autocomplete.rs` 支持 `rule:` / `-rule:` 过滤与自动补全。
 
 ### 20. `Cmd/Ctrl+K` 清空会话的误触保护 — ✅ 已决策并落地（选项 A，v0.4.x）
 

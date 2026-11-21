@@ -13,27 +13,27 @@
 
 | # | 项目 | 现状问题 | 建议 | 涉及模块 | 状态 |
 |---|---|---|---|---|---|
-| A1 | 过滤 / 规则拆分 | 「过滤」弹出层同时承载过滤、直通、规则、分组、上游与配置存取，「看什么」与「改什么」混在一起 | 「过滤」只管视图；新增独立「规则」入口（规则组、快速添加、直通、上游）；配置存取收口在预设胶囊中；顶栏胶囊分开显示 `过滤: …` 与 `规则 N 条 · M 组` | `ui/filter_panel.rs`、`ui/toolbar.rs`、`ui/profile_dock.rs`、`ui/rule_groups.rs` | 🟦 ADR-17 |
-| A2 | 设置窗口 | 语言、字体、默认美化/树形、系统代理、证书、外部 CA、中继、认证、`allow_hosts` 分散在「更多」、底栏「安全」、底栏「接入」三处 | 新增分页「设置」窗口（通用 / 证书 / 网络与上游 / 安全 / 中继 / 更新）；`Cmd/Ctrl+,` 打开（桌面 `desktop::window()` / Wasm 模态层） | 新增 `ui/settings_window.rs`，迁移 `more_menu_rows.rs`、`access_popover.rs`、`machine_settings.rs` 中的设置项 | 🟦 ADR-18 |
-| A3 | 「更多」菜单瘦身 | 20+ 项与多行内联胶囊，`more_menu_rows.rs` 已 1074 行 | 只保留「导出 / 工具 / 帮助」三组，每组 ≤ 6 项；设置项迁往 A2 | `ui/more_menu.rs`、`ui/more_menu_rows.rs` | ⬜（依赖 A2） |
-| A4 | 情境化建规则 | 规则主要靠 DSL 或快速添加表单 | 行右键与详情「更多」补「Mock 这个响应」「改这个请求头」「延迟这个接口」「屏蔽这个域名」，预填快速添加表单 | `ui/flow_table.rs`、`ui/detail_actions.rs`、`ui/quick_rules.rs` | ⬜ |
+| A1 | 过滤 / 规则拆分 | 「过滤」弹出层同时承载过滤、直通、规则、分组、上游与配置存取，「看什么」与「改什么」混在一起 | 「过滤」只管视图；新增独立「规则」入口（规则组、快速添加、直通、上游）；配置存取收口在预设胶囊中；顶栏胶囊分开显示 `过滤: …` 与 `规则 N 条 · M 组` | `ui/filter_panel.rs`、`ui/rules_panel.rs`、`ui/toolbar.rs`、`ui/profile_dock.rs` | ✅ ADR-17 (`179575b`) |
+| A2 | 设置窗口 | 语言、字体、默认美化/树形、系统代理、证书、外部 CA、中继、认证、`allow_hosts` 分散在「更多」、底栏「安全」、底栏「接入」三处 | 新增分页「设置」窗口（通用 / 证书 / 网络与上游 / 安全 / 中继 / 更新）；`Cmd/Ctrl+,` 打开（桌面 `desktop::window()` / Wasm 模态层） | `ui/settings_window.rs`、`ui/settings_tabs.rs` | ✅ ADR-18 (`d481fac`) |
+| A3 | 「更多」菜单瘦身 | 20+ 项与多行内联胶囊，`more_menu_rows.rs` 已 1074 行 | 只保留「导出 / 工具 / 帮助」三组，每组 ≤ 6 项；设置项迁往 A2 | `ui/more_menu.rs`、`ui/more_menu_rows.rs` | ✅ (`d481fac`) |
+| A4 | 情境化建规则 | 规则主要靠 DSL 或快速添加表单 | 行右键与详情「更多」补「Mock 这个响应」「改这个请求头」「延迟这个接口」「屏蔽这个域名」，预填快速添加表单 | `ui/flow_quick_rules.rs`、`ui/flow_table.rs`、`ui/detail_actions.rs` | ✅ (`81febe2`) |
 
 ## 二、规则效果可视化
 
 | # | 项目 | 建议 | 涉及模块 | 状态 |
 |---|---|---|---|---|
-| B1 | 流量级规则命中记录 | 基于现有 `Flow.rule_hit` 扩展记录命中明细（来源分组 + 行号 + 动词，上限 8 条）；列表行显示小标记（`✎` 改写、`↪` 转发、`⏸` 断点、`⛔` 阻断、`⏱` 延迟/限速）；详情摘要列出命中规则，点击跳到对应规则行 | `session.rs`、`proxy/hub.rs`、`rules.rs`、`ui/flow_cells.rs`、`ui/detail_summary.rs` | 🟦 ADR-19 |
-| B2 | 规则行命中计数 | 规则编辑器每行显示本会话命中次数，0 次的行变灰；可用 `rule:<行号>` 过滤命中流量 | `ui/rule_assist.rs`、`session.rs` | 🟦 ADR-19 |
-| B3 | 保存前试跑 | 保存规则时用当前会话流量离线试跑，提示「将命中 N 条已有流量」或「0 条命中，检查域名」 | `rules.rs`（纯函数）、`ui/filter_panel.rs` | ⬜ |
+| B1 | 流量级规则命中记录 | 基于现有 `Flow.rule_hit` 扩展记录命中明细（来源分组 + 行号 + 动词，上限 8 条）；列表行显示小标记（`✎` 改写、`↪` 转发、`⏸` 断点、`⛔` 阻断、`⏱` 延迟/限速）；详情摘要列出命中规则，点击跳到对应规则行 | `session.rs`、`proxy/hub.rs`、`rules.rs`、`ui/flow_cells.rs`、`ui/rule_badges.rs` | ✅ ADR-19 (`0f780e0`) |
+| B2 | 规则行命中计数 | 规则编辑器每行显示本会话命中次数，0 次的行变灰；可用 `rule:<行号>` 过滤命中流量 | `ui/rule_assist.rs`、`ui/filter_autocomplete.rs`、`session.rs` | ✅ ADR-19 (`7789cf5`) |
+| B3 | 保存前试跑 | 保存规则时用当前会话流量离线试跑，提示「将命中 N 条已有流量」或「0 条命中，检查域名」 | `rules.rs`（纯函数）、`ui/rule_dry_run.rs` | ✅ (`ca1453a`) |
 
 ## 三、出错可自救
 
 | # | 项目 | 建议 | 涉及模块 | 状态 |
 |---|---|---|---|---|
 | C1 | ERR 行修复按钮 | 证书不信任或证书钉扎 → `[加入直通]` `[安装证书]` `[用隔离浏览器打开]`；源站连不上或 DNS 失败 → `[检查上游]` `[添加 resolve]`；`407` → 指向「安全」设置 | `ui/detail_summary.rs`、新增 `ui/error_actions.rs` | ✅ (`42bb92f`) |
-| C2 | 批量 TLS 失败横幅 | 短时间内多条隧道失败或 `ServerHello` 后断开时，列表顶部提示「检测到 N 个应用 TLS 握手失败，可能未信任 CA」并给出一键操作 | `proxy/tls_mitm.rs`（计数）、`ui/app_shell.rs` | ⬜ |
-| C3 | 引导卡改为自动勾选清单 | ① 代理已监听 ② 证书已信任 ③ 收到第一条 HTTP ④ 收到第一条解密的 HTTPS；每步都显示状态，卡住的步骤给出诊断 | `ui/onboarding_card.rs` | ⬜ |
-| C4 | 诊断包 | 「帮助 → 导出诊断包」：脱敏后的配置、版本、平台、证书状态、最近错误摘要，便于提 issue | 新增 `diagnostics.rs` | ⬜ |
+| C2 | 批量 TLS 失败横幅 | 短时间内多条隧道失败或 `ServerHello` 后断开时，列表顶部提示「检测到 N 个应用 TLS 握手失败，可能未信任 CA」并给出一键操作 | `ui/tls_failure_banner.rs`、`ui/facet_drawer.rs`、`ui/app_shell.rs` | ✅ (`53401ff`) |
+| C3 | 引导卡改为自动勾选清单 | ① 代理已监听 ② 证书已信任 ③ 收到第一条 HTTP ④ 收到第一条解密的 HTTPS；每步都显示状态，卡住的步骤给出诊断 | `ui/onboarding_checklist.rs`、`ui/onboarding_card.rs` | ✅ (`7a5a5e2`) |
+| C4 | 诊断包 | 「帮助 → 导出诊断包」：脱敏后的配置、版本、平台、证书状态、最近错误摘要，便于提 issue | `diagnostics.rs`、`ui/more_menu.rs`、`ui/command_palette.rs` | ✅ (`bf2e8c5`) |
 
 ## 四、日常小摩擦（v0.4.x 小版本）
 
