@@ -2953,6 +2953,7 @@ fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
             status: signal(String::new()),
             draft_saved: signal((String::new(), String::new(), String::new(), String::new())),
             recent: signal(Vec::new()),
+            inline_mock: InlineMockSignals::new(),
         };
         let seq_diagram = signal(present::SequenceDiagramData::default());
         let seq_viewport_w = signal(0.0_f32);
@@ -4535,6 +4536,7 @@ fn keyboard_step_selected_auto_scrolls_row_into_viewport() {
             body: signal(String::new()),
             draft_saved: signal(super::ComposeDraft::default()),
             recent: signal(Vec::new()),
+            inline_mock: super::InlineMockSignals::new(),
         };
         let columns = signal(super::ListColumns::from_config(
             &crate::config::Config::default(),

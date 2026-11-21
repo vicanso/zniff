@@ -666,6 +666,10 @@ pub(crate) fn ready_detail(
             let controls = controls.clone();
             move || compose_box(compose, controls.clone(), selected, paused)
         }))
+        .child(when(move || compose.inline_mock.open.get(), {
+            let controls = controls.clone();
+            move || inline_mock_box(compose, controls.clone(), profiles)
+        }))
         .child(
             when(side_by_side, move || {
                 view()
@@ -972,6 +976,12 @@ pub(crate) fn summary(
                     },
                 ))
                 .child(view().flex_1())
+                .child(inline_mock_trigger_button(
+                    shown,
+                    controls.clone(),
+                    selected,
+                    compose,
+                ))
                 .child(detail_actions(
                     shown,
                     controls.clone(),

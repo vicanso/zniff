@@ -1097,6 +1097,7 @@ pub(crate) fn reset_compose(compose: Compose) {
     compose.headers.set(String::new());
     compose.body.set(String::new());
     compose.status.set(String::new());
+    compose.inline_mock.close();
 }
 
 pub(crate) fn clear_shown(shown: Shown) {

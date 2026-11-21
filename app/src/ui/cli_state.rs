@@ -356,6 +356,7 @@ pub(crate) struct Compose {
     pub(crate) status: Signal<String>,
     pub(crate) draft_saved: Signal<ComposeDraft>,
     pub(crate) recent: Signal<Vec<ComposeDraft>>,
+    pub(crate) inline_mock: InlineMockSignals,
 }
 
 #[derive(Clone, PartialEq, Default)]

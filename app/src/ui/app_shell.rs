@@ -159,6 +159,7 @@ pub fn App() -> impl IntoElement {
                 })
                 .collect(),
         ),
+        inline_mock: InlineMockSignals::new(),
     };
     effect(move || {
         if compose.composing.get() && !compose.response.get() && selected.get().is_none() {
@@ -1262,7 +1263,7 @@ pub fn App() -> impl IntoElement {
             profile_signals.about_open.set(false);
         } else if profile_signals.machine_settings_open.get() {
             profile_signals.machine_settings_open.set(false);
-        } else if compose_esc.composing.get() {
+        } else if compose_esc.composing.get() || compose_esc.inline_mock.open.get() {
             reset_compose(compose_esc);
         } else if seq_esc.open.get() {
             close_sequence_diagram(seq_esc);

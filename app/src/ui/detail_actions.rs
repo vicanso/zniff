@@ -40,6 +40,7 @@ pub(crate) fn detail_actions(
     let send_controls = controls.clone();
     let break_controls = controls.clone();
     let map_local_controls = controls.clone();
+    let inline_mock_controls = controls.clone();
     let quick_rule_controls = controls.clone();
     let pretty_controls = controls;
     let pinned = shown.pinned;
@@ -279,6 +280,13 @@ pub(crate) fn detail_actions(
             can_local,
             move || {
                 map_local_from_flow(map_local_controls.clone(), selected.get(), rules_text);
+            },
+        ))
+        .child(action_item_enabled(
+            tr("内联 Mock 响应", "Inline mock response"),
+            can_local,
+            move || {
+                begin_inline_mock(&inline_mock_controls, selected.get(), compose);
             },
         ))
         .child(flow_quick_rule_section(can_local, move |action| {
