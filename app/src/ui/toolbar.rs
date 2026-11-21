@@ -62,6 +62,7 @@ pub(crate) fn toolbar(
     let remove = Rc::new(remove);
     let preset_controls = import_controls.clone();
     let rules_controls = import_controls.clone();
+    let network_controls = import_controls.clone();
     let layout_controls = import_controls.clone();
     let shared_rule_draft = QuickRuleDraftSignals {
         kind: signal(0_u8),
@@ -221,6 +222,14 @@ pub(crate) fn toolbar(
                                 preset_controls.clone(),
                                 shared_rule_draft,
                             ))
+                    },
+                ))
+                .child(when(
+                    move || startup_error().is_none(),
+                    move || {
+                        view().min_w(px(0.0)).flex_shrink(0.0).child(
+                            toolbar_network_preset_popover(profiles, network_controls.clone()),
+                        )
                     },
                 ))
                 .child(when(

@@ -3,19 +3,36 @@ use super::*;
 
 use nsh_base::{CommandEntry, CommandGroup, CommandItem};
 
-pub(crate) fn build_command_items(
-    lang: Lang,
-    running: bool,
-    proxy_on: bool,
-    has_rows: bool,
-    has_selection: bool,
-    layout_mode: config::LayoutMode,
-    sidebar_collapsed: bool,
-    pretty: bool,
-    default_json_tree: bool,
-    adb_count: usize,
-) -> Vec<CommandItem> {
+pub(crate) struct CommandPaletteState {
+    pub(crate) lang: Lang,
+    pub(crate) running: bool,
+    pub(crate) proxy_on: bool,
+    pub(crate) has_rows: bool,
+    pub(crate) has_selection: bool,
+    pub(crate) layout_mode: config::LayoutMode,
+    pub(crate) sidebar_collapsed: bool,
+    pub(crate) pretty: bool,
+    pub(crate) default_json_tree: bool,
+    pub(crate) adb_count: usize,
+    pub(crate) network_preset: NetworkPreset,
+}
+
+pub(crate) fn build_command_items(state: CommandPaletteState) -> Vec<CommandItem> {
+    let CommandPaletteState {
+        lang,
+        running,
+        proxy_on,
+        has_rows,
+        has_selection,
+        layout_mode,
+        sidebar_collapsed,
+        pretty,
+        default_json_tree,
+        adb_count,
+        network_preset,
+    } = state;
     let g_capture = t(lang, "抓包", "Capture");
+    let g_network = t(lang, "网络条件", "Network");
     let g_copy = t(lang, "复制代码片段", "Copy as Code");
     let g_export = t(lang, "导出与分析", "Export & Tools");
     let g_view = t(lang, "视图与设置", "View & Settings");
@@ -132,6 +149,19 @@ pub(crate) fn build_command_items(
     }
     #[cfg(target_arch = "wasm32")]
     let _ = (proxy_on, adb_count);
+
+    for &preset in NetworkPreset::ALL {
+        let label = format!("{}: {}", t(lang, "网络条件", "Network"), preset.label(lang));
+        items.push(
+            CommandItem::new(preset.command_id(), label)
+                .group(g_network)
+                .checked(network_preset == preset)
+                .keywords([
+                    "network", "throttle", "3g", "slow", "latency", "offline", "网络", "弱网",
+                    "限速", "延迟", "离线",
+                ]),
+        );
+    }
 
     items.push(
         CommandItem::new(
@@ -479,18 +509,26 @@ pub(crate) fn command_palette_modal(
                     let adb_count = launcher::configured_adb_count();
                     #[cfg(target_arch = "wasm32")]
                     let adb_count = 0usize;
-                    build_command_items(
+                    let network_preset = if profiles.rules_on.get() {
+                        profiles
+                            .rule_groups
+                            .with(|groups| detect_active_network_preset(groups))
+                    } else {
+                        NetworkPreset::None
+                    };
+                    build_command_items(CommandPaletteState {
                         lang,
-                        running.get(),
-                        proxy_on.get(),
-                        !rows.with(Vec::is_empty),
-                        selected.get().is_some(),
-                        profiles.layout_mode.get(),
-                        profiles.sidebar_collapsed.get(),
-                        pretty.get(),
-                        profiles.default_json_tree.get(),
+                        running: running.get(),
+                        proxy_on: proxy_on.get(),
+                        has_rows: !rows.with(Vec::is_empty),
+                        has_selection: selected.get().is_some(),
+                        layout_mode: profiles.layout_mode.get(),
+                        sidebar_collapsed: profiles.sidebar_collapsed.get(),
+                        pretty: pretty.get(),
+                        default_json_tree: profiles.default_json_tree.get(),
                         adb_count,
-                    )
+                        network_preset,
+                    })
                 })
                 .placeholder(move || {
                     Some(SharedString::from(tr(
@@ -698,7 +736,11 @@ pub(crate) fn command_palette_modal(
                         "open_settings" => open_settings_tab(profiles, SettingsTab::General),
                         "open_shortcuts" => shortcuts_open.set(true),
                         "open_about" => profiles.about_open.set(true),
-                        _ => {}
+                        other => {
+                            if let Some(preset) = NetworkPreset::from_command_id(other) {
+                                apply_network_preset(profiles, &controls, preset);
+                            }
+                        }
                     }
                 });
 
@@ -732,20 +774,33 @@ mod tests {
 
     #[test]
     fn command_palette_items_have_unique_ids_and_reflect_state() {
-        let items = build_command_items(
-            Lang::Zh,
-            true,
-            true,
-            true,
-            true,
-            config::LayoutMode::Split,
-            false,
-            true,
-            false,
-            2,
-        );
+        let items = build_command_items(CommandPaletteState {
+            lang: Lang::Zh,
+            running: true,
+            proxy_on: true,
+            has_rows: true,
+            has_selection: true,
+            layout_mode: config::LayoutMode::Split,
+            sidebar_collapsed: false,
+            pretty: true,
+            default_json_tree: false,
+            adb_count: 2,
+            network_preset: NetworkPreset::Slow3g,
+        });
         let ids: HashSet<&str> = items.iter().map(|it| it.id.as_str()).collect();
         assert_eq!(ids.len(), items.len(), "command ids must be unique");
+        assert!(ids.contains("network_none"));
+        assert!(ids.contains("network_3g"));
+        assert!(ids.contains("network_slow_3g"));
+        assert!(ids.contains("network_high_latency"));
+        assert!(ids.contains("network_offline"));
+        assert!(
+            items
+                .iter()
+                .find(|it| it.id == "network_slow_3g")
+                .unwrap()
+                .checked
+        );
         assert!(ids.contains("toggle_capture"));
         assert!(ids.contains("export_openapi_yaml"));
         assert!(ids.contains("toggle_layout"));
