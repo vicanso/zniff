@@ -64,7 +64,7 @@ pub(crate) fn build_command_items(state: CommandPaletteState) -> Vec<CommandItem
             t(lang, "插入会话标记", "Insert session marker"),
         )
         .group(g_capture)
-        .shortcut("mod+m")
+        .shortcut("mod+shift+m")
         .keywords(["marker", "mark", "divider", "timeline", "标记", "分隔线"]),
         CommandItem::new(
             "replay_selected",
@@ -913,6 +913,7 @@ mod tests {
             assert!(!item.disabled, "{copy_id} should be enabled when selected");
         }
         for (id, expected_shortcut) in [
+            ("add_marker", "mod+shift+m"),
             ("clear_all", "mod+k"),
             ("focus_filter", "mod+f"),
             ("replay_selected", "mod+r"),

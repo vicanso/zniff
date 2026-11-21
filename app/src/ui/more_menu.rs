@@ -22,7 +22,7 @@ pub(crate) fn more_menu(
     let apple = cfg!(target_os = "macos");
     let settings_shortcut = format_shortcut_badge("mod+,", apple);
     let shortcuts_key = format_shortcut_badge("mod+/", apple);
-    let marker_shortcut = format_shortcut_badge("mod+m", apple);
+    let marker_shortcut = format_shortcut_badge("mod+shift+m", apple);
 
     // Group 1: Export (<= 6 items)
     let items = view()

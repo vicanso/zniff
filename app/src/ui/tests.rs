@@ -5253,3 +5253,81 @@ async fn access_control_popover_reflects_strict_deny_all_and_locked_state() {
     );
     assert!(!tree_denied_locked.texts.values().any(|s| s == "+ Allow"));
 }
+
+#[test]
+fn all_app_shell_on_key_bindings_are_non_reserved_and_mount_cleanly() {
+    use nsh_core::keymap::Keystroke;
+    use nsh_core::platform::Os;
+
+    let src = include_str!("app_shell.rs");
+    let mut bindings = Vec::new();
+    for needle in ["on_key(\"", "on_key_with(\n", "on_key_with(\""] {
+        let mut rest = src;
+        while let Some(pos) = rest.find(needle) {
+            let after = &rest[pos + needle.len()..];
+            let trimmed = after.trim_start();
+            let lit = if needle.ends_with('"') {
+                trimmed
+            } else if let Some(s) = trimmed.strip_prefix('"') {
+                s
+            } else {
+                rest = after;
+                continue;
+            };
+            if let Some(end) = lit.find('"') {
+                bindings.push(lit[..end].to_string());
+            }
+            rest = after;
+        }
+    }
+    assert!(
+        bindings.len() >= 10,
+        "expected to extract all on_key / on_key_with bindings from app_shell.rs, got {bindings:?}"
+    );
+    assert!(
+        bindings.iter().any(|b| b == "mod+shift+m"),
+        "marker shortcut should be mod+shift+m: {bindings:?}"
+    );
+    assert!(
+        !bindings.iter().any(|b| b == "mod+m"),
+        "reserved macOS shortcut mod+m must not be bound: {bindings:?}"
+    );
+
+    for spec in &bindings {
+        let apple_ks = Keystroke::parse_with(spec, true)
+            .unwrap_or_else(|e| panic!("apple keystroke parse failed for `{spec}`: {e}"));
+        let other_ks = Keystroke::parse_with(spec, false)
+            .unwrap_or_else(|e| panic!("non-apple keystroke parse failed for `{spec}`: {e}"));
+        for os in [Os::MacOs, Os::Ios] {
+            assert!(
+                apple_ks.reserved(os).is_none(),
+                "on_key `{spec}` is reserved on {os:?}: {:?}",
+                apple_ks.reserved(os)
+            );
+        }
+        for os in [Os::Linux, Os::Windows, Os::Android, Os::Web] {
+            assert!(
+                other_ks.reserved(os).is_none(),
+                "on_key `{spec}` is reserved on {os:?}: {:?}",
+                other_ks.reserved(os)
+            );
+        }
+    }
+
+    thread_local! {
+        static TEST_BINDINGS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    TEST_BINDINGS.with(|cell| *cell.borrow_mut() = bindings);
+
+    #[component]
+    fn OnKeyAuditHarness() -> impl IntoElement {
+        TEST_BINDINGS.with(|cell| {
+            for spec in cell.borrow().iter() {
+                on_key(spec, |_| {});
+            }
+        });
+        view().w(px(200.0)).h(px(100.0))
+    }
+
+    let _ = mount_headless_component::<OnKeyAuditHarness>(Size::new(px(200.0), px(100.0)));
+}

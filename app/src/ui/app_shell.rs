@@ -1270,7 +1270,7 @@ pub fn App() -> impl IntoElement {
     });
     let marker_open_key = profile_signals.marker_modal_open;
     let controls_marker_key = controls.clone();
-    on_key("mod+m", move |_| {
+    on_key("mod+shift+m", move |_| {
         if guard_read_only_tab(&controls_marker_key) {
             return;
         }

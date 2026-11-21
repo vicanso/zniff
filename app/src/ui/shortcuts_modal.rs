@@ -55,7 +55,7 @@ pub(crate) const SHORTCUT_SECTIONS: &[ShortcutSection] = &[
                 en: "Replay selected flow",
             },
             ShortcutEntry {
-                keys: &["mod+m"],
+                keys: &["mod+shift+m"],
                 zh: "插入会话时间标记",
                 en: "Insert session marker",
             },
@@ -320,14 +320,31 @@ mod tests {
                 assert!(!item.en.is_empty());
                 assert!(!item.keys.is_empty());
                 for &spec in item.keys {
-                    assert!(
-                        Keystroke::parse_with(spec, true).is_ok(),
-                        "apple keystroke parse failed for `{spec}`"
-                    );
-                    assert!(
-                        Keystroke::parse_with(spec, false).is_ok(),
-                        "non-apple keystroke parse failed for `{spec}`"
-                    );
+                    let apple_ks = Keystroke::parse_with(spec, true).unwrap_or_else(|e| {
+                        panic!("apple keystroke parse failed for `{spec}`: {e}")
+                    });
+                    let other_ks = Keystroke::parse_with(spec, false).unwrap_or_else(|e| {
+                        panic!("non-apple keystroke parse failed for `{spec}`: {e}")
+                    });
+                    for os in [nsh_core::platform::Os::MacOs, nsh_core::platform::Os::Ios] {
+                        assert!(
+                            apple_ks.reserved(os).is_none(),
+                            "shortcut `{spec}` is reserved on {os:?}: {:?}",
+                            apple_ks.reserved(os)
+                        );
+                    }
+                    for os in [
+                        nsh_core::platform::Os::Linux,
+                        nsh_core::platform::Os::Windows,
+                        nsh_core::platform::Os::Android,
+                        nsh_core::platform::Os::Web,
+                    ] {
+                        assert!(
+                            other_ks.reserved(os).is_none(),
+                            "shortcut `{spec}` is reserved on {os:?}: {:?}",
+                            other_ks.reserved(os)
+                        );
+                    }
                     assert!(!format_shortcut_badge(spec, true).is_empty());
                     assert!(!format_shortcut_badge(spec, false).is_empty());
                 }
@@ -345,5 +362,7 @@ mod tests {
         assert_eq!(format_shortcut_badge("mod+k", false), "Ctrl+K");
         assert_eq!(format_shortcut_badge("mod+shift+p", true), "⇧⌘P");
         assert_eq!(format_shortcut_badge("mod+shift+p", false), "Ctrl+Shift+P");
+        assert_eq!(format_shortcut_badge("mod+shift+m", true), "⇧⌘M");
+        assert_eq!(format_shortcut_badge("mod+shift+m", false), "Ctrl+Shift+M");
     }
 }
