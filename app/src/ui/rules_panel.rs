@@ -216,6 +216,7 @@ fn rules_panel(
     let rules_controls = controls.clone();
     let rule_strip_controls = controls.clone();
     let rules_clear_controls = controls.clone();
+    let templates_controls = controls.clone();
     let upstream_controls = controls.clone();
     let tunnel_controls = controls;
 
@@ -358,6 +359,7 @@ fn rules_panel(
                             draft.modes,
                             draft.kind,
                         ))
+                        .child(rule_templates_section(rule_target, templates_controls))
                         .child(config_field(
                             "上游代理",
                             "Upstream Proxy",
