@@ -915,6 +915,7 @@ impl Hub {
         rules::has_op_rules(&rules, host, path)
             || crate::rule_vars::rules_need_request_body(&rules, host, path)
             || rules::has_request_hooks(&rules, host, path)
+            || rules::has_request_body_break(&rules, host, path)
     }
 
     #[cfg(test)]

@@ -169,25 +169,27 @@ pub(crate) fn fill_draft_from_rule_line(
             host,
             path_prefix,
             op,
+            cond,
         } => {
             draft_kind.set(4);
             draft_host.set(host);
             draft_path.set(clean_draft_path(&path_prefix));
             draft_op.set(op.unwrap_or_default());
-            draft_from.set(String::new());
-            draft_to.set(String::new());
+            draft_from.set(cond.format_header_spec());
+            draft_to.set(cond.body.unwrap_or_default());
         }
         Rule::BreakResponse {
             host,
             path_prefix,
             op,
+            cond,
         } => {
             draft_kind.set(5);
             draft_host.set(host);
             draft_path.set(clean_draft_path(&path_prefix));
             draft_op.set(op.unwrap_or_default());
-            draft_from.set(String::new());
-            draft_to.set(String::new());
+            draft_from.set(cond.format_header_spec());
+            draft_to.set(cond.body.unwrap_or_default());
         }
         Rule::Header {
             host,

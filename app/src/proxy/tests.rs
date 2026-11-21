@@ -2991,7 +2991,7 @@ fn rule_switches_skip_matching_without_rewriting_the_text() {
     hub.set_rules("delay example.com 1s\nbreak example.com");
     assert!(matches!(
         hub.plan("example.com", "/").action,
-        Some(Action::BreakRequest)
+        Some(rules::Action::BreakRequest(_))
     ));
     hub.set_breaks_enabled(false);
     let kept = hub.plan("example.com", "/");

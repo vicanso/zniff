@@ -421,7 +421,7 @@ pub(crate) fn replace_row(
                     let langs = ui_langs();
                     let row = view().flex_row().items_center().gap_1().child(when(
                         move || {
-                            !matches!(kind.get(), 4 | 5 | 8 | 12)
+                            !matches!(kind.get(), 8 | 12)
                                 && !(kind.get() == 13 && modes.status_drop.get())
                         },
                         move || {
@@ -444,6 +444,12 @@ pub(crate) fn replace_row(
                                         lang,
                                         "延迟时长: 2000ms 或 2s",
                                         "Delay duration: 2000ms or 2s",
+                                    )
+                                    .to_string(),
+                                    4 | 5 => t(
+                                        lang,
+                                        "Header 条件 (可选): X-Debug:1",
+                                        "Header cond (optional): X-Debug:1",
                                     )
                                     .to_string(),
                                     6 => t(lang, "Header 名称: X-Debug", "Header name: X-Debug")
@@ -542,13 +548,19 @@ pub(crate) fn replace_row(
                         )
                     );
                     let row = row.child(when(
-                        move || matches!(kind.get(), 0 | 2 | 6 | 7 | 9 | 10 | 11 | 14 | 15),
+                        move || matches!(kind.get(), 0 | 2 | 4 | 5 | 6 | 7 | 9 | 10 | 11 | 14 | 15),
                         move || {
                             let placeholder = move || {
                                 let lang = ui_lang(langs);
                                 match kind.get() {
                                     2 => t(lang, "状态码: 200 (可选)", "Status: 200 (optional)")
                                         .to_string(),
+                                    4 | 5 => t(
+                                        lang,
+                                        "Body 子串 (可选): error",
+                                        "Body substr (optional): error",
+                                    )
+                                    .to_string(),
                                     6 => t(lang, "Header 值 (留空删除)", "Value (empty to delete)")
                                         .to_string(),
                                     7 => t(lang, "参数值 (留空删除)", "Value (empty to delete)")

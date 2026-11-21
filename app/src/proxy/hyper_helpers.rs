@@ -7,6 +7,7 @@ pub(super) async fn hold_hyper_response(
     parts: http::response::Parts,
     body: Incoming,
     encoding: Option<String>,
+    cond: rules::BreakCondition,
 ) -> Result<Response<RecordingBody<Incoming>>> {
     let too_big = parts
         .headers
@@ -53,6 +54,20 @@ pub(super) async fn hold_hyper_response(
                 header_pairs(&parts.headers),
                 None,
             );
+            if cond.needs_body() {
+                let decoded = hub.with_session(|s| {
+                    s.get(id)
+                        .map(|f| f.response_body.clone())
+                        .unwrap_or_default()
+                });
+                if !cond.matches_body(&decoded) {
+                    hub.mark_finished(id);
+                    return Ok(Response::from_parts(
+                        parts,
+                        RecordingBody::from_bytes(bytes),
+                    ));
+                }
+            }
             let decision = hub.wait_break(id, BreakSide::Response).await;
             if decision.drop {
                 hub.clear_response(id);

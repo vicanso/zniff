@@ -522,7 +522,7 @@ pub(super) async fn exchange_tls<S>(
     headers: &[(String, String)],
     body: &[u8],
     plan: &rules::Effect,
-    break_response: bool,
+    break_response: Option<&rules::BreakCondition>,
     throttle_up_bps: Option<u64>,
     throttle_down_bps: Option<u64>,
     flow_now_ms: u64,
@@ -604,7 +604,7 @@ where
         pos: 0,
         inner: origin,
     };
-    if !break_response
+    if break_response.is_none()
         && (has_resp_hooks
             || (!no_resp_body
                 && (!plan.response_replaces.is_empty() || !plan.response_json_ops.is_empty())))
@@ -712,7 +712,9 @@ where
             return Ok(());
         }
     }
-    if break_response {
+    if let Some(cond) = break_response
+        && cond.matches_headers(&resp_headers)
+    {
         match read_capped_body(
             &mut origin,
             &resp_headers,
@@ -731,6 +733,29 @@ where
                         &resp_body,
                         encoding.as_deref(),
                     );
+                }
+                let body_matched = if cond.needs_body() {
+                    let decoded = hub.with_session(|s| {
+                        s.get(id)
+                            .map(|f| f.response_body.clone())
+                            .unwrap_or_default()
+                    });
+                    cond.matches_body(&decoded)
+                } else {
+                    true
+                };
+                if !body_matched {
+                    write_bytes(
+                        client,
+                        status,
+                        reason_phrase(status),
+                        &resp_headers,
+                        &resp_body,
+                        throttle_down_bps,
+                    )
+                    .await?;
+                    hub.mark_finished(id);
+                    return Ok(());
                 }
                 let decision = hub.wait_break(id, BreakSide::Response).await;
                 if decision.drop {

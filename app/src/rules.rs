@@ -32,6 +32,54 @@ use std::time::Duration;
 
 pub const DELAY_CAP: Duration = Duration::from_secs(30);
 
+/// Optional header and/or body substring filter for conditional breakpoints (E8, ADR-21).
+/// No regex; case-insensitive header name/value substring match and UTF-8 body substring
+/// match bounded by [`crate::session::BODY_CAP`] (1 MB).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BreakCondition {
+    /// `(header_name, value_substring)` parsed from `header=<k:v>` (or `header=<k>` for presence).
+    pub header: Option<(String, String)>,
+    /// UTF-8 substring parsed from `body=<substr>`.
+    pub body: Option<String>,
+}
+
+impl BreakCondition {
+    pub fn needs_body(&self) -> bool {
+        self.body.is_some()
+    }
+
+    pub fn matches_headers(&self, headers: &[(String, String)]) -> bool {
+        let Some((name, val_sub)) = &self.header else {
+            return true;
+        };
+        let needle = val_sub.to_ascii_lowercase();
+        headers.iter().any(|(k, v)| {
+            k.eq_ignore_ascii_case(name)
+                && (needle.is_empty() || v.to_ascii_lowercase().contains(&needle))
+        })
+    }
+
+    pub fn matches_body(&self, body: &[u8]) -> bool {
+        let Some(substr) = &self.body else {
+            return true;
+        };
+        let capped = if body.len() > crate::session::BODY_CAP {
+            &body[..crate::session::BODY_CAP]
+        } else {
+            body
+        };
+        String::from_utf8_lossy(capped).contains(substr.as_str())
+    }
+
+    pub fn format_header_spec(&self) -> String {
+        match &self.header {
+            Some((k, v)) if !v.is_empty() => format!("{k}:{v}"),
+            Some((k, _)) => k.clone(),
+            None => String::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Rule {
     MapLocal {
@@ -53,11 +101,13 @@ pub enum Rule {
         host: String,
         path_prefix: String,
         op: Option<String>,
+        cond: BreakCondition,
     },
     BreakResponse {
         host: String,
         path_prefix: String,
         op: Option<String>,
+        cond: BreakCondition,
     },
     Delay {
         host: String,
@@ -246,8 +296,8 @@ pub enum Action {
         url: String,
         path_prefix: String,
     },
-    BreakRequest,
-    BreakResponse,
+    BreakRequest(BreakCondition),
+    BreakResponse(BreakCondition),
     Block {
         drop_conn: bool,
         status: u16,
@@ -465,6 +515,15 @@ pub fn has_op_rules(rules: &[Rule], host: &str, path: &str) -> bool {
     rules
         .iter()
         .any(|rule| rule.op().is_some() && rule.matches_location(host, path))
+}
+
+/// Returns true when at least one `break` rule matching `(host, path)` requires inspecting
+/// the request body (`body=<substr>`).
+pub fn has_request_body_break(rules: &[Rule], host: &str, path: &str) -> bool {
+    rules.iter().any(|rule| {
+        matches!(rule, Rule::Break { cond, .. } if cond.needs_body())
+            && rule.matches_location(host, path)
+    })
 }
 
 /// Returns true when at least one mutating `hook` rule matching `(host, path)` runs on requests.
@@ -756,7 +815,7 @@ pub fn hit_summary_with_ops(rules: &[Rule], host: &str, path: &str, ops: &[Strin
 pub fn without_breaks(mut effect: Effect) -> Effect {
     if matches!(
         effect.action,
-        Some(Action::BreakRequest | Action::BreakResponse)
+        Some(Action::BreakRequest(_) | Action::BreakResponse(_))
     ) {
         effect.action = None;
     }
@@ -935,11 +994,11 @@ pub fn effect_with_ops(rules: &[Rule], host: &str, path: &str, ops: &[String]) -
                     path_prefix: path_prefix.clone(),
                 });
             }
-            Rule::Break { .. } if effect.action.is_none() => {
-                effect.action = Some(Action::BreakRequest);
+            Rule::Break { cond, .. } if effect.action.is_none() => {
+                effect.action = Some(Action::BreakRequest(cond.clone()));
             }
-            Rule::BreakResponse { .. } if effect.action.is_none() => {
-                effect.action = Some(Action::BreakResponse);
+            Rule::BreakResponse { cond, .. } if effect.action.is_none() => {
+                effect.action = Some(Action::BreakResponse(cond.clone()));
             }
             Rule::Block {
                 drop_conn, status, ..
@@ -1282,6 +1341,92 @@ fn parse_resolve_target(tokens: &[String]) -> Option<(String, Option<u16>)> {
     Some((target_host, port))
 }
 
+fn parse_header_cond_opt(raw: &str) -> Option<(String, String)> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (name, value) = match trimmed.split_once(':') {
+        Some((k, v)) => (k.trim(), v.trim()),
+        None => (trimmed, ""),
+    };
+    if name.is_empty() || name.contains(char::is_whitespace) {
+        return None;
+    }
+    Some((name.to_string(), value.to_string()))
+}
+
+fn parse_break_options(tokens: &[String]) -> Option<(Option<String>, BreakCondition)> {
+    let mut op = None;
+    let mut cond = BreakCondition::default();
+    for token in tokens {
+        if let Some(op_str) = token
+            .strip_prefix("op=")
+            .or_else(|| token.strip_prefix("operation="))
+        {
+            if op.is_some() {
+                return None;
+            }
+            op = Some(parse_op_opt(op_str)?);
+        } else if let Some(hdr_str) = token.strip_prefix("header=") {
+            if cond.header.is_some() {
+                return None;
+            }
+            cond.header = Some(parse_header_cond_opt(hdr_str)?);
+        } else {
+            let body_str = token.strip_prefix("body=")?;
+            if cond.body.is_some() || body_str.is_empty() {
+                return None;
+            }
+            cond.body = Some(body_str.to_string());
+        }
+    }
+    Some((op, cond))
+}
+
+fn format_quick_break_line(
+    verb: &str,
+    pattern: &str,
+    from: &str,
+    to: &str,
+    explicit_op: Option<String>,
+) -> Option<String> {
+    let (resolved_op, header_spec) = if let Some(op_str) = from
+        .strip_prefix("op=")
+        .or_else(|| from.strip_prefix("operation="))
+    {
+        let legacy = parse_op_opt(op_str)?;
+        if let Some(ref exp) = explicit_op
+            && exp != &legacy
+        {
+            return None;
+        }
+        (Some(legacy), None)
+    } else if !from.is_empty() {
+        let (k, v) = parse_header_cond_opt(from)?;
+        let spec = if v.is_empty() { k } else { format!("{k}:{v}") };
+        (explicit_op, Some(spec))
+    } else {
+        (explicit_op, None)
+    };
+    let mut line = format!("{verb} {pattern}");
+    if let Some(hdr) = header_spec {
+        line.push(' ');
+        line.push_str(&quote_rule_token(&format!("header={hdr}")));
+    }
+    if !to.is_empty() {
+        if to.contains('\n') {
+            return None;
+        }
+        line.push(' ');
+        line.push_str(&quote_rule_token(&format!("body={to}")));
+    }
+    if let Some(op_val) = resolved_op {
+        line.push_str(&format!(" op={op_val}"));
+    }
+    Some(line)
+}
+
 fn parse_op_opt(text: &str) -> Option<String> {
     let raw = text
         .trim()
@@ -1400,38 +1545,22 @@ fn parse_line(line: &str) -> Option<Rule> {
         }
         "break" => {
             let tokens = rule_tokens(rest)?;
-            let op = match tokens.as_slice() {
-                [] => None,
-                [token] => {
-                    let op_str = token
-                        .strip_prefix("op=")
-                        .or_else(|| token.strip_prefix("operation="))?;
-                    Some(parse_op_opt(op_str)?)
-                }
-                _ => return None,
-            };
+            let (op, cond) = parse_break_options(&tokens)?;
             Some(Rule::Break {
                 host,
                 path_prefix,
                 op,
+                cond,
             })
         }
         "break-res" | "break-response" => {
             let tokens = rule_tokens(rest)?;
-            let op = match tokens.as_slice() {
-                [] => None,
-                [token] => {
-                    let op_str = token
-                        .strip_prefix("op=")
-                        .or_else(|| token.strip_prefix("operation="))?;
-                    Some(parse_op_opt(op_str)?)
-                }
-                _ => return None,
-            };
+            let (op, cond) = parse_break_options(&tokens)?;
             Some(Rule::BreakResponse {
                 host,
                 path_prefix,
                 op,
+                cond,
             })
         }
         "delay" => {
@@ -2463,41 +2592,9 @@ pub fn append_quick_rule_with_op(
             let _ = parse_throttle_tokens(&tokens)?;
             format!("throttle {pattern} {}", tokens.join(" "))
         }
-        QuickRule::Break => {
-            let resolved_op = match (explicit_op, from.is_empty()) {
-                (Some(op_val), true) => Some(op_val),
-                (Some(op_val), false) => {
-                    let legacy = parse_op_opt(from)?;
-                    if legacy != op_val {
-                        return None;
-                    }
-                    Some(op_val)
-                }
-                (None, true) => None,
-                (None, false) => Some(parse_op_opt(from)?),
-            };
-            match resolved_op {
-                Some(op_val) => format!("break {pattern} op={op_val}"),
-                None => format!("break {pattern}"),
-            }
-        }
+        QuickRule::Break => format_quick_break_line("break", pattern, from, to, explicit_op)?,
         QuickRule::BreakRes => {
-            let resolved_op = match (explicit_op, from.is_empty()) {
-                (Some(op_val), true) => Some(op_val),
-                (Some(op_val), false) => {
-                    let legacy = parse_op_opt(from)?;
-                    if legacy != op_val {
-                        return None;
-                    }
-                    Some(op_val)
-                }
-                (None, true) => None,
-                (None, false) => Some(parse_op_opt(from)?),
-            };
-            match resolved_op {
-                Some(op_val) => format!("break-res {pattern} op={op_val}"),
-                None => format!("break-res {pattern}"),
-            }
+            format_quick_break_line("break-res", pattern, from, to, explicit_op)?
         }
         QuickRule::Header => {
             let from = from.trim_end_matches(':').trim();
@@ -3478,7 +3575,7 @@ break example.com/api
             "example.com",
             "/",
         );
-        assert!(matches!(paused.action, Some(Action::BreakRequest)));
+        assert!(matches!(paused.action, Some(Action::BreakRequest(_))));
         let kept = without_breaks(paused);
         assert!(kept.action.is_none());
         assert!(!kept.delay.is_zero());
@@ -3869,7 +3966,10 @@ break-res example.com/graphql op=anonymous
             "/graphql",
             &["PlaceOrder".to_string()],
         );
-        assert_eq!(break_eff.action, Some(Action::BreakRequest));
+        assert_eq!(
+            break_eff.action,
+            Some(Action::BreakRequest(BreakCondition::default()))
+        );
 
         let break_res_eff = effect_with_ops(
             &rules,
@@ -3877,7 +3977,10 @@ break-res example.com/graphql op=anonymous
             "/graphql",
             &["anonymous".to_string()],
         );
-        assert_eq!(break_res_eff.action, Some(Action::BreakResponse));
+        assert_eq!(
+            break_res_eff.action,
+            Some(Action::BreakResponse(BreakCondition::default()))
+        );
     }
 
     #[test]
@@ -5078,5 +5181,139 @@ resolve a.com *
         assert_eq!(empty.rule_count, 0);
         assert_eq!(empty.total_flows, 0);
         assert_eq!(empty.matched_flows, 0);
+    }
+
+    #[test]
+    fn conditional_break_parses_header_body_op_and_rejects_invalid() {
+        let rules = parse_rules(
+            r#"
+            break api.example.com/v1 header=X-Debug:1 body=error op=UpdateUser
+            break-res api.example.com/v1 "header=Content-Type:application/json" "body=invalid token"
+            break api.example.com/v2 header=X-Trace
+            "#,
+        );
+        assert_eq!(rules.len(), 3);
+        assert_eq!(
+            rules[0],
+            Rule::Break {
+                host: "api.example.com".into(),
+                path_prefix: "/v1".into(),
+                op: Some("UpdateUser".into()),
+                cond: BreakCondition {
+                    header: Some(("X-Debug".into(), "1".into())),
+                    body: Some("error".into()),
+                },
+            }
+        );
+        assert_eq!(
+            rules[1],
+            Rule::BreakResponse {
+                host: "api.example.com".into(),
+                path_prefix: "/v1".into(),
+                op: None,
+                cond: BreakCondition {
+                    header: Some(("Content-Type".into(), "application/json".into())),
+                    body: Some("invalid token".into()),
+                },
+            }
+        );
+        assert_eq!(
+            rules[2],
+            Rule::Break {
+                host: "api.example.com".into(),
+                path_prefix: "/v2".into(),
+                op: None,
+                cond: BreakCondition {
+                    header: Some(("X-Trace".into(), String::new())),
+                    body: None,
+                },
+            }
+        );
+
+        assert!(has_request_body_break(
+            &rules,
+            "api.example.com",
+            "/v1/users"
+        ));
+        assert!(!has_request_body_break(
+            &rules,
+            "api.example.com",
+            "/v2/users"
+        ));
+        assert!(!has_request_body_break(
+            &rules,
+            "other.example.com",
+            "/v1/users"
+        ));
+
+        // Invalid / duplicate options must be rejected.
+        assert!(parse_rules("break api.example.com header=").is_empty());
+        assert!(parse_rules("break api.example.com body=").is_empty());
+        assert!(parse_rules("break api.example.com header=A:1 header=B:2").is_empty());
+        assert!(parse_rules("break api.example.com body=a body=b").is_empty());
+        assert!(parse_rules("break api.example.com unknown=1").is_empty());
+    }
+
+    #[test]
+    fn break_condition_matches_headers_and_body_within_cap() {
+        let cond = BreakCondition {
+            header: Some(("x-env".into(), "staging".into())),
+            body: Some("ERR_TIMEOUT".into()),
+        };
+        let headers = vec![("X-Env".into(), "us-STAGING-1".into())];
+        assert!(cond.matches_headers(&headers));
+        assert!(!cond.matches_headers(&[("X-Env".into(), "prod".into())]));
+        assert!(cond.matches_body(br#"{"code":"ERR_TIMEOUT"}"#));
+        assert!(!cond.matches_body(br#"{"code":"OK"}"#));
+
+        // Substring past BODY_CAP (1 MB) is ignored.
+        let mut oversized = vec![b'a'; crate::session::BODY_CAP];
+        oversized.extend_from_slice(b"ERR_TIMEOUT");
+        assert!(!cond.matches_body(&oversized));
+
+        // Header presence-only match (empty value).
+        let presence = BreakCondition {
+            header: Some(("X-Trace".into(), String::new())),
+            body: None,
+        };
+        assert!(presence.matches_headers(&[("x-trace".into(), "any-val".into())]));
+        assert!(!presence.matches_headers(&[("X-Other".into(), "1".into())]));
+    }
+
+    #[test]
+    fn quick_add_break_formats_conditional_header_and_body_and_roundtrips() {
+        let line = append_quick_rule_with_op(
+            "",
+            QuickRule::Break,
+            "api.example.com/pay",
+            false,
+            "X-Debug:1",
+            "insufficient funds",
+            "Charge",
+        )
+        .expect("quick break line");
+        assert_eq!(
+            line.trim(),
+            r#"break api.example.com/pay header=X-Debug:1 "body=insufficient funds" op=Charge"#
+        );
+        let parsed = parse_rules(&line);
+        assert_eq!(parsed.len(), 1);
+        assert!(invalid_rule_lines(&line).is_empty());
+
+        let res_line = append_quick_rule_with_op(
+            "",
+            QuickRule::BreakRes,
+            "api.example.com/pay",
+            false,
+            "Content-Type:json",
+            "error",
+            "",
+        )
+        .expect("quick break-res line");
+        assert_eq!(
+            res_line.trim(),
+            "break-res api.example.com/pay header=Content-Type:json body=error"
+        );
+        assert_eq!(parse_rules(&res_line).len(), 1);
     }
 }

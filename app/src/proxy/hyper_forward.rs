@@ -239,7 +239,7 @@ pub(super) async fn forward_request(
     let mut strip_request_encoding = false;
     let mut headers_replaced = false;
     let mut mapped_remote = false;
-    let mut break_response = false;
+    let mut break_response: Option<rules::BreakCondition> = None;
     let flow_now_ms = crate::rule_vars::VarContext::current_ms();
     let mut response_ops = Vec::new();
     let mut req_header_ops = Vec::new();
@@ -398,24 +398,43 @@ pub(super) async fn forward_request(
                     .map(|res| res.map(|b| b.with_throttle(throttle_down_bps)));
                 }
             },
-            Some(Action::BreakRequest) => {
-                let decision = hub.wait_break(id, BreakSide::Request).await;
-                if decision.drop {
-                    if let Some(left) = incoming.take() {
-                        let _ = drain_and_record_request(&hub, id, left, encoding.as_deref()).await;
+            Some(Action::BreakRequest(cond)) => {
+                let req_hdrs = header_pairs(&parts.headers);
+                let mut should_break = cond.matches_headers(&req_hdrs);
+                if should_break && cond.needs_body() {
+                    if request_prefixed.is_some() {
+                        hub.append_comment(id, "[break skipped: body > 1MB]");
+                        should_break = false;
+                    } else {
+                        let decoded = current_decoded_request_body(
+                            &hub,
+                            id,
+                            body_override.as_deref(),
+                            break_overrode_body || strip_request_encoding,
+                        );
+                        should_break = cond.matches_body(&decoded);
                     }
-                    hub.set_error(id, "断点丢弃");
-                    hub.mark_finished(id);
-                    anyhow::bail!("断点丢弃");
                 }
-                if let Some(next) = decision.headers {
-                    replace_header_map(&mut parts.headers, &next);
-                    headers_replaced = true;
-                }
-                if let Some(b) = decision.body {
-                    body_override = Some(b);
-                    break_overrode_body = true;
-                    strip_request_encoding = true;
+                if should_break {
+                    let decision = hub.wait_break(id, BreakSide::Request).await;
+                    if decision.drop {
+                        if let Some(left) = incoming.take() {
+                            let _ =
+                                drain_and_record_request(&hub, id, left, encoding.as_deref()).await;
+                        }
+                        hub.set_error(id, "断点丢弃");
+                        hub.mark_finished(id);
+                        anyhow::bail!("断点丢弃");
+                    }
+                    if let Some(next) = decision.headers {
+                        replace_header_map(&mut parts.headers, &next);
+                        headers_replaced = true;
+                    }
+                    if let Some(b) = decision.body {
+                        body_override = Some(b);
+                        break_overrode_body = true;
+                        strip_request_encoding = true;
+                    }
                 }
             }
             Some(Action::MapRemote { url, path_prefix }) => {
@@ -458,7 +477,7 @@ pub(super) async fn forward_request(
                     }
                 }
             }
-            Some(Action::BreakResponse) => break_response = true,
+            Some(Action::BreakResponse(cond)) => break_response = Some(cond.clone()),
             Some(Action::Block { drop_conn, status }) => {
                 if let Some(left) = incoming.take() {
                     let _ = drain_and_record_request(&hub, id, left, encoding.as_deref()).await;
@@ -882,7 +901,7 @@ pub(super) async fn forward_request(
     let has_resp_hooks = !websocket && req_hooks.iter().any(|h| h.phase.runs_response());
     let no_resp_body = response_has_no_body(req_method.as_str(), parts.status.as_u16());
     if !websocket
-        && !break_response
+        && break_response.is_none()
         && (has_resp_hooks
             || (!no_resp_body && (!response_replaces.is_empty() || !response_json_ops.is_empty())))
     {
@@ -1047,8 +1066,11 @@ pub(super) async fn forward_request(
             }
         }
     }
-    if break_response && !websocket {
-        return hold_hyper_response(hub, id, parts, body, resp_encoding)
+    if let Some(cond) = break_response
+        && !websocket
+        && cond.matches_headers(&header_pairs(&parts.headers))
+    {
+        return hold_hyper_response(hub, id, parts, body, resp_encoding, cond)
             .await
             .map(|res| res.map(|b| b.with_throttle(throttle_down_bps)));
     }

@@ -158,7 +158,10 @@ where
     let cors = plan.cors;
     let throttle_up_bps = plan.throttle_up_bps;
     let throttle_down_bps = plan.throttle_down_bps;
-    let break_response = matches!(plan.action, Some(Action::BreakResponse));
+    let break_response: Option<rules::BreakCondition> = match &plan.action {
+        Some(Action::BreakResponse(cond)) => Some(cond.clone()),
+        _ => None,
+    };
     if cors && method.eq_ignore_ascii_case("OPTIONS") && plan.action.is_none() {
         if !request_taken {
             let _ = drain_request(&mut client, &headers, &hub, id).await;
@@ -237,30 +240,47 @@ where
                 return Ok(());
             }
         },
-        Some(Action::BreakRequest) => {
-            let decision = hub.wait_break(id, BreakSide::Request).await;
-            if decision.drop {
-                if !request_taken && !has_expect {
-                    let _ = drain_request(&mut client, &headers, &hub, id).await;
+        Some(Action::BreakRequest(cond)) => {
+            let mut should_break = cond.matches_headers(&headers);
+            if should_break && cond.needs_body() {
+                if request_overflowed {
+                    hub.append_comment(id, "[break skipped: body > 1MB]");
+                    should_break = false;
+                } else {
+                    let decoded = current_decoded_request_body(
+                        &hub,
+                        id,
+                        body_override.as_deref(),
+                        break_overrode_body || strip_request_encoding,
+                    );
+                    should_break = cond.matches_body(&decoded);
                 }
-                hub.set_error(id, "断点丢弃");
-                hub.mark_finished(id);
-                let _ = client.shutdown().await;
-                return Ok(());
             }
-            if let Some(next) = decision.headers {
-                let existing = hub.with_session(|s| {
-                    s.get(id)
-                        .map(|f| f.request_body.clone())
-                        .unwrap_or_default()
-                });
-                hub.replace_request(id, next.clone(), existing);
-                headers = next;
-            }
-            if let Some(b) = decision.body {
-                body_override = Some(b);
-                break_overrode_body = true;
-                strip_request_encoding = true;
+            if should_break {
+                let decision = hub.wait_break(id, BreakSide::Request).await;
+                if decision.drop {
+                    if !request_taken && !has_expect {
+                        let _ = drain_request(&mut client, &headers, &hub, id).await;
+                    }
+                    hub.set_error(id, "断点丢弃");
+                    hub.mark_finished(id);
+                    let _ = client.shutdown().await;
+                    return Ok(());
+                }
+                if let Some(next) = decision.headers {
+                    let existing = hub.with_session(|s| {
+                        s.get(id)
+                            .map(|f| f.request_body.clone())
+                            .unwrap_or_default()
+                    });
+                    hub.replace_request(id, next.clone(), existing);
+                    headers = next;
+                }
+                if let Some(b) = decision.body {
+                    body_override = Some(b);
+                    break_overrode_body = true;
+                    strip_request_encoding = true;
+                }
             }
         }
         Some(Action::MapRemote { url, path_prefix }) => {
@@ -310,7 +330,7 @@ where
                 hub.replace_request(id, headers.clone(), existing);
             }
         }
-        Some(Action::BreakResponse) | None => {}
+        Some(Action::BreakResponse(_)) | None => {}
         Some(Action::Block { drop_conn, status }) => {
             if !request_taken {
                 let _ = drain_request(&mut client, &headers, &hub, id).await;
@@ -615,7 +635,7 @@ where
             &headers,
             &body,
             &plan,
-            break_response,
+            break_response.as_ref(),
             throttle_up_bps,
             throttle_down_bps,
             flow_now_ms,
@@ -826,7 +846,7 @@ where
         inner: origin,
     };
     if !websocket
-        && !break_response
+        && break_response.is_none()
         && (has_resp_hooks
             || (!no_resp_body
                 && (!plan.response_replaces.is_empty() || !plan.response_json_ops.is_empty())))
@@ -944,7 +964,9 @@ where
             return Ok(());
         }
     }
-    if break_response {
+    if let Some(ref cond) = break_response
+        && cond.matches_headers(&resp_headers)
+    {
         match read_capped_body(
             &mut origin,
             &resp_headers,
@@ -957,6 +979,29 @@ where
                 let encoding = header_value(&resp_headers, "content-encoding");
                 if !body.is_empty() {
                     note_decoded(&hub, id, Direction::Response, &body, encoding.as_deref());
+                }
+                let body_matched = if cond.needs_body() {
+                    let decoded = hub.with_session(|s| {
+                        s.get(id)
+                            .map(|f| f.response_body.clone())
+                            .unwrap_or_default()
+                    });
+                    cond.matches_body(&decoded)
+                } else {
+                    true
+                };
+                if !body_matched {
+                    write_bytes(
+                        &mut client,
+                        status,
+                        reason_phrase(status),
+                        &resp_headers,
+                        &body,
+                        throttle_down_bps,
+                    )
+                    .await?;
+                    hub.mark_finished(id);
+                    return Ok(());
                 }
                 let decision = hub.wait_break(id, BreakSide::Response).await;
                 if decision.drop {
