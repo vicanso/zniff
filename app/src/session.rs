@@ -1069,6 +1069,18 @@ fn same_cached_view(flow: &Flow, row: &CachedFlowView) -> bool {
         && flow.relay_source == row.relay_source
 }
 
+/// How long cleared flows remain recoverable in the temporary undo slot.
+pub const CLEAR_UNDO_TTL: Duration = Duration::from_secs(5);
+
+#[derive(Debug)]
+struct ClearUndoSnapshot {
+    order: VecDeque<u64>,
+    flows: HashMap<u64, Flow>,
+    dropped: u64,
+    cached_total: Option<usize>,
+    expires_at: SystemTime,
+}
+
 #[derive(Debug, Default)]
 pub struct Session {
     order: VecDeque<u64>,
@@ -1079,6 +1091,7 @@ pub struct Session {
     next_id: u64,
     next_rev: u64,
     cached_total: Option<usize>,
+    clear_undo: Option<ClearUndoSnapshot>,
 }
 
 impl Session {
@@ -1102,6 +1115,7 @@ impl Session {
     pub fn open(&mut self, draft: FlowDraft) -> u64 {
         let now = crate::clock::now();
         self.spill.gc(now);
+        self.expire_clear_undo_at(now);
         self.next_id += 1;
         self.next_rev += 1;
         let id = self.next_id;
@@ -1861,6 +1875,7 @@ impl Session {
 
     pub fn clear(&mut self) {
         self.next_rev += 1;
+        self.clear_undo = None;
         self.order.clear();
         self.order.shrink_to_fit();
         self.flows.clear();
@@ -1870,6 +1885,109 @@ impl Session {
         self.dropped = 0;
         self.cached_total = None;
         trim_memory();
+    }
+
+    /// Clears all flows into a temporary 5-second undo slot.
+    /// Returns the number of flows stashed (`0` if the session was already empty).
+    pub fn clear_with_undo(&mut self) -> usize {
+        self.clear_with_undo_at(crate::clock::now(), CLEAR_UNDO_TTL)
+    }
+
+    pub fn clear_with_undo_at(&mut self, now: SystemTime, ttl: Duration) -> usize {
+        let count = self.flows.len();
+        if count == 0 {
+            self.expire_clear_undo_at(now);
+            return 0;
+        }
+        self.clear_undo = None;
+        self.next_rev += 1;
+        self.bytes = 0;
+        let snapshot = ClearUndoSnapshot {
+            order: std::mem::take(&mut self.order),
+            flows: std::mem::take(&mut self.flows),
+            dropped: std::mem::take(&mut self.dropped),
+            cached_total: self.cached_total.take(),
+            expires_at: now + ttl,
+        };
+        self.clear_undo = Some(snapshot);
+        count
+    }
+
+    /// Restores stashed flows if still within the undo window, merging with any
+    /// new flows that arrived after clear without ID collisions.
+    pub fn undo_clear(&mut self) -> usize {
+        self.undo_clear_at(crate::clock::now())
+    }
+
+    pub fn undo_clear_at(&mut self, now: SystemTime) -> usize {
+        let Some(snapshot) = self.clear_undo.take() else {
+            return 0;
+        };
+        if now >= snapshot.expires_at {
+            if self.flows.is_empty() {
+                self.spill.clear();
+            }
+            trim_memory();
+            return 0;
+        }
+        self.next_rev += 1;
+        let rev = self.next_rev;
+        let mut merged_order = VecDeque::with_capacity(snapshot.order.len() + self.order.len());
+        let mut old_flows = snapshot.flows;
+        let mut restored = 0usize;
+        for id in snapshot.order {
+            let Some(mut flow) = old_flows.remove(&id) else {
+                continue;
+            };
+            if self.flows.contains_key(&flow.id) {
+                self.next_id += 1;
+                flow.id = self.next_id;
+            } else {
+                self.next_id = self.next_id.max(flow.id);
+            }
+            flow.rev = rev;
+            let fid = flow.id;
+            self.flows.insert(fid, flow);
+            merged_order.push_back(fid);
+            restored += 1;
+        }
+        merged_order.extend(self.order.drain(..));
+        self.order = merged_order;
+        self.bytes = self.flows.values().map(|flow| flow.accounted).sum();
+        self.dropped = self.dropped.saturating_add(snapshot.dropped);
+        if let Some(old_total) = snapshot.cached_total {
+            self.cached_total = Some(old_total.saturating_add(self.cached_total.unwrap_or(0)));
+        }
+        restored
+    }
+
+    /// Drops the stashed undo snapshot once its deadline has passed.
+    pub fn expire_clear_undo(&mut self) -> bool {
+        self.expire_clear_undo_at(crate::clock::now())
+    }
+
+    pub fn expire_clear_undo_at(&mut self, now: SystemTime) -> bool {
+        let expired = self
+            .clear_undo
+            .as_ref()
+            .is_some_and(|snapshot| now >= snapshot.expires_at);
+        if !expired {
+            return false;
+        }
+        self.clear_undo = None;
+        if self.flows.is_empty() {
+            self.spill.clear();
+        }
+        trim_memory();
+        true
+    }
+
+    #[cfg(test)]
+    pub fn has_clear_undo_at(&self, now: SystemTime) -> Option<usize> {
+        self.clear_undo
+            .as_ref()
+            .filter(|snapshot| now < snapshot.expires_at)
+            .map(|snapshot| snapshot.flows.len())
     }
 
     /// Removes all unpinned flows while keeping pinned flows intact.
@@ -4818,5 +4936,112 @@ mod tests {
             format_client_label(&relay_label("deadbeef1234"), crate::i18n::Lang::En),
             "Relay deadbeef"
         );
+    }
+
+    #[test]
+    fn clear_with_undo_stash_restore_and_merge_without_id_collisions() {
+        let mut session = Session::default();
+        let t0 = crate::clock::now();
+        let a = session.open(draft("a.example"));
+        session.replace_response(a, 200, Vec::new(), b"alpha".to_vec());
+        let b = session.open(draft("b.example"));
+        session.replace_response(b, 201, Vec::new(), b"beta".to_vec());
+        let bytes_before = session.bytes;
+
+        assert_eq!(session.clear_with_undo_at(t0, CLEAR_UNDO_TTL), 2);
+        assert_eq!(session.len(), 0);
+        assert_eq!(session.bytes, 0);
+        assert_eq!(
+            session.has_clear_undo_at(t0 + Duration::from_secs(1)),
+            Some(2)
+        );
+
+        // Clearing an already-empty session within TTL is a no-op and preserves stash.
+        assert_eq!(
+            session.clear_with_undo_at(t0 + Duration::from_secs(1), CLEAR_UNDO_TTL),
+            0
+        );
+        assert_eq!(
+            session.has_clear_undo_at(t0 + Duration::from_secs(2)),
+            Some(2)
+        );
+
+        // New traffic arrives while the undo toast is visible.
+        let c = session.open(draft("c.example"));
+        assert!(c > b);
+        session.replace_response(c, 202, Vec::new(), b"gamma".to_vec());
+
+        // Restore within 5s merges old flows before new flows with no ID collisions.
+        assert_eq!(session.undo_clear_at(t0 + Duration::from_secs(3)), 2);
+        assert_eq!(session.len(), 3);
+        let ids: Vec<u64> = session.order.iter().copied().collect();
+        assert_eq!(ids, vec![a, b, c]);
+        assert_eq!(session.get(a).unwrap().host, "a.example");
+        assert_eq!(session.get(b).unwrap().host, "b.example");
+        assert_eq!(session.get(c).unwrap().host, "c.example");
+        assert!(session.bytes >= bytes_before);
+        assert_eq!(session.has_clear_undo_at(t0 + Duration::from_secs(3)), None);
+        // Second undo is a no-op.
+        assert_eq!(session.undo_clear_at(t0 + Duration::from_secs(3)), 0);
+    }
+
+    #[test]
+    fn clear_with_undo_remaps_colliding_ids_on_restore() {
+        let mut session = Session::default();
+        let t0 = crate::clock::now();
+        let a = session.open(draft("old.example"));
+        assert_eq!(session.clear_with_undo_at(t0, CLEAR_UNDO_TTL), 1);
+
+        // Simulate a colliding ID (e.g. from cached web view sync).
+        session.next_id = a - 1;
+        let colliding = session.open(draft("new.example"));
+        assert_eq!(colliding, a);
+
+        assert_eq!(session.undo_clear_at(t0 + Duration::from_secs(1)), 1);
+        assert_eq!(session.len(), 2);
+        let hosts: Vec<&str> = session
+            .order
+            .iter()
+            .map(|id| session.get(*id).unwrap().host.as_str())
+            .collect();
+        assert_eq!(hosts, vec!["old.example", "new.example"]);
+        assert_ne!(session.order[0], session.order[1]);
+    }
+
+    #[test]
+    fn clear_with_undo_expires_and_drops_on_ttl_or_next_clear() {
+        let mut session = Session::default();
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        session.open(draft("first.example"));
+        assert_eq!(session.clear_with_undo_at(t0, CLEAR_UNDO_TTL), 1);
+
+        // Before 5s: not expired.
+        assert!(!session.expire_clear_undo_at(t0 + Duration::from_secs(4)));
+        assert_eq!(
+            session.has_clear_undo_at(t0 + Duration::from_secs(4)),
+            Some(1)
+        );
+
+        // At 5s: expires and drops stash.
+        assert!(session.expire_clear_undo_at(t0 + CLEAR_UNDO_TTL));
+        assert_eq!(session.has_clear_undo_at(t0 + CLEAR_UNDO_TTL), None);
+        assert_eq!(session.undo_clear_at(t0 + CLEAR_UNDO_TTL), 0);
+
+        // Next non-empty clear replaces previous stash.
+        session.open(draft("second.example"));
+        assert_eq!(session.clear_with_undo_at(t0, CLEAR_UNDO_TTL), 1);
+        let third = session.open(draft("third.example"));
+        assert_eq!(
+            session.clear_with_undo_at(t0 + Duration::from_secs(1), CLEAR_UNDO_TTL),
+            1
+        );
+        assert_eq!(session.undo_clear_at(t0 + Duration::from_secs(2)), 1);
+        assert_eq!(session.len(), 1);
+        assert_eq!(session.get(third).unwrap().host, "third.example");
+
+        // Hard clear drops stash immediately.
+        assert_eq!(session.clear_with_undo_at(t0, CLEAR_UNDO_TTL), 1);
+        session.clear();
+        assert_eq!(session.undo_clear_at(t0 + Duration::from_secs(1)), 0);
     }
 }

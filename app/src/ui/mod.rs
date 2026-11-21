@@ -123,6 +123,7 @@ mod seq_panel;
 mod seq_swimlane;
 mod session_actions;
 mod theme;
+mod toast_overlay;
 mod toolbar;
 mod web_poll;
 
@@ -178,6 +179,7 @@ pub(crate) use self::seq_panel::*;
 pub(crate) use self::seq_swimlane::*;
 pub(crate) use self::session_actions::*;
 pub(crate) use self::theme::*;
+pub(crate) use self::toast_overlay::*;
 pub(crate) use self::toolbar::*;
 #[allow(unused_imports)]
 pub(crate) use self::web_poll::*;

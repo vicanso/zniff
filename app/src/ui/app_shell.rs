@@ -430,10 +430,12 @@ pub fn App() -> impl IntoElement {
     let toast_shown = signal(Vec::<(u64, StatusMsg, ToastTransitionStatus)>::new());
     let toast_state = ToastStackState::new();
     let toast_overlay_gen = signal(0_u64);
+    let clear_toast_id = stored(None::<u64>);
     let toast_manager_tick = toast_manager;
     let toast_shown_tick = toast_shown;
     let toast_state_tick = toast_state;
     let toast_gen_tick = toast_overlay_gen;
+    let clear_toast_tick = clear_toast_id;
     // The hex text's own box is only as wide as the current line, so measuring
     // it always says 16 bytes fit. The pane viewport is the width the card
     // actually has. Publishing it from this tick rebuilds the text; a signal
@@ -442,6 +444,7 @@ pub fn App() -> impl IntoElement {
     let pane_tick = pane_px.clone();
     let seen_rules_rev = stored(controls_tick.hub.rules_revision());
     set_interval(Duration::from_millis(16), move || {
+        controls_tick.hub.expire_clear_undo();
         let pending_toasts = {
             let mut q = controls_tick
                 .toast_queue
@@ -458,7 +461,14 @@ pub fn App() -> impl IntoElement {
             let now = nsh_core::time::now();
             let next_toasts = toast_manager_tick.with(|m| {
                 for (tid, msg) in pending_toasts {
+                    if matches!(msg, StatusMsg::ClearedFlows { .. }) {
+                        if let Some(prev_id) = clear_toast_tick.get() {
+                            m.dismiss(&prev_id, now);
+                        }
+                        clear_toast_tick.replace(Some(tid));
+                    }
                     let timeout_ms = match &msg {
+                        StatusMsg::ClearedFlows { .. } => 5000,
                         StatusMsg::UpdateUpToDate(_)
                         | StatusMsg::UpdateAvailable(_)
                         | StatusMsg::UpdateCheckFailed(_) => 4000,
@@ -1366,7 +1376,7 @@ pub fn App() -> impl IntoElement {
         .child(about_modal(profile_signals, update_state, controls.clone()))
         .child(command_palette_modal(
             palette_open,
-            controls,
+            controls.clone(),
             running,
             use_system_proxy,
             rows,
@@ -1379,163 +1389,11 @@ pub fn App() -> impl IntoElement {
             baseline,
             shown,
         ))
-        .child(each(
-            move || {
-                if toast_shown.with(Vec::is_empty) {
-                    Vec::new()
-                } else {
-                    vec![toast_overlay_gen.get()]
-                }
-            },
-            |id| *id,
-            move |_, _| {
-                overlay()
-                    .inset_0()
-                    .flex_col()
-                    .items_center()
-                    .pt(px(54.0))
-                    .pointer_events(PointerEvents::None)
-                    .child(
-                        toast_stack()
-                            .placement(Anchor::TopCenter)
-                            .state(toast_state)
-                            .w(move || px((window().width.0 - 24.0).clamp(220.0, 380.0)))
-                            .max_w(move || px((window().width.0 - 24.0).max(200.0)))
-                            .pointer_events(PointerEvents::Auto)
-                            .child(each(
-                                toast_shown,
-                                |(id, _, _)| *id,
-                                move |item, _| {
-                                    let id = item.with(|(id, _, _)| *id);
-                                    let dismiss_manager = toast_manager;
-                                    let dismiss_shown = toast_shown;
-                                    let dismiss_one = move || {
-                                        let now = nsh_core::time::now();
-                                        let next = dismiss_manager.with(|m| {
-                                            m.dismiss(&id, now);
-                                            m.visible(3)
-                                                .map(|(id, data, status)| {
-                                                    (*id, data.clone(), status)
-                                                })
-                                                .collect::<Vec<_>>()
-                                        });
-                                        dismiss_shown.set(next);
-                                    };
-                                    toast()
-                                        .transition_status(move || item.with(|(_, _, s)| *s))
-                                        .on_dismiss_request(dismiss_one)
-                                        .rounded(px(10.0))
-                                        .border_1()
-                                        .border_color(border_strong())
-                                        .bg(bg_card())
-                                        .shadow_lg()
-                                        .transition_all()
-                                        .duration(180.0)
-                                        .starting_class("opacity-0 -translate-y-2")
-                                        .ending_class("opacity-0 scale-95")
-                                        .child(
-                                            view()
-                                                .w_full()
-                                                .px_3p5()
-                                                .py_3()
-                                                .flex_row()
-                                                .items_center()
-                                                .gap_3()
-                                                .cursor(Cursor::Pointer)
-                                                .on_press(dismiss_one)
-                                                .child(
-                                                    view()
-                                                        .w(px(32.0))
-                                                        .h(px(32.0))
-                                                        .rounded(px(8.0))
-                                                        .flex_shrink_0()
-                                                        .flex_row()
-                                                        .items_center()
-                                                        .justify_center()
-                                                        .bg(move || {
-                                                            if item.with(|(_, msg, _)| {
-                                                                msg.toast_kind() == Some(true)
-                                                            }) {
-                                                                status_warn_bg()
-                                                            } else {
-                                                                status_ok_bg()
-                                                            }
-                                                        })
-                                                        .child(glyph_px(
-                                                            16.0,
-                                                            move || {
-                                                                if item.with(|(_, msg, _)| {
-                                                                    msg.toast_kind() == Some(true)
-                                                                }) {
-                                                                    Glyph::Alert
-                                                                } else {
-                                                                    Glyph::Check
-                                                                }
-                                                            },
-                                                            move || {
-                                                                if item.with(|(_, msg, _)| {
-                                                                    msg.toast_kind() == Some(true)
-                                                                }) {
-                                                                    color(status_warn_fg())
-                                                                } else {
-                                                                    color(status_ok_fg())
-                                                                }
-                                                            },
-                                                        )),
-                                                )
-                                                .child(
-                                                    view()
-                                                        .flex_1()
-                                                        .min_w(px(0.0))
-                                                        .flex_col()
-                                                        .gap(px(2.0))
-                                                        .child(
-                                                            text(move || {
-                                                                let lang = ui_lang(ui_langs());
-                                                                item.with(|(_, msg, _)| {
-                                                                    msg.toast_title(lang)
-                                                                        .to_string()
-                                                                })
-                                                            })
-                                                            .text_size(px(13.0))
-                                                            .font_weight(FontWeight::SEMIBOLD)
-                                                            .text_color(fg_primary()),
-                                                        )
-                                                        .child(
-                                                            text(move || {
-                                                                let lang = ui_lang(ui_langs());
-                                                                item.with(|(_, msg, _)| {
-                                                                    msg.text(lang)
-                                                                })
-                                                            })
-                                                            .number_of_lines(3)
-                                                            .text_overflow(EllipsizeMode::Middle)
-                                                            .text_size(px(12.0))
-                                                            .text_color(fg_secondary()),
-                                                        ),
-                                                )
-                                                .child(
-                                                    view()
-                                                        .w(px(20.0))
-                                                        .h(px(20.0))
-                                                        .rounded(px(5.0))
-                                                        .flex_shrink_0()
-                                                        .flex_row()
-                                                        .items_center()
-                                                        .justify_center()
-                                                        .hover(|s| s.bg(bg_control_hover()))
-                                                        .active(|s| s.opacity(0.75))
-                                                        .label(tr("关闭", "Dismiss"))
-                                                        .child(glyph_px(
-                                                            10.5,
-                                                            || Glyph::Close,
-                                                            || color(fg_muted()),
-                                                        )),
-                                                ),
-                                        )
-                                },
-                            )),
-                    )
-            },
+        .child(toast_overlay(
+            toast_shown,
+            toast_overlay_gen,
+            toast_state,
+            toast_manager,
+            controls.clone(),
         ))
 }

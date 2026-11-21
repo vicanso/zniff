@@ -608,6 +608,26 @@ impl Hub {
         self.touch();
     }
 
+    pub fn clear_session_with_undo(&self) -> usize {
+        let cleared = self.with_session(|session| session.clear_with_undo());
+        if cleared > 0 {
+            self.touch();
+        }
+        cleared
+    }
+
+    pub fn undo_clear_session(&self) -> usize {
+        let restored = self.with_session(|session| session.undo_clear());
+        if restored > 0 {
+            self.touch();
+        }
+        restored
+    }
+
+    pub fn expire_clear_undo(&self) -> bool {
+        self.with_session(|session| session.expire_clear_undo())
+    }
+
     pub fn clear_unpinned(&self) -> usize {
         let removed = self.with_session(|session| session.clear_unpinned());
         if removed > 0 {

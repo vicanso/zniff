@@ -9,13 +9,25 @@ pub(crate) fn clear_captured(
     seq_builder: SeqBuilder,
     shown: Shown,
 ) {
-    controls.hub.clear_session();
+    let cleared = controls.hub.clear_session_with_undo();
     selected.set(None);
     baseline.set(None);
     reset_compose(compose);
     close_sequence_diagram(seq_builder);
     clear_shown(shown);
-    crate::session::trim_memory();
+    if cleared > 0 {
+        set_status(controls, StatusMsg::ClearedFlows { count: cleared });
+    } else {
+        crate::session::trim_memory();
+    }
+}
+
+pub(crate) fn undo_clear_captured(controls: &Controls) -> usize {
+    let restored = controls.hub.undo_clear_session();
+    if restored > 0 {
+        set_status(controls, StatusMsg::ClearUndone { count: restored });
+    }
+    restored
 }
 
 pub(crate) fn clear_unpinned_captured(

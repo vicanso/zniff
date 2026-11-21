@@ -2517,6 +2517,15 @@ fn sync_hub_op(slot: &mut Slot, op: &str, value: &Value) -> Reply {
             slot.hub.set_comment(id, json_text(value));
         }
         "clear" => slot.hub.clear_session(),
+        "clear_undoable" => {
+            slot.hub.clear_session_with_undo();
+        }
+        "undo_clear" => {
+            slot.hub.undo_clear_session();
+        }
+        "expire_clear_undo" => {
+            slot.hub.expire_clear_undo();
+        }
         "clear_unpinned" => {
             slot.hub.clear_unpinned();
         }

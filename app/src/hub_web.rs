@@ -549,6 +549,36 @@ impl Hub {
         post_op(json!({"op": "clear"}));
     }
 
+    pub fn clear_session_with_undo(&self) -> usize {
+        let cleared = self.with_session(|session| session.clear_with_undo());
+        if cleared > 0 {
+            self.in_flight_details
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .clear();
+            self.bump();
+            post_op(json!({"op": "clear_undoable"}));
+        }
+        cleared
+    }
+
+    pub fn undo_clear_session(&self) -> usize {
+        let restored = self.with_session(|session| session.undo_clear());
+        if restored > 0 {
+            self.bump();
+        }
+        post_op(json!({"op": "undo_clear"}));
+        restored
+    }
+
+    pub fn expire_clear_undo(&self) -> bool {
+        let expired = self.with_session(|session| session.expire_clear_undo());
+        if expired {
+            post_op(json!({"op": "expire_clear_undo"}));
+        }
+        expired
+    }
+
     pub fn clear_unpinned(&self) -> usize {
         let removed = self.with_session(|session| session.clear_unpinned());
         if removed > 0 {

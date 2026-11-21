@@ -235,6 +235,12 @@ pub enum StatusMsg {
     AdbFailed(String),
     CopiedLinuxCaCmd(String),
     CopiedSystemInfo,
+    ClearedFlows {
+        count: usize,
+    },
+    ClearUndone {
+        count: usize,
+    },
 }
 
 fn port_in_use(err: &str) -> bool {
@@ -777,6 +783,16 @@ impl StatusMsg {
                 Lang::En => format!("Copied system CA install command · {cmd}"),
             },
             Self::CopiedSystemInfo => t(lang, "已复制系统与环境信息", "Copied system info").into(),
+            Self::ClearedFlows { count } => match lang {
+                Lang::Zh => format!("已清空 {count} 条流量"),
+                Lang::En if *count == 1 => "Cleared 1 flow".to_string(),
+                Lang::En => format!("Cleared {count} flows"),
+            },
+            Self::ClearUndone { count } => match lang {
+                Lang::Zh => format!("已恢复 {count} 条流量"),
+                Lang::En if *count == 1 => "Restored 1 flow".to_string(),
+                Lang::En => format!("Restored {count} flows"),
+            },
         }
     }
 
@@ -828,7 +844,8 @@ impl StatusMsg {
             | Self::CopiedOpenApi { .. }
             | Self::CopiedSystemInfo
             | Self::UpdateUpToDate(_)
-            | Self::UpdateAvailable(_) => Some(false),
+            | Self::UpdateAvailable(_)
+            | Self::ClearedFlows { .. } => Some(false),
             Self::ExportFailed(_)
             | Self::ImportFailed(_)
             | Self::SaveFailed(_)
@@ -910,6 +927,7 @@ impl StatusMsg {
             Self::UpdateUpToDate(_) | Self::UpdateAvailable(_) => {
                 t(lang, "检查更新", "Update Check")
             }
+            Self::ClearedFlows { .. } => t(lang, "已清空会话", "Session Cleared"),
             Self::ExportFailed(_)
             | Self::ImportFailed(_)
             | Self::SaveFailed(_)
@@ -1513,6 +1531,29 @@ mod tests {
         assert_eq!(
             StatusMsg::CopiedConfigPath("/tmp/config.toml".into()).toast_kind(),
             Some(false)
+        );
+    }
+
+    #[test]
+    fn cleared_flows_and_undo_messages_are_bilingual() {
+        let cleared = StatusMsg::ClearedFlows { count: 5 };
+        assert_eq!(cleared.toast_kind(), Some(false));
+        assert_eq!(cleared.toast_title(Lang::Zh), "已清空会话");
+        assert_eq!(cleared.toast_title(Lang::En), "Session Cleared");
+        assert_eq!(cleared.text(Lang::Zh), "已清空 5 条流量");
+        assert_eq!(cleared.text(Lang::En), "Cleared 5 flows");
+        assert_eq!(
+            StatusMsg::ClearedFlows { count: 1 }.text(Lang::En),
+            "Cleared 1 flow"
+        );
+
+        let undone = StatusMsg::ClearUndone { count: 5 };
+        assert_eq!(undone.toast_kind(), None);
+        assert_eq!(undone.text(Lang::Zh), "已恢复 5 条流量");
+        assert_eq!(undone.text(Lang::En), "Restored 5 flows");
+        assert_eq!(
+            StatusMsg::ClearUndone { count: 1 }.text(Lang::En),
+            "Restored 1 flow"
         );
     }
 }
