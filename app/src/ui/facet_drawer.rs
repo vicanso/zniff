@@ -254,6 +254,7 @@ pub(crate) fn flow_list(
         .flex_shrink_0()
         .overflow_hidden()
         .bg(bg_list())
+        .child(session_tab_bar())
         .child(
             view()
                 .w_full()

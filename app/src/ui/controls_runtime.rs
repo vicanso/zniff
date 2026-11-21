@@ -29,6 +29,7 @@ pub(crate) fn open_controls() -> Arc<Controls> {
         config_error: Mutex::new(None),
         config_path: Mutex::new(String::new()),
         pending_replay_diff: Mutex::new(None),
+        session_tabs: Mutex::new(SessionTabsStore::new()),
     })
 }
 
@@ -83,6 +84,7 @@ pub(crate) fn open_controls() -> Arc<Controls> {
                 config_error: Mutex::new(cfg_err),
                 config_path: Mutex::new(cfg_path),
                 pending_replay_diff: Mutex::new(None),
+                session_tabs: Mutex::new(SessionTabsStore::new()),
             });
             if let Some(tool) = fallback_tool {
                 set_status(&controls, StatusMsg::ExternalCaFallback { tool });
@@ -124,6 +126,7 @@ pub(crate) fn open_controls() -> Arc<Controls> {
                 config_error: Mutex::new(cfg_err),
                 config_path: Mutex::new(cfg_path),
                 pending_replay_diff: Mutex::new(None),
+                session_tabs: Mutex::new(SessionTabsStore::new()),
             })
         }
     }

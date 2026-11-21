@@ -256,6 +256,8 @@ pub enum StatusMsg {
         count: usize,
     },
     UiZoomChanged(u16),
+    ReadOnlyTab,
+    TabLimitReached(usize),
 }
 
 fn port_in_use(err: &str) -> bool {
@@ -846,6 +848,18 @@ impl StatusMsg {
                 Lang::Zh => format!("界面缩放 {pct}%"),
                 Lang::En => format!("UI zoom {pct}%"),
             },
+            Self::ReadOnlyTab => t(
+                lang,
+                "当前为只读导入标签，请切换回「实时会话」执行此操作",
+                "Imported tab is read-only; switch to Live to modify",
+            )
+            .into(),
+            Self::TabLimitReached(limit) => match lang {
+                Lang::Zh => format!("最多同时打开 {limit} 个导入标签，请先关闭旧标签"),
+                Lang::En => {
+                    format!("Up to {limit} imported tabs can be open at once; close one first")
+                }
+            },
         }
     }
 
@@ -943,7 +957,9 @@ impl StatusMsg {
             | Self::UpdateCheckFailed(_)
             | Self::UpdateFailed { .. }
             | Self::WatchAlert { .. }
-            | Self::ConfigBroken { .. } => Some(true),
+            | Self::ConfigBroken { .. }
+            | Self::ReadOnlyTab
+            | Self::TabLimitReached(_) => Some(true),
             _ => None,
         }
     }

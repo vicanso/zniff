@@ -152,6 +152,9 @@ pub(crate) fn mute_host(controls: &Controls, id: Option<u64>, filter: Signal<Str
 }
 
 pub(crate) fn toggle_pin(controls: &Controls, id: Option<u64>) {
+    if guard_read_only_tab(controls) {
+        return;
+    }
     let Some(flow) = selected_flow(controls, id) else {
         return;
     };
@@ -180,18 +183,36 @@ pub(crate) fn set_baseline(
         set_status(controls, StatusMsg::NeedSelection);
         return;
     };
-    if selected_flow(controls, Some(id)).is_none() {
+    let Some(flow) = selected_flow(controls, Some(id)) else {
         return;
-    }
-    if baseline.get() == Some(id) {
+    };
+    let cur_tab = active_tab_id(controls);
+    let clearing = {
+        let mut store = controls
+            .session_tabs
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let same_as_current = store
+            .baseline_ref()
+            .is_some_and(|b| b.tab_id == cur_tab && b.flow_id == id)
+            || (store.baseline_ref().is_none() && baseline.get() == Some(id));
+        if same_as_current {
+            store.clear_baseline();
+            true
+        } else {
+            store.set_baseline_ref(cur_tab, flow);
+            false
+        }
+    };
+    if clearing {
         baseline.set(None);
         set_status(controls, StatusMsg::BaselineCleared);
-        publish_detail(shown, &controls.hub, Some(id), lang, None);
+        publish_detail_for_controls(shown, controls, Some(id), lang, None);
         return;
     }
     baseline.set(Some(id));
     set_status(controls, StatusMsg::BaselineSet);
-    publish_detail(shown, &controls.hub, Some(id), lang, Some(id));
+    publish_detail_for_controls(shown, controls, Some(id), lang, Some(id));
 }
 
 pub(crate) fn copy_part(controls: &Controls, id: Option<u64>, part: CopyPart) {
@@ -548,7 +569,7 @@ pub(crate) fn body_extension(headers: &[(String, String)], body: &[u8]) -> &'sta
 
 pub(crate) fn selected_flow(controls: &Controls, id: Option<u64>) -> Option<crate::session::Flow> {
     let id = id?;
-    let flow = controls.hub.with_session(|session| session.hydrated(id));
+    let flow = with_active_session(controls, |session| session.hydrated(id));
     if flow.is_none() {
         set_status(controls, StatusMsg::FlowGone);
     }

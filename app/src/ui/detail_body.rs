@@ -496,7 +496,7 @@ pub(crate) fn nudge_body_window(
     } else {
         shown.request_offset.set(next);
     }
-    publish_detail(&shown, &controls.hub, selected.get(), lang, baseline.get());
+    publish_detail_for_controls(&shown, controls, selected.get(), lang, baseline.get());
 }
 
 pub(crate) fn reset_body_offsets(shown: Shown) {
@@ -606,7 +606,7 @@ fn jump_next_body_match(
     let Some(id) = selected.get() else {
         return;
     };
-    let Some(flow) = controls.hub.with_session(|s| s.hydrated(id)) else {
+    let Some(flow) = with_active_session(controls, |s| s.hydrated(id)) else {
         return;
     };
     let (raw, headers, window) = if response {
@@ -636,7 +636,7 @@ fn jump_next_body_match(
         } else {
             shown.request_offset.set(next_offset);
         }
-        publish_detail(&shown, &controls.hub, Some(id), lang, baseline.get());
+        publish_detail_for_controls(&shown, controls, Some(id), lang, baseline.get());
     }
 }
 
@@ -1061,9 +1061,9 @@ pub(crate) fn pretty_chip(
         }
         shown.pretty.set(on);
         reset_body_offsets(shown);
-        publish_detail(
+        publish_detail_for_controls(
             &shown,
-            &controls.hub,
+            &controls,
             selected.get(),
             ui_lang(langs),
             baseline.get(),

@@ -2886,6 +2886,7 @@ fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
             config_error: Mutex::new(None),
             config_path: Mutex::new(String::new()),
             pending_replay_diff: Mutex::new(None),
+            session_tabs: Mutex::new(SessionTabsStore::new()),
         });
 
         let status = signal(StatusMsg::Idle);
@@ -4865,6 +4866,7 @@ fn make_test_controls(tag: &str) -> Arc<Controls> {
         config_error: Mutex::new(None),
         config_path: Mutex::new(String::new()),
         pending_replay_diff: Mutex::new(None),
+        session_tabs: Mutex::new(SessionTabsStore::new()),
     })
 }
 

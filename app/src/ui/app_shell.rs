@@ -56,6 +56,13 @@ pub fn App() -> impl IntoElement {
     provide_context(filter_catalog);
     let facets_open = signal(false);
     let flow_total = signal(0_usize);
+    let session_tabs_sig = signal(vec![TabSummary {
+        id: LIVE_TAB_ID,
+        name: String::new(),
+        count: 0,
+        read_only: false,
+    }]);
+    let active_tab_sig = signal(LIVE_TAB_ID);
     let onboarding_traffic = signal(OnboardingTraffic::default());
     let tls_failure_burst = signal(TlsFailureBurst::default());
     let tls_banner_dismissed = signal(false);
@@ -425,9 +432,10 @@ pub fn App() -> impl IntoElement {
     let detail_top_left = stored(false);
     let seen_detail_stamp = stored((
         true,
+        LIVE_TAB_ID,
         None::<u64>,
         None::<u64>,
-        None::<u64>,
+        None::<(u64, u64)>,
         None::<u64>,
         shown_tick.pretty.get(),
         ui_lang(langs),
@@ -435,6 +443,11 @@ pub fn App() -> impl IntoElement {
         (false, false),
         0_u8,
     ));
+    let seen_tabs_ver = stored(u64::MAX);
+    let seen_active_tab = stored(LIVE_TAB_ID);
+    let seen_live_count = stored(usize::MAX);
+    let session_tabs_tick = session_tabs_sig;
+    let active_tab_tick = active_tab_sig;
     let seen_listen = stored(String::new());
     let seen_lang = stored(ui_lang(langs));
     let baseline_tick = baseline;
@@ -852,8 +865,29 @@ pub fn App() -> impl IntoElement {
         } else {
             false
         };
-        if let Some((source_id, replayed_id)) = take_pending_replay_diff(&controls_tick)
-            && !apply_replay_auto_diff(
+        let tabs_ver_now = session_tabs_version(&controls_tick);
+        let active_tab_now = active_tab_id(&controls_tick);
+        let tab_switched = active_tab_now != seen_active_tab.get();
+        if tab_switched {
+            seen_active_tab.replace(active_tab_now);
+            active_tab_tick.set(active_tab_now);
+            row_cache_tick.borrow_mut().rows.clear();
+            if selected_tick.get_untracked().is_some() {
+                selected_tick.set(None);
+            }
+            baseline_tick.set(baseline_id_for_active_tab(&controls_tick));
+        }
+        let live_count_now = controls_tick.hub.with_session(|s| s.len());
+        if tabs_ver_now != seen_tabs_ver.get() || live_count_now != seen_live_count.get() {
+            seen_tabs_ver.replace(tabs_ver_now);
+            seen_live_count.replace(live_count_now);
+            let next_summaries = session_tab_summaries(&controls_tick, live_count_now);
+            if session_tabs_tick.with_untracked(|cur| cur != &next_summaries) {
+                session_tabs_tick.set(next_summaries);
+            }
+        }
+        if let Some((source_id, replayed_id)) = take_pending_replay_diff(&controls_tick) {
+            if apply_replay_auto_diff(
                 &controls_tick.hub,
                 source_id,
                 replayed_id,
@@ -861,9 +895,17 @@ pub fn App() -> impl IntoElement {
                 baseline_tick,
                 folded,
                 compose_tick,
-            )
-        {
-            queue_pending_replay_diff(&controls_tick, source_id, replayed_id);
+            ) {
+                if let Some(src_flow) = controls_tick.hub.with_session(|s| s.hydrated(source_id)) {
+                    controls_tick
+                        .session_tabs
+                        .lock()
+                        .unwrap_or_else(|err| err.into_inner())
+                        .set_baseline_ref(LIVE_TAB_ID, src_flow);
+                }
+            } else {
+                queue_pending_replay_diff(&controls_tick, source_id, replayed_id);
+            }
         }
         let selected_now = selected_tick.get();
         let lang_now = ui_lang(langs);
@@ -882,8 +924,9 @@ pub fn App() -> impl IntoElement {
             || sort_now != seen_sort.get()
             || path_display_now != seen_path_display.get()
             || spill_expired
-            || facets_opened;
-        let gen_changed = generation != seen_gen.get();
+            || facets_opened
+            || tab_switched;
+        let gen_changed = active_tab_now == LIVE_TAB_ID && generation != seen_gen.get();
         let refresh = refresh_throttle.borrow_mut().decide(
             clock::now(),
             total_tick.get_untracked(),
@@ -924,12 +967,12 @@ pub fn App() -> impl IntoElement {
             seen_lang.replace(lang_now);
             seen_sort.replace(sort_now);
             seen_path_display.replace(path_display_now);
-            let (matched, _) = controls_tick.hub.matching_ids(&effective_filter_now);
+            let matched = active_matching_ids(&controls_tick, &effective_filter_now);
             let facet_ids = if run_secondary
                 && (facets_open_now || layout_mode_now == config::LayoutMode::Split)
                 && filter_now != effective_filter_now
             {
-                Some(controls_tick.hub.matching_ids(&filter_now).0)
+                Some(active_matching_ids(&controls_tick, &filter_now))
             } else {
                 None
             };
@@ -941,15 +984,12 @@ pub fn App() -> impl IntoElement {
                 next_facets,
                 next_catalog,
                 next_total,
-                next_onboarding_traffic,
-                next_tls_burst,
                 next_mem,
                 next_dropped,
                 diag_plan,
             ) = {
                 let mut cache = row_cache_tick.borrow_mut();
-                let burst_now = clock::now();
-                controls_tick.hub.with_session(|session| {
+                with_active_session(&controls_tick, |session| {
                     let lines = project_rows(
                         session,
                         &matched,
@@ -986,19 +1026,24 @@ pub fn App() -> impl IntoElement {
                             &list_filter_now,
                         )
                     });
-                    let next_onboarding_traffic = OnboardingTraffic::from_flows(session.iter());
-                    let next_tls_burst = TlsFailureBurst::from_flows(session.iter(), burst_now);
                     (
                         lines,
                         stats,
                         next_facets,
                         next_catalog,
                         session.len(),
-                        next_onboarding_traffic,
-                        next_tls_burst,
                         format_bytes(session.memory_bytes()),
                         session.dropped(),
                         diag_plan,
+                    )
+                })
+            };
+            let (next_onboarding_traffic, next_tls_burst) = {
+                let burst_now = clock::now();
+                controls_tick.hub.with_session(|live| {
+                    (
+                        OnboardingTraffic::from_flows(live.iter()),
+                        TlsFailureBurst::from_flows(live.iter(), burst_now),
                     )
                 })
             };
@@ -1051,8 +1096,8 @@ pub fn App() -> impl IntoElement {
                 dropped.set(next_dropped);
             }
         } else if stats_only {
-            let (matched, _) = controls_tick.hub.matching_ids(&effective_filter_now);
-            let stats = controls_tick.hub.with_session(|session| {
+            let matched = active_matching_ids(&controls_tick, &effective_filter_now);
+            let stats = with_active_session(&controls_tick, |session| {
                 session::FilteredStats::from_flows(
                     matched.iter().filter_map(|(id, _)| session.get(*id)),
                 )
@@ -1079,34 +1124,46 @@ pub fn App() -> impl IntoElement {
             detail_scroll_tick.scroll_to_offset(px(0.0), false);
             detail_top_left.replace(false);
         }
-        let (selected_rev, selected_done, selected_flags, baseline_rev, baseline_flags) =
-            if selected_now.is_some() || baseline_now.is_some() {
+        let baseline_key_now = baseline_key_for_controls(&controls_tick)
+            .or_else(|| baseline_now.map(|id| (active_tab_now, id)));
+        let (selected_rev, selected_done, selected_flags) = if let Some(id) = selected_now {
+            with_active_session(&controls_tick, |session| {
+                let selected_flow = session.get(id);
+                (
+                    selected_flow.map(|flow| flow.rev),
+                    selected_flow
+                        .map(|flow| flow.finished_at.is_some())
+                        .unwrap_or(true),
+                    selected_flow
+                        .map(|flow| (flow.detail_unloaded(), flow.detail_pending()))
+                        .unwrap_or((false, false)),
+                )
+            })
+        } else {
+            (None, true, (false, false))
+        };
+        let (baseline_rev, baseline_flags) = match baseline_key_now {
+            Some((tab_id, base_id)) if tab_id == LIVE_TAB_ID => {
                 controls_tick.hub.with_session(|session| {
-                    let selected_flow = selected_now.and_then(|id| session.get(id));
-                    let base_flow = baseline_now.and_then(|id| session.get(id));
+                    let base_flow = session.get(base_id);
                     (
-                        selected_flow.map(|flow| flow.rev),
-                        selected_flow
-                            .map(|flow| flow.finished_at.is_some())
-                            .unwrap_or(true),
-                        selected_flow
-                            .map(|flow| (flow.detail_unloaded(), flow.detail_pending()))
-                            .unwrap_or((false, false)),
                         base_flow.map(|flow| flow.rev),
                         base_flow
                             .map(|flow| (flow.detail_unloaded(), flow.detail_pending()))
                             .unwrap_or((false, false)),
                     )
                 })
-            } else {
-                (None, true, (false, false), None, (false, false))
-            };
+            }
+            Some((_tab_id, base_id)) => (Some(base_id), (false, false)),
+            None => (None, (false, false)),
+        };
         let diff_scope_now = shown_tick.diff_scope.get();
         let detail_stamp = (
             false,
+            active_tab_now,
             selected_now,
             selected_rev,
-            baseline_now,
+            baseline_key_now,
             baseline_rev,
             pretty_now,
             lang_now,
@@ -1116,23 +1173,24 @@ pub fn App() -> impl IntoElement {
         );
         if detail_stamp != seen_detail_stamp.get() || spill_expired {
             let prev = seen_detail_stamp.get();
-            let view_changed = prev.1 != selected_now
-                || prev.3 != baseline_now
-                || prev.5 != pretty_now
-                || prev.6 != lang_now
-                || prev.7 != selected_flags
-                || prev.8 != baseline_flags;
+            let view_changed = prev.1 != active_tab_now
+                || prev.2 != selected_now
+                || prev.4 != baseline_key_now
+                || prev.6 != pretty_now
+                || prev.7 != lang_now
+                || prev.8 != selected_flags
+                || prev.9 != baseline_flags;
             let streaming = selected_now.is_some() && !selected_done;
             let due = clock::elapsed(detail_hold.get()) >= Duration::from_millis(200);
             if !streaming || view_changed || spill_expired || due {
                 seen_detail_stamp.replace(detail_stamp);
                 detail_hold.replace(clock::now());
-                if prev.1 != selected_now || prev.5 != pretty_now {
+                if prev.1 != active_tab_now || prev.2 != selected_now || prev.6 != pretty_now {
                     reset_body_offsets(shown_tick);
                 }
-                publish_detail(
+                publish_detail_for_controls(
                     &shown_tick,
-                    &controls_tick.hub,
+                    &controls_tick,
                     selected_now,
                     lang_now,
                     baseline_now,
@@ -1211,7 +1269,11 @@ pub fn App() -> impl IntoElement {
         );
     });
     let marker_open_key = profile_signals.marker_modal_open;
+    let controls_marker_key = controls.clone();
     on_key("mod+m", move |_| {
+        if guard_read_only_tab(&controls_marker_key) {
+            return;
+        }
         marker_open_key.set(!marker_open_key.get());
     });
     let compose_submit_key = compose;
@@ -1435,6 +1497,15 @@ pub fn App() -> impl IntoElement {
                 controls: controls.clone(),
                 selected,
                 install_ca: Rc::clone(&install_ca_cb),
+            });
+            provide_context(SessionTabBarProps {
+                tabs: session_tabs_sig,
+                active_tab: active_tab_sig,
+                controls: controls.clone(),
+                selected,
+                baseline,
+                compose,
+                seq_builder,
             });
             let toggle_sys_cb: Rc<dyn Fn()> = {
                 let c = controls.clone();

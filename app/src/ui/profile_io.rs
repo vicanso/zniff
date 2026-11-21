@@ -462,14 +462,7 @@ pub(crate) fn import_chlsj_file(controls: &Controls, path_text: &str) {
         }
     };
     let items = import_charles::import_charles_chlsj(&value);
-    let count = controls.hub.import_flows(items);
-    set_status(
-        controls,
-        StatusMsg::Imported {
-            count,
-            path: path.display().to_string(),
-        },
-    );
+    open_imported_flows_tab(controls, &path.display().to_string(), items);
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -590,12 +583,6 @@ pub(crate) fn import_har_file(controls: &Controls, path_text: &str) {
             return;
         }
     };
-    let count = controls.hub.import_har(&value);
-    set_status(
-        controls,
-        StatusMsg::Imported {
-            count,
-            path: path.display().to_string(),
-        },
-    );
+    let items = crate::har::import_har(&value);
+    open_imported_flows_tab(controls, &path.display().to_string(), items);
 }

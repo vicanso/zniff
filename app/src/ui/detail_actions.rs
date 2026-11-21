@@ -213,9 +213,9 @@ pub(crate) fn detail_actions(
                     shown.res_json_tree.set(false);
                     shown.pretty.set(!shown.pretty.get());
                     reset_body_offsets(shown);
-                    publish_detail(
+                    publish_detail_for_controls(
                         &shown,
-                        &pretty_controls.hub,
+                        &pretty_controls,
                         selected.get(),
                         ui_lang(langs),
                         baseline.get(),

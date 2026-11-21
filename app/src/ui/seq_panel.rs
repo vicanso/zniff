@@ -13,7 +13,7 @@ pub(crate) fn begin_sequence_diagram(
     if current_rows.is_empty() {
         return;
     }
-    let mut candidates: Vec<SeqCandidate> = controls.hub.with_session(|session| {
+    let mut candidates: Vec<SeqCandidate> = with_active_session(controls, |session| {
         current_rows
             .into_iter()
             .map(|row| {

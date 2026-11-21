@@ -461,9 +461,9 @@ pub(crate) fn row_context_menu(
     let is_marker_check = controls.clone();
     let is_marker = move || {
         picked.get().is_some_and(|id| {
-            is_marker_check
-                .hub
-                .with_session(|s| s.get(id).is_some_and(session::Flow::is_marker))
+            with_active_session(&is_marker_check, |s| {
+                s.get(id).is_some_and(session::Flow::is_marker)
+            })
         })
     };
     let marker_filter_controls = controls.clone();
@@ -472,7 +472,7 @@ pub(crate) fn row_context_menu(
     let can_local = move || {
         let controls = &local_check;
         picked.get().is_some_and(|id| {
-            controls.hub.with_session(|session| {
+            with_active_session(controls, |session| {
                 session
                     .get(id)
                     .is_some_and(|flow| !flow.is_marker() && flow.relay_source.is_none())
@@ -512,9 +512,10 @@ pub(crate) fn row_context_menu(
                                 tr("只看此标记段", "Filter this section"),
                                 closing(menu_open, move || {
                                     if let Some(id) = picked.get()
-                                        && let Some(label) = marker_filter_controls
-                                            .hub
-                                            .with_session(|s| s.get(id).map(|f| f.path.clone()))
+                                        && let Some(label) =
+                                            with_active_session(&marker_filter_controls, |s| {
+                                                s.get(id).map(|f| f.path.clone())
+                                            })
                                     {
                                         filter.set(marker_filter_token(&label));
                                     }
@@ -524,9 +525,10 @@ pub(crate) fn row_context_menu(
                                 tr("复制标记名称", "Copy marker label"),
                                 closing(menu_open, move || {
                                     if let Some(id) = picked.get()
-                                        && let Some(label) = marker_copy_controls
-                                            .hub
-                                            .with_session(|s| s.get(id).map(|f| f.path.clone()))
+                                        && let Some(label) =
+                                            with_active_session(&marker_copy_controls, |s| {
+                                                s.get(id).map(|f| f.path.clone())
+                                            })
                                     {
                                         set_clipboard(label);
                                     }
@@ -536,6 +538,9 @@ pub(crate) fn row_context_menu(
                             .child(action_item(
                                 tr("删除标记", "Delete marker"),
                                 closing(menu_open, move || {
+                                    if guard_read_only_tab(&marker_del_controls) {
+                                        return;
+                                    }
                                     if let Some(id) = picked.get() {
                                         marker_del_controls.hub.remove_marker(id);
                                         if selected.get() == Some(id) {
@@ -712,7 +717,7 @@ pub(crate) fn row_context_menu(
                                     move || -> SharedString {
                                         #[cfg(not(target_arch = "wasm32"))]
                                         let saves_file = picked.get().is_some_and(|id| {
-                                            map_label_check.hub.with_session(|session| {
+                                            with_active_session(&map_label_check, |session| {
                                                 session.get(id).is_some_and(|flow| {
                                                     !flow.response_body.is_empty()
                                                 })
@@ -902,8 +907,8 @@ pub(crate) fn map_local_from_flow(
 
 pub(crate) fn flow_pinned(controls: &Controls, id: Option<u64>) -> bool {
     id.is_some_and(|id| {
-        controls
-            .hub
-            .with_session(|session| session.get(id).is_some_and(|flow| flow.pinned))
+        with_active_session(controls, |session| {
+            session.get(id).is_some_and(|flow| flow.pinned)
+        })
     })
 }

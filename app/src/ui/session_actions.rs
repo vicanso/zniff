@@ -9,8 +9,16 @@ pub(crate) fn clear_captured(
     seq_builder: SeqBuilder,
     shown: Shown,
 ) {
+    if guard_read_only_tab(controls) {
+        return;
+    }
     let cleared = controls.hub.clear_session_with_undo();
     clear_pending_replay_diff(controls);
+    controls
+        .session_tabs
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .clear_baseline_for_tab(LIVE_TAB_ID);
     selected.set(None);
     baseline.set(None);
     reset_compose(compose);
@@ -39,6 +47,9 @@ pub(crate) fn clear_unpinned_captured(
     seq_builder: SeqBuilder,
     shown: Shown,
 ) {
+    if guard_read_only_tab(controls) {
+        return;
+    }
     controls.hub.clear_unpinned();
     if let Some(id) = selected.get()
         && controls
@@ -54,6 +65,11 @@ pub(crate) fn clear_unpinned_captured(
             .hub
             .with_session(|session| session.get(id).is_none())
     {
+        controls
+            .session_tabs
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clear_baseline_for_tab(LIVE_TAB_ID);
         baseline.set(None);
     }
     if seq_builder.open.get() {
@@ -73,6 +89,10 @@ pub(crate) fn clear_unpinned_captured(
 }
 
 pub(crate) fn save_flow_comment(controls: &Controls, id: Option<u64>, shown: Shown) {
+    if guard_read_only_tab(controls) {
+        shown.editing_comment.set(false);
+        return;
+    }
     let Some(id) = id else {
         shown.editing_comment.set(false);
         return;
@@ -230,6 +250,9 @@ pub(crate) fn replay_flow(controls: &Arc<Controls>, id: Option<u64>, edit: Repla
         }
         return;
     };
+    if guard_read_only_tab(controls) {
+        return;
+    }
     if refuse_relay(controls, Some(id)) {
         return;
     }
@@ -256,6 +279,9 @@ pub(crate) fn repeat_flow_batch(controls: &Arc<Controls>, id: Option<u64>, shown
     shown.repeat_interval.set(interval_ms.to_string());
     shown.repeat_concurrency.set(concurrency.to_string());
     shown.repeating.set(false);
+    if guard_read_only_tab(controls) {
+        return;
+    }
     if refuse_relay(controls, Some(id)) {
         return;
     }
@@ -303,8 +329,8 @@ fn unix_secs_now() -> u64 {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn matched_hydrated_flows(controls: &Controls, filter: &str) -> Vec<session::Flow> {
-    let (matched, _) = controls.hub.matching_ids(filter);
-    controls.hub.with_session(|session| {
+    let matched = active_matching_ids(controls, filter);
+    with_active_session(controls, |session| {
         matched
             .into_iter()
             .filter_map(|(id, _)| session.hydrated(id))
@@ -339,9 +365,14 @@ fn spawn_export_save(
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn export_har_file(controls: Arc<Controls>, filter: &str) {
     let redact = redact_options(&controls);
-    let value = controls
-        .hub
-        .export_har_matching_with_redact(filter, &redact);
+    let value = if is_active_tab_read_only(&controls) {
+        let flows = matched_hydrated_flows(&controls, filter);
+        crate::har::export_har_with_redact(&flows, &redact)
+    } else {
+        controls
+            .hub
+            .export_har_matching_with_redact(filter, &redact)
+    };
     let bytes = match serde_json::to_vec_pretty(&value) {
         Ok(bytes) => bytes,
         Err(err) => {

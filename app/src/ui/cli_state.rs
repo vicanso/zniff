@@ -229,6 +229,8 @@ pub(crate) struct Controls {
     pub(crate) config_path: Mutex<String>,
     /// Pending `(source_id, replayed_id)` pair for automatic post-replay diffing (E2).
     pub(crate) pending_replay_diff: Mutex<Option<(u64, u64)>>,
+    /// Session tabs (Live + read-only imported `.har`/`.chlsj` tabs) and cross-tab baseline (E10).
+    pub(crate) session_tabs: Mutex<SessionTabsStore>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]

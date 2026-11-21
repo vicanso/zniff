@@ -75,6 +75,7 @@ fn resolve_preview_hook_override(
     (None, None, None)
 }
 
+#[cfg(test)]
 pub(crate) fn publish_detail(
     shown: &Shown,
     hub: &Hub,
@@ -86,7 +87,37 @@ pub(crate) fn publish_detail(
         clear_shown(*shown);
         return;
     };
-    let snapshot = hub.with_session(|session| session.hydrated(id));
+    let flow = hub.with_session(|session| session.hydrated(id));
+    let base_state = baseline
+        .filter(|&base| base != id)
+        .and_then(|base| hub.with_session(|session| session.hydrated(base)));
+    publish_detail_with_flows(shown, hub, id, flow, base_state, lang);
+}
+
+pub(crate) fn publish_detail_for_controls(
+    shown: &Shown,
+    controls: &Controls,
+    id: Option<u64>,
+    lang: Lang,
+    baseline: Option<u64>,
+) {
+    let Some(id) = id else {
+        clear_shown(*shown);
+        return;
+    };
+    let flow = with_active_session(controls, |session| session.hydrated(id));
+    let base_state = resolve_baseline_flow(controls, Some(id), baseline);
+    publish_detail_with_flows(shown, &controls.hub, id, flow, base_state, lang);
+}
+
+fn publish_detail_with_flows(
+    shown: &Shown,
+    hub: &Hub,
+    id: u64,
+    snapshot: Option<session::Flow>,
+    base_state: Option<session::Flow>,
+    lang: Lang,
+) {
     let Some(flow) = snapshot else {
         clear_shown(*shown);
         shown.phase.set(Phase::Gone);
@@ -121,9 +152,6 @@ pub(crate) fn publish_detail(
         && flow.response_expired.is_none()
         && flow.response_encoding_error.is_none();
     let messages_loading = unloaded && flow.protocol == session::Protocol::WebSocket;
-    let base_state = baseline
-        .filter(|&base| base != id)
-        .and_then(|base| hub.with_session(|session| session.hydrated(base)));
     let diff_loading = base_state
         .as_ref()
         .is_some_and(|base| unloaded || base.detail_unloaded());

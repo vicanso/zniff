@@ -4,7 +4,7 @@ use super::*;
 pub(crate) fn refresh_seq_diagram(controls: &Controls, seq_builder: SeqBuilder) -> String {
     let include_res = seq_builder.include_response.get();
     let include_query = seq_builder.include_query.get();
-    let data = controls.hub.with_session(|session| {
+    let data = with_active_session(controls, |session| {
         seq_builder.items.update(|items| {
             for item in items.iter_mut() {
                 if let Some(f) = session.get(item.id) {

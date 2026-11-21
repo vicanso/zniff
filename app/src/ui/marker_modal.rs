@@ -20,6 +20,10 @@ pub(crate) fn marker_filter_token(label: &str) -> String {
 }
 
 fn submit_marker(controls: &Arc<Controls>, open: Signal<bool>, draft: Signal<String>, lang: Lang) {
+    if guard_read_only_tab(controls) {
+        open.set(false);
+        return;
+    }
     let raw = draft.get_untracked();
     let label = raw.trim();
     let final_label = if label.is_empty() {
@@ -189,6 +193,10 @@ fn marker_preset_chips(
                 .justify_center()
                 .cursor(Cursor::Pointer)
                 .on_press(move || {
+                    if guard_read_only_tab(&controls) {
+                        open.set(false);
+                        return;
+                    }
                     let lang = ui_lang(langs);
                     let label = match lang {
                         Lang::Zh => PRESETS_ZH[idx],
@@ -341,9 +349,9 @@ pub(crate) fn marker_detail_card(
                         let count = selected
                             .get()
                             .map(|id| {
-                                controls_count
-                                    .hub
-                                    .with_session(|s| s.flows_in_marker_section(id))
+                                with_active_session(&controls_count, |s| {
+                                    s.flows_in_marker_section(id)
+                                })
                             })
                             .unwrap_or(0);
                         match lang {
