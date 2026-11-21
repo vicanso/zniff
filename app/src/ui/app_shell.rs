@@ -137,6 +137,7 @@ pub fn App() -> impl IntoElement {
     let paused_count = signal(0_usize);
     let paused_queue = signal(Vec::<(u64, BreakSide)>::new());
     let baseline = signal(None::<u64>);
+    let folded = signal(0_u8);
     let compose = Compose {
         composing: signal(false),
         response: signal(false),
@@ -836,6 +837,19 @@ pub fn App() -> impl IntoElement {
         } else {
             false
         };
+        if let Some((source_id, replayed_id)) = take_pending_replay_diff(&controls_tick)
+            && !apply_replay_auto_diff(
+                &controls_tick.hub,
+                source_id,
+                replayed_id,
+                selected_tick,
+                baseline_tick,
+                folded,
+                compose_tick,
+            )
+        {
+            queue_pending_replay_diff(&controls_tick, source_id, replayed_id);
+        }
         let selected_now = selected_tick.get();
         let lang_now = ui_lang(langs);
         let baseline_now = baseline_tick.get();
@@ -1112,7 +1126,6 @@ pub fn App() -> impl IntoElement {
     let controls_split = controls.clone();
     let controls_import = controls.clone();
     let controls_drop = controls.clone();
-    let folded = signal(0_u8);
     let drop_langs = langs;
     let filter_focus = element_ref();
     let rows_step = rows;

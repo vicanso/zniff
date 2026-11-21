@@ -10,6 +10,7 @@ pub(crate) fn clear_captured(
     shown: Shown,
 ) {
     let cleared = controls.hub.clear_session_with_undo();
+    clear_pending_replay_diff(controls);
     selected.set(None);
     baseline.set(None);
     reset_compose(compose);
@@ -131,6 +132,90 @@ pub(crate) fn step_selected(
     }
 }
 
+pub(crate) fn queue_pending_replay_diff(controls: &Controls, source_id: u64, replayed_id: u64) {
+    if source_id == replayed_id {
+        return;
+    }
+    *controls
+        .pending_replay_diff
+        .lock()
+        .unwrap_or_else(|err| err.into_inner()) = Some((source_id, replayed_id));
+}
+
+pub(crate) fn clear_pending_replay_diff(controls: &Controls) {
+    *controls
+        .pending_replay_diff
+        .lock()
+        .unwrap_or_else(|err| err.into_inner()) = None;
+}
+
+pub(crate) fn take_pending_replay_diff(controls: &Controls) -> Option<(u64, u64)> {
+    controls
+        .pending_replay_diff
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .take()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReplayDiffPlan {
+    Apply,
+    WaitForSync,
+    Drop,
+}
+
+pub(crate) fn plan_replay_auto_diff(hub: &Hub, source_id: u64, replayed_id: u64) -> ReplayDiffPlan {
+    if source_id == replayed_id {
+        return ReplayDiffPlan::Drop;
+    }
+    let (has_source, has_replayed) = hub.with_session(|session| {
+        (
+            session.get(source_id).is_some(),
+            session.get(replayed_id).is_some(),
+        )
+    });
+    if !has_source {
+        ReplayDiffPlan::Drop
+    } else if !has_replayed {
+        ReplayDiffPlan::WaitForSync
+    } else {
+        ReplayDiffPlan::Apply
+    }
+}
+
+pub(crate) fn unfold_diff_bits(bits: u8) -> u8 {
+    bits & !FOLD_DIFF
+}
+
+/// Applies a completed replay's auto-diff state: sets `source_id` as baseline,
+/// selects `replayed_id`, unfolds the line-level diff card, and closes compose.
+/// Returns `false` if `source_id` still exists but `replayed_id` has not synced
+/// into the local session yet (e.g. pending a Wasm poll cycle), so the caller
+/// can keep it queued for the next tick.
+pub(crate) fn apply_replay_auto_diff(
+    hub: &Hub,
+    source_id: u64,
+    replayed_id: u64,
+    selected: Signal<Option<u64>>,
+    baseline: Signal<Option<u64>>,
+    folded: Signal<u8>,
+    compose: Compose,
+) -> bool {
+    match plan_replay_auto_diff(hub, source_id, replayed_id) {
+        ReplayDiffPlan::Drop => true,
+        ReplayDiffPlan::WaitForSync => false,
+        ReplayDiffPlan::Apply => {
+            baseline.set(Some(source_id));
+            selected.set(Some(replayed_id));
+            folded.update(|bits| *bits = unfold_diff_bits(*bits));
+            if compose.composing.get_untracked() || compose.inline_mock.open.get_untracked() {
+                reset_compose(compose);
+            }
+            true
+        }
+    }
+}
+
 pub(crate) fn replay_flow(controls: &Arc<Controls>, id: Option<u64>, edit: ReplayOverride) {
     let hub = controls.hub.clone();
     let Some(id) = id else {
@@ -150,7 +235,10 @@ pub(crate) fn replay_flow(controls: &Arc<Controls>, id: Option<u64>, edit: Repla
     }
     let controls = Arc::clone(controls);
     hub.replay_later(id, edit, move |result| match result {
-        Ok(new_id) => set_status(&controls, StatusMsg::Replayed(new_id)),
+        Ok(new_id) => {
+            queue_pending_replay_diff(&controls, id, new_id);
+            set_status(&controls, StatusMsg::Replayed(new_id));
+        }
         Err(err) => set_status(&controls, StatusMsg::ReplayFailed(format!("{err:#}"))),
     });
 }
@@ -804,4 +892,54 @@ pub(crate) fn refuse_relay(controls: &Controls, id: Option<u64>) -> bool {
         set_status(controls, StatusMsg::RelayViewOnly);
     }
     locked
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replay_auto_diff_plan_handles_apply_wait_and_cleared_session() {
+        let dir = std::env::temp_dir().join(format!("zniff-e2-autodiff-{}", std::process::id()));
+        let ca = Arc::new(Ca::open(&dir).expect("ca"));
+        let hub = Hub::new(ca).expect("hub");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let src_id = hub.open(session::FlowDraft {
+            protocol: session::Protocol::Http11,
+            method: "GET".into(),
+            host: "api.example.com".into(),
+            path: "/v1/items".into(),
+            url: "https://api.example.com/v1/items".into(),
+            request_headers: Vec::new(),
+        });
+        let replay_id = hub.open(session::FlowDraft {
+            protocol: session::Protocol::Http11,
+            method: "GET".into(),
+            host: "api.example.com".into(),
+            path: "/v1/items".into(),
+            url: "https://api.example.com/v1/items".into(),
+            request_headers: Vec::new(),
+        });
+
+        assert_eq!(
+            plan_replay_auto_diff(&hub, src_id, src_id),
+            ReplayDiffPlan::Drop
+        );
+        assert_eq!(
+            plan_replay_auto_diff(&hub, src_id, replay_id + 999),
+            ReplayDiffPlan::WaitForSync
+        );
+        assert_eq!(
+            plan_replay_auto_diff(&hub, src_id, replay_id),
+            ReplayDiffPlan::Apply
+        );
+        assert_eq!(unfold_diff_bits(FOLD_DIFF | FOLD_QUERY), FOLD_QUERY);
+
+        hub.clear_session();
+        assert_eq!(
+            plan_replay_auto_diff(&hub, src_id, replay_id),
+            ReplayDiffPlan::Drop
+        );
+    }
 }

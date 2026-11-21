@@ -227,6 +227,8 @@ pub(crate) struct Controls {
     pub(crate) toast_queue: Mutex<Vec<(u64, StatusMsg)>>,
     pub(crate) config_error: Mutex<Option<String>>,
     pub(crate) config_path: Mutex<String>,
+    /// Pending `(source_id, replayed_id)` pair for automatic post-replay diffing (E2).
+    pub(crate) pending_replay_diff: Mutex<Option<(u64, u64)>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]

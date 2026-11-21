@@ -2885,6 +2885,7 @@ fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
             toast_queue: Mutex::new(Vec::new()),
             config_error: Mutex::new(None),
             config_path: Mutex::new(String::new()),
+            pending_replay_diff: Mutex::new(None),
         });
 
         let status = signal(StatusMsg::Idle);
@@ -4862,6 +4863,7 @@ fn make_test_controls(tag: &str) -> Arc<Controls> {
         toast_queue: Mutex::new(Vec::new()),
         config_error: Mutex::new(None),
         config_path: Mutex::new(String::new()),
+        pending_replay_diff: Mutex::new(None),
     })
 }
 
