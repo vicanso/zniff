@@ -179,12 +179,13 @@
   - 选项 A：维持仅记录动词，不记录行号。
   - **选项 B（已采用）**：保留 `Flow.rule_hit` 兼容现有 Web/分享/测试，补充轻量命中明细数组（上限 8 条，记录 `group_idx / line_no / verb`，未命中规则的流量零堆分配）；列表行增加紧凑标记、规则编辑器显示命中计数并支持 `rule:` 过滤，HAR 导出写入 `_zniffRules`，MCP `get_flow_detail` 同步返回。
 
-### 20. `Cmd/Ctrl+K` 清空会话的误触保护 — ✅ 已决策待实施（选项 A，v0.4.x）
+### 20. `Cmd/Ctrl+K` 清空会话的误触保护 — ✅ 已决策并落地（选项 A，v0.4.x）
 
 - **评估选项**：
   - **选项 A（已采用）**：保留 `Cmd/Ctrl+K` 清空会话快捷键（与现有 `Cmd/Ctrl+Shift+P` 命令面板保持兼容），清空后将原流量暂存至 5 秒撤销槽并在界面展示「已清空 N 条 · 撤销」Toast，超时自动释放。
   - 选项 B：改为 `Cmd/Ctrl+Shift+K`，`Cmd/Ctrl+K` 改为打开命令面板。
   - 选项 C：A 与 B 同时做。
+- **落地说明**（`ec6a899`）：在 `Session` / `Hub`（含 `hub_web.rs` 与 `web.rs` `/api/hub`）新增 5 秒撤销槽（`clear_with_undo` / `undo_clear` / `expire_clear_undo`，支持恢复时与新到达流量无 ID 冲突合并及超时释放内存），并抽离 `app/src/ui/toast_overlay.rs` 提供中英双语 `[撤销 / Undo]` 提示条。
 
 ### 21. WebSocket 帧注入与条件断点的语法边界 — ✅ 已决策待实施（仅采纳 E8，v0.5.x；E7 延至 v0.6）
 
