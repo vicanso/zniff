@@ -407,6 +407,8 @@ fn list_columns_round_trip_and_the_pane_clamps() {
         size_bytes: 128,
         failed: false,
         pinned: false,
+        rule_marker: String::new(),
+        rule_summary: String::new(),
         relay_short: String::new(),
     };
     assert_eq!(
@@ -1149,6 +1151,8 @@ fn list_sort_cycles_asc_desc_none_and_orders_rows() {
         size_bytes,
         failed,
         pinned: false,
+        rule_marker: String::new(),
+        rule_summary: String::new(),
         relay_short: String::new(),
     };
 
@@ -2539,6 +2543,7 @@ fn web_cached_flow_detail_publishes_loading_then_hydrates_cleanly() {
         response_bytes: 61,
         pinned: false,
         rule_hit: String::new(),
+        rule_hits: Vec::new(),
         comment: String::new(),
         relay_source: None,
     };
@@ -2561,6 +2566,7 @@ fn web_cached_flow_detail_publishes_loading_then_hydrates_cleanly() {
         response_bytes: 0,
         pinned: false,
         rule_hit: String::new(),
+        rule_hits: Vec::new(),
         comment: String::new(),
         relay_source: None,
     };
@@ -2583,6 +2589,7 @@ fn web_cached_flow_detail_publishes_loading_then_hydrates_cleanly() {
         response_bytes: 0,
         pinned: false,
         rule_hit: String::new(),
+        rule_hits: Vec::new(),
         comment: String::new(),
         relay_source: None,
     };
@@ -2599,6 +2606,8 @@ fn web_cached_flow_detail_publishes_loading_then_hydrates_cleanly() {
             url: signal(String::new()),
             protocol: signal(String::new()),
             rules: signal(String::new()),
+            rule_hits: signal(Vec::new()),
+            gql_badge: signal(String::new()),
             status: signal(None),
             error: signal(String::new()),
             request_headers: signal(Vec::new()),
@@ -2753,6 +2762,7 @@ fn web_cached_flow_detail_publishes_loading_then_hydrates_cleanly() {
                 response_bytes: empty_v.response_bytes,
                 pinned: empty_v.pinned,
                 rule_hit: empty_v.rule_hit.clone(),
+                rule_hits: empty_v.rule_hits.clone(),
                 comment: empty_v.comment.clone(),
                 relay_source: empty_v.relay_source.clone(),
             };
@@ -2925,6 +2935,7 @@ fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
             rules: signal(String::new()),
             rule_groups: signal(Vec::new()),
             editing_group: signal(None),
+            focused_rule_line: signal(None),
             upstream: signal(String::new()),
             rules_on: signal(true),
             breaks_on: signal(true),
@@ -4516,6 +4527,8 @@ fn keyboard_step_selected_auto_scrolls_row_into_viewport() {
                     size_bytes: 128,
                     failed: false,
                     pinned: false,
+                    rule_marker: String::new(),
+                    rule_summary: String::new(),
                     relay_short: String::new(),
                 })
             })
@@ -4867,6 +4880,8 @@ fn make_test_json_shown(pane_w: f32) -> super::Shown {
         url: signal("http://127.0.0.1:18999/api/orders".into()),
         protocol: signal("HTTP/1.1".into()),
         rules: signal(String::new()),
+        rule_hits: signal(Vec::new()),
+        gql_badge: signal(String::new()),
         status: signal(Some(201)),
         error: signal(String::new()),
         request_headers: signal(Vec::new()),

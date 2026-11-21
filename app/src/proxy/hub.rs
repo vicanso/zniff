@@ -23,6 +23,7 @@ pub struct Hub {
     pub(super) bypass: Mutex<BypassRules>,
     pub(super) bypass_text: Mutex<String>,
     pub(super) rules: Mutex<Vec<Rule>>,
+    pub(super) attributed_rules: Mutex<Vec<rules::AttributedRule>>,
     pub(super) rules_text: Mutex<String>,
     pub(super) rule_groups: Mutex<Vec<crate::config::RuleGroup>>,
     pub(super) rules_rev: AtomicU64,
@@ -179,6 +180,7 @@ impl Hub {
             bypass: Mutex::new(BypassRules::default()),
             bypass_text: Mutex::new(String::new()),
             rules: Mutex::new(Vec::new()),
+            attributed_rules: Mutex::new(Vec::new()),
             rules_text: Mutex::new(String::new()),
             rule_groups: Mutex::new(Vec::new()),
             rules_rev: AtomicU64::new(0),
@@ -604,14 +606,18 @@ impl Hub {
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .clone();
-        let combined = rules::combine_effective_rules_text(&groups, &workspace);
-        let next_rules = rules::parse_rules(&combined);
+        let attributed = rules::parse_rules_attributed(&groups, &workspace);
+        let next_rules: Vec<Rule> = attributed.iter().map(|entry| entry.rule.clone()).collect();
         let origin_rules_changed = {
             let mut guard = self.rules.lock().unwrap_or_else(|err| err.into_inner());
             let changed = origin_dial_rules(&guard) != origin_dial_rules(&next_rules);
             *guard = next_rules;
             changed
         };
+        *self
+            .attributed_rules
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = attributed;
         self.rules_rev.fetch_add(1, Ordering::Relaxed);
         if origin_rules_changed {
             self.invalidate_origin_pools();
@@ -994,17 +1000,31 @@ impl Hub {
         if !self.apply_rules.load(Ordering::Relaxed) {
             return;
         }
-        let rules = self
-            .rules
+        let attributed = self
+            .attributed_rules
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .clone();
-        let mut hit = rules::hit_summary_with_ops(&rules, host, path, ops);
-        if !self.apply_breaks.load(Ordering::Relaxed) {
-            hit = rules::without_break_labels(&hit);
+        let include_breaks = self.apply_breaks.load(Ordering::Relaxed);
+        let (hit, details) =
+            rules::hit_details_with_ops(&attributed, host, path, ops, include_breaks);
+        if !hit.is_empty() || !details.is_empty() {
+            self.with_session(|session| session.set_rule_hit_details(id, hit, details));
+            self.touch();
         }
-        if !hit.is_empty() {
-            self.with_session(|session| session.set_rule_hit(id, hit));
+    }
+
+    pub(super) fn note_resolve_hit(&self, id: u64, host: &str) {
+        if !self.apply_rules.load(Ordering::Relaxed) {
+            return;
+        }
+        let attributed = self
+            .attributed_rules
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone();
+        if let Some(hit) = rules::matching_resolve_hit(&attributed, host) {
+            self.with_session(|session| session.append_rule_hit(id, hit));
             self.touch();
         }
     }

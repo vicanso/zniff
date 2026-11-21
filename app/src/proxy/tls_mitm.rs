@@ -222,16 +222,14 @@ where
                 hub.note_rules_with_ops(id, &host, &path, &[]);
                 if hub.ca.has_client_cert_in_dir(&host) {
                     hub.with_session(|session| {
-                        if let Some(flow) = session.get(id)
-                            && !flow.rule_hit.split_whitespace().any(|t| t == "client-cert")
-                        {
-                            let next = if flow.rule_hit.is_empty() {
-                                "client-cert".to_string()
-                            } else {
-                                format!("{} client-cert", flow.rule_hit)
-                            };
-                            session.set_rule_hit(id, next);
-                        }
+                        session.append_rule_hit(
+                            id,
+                            crate::session::RuleHit {
+                                group_name: None,
+                                line_no: 0,
+                                verb: "client-cert".to_string(),
+                            },
+                        );
                     });
                 }
                 hub.set_error(id, reason.clone());

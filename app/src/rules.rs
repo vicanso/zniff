@@ -540,6 +540,136 @@ pub fn proto_specs(rules: &[Rule], host: &str, path: &str) -> Vec<ProtoSpec> {
     out
 }
 
+/// A parsed [`Rule`] paired with its source buffer (`group_name`) and 1-based line number.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttributedRule {
+    pub group_name: Option<String>,
+    pub line_no: usize,
+    pub rule: Rule,
+}
+
+/// Parses workspace rules (highest precedence) followed by all enabled rule groups,
+/// preserving exact 1-based line numbers within each source buffer.
+pub fn parse_rules_attributed(
+    groups: &[crate::config::RuleGroup],
+    workspace_rules: &str,
+) -> Vec<AttributedRule> {
+    let mut out = Vec::new();
+    for (idx, line) in workspace_rules.lines().enumerate() {
+        if let Some(rule) = parse_single_rule(line) {
+            out.push(AttributedRule {
+                group_name: None,
+                line_no: idx + 1,
+                rule,
+            });
+        }
+    }
+    for group in groups {
+        if !group.enabled {
+            continue;
+        }
+        for (idx, line) in group.rules.lines().enumerate() {
+            if let Some(rule) = parse_single_rule(line) {
+                out.push(AttributedRule {
+                    group_name: Some(group.name.clone()),
+                    line_no: idx + 1,
+                    rule,
+                });
+            }
+        }
+    }
+    out
+}
+
+fn rule_verb_and_terminal(rule: &Rule) -> Option<(&'static str, bool)> {
+    match rule {
+        Rule::MapLocal { .. } => Some(("map-local", true)),
+        Rule::MapRemote { .. } => Some(("map-remote", true)),
+        Rule::Break { .. } => Some(("break", true)),
+        Rule::BreakResponse { .. } => Some(("break-res", true)),
+        Rule::Delay { .. } => Some(("delay", false)),
+        Rule::Throttle { .. } => Some(("throttle", false)),
+        Rule::Cert { .. } => Some(("cert", false)),
+        Rule::ClientCert { .. } => Some(("client-cert", false)),
+        Rule::Header { .. } => Some(("header", false)),
+        Rule::Query { .. } => Some(("query", false)),
+        Rule::Cors { .. } => Some(("cors", false)),
+        Rule::Replace { .. } => Some(("replace", false)),
+        Rule::Json { .. } => Some(("json", false)),
+        Rule::NoCache { .. } => Some(("no-cache", false)),
+        Rule::Block { .. } => Some(("block", true)),
+        Rule::Resolve { .. } => Some(("resolve", false)),
+        Rule::Hook {
+            mode: HookMode::Preview,
+            ..
+        }
+        | Rule::Proto { .. } => None,
+        Rule::Hook { .. } => Some(("hook", false)),
+    }
+}
+
+/// Computes both the legacy space-joined verb summary and the attributed [`crate::session::RuleHit`]
+/// list (capped at [`crate::session::MAX_RULE_HITS`]) in rule order.
+pub fn hit_details_with_ops(
+    rules: &[AttributedRule],
+    host: &str,
+    path: &str,
+    ops: &[String],
+    include_breaks: bool,
+) -> (String, Vec<crate::session::RuleHit>) {
+    let mut labels: Vec<&'static str> = Vec::new();
+    let mut hits: Vec<crate::session::RuleHit> = Vec::new();
+    let mut took_terminal = false;
+    for entry in rules {
+        if !entry.rule.matches_with_ops(host, path, ops) {
+            continue;
+        }
+        let Some((label, terminal)) = rule_verb_and_terminal(&entry.rule) else {
+            continue;
+        };
+        if terminal {
+            if took_terminal {
+                continue;
+            }
+            took_terminal = true;
+        }
+        if !include_breaks && (label == "break" || label == "break-res") {
+            continue;
+        }
+        if !labels.contains(&label) {
+            labels.push(label);
+        }
+        if hits.len() < crate::session::MAX_RULE_HITS {
+            hits.push(crate::session::RuleHit {
+                group_name: entry.group_name.clone(),
+                line_no: entry.line_no,
+                verb: label.to_string(),
+            });
+        }
+    }
+    (labels.join(" "), hits)
+}
+
+/// Finds the first matching `resolve` rule for `host` with its source attribution.
+pub fn matching_resolve_hit(
+    rules: &[AttributedRule],
+    host: &str,
+) -> Option<crate::session::RuleHit> {
+    rules.iter().find_map(|entry| {
+        if let Rule::Resolve { host: pat, .. } = &entry.rule
+            && host_matches(pat, host)
+        {
+            Some(crate::session::RuleHit {
+                group_name: entry.group_name.clone(),
+                line_no: entry.line_no,
+                verb: "resolve".to_string(),
+            })
+        } else {
+            None
+        }
+    })
+}
+
 /// Labels of the rules that actually apply, in text order. The first terminal
 /// rule stops later terminal rules. Modifiers still count after it.
 #[cfg(test)]
@@ -547,6 +677,7 @@ pub fn hit_summary(rules: &[Rule], host: &str, path: &str) -> String {
     hit_summary_with_ops(rules, host, path, &[])
 }
 
+#[cfg(test)]
 pub fn hit_summary_with_ops(rules: &[Rule], host: &str, path: &str, ops: &[String]) -> String {
     let mut labels = Vec::new();
     let mut took_terminal = false;
@@ -554,29 +685,8 @@ pub fn hit_summary_with_ops(rules: &[Rule], host: &str, path: &str, ops: &[Strin
         if !rule.matches_with_ops(host, path, ops) {
             continue;
         }
-        let (label, terminal) = match rule {
-            Rule::MapLocal { .. } => ("map-local", true),
-            Rule::MapRemote { .. } => ("map-remote", true),
-            Rule::Break { .. } => ("break", true),
-            Rule::BreakResponse { .. } => ("break-res", true),
-            Rule::Delay { .. } => ("delay", false),
-            Rule::Throttle { .. } => ("throttle", false),
-            Rule::Cert { .. } => ("cert", false),
-            Rule::ClientCert { .. } => ("client-cert", false),
-            Rule::Header { .. } => ("header", false),
-            Rule::Query { .. } => ("query", false),
-            Rule::Cors { .. } => ("cors", false),
-            Rule::Replace { .. } => ("replace", false),
-            Rule::Json { .. } => ("json", false),
-            Rule::NoCache { .. } => ("no-cache", false),
-            Rule::Block { .. } => ("block", true),
-            Rule::Resolve { .. } => ("resolve", false),
-            Rule::Hook {
-                mode: HookMode::Preview,
-                ..
-            }
-            | Rule::Proto { .. } => continue,
-            Rule::Hook { .. } => ("hook", false),
+        let Some((label, terminal)) = rule_verb_and_terminal(rule) else {
+            continue;
         };
         if terminal {
             if took_terminal {
@@ -603,6 +713,7 @@ pub fn without_breaks(mut effect: Effect) -> Effect {
 }
 
 /// `hit_summary` with the pause labels removed.
+#[cfg(test)]
 pub fn without_break_labels(summary: &str) -> String {
     summary
         .split_whitespace()
@@ -4789,5 +4900,72 @@ resolve a.com *
         assert_eq!(specs[0].schema_path, PathBuf::from("/tmp/my protos"));
         assert_eq!(specs[0].req_type.as_deref(), Some("GetUserReq"));
         assert_eq!(specs[0].res_type.as_deref(), Some("GetUserReply"));
+    }
+
+    #[test]
+    fn attributed_rules_track_source_group_lines_and_cap_at_eight() {
+        let workspace =
+            "\n# comment\nreplace api.test/v1 res foo -> bar\nheader api.test/v1 res set X-A 1";
+        let groups = vec![
+            crate::config::RuleGroup {
+                name: "disabled".into(),
+                enabled: false,
+                rules: "delay api.test/v1 100ms".into(),
+            },
+            crate::config::RuleGroup {
+                name: "mock".into(),
+                enabled: true,
+                rules: "# group comment\nmap-local api.test/v1 status=201\nblock api.test/v1 403\ndelay api.test/v1 200ms".into(),
+            },
+        ];
+        let attributed = parse_rules_attributed(&groups, workspace);
+        let (summary, hits) =
+            hit_details_with_ops(&attributed, "api.test", "/v1/orders", &[], true);
+        assert_eq!(summary, "replace header map-local delay");
+        assert_eq!(
+            hits,
+            vec![
+                crate::session::RuleHit {
+                    group_name: None,
+                    line_no: 3,
+                    verb: "replace".into(),
+                },
+                crate::session::RuleHit {
+                    group_name: None,
+                    line_no: 4,
+                    verb: "header".into(),
+                },
+                crate::session::RuleHit {
+                    group_name: Some("mock".into()),
+                    line_no: 2,
+                    verb: "map-local".into(),
+                },
+                crate::session::RuleHit {
+                    group_name: Some("mock".into()),
+                    line_no: 4,
+                    verb: "delay".into(),
+                },
+            ]
+        );
+
+        // No match -> empty vec (zero heap allocation)
+        let (empty_summary, empty_hits) =
+            hit_details_with_ops(&attributed, "other.test", "/", &[], true);
+        assert!(empty_summary.is_empty());
+        assert!(empty_hits.is_empty());
+        assert_eq!(empty_hits.capacity(), 0);
+
+        // Cap at MAX_RULE_HITS (8)
+        let many_rules: String = (1..=12)
+            .map(|i| format!("header api.test/v1 res set X-H{i} {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let many_attr = parse_rules_attributed(&[], &many_rules);
+        let (many_summary, many_hits) =
+            hit_details_with_ops(&many_attr, "api.test", "/v1/cap", &[], true);
+        assert_eq!(many_summary, "header");
+        assert_eq!(many_hits.len(), crate::session::MAX_RULE_HITS);
+        assert_eq!(many_hits[0].line_no, 1);
+        assert_eq!(many_hits[7].line_no, 8);
     }
 }

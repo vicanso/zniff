@@ -77,9 +77,7 @@ where
     let websocket = header_is_websocket(&headers);
     let flow_now_ms = crate::rule_vars::VarContext::current_ms();
     let plan = if websocket {
-        if hub.resolve_for_host(&host).is_some() {
-            hub.with_session(|s| s.set_rule_hit(id, "resolve".to_string()));
-        }
+        hub.note_resolve_hit(id, &host);
         rules::Effect::default()
     } else {
         let mut ops = crate::present::graphql_operations(&path, &[]);

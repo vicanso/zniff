@@ -605,6 +605,35 @@ pub(crate) fn path_cell(
                     )
             },
         ))
+        .child(when(
+            move || {
+                rows.with(|rows| {
+                    rows.get(index)
+                        .is_some_and(|row| !row.rule_marker.is_empty())
+                })
+            },
+            move || {
+                view()
+                    .mr(px(4.0))
+                    .px(px(4.0))
+                    .rounded(px(4.0))
+                    .flex_shrink_0()
+                    .bg(accent_blue_soft())
+                    .child(
+                        text(move || {
+                            rows.with(|rows| {
+                                rows.get(index)
+                                    .map(|row| row.rule_marker.clone())
+                                    .unwrap_or_default()
+                            })
+                        })
+                        .number_of_lines(1)
+                        .text_size(move || scaled_px(10.5))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(accent_blue_text()),
+                    )
+            },
+        ))
         .child(
             mono(move || {
                 let display = effective_path_display(columns.get(), &effective_filter.get());
@@ -639,7 +668,7 @@ pub(crate) fn path_cell(
                                 tip_display
                             };
                         let target = row_target_display(row, effective);
-                        if row.relay_short.is_empty() {
+                        let with_relay = if row.relay_short.is_empty() {
                             target
                         } else {
                             format!(
@@ -647,6 +676,11 @@ pub(crate) fn path_cell(
                                 t(ui_lang(langs), "中继", "relay"),
                                 row.relay_short
                             )
+                        };
+                        if row.rule_summary.is_empty() {
+                            with_relay
+                        } else {
+                            format!("[{}] {with_relay}", row.rule_summary)
                         }
                     })
                     .unwrap_or_default()

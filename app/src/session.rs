@@ -503,6 +503,8 @@ pub struct Flow {
     pub pinned: bool,
     /// Rules that rewrote this flow, joined by spaces. Empty when none did.
     pub rule_hit: String,
+    /// Attributed rule hits (capped at [`MAX_RULE_HITS`]; zero heap allocation when empty).
+    pub rule_hits: Vec<RuleHit>,
     /// User-supplied note/comment attached to this flow.
     pub comment: String,
     /// Share id when another zniff pushed this row. Local captures stay `None`.
@@ -515,6 +517,31 @@ pub struct Flow {
     cached_server_rev: u64,
     cached_detail_rev: Option<u64>,
     accounted: usize,
+}
+
+/// Maximum number of attributed rule hits stored per flow (ADR-19).
+pub const MAX_RULE_HITS: usize = 8;
+
+/// One rule line that matched and applied to a flow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleHit {
+    /// `None` for workspace rules, `Some(name)` for a named rule group.
+    pub group_name: Option<String>,
+    /// 1-based line number in that rule buffer (`0` when not backed by a rule line).
+    pub line_no: usize,
+    /// Rule verb, e.g. `replace`, `map-local`, `header`, `break`, `block`, `delay`.
+    pub verb: String,
+}
+
+impl RuleHit {
+    pub fn format_badge(&self) -> String {
+        match (self.group_name.as_deref(), self.line_no) {
+            (Some(group), line) if line > 0 => format!("[{group}] {} #{line}", self.verb),
+            (Some(group), _) => format!("[{group}] {}", self.verb),
+            (None, line) if line > 0 => format!("{} #{line}", self.verb),
+            (None, _) => self.verb.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -977,6 +1004,7 @@ pub struct CachedFlowView {
     pub response_bytes: u64,
     pub pinned: bool,
     pub rule_hit: String,
+    pub rule_hits: Vec<RuleHit>,
     pub comment: String,
     pub relay_source: Option<String>,
 }
@@ -1035,6 +1063,7 @@ fn blank_cached_flow(id: u64) -> Flow {
         messages_truncated: false,
         pinned: false,
         rule_hit: String::new(),
+        rule_hits: Vec::new(),
         comment: String::new(),
         relay_source: None,
         relay_remote_id: None,
@@ -1065,6 +1094,7 @@ fn same_cached_view(flow: &Flow, row: &CachedFlowView) -> bool {
         && flow.response_bytes == row.response_bytes
         && flow.pinned == row.pinned
         && flow.rule_hit == row.rule_hit
+        && flow.rule_hits == row.rule_hits
         && flow.comment == row.comment
         && flow.relay_source == row.relay_source
 }
@@ -1153,6 +1183,7 @@ impl Session {
             messages_truncated: false,
             pinned: false,
             rule_hit: String::new(),
+            rule_hits: Vec::new(),
             comment: String::new(),
             relay_source: None,
             relay_remote_id: None,
@@ -1190,6 +1221,16 @@ impl Session {
                 } else {
                     flow.rule_hit.push_str(" client-cert");
                 }
+            }
+            if !conn_info.client_cert.is_empty()
+                && !flow.rule_hits.iter().any(|h| h.verb == "client-cert")
+                && flow.rule_hits.len() < MAX_RULE_HITS
+            {
+                flow.rule_hits.push(RuleHit {
+                    group_name: None,
+                    line_no: 0,
+                    verb: "client-cert".to_string(),
+                });
             }
             flow.conn_info = conn_info;
             flow.rev = rev;
@@ -2039,11 +2080,52 @@ impl Session {
         true
     }
 
+    #[cfg(test)]
     pub fn set_rule_hit(&mut self, id: u64, hit: impl Into<String>) {
         self.next_rev += 1;
         let rev = self.next_rev;
         if let Some(flow) = self.flows.get_mut(&id) {
             flow.rule_hit = hit.into();
+            flow.rev = rev;
+        }
+    }
+
+    pub fn set_rule_hit_details(
+        &mut self,
+        id: u64,
+        hit: impl Into<String>,
+        mut hits: Vec<RuleHit>,
+    ) {
+        hits.truncate(MAX_RULE_HITS);
+        self.next_rev += 1;
+        let rev = self.next_rev;
+        if let Some(flow) = self.flows.get_mut(&id) {
+            flow.rule_hit = hit.into();
+            flow.rule_hits = hits;
+            flow.rev = rev;
+        }
+    }
+
+    pub fn append_rule_hit(&mut self, id: u64, rule_hit: RuleHit) {
+        self.next_rev += 1;
+        let rev = self.next_rev;
+        if let Some(flow) = self.flows.get_mut(&id) {
+            if !rule_hit.verb.is_empty()
+                && !flow
+                    .rule_hit
+                    .split_whitespace()
+                    .any(|token| token == rule_hit.verb)
+            {
+                if flow.rule_hit.is_empty() {
+                    flow.rule_hit = rule_hit.verb.clone();
+                } else {
+                    flow.rule_hit.push(' ');
+                    flow.rule_hit.push_str(&rule_hit.verb);
+                }
+            }
+            if !flow.rule_hits.contains(&rule_hit) && flow.rule_hits.len() < MAX_RULE_HITS {
+                flow.rule_hits.push(rule_hit);
+            }
             flow.rev = rev;
         }
     }
@@ -2182,6 +2264,7 @@ impl Session {
             flow.response_bytes = row.response_bytes;
             flow.pinned = row.pinned;
             flow.rule_hit = row.rule_hit;
+            flow.rule_hits = row.rule_hits;
             flow.comment = row.comment;
             flow.relay_source = row.relay_source;
             next.insert(flow.id, flow);
@@ -4447,6 +4530,7 @@ mod tests {
             response_bytes: 64,
             pinned: false,
             rule_hit: "header".into(),
+            rule_hits: Vec::new(),
             comment: "stream".into(),
             relay_source: None,
         };
@@ -4535,6 +4619,7 @@ mod tests {
             response_bytes: 0,
             pinned: false,
             rule_hit: String::new(),
+            rule_hits: Vec::new(),
             comment: String::new(),
             relay_source: None,
         };

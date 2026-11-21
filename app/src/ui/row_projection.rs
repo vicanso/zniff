@@ -137,6 +137,8 @@ pub(crate) fn project_rows(
             size_bytes: flow.response_bytes,
             failed,
             pinned: flow.pinned,
+            rule_marker: rule_marker_for_flow(&flow.rule_hits, &flow.rule_hit),
+            rule_summary: rule_hover_summary(&flow.rule_hits, &flow.rule_hit),
             relay_short: flow
                 .relay_source
                 .as_deref()

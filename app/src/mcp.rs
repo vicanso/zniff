@@ -486,6 +486,17 @@ fn tool_get_flow_detail(hub: &Hub, args: &Value) -> Value {
         "response_expired": flow.response_expired,
         "graphql_op": graphql_op,
         "rule_hit": flow.rule_hit,
+        "rule_hits": flow
+            .rule_hits
+            .iter()
+            .map(|hit| {
+                json!({
+                    "group": hit.group_name,
+                    "line": hit.line_no,
+                    "verb": hit.verb,
+                })
+            })
+            .collect::<Vec<_>>(),
         "comment": flow.comment,
         "pinned": flow.pinned,
         "timing": {
@@ -1554,6 +1565,38 @@ resolve api.example.com 127.0.0.1:8443";
         let detail = parse_tool_payload(&tool_get_flow_detail(&hub, &json!({ "id": id1 })));
         assert_eq!(detail["timing"]["client_cert"], "/tmp/mtls-client.pem");
         assert_eq!(detail["rule_hit"], "client-cert");
+        assert_eq!(
+            detail["rule_hits"],
+            json!([{ "group": null, "line": 0, "verb": "client-cert" }])
+        );
+
+        hub.with_session(|s| {
+            s.set_rule_hit_details(
+                id1,
+                "replace header",
+                vec![
+                    crate::session::RuleHit {
+                        group_name: None,
+                        line_no: 3,
+                        verb: "replace".into(),
+                    },
+                    crate::session::RuleHit {
+                        group_name: Some("dev".into()),
+                        line_no: 1,
+                        verb: "header".into(),
+                    },
+                ],
+            );
+        });
+        let detail2 = parse_tool_payload(&tool_get_flow_detail(&hub, &json!({ "id": id1 })));
+        assert_eq!(detail2["rule_hit"], "replace header");
+        assert_eq!(
+            detail2["rule_hits"],
+            json!([
+                { "group": null, "line": 3, "verb": "replace" },
+                { "group": "dev", "line": 1, "verb": "header" }
+            ])
+        );
 
         // manage_breaks when queue is empty
         let listed = parse_tool_payload(&tool_manage_breaks(&hub, &json!({ "action": "list" })));

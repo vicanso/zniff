@@ -967,6 +967,7 @@ fn parse_view(value: &Value) -> Option<CachedFlowView> {
             .and_then(Value::as_bool)
             .unwrap_or(false),
         rule_hit: text_field(value, "rule_hit"),
+        rule_hits: parse_rule_hits(value.get("rule_hits")),
         comment: text_field(value, "comment"),
         relay_source: value
             .get("relay_source")
@@ -974,6 +975,33 @@ fn parse_view(value: &Value) -> Option<CachedFlowView> {
             .filter(|text| !text.is_empty())
             .map(str::to_string),
     })
+}
+
+fn parse_rule_hits(value: Option<&Value>) -> Vec<crate::session::RuleHit> {
+    let Some(items) = value.and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for item in items.iter().take(crate::session::MAX_RULE_HITS) {
+        let Some(verb) = item.get("verb").and_then(Value::as_str) else {
+            continue;
+        };
+        if verb.is_empty() {
+            continue;
+        }
+        let group_name = item
+            .get("group")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let line_no = item.get("line").and_then(Value::as_u64).unwrap_or(0) as usize;
+        out.push(crate::session::RuleHit {
+            group_name,
+            line_no,
+            verb: verb.to_string(),
+        });
+    }
+    out
 }
 
 fn body_field(value: &Value, text_key: &str, b64_key: &str) -> Vec<u8> {

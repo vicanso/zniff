@@ -23,6 +23,8 @@ pub(crate) struct Shown {
     pub(crate) url: Signal<String>,
     pub(crate) protocol: Signal<String>,
     pub(crate) rules: Signal<String>,
+    pub(crate) rule_hits: Signal<Vec<session::RuleHit>>,
+    pub(crate) gql_badge: Signal<String>,
     pub(crate) status: Signal<Option<u16>>,
     pub(crate) error: Signal<String>,
     pub(crate) request_headers: Signal<Vec<HeaderLine>>,
@@ -944,26 +946,7 @@ pub(crate) fn summary(
                                 .text_color(fg_muted()),
                         ),
                 )
-                .child(when(
-                    move || !shown.rules.get().is_empty(),
-                    move || {
-                        view()
-                            .max_w(px(180.0))
-                            .overflow_hidden()
-                            .px_2()
-                            .py_0p5()
-                            .rounded(px(5.0))
-                            .bg(accent_blue_soft())
-                            .child(
-                                mono(move || shown.rules.get())
-                                    .number_of_lines(1)
-                                    .text_overflow(EllipsizeMode::Tail)
-                                    .text_size(px(11.5))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(accent_blue_text()),
-                            )
-                    },
-                ))
+                .child(detail_rule_badges(shown, profiles))
                 .child(when(
                     move || !shown.comment.get().is_empty() && !shown.editing_comment.get(),
                     move || {

@@ -629,7 +629,7 @@ pub(super) async fn forward_request(
             }
         }
     } else if hub.resolve_for_host(&host).is_some() {
-        hub.with_session(|s| s.set_rule_hit(id, "resolve".to_string()));
+        hub.note_resolve_hit(id, &host);
     }
     if mapped_remote
         && body_override.is_none()

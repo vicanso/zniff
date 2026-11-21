@@ -309,6 +309,8 @@ pub(crate) struct ProfileSignals {
     pub(crate) rules: Signal<String>,
     pub(crate) rule_groups: Signal<Vec<config::RuleGroup>>,
     pub(crate) editing_group: Signal<Option<String>>,
+    /// Optional `(group_name, 1-based line_no)` highlighted when jumping from a detail rule badge.
+    pub(crate) focused_rule_line: Signal<Option<(Option<String>, usize)>>,
     pub(crate) upstream: Signal<String>,
     pub(crate) rules_on: Signal<bool>,
     pub(crate) breaks_on: Signal<bool>,

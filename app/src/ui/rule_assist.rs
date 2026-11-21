@@ -409,7 +409,10 @@ pub(crate) fn rule_line_strip(
                             .rounded(px(5.0))
                             .border_1()
                             .border_color(move || {
-                                if item.with(|it| !it.commented && !it.valid) {
+                                let line_no = item.with(|it| it.line_idx + 1);
+                                if target.is_line_focused(line_no) {
+                                    status_warn_fg()
+                                } else if item.with(|it| !it.commented && !it.valid) {
                                     status_err_fg()
                                 } else if item.with(|it| it.commented) {
                                     border_control()
@@ -418,7 +421,10 @@ pub(crate) fn rule_line_strip(
                                 }
                             })
                             .bg(move || {
-                                if item.with(|it| it.commented) {
+                                let line_no = item.with(|it| it.line_idx + 1);
+                                if target.is_line_focused(line_no) {
+                                    status_warn_bg()
+                                } else if item.with(|it| it.commented) {
                                     bg_control()
                                 } else if item.with(|it| !it.valid) {
                                     status_err_bg()
@@ -482,6 +488,7 @@ pub(crate) fn rule_line_strip(
                                         "Fill rule into quick editor below",
                                     ))
                                     .on_press(move || {
+                                        target.focused_line.set(None);
                                         let raw = item.with(|it| it.raw.clone());
                                         fill_draft_from_rule_line(
                                             &raw,

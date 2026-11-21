@@ -220,16 +220,22 @@ pub(crate) fn publish_detail(
     shown.url.set(flow.url);
     shown.protocol.set(flow.protocol.label_in(lang).to_string());
     let mut badges = flow.rule_hit.clone();
-    if let Some(op_label) = present::graphql_operation_label(&flow.path, &flow.request_body) {
-        let tag = format!("gql:{op_label}");
-        if badges.is_empty() {
-            badges = tag;
+    let gql_badge =
+        if let Some(op_label) = present::graphql_operation_label(&flow.path, &flow.request_body) {
+            let tag = format!("gql:{op_label}");
+            if badges.is_empty() {
+                badges = tag.clone();
+            } else {
+                badges.push(' ');
+                badges.push_str(&tag);
+            }
+            tag
         } else {
-            badges.push(' ');
-            badges.push_str(&tag);
-        }
-    }
+            String::new()
+        };
     shown.rules.set(badges);
+    shown.rule_hits.set(flow.rule_hits.clone());
+    shown.gql_badge.set(gql_badge);
     shown.status.set(flow.status);
     shown.error.set(flow.error.clone().unwrap_or_default());
     shown

@@ -31,6 +31,10 @@ pub(crate) struct RowLine {
     pub(crate) size_bytes: u64,
     pub(crate) failed: bool,
     pub(crate) pinned: bool,
+    /// Compact rule category icons (e.g. `✎`, `↪`, `⏸`, `⛔`, `⏱`) when rules matched.
+    pub(crate) rule_marker: String,
+    /// Attributed rule hit summary shown in the path cell hover bubble.
+    pub(crate) rule_summary: String,
     /// First 8 hex characters of the share that pushed this row. Empty for local capture.
     pub(crate) relay_short: String,
 }

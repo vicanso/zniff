@@ -142,6 +142,20 @@ fn entry(flow: &Flow) -> Value {
     if !flow.comment.is_empty() {
         obj["comment"] = json!(flow.comment);
     }
+    if !flow.rule_hits.is_empty() {
+        obj["_zniffRules"] = Value::Array(
+            flow.rule_hits
+                .iter()
+                .map(|hit| {
+                    json!({
+                        "group": hit.group_name,
+                        "line": hit.line_no,
+                        "verb": hit.verb,
+                    })
+                })
+                .collect(),
+        );
+    }
     if should_export_ws_messages(flow) {
         let base_time = epoch_secs_ms(flow.response_at.unwrap_or(flow.started));
         let ws_messages: Vec<Value> = flow
@@ -1178,5 +1192,61 @@ mod tests {
 
         // Entry with `ws://` scheme and status 0 (no `_webSocketMessages` yet) is also marked WebSocket
         assert_eq!(imported[1].protocol, Protocol::WebSocket);
+    }
+
+    #[test]
+    fn exports_zniff_rules_extension_when_rule_hits_present() {
+        let mut session = Session::default();
+        let id_hit = session.open(FlowDraft {
+            protocol: Protocol::Http11,
+            method: "GET".into(),
+            host: "api.example.com".into(),
+            path: "/v1/items".into(),
+            url: "https://api.example.com/v1/items".into(),
+            request_headers: vec![],
+        });
+        session.set_rule_hit_details(
+            id_hit,
+            "header map-local",
+            vec![
+                crate::session::RuleHit {
+                    group_name: None,
+                    line_no: 2,
+                    verb: "header".into(),
+                },
+                crate::session::RuleHit {
+                    group_name: Some("mock-api".into()),
+                    line_no: 4,
+                    verb: "map-local".into(),
+                },
+            ],
+        );
+        let id_plain = session.open(FlowDraft {
+            protocol: Protocol::Http11,
+            method: "GET".into(),
+            host: "api.example.com".into(),
+            path: "/v1/plain".into(),
+            url: "https://api.example.com/v1/plain".into(),
+            request_headers: vec![],
+        });
+
+        let flows = vec![
+            session.get(id_hit).unwrap().clone(),
+            session.get(id_plain).unwrap().clone(),
+        ];
+        let exported = export_har(&flows);
+        let entries = exported["log"]["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        let rules = entries[0]["_zniffRules"].as_array().unwrap();
+        assert_eq!(rules.len(), 2);
+        assert_eq!(
+            rules[0],
+            json!({ "group": null, "line": 2, "verb": "header" })
+        );
+        assert_eq!(
+            rules[1],
+            json!({ "group": "mock-api", "line": 4, "verb": "map-local" })
+        );
+        assert!(entries[1].get("_zniffRules").is_none());
     }
 }

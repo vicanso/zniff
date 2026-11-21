@@ -1297,6 +1297,20 @@ fn conn_info_json(conn: &session::ConnInfo) -> Value {
     })
 }
 
+fn rule_hits_json(hits: &[crate::session::RuleHit]) -> Value {
+    Value::Array(
+        hits.iter()
+            .map(|hit| {
+                json!({
+                    "group": hit.group_name,
+                    "line": hit.line_no,
+                    "verb": hit.verb,
+                })
+            })
+            .collect(),
+    )
+}
+
 fn flow_summary(flow: &Flow) -> Value {
     json!({
         "id": flow.id,
@@ -1315,6 +1329,7 @@ fn flow_summary(flow: &Flow) -> Value {
         "url": flow.url,
         "pinned": flow.pinned,
         "rule_hit": flow.rule_hit,
+        "rule_hits": rule_hits_json(&flow.rule_hits),
         "comment": flow.comment,
         "started_ms": unix_millis(flow.started),
         "response_ms": flow.response_at.map(unix_millis),
@@ -1349,6 +1364,7 @@ fn flow_detail(hub: &Hub, id: u64) -> Option<Value> {
             "client_ip": flow.client_ip,
             "conn_info": conn_info_json(&flow.conn_info),
             "rule_hit": flow.rule_hit,
+            "rule_hits": rule_hits_json(&flow.rule_hits),
             "relay": flow.relay_source.as_deref().map(session::relay_short).unwrap_or_default(),
             "request_headers": pairs(&flow.request_headers),
             "response_headers": pairs(&flow.response_headers),
@@ -3528,7 +3544,15 @@ mod tests {
                     dialed_before_start: true,
                 },
             );
-            session.set_rule_hit(id, "header");
+            session.set_rule_hit_details(
+                id,
+                "header",
+                vec![session::RuleHit {
+                    group_name: Some("api".into()),
+                    line_no: 2,
+                    verb: "header".into(),
+                }],
+            );
             session.append_body(id, Direction::Request, &raw_req);
             session.set_response(
                 id,
@@ -3577,6 +3601,10 @@ mod tests {
         assert_eq!(listed["total"], 1);
         assert_eq!(listed["session_total"], 2);
         assert_eq!(listed["flows"][0]["rule_hit"], "header");
+        assert_eq!(
+            listed["flows"][0]["rule_hits"],
+            json!([{ "group": "api", "line": 2, "verb": "header" }])
+        );
         assert!(listed["flows"][0]["response_ms"].as_u64().is_some());
         assert_eq!(listed["flows"][0]["conn_info"]["tls_version"], "TLSv1.3");
         assert_eq!(listed["flows"][0]["conn_info"]["dns_ms"], 3);

@@ -6,6 +6,7 @@ pub(crate) struct RuleEditTarget {
     pub(crate) workspace: Signal<String>,
     pub(crate) groups: Signal<Vec<config::RuleGroup>>,
     pub(crate) editing: Signal<Option<String>>,
+    pub(crate) focused_line: Signal<Option<(Option<String>, usize)>>,
 }
 
 impl RuleEditTarget {
@@ -14,7 +15,25 @@ impl RuleEditTarget {
             workspace: profiles.rules,
             groups: profiles.rule_groups,
             editing: profiles.editing_group,
+            focused_line: profiles.focused_rule_line,
         }
+    }
+
+    pub(crate) fn is_line_focused(&self, line_no: usize) -> bool {
+        let editing = self.editing.get();
+        self.focused_line.with(|focused| {
+            let Some((group, focused_no)) = focused else {
+                return false;
+            };
+            if *focused_no != line_no {
+                return false;
+            }
+            match (editing.as_deref(), group.as_deref()) {
+                (None, None) => true,
+                (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+                _ => false,
+            }
+        })
     }
 
     pub(crate) fn current_text(&self) -> String {

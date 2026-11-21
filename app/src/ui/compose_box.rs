@@ -1105,6 +1105,8 @@ pub(crate) fn clear_shown(shown: Shown) {
     shown.url.set(String::new());
     shown.protocol.set(String::new());
     shown.rules.set(String::new());
+    shown.rule_hits.set(Vec::new());
+    shown.gql_badge.set(String::new());
     shown.status.set(None);
     shown.error.set(String::new());
     shown.request_headers.set(Vec::new());
