@@ -46,6 +46,8 @@ mod mcp;
 #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
 mod mock_gen;
 mod openapi;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod perf_bench;
 mod present;
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(not(feature = "desktop"), allow(dead_code))]

@@ -8,7 +8,7 @@ NSH_JSON := app/nsh.json
 CARGO_FLAGS := --manifest-path $(MANIFEST)
 VERSION := $(shell sed -n 's/^version = "\([^"]*\)"/\1/p' $(MANIFEST) | head -1)
 
-.PHONY: all help build dev debug run web web-ui fmt lint test check check-wasm release bundle clean \
+.PHONY: all help build dev debug run web web-ui fmt lint test bench check check-wasm release bundle clean \
 	bloat udeps version sync-version version-patch version-minor version-major tag nightly changelog
 
 # --- develop ---------------------------------------------------------------
@@ -28,6 +28,7 @@ help:
 		'check    type-check every target (plus wasm32 when installed)' \
 		'check-wasm  type-check the shared wasm32 UI library' \
 		'test     run the library and binary tests' \
+		'bench    run large-session performance benchmarks (10k / 100k flows)' \
 		'release  compile the release binary' \
 		'bundle   release binary wrapped as zniff.app with icons/zniff.icns' \
 		'clean    remove this package from the cargo target directory' \
@@ -107,6 +108,9 @@ check-wasm:
 
 test:
 	$(CARGO) test $(CARGO_FLAGS) --workspace $(ARGS)
+
+bench:
+	$(CARGO) bench $(CARGO_FLAGS) --bench large_session $(ARGS)
 
 # --- release ---------------------------------------------------------------
 
