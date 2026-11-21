@@ -10,6 +10,7 @@ pub(crate) struct OnboardingProps {
     pub(crate) use_system_proxy: Signal<bool>,
     pub(crate) adb_count: Signal<usize>,
     pub(crate) flow_total: Signal<usize>,
+    pub(crate) onboarding_traffic: Signal<OnboardingTraffic>,
     pub(crate) compose: Compose,
     pub(crate) selected: Signal<Option<u64>>,
     pub(crate) profiles: ProfileSignals,
@@ -40,7 +41,8 @@ pub(crate) fn onboarding_card(props: OnboardingProps, pane_width: Signal<f32>) -
         .max_w(px(580.0))
         .flex_col()
         .gap_5()
-        .child(onboarding_header(&props));
+        .child(onboarding_header(&props))
+        .child(onboarding_checklist(&props));
 
     #[cfg(not(target_arch = "wasm32"))]
     let root = root.child(onboarding_primary_section(&props, pane_width));
@@ -53,6 +55,8 @@ pub(crate) fn onboarding_card(props: OnboardingProps, pane_width: Signal<f32>) -
 }
 
 fn onboarding_header(props: &OnboardingProps) -> impl IntoElement {
+    let running = props.running;
+    let listen = props.listen;
     view()
         .w_full()
         .flex_col()
@@ -71,7 +75,28 @@ fn onboarding_header(props: &OnboardingProps) -> impl IntoElement {
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(fg_primary()),
                 )
-                .child(onboarding_header_status(props)),
+                .child(when(
+                    move || running.get() && !listen.with(String::is_empty),
+                    move || {
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap_1p5()
+                            .child(
+                                view()
+                                    .w(px(6.0))
+                                    .h(px(6.0))
+                                    .rounded_full()
+                                    .bg(status_ok_fg()),
+                            )
+                            .child(
+                                mono(move || SharedString::from(listen.get()))
+                                    .number_of_lines(1)
+                                    .text_size(px(11.5))
+                                    .text_color(fg_muted()),
+                            )
+                    },
+                )),
         )
         .child(
             text(tr(
@@ -80,225 +105,6 @@ fn onboarding_header(props: &OnboardingProps) -> impl IntoElement {
             ))
             .text_size(px(12.5))
             .text_color(fg_muted()),
-        )
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn onboarding_header_status(props: &OnboardingProps) -> impl IntoElement {
-    let controls = props.controls.clone();
-    let running = props.running;
-    let listen = props.listen;
-    let ca_ui = props.ca_ui;
-    let install_ca = props.install_ca.clone();
-    let langs = ui_langs();
-
-    when(
-        move || running.get() && ca_ui.status.get() == ca::CaStatus::Trusted,
-        move || {
-            view()
-                .flex_row()
-                .items_center()
-                .gap_1p5()
-                .child(
-                    view()
-                        .w(px(6.0))
-                        .h(px(6.0))
-                        .rounded_full()
-                        .bg(status_ok_fg()),
-                )
-                .child(
-                    mono(move || -> SharedString {
-                        let lang = ui_lang(langs);
-                        let addr = listen.get();
-                        let ca_label = if let Some(ext) = ca_ui.active_external.get() {
-                            match lang {
-                                Lang::Zh => format!("已复用 {} 证书", ext.tool_name),
-                                Lang::En => format!("Reusing {} CA", ext.tool_name),
-                            }
-                        } else {
-                            t(lang, "根证书已信任", "CA trusted").to_string()
-                        };
-                        if addr.is_empty() {
-                            ca_label.into()
-                        } else {
-                            format!("{addr} · {ca_label}").into()
-                        }
-                    })
-                    .number_of_lines(1)
-                    .text_size(px(11.5))
-                    .text_color(fg_muted()),
-                )
-        },
-    )
-    .otherwise(move || {
-        let start_controls = controls.clone();
-        let ext_controls = controls.clone();
-        let install_cb = install_ca.clone();
-        view()
-            .flex_row()
-            .flex_wrap()
-            .items_center()
-            .gap_2()
-            .child(when(
-                move || !running.get(),
-                move || {
-                    let toggle_controls = start_controls.clone();
-                    header_action_chip(tr("开始监听", "Start listening"), true, move || {
-                        toggle_capture(toggle_controls.clone())
-                    })
-                },
-            ))
-            .child(when(
-                move || {
-                    ca_ui.status.get() != ca::CaStatus::Trusted
-                        && ca_ui.detected_external.with(|items| !items.is_empty())
-                },
-                move || {
-                    let reuse_controls = ext_controls.clone();
-                    header_action_chip(
-                        move || -> SharedString {
-                            let lang = ui_lang(langs);
-                            let tool = ca_ui
-                                .detected_external
-                                .with(|items| items.first().map(|item| item.tool_name.clone()))
-                                .unwrap_or_default();
-                            match lang {
-                                Lang::Zh => format!("复用 {tool} 证书").into(),
-                                Lang::En => format!("Reuse {tool} CA").into(),
-                            }
-                        },
-                        true,
-                        move || {
-                            if let Some(first) =
-                                ca_ui.detected_external.with(|items| items.first().cloned())
-                            {
-                                use_external_ca(reuse_controls.clone(), first.id);
-                            }
-                        },
-                    )
-                },
-            ))
-            .child(when(
-                move || ca_ui.status.get() != ca::CaStatus::Trusted,
-                move || {
-                    let cb = install_cb.clone();
-                    header_action_chip(
-                        move || -> SharedString {
-                            let lang = ui_lang(langs);
-                            match ca_ui.status.get() {
-                                ca::CaStatus::InstalledUntrusted => {
-                                    t(lang, "信任根证书", "Trust CA").into()
-                                }
-                                ca::CaStatus::NotInstalled | ca::CaStatus::Trusted => {
-                                    t(lang, "安装根证书", "Install CA").into()
-                                }
-                            }
-                        },
-                        false,
-                        move || cb.as_ref()(),
-                    )
-                },
-            ))
-    })
-}
-
-#[cfg(target_arch = "wasm32")]
-fn onboarding_header_status(props: &OnboardingProps) -> impl IntoElement {
-    let controls = props.controls.clone();
-    let running = props.running;
-    let listen = props.listen;
-    when(
-        move || running.get(),
-        move || {
-            view()
-                .flex_row()
-                .items_center()
-                .gap_1p5()
-                .child(
-                    view()
-                        .w(px(6.0))
-                        .h(px(6.0))
-                        .rounded_full()
-                        .bg(status_ok_fg()),
-                )
-                .child(
-                    mono(move || SharedString::from(listen.get()))
-                        .number_of_lines(1)
-                        .text_size(px(11.5))
-                        .text_color(fg_muted()),
-                )
-        },
-    )
-    .otherwise(move || {
-        let toggle_controls = controls.clone();
-        header_action_chip(tr("开始监听", "Start listening"), true, move || {
-            toggle_capture(toggle_controls.clone())
-        })
-    })
-}
-
-fn header_action_chip(
-    label: impl IntoReactive<SharedString>,
-    accent: bool,
-    on_press: impl Fn() + 'static,
-) -> impl IntoElement {
-    nsh_base::button()
-        .on_press(on_press)
-        .h(px(26.0))
-        .px_2p5()
-        .gap_1p5()
-        .flex_row()
-        .items_center()
-        .rounded(px(6.0))
-        .border_1()
-        .transition_colors()
-        .duration(120.0)
-        .ease_out()
-        .border_color(if accent {
-            accent_blue_border()
-        } else {
-            status_warn_fg()
-        })
-        .bg(if accent {
-            accent_blue_soft()
-        } else {
-            status_warn_bg()
-        })
-        .hover(move |s| {
-            s.bg(if accent {
-                accent_blue_soft_hover()
-            } else {
-                status_warn_bg()
-            })
-        })
-        .active(move |s| {
-            s.bg(if accent {
-                accent_blue_soft_hover()
-            } else {
-                status_warn_bg()
-            })
-            .opacity(0.85)
-        })
-        .focus_visible(|s| {
-            s.outline(px(2.0))
-                .outline_color(accent_blue())
-                .outline_offset(px(2.0))
-        })
-        .child(view().w(px(6.0)).h(px(6.0)).rounded_full().bg(if accent {
-            accent_blue_text()
-        } else {
-            status_warn_fg()
-        }))
-        .child(
-            text(label)
-                .number_of_lines(1)
-                .text_size(px(11.5))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(if accent {
-                    accent_blue_text()
-                } else {
-                    status_warn_fg()
-                }),
         )
 }
 
@@ -701,29 +507,13 @@ fn onboarding_secondary_tile(
     subtitle: impl IntoReactive<SharedString>,
     on_press: impl Fn() + 'static,
 ) -> impl IntoElement {
-    nsh_base::button()
-        .on_press(on_press)
+    interactive_surface_button(bg_canvas(), border_strong(), || false, on_press)
         .w_full()
         .min_w(px(0.0))
         .px_3()
         .py_2p5()
         .gap_2p5()
-        .flex_row()
-        .items_center()
         .rounded(px(8.0))
-        .border_1()
-        .border_color(border_strong())
-        .bg(bg_canvas())
-        .transition_colors()
-        .duration(120.0)
-        .ease_out()
-        .hover(|s| s.bg(bg_card()).border_color(border_control()))
-        .active(|s| s.bg(bg_control()))
-        .focus_visible(|s| {
-            s.outline(px(2.0))
-                .outline_color(accent_blue())
-                .outline_offset(px(2.0))
-        })
         .child(
             view()
                 .w(px(18.0))
@@ -733,28 +523,7 @@ fn onboarding_secondary_tile(
                 .justify_center()
                 .child(glyph_px(14.0, move || icon, || color(fg_muted()))),
         )
-        .child(
-            view()
-                .flex_1()
-                .min_w(px(0.0))
-                .flex_col()
-                .gap_0p5()
-                .child(
-                    text(title)
-                        .number_of_lines(1)
-                        .text_overflow(EllipsizeMode::Tail)
-                        .text_size(px(12.5))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(fg_secondary()),
-                )
-                .child(
-                    text(subtitle)
-                        .number_of_lines(1)
-                        .text_overflow(EllipsizeMode::Tail)
-                        .text_size(px(11.5))
-                        .text_color(fg_muted()),
-                ),
-        )
+        .child(onboarding_card_labels(title, subtitle, || false))
 }
 
 #[cfg(not(target_arch = "wasm32"))]

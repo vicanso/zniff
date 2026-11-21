@@ -2276,6 +2276,10 @@ impl Session {
         self.cached_total.unwrap_or(self.flows.len())
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = &Flow> {
+        self.order.iter().filter_map(|id| self.flows.get(id))
+    }
+
     pub fn memory_bytes(&self) -> usize {
         self.bytes
     }

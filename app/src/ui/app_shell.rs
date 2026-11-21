@@ -55,6 +55,7 @@ pub fn App() -> impl IntoElement {
     provide_context(filter_catalog);
     let facets_open = signal(false);
     let flow_total = signal(0_usize);
+    let onboarding_traffic = signal(OnboardingTraffic::default());
     let listen = signal(String::new());
     let saved = saved_config();
     let shown = Shown {
@@ -380,6 +381,7 @@ pub fn App() -> impl IntoElement {
     let filter_catalog_tick = filter_catalog;
     let facets_open_tick = facets_open;
     let total_tick = flow_total;
+    let onboarding_traffic_tick = onboarding_traffic;
     let shown_tick = shown;
     let seen_gen = stored(0_u64);
     let seen_filter = stored(String::new());
@@ -846,6 +848,7 @@ pub fn App() -> impl IntoElement {
                 next_facets,
                 next_catalog,
                 next_total,
+                next_onboarding_traffic,
                 next_mem,
                 next_dropped,
                 diag_plan,
@@ -888,12 +891,14 @@ pub fn App() -> impl IntoElement {
                             &list_filter_now,
                         )
                     });
+                    let next_onboarding_traffic = OnboardingTraffic::from_flows(session.iter());
                     (
                         lines,
                         stats,
                         next_facets,
                         next_catalog,
                         session.len(),
+                        next_onboarding_traffic,
                         format_bytes(session.memory_bytes()),
                         session.dropped(),
                         diag_plan,
@@ -913,6 +918,9 @@ pub fn App() -> impl IntoElement {
             }
             if total_tick.get_untracked() != next_total {
                 total_tick.set(next_total);
+            }
+            if onboarding_traffic_tick.get_untracked() != next_onboarding_traffic {
+                onboarding_traffic_tick.set(next_onboarding_traffic);
             }
             if let Some(next_facets) = next_facets
                 && facets_tick.with(|cur| cur != &next_facets)
@@ -1303,6 +1311,7 @@ pub fn App() -> impl IntoElement {
                 use_system_proxy,
                 adb_count,
                 flow_total,
+                onboarding_traffic,
                 compose,
                 selected,
                 profiles: profile_signals,
