@@ -22,7 +22,6 @@ pub(crate) fn more_menu(
     let apple = cfg!(target_os = "macos");
     let settings_shortcut = format_shortcut_badge("mod+,", apple);
     let shortcuts_key = format_shortcut_badge("mod+/", apple);
-    let marker_shortcut = format_shortcut_badge("mod+shift+m", apple);
 
     // Group 1: Export (<= 6 items)
     let items = view()
@@ -103,23 +102,47 @@ pub(crate) fn more_menu(
                 }
             },
         ))
-        .child(menu_action(
-            Glyph::Prompt,
-            tr("构造请求", "New request"),
-            move || {
-                open.set(false);
-                begin_new_request(compose, selected);
-            },
-        ))
-        .child(menu_action_meta(
-            Glyph::Badge,
-            tr("插入会话标记", "Insert marker"),
-            move || SharedString::from(marker_shortcut.clone()),
-            move || {
-                open.set(false);
-                profiles.marker_modal_open.set(true);
-            },
-        ));
+        .child(
+            view()
+                .h(px(32.0))
+                .px_2p5()
+                .gap_2()
+                .rounded(px(6.0))
+                .flex_row()
+                .items_center()
+                .child(glyph(|| Glyph::Prompt, || color(fg_secondary())))
+                .child(
+                    control_text(tr("新建", "New"))
+                        .flex_1()
+                        .text_color(fg_secondary()),
+                )
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_1()
+                        .child(menu_inline_pill(
+                            tr("构造请求", "Request"),
+                            || false,
+                            move || {
+                                open.set(false);
+                                begin_new_request(compose, selected);
+                            },
+                        ))
+                        .child(
+                            view()
+                                .tooltip(label_tip("插入会话标记", "Insert marker"))
+                                .child(menu_inline_pill(
+                                    tr("会话标记", "Marker"),
+                                    || false,
+                                    move || {
+                                        open.set(false);
+                                        profiles.marker_modal_open.set(true);
+                                    },
+                                )),
+                        ),
+                ),
+        );
     let items = desktop_child!(
         items,
         menu_import_row(open, import_controls.clone(), profiles)

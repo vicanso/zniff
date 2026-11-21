@@ -229,3 +229,5 @@ pub(crate) use self::web_poll::*;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_v05;

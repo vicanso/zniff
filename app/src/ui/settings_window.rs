@@ -184,7 +184,7 @@ fn settings_modal_header(open: Signal<bool>) -> impl IntoElement {
         )
 }
 
-fn settings_shell(props: SettingsWindowProps, is_modal: bool) -> impl IntoElement {
+pub(crate) fn settings_shell(props: SettingsWindowProps, is_modal: bool) -> impl IntoElement {
     let tab = props.profiles.settings_tab;
     let content_props = props.clone();
     view()
