@@ -269,6 +269,7 @@ pub fn App() -> impl IntoElement {
         settings_tab: signal(SettingsTab::General),
         shortcuts_open: signal(false),
         marker_modal_open: signal(false),
+        watch_open: signal(false),
         about_open: signal(false),
         default_json_tree: shown.default_json_tree,
         minimize_to_tray: signal(saved.minimize_to_tray),
@@ -468,6 +469,14 @@ pub fn App() -> impl IntoElement {
     let clear_toast_id = stored(None::<u64>);
     let toast_manager_tick = toast_manager;
     let toast_shown_tick = toast_shown;
+    let watch_rules = signal(saved_config().watch_rules);
+    let watch_eval = signal(crate::watch::WatchEvaluation::default());
+    let watch_tracker = stored(crate::watch::WatchTracker::default());
+    let seen_watch_rules = stored(Vec::<config::WatchRule>::new());
+    let seen_watch_gen = stored(u64::MAX);
+    let watch_rules_tick = watch_rules;
+    let watch_eval_tick = watch_eval;
+    let watch_tracker_tick = watch_tracker;
     let toast_state_tick = toast_state;
     let toast_gen_tick = toast_overlay_gen;
     let clear_toast_tick = clear_toast_id;
@@ -885,6 +894,29 @@ pub fn App() -> impl IntoElement {
         let run_secondary = refresh.run_secondary;
         let want_stats = selected_now.is_none();
         let stats_only = !list_changed && want_stats && seen_selected.get().is_some();
+        let watch_rules_now = watch_rules_tick.get_untracked();
+        if generation != seen_watch_gen.get()
+            || seen_watch_rules.with(|prev| prev != &watch_rules_now)
+        {
+            seen_watch_gen.replace(generation);
+            seen_watch_rules.replace(watch_rules_now.clone());
+            let eval = watch_tracker_tick.with(|tracker| {
+                controls_tick
+                    .hub
+                    .with_session(|session| tracker.evaluate(&watch_rules_now, session))
+            });
+            for alert in &eval.new_alerts {
+                set_status(
+                    &controls_tick,
+                    StatusMsg::WatchAlert {
+                        rule: alert.rule_name.clone(),
+                        target: alert.target.clone(),
+                        count: alert.new_count,
+                    },
+                );
+            }
+            watch_eval_tick.set(eval);
+        }
         if list_changed {
             seen_gen.replace(generation);
             seen_filter.replace(effective_filter_now.clone());
@@ -1285,6 +1317,8 @@ pub fn App() -> impl IntoElement {
             shortcuts_open.set(false);
         } else if profile_signals.marker_modal_open.get() {
             profile_signals.marker_modal_open.set(false);
+        } else if profile_signals.watch_open.get() {
+            profile_signals.watch_open.set(false);
         } else if profile_signals.filter_panel_open.get() {
             profile_signals.filter_panel_open.set(false);
         } else if profile_signals.panel_open.get() {
@@ -1554,6 +1588,15 @@ pub fn App() -> impl IntoElement {
                 },
                 qr_open,
                 pending_qr,
+            },
+            WatchPopoverProps {
+                open: profile_signals.watch_open,
+                rules: watch_rules,
+                eval: watch_eval,
+                effective_filter,
+                list_filter,
+                selected,
+                controls: controls.clone(),
             },
             controls.clone(),
         ))

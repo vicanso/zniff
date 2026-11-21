@@ -19,6 +19,7 @@ pub(crate) fn footer(
     layout_mode: Signal<config::LayoutMode>,
     sidebar_collapsed: Signal<bool>,
     connect_hub: ConnectHubProps,
+    watch: WatchPopoverProps,
     controls: Arc<Controls>,
 ) -> impl IntoElement {
     let port_controls = controls.clone();
@@ -238,6 +239,7 @@ pub(crate) fn footer(
             move || !running.get(),
             move || lan_toggle(listen_all, lan_controls.clone()),
         ))
+        .child(watch_popover(watch))
         .child(connect_hub_popover(connect_hub))
         .child(access_control_popover(access))
         .child(

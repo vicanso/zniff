@@ -533,6 +533,42 @@ pub fn merge_imported_profiles(
 /// Maximum number of independent rule groups persisted in `config.toml`.
 pub const RULE_GROUP_CAP: usize = 32;
 
+/// Maximum number of saved watch alert rules persisted in `config.toml`.
+pub const WATCH_RULE_CAP: usize = 16;
+
+/// One saved filter expression monitored for live hits and toast alerts (E6).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WatchRule {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    pub filter: String,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub enabled: bool,
+}
+
+/// Trims watch rule fields, drops empty filters, deduplicates by filter case-insensitively,
+/// and caps the list at [`WATCH_RULE_CAP`].
+pub fn sanitize_watch_rules(rules: Vec<WatchRule>) -> Vec<WatchRule> {
+    let mut out: Vec<WatchRule> = Vec::new();
+    for mut rule in rules {
+        rule.name = rule.name.trim().to_string();
+        rule.filter = rule.filter.trim().to_string();
+        if rule.filter.is_empty() {
+            continue;
+        }
+        if !out
+            .iter()
+            .any(|seen| seen.filter.eq_ignore_ascii_case(&rule.filter))
+        {
+            out.push(rule);
+        }
+        if out.len() >= WATCH_RULE_CAP {
+            break;
+        }
+    }
+    out
+}
+
 /// One toggleable named rule group evaluated alongside workspace `rules`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuleGroup {
@@ -706,6 +742,8 @@ pub struct Config {
     pub profile_history: Vec<SavedProfile>,
     /// Named rule groups stacked alongside workspace `rules`.
     pub rule_groups: Vec<RuleGroup>,
+    /// Saved filter expressions watched for live hit counts and toast alerts (E6).
+    pub watch_rules: Vec<WatchRule>,
     /// Persisted recent Compose requests (up to [`COMPOSE_HISTORY_CAP`], newest first).
     pub compose_history: Vec<ComposeHistoryItem>,
     /// Dragged list-column widths, in points, keyed by `method`, `path`, and the rest.
@@ -889,6 +927,8 @@ struct RawConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     rule_groups: Vec<RuleGroup>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    watch_rules: Vec<WatchRule>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     compose_history: Vec<ComposeHistoryItem>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     column_widths: HashMap<String, u32>,
@@ -903,6 +943,7 @@ impl From<RawConfig> for Config {
         let mut saved_profiles = raw.saved_profiles;
         let mut profile_history = raw.profile_history;
         let rule_groups = sanitize_rule_groups(raw.rule_groups);
+        let watch_rules = sanitize_watch_rules(raw.watch_rules);
         let compose_history = sanitize_compose_history(raw.compose_history);
         clamp_saved_filters(&mut saved_filters);
         clamp_saved_rules(&mut saved_rules);
@@ -1053,6 +1094,7 @@ impl From<RawConfig> for Config {
             saved_profiles,
             profile_history,
             rule_groups,
+            watch_rules,
             compose_history,
             column_widths: raw.column_widths,
             column_widths_top_bottom: raw.column_widths_top_bottom,
@@ -1184,6 +1226,7 @@ impl From<Config> for RawConfig {
             saved_profiles: config.saved_profiles,
             profile_history: config.profile_history,
             rule_groups: sanitize_rule_groups(config.rule_groups),
+            watch_rules: sanitize_watch_rules(config.watch_rules),
             compose_history: sanitize_compose_history(config.compose_history),
             column_widths: config.column_widths,
             column_widths_top_bottom: config.column_widths_top_bottom,
@@ -1241,6 +1284,7 @@ impl Default for Config {
             saved_profiles: Vec::new(),
             profile_history: Vec::new(),
             rule_groups: Vec::new(),
+            watch_rules: Vec::new(),
             compose_history: Vec::new(),
             column_widths: HashMap::new(),
             column_widths_top_bottom: HashMap::new(),
@@ -3049,5 +3093,35 @@ mod tests {
         let raw_toml = fs::read_to_string(dir.path().join("config.toml")).unwrap();
         assert!(!raw_toml.contains("compose_history"), "{raw_toml}");
         assert!(load(dir.path()).compose_history.is_empty());
+    }
+
+    #[test]
+    fn watch_rules_roundtrip_and_sanitize() {
+        let dir = Scratch::new();
+        update(dir.path(), |config| {
+            config.watch_rules = vec![
+                WatchRule {
+                    name: "  API 5xx ".into(),
+                    filter: " status:5xx host:api.x.com ".into(),
+                    enabled: true,
+                },
+                WatchRule {
+                    name: "dup".into(),
+                    filter: "STATUS:5XX HOST:API.X.COM".into(),
+                    enabled: false,
+                },
+                WatchRule {
+                    name: "empty".into(),
+                    filter: "   ".into(),
+                    enabled: true,
+                },
+            ];
+        })
+        .unwrap();
+        let reloaded = load(dir.path());
+        assert_eq!(reloaded.watch_rules.len(), 1);
+        assert_eq!(reloaded.watch_rules[0].name, "API 5xx");
+        assert_eq!(reloaded.watch_rules[0].filter, "status:5xx host:api.x.com");
+        assert!(reloaded.watch_rules[0].enabled);
     }
 }

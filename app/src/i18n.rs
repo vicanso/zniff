@@ -250,6 +250,11 @@ pub enum StatusMsg {
     ClearUndone {
         count: usize,
     },
+    WatchAlert {
+        rule: String,
+        target: String,
+        count: usize,
+    },
     UiZoomChanged(u16),
 }
 
@@ -826,6 +831,17 @@ impl StatusMsg {
                 Lang::En if *count == 1 => "Restored 1 flow".to_string(),
                 Lang::En => format!("Restored {count} flows"),
             },
+            Self::WatchAlert {
+                rule,
+                target,
+                count,
+            } => {
+                if *count > 1 {
+                    format!("{rule} (+{count}) · {target}")
+                } else {
+                    format!("{rule} · {target}")
+                }
+            }
             Self::UiZoomChanged(pct) => match lang {
                 Lang::Zh => format!("界面缩放 {pct}%"),
                 Lang::En => format!("UI zoom {pct}%"),
@@ -926,6 +942,7 @@ impl StatusMsg {
             | Self::AdbFailed(_)
             | Self::UpdateCheckFailed(_)
             | Self::UpdateFailed { .. }
+            | Self::WatchAlert { .. }
             | Self::ConfigBroken { .. } => Some(true),
             _ => None,
         }
@@ -979,6 +996,7 @@ impl StatusMsg {
                 t(lang, "检查更新", "Update Check")
             }
             Self::ClearedFlows { .. } => t(lang, "已清空会话", "Session Cleared"),
+            Self::WatchAlert { .. } => t(lang, "匹配提醒命中", "Watch Alert"),
             Self::ExportFailed(_)
             | Self::ImportFailed(_)
             | Self::SaveFailed(_)
@@ -1606,5 +1624,15 @@ mod tests {
             StatusMsg::ClearUndone { count: 1 }.text(Lang::En),
             "Restored 1 flow"
         );
+
+        let watch = StatusMsg::WatchAlert {
+            rule: "API 5xx".into(),
+            target: "GET api.x.com/pay 502".into(),
+            count: 2,
+        };
+        assert_eq!(watch.toast_kind(), Some(true));
+        assert_eq!(watch.toast_title(Lang::Zh), "匹配提醒命中");
+        assert_eq!(watch.toast_title(Lang::En), "Watch Alert");
+        assert!(watch.text(Lang::En).contains("(+2)"));
     }
 }

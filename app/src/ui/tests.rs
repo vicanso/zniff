@@ -2943,6 +2943,7 @@ fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
             settings_tab: signal(super::SettingsTab::General),
             shortcuts_open: signal(false),
             marker_modal_open: signal(false),
+            watch_open: signal(false),
             about_open: signal(false),
             default_json_tree: signal(false),
             minimize_to_tray: signal(false),

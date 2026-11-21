@@ -72,6 +72,7 @@ mod sysproxy;
 mod ui;
 #[cfg(not(target_arch = "wasm32"))]
 mod updater;
+mod watch;
 #[cfg(not(target_arch = "wasm32"))]
 mod web;
 #[cfg(not(target_arch = "wasm32"))]

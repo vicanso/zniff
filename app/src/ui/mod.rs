@@ -143,6 +143,7 @@ mod tls_failure_banner;
 mod toast_overlay;
 mod toolbar;
 mod tray;
+mod watch_popover;
 mod web_poll;
 
 pub(crate) use self::about_modal::*;
@@ -218,6 +219,7 @@ pub(crate) use self::toast_overlay::*;
 pub(crate) use self::toolbar::*;
 #[cfg_attr(target_arch = "wasm32", allow(unused_imports))]
 pub(crate) use self::tray::*;
+pub(crate) use self::watch_popover::*;
 #[allow(unused_imports)]
 pub(crate) use self::web_poll::*;
 

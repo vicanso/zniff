@@ -48,6 +48,14 @@ pub(crate) fn build_command_items(state: CommandPaletteState) -> Vec<CommandItem
         )
         .group(g_capture)
         .keywords(["capture", "start", "stop", "proxy", "抓包", "开始", "停止"]),
+        CommandItem::new(
+            "open_watch",
+            t(lang, "打开匹配提醒 (Watch)", "Open Watch Alerts"),
+        )
+        .group(g_capture)
+        .keywords([
+            "watch", "alert", "notify", "monitor", "提醒", "监控", "告警",
+        ]),
         CommandItem::new("new_request", t(lang, "构造请求", "New request"))
             .group(g_capture)
             .keywords(["compose", "request", "curl", "http", "构造", "请求"]),
@@ -816,6 +824,7 @@ pub(crate) fn command_palette_modal(
                         "open_settings" => open_settings_tab(profiles, SettingsTab::General),
                         "open_shortcuts" => shortcuts_open.set(true),
                         "add_marker" => profiles.marker_modal_open.set(true),
+                        "open_watch" => profiles.watch_open.set(true),
                         "open_about" => profiles.about_open.set(true),
                         other => {
                             if let Some(preset) = NetworkPreset::from_command_id(other) {
