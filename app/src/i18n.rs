@@ -176,6 +176,7 @@ pub enum StatusMsg {
     CopiedAxios,
     CopiedKotlinOkHttp,
     CopiedSwiftUrlSession,
+    CopiedAiContext,
     CopiedInterface,
     CopiedRustStruct,
     InterfaceUnavailable,
@@ -603,6 +604,12 @@ impl StatusMsg {
             Self::CopiedSwiftUrlSession => {
                 t(lang, "已复制 Swift URLSession", "Copied Swift URLSession").into()
             }
+            Self::CopiedAiContext => t(
+                lang,
+                "已复制脱敏 AI 上下文 (Markdown)",
+                "Copied redacted AI context (Markdown)",
+            )
+            .into(),
             Self::CopiedInterface => t(
                 lang,
                 "已复制 TypeScript interface",
@@ -853,6 +860,7 @@ impl StatusMsg {
             | Self::CopiedAxios
             | Self::CopiedKotlinOkHttp
             | Self::CopiedSwiftUrlSession
+            | Self::CopiedAiContext
             | Self::CopiedInterface
             | Self::CopiedRustStruct
             | Self::CopiedMermaid
@@ -949,6 +957,7 @@ impl StatusMsg {
             | Self::CopiedAxios
             | Self::CopiedKotlinOkHttp
             | Self::CopiedSwiftUrlSession
+            | Self::CopiedAiContext
             | Self::CopiedInterface
             | Self::CopiedRustStruct
             | Self::CopiedMermaid

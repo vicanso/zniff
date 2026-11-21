@@ -12,6 +12,7 @@ pub(crate) enum Snippet {
     Axios,
     KotlinOkHttp,
     SwiftUrlSession,
+    AiContext,
     Types,
     RustStruct,
 }
@@ -75,6 +76,12 @@ pub(crate) fn copy_snippet(controls: &Controls, id: Option<u64>, kind: Snippet) 
         Snippet::SwiftUrlSession => {
             set_clipboard(copy_formats::swift_urlsession(&flow));
             set_status(controls, StatusMsg::CopiedSwiftUrlSession);
+        }
+        Snippet::AiContext => {
+            let opts = redact::RedactOptions::new(true, &lock_string(&controls.redact_fields))
+                .with_strict(lock_bool(&controls.redact_strict));
+            set_clipboard(ai_context::format_flow_for_ai(&flow, &opts));
+            set_status(controls, StatusMsg::CopiedAiContext);
         }
         Snippet::Types => match std::str::from_utf8(&flow.response_body)
             .ok()

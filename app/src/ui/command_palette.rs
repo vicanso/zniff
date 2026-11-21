@@ -165,6 +165,21 @@ pub(crate) fn build_command_items(state: CommandPaletteState) -> Vec<CommandItem
 
     items.push(
         CommandItem::new(
+            "copy_for_ai",
+            t(
+                lang,
+                "复制给 AI (脱敏 Markdown 上下文)",
+                "Copy for AI (redacted Markdown)",
+            ),
+        )
+        .group(g_copy)
+        .disabled(!has_selection)
+        .keywords([
+            "ai", "llm", "markdown", "prompt", "copy", "redact", "debug", "复制", "脱敏",
+        ]),
+    );
+    items.push(
+        CommandItem::new(
             "copy_httpie",
             t(lang, "复制为 HTTPie 命令", "Copy as HTTPie"),
         )
@@ -647,6 +662,9 @@ pub(crate) fn command_palette_modal(
                         "copy_env" => copy_proxy_env(&controls),
                         #[cfg(not(target_arch = "wasm32"))]
                         "copy_mcp" => copy_mcp_config(&controls),
+                        "copy_for_ai" => {
+                            copy_snippet(&controls, selected.get(), Snippet::AiContext);
+                        }
                         "copy_httpie" => {
                             copy_snippet(&controls, selected.get(), Snippet::Httpie);
                         }
@@ -808,6 +826,7 @@ mod tests {
         assert!(ids.contains("focus_filter"));
         assert!(ids.contains("replay_selected"));
         for copy_id in [
+            "copy_for_ai",
             "copy_httpie",
             "copy_powershell",
             "copy_axios",

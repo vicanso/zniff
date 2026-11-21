@@ -15,6 +15,7 @@ pub(crate) fn detail_actions(
     let rules_text = profiles.rules;
     let copy_url = controls.clone();
     let copy_curl = controls.clone();
+    let copy_ai = controls.clone();
     let copy_fetch = controls.clone();
     let copy_python = controls.clone();
     let copy_rust = controls.clone();
@@ -62,6 +63,9 @@ pub(crate) fn detail_actions(
         }))
         .child(action_item("cURL", move || {
             copy_part(&copy_curl, selected.get(), CopyPart::Curl);
+        }))
+        .child(action_item(tr("复制给 AI", "Copy for AI"), move || {
+            copy_snippet(&copy_ai, selected.get(), Snippet::AiContext);
         }))
         .child(action_item("fetch", move || {
             copy_snippet(&copy_fetch, selected.get(), Snippet::Fetch);

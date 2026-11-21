@@ -444,6 +444,7 @@ pub(crate) fn row_context_menu(
     let copy_url = controls.clone();
     let break_controls = controls.clone();
     let copy_curl = controls.clone();
+    let copy_ai = controls.clone();
     let focus_controls = controls.clone();
     let mute_controls = controls.clone();
     let pin_controls = controls.clone();
@@ -502,6 +503,12 @@ pub(crate) fn row_context_menu(
                             "cURL",
                             closing(menu_open, move || {
                                 copy_part(&copy_curl, picked.get(), CopyPart::Curl);
+                            }),
+                        ))
+                        .child(action_item(
+                            tr("复制给 AI", "Copy for AI"),
+                            closing(menu_open, move || {
+                                copy_snippet(&copy_ai, picked.get(), Snippet::AiContext);
                             }),
                         ))
                         .child(menu_rule())
