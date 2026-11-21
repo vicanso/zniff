@@ -5,18 +5,12 @@ use super::*;
 #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
 pub(crate) fn more_menu(
     open: Signal<bool>,
-    ca_ui: CaSignals,
-    proxy_on: Signal<bool>,
-    install: Rc<impl Fn() + 'static>,
-    remove: Rc<impl Fn() + 'static>,
-    toggle_proxy: impl Fn() + 'static,
     export_har: impl Fn() + 'static,
     copy_env: impl Fn() + 'static,
     clear_unpinned: impl Fn() + 'static,
     import_controls: Arc<Controls>,
     rows: Signal<Vec<Arc<RowLine>>>,
     filter: Signal<String>,
-    pretty: Signal<bool>,
     shown_phase: Signal<Phase>,
     share_id: Signal<String>,
     profiles: ProfileSignals,
@@ -25,10 +19,16 @@ pub(crate) fn more_menu(
     selected: Signal<Option<u64>>,
     update_state: Signal<UpdateState>,
 ) -> impl IntoElement {
+    let apple = cfg!(target_os = "macos");
+    let settings_shortcut = format_shortcut_badge("mod+,", apple);
+    let shortcuts_key = format_shortcut_badge("mod+/", apple);
+
+    // Group 1: Export (<= 6 items)
     let items = view()
         .w_full()
         .p_1()
         .gap_0p5()
+        .child(menu_group_label("导出", "Export"))
         .child(menu_export_row(
             open,
             export_har,
@@ -36,7 +36,30 @@ pub(crate) fn more_menu(
             rows,
             filter,
         ))
-        .child(menu_openapi_row(open, import_controls.clone(), filter))
+        .child(menu_openapi_row(open, import_controls.clone(), filter));
+    let items = desktop_child!(
+        items,
+        menu_action(
+            Glyph::Download,
+            tr("生成本地 Mock…", "Export Mock dir…"),
+            {
+                let controls = import_controls.clone();
+                let rules_text = profiles.rules;
+                move || {
+                    open.set(false);
+                    export_mock_dir(controls.clone(), &filter.get(), rules_text);
+                }
+            }
+        )
+    );
+    let items = items
+        .child(menu_share_row(
+            open,
+            import_controls.clone(),
+            filter,
+            share_id,
+            profiles,
+        ))
         .child(menu_redact_row(
             open,
             import_controls.clone(),
@@ -45,14 +68,12 @@ pub(crate) fn more_menu(
             compose,
             selected,
             shown_phase,
-        ))
-        .child(menu_share_row(
-            open,
-            import_controls.clone(),
-            filter,
-            share_id,
-            profiles,
-        ))
+        ));
+
+    // Group 2: Tools (<= 6 items)
+    let items = items
+        .child(menu_rule())
+        .child(menu_group_label("工具", "Tools"))
         .child(menu_action_enabled(
             Glyph::List,
             tr("生成时序图", "Sequence diagram"),
@@ -90,46 +111,15 @@ pub(crate) fn more_menu(
         ));
     let items = desktop_child!(
         items,
-        menu_action(
-            Glyph::List,
-            tr("导入 HAR / .chlsj", "Import HAR / .chlsj"),
-            {
-                let controls = import_controls.clone();
-                move || {
-                    open.set(false);
-                    prompt_import_har(controls.clone());
-                }
-            }
-        )
+        menu_import_row(open, import_controls.clone(), profiles)
     );
     let items = desktop_child!(
         items,
-        menu_action(
-            Glyph::Download,
-            tr("导入 Whistle / Charles 规则…", "Import Whistle / Charles…"),
-            {
-                let controls = import_controls.clone();
-                move || {
-                    open.set(false);
-                    prompt_import_migration(controls.clone(), profiles);
-                }
-            }
-        )
+        menu_quick_launch_row(open, import_controls.clone(), selected)
     );
     let items = desktop_child!(
         items,
-        menu_action(
-            Glyph::Download,
-            tr("生成本地 Mock…", "Export Mock dir…"),
-            {
-                let controls = import_controls.clone();
-                let rules_text = profiles.rules;
-                move || {
-                    open.set(false);
-                    export_mock_dir(controls.clone(), &filter.get(), rules_text);
-                }
-            }
-        )
+        menu_copy_config_row(open, copy_env, import_controls.clone())
     );
     let items = items.child(menu_action(
         Glyph::Trash,
@@ -139,104 +129,63 @@ pub(crate) fn more_menu(
             clear_unpinned();
         },
     ));
-    let items = desktop_child!(items, menu_rule());
-    let items = desktop_child!(
-        items,
-        menu_quick_launch_row(open, import_controls.clone(), selected)
-    );
-    let items = desktop_child!(items, proxy_menu_item(proxy_on, toggle_proxy));
-    let items = desktop_child!(
-        items,
-        menu_copy_config_row(open, copy_env, import_controls.clone())
-    );
-    let items = desktop_child!(items, menu_rule());
-    let items = desktop_child!(
-        items,
-        cert_menu_row(ca_ui, install, remove, {
-            let controls = import_controls.clone();
-            move || use_builtin_ca(controls.clone())
-        })
-    );
-    let items = desktop_child!(
-        items,
-        external_ca_menu_row(open, ca_ui, import_controls.clone())
-    );
-    let items = desktop_child!(items, platform_ca_extra_menu_item(&import_controls));
+
+    // Group 3: Help & Settings (<= 6 items)
     let items = items
         .child(menu_rule())
-        .child(more_check_action(
-            move || pretty.get(),
-            tr("默认美化", "Pretty by default"),
-            {
-                let controls = import_controls.clone();
-                move || {
-                    let next = !pretty.get();
-                    pretty.set(next);
-                    if let Err(err) = save_config(|config| config.default_pretty = next) {
-                        set_status(
-                            &controls,
-                            StatusMsg::PrefUnsaved {
-                                name: PrefName::Pretty,
-                                err: err.to_string(),
-                            },
-                        );
-                    }
-                }
-            },
-        ))
-        .child(more_check_action(
-            move || profiles.default_json_tree.get(),
-            tr("JSON 默认树形", "JSON tree by default"),
-            {
-                let controls = import_controls.clone();
-                move || {
-                    let next = !profiles.default_json_tree.get();
-                    profiles.default_json_tree.set(next);
-                    if next && !pretty.get() {
-                        pretty.set(true);
-                    }
-                    if let Err(err) = save_config(|config| config.default_json_tree = next) {
-                        set_status(
-                            &controls,
-                            StatusMsg::PrefUnsaved {
-                                name: PrefName::Pretty,
-                                err: err.to_string(),
-                            },
-                        );
-                    }
-                }
-            },
-        ))
-        .child(menu_lang_row(import_controls.clone()))
-        .child(menu_theme_row(import_controls.clone()))
-        .child(menu_zoom_row(import_controls.clone()))
-        .child(menu_mono_font_row(import_controls.clone()))
+        .child(menu_group_label("帮助", "Help"))
         .child(menu_action_meta(
             Glyph::Sliders,
-            tr("中继设置", "Relay Settings"),
+            tr("设置…", "Settings…"),
+            move || SharedString::from(settings_shortcut.clone()),
+            move || {
+                open.set(false);
+                open_settings_tab(profiles, SettingsTab::General);
+            },
+        ))
+        .child(menu_action_meta(
+            Glyph::List,
+            tr("快捷键速查", "Keyboard shortcuts"),
+            move || SharedString::from(shortcuts_key.clone()),
+            move || {
+                open.set(false);
+                profiles.shortcuts_open.set(true);
+            },
+        ));
+    let items = desktop_child!(
+        items,
+        menu_action_enabled(
+            Glyph::Download,
+            tr("检查更新", "Check for updates"),
             {
                 let langs = ui_langs();
                 move || {
-                    let has_relay = !profiles.relay_url.get().trim().is_empty();
-                    let label = if has_relay {
-                        t(ui_lang(langs), "已配置", "Configured")
+                    let lang = ui_lang(langs);
+                    let st = update_state.get();
+                    if let Some(ver) = st.nudge {
+                        SharedString::from(ver)
+                    } else if matches!(st.phase, UpdatePhase::Checking) {
+                        SharedString::from(t(lang, "检查中…", "Checking…"))
                     } else {
-                        ""
-                    };
-                    SharedString::from(label)
+                        SharedString::default()
+                    }
                 }
             },
-            move || {
-                open.set(false);
-                profiles.machine_settings_open.set(true);
+            move || !update_state.get().is_busy(),
+            {
+                let controls = import_controls.clone();
+                move || {
+                    open.set(false);
+                    if update_state.get().nudge.is_some() {
+                        open_settings_tab(profiles, SettingsTab::Updates);
+                    } else {
+                        check_update_manual(controls.clone());
+                    }
+                }
             },
-        ));
-    let items = items.child(menu_rule());
-    let diag_controls = import_controls.clone();
-    let items = desktop_child!(
-        items,
-        update_menu_section(open, update_state, import_controls)
+        )
     );
+    let diag_controls = import_controls.clone();
     let items = items.child(menu_action(
         Glyph::Download,
         tr("导出诊断包…", "Export Diagnostics…"),

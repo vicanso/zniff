@@ -496,6 +496,7 @@ pub(crate) fn toolbar_menu(
     selected: Signal<Option<u64>>,
     update_state: Signal<UpdateState>,
 ) -> impl IntoElement {
+    let _ = (install, remove, toggle_proxy, pretty);
     let open = signal(false);
     popover()
         .open(move || Some(open.get()))
@@ -511,18 +512,12 @@ pub(crate) fn toolbar_menu(
         .trigger(more_trigger(ca_ui.status, proxy_on, update_state, open))
         .child(more_menu(
             open,
-            ca_ui,
-            proxy_on,
-            install,
-            remove,
-            toggle_proxy,
             export_har,
             copy_env,
             clear_unpinned,
             import_controls,
             rows,
             filter,
-            pretty,
             shown_phase,
             share_id,
             profiles,

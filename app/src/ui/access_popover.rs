@@ -159,7 +159,10 @@ pub(crate) fn access_trigger_pill(
         )
 }
 
-fn proxy_auth_section(proxy_auth: Signal<String>, controls: Arc<Controls>) -> impl IntoElement {
+pub(crate) fn proxy_auth_section(
+    proxy_auth: Signal<String>,
+    controls: Arc<Controls>,
+) -> impl IntoElement {
     let langs = ui_langs();
     let active = move || !proxy_auth.get().trim().is_empty();
     let change_controls = controls.clone();
@@ -462,7 +465,11 @@ fn apply_proxy_auth_change(controls: &Controls, proxy_auth: Signal<String>, raw:
     }
 }
 
-fn apply_allow_hosts_change(controls: &Controls, allow_hosts: Signal<String>, raw: &str) {
+pub(crate) fn apply_allow_hosts_change(
+    controls: &Controls,
+    allow_hosts: Signal<String>,
+    raw: &str,
+) {
     allow_hosts.set(raw.to_string());
     let stored = raw.trim().to_string();
     if let Err(err) = controls.hub.set_allow_hosts(&stored) {

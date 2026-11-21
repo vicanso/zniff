@@ -347,6 +347,22 @@ pub(crate) fn build_command_items(
         .keywords(["zoom", "reset", "100%", "重置", "缩放"]),
     );
     items.push(
+        CommandItem::new("open_settings", t(lang, "打开设置", "Open Settings"))
+            .group(g_view)
+            .shortcut("mod+,")
+            .keywords([
+                "settings",
+                "preferences",
+                "config",
+                "设置",
+                "偏好",
+                "证书",
+                "上游",
+                "安全",
+                "中继",
+            ]),
+    );
+    items.push(
         CommandItem::new(
             "open_shortcuts",
             t(lang, "快捷键速查", "Keyboard shortcuts"),
@@ -602,6 +618,7 @@ pub(crate) fn command_palette_modal(
                         "zoom_in" => step_ui_zoom(&controls, config::UI_ZOOM_STEP as i16),
                         "zoom_out" => step_ui_zoom(&controls, -(config::UI_ZOOM_STEP as i16)),
                         "zoom_reset" => reset_ui_zoom(&controls),
+                        "open_settings" => open_settings_tab(profiles, SettingsTab::General),
                         "open_shortcuts" => shortcuts_open.set(true),
                         "open_about" => profiles.about_open.set(true),
                         _ => {}
@@ -663,6 +680,7 @@ mod tests {
             ("focus_filter", "mod+f"),
             ("replay_selected", "mod+r"),
             ("show_summary", "escape"),
+            ("open_settings", "mod+,"),
             ("open_shortcuts", "mod+/"),
         ] {
             let item = items.iter().find(|it| it.id == id).unwrap();

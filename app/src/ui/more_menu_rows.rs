@@ -1,6 +1,61 @@
 #[allow(unused_imports)]
 use super::*;
 
+pub(crate) fn menu_group_label(zh: &'static str, en: &'static str) -> impl IntoElement {
+    view().px_2p5().pt_1().pb_0p5().child(
+        text(tr(zh, en))
+            .number_of_lines(1)
+            .text_size(px(10.5))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(fg_muted()),
+    )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn menu_import_row(
+    open: Signal<bool>,
+    controls: Arc<Controls>,
+    profiles: ProfileSignals,
+) -> impl IntoElement {
+    let har_controls = controls.clone();
+    let rules_controls = controls;
+    view()
+        .h(px(32.0))
+        .px_2p5()
+        .gap_2()
+        .rounded(px(6.0))
+        .flex_row()
+        .items_center()
+        .child(glyph(|| Glyph::Download, || color(fg_secondary())))
+        .child(
+            control_text(tr("导入", "Import"))
+                .flex_1()
+                .text_color(fg_secondary()),
+        )
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .child(menu_inline_pill(
+                    "HAR/.chlsj",
+                    || false,
+                    move || {
+                        open.set(false);
+                        prompt_import_har(har_controls.clone());
+                    },
+                ))
+                .child(menu_inline_pill(
+                    tr("规则迁移", "Rules"),
+                    || false,
+                    move || {
+                        open.set(false);
+                        prompt_import_migration(rules_controls.clone(), profiles);
+                    },
+                )),
+        )
+}
+
 pub(crate) fn menu_action(
     icon: Glyph,
     label: impl IntoReactive<SharedString>,
@@ -113,57 +168,6 @@ pub(crate) fn menu_action_enabled(
                 .text_size(px(11.0))
                 .text_color(fg_muted()),
         )
-}
-
-pub(crate) fn more_check_action(
-    marked: impl Fn() -> bool + 'static + Clone,
-    label: impl IntoReactive<SharedString>,
-    on_select: impl Fn() + 'static,
-) -> impl IntoElement {
-    let dot_border = marked.clone();
-    let dot_bg = marked.clone();
-    menu_item()
-        .on_select(on_select)
-        .h(px(32.0))
-        .px_2p5()
-        .gap_2()
-        .rounded(px(6.0))
-        .flex_row()
-        .items_center()
-        .hover(|style| style.bg(bg_control_hover()))
-        .active(|style| style.opacity(0.75))
-        .cursor(Cursor::Pointer)
-        .child(
-            view()
-                .w(px(13.0))
-                .h(px(13.0))
-                .flex_shrink_0()
-                .flex_row()
-                .items_center()
-                .justify_center()
-                .child(
-                    view()
-                        .w(px(10.0))
-                        .h(px(10.0))
-                        .rounded(px(2.5))
-                        .border_1()
-                        .border_color(move || {
-                            if dot_border() {
-                                accent_blue()
-                            } else {
-                                border_control()
-                            }
-                        })
-                        .bg(move || if dot_bg() { accent_blue() } else { bg_card() }),
-                ),
-        )
-        .child(control_text(label).text_color(move || {
-            if marked() {
-                accent_blue_text()
-            } else {
-                fg_secondary()
-            }
-        }))
 }
 
 pub(crate) fn menu_inline_pill(
@@ -528,7 +532,7 @@ pub(crate) fn menu_share_row(
                         .tooltip(label_tip("配置中转服务器", "Configure relay server"))
                         .on_press(move || {
                             open.set(false);
-                            profiles.machine_settings_open.set(true);
+                            open_settings_tab(profiles, SettingsTab::Relay);
                         })
                         .child(glyph_px(
                             11.5,
@@ -731,93 +735,6 @@ pub(crate) fn menu_lang_row(controls: Arc<Controls>) -> impl IntoElement {
                     move || langs.get() == Some(Lang::En),
                     move || set_lang(Some(Lang::En), c_en.clone()),
                 )),
-        )
-}
-
-pub(crate) fn proxy_menu_item(on: Signal<bool>, toggle: impl Fn() + 'static) -> impl IntoElement {
-    let bg_on = on;
-    let hover_on = on;
-    let dot_on = on;
-    let label_on = on;
-    let state_on = on;
-    menu_item()
-        .on_select(toggle)
-        .h(px(32.0))
-        .px_2p5()
-        .gap_2()
-        .rounded(px(6.0))
-        .flex_row()
-        .items_center()
-        .bg(move || {
-            if bg_on.get() {
-                accent_blue_soft()
-            } else {
-                bg_card()
-            }
-        })
-        .hover(|style| {
-            style.bg(move || {
-                if hover_on.get() {
-                    accent_blue_soft_hover()
-                } else {
-                    bg_control_hover()
-                }
-            })
-        })
-        .active(|style| style.opacity(0.75))
-        .cursor(Cursor::Pointer)
-        .child(glyph(
-            || Glyph::Shield,
-            move || {
-                color(if dot_on.get() {
-                    accent_blue_text()
-                } else {
-                    fg_secondary()
-                })
-            },
-        ))
-        .child(
-            control_text(tr("系统代理", "System proxy"))
-                .flex_1()
-                .text_color(move || {
-                    if label_on.get() {
-                        accent_blue_text()
-                    } else {
-                        fg_secondary()
-                    }
-                }),
-        )
-        .child(
-            view()
-                .flex_row()
-                .items_center()
-                .gap_1p5()
-                .child(view().w(px(6.0)).h(px(6.0)).rounded_full().bg(move || {
-                    if dot_on.get() {
-                        accent_blue()
-                    } else {
-                        fg_muted()
-                    }
-                }))
-                .child(
-                    control_text({
-                        let langs = ui_langs();
-                        move || -> SharedString {
-                            if state_on.get() {
-                                t(ui_lang(langs), "开", "On").into()
-                            } else {
-                                t(ui_lang(langs), "关", "Off").into()
-                            }
-                        }
-                    })
-                    .text_color(move || {
-                        if state_on.get() {
-                            accent_blue_text()
-                        } else {
-                            fg_muted()
-                        }
-                    }),
-                ),
         )
 }
 

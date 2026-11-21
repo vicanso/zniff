@@ -256,6 +256,9 @@ pub fn App() -> impl IntoElement {
         access_open: signal(false),
         quick_rule_prefill: signal(None),
         machine_settings_open: signal(false),
+        settings_open: signal(false),
+        settings_tab: signal(SettingsTab::General),
+        shortcuts_open: signal(false),
         about_open: signal(false),
         default_json_tree: shown.default_json_tree,
         deselect_rev: signal(0),
@@ -1150,7 +1153,18 @@ pub fn App() -> impl IntoElement {
     let seq_esc = seq_builder;
     let shown_esc = shown;
     let palette_open = signal(false);
-    let shortcuts_open = signal(false);
+    let shortcuts_open = profile_signals.shortcuts_open;
+    on_key_with(
+        "mod+,",
+        KeyOptions {
+            when: nsh_core::keymap::When::Always,
+            ..KeyOptions::default()
+        },
+        move |_| {
+            let next = !profile_signals.settings_open.get();
+            profile_signals.settings_open.set(next);
+        },
+    );
     on_key_with(
         "mod+shift+p",
         KeyOptions {
@@ -1215,6 +1229,8 @@ pub fn App() -> impl IntoElement {
             palette_open.set(false);
         } else if shortcuts_open.get() {
             shortcuts_open.set(false);
+        } else if profile_signals.settings_open.get() {
+            profile_signals.settings_open.set(false);
         } else if profile_signals.about_open.get() {
             profile_signals.about_open.set(false);
         } else if profile_signals.machine_settings_open.get() {
@@ -1479,6 +1495,48 @@ pub fn App() -> impl IntoElement {
             controls.clone(),
         ))
         .child(machine_settings_modal(profile_signals, controls.clone()))
+        .child(settings_window(SettingsWindowProps {
+            profiles: profile_signals,
+            controls: controls.clone(),
+            ca_ui,
+            proxy_on: use_system_proxy,
+            port_text,
+            listen_all,
+            pretty: shown.pretty,
+            seq_builder,
+            rows,
+            compose,
+            selected,
+            shown_phase: shown.phase,
+            update_state,
+            install_ca: {
+                let c = controls.clone();
+                Rc::new(move || {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    install_ca(c.clone());
+                    #[cfg(target_arch = "wasm32")]
+                    let _ = &c;
+                })
+            },
+            remove_ca: {
+                let c = controls.clone();
+                Rc::new(move || {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    remove_ca(c.clone());
+                    #[cfg(target_arch = "wasm32")]
+                    let _ = &c;
+                })
+            },
+            toggle_proxy: {
+                let c = controls.clone();
+                Rc::new(move || {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    toggle_system_proxy(c.clone());
+                    #[cfg(target_arch = "wasm32")]
+                    let _ = &c;
+                })
+            },
+        }))
         .child(about_modal(profile_signals, update_state, controls.clone()))
         .child(command_palette_modal(
             palette_open,
