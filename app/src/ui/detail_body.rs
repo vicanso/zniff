@@ -66,7 +66,8 @@ pub(crate) fn body_section(
                 .flex_wrap()
                 .items_center()
                 .justify_between()
-                .gap_2()
+                .gap_x_2()
+                .gap_y_1p5()
                 .px_3p5()
                 .py_2()
                 .border_b(move || {
@@ -79,8 +80,9 @@ pub(crate) fn body_section(
                 .border_b_color(border_subtle())
                 .child(
                     view()
-                        .flex_1()
-                        .min_w(px(96.0))
+                        .flex_shrink_0()
+                        .max_w(relative(1.0))
+                        .overflow_hidden()
                         .flex_row()
                         .items_center()
                         .gap_1p5()
@@ -92,7 +94,11 @@ pub(crate) fn body_section(
                         .cursor(Cursor::Pointer)
                         .on_press(move || toggle_card(folded, bit))
                         .child(fold_mark(folded, bit))
-                        .child(section_title(tr(zh, en))),
+                        .child(
+                            section_title(tr(zh, en))
+                                .number_of_lines(1)
+                                .text_overflow(EllipsizeMode::Tail),
+                        ),
                 )
                 .child(
                     when(
@@ -634,6 +640,14 @@ fn jump_next_body_match(
     }
 }
 
+pub(crate) fn body_search_width(pane_width: f32) -> f32 {
+    if pane_width > 0.0 && pane_width < 460.0 {
+        76.0
+    } else {
+        120.0
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn body_search_box(
     search: Signal<String>,
@@ -660,12 +674,9 @@ pub(crate) fn body_search_box(
                 .value(search)
                 .placeholder(tr("搜索…", "Search…"))
                 .placeholder_color(move || color(fg_muted()))
-                .w(move || {
-                    let w = pane_width.get();
-                    px(if w > 0.0 && w < 430.0 { 82.0 } else { 120.0 })
-                })
+                .w(move || px(body_search_width(pane_width.get())))
                 .h(px(22.0))
-                .px_2()
+                .px_1p5()
                 .rounded(px(6.0))
                 .bg(bg_code())
                 .border_1()
@@ -975,7 +986,7 @@ fn body_mode_chip(
 ) -> impl IntoElement {
     view()
         .h(px(22.0))
-        .px_2()
+        .px_1p5()
         .flex_row()
         .items_center()
         .border_r(if has_right_border { px(1.0) } else { px(0.0) })

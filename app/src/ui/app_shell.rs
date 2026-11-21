@@ -1223,6 +1223,7 @@ pub fn App() -> impl IntoElement {
                         filter,
                         list_filter,
                         effective_filter,
+                        running,
                         rules_text,
                         list_width,
                         profile_signals.list_height,

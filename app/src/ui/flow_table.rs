@@ -1,7 +1,25 @@
 #[allow(unused_imports)]
 use super::*;
 
-pub(crate) fn list_empty(filter: Signal<String>) -> impl IntoElement {
+pub(crate) fn list_empty_subtitle(lang: Lang, filtered: bool, running: bool) -> &'static str {
+    if filtered {
+        t(lang, "试试调整上方的过滤关键词", "Try a different filter")
+    } else if running {
+        t(
+            lang,
+            "正在监听，等待 HTTP(S) 请求",
+            "Listening, waiting for HTTP(S) traffic",
+        )
+    } else {
+        t(
+            lang,
+            "点击右上角「开始」捕获 HTTP(S) 请求",
+            "Press Start to capture HTTP(S)",
+        )
+    }
+}
+
+pub(crate) fn list_empty(filter: Signal<String>, running: Signal<bool>) -> impl IntoElement {
     view()
         .flex_1()
         .items_center()
@@ -30,17 +48,8 @@ pub(crate) fn list_empty(filter: Signal<String>) -> impl IntoElement {
             text({
                 let langs = ui_langs();
                 move || -> SharedString {
-                    let lang = ui_lang(langs);
-                    if filter.get().is_empty() {
-                        t(
-                            lang,
-                            "点击右上角「开始」捕获 HTTP(S) 请求",
-                            "Press Start to capture HTTP(S)",
-                        )
+                    list_empty_subtitle(ui_lang(langs), !filter.get().is_empty(), running.get())
                         .into()
-                    } else {
-                        t(lang, "试试调整上方的过滤关键词", "Try a different filter").into()
-                    }
                 }
             })
             .text_center()
@@ -60,6 +69,7 @@ pub(crate) fn list_menu(
     controls: Arc<Controls>,
     list_filter: Signal<String>,
     effective_filter: Signal<String>,
+    running: Signal<bool>,
     shown: Shown,
     baseline: Signal<Option<u64>>,
     rules_text: Signal<String>,
@@ -86,6 +96,7 @@ pub(crate) fn list_menu(
             sort,
             controls.clone(),
             effective_filter,
+            running,
             layout_mode,
             picked,
             menu_open,
@@ -143,6 +154,7 @@ pub(crate) fn flow_table(
     sort: Signal<Option<ListSort>>,
     controls: Arc<Controls>,
     filter: Signal<String>,
+    running: Signal<bool>,
     layout_mode: Signal<config::LayoutMode>,
     picked: Signal<Option<u64>>,
     menu_open: Signal<bool>,
@@ -298,7 +310,7 @@ pub(crate) fn flow_table(
                             blur_header();
                         })
                     })
-                    .empty(list_empty(filter))
+                    .empty(list_empty(filter, running))
                     .on_row_press(move |_: &DataTablePress| blur_press())
                     .on_selection_change(move |selection: &Option<DataTableSelection>| {
                         blur_select();

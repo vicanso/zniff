@@ -521,10 +521,11 @@ pub(crate) fn sidebar_domain_group_view(
         mute_facet_active(&f, &root)
     };
     when(single, move || {
-        let entry_opt = group.with(|g| g.entries.first().cloned());
-        view()
-            .w_full()
-            .children(entry_opt.map(|item| sidebar_domain_leaf_row(item, false, filter)))
+        view().w_full().child(each(
+            move || group.with(|g| g.entries.clone()),
+            |entry| entry.token.clone(),
+            move |entry, _| sidebar_domain_leaf_row(entry, false, filter),
+        ))
     })
     .otherwise(move || {
         view()
@@ -665,22 +666,13 @@ pub(crate) fn sidebar_domain_group_view(
                 view().w_full().gap_0p5().child(each(
                     move || group.with(|g| g.entries.clone()),
                     |entry| entry.token.clone(),
-                    move |entry, _| sidebar_domain_leaf_row_sig(entry, true, filter),
+                    move |entry, _| sidebar_domain_leaf_row(entry, true, filter),
                 ))
             }))
     })
 }
 
 fn sidebar_domain_leaf_row(
-    entry: session::FacetEntry,
-    indented: bool,
-    filter: Signal<String>,
-) -> impl IntoElement {
-    let sig = signal(entry);
-    sidebar_domain_leaf_row_sig(sig.read_only(), indented, filter)
-}
-
-fn sidebar_domain_leaf_row_sig(
     entry: ReadSignal<session::FacetEntry>,
     indented: bool,
     filter: Signal<String>,

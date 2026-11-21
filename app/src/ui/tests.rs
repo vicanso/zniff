@@ -3908,3 +3908,541 @@ fn onboarding_grid_aligns_columns_and_collapses_narrow() {
         }
     }
 }
+
+#[derive(Default)]
+struct HeadlessMountTree {
+    kinds: std::collections::HashMap<nsh_core::NodeId, nsh_core::ViewKind>,
+    parent: std::collections::HashMap<nsh_core::NodeId, nsh_core::NodeId>,
+    children: std::collections::HashMap<nsh_core::NodeId, Vec<nsh_core::NodeId>>,
+    frames: std::collections::HashMap<nsh_core::NodeId, Bounds<Points>>,
+    texts: std::collections::HashMap<nsh_core::NodeId, String>,
+}
+
+impl HeadlessMountTree {
+    fn pump(&mut self, core: &mut nsh_core::Core<nsh_core::ApproxTextEngine>) {
+        use nsh_core::MountItem;
+        let mut evs = Vec::new();
+        for _ in 0..16 {
+            let batch = core.commit();
+            if let Some(b) = &batch {
+                for item in &b.items {
+                    match item {
+                        MountItem::Create { id, kind } => {
+                            self.kinds.insert(*id, *kind);
+                        }
+                        MountItem::Insert {
+                            parent,
+                            child,
+                            before,
+                        } => {
+                            if let Some(old_parent) = self.parent.insert(*child, *parent)
+                                && let Some(list) = self.children.get_mut(&old_parent)
+                            {
+                                list.retain(|c| c != child);
+                            }
+                            let list = self.children.entry(*parent).or_default();
+                            list.retain(|c| c != child);
+                            match before.and_then(|b| list.iter().position(|c| *c == b)) {
+                                Some(pos) => list.insert(pos, *child),
+                                None => list.push(*child),
+                            }
+                        }
+                        MountItem::Remove { id } => {
+                            if let Some(old_parent) = self.parent.remove(id)
+                                && let Some(list) = self.children.get_mut(&old_parent)
+                            {
+                                list.retain(|c| c != id);
+                            }
+                        }
+                        MountItem::Delete { id } => {
+                            if let Some(old_parent) = self.parent.remove(id)
+                                && let Some(list) = self.children.get_mut(&old_parent)
+                            {
+                                list.retain(|c| c != id);
+                            }
+                            self.children.remove(id);
+                            self.kinds.remove(id);
+                            self.frames.remove(id);
+                            self.texts.remove(id);
+                        }
+                        MountItem::Frame { id, frame } => {
+                            self.frames.insert(*id, *frame);
+                        }
+                        MountItem::Text { id, text, .. } => {
+                            self.texts.insert(*id, text.text.clone());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            evs.clear();
+            core.take_events(&mut evs);
+            let mut any = false;
+            for ev in evs.drain(..) {
+                if let nsh_core::element::JsEvent::Event(id, kind, payload) = ev {
+                    any |= core.component_event(id, kind, &payload);
+                }
+            }
+            if batch.is_none() && !any {
+                break;
+            }
+        }
+    }
+
+    fn collect_live_texts(&self, root: nsh_core::NodeId) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut stack = vec![root];
+        while let Some(id) = stack.pop() {
+            if let Some(s) = self.texts.get(&id) {
+                out.push(s.clone());
+            }
+            if let Some(kids) = self.children.get(&id) {
+                for &child in kids.iter().rev() {
+                    stack.push(child);
+                }
+            }
+        }
+        out
+    }
+
+    fn abs_frame(&self, id: nsh_core::NodeId) -> Bounds<Points> {
+        let mut frame = self.frames[&id];
+        let mut cur = self.parent.get(&id).copied();
+        while let Some(p) = cur {
+            if let Some(pf) = self.frames.get(&p) {
+                frame.origin.x = Points(frame.origin.x.0 + pf.origin.x.0);
+                frame.origin.y = Points(frame.origin.y.0 + pf.origin.y.0);
+            }
+            cur = self.parent.get(&p).copied();
+        }
+        frame
+    }
+}
+
+fn mount_headless_component<C: nsh_core::prelude::Component + 'static>(
+    size: Size<Points>,
+) -> (
+    nsh_core::Core<nsh_core::ApproxTextEngine>,
+    HeadlessMountTree,
+) {
+    use nsh_core::{ApproxTextEngine, Core, Op, Prop, ROOT_ID, Tag};
+    let mut core = Core::new(ApproxTextEngine, size);
+    let mut registry = Registry::new();
+    registry.register::<C>();
+    core.set_components(registry);
+    for op in [
+        Op::Create {
+            id: 2,
+            tag: Tag::View,
+        },
+        Op::SetProp {
+            id: 2,
+            prop: Prop::Component(std::any::type_name::<C>().into()),
+        },
+        Op::Insert {
+            parent: ROOT_ID,
+            child: 2,
+            before: None,
+        },
+    ] {
+        core.apply(op).expect("apply op");
+    }
+    let mut tree = HeadlessMountTree::default();
+    tree.pump(&mut core);
+    (core, tree)
+}
+
+#[test]
+fn single_entry_domain_group_updates_count_error_badge_and_label_reactively() {
+    use crate::session::{FacetEntry, FacetKind, SessionFacets};
+    use nsh_core::{EventKind, EventPayload, PressEvent};
+
+    #[component]
+    fn SingleDomainSidebarHarness() -> impl IntoElement {
+        provide_context(signal(Some(crate::i18n::Lang::En)));
+        super::provide_mono_font(false);
+        let step = signal(0_u8);
+        let facets = signal(SessionFacets {
+            domains: vec![FacetEntry {
+                label: "127.0.0.1".into(),
+                token: "127.0.0.1".into(),
+                kind: FacetKind::Domain,
+                count: 1,
+                error_count: 0,
+            }],
+            apps: Vec::new(),
+        });
+        let filter = signal(String::new());
+        let width = signal(super::SIDEBAR_WIDTH_DEFAULT);
+        let collapsed = signal(false);
+        view()
+            .w(px(260.0))
+            .h(px(500.0))
+            .on_press(move || {
+                let next = step.get() + 1;
+                step.set(next);
+                let domain = match next {
+                    1 => FacetEntry {
+                        label: "127.0.0.1".into(),
+                        token: "127.0.0.1".into(),
+                        kind: FacetKind::Domain,
+                        count: 5,
+                        error_count: 1,
+                    },
+                    2 => FacetEntry {
+                        label: "127.0.0.1".into(),
+                        token: "127.0.0.1".into(),
+                        kind: FacetKind::Domain,
+                        count: 8,
+                        error_count: 3,
+                    },
+                    _ => FacetEntry {
+                        label: "api.local".into(),
+                        token: "api.local".into(),
+                        kind: FacetKind::Domain,
+                        count: 8,
+                        error_count: 0,
+                    },
+                };
+                facets.set(SessionFacets {
+                    domains: vec![domain],
+                    apps: Vec::new(),
+                });
+            })
+            .child(super::facet_sidebar(facets, filter, width, collapsed))
+    }
+
+    let (mut core, mut tree) =
+        mount_headless_component::<SingleDomainSidebarHarness>(Size::new(px(260.0), px(500.0)));
+
+    let row_texts = |tree: &HeadlessMountTree, host: &str| -> Vec<String> {
+        let label_id = tree
+            .texts
+            .iter()
+            .find_map(|(id, text)| (text == host && tree.parent.contains_key(id)).then_some(*id))
+            .expect("domain label mounted");
+        let row_id = tree.parent[&label_id];
+        tree.collect_live_texts(row_id)
+    };
+
+    // Initial: count=1, error_count=0 (no error badge).
+    assert_eq!(row_texts(&tree, "127.0.0.1"), vec!["127.0.0.1", "1"]);
+
+    // Step 1: count 1 -> 5, error_count 0 -> 1.
+    core.component_event(
+        2,
+        EventKind::Press,
+        &EventPayload::Press(PressEvent::default()),
+    );
+    tree.pump(&mut core);
+    assert_eq!(row_texts(&tree, "127.0.0.1"), vec!["127.0.0.1", "1", "5"]);
+
+    // Step 2: count 5 -> 8, error_count 1 -> 3.
+    core.component_event(
+        2,
+        EventKind::Press,
+        &EventPayload::Press(PressEvent::default()),
+    );
+    tree.pump(&mut core);
+    assert_eq!(row_texts(&tree, "127.0.0.1"), vec!["127.0.0.1", "3", "8"]);
+
+    // Step 3: swapped single domain & error_count cleared to 0.
+    core.component_event(
+        2,
+        EventKind::Press,
+        &EventPayload::Press(PressEvent::default()),
+    );
+    tree.pump(&mut core);
+    assert_eq!(row_texts(&tree, "api.local"), vec!["api.local", "8"]);
+}
+
+#[test]
+fn list_empty_subtitle_reflects_running_and_filter_state() {
+    use crate::i18n::Lang;
+    use nsh_core::{EventKind, EventPayload, PressEvent};
+
+    assert_eq!(
+        super::list_empty_subtitle(Lang::En, false, false),
+        "Press Start to capture HTTP(S)"
+    );
+    assert_eq!(
+        super::list_empty_subtitle(Lang::En, false, true),
+        "Listening, waiting for HTTP(S) traffic"
+    );
+    assert_eq!(
+        super::list_empty_subtitle(Lang::En, true, true),
+        "Try a different filter"
+    );
+    assert_eq!(
+        super::list_empty_subtitle(Lang::Zh, false, false),
+        "点击右上角「开始」捕获 HTTP(S) 请求"
+    );
+    assert_eq!(
+        super::list_empty_subtitle(Lang::Zh, false, true),
+        "正在监听，等待 HTTP(S) 请求"
+    );
+    assert_eq!(
+        super::list_empty_subtitle(Lang::Zh, true, false),
+        "试试调整上方的过滤关键词"
+    );
+
+    #[component]
+    fn ListEmptyHarness() -> impl IntoElement {
+        provide_context(signal(Some(Lang::En)));
+        let step = signal(0_u8);
+        let filter = signal(String::new());
+        let running = signal(false);
+        view()
+            .w(px(500.0))
+            .h(px(300.0))
+            .on_press(move || {
+                let next = step.get() + 1;
+                step.set(next);
+                match next {
+                    1 => running.set(true),
+                    _ => filter.set("host:example.com".into()),
+                }
+            })
+            .child(super::list_empty(filter, running))
+    }
+
+    let (mut core, mut tree) =
+        mount_headless_component::<ListEmptyHarness>(Size::new(px(500.0), px(300.0)));
+    assert_eq!(
+        tree.collect_live_texts(2),
+        vec!["No traffic yet", "Press Start to capture HTTP(S)"]
+    );
+
+    core.component_event(
+        2,
+        EventKind::Press,
+        &EventPayload::Press(PressEvent::default()),
+    );
+    tree.pump(&mut core);
+    assert_eq!(
+        tree.collect_live_texts(2),
+        vec!["No traffic yet", "Listening, waiting for HTTP(S) traffic"]
+    );
+
+    core.component_event(
+        2,
+        EventKind::Press,
+        &EventPayload::Press(PressEvent::default()),
+    );
+    tree.pump(&mut core);
+    assert_eq!(
+        tree.collect_live_texts(2),
+        vec!["No matching traffic", "Try a different filter"]
+    );
+}
+
+fn make_test_controls(tag: &str) -> Arc<Controls> {
+    let dir = std::env::temp_dir().join(format!("zniff-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let ca = Arc::new(crate::ca::Ca::open(&dir).expect("ca"));
+    let hub = Arc::new(Hub::new(ca).expect("hub"));
+    let _ = std::fs::remove_dir_all(&dir);
+    Arc::new(Controls {
+        hub,
+        capture: Mutex::new(None),
+        status: Mutex::new(StatusMsg::Idle),
+        running: Mutex::new(false),
+        listen: Mutex::new(String::new()),
+        listen_port: Mutex::new(8895),
+        ca_status: Mutex::new(crate::ca::CaStatus::NotInstalled),
+        active_external_ca: Mutex::new(None),
+        external_cas: Mutex::new(Vec::new()),
+        use_system_proxy: Mutex::new(false),
+        proxy_applied: Mutex::new(false),
+        ops: Mutex::new(()),
+        listen_all: Mutex::new(false),
+        update_state: Mutex::new(UpdateState::default()),
+        redact_export: Mutex::new(false),
+        redact_strict: Mutex::new(false),
+        redact_fields: Mutex::new(String::new()),
+        relay_url: Mutex::new(String::new()),
+        relay_token: Mutex::new(String::new()),
+        relay_push: Mutex::new(None),
+        toast_seq: std::sync::atomic::AtomicU64::new(0),
+        toast_queue: Mutex::new(Vec::new()),
+        config_error: Mutex::new(None),
+        config_path: Mutex::new(String::new()),
+    })
+}
+
+fn make_test_json_shown(pane_w: f32) -> super::Shown {
+    super::Shown {
+        phase: signal(super::Phase::Ready),
+        method: signal("POST".into()),
+        url: signal("http://127.0.0.1:18999/api/orders".into()),
+        protocol: signal("HTTP/1.1".into()),
+        rules: signal(String::new()),
+        status: signal(Some(201)),
+        error: signal(String::new()),
+        request_headers: signal(Vec::new()),
+        response_headers: signal(Vec::new()),
+        request_body: signal(String::new()),
+        response_body: signal("{\"ok\":true}".into()),
+        request_hex: signal(Vec::new()),
+        response_hex: signal(Vec::new()),
+        pane_width: signal(pane_w),
+        request_language: signal(String::new()),
+        response_language: signal("json".into()),
+        request_doc: signal(None),
+        response_doc: signal(None),
+        req_doc_preview: signal(false),
+        res_doc_preview: signal(false),
+        request_json: signal(None),
+        response_json: signal(Some(super::JsonBody {
+            flow_id: 2,
+            body_hash: 1,
+            value: Arc::new(serde_json::json!({"ok": true})),
+        })),
+        req_json_tree: signal(false),
+        res_json_tree: signal(false),
+        request_form: signal(Vec::new()),
+        request_note: signal(String::new()),
+        response_note: signal(String::new()),
+        metrics: signal(String::new()),
+        timing_bar: signal(crate::present::TimingBreakdown::default()),
+        query: signal(Vec::new()),
+        preview: signal(String::new()),
+        preview_w: signal(0.0),
+        preview_h: signal(0.0),
+        image_caption: signal(String::new()),
+        pretty: signal(true),
+        default_json_tree: signal(false),
+        messages: signal(Vec::new()),
+        llm_stream: signal(None),
+        msg_llm_view: signal(true),
+        diff: signal(String::new()),
+        diff_old: signal(String::new()),
+        diff_new: signal(String::new()),
+        diff_scope: signal(0_u8),
+        pinned: signal(false),
+        comment: signal(String::new()),
+        editing_comment: signal(false),
+        repeating: signal(false),
+        repeat_count: signal("1".into()),
+        repeat_interval: signal("0".into()),
+        repeat_concurrency: signal("1".into()),
+        req_search: signal(String::new()),
+        res_search: signal(String::new()),
+        msg_search: signal(String::new()),
+        msg_dir: signal(0),
+        msg_kind: signal(0),
+        relay: signal(String::new()),
+        request_offset: signal(0),
+        response_offset: signal(0),
+        request_window: signal(super::TextWindow::default()),
+        response_window: signal(super::TextWindow::default()),
+        req_headers_loading: signal(false),
+        res_headers_loading: signal(false),
+        req_body_loading: signal(false),
+        res_body_loading: signal(false),
+        messages_loading: signal(false),
+        diff_loading: signal(false),
+    }
+}
+
+#[tokio::test]
+async fn body_section_header_keeps_gap_between_title_and_search_at_narrow_split() {
+    use nsh_core::ViewKind;
+    use std::cell::Cell;
+
+    thread_local! {
+        static BODY_PANE_W: Cell<f32> = const { Cell::new(400.0) };
+        static BODY_SEARCH_Q: Cell<bool> = const { Cell::new(false) };
+    }
+
+    #[component]
+    fn NarrowBodyHeaderHarness() -> impl IntoElement {
+        provide_context(signal(Some(crate::i18n::Lang::En)));
+        super::provide_mono_font(false);
+        let pane_w = BODY_PANE_W.with(Cell::get);
+        let controls = make_test_controls("body-header-test");
+        let shown = make_test_json_shown(pane_w);
+        if BODY_SEARCH_Q.with(Cell::get) {
+            shown.res_search.set("ok".into());
+        }
+        let selected = signal(Some(2_u64));
+        let baseline = signal(None::<u64>);
+        let folded = signal(0_u8);
+        view()
+            .w(px(pane_w))
+            .h(px(400.0))
+            .pl_3p5()
+            .pr_5()
+            .py_3p5()
+            .child(super::body_section(
+                "响应 body",
+                "Response body",
+                shown.response_body,
+                shown.response_hex,
+                shown.response_note,
+                shown.response_language,
+                shown.response_doc,
+                signal(Vec::new()),
+                shown.res_search,
+                true,
+                shown,
+                controls,
+                selected,
+                baseline,
+                folded,
+                super::FOLD_RES_BODY,
+                shown.res_body_loading,
+            ))
+    }
+
+    let check_width = |pane_w: f32, with_query: bool, expect_single_row: bool| {
+        BODY_PANE_W.with(|c| c.set(pane_w));
+        BODY_SEARCH_Q.with(|c| c.set(with_query));
+        let (_core, tree) =
+            mount_headless_component::<NarrowBodyHeaderHarness>(Size::new(px(pane_w), px(400.0)));
+        let title_id = tree
+            .texts
+            .iter()
+            .find_map(|(id, text)| (text == "Response body").then_some(*id))
+            .expect("Response body title");
+        let search_id = tree
+            .kinds
+            .iter()
+            .find_map(|(id, kind)| {
+                (*kind == ViewKind::Input
+                    && tree.frames.get(id).is_some_and(|f| f.size.width.0 >= 40.0))
+                .then_some(*id)
+            })
+            .expect("Search input");
+        let title = tree.abs_frame(title_id);
+        let search = tree.abs_frame(search_id);
+        let same_row = (title.origin.y.0 - search.origin.y.0).abs() < 10.0;
+        if expect_single_row {
+            assert!(
+                same_row,
+                "pane_w={pane_w}: expected single-row header, got title={title:?} search={search:?}"
+            );
+            let gap = search.origin.x.0 - (title.origin.x.0 + title.size.width.0);
+            assert!(
+                gap >= 8.0,
+                "pane_w={pane_w}: Response body must keep >= 8px gap before Search..., got {gap:.1}px (title={title:?}, search={search:?})"
+            );
+        } else if same_row {
+            let gap = search.origin.x.0 - (title.origin.x.0 + title.size.width.0);
+            assert!(
+                gap >= 8.0,
+                "pane_w={pane_w}: same-row gap must stay >= 8px, got {gap:.1}px"
+            );
+        } else {
+            assert!(
+                search.origin.y.0 >= title.origin.y.0 + title.size.height.0,
+                "pane_w={pane_w}: wrapped search row must sit below title: title={title:?} search={search:?}"
+            );
+        }
+    };
+
+    check_width(400.0, false, true);
+    check_width(396.0, false, true);
+    check_width(400.0, true, false);
+    check_width(300.0, false, false);
+}
