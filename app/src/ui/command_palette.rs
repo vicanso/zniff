@@ -139,6 +139,24 @@ pub(crate) fn build_command_items(
     );
     items.push(
         CommandItem::new(
+            "export_diagnostics",
+            t(lang, "导出诊断包…", "Export Diagnostics…"),
+        )
+        .group(g_export)
+        .keywords([
+            "diagnostics",
+            "debug",
+            "issue",
+            "bug",
+            "support",
+            "export",
+            "诊断",
+            "排查",
+            "导出",
+        ]),
+    );
+    items.push(
+        CommandItem::new(
             "export_html",
             t(lang, "导出 HTML 快照", "Export HTML snapshot"),
         )
@@ -514,6 +532,7 @@ pub(crate) fn command_palette_modal(
                         #[cfg(not(target_arch = "wasm32"))]
                         "copy_mcp" => copy_mcp_config(&controls),
                         "export_har" => export_har_file(controls, &filter.get()),
+                        "export_diagnostics" => export_diagnostics_file(controls),
                         "export_html" => {
                             export_html_file(controls, &filter.get(), ui_lang(langs) == Lang::Zh)
                         }

@@ -232,10 +232,19 @@ pub(crate) fn more_menu(
             },
         ));
     let items = items.child(menu_rule());
+    let diag_controls = import_controls.clone();
     let items = desktop_child!(
         items,
         update_menu_section(open, update_state, import_controls)
     );
+    let items = items.child(menu_action(
+        Glyph::Download,
+        tr("导出诊断包…", "Export Diagnostics…"),
+        move || {
+            open.set(false);
+            export_diagnostics_file(diag_controls.clone());
+        },
+    ));
     let items = items.child(menu_action_meta(
         Glyph::Badge,
         tr("关于 zniff", "About zniff"),

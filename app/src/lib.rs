@@ -18,6 +18,7 @@ mod clock;
 mod config;
 #[cfg(not(target_arch = "wasm32"))]
 mod decompress;
+mod diagnostics;
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
 mod external_ca;

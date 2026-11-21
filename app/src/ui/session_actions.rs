@@ -268,6 +268,99 @@ pub(crate) fn export_har_file(controls: Arc<Controls>, filter: &str) {
     spawn_export_save(controls, dialog, bytes);
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn export_diagnostics_file(controls: Arc<Controls>) {
+    let secs = unix_secs_now();
+    let cfg = saved_config();
+    let ca_status_str = match lock_ca_status(&controls) {
+        ca::CaStatus::Trusted => "trusted",
+        ca::CaStatus::InstalledUntrusted => "installed_untrusted",
+        ca::CaStatus::NotInstalled => "not_installed",
+    };
+    let active_external_ca = lock_active_external_ca(&controls).map(|ext| ext.tool_name);
+    let detected_external_cas = lock_external_cas(&controls)
+        .into_iter()
+        .map(|ext| ext.tool_name)
+        .collect();
+    let capturing = *controls
+        .running
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let listen_addr = lock_string(&controls.listen);
+    let use_system_proxy = lock_bool(&controls.use_system_proxy);
+    let config_load_error = current_config_error(&controls);
+
+    let bundle = controls.hub.with_session(|session| {
+        crate::diagnostics::build_diagnostics_bundle(crate::diagnostics::DiagnosticsInput {
+            generated_at_unix_secs: secs,
+            dev_mode: config::is_dev_mode(),
+            capturing,
+            listen_addr,
+            use_system_proxy,
+            config_load_error,
+            ca: crate::diagnostics::CaDiagnostics {
+                status: ca_status_str.to_string(),
+                active_external_ca,
+                detected_external_cas,
+            },
+            config: &cfg,
+            session,
+        })
+    });
+    let json = match bundle.to_pretty_json() {
+        Ok(json) => json,
+        Err(err) => {
+            set_status(&controls, StatusMsg::ExportFailed(err.to_string()));
+            return;
+        }
+    };
+    let dialog = save_dialog_with_default_dir()
+        .file_name(format!("zniff-diagnostics-{secs}.json"))
+        .filter(nsh_core::file_dialog::FileFilter::new("JSON", ["json"]));
+    spawn_export_save(controls, dialog, json.into_bytes());
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn export_diagnostics_file(controls: Arc<Controls>) {
+    let secs = clock::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let cfg = saved_config();
+    let capturing = *controls
+        .running
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let listen_addr = lock_string(&controls.listen);
+    let config_load_error = current_config_error(&controls);
+    let bundle = controls.hub.with_session(|session| {
+        crate::diagnostics::build_diagnostics_bundle(crate::diagnostics::DiagnosticsInput {
+            generated_at_unix_secs: secs,
+            dev_mode: false,
+            capturing,
+            listen_addr,
+            use_system_proxy: false,
+            config_load_error,
+            ca: crate::diagnostics::CaDiagnostics {
+                status: "server_managed".to_string(),
+                active_external_ca: None,
+                detected_external_cas: vec![],
+            },
+            config: &cfg,
+            session,
+        })
+    });
+    match bundle.to_pretty_json() {
+        Ok(json) => {
+            set_clipboard(json);
+            set_status(
+                &controls,
+                StatusMsg::Exported("zniff-diagnostics.json (clipboard)".into()),
+            );
+        }
+        Err(err) => set_status(&controls, StatusMsg::ExportFailed(err.to_string())),
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn export_response_web(controls: Arc<Controls>, id: Option<u64>) {
     let Some(id) = id else {
