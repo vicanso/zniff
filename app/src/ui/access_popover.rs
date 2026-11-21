@@ -8,6 +8,7 @@ pub(crate) struct AccessControlProps {
     pub(crate) allow_hosts: Signal<String>,
     pub(crate) allow_hosts_strict: Signal<bool>,
     pub(crate) allow_hosts_locked: Signal<bool>,
+    pub(crate) allow_denied: Signal<allow_hosts::AllowDeniedSummary>,
     pub(crate) controls: Arc<Controls>,
 }
 
@@ -26,9 +27,11 @@ pub(crate) fn access_summary_state(
 pub(crate) fn access_control_popover(props: AccessControlProps) -> impl IntoElement {
     let open = props.open;
     let controls = props.controls.clone();
+    let denied_controls = props.controls.clone();
     let allow_hosts = props.allow_hosts;
     let allow_hosts_strict = props.allow_hosts_strict;
     let allow_hosts_locked = props.allow_hosts_locked;
+    let allow_denied = props.allow_denied;
     let proxy_auth = props.proxy_auth;
     popover()
         .open(move || Some(open.get()))
@@ -61,6 +64,12 @@ pub(crate) fn access_control_popover(props: AccessControlProps) -> impl IntoElem
                     Rc::new(move |raw: &str| {
                         apply_allow_hosts_change(&controls, allow_hosts, raw);
                     }),
+                ))
+                .child(allow_denied_summary_section(
+                    allow_denied,
+                    allow_hosts,
+                    allow_hosts_locked,
+                    denied_controls,
                 )),
         )
 }
@@ -74,6 +83,7 @@ pub(crate) fn access_trigger_pill(
     let proxy_auth = props.proxy_auth;
     let allow_hosts = props.allow_hosts;
     let allow_hosts_strict = props.allow_hosts_strict;
+    let allow_denied = props.allow_denied;
     let state = move || {
         access_summary_state(
             &proxy_auth.get(),
@@ -81,6 +91,7 @@ pub(crate) fn access_trigger_pill(
             allow_hosts_strict.get(),
         )
     };
+    let denied_total = move || allow_denied.with(|summary| summary.total);
     view()
         .h(px(22.0))
         .px_2()
@@ -92,7 +103,7 @@ pub(crate) fn access_trigger_pill(
         .border_1()
         .border_color(move || {
             let (auth_on, denies_all, restricted) = state();
-            if denies_all {
+            if denies_all || denied_total() > 0 {
                 status_warn_fg()
             } else if open.get() || auth_on || restricted {
                 accent_blue_border()
@@ -102,7 +113,7 @@ pub(crate) fn access_trigger_pill(
         })
         .bg(move || {
             let (_, denies_all, _) = state();
-            if denies_all {
+            if denies_all || denied_total() > 0 {
                 status_warn_bg()
             } else if open.get() {
                 accent_blue_soft()
@@ -113,7 +124,7 @@ pub(crate) fn access_trigger_pill(
         .hover(|style| {
             style.bg(move || {
                 let (_, denies_all, _) = state();
-                if denies_all {
+                if denies_all || denied_total() > 0 {
                     status_warn_bg()
                 } else if open.get() {
                     accent_blue_soft_hover()
@@ -126,7 +137,7 @@ pub(crate) fn access_trigger_pill(
         .cursor(Cursor::Pointer)
         .child(view().w(px(6.0)).h(px(6.0)).rounded_full().bg(move || {
             let (auth_on, denies_all, restricted) = state();
-            if denies_all {
+            if denies_all || denied_total() > 0 {
                 status_warn_fg()
             } else if auth_on || restricted {
                 status_ok_fg()
@@ -138,17 +149,24 @@ pub(crate) fn access_trigger_pill(
             text(move || -> SharedString {
                 let lang = ui_lang(langs);
                 let (_, denies_all, _) = state();
-                if denies_all {
+                let blocked = denied_total();
+                if blocked > 0 {
+                    match lang {
+                        Lang::Zh => format!("安全 · 拦截 {blocked}").into(),
+                        Lang::En => format!("Access · {blocked} denied").into(),
+                    }
+                } else if denies_all {
                     t(lang, "安全 · 全拒", "Access · Denied").into()
                 } else {
                     t(lang, "安全", "Access").into()
                 }
             })
+            .tabular_nums()
             .number_of_lines(1)
             .text_size(px(11.5))
             .text_color(move || {
                 let (_, denies_all, _) = state();
-                if denies_all {
+                if denies_all || denied_total() > 0 {
                     status_warn_fg()
                 } else if open.get() {
                     accent_blue_text()

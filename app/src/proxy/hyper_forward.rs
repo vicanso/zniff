@@ -197,6 +197,7 @@ pub(super) async fn forward_request(
         inner_host.as_deref().filter(|h| !hub.host_allowed(h))
     };
     if let Some(blocked) = blocked_host {
+        hub.record_allow_denied(blocked);
         return host_not_allowed_response(blocked, *req.method() == Method::HEAD);
     }
     let websocket = is_websocket(&req);
@@ -420,6 +421,7 @@ pub(super) async fn forward_request(
             Some(Action::MapRemote { url, path_prefix }) => {
                 if let Some((next_scheme, next_host, next_port, next_path)) = parse_http_url(url) {
                     if !hub.host_allowed(&next_host) {
+                        hub.record_allow_denied(&next_host);
                         if let Some(left) = incoming.take() {
                             let _ =
                                 drain_and_record_request(&hub, id, left, encoding.as_deref()).await;

@@ -224,6 +224,7 @@ pub fn App() -> impl IntoElement {
     let allow_hosts_sig = signal(allow_runtime.text);
     let allow_hosts_strict_sig = signal(allow_runtime.strict);
     let allow_hosts_locked_sig = signal(allow_runtime.locked);
+    let allow_denied_sig = signal(allow_hosts::AllowDeniedSummary::default());
     let relay_url_sig = signal(saved.relay_url);
     let relay_accept_sig = signal(saved.relay_accept);
     let profile_signals = ProfileSignals {
@@ -245,6 +246,7 @@ pub fn App() -> impl IntoElement {
         allow_hosts: allow_hosts_sig,
         allow_hosts_strict: allow_hosts_strict_sig,
         allow_hosts_locked: allow_hosts_locked_sig,
+        allow_denied: allow_denied_sig,
         relay_url: relay_url_sig,
         relay_accept: relay_accept_sig,
         list_width,
@@ -462,6 +464,7 @@ pub fn App() -> impl IntoElement {
     let pane_px = Rc::new(Cell::new(0.0_f32));
     let pane_tick = pane_px.clone();
     let seen_rules_rev = stored(controls_tick.hub.rules_revision());
+    let seen_denied_gen = stored(0_u64);
     set_interval(Duration::from_millis(16), move || {
         controls_tick.hub.expire_clear_undo();
         let pending_toasts = {
@@ -677,6 +680,16 @@ pub fn App() -> impl IntoElement {
             );
         }
         let generation = controls_tick.hub.generation();
+        if generation != seen_denied_gen.get() {
+            seen_denied_gen.replace(generation);
+            let denied_now = controls_tick.hub.allow_denied_summary();
+            if profile_tick
+                .allow_denied
+                .with_untracked(|cur| cur != &denied_now)
+            {
+                profile_tick.allow_denied.set(denied_now);
+            }
+        }
         let filter_now = filter_tick.get();
         let effective_filter_now = effective_filter_tick.get();
         if filter_now != filter_pending.get() {
@@ -1475,6 +1488,7 @@ pub fn App() -> impl IntoElement {
                 allow_hosts: profile_signals.allow_hosts,
                 allow_hosts_strict: profile_signals.allow_hosts_strict,
                 allow_hosts_locked: profile_signals.allow_hosts_locked,
+                allow_denied: profile_signals.allow_denied,
                 controls: controls.clone(),
             },
             config_broken,

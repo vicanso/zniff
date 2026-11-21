@@ -319,6 +319,7 @@ pub(crate) struct ProfileSignals {
     pub(crate) allow_hosts: Signal<String>,
     pub(crate) allow_hosts_strict: Signal<bool>,
     pub(crate) allow_hosts_locked: Signal<bool>,
+    pub(crate) allow_denied: Signal<allow_hosts::AllowDeniedSummary>,
     pub(crate) relay_url: Signal<String>,
     pub(crate) relay_accept: Signal<bool>,
     pub(crate) list_width: Signal<f32>,

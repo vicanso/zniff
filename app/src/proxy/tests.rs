@@ -7129,6 +7129,9 @@ async fn allow_hosts_enforces_connect_plain_http_map_remote_replay_and_exempts_l
     }
     assert_eq!(origin_hits.load(Ordering::Relaxed), 0);
     assert_eq!(hub.with_session(|s| s.len()), 0);
+    let denied = hub.allow_denied_summary();
+    assert_eq!(denied.total, 2);
+    assert_eq!(denied.hosts, vec![("127.0.0.1".to_string(), 2)]);
 
     // Local routes remain exempt even under strict deny-all.
     for route in ["/zniff-ca.crt", "/zniff", "/proxy.pac"] {
@@ -7195,6 +7198,18 @@ async fn allow_hosts_enforces_connect_plain_http_map_remote_replay_and_exempts_l
         replay_err.to_string().contains("blocked.vicanso.dev"),
         "{replay_err:#}"
     );
+    let denied_after = hub.allow_denied_summary();
+    assert_eq!(denied_after.total, 4);
+    assert_eq!(
+        denied_after.hosts,
+        vec![
+            ("127.0.0.1".to_string(), 2),
+            ("blocked.vicanso.dev".to_string(), 2),
+        ]
+    );
+    hub.reset_allow_denied();
+    assert_eq!(hub.allow_denied_summary().total, 0);
+    assert!(hub.allow_denied_summary().hosts.is_empty());
 
     // Locked allow_hosts rejects runtime set_allow_hosts mutations.
     hub.configure_allow_hosts("allowed.vicanso.dev", true, true);

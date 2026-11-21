@@ -40,6 +40,7 @@ pub struct Hub {
     pub(super) allow_hosts_text: Mutex<String>,
     pub(super) allow_hosts_strict: AtomicBool,
     pub(super) allow_hosts_locked: AtomicBool,
+    pub(super) allow_denied: Mutex<crate::allow_hosts::DeniedHostStats>,
     /// Idle plaintext origin sockets, used only on the proxy runtime.
     pub(super) pool: tokio::sync::Mutex<PlainPoolMap>,
     /// Origin HTTP/2 senders. Each browser connection keeps its own lane.
@@ -194,6 +195,7 @@ impl Hub {
             allow_hosts_text: Mutex::new(String::new()),
             allow_hosts_strict: AtomicBool::new(false),
             allow_hosts_locked: AtomicBool::new(false),
+            allow_denied: Mutex::new(crate::allow_hosts::DeniedHostStats::default()),
             pool: tokio::sync::Mutex::new(HashMap::new()),
             h2_pool: Mutex::new(HashMap::new()),
             h2_generation: AtomicU64::new(1),
@@ -836,6 +838,35 @@ impl Hub {
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .allows(host)
+    }
+
+    /// Records a request rejected by `allow_hosts` and wakes UI/web state observers.
+    pub fn record_allow_denied(&self, host: &str) {
+        self.allow_denied
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .record(host);
+        self.touch();
+    }
+
+    /// Returns a bounded summary of requests rejected by `allow_hosts`.
+    pub fn allow_denied_summary(&self) -> crate::allow_hosts::AllowDeniedSummary {
+        self.allow_denied
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .summary()
+    }
+
+    /// Resets the `allow_hosts` denial summary counters.
+    pub fn reset_allow_denied(&self) {
+        let changed = self
+            .allow_denied
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .reset();
+        if changed {
+            self.touch();
+        }
     }
 
     pub fn proxy_auth_text(&self) -> String {

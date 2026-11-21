@@ -661,6 +661,8 @@ struct StateRuntime {
     session_rev: u64,
     paused: Option<PausedBody>,
     paused_queue: Vec<PausedBody>,
+    allow_denied_total: u64,
+    allow_denied_hosts: Vec<(String, u64)>,
 }
 
 #[derive(Serialize)]
@@ -943,6 +945,19 @@ async fn route(
             };
             return (json_reply(200, "OK", &value), clean_nobody);
         }
+        if path == "/api/hub" {
+            let slot = lock(slot);
+            let denied = slot.hub.allow_denied_summary();
+            let payload = json!({
+                "generation": slot.hub.generation(),
+                "allow_hosts": slot.hub.allow_hosts_text(),
+                "allow_hosts_strict": slot.hub.allow_hosts_strict(),
+                "allow_hosts_locked": slot.hub.allow_hosts_locked(),
+                "allow_denied_total": denied.total,
+                "allow_denied_hosts": denied.hosts,
+            });
+            return (json_reply(200, "OK", &payload), clean_nobody);
+        }
         if path == "/api/flows" {
             let filter = query_value(&head.target, "filter");
             let hub = Arc::clone(&lock(slot).hub);
@@ -1153,6 +1168,7 @@ fn state_runtime(slot: &Slot) -> StateRuntime {
         .hub
         .with_session(|session| (session.len(), session.rev()));
     let queue = slot.hub.paused_queue();
+    let denied = slot.hub.allow_denied_summary();
     StateRuntime {
         capturing: slot.capture.is_some(),
         listen,
@@ -1174,6 +1190,8 @@ fn state_runtime(slot: &Slot) -> StateRuntime {
                 side: break_side_name(*side),
             })
             .collect(),
+        allow_denied_total: denied.total,
+        allow_denied_hosts: denied.hosts,
     }
 }
 
@@ -2317,6 +2335,9 @@ fn sync_hub_op(slot: &mut Slot, op: &str, value: &Value) -> Reply {
             }
             let trimmed = slot.hub.allow_hosts_text();
             save_error = persist_slot_config(slot, |cfg| cfg.allow_hosts = trimmed);
+        }
+        "reset_allow_denied" => {
+            slot.hub.reset_allow_denied();
         }
         "set_relay_token" => {
             let text = json_text(value);
@@ -3931,6 +3952,25 @@ mod tests {
         assert_eq!(status, 403, "{locked_body}");
         assert_eq!(hub.allow_hosts_text(), "locked.vicanso.dev");
 
+        hub.record_allow_denied("blocked.vicanso.dev");
+        hub.record_allow_denied("blocked.vicanso.dev");
+        hub.record_allow_denied("other.vicanso.dev");
+
+        let (status, raw_hub) = exchange(
+            web,
+            "GET /api/hub HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert_eq!(status, 200);
+        let hub_status: Value = serde_json::from_str(body_of(&raw_hub)).unwrap();
+        assert_eq!(hub_status["allow_hosts"], "locked.vicanso.dev");
+        assert_eq!(hub_status["allow_hosts_locked"], true);
+        assert_eq!(hub_status["allow_denied_total"], 3);
+        assert_eq!(
+            hub_status["allow_denied_hosts"],
+            json!([["blocked.vicanso.dev", 2], ["other.vicanso.dev", 1]])
+        );
+
         let (status, raw_state) = exchange(
             web,
             "GET /api/state HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
@@ -3941,6 +3981,24 @@ mod tests {
         assert_eq!(state["prefs"]["allow_hosts"], "locked.vicanso.dev");
         assert_eq!(state["prefs"]["allow_hosts_strict"], true);
         assert_eq!(state["prefs"]["allow_hosts_locked"], true);
+        assert_eq!(state["allow_denied_total"], 3);
+        assert_eq!(
+            state["allow_denied_hosts"],
+            json!([["blocked.vicanso.dev", 2], ["other.vicanso.dev", 1]])
+        );
+
+        let (status, _) = post(web, "/api/hub", r#"{"op":"reset_allow_denied"}"#).await;
+        assert_eq!(status, 200);
+        assert_eq!(hub.allow_denied_summary().total, 0);
+        let (status, raw_hub_after) = exchange(
+            web,
+            "GET /api/hub HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert_eq!(status, 200);
+        let hub_after: Value = serde_json::from_str(body_of(&raw_hub_after)).unwrap();
+        assert_eq!(hub_after["allow_denied_total"], 0);
+        assert_eq!(hub_after["allow_denied_hosts"], json!([]));
 
         drop(server);
         let _ = std::fs::remove_dir_all(&dir);

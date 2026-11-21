@@ -76,6 +76,7 @@ macro_rules! desktop_child {
 
 mod about_modal;
 mod access_popover;
+mod allow_denied_summary;
 mod app_icon;
 mod app_shell;
 mod appearance;
@@ -140,6 +141,7 @@ mod web_poll;
 
 pub(crate) use self::about_modal::*;
 pub(crate) use self::access_popover::*;
+pub(crate) use self::allow_denied_summary::*;
 pub(crate) use self::app_icon::*;
 pub use self::app_shell::App;
 pub(crate) use self::appearance::*;

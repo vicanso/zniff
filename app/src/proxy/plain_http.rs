@@ -7,6 +7,7 @@ where
 {
     let (method, host, port, path) = request_target(head)?;
     if !hub.host_allowed(&host) {
+        hub.record_allow_denied(&host);
         return write_host_not_allowed(client, &host, method.eq_ignore_ascii_case("HEAD")).await;
     }
     let client = Prefixed {
@@ -265,6 +266,7 @@ where
         Some(Action::MapRemote { url, path_prefix }) => {
             if let Some((next_scheme, next_host, next_port, next_path)) = parse_http_url(url) {
                 if !hub.host_allowed(&next_host) {
+                    hub.record_allow_denied(&next_host);
                     if !request_taken {
                         let _ = drain_request(&mut client, &headers, &hub, id).await;
                     }

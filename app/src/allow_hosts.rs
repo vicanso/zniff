@@ -4,7 +4,91 @@
 //! non-excluded hosts. When `strict` is true (Docker default), an empty or exclusion-only list
 //! denies all hosts until an explicit positive rule (`example.com`, `*.example.com`, or `*`) is set.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+
+/// Maximum number of distinct denied hosts tracked in memory at once.
+pub const DENIED_HOST_CAP: usize = 64;
+
+/// Snapshot of requests blocked by `allow_hosts`, sorted by hit count descending then host ascending.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct AllowDeniedSummary {
+    pub total: u64,
+    pub hosts: Vec<(String, u64)>,
+}
+
+/// Bounded in-memory counter of requests rejected by `allow_hosts`.
+#[derive(Debug, Clone, Default)]
+pub struct DeniedHostStats {
+    total: u64,
+    hosts: HashMap<String, u64>,
+}
+
+impl DeniedHostStats {
+    /// Records one denied request for `host`.
+    ///
+    /// Once [`DENIED_HOST_CAP`] distinct hosts are tracked, new hostnames still increment
+    /// `total` without growing the map, while already-tracked hosts continue incrementing.
+    pub fn record(&mut self, host: &str) {
+        self.total = self.total.saturating_add(1);
+        let key = normalize_host(host);
+        if key.is_empty() {
+            return;
+        }
+        if let Some(count) = self.hosts.get_mut(&key) {
+            *count = count.saturating_add(1);
+        } else if self.hosts.len() < DENIED_HOST_CAP {
+            self.hosts.insert(key, 1);
+        }
+    }
+
+    /// Returns the total blocked count and tracked hosts sorted by count desc, then host asc.
+    pub fn summary(&self) -> AllowDeniedSummary {
+        let mut hosts: Vec<(String, u64)> = self
+            .hosts
+            .iter()
+            .map(|(host, count)| (host.clone(), *count))
+            .collect();
+        hosts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        AllowDeniedSummary {
+            total: self.total,
+            hosts,
+        }
+    }
+
+    /// Clears all tracked counts and returns `true` if any state changed.
+    pub fn reset(&mut self) -> bool {
+        if self.total == 0 && self.hosts.is_empty() {
+            return false;
+        }
+        self.total = 0;
+        self.hosts.clear();
+        true
+    }
+}
+
+/// Appends `host` as an exact allow rule to `existing` unless already present as a positive token.
+pub fn append_allow_host(existing: &str, host: &str) -> String {
+    let target = normalize_host(host);
+    let trimmed = existing.trim();
+    if target.is_empty() {
+        return trimmed.to_string();
+    }
+    let already_listed = trimmed.lines().any(|line| {
+        let clean = line.split('#').next().unwrap_or("");
+        clean
+            .split(|ch: char| ch.is_whitespace() || ch == ',' || ch == ';' || ch == '|')
+            .filter(|tok| !tok.is_empty() && !tok.starts_with('-'))
+            .any(|tok| normalize_host(tok) == target)
+    });
+    if already_listed {
+        return trimmed.to_string();
+    }
+    if trimmed.is_empty() {
+        target
+    } else {
+        format!("{trimmed}\n{target}")
+    }
+}
 
 /// Parsed host restriction rules for proxied and replayed requests.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -263,5 +347,62 @@ mod tests {
         assert!(deny_all.denies_all());
         assert!(!deny_all.allows("api.vicanso.dev"));
         assert_eq!(deny_all.pac_allow_expr().as_deref(), Some("false"));
+    }
+
+    #[test]
+    fn denied_host_stats_counts_sorts_bounds_and_resets() {
+        let mut stats = DeniedHostStats::default();
+        assert!(!stats.reset());
+        assert_eq!(stats.summary(), AllowDeniedSummary::default());
+
+        stats.record("B.Example.COM.");
+        stats.record("a.example.com");
+        stats.record("b.example.com");
+        stats.record("c.example.com");
+        stats.record("   ");
+
+        let summary = stats.summary();
+        assert_eq!(summary.total, 5);
+        assert_eq!(
+            summary.hosts,
+            vec![
+                ("b.example.com".to_string(), 2),
+                ("a.example.com".to_string(), 1),
+                ("c.example.com".to_string(), 1),
+            ]
+        );
+
+        // Fill up to DENIED_HOST_CAP and overflow with extra distinct hosts.
+        for i in 0..(DENIED_HOST_CAP + 20) {
+            stats.record(&format!("h{i:03}.flood.test"));
+        }
+        // Existing tracked host continues incrementing even when at cap.
+        stats.record("b.example.com");
+
+        let capped = stats.summary();
+        assert_eq!(capped.hosts.len(), DENIED_HOST_CAP);
+        assert_eq!(capped.total, 5 + (DENIED_HOST_CAP as u64 + 20) + 1);
+        assert_eq!(capped.hosts[0], ("b.example.com".to_string(), 3));
+
+        assert!(stats.reset());
+        assert!(!stats.reset());
+        assert_eq!(stats.summary(), AllowDeniedSummary::default());
+    }
+
+    #[test]
+    fn append_allow_host_normalizes_and_deduplicates() {
+        assert_eq!(append_allow_host("", "API.Vicanso.Dev."), "api.vicanso.dev");
+        assert_eq!(
+            append_allow_host("api.vicanso.dev", "API.VICANSO.DEV"),
+            "api.vicanso.dev"
+        );
+        assert_eq!(
+            append_allow_host("api.vicanso.dev", "cdn.vicanso.dev"),
+            "api.vicanso.dev\ncdn.vicanso.dev"
+        );
+        assert_eq!(
+            append_allow_host("api.vicanso.dev", "   "),
+            "api.vicanso.dev"
+        );
     }
 }

@@ -74,7 +74,7 @@
 ### 4.1 连接池、HTTP/2 与重放
 
 - **上游代理与认证**：未配 `upstream_proxy` 时直连源站（不走系统代理）；支持 HTTP/CONNECT 与 `socks5://` / `socks5h://`（RFC 1928 + RFC 1929）。配置 `proxy_auth`（或 `--proxy-auth` / `ZNIFF_PROXY_AUTH`）后，抓包端口要求 HTTP Basic `Proxy-Authorization`（失败回 `407` 且不写入会话，转发前剥离该头；`/zniff`、`/zniff-ca.crt`、`/proxy.pac`、`/zniff.pac`、`/s/{uuid}`、`/r/{uuid}` 与回环 `/mcp` 豁免）。
-- **代理域名准入控制（`allow_hosts.rs`）**：非严格模式下留空放行全部；启用 `--strict-allow-hosts` / `ZNIFF_STRICT_ALLOW_HOSTS=1`（Docker 镜像默认开启）且无正向允许项时拒绝所有代理域名。优先级为 `--allow-hosts` > 非空 `ZNIFF_ALLOW_HOSTS` > `config.toml` 的 `allow_hosts`，由 CLI 或非空环境变量传入时界面与 `/api/hub` 仅只读展示并拒绝写操作（`403`）。全链路覆盖 `CONNECT` 握手前（先于 `200` 与直通名单）、SNI、HTTP/HTTPS/H2、`map-remote` 目标主机与重放（同步过滤 `/proxy.pac`）；被拒绝请求直接回 `403 Forbidden`（不拨号、不写入会话），本地路由 `/zniff`、`/zniff-ca.crt`、`/proxy.pac`、`/zniff.pac`、`/mcp`、`/s/`、`/relay` 豁免。
+- **代理域名准入控制（`allow_hosts.rs`）**：非严格模式下留空放行全部；启用 `--strict-allow-hosts` / `ZNIFF_STRICT_ALLOW_HOSTS=1`（Docker 镜像默认开启）且无正向允许项时拒绝所有代理域名。优先级为 `--allow-hosts` > 非空 `ZNIFF_ALLOW_HOSTS` > `config.toml` 的 `allow_hosts`，由 CLI 或非空环境变量传入时界面与 `/api/hub` 仅只读展示并拒绝写操作（`403`）。全链路覆盖 `CONNECT` 握手前（先于 `200` 与直通名单）、SNI、HTTP/HTTPS/H2、`map-remote` 目标主机与重放（同步过滤 `/proxy.pac`）；被拒绝请求直接回 `403 Forbidden`（不拨号、不写入会话），其有界计数与域名摘要（最多追踪 64 个域名）实时展示在底栏「安全」按钮角标、安全弹窗及设置安全页中（未锁定时支持一键 `+ 允许` 与清零），避免污染会话列表。本地路由 `/zniff`、`/zniff-ca.crt`、`/proxy.pac`、`/zniff.pac`、`/mcp`、`/s/`、`/relay` 豁免。
 - **明文 HTTP 连接池**：客户端省略 `Connection` 时补 `Connection: keep-alive`；body 读完、双方未要求关闭且状态非 `101` 时回池（每键最多 4 条，超过 32 键清空）。HTTP/1 TLS 不进此池。
 - **HTTP/2 连接复用**：同一客户端连接复用源站连接，另外缓存最多 16 条发送端（空闲超过 45 秒或驱动结束时淘汰）；仅在请求尚未写出时自动换连重试。HTTP/2 传输层不解析底层二进制帧、HPACK 表或 trailer。
 - **重放独立建连**：重放/批量重放不走规则和断点、不进入连接池；HTTP/1.1 强制 `Connection: close`，源流为 `HTTP/2` 或新建 HTTPS 请求时宣告 `["h2", "http/1.1"]` ALPN 并按协商结果发送。

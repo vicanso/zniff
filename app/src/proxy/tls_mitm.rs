@@ -32,6 +32,7 @@ where
     };
     let sni_host = hello.sni.clone().unwrap_or_else(|| host.to_string());
     if !hub.host_allowed(&sni_host) {
+        hub.record_allow_denied(&sni_host);
         return Ok(());
     }
     if hub.skips_tls(&sni_host) {

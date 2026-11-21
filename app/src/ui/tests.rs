@@ -2921,6 +2921,7 @@ fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
             allow_hosts: signal(String::new()),
             allow_hosts_strict: signal(false),
             allow_hosts_locked: signal(false),
+            allow_denied: signal(crate::allow_hosts::AllowDeniedSummary::default()),
             relay_url: signal(String::new()),
             relay_accept: signal(false),
             list_width: signal(660.0),
@@ -5044,6 +5045,12 @@ async fn access_control_popover_reflects_strict_deny_all_and_locked_state() {
         static ACCESS_STRICT: Cell<bool> = const { Cell::new(false) };
         static ACCESS_LOCKED: Cell<bool> = const { Cell::new(false) };
         static ACCESS_HOSTS: RefCell<String> = const { RefCell::new(String::new()) };
+        static ACCESS_DENIED: RefCell<crate::allow_hosts::AllowDeniedSummary> = const {
+            RefCell::new(crate::allow_hosts::AllowDeniedSummary {
+                total: 0,
+                hosts: Vec::new(),
+            })
+        };
     }
 
     #[component]
@@ -5058,12 +5065,13 @@ async fn access_control_popover_reflects_strict_deny_all_and_locked_state() {
             allow_hosts: signal(ACCESS_HOSTS.with(|c| c.borrow().clone())),
             allow_hosts_strict: signal(ACCESS_STRICT.with(Cell::get)),
             allow_hosts_locked: signal(ACCESS_LOCKED.with(Cell::get)),
-            controls,
+            allow_denied: signal(ACCESS_DENIED.with(|c| c.borrow().clone())),
+            controls: controls.clone(),
         };
         let on_change: std::rc::Rc<dyn Fn(&str)> = std::rc::Rc::new(|_| {});
         view()
             .w(px(380.0))
-            .h(px(400.0))
+            .h(px(480.0))
             .p_2()
             .gap_2()
             .child(super::access_trigger_pill(open, &props))
@@ -5072,6 +5080,12 @@ async fn access_control_popover_reflects_strict_deny_all_and_locked_state() {
                 props.allow_hosts_strict,
                 props.allow_hosts_locked,
                 on_change,
+            ))
+            .child(super::allow_denied_summary_section(
+                props.allow_denied,
+                props.allow_hosts,
+                props.allow_hosts_locked,
+                controls,
             ))
     }
 
@@ -5096,7 +5110,8 @@ async fn access_control_popover_reflects_strict_deny_all_and_locked_state() {
         ACCESS_STRICT.with(|c| c.set(strict));
         ACCESS_LOCKED.with(|c| c.set(locked));
         ACCESS_HOSTS.with(|c| *c.borrow_mut() = hosts.to_string());
-        mount_headless_component::<AccessPopoverHarness>(Size::new(px(380.0), px(400.0))).1
+        ACCESS_DENIED.with(|c| *c.borrow_mut() = crate::allow_hosts::AllowDeniedSummary::default());
+        mount_headless_component::<AccessPopoverHarness>(Size::new(px(380.0), px(480.0))).1
     };
 
     let tree_default = mount_state(false, false, "");
@@ -5170,4 +5185,57 @@ async fn access_control_popover_reflects_strict_deny_all_and_locked_state() {
             .values()
             .any(|k| *k == ViewKind::Input)
     );
+
+    let mount_with_denied = |locked: bool| {
+        ACCESS_STRICT.with(|c| c.set(true));
+        ACCESS_LOCKED.with(|c| c.set(locked));
+        ACCESS_HOSTS.with(|c| *c.borrow_mut() = "allowed.vicanso.dev".to_string());
+        ACCESS_DENIED.with(|c| {
+            *c.borrow_mut() = crate::allow_hosts::AllowDeniedSummary {
+                total: 3,
+                hosts: vec![
+                    ("blocked.vicanso.dev".to_string(), 2),
+                    ("other.vicanso.dev".to_string(), 1),
+                ],
+            }
+        });
+        mount_headless_component::<AccessPopoverHarness>(Size::new(px(380.0), px(480.0))).1
+    };
+
+    let tree_denied_unlocked = mount_with_denied(false);
+    assert!(
+        tree_denied_unlocked
+            .texts
+            .values()
+            .any(|s| s == "Access · 3 denied")
+    );
+    assert!(
+        tree_denied_unlocked
+            .texts
+            .values()
+            .any(|s| s == "3 requests denied")
+    );
+    assert!(
+        tree_denied_unlocked
+            .texts
+            .values()
+            .any(|s| s == "blocked.vicanso.dev")
+    );
+    assert!(tree_denied_unlocked.texts.values().any(|s| s == "×2"));
+    assert!(tree_denied_unlocked.texts.values().any(|s| s == "+ Allow"));
+
+    let tree_denied_locked = mount_with_denied(true);
+    assert!(
+        tree_denied_locked
+            .texts
+            .values()
+            .any(|s| s == "Access · 3 denied")
+    );
+    assert!(
+        tree_denied_locked
+            .texts
+            .values()
+            .any(|s| s == "blocked.vicanso.dev")
+    );
+    assert!(!tree_denied_locked.texts.values().any(|s| s == "+ Allow"));
 }

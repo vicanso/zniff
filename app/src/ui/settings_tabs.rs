@@ -231,6 +231,7 @@ pub(crate) fn settings_security_tab(
     let profiles = props.profiles;
     let controls = props.controls;
     let allow_controls = controls.clone();
+    let denied_controls = controls.clone();
     let redact_controls = controls.clone();
     let strict_controls = controls.clone();
     let preview_controls = controls.clone();
@@ -256,6 +257,12 @@ pub(crate) fn settings_security_tab(
                     Rc::new(move |raw: &str| {
                         apply_allow_hosts_change(&allow_controls, profiles.allow_hosts, raw);
                     }),
+                ))
+                .child(allow_denied_summary_section(
+                    profiles.allow_denied,
+                    profiles.allow_hosts,
+                    profiles.allow_hosts_locked,
+                    denied_controls,
                 )),
         ))
         .child(settings_card(

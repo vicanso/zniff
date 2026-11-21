@@ -134,6 +134,7 @@ pub(super) async fn replay_once_attempt(
         );
     };
     if !hub.host_allowed(&host) {
+        hub.record_allow_denied(&host);
         anyhow::bail!("目标域名未在允许列表中: {host}");
     }
     let mut headers = edit.headers.unwrap_or_else(|| {

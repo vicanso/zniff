@@ -569,7 +569,8 @@ fn tool_get_session_summary(hub: &Hub, args: &Value) -> Value {
             })
         })
         .collect();
-    tool_json(&json!({
+    let allow_denied = hub.allow_denied_summary();
+    let mut payload = json!({
         "filter": filter,
         "session_total": session_total,
         "matched_count": stats.total_count,
@@ -593,7 +594,19 @@ fn tool_get_session_summary(hub: &Hub, args: &Value) -> Value {
             "domains": domains,
             "apps": apps,
         },
-    }))
+    });
+    if allow_denied.total > 0
+        && let Some(obj) = payload.as_object_mut()
+    {
+        obj.insert("allow_denied_total".to_string(), json!(allow_denied.total));
+        let hosts: Vec<Value> = allow_denied
+            .hosts
+            .into_iter()
+            .map(|(host, count)| json!({"host": host, "count": count}))
+            .collect();
+        obj.insert("allow_denied_hosts".to_string(), json!(hosts));
+    }
+    tool_json(&payload)
 }
 
 fn tool_annotate_flow(hub: &Hub, args: &Value) -> Value {

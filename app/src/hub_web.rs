@@ -62,6 +62,7 @@ pub struct Hub {
     allow_hosts: Mutex<String>,
     allow_hosts_strict: AtomicBool,
     allow_hosts_locked: AtomicBool,
+    allow_denied: Mutex<crate::allow_hosts::AllowDeniedSummary>,
     rules_on: AtomicBool,
     breaks_on: AtomicBool,
     show_tunnels: AtomicBool,
@@ -87,6 +88,7 @@ impl Hub {
             allow_hosts: Mutex::new(String::new()),
             allow_hosts_strict: AtomicBool::new(false),
             allow_hosts_locked: AtomicBool::new(false),
+            allow_denied: Mutex::new(crate::allow_hosts::AllowDeniedSummary::default()),
             rules_on: AtomicBool::new(true),
             breaks_on: AtomicBool::new(true),
             show_tunnels: AtomicBool::new(false),
@@ -193,6 +195,32 @@ impl Hub {
             if *guard != next {
                 *guard = next;
                 self.rules_rev.fetch_add(1, Ordering::Relaxed);
+                changed = true;
+            }
+        }
+        if let Some(total) = value.get("allow_denied_total").and_then(Value::as_u64) {
+            let hosts: Vec<(String, u64)> = value
+                .get("allow_denied_hosts")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| {
+                            let arr = item.as_array()?;
+                            let host = arr.first()?.as_str()?.to_string();
+                            let count = arr.get(1)?.as_u64()?;
+                            Some((host, count))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let next = crate::allow_hosts::AllowDeniedSummary { total, hosts };
+            let mut guard = self
+                .allow_denied
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            if *guard != next {
+                *guard = next;
                 changed = true;
             }
         }
@@ -431,6 +459,28 @@ impl Hub {
             self.allow_hosts_strict(),
         )
         .denies_all()
+    }
+
+    /// Returns the cached `allow_hosts` denial summary synced from the server.
+    pub fn allow_denied_summary(&self) -> crate::allow_hosts::AllowDeniedSummary {
+        self.allow_denied
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+    }
+
+    /// Resets the `allow_hosts` denial summary locally and on the server.
+    pub fn reset_allow_denied(&self) {
+        {
+            let mut guard = self
+                .allow_denied
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            guard.total = 0;
+            guard.hosts.clear();
+        }
+        self.bump();
+        post_op(json!({"op": "reset_allow_denied"}));
     }
 
     pub fn set_relay_ingress(&self, accept: bool, token: &str) {
