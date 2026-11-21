@@ -16,7 +16,6 @@ use crate::rules;
 use crate::session::{FilteredStats, SessionFacets};
 
 const DEFAULT_PROTOCOL_VERSION: &str = "2024-11-05";
-const BODY_PREVIEW_CAP: usize = 32 * 1024;
 
 fn mcp_lang() -> crate::i18n::Lang {
     for key in ["LC_ALL", "LC_MESSAGES", "LANG"] {
@@ -46,7 +45,7 @@ pub fn mcp_config_json(port: u16) -> String {
 }
 
 pub fn tools_list_value() -> Value {
-    json!({
+    let mut list = json!({
         "tools": [
             {
                 "name": "list_flows",
@@ -256,7 +255,11 @@ pub fn tools_list_value() -> Value {
                 }
             }
         ]
-    })
+    });
+    if let Some(arr) = list["tools"].as_array_mut() {
+        arr.extend(crate::mcp_tools::extra_tool_schemas());
+    }
+    list
 }
 
 pub async fn handle_http_jsonrpc(hub: Arc<Hub>, body: &[u8]) -> Option<Vec<u8>> {
@@ -307,6 +310,14 @@ async fn handle_single_request(hub: Arc<Hub>, req: &Value) -> Option<Value> {
             let tool_res = call_tool(hub, name, &args).await;
             Some(jsonrpc_ok(id, tool_res))
         }
+        "resources/read" => match crate::mcp_resources::handle_resources_read(&hub, &params) {
+            Ok(res) => Some(jsonrpc_ok(id, res)),
+            Err((code, msg)) => Some(jsonrpc_error(id, code, msg)),
+        },
+        "prompts/get" => match crate::mcp_resources::handle_prompts_get(&hub, &params) {
+            Ok(res) => Some(jsonrpc_ok(id, res)),
+            Err((code, msg)) => Some(jsonrpc_error(id, code, msg)),
+        },
         _ => Some(jsonrpc_error(
             id,
             -32601,
@@ -331,7 +342,9 @@ fn handle_discovery_method(id: &Value, method: &str, params: &Value) -> Option<V
                 json!({
                     "protocolVersion": version,
                     "capabilities": {
-                        "tools": {}
+                        "tools": {},
+                        "resources": {},
+                        "prompts": {}
                     },
                     "serverInfo": {
                         "name": "zniff",
@@ -342,8 +355,14 @@ fn handle_discovery_method(id: &Value, method: &str, params: &Value) -> Option<V
         }
         "ping" => Some(jsonrpc_ok(id.clone(), json!({}))),
         "tools/list" => Some(jsonrpc_ok(id.clone(), tools_list_value())),
-        "resources/list" => Some(jsonrpc_ok(id.clone(), json!({ "resources": [] }))),
-        "prompts/list" => Some(jsonrpc_ok(id.clone(), json!({ "prompts": [] }))),
+        "resources/list" => Some(jsonrpc_ok(
+            id.clone(),
+            crate::mcp_resources::resources_list_value(),
+        )),
+        "prompts/list" => Some(jsonrpc_ok(
+            id.clone(),
+            crate::mcp_resources::prompts_list_value(),
+        )),
         _ => None,
     }
 }
@@ -360,8 +379,45 @@ async fn call_tool(hub: Arc<Hub>, name: &str, args: &Value) -> Value {
         "clear_flows" => tool_clear_flows(&hub, args),
         "manage_breaks" => tool_manage_breaks(&hub, args),
         "generate_openapi" => tool_generate_openapi(&hub, args),
+        "wait_for_flow" => crate::mcp_tools::tool_wait_for_flow(hub, args).await,
+        "mock_flow" | "add_rule_from_flow" => crate::mcp_tools::tool_mock_flow(&hub, args),
+        "diff_flows" => crate::mcp_tools::tool_diff_flows(&hub, args),
         _ => tool_error(format!("Unknown tool: {name}")),
     }
+}
+
+pub(crate) fn flow_summary_json(f: &crate::session::Flow) -> Value {
+    let tb = present::flow_timing_breakdown(f);
+    let graphql_op = present::graphql_operation_label(&f.path, &f.request_body);
+    json!({
+        "id": f.id,
+        "method": f.method,
+        "url": f.url,
+        "host": f.host,
+        "path": f.path,
+        "protocol": f.protocol.label(),
+        "status": f.status,
+        "error": f.error.as_deref().map(mcp_localize_error),
+        "client_ip": f.client_ip,
+        "elapsed_ms": f.elapsed_ms(),
+        "request_bytes": f.req_bytes(),
+        "response_bytes": f.res_bytes(),
+        "graphql_op": graphql_op,
+        "rule_hit": f.rule_hit,
+        "comment": f.comment,
+        "pinned": f.pinned,
+        "timing": {
+            "dns_ms": tb.dns_ms,
+            "tcp_ms": tb.tcp_ms,
+            "tls_ms": tb.tls_ms,
+            "wait_ms": tb.wait_ms,
+            "download_ms": tb.download_ms,
+            "reused": tb.reused,
+            "server_addr": tb.server_addr,
+            "tls_version": tb.tls_version,
+            "client_cert": if tb.client_cert.is_empty() { Value::Null } else { Value::String(tb.client_cert) },
+        }
+    })
 }
 
 fn tool_list_flows(hub: &Hub, args: &Value) -> Value {
@@ -387,42 +443,7 @@ fn tool_list_flows(hub: &Hub, args: &Value) -> Value {
             })
             .collect();
         newest.reverse();
-        newest
-            .into_iter()
-            .map(|f| {
-                let tb = present::flow_timing_breakdown(&f);
-                let graphql_op = present::graphql_operation_label(&f.path, &f.request_body);
-                json!({
-                    "id": f.id,
-                    "method": f.method,
-                    "url": f.url,
-                    "host": f.host,
-                    "path": f.path,
-                    "protocol": f.protocol.label(),
-                    "status": f.status,
-                    "error": f.error.as_deref().map(mcp_localize_error),
-                    "client_ip": f.client_ip,
-                    "elapsed_ms": f.elapsed_ms(),
-                    "request_bytes": f.req_bytes(),
-                    "response_bytes": f.res_bytes(),
-                    "graphql_op": graphql_op,
-                    "rule_hit": f.rule_hit,
-                    "comment": f.comment,
-                    "pinned": f.pinned,
-                    "timing": {
-                        "dns_ms": tb.dns_ms,
-                        "tcp_ms": tb.tcp_ms,
-                        "tls_ms": tb.tls_ms,
-                        "wait_ms": tb.wait_ms,
-                        "download_ms": tb.download_ms,
-                        "reused": tb.reused,
-                        "server_addr": tb.server_addr,
-                        "tls_version": tb.tls_version,
-                        "client_cert": if tb.client_cert.is_empty() { Value::Null } else { Value::String(tb.client_cert) },
-                    }
-                })
-            })
-            .collect()
+        newest.iter().map(flow_summary_json).collect()
     });
     tool_json(&json!({
         "filter": filter,
@@ -443,13 +464,13 @@ fn tool_get_flow_detail(hub: &Hub, args: &Value) -> Value {
     let graphql_op = present::graphql_operation_label(&flow.path, &flow.request_body);
     let req_ct = present::content_type(&flow.request_headers);
     let res_ct = present::content_type(&flow.response_headers);
-    let req_body = format_body_preview(
+    let req_body = crate::mcp_tools::format_body_preview(
         &flow.request_body,
         flow.request_truncated,
         flow.request_expired,
         req_ct,
     );
-    let res_body = format_body_preview(
+    let res_body = crate::mcp_tools::format_body_preview(
         &flow.response_body,
         flow.response_truncated,
         flow.response_expired,
@@ -985,7 +1006,7 @@ fn tool_generate_openapi(hub: &Hub, args: &Value) -> Value {
     }
 }
 
-fn parse_headers_arg(val: &Value) -> Option<Vec<(String, String)>> {
+pub(crate) fn parse_headers_arg(val: &Value) -> Option<Vec<(String, String)>> {
     if let Some(text) = val.as_str() {
         let pairs = text
             .lines()
@@ -1010,71 +1031,7 @@ fn parse_headers_arg(val: &Value) -> Option<Vec<(String, String)>> {
     None
 }
 
-fn truncate_utf8_preview(text: &str, cap: usize) -> &str {
-    if text.len() <= cap {
-        return text;
-    }
-    let mut end = cap;
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    &text[..end]
-}
-
-fn format_body_preview(
-    bytes: &[u8],
-    truncated: bool,
-    expired: Option<usize>,
-    content_type: Option<&str>,
-) -> Value {
-    if bytes.is_empty() {
-        let mut obj = json!({
-            "size": 0,
-            "truncated": truncated || expired.is_some(),
-            "text": "",
-        });
-        if let Some(exp) = expired {
-            obj["expired_bytes"] = json!(exp);
-        }
-        return obj;
-    }
-    let slice = &bytes[..bytes.len().min(BODY_PREVIEW_CAP)];
-    let preview_truncated = truncated || bytes.len() > BODY_PREVIEW_CAP;
-    let decoded = present::pretty_binary_body(content_type, bytes)
-        .map(|s| truncate_utf8_preview(&s, BODY_PREVIEW_CAP).to_string());
-    let mut obj = match std::str::from_utf8(slice) {
-        Ok(text) => json!({
-            "size": bytes.len(),
-            "truncated": preview_truncated,
-            "encoding": "utf-8",
-            "text": text,
-        }),
-        Err(err) if err.error_len().is_none() && err.valid_up_to() > 0 => {
-            let valid = std::str::from_utf8(&slice[..err.valid_up_to()]).unwrap_or("");
-            json!({
-                "size": bytes.len(),
-                "truncated": true,
-                "encoding": "utf-8",
-                "text": valid,
-            })
-        }
-        Err(_) => json!({
-            "size": bytes.len(),
-            "truncated": preview_truncated,
-            "encoding": "hex",
-            "text": present::hex_dump_raw(slice),
-        }),
-    };
-    if let Some(decoded_preview) = decoded {
-        obj["decoded_preview"] = json!(decoded_preview);
-    }
-    if let Some(exp) = expired {
-        obj["expired_bytes"] = json!(exp);
-    }
-    obj
-}
-
-fn tool_json(data: &Value) -> Value {
+pub(crate) fn tool_json(data: &Value) -> Value {
     let text = serde_json::to_string_pretty(data).unwrap_or_else(|_| "{}".to_string());
     json!({
         "content": [
@@ -1087,7 +1044,7 @@ fn tool_json(data: &Value) -> Value {
     })
 }
 
-fn tool_error(msg: impl Into<String>) -> Value {
+pub(crate) fn tool_error(msg: impl Into<String>) -> Value {
     json!({
         "content": [
             {
@@ -1175,7 +1132,7 @@ pub fn run_stdio_bridge(port: u16) -> i32 {
 fn post_local_mcp(port: u16, body: &[u8]) -> std::io::Result<Option<Vec<u8>>> {
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(2))?;
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(15)));
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(40)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
     let req = format!(
         "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -1202,433 +1159,5 @@ fn post_local_mcp(port: u16, body: &[u8]) -> std::io::Result<Option<Vec<u8>>> {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use super::*;
-    use crate::ca::Ca;
-    use crate::session::{Direction, FlowDraft, Protocol};
-
-    fn test_hub() -> Arc<Hub> {
-        static SEQ: AtomicUsize = AtomicUsize::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("zniff-mcp-test-{}-{n}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let ca = Arc::new(Ca::open(&dir).unwrap());
-        let hub = Arc::new(Hub::new(ca).unwrap());
-        let _ = std::fs::remove_dir_all(&dir);
-        hub
-    }
-
-    fn parse_tool_payload(res: &Value) -> Value {
-        assert_eq!(res["isError"], false, "unexpected tool error: {res}");
-        let text = res["content"][0]["text"].as_str().unwrap();
-        serde_json::from_str(text).unwrap()
-    }
-
-    #[tokio::test]
-    async fn mcp_initialize_list_flows_detail_and_rules_work() {
-        let hub = test_hub();
-        let id = hub.with_session(|s| {
-            let id = s.open(FlowDraft {
-                protocol: Protocol::Http2,
-                method: "POST".into(),
-                host: "api.example.com".into(),
-                path: "/v1/orders".into(),
-                url: "https://api.example.com/v1/orders".into(),
-                request_headers: vec![("Content-Type".into(), "application/json".into())],
-            });
-            s.append_body(id, Direction::Request, br#"{"item":"book"}"#);
-            s.set_response(
-                id,
-                500,
-                vec![("Content-Type".into(), "application/json".into())],
-                None,
-            );
-            s.append_body(id, Direction::Response, br#"{"error":"db timeout"}"#);
-            s.mark_finished(id);
-            id
-        });
-
-        // 1. initialize
-        let init_req = br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}"#;
-        let init_res: Value =
-            serde_json::from_slice(&handle_http_jsonrpc(hub.clone(), init_req).await.unwrap())
-                .unwrap();
-        assert_eq!(init_res["result"]["serverInfo"]["name"], "zniff");
-
-        // 2. notification returns None
-        let notif = br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
-        assert!(handle_http_jsonrpc(hub.clone(), notif).await.is_none());
-
-        // 3. list_flows with filter
-        let list_req = br#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_flows","arguments":{"filter":"5xx host:api.example.com"}}}"#;
-        let list_res: Value =
-            serde_json::from_slice(&handle_http_jsonrpc(hub.clone(), list_req).await.unwrap())
-                .unwrap();
-        let list_text = list_res["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(list_text.contains("https://api.example.com/v1/orders"));
-
-        // 4. get_flow_detail
-        let detail_req = serde_json::to_vec(&json!({
-            "jsonrpc": "2.0",
-            "id": 3,
-            "method": "tools/call",
-            "params": {
-                "name": "get_flow_detail",
-                "arguments": { "id": id }
-            }
-        }))
-        .unwrap();
-        let detail_res: Value =
-            serde_json::from_slice(&handle_http_jsonrpc(hub.clone(), &detail_req).await.unwrap())
-                .unwrap();
-        let detail_text = detail_res["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(detail_text.contains("db timeout"));
-
-        // 5. set_rules & get_rules
-        let set_req = br#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"set_rules","arguments":{"rules":"cors api.example.com"}}}"#;
-        let set_res: Value =
-            serde_json::from_slice(&handle_http_jsonrpc(hub.clone(), set_req).await.unwrap())
-                .unwrap();
-        assert_eq!(set_res["result"]["isError"], false);
-        assert_eq!(hub.rules_text().trim(), "cors api.example.com");
-    }
-
-    #[tokio::test]
-    async fn test_mcp_set_rules_persists_to_disk_and_increments_revision() {
-        let dir = std::env::temp_dir().join(format!("zniff-mcp-persist-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let ca = Arc::new(Ca::open(&dir).unwrap());
-        let hub = Arc::new(Hub::new(ca).unwrap());
-
-        assert_eq!(hub.rules_revision(), 0);
-
-        let set_req = br#"{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"set_rules","arguments":{"rules":"cors test.example.com","rules_enabled":false,"breaks_enabled":false}}}"#;
-        let set_res: Value =
-            serde_json::from_slice(&handle_http_jsonrpc(hub.clone(), set_req).await.unwrap())
-                .unwrap();
-        let set_payload = parse_tool_payload(&set_res["result"]);
-        assert_eq!(set_payload["apply_rules"], false);
-        assert_eq!(set_payload["apply_breaks"], false);
-        assert!(!hub.rules_enabled());
-        assert!(!hub.breaks_enabled());
-        assert_eq!(hub.rules_revision(), 1);
-
-        // Toggle switches alone without resending `rules`
-        let toggle_req = br#"{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"set_rules","arguments":{"rules_enabled":true}}}"#;
-        let toggle_res: Value =
-            serde_json::from_slice(&handle_http_jsonrpc(hub.clone(), toggle_req).await.unwrap())
-                .unwrap();
-        let toggle_payload = parse_tool_payload(&toggle_res["result"]);
-        assert_eq!(toggle_payload["apply_rules"], true);
-        assert_eq!(toggle_payload["apply_breaks"], false);
-        assert_eq!(hub.rules_text().trim(), "cors test.example.com");
-
-        // Verify rules and switches on disk
-        let config_file = dir.join(crate::config::config_file_name(crate::config::is_dev_mode()));
-        assert!(config_file.exists());
-        let saved_cfg = crate::config::load_mode(&dir, crate::config::is_dev_mode());
-        assert_eq!(saved_cfg.rules.trim(), "cors test.example.com");
-        assert!(saved_cfg.rules_enabled);
-        assert!(!saved_cfg.breaks_enabled);
-
-        // Syntax error does NOT persist, does NOT flip switches, and does NOT increment revision
-        let bad_req = br#"{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"set_rules","arguments":{"rules":"cors test.example.com op=Invalid","rules_enabled":false}}}"#;
-        let bad_res: Value =
-            serde_json::from_slice(&handle_http_jsonrpc(hub.clone(), bad_req).await.unwrap())
-                .unwrap();
-        assert_eq!(bad_res["result"]["isError"], true);
-        assert!(hub.rules_enabled());
-        assert_eq!(hub.rules_revision(), 1);
-
-        // Rule groups roundtrip through set_rules & get_rules
-        let group_req = serde_json::to_vec(&json!({
-            "jsonrpc": "2.0",
-            "id": 13,
-            "method": "tools/call",
-            "params": {
-                "name": "set_rules",
-                "arguments": {
-                    "rule_groups": [
-                        {"name": "Dev", "enabled": true, "rules": "header api.vicanso.dev res set X-Dev 1"},
-                        {"name": "Muted", "enabled": false, "rules": "block test.vicanso.dev"}
-                    ]
-                }
-            }
-        }))
-        .unwrap();
-        let group_res: Value =
-            serde_json::from_slice(&handle_http_jsonrpc(hub.clone(), &group_req).await.unwrap())
-                .unwrap();
-        let group_payload = parse_tool_payload(&group_res["result"]);
-        assert_eq!(group_payload["effective_rules_count"], 2);
-        assert_eq!(group_payload["rule_groups"].as_array().unwrap().len(), 2);
-
-        let get_req = br#"{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"get_rules","arguments":{}}}"#;
-        let get_res: Value =
-            serde_json::from_slice(&handle_http_jsonrpc(hub.clone(), get_req).await.unwrap())
-                .unwrap();
-        let get_payload = parse_tool_payload(&get_res["result"]);
-        assert_eq!(get_payload["effective_rules_count"], 2);
-        assert_eq!(get_payload["rule_groups"][0]["name"], "Dev");
-        assert_eq!(get_payload["rule_groups"][1]["enabled"], false);
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn format_body_preview_preserves_multibyte_utf8_at_32kb_boundary_and_decodes_binary() {
-        // 32767 ASCII bytes + 3-byte UTF-8 '中' (0xE4 0xB8 0xAD) = 32770 bytes.
-        // Byte 32767..32768 splits '中' after its first byte 0xE4.
-        let mut split_utf8 = vec![b'a'; BODY_PREVIEW_CAP - 1];
-        split_utf8.extend_from_slice("中尾".as_bytes());
-        let preview = format_body_preview(&split_utf8, false, None, Some("application/json"));
-        assert_eq!(preview["encoding"], "utf-8");
-        assert_eq!(preview["truncated"], true);
-        assert_eq!(preview["size"], split_utf8.len());
-        assert_eq!(
-            preview["text"].as_str().unwrap().len(),
-            BODY_PREVIEW_CAP - 1
-        );
-
-        // Genuine binary invalid UTF-8 still uses hex, and attaches decoded_preview for MessagePack.
-        // MsgPack fixmap(1) { "id": 42 } -> 0x81 0xa2 'i' 'd' 0x2a
-        let msgpack = [0x81u8, 0xa2, b'i', b'd', 0x2a];
-        let mp_preview = format_body_preview(&msgpack, false, None, Some("application/msgpack"));
-        assert_eq!(mp_preview["encoding"], "hex");
-        let decoded = mp_preview["decoded_preview"].as_str().unwrap();
-        assert!(decoded.contains("\"id\": 42"), "{decoded}");
-
-        // Protobuf bytes that happen to be valid ASCII control chars still attach decoded_preview.
-        // Field 1 varint 7 (0x08 0x07), field 2 string "zniff" (0x12 0x05 "zniff")
-        let proto = b"\x08\x07\x12\x05zniff";
-        let pb_preview = format_body_preview(proto, false, None, Some("application/x-protobuf"));
-        let pb_decoded = pb_preview["decoded_preview"].as_str().unwrap();
-        assert!(pb_decoded.contains("zniff"), "{pb_decoded}");
-
-        // Expired spilled body reports expired_bytes.
-        let exp_preview = format_body_preview(&[], false, Some(65_536), Some("application/json"));
-        assert_eq!(exp_preview["truncated"], true);
-        assert_eq!(exp_preview["expired_bytes"], 65_536);
-    }
-
-    #[test]
-    fn detail_and_list_expose_graphql_op_total_matched_and_expired_bytes() {
-        let hub = test_hub();
-        let mut ids = Vec::new();
-        hub.with_session(|s| {
-            for op_name in ["GetViewer", "UpdateCart", "ListOrders"] {
-                let id = s.open(FlowDraft {
-                    protocol: Protocol::Http2,
-                    method: "POST".into(),
-                    host: "gql.example.com".into(),
-                    path: "/graphql".into(),
-                    url: "https://gql.example.com/graphql".into(),
-                    request_headers: vec![("Content-Type".into(), "application/json".into())],
-                });
-                let body = format!(
-                    r#"{{"operationName":"{op_name}","query":"query {op_name} {{ ok }}"}}"#
-                );
-                s.append_body(id, Direction::Request, body.as_bytes());
-                s.set_response(id, 200, vec![], None);
-                s.mark_finished(id);
-                ids.push(id);
-            }
-        });
-
-        let listed = parse_tool_payload(&tool_list_flows(
-            &hub,
-            &json!({ "filter": "host:gql.example.com", "limit": 2 }),
-        ));
-        assert_eq!(listed["count"], 2);
-        assert_eq!(listed["total_matched"], 3);
-        assert_eq!(listed["flows"][0]["graphql_op"], "ListOrders");
-        assert_eq!(listed["flows"][1]["graphql_op"], "UpdateCart");
-
-        let detail = parse_tool_payload(&tool_get_flow_detail(&hub, &json!({ "id": ids[0] })));
-        assert_eq!(detail["graphql_op"], "GetViewer");
-        assert!(detail["request_expired"].is_null());
-        assert!(detail["response_expired"].is_null());
-    }
-
-    #[test]
-    fn session_summary_and_annotate_flow_work_and_rule_templates_parse() {
-        let hub = test_hub();
-        let (id1, id2) = hub.with_session(|s| {
-            let id1 = s.open(FlowDraft {
-                protocol: Protocol::Http2,
-                method: "GET".into(),
-                host: "api.example.com".into(),
-                path: "/users".into(),
-                url: "https://api.example.com/users".into(),
-                request_headers: vec![],
-            });
-            s.set_client_ip(id1, "127.0.0.1 (curl)");
-            s.set_response(id1, 200, vec![], None);
-            s.append_body(id1, Direction::Response, b"hello");
-            s.mark_finished(id1);
-
-            let id2 = s.open(FlowDraft {
-                protocol: Protocol::Http11,
-                method: "POST".into(),
-                host: "auth.example.com".into(),
-                path: "/login".into(),
-                url: "https://auth.example.com/login".into(),
-                request_headers: vec![],
-            });
-            s.set_client_ip(id2, "127.0.0.1 (node)");
-            s.set_response(id2, 502, vec![], None);
-            s.mark_finished(id2);
-            (id1, id2)
-        });
-
-        // annotate_flow sets comment and pins
-        let ann = parse_tool_payload(&tool_annotate_flow(
-            &hub,
-            &json!({ "id": id2, "comment": "investigate 502", "pinned": true }),
-        ));
-        assert_eq!(ann["ok"], true);
-        assert_eq!(ann["comment"], "investigate 502");
-        assert_eq!(ann["pinned"], true);
-
-        // get_session_summary aggregates stats and facets
-        let summary = parse_tool_payload(&tool_get_session_summary(&hub, &json!({})));
-        assert_eq!(summary["session_total"], 2);
-        assert_eq!(summary["matched_count"], 2);
-        assert_eq!(summary["stats"]["s2xx"], 1);
-        assert_eq!(summary["stats"]["s5xx"], 1);
-        assert_eq!(summary["facets"]["domains"].as_array().unwrap().len(), 2);
-        assert_eq!(summary["facets"]["apps"].as_array().unwrap().len(), 2);
-
-        // Filtered summary via note: filter
-        let filtered = parse_tool_payload(&tool_get_session_summary(
-            &hub,
-            &json!({ "filter": "note:investigate pin:" }),
-        ));
-        assert_eq!(filtered["matched_count"], 1);
-        assert_eq!(filtered["stats"]["s5xx"], 1);
-        let _ = id1;
-
-        // Every rule syntax template documented in set_rules must parse cleanly
-        let sample_rules = "\
-replace api.example.com/v1 res old -> new op=GetUser
-map-remote api.example.com/v1 https://staging.example.com/v1 op=GetUser
-map-local api.example.com/static ./public status=200 delay=50ms fallback op=GetUser
-delay api.example.com/v1 200ms op=GetUser
-break api.example.com/pay op=Checkout
-break-res api.example.com/pay op=Checkout
-header api.example.com req set X-Env staging op=GetUser
-header api.example.com res del Server op=GetUser
-query api.example.com/search set debug 1 op=Search
-query api.example.com/search del utm_source op=Search
-json api.example.com/v1 res set /data/flag true op=GetUser
-json api.example.com/v1 req del /meta/secret op=GetUser
-cors api.example.com
-no-cache api.example.com/v1 op=GetUser
-block ads.example.com status=451 op=Track
-throttle api.example.com down=512kb up=256kb
-cert internal.example.com ./server.crt ./server.key
-client-cert mtls.example.com ./client.crt ./client.key
-resolve api.example.com 127.0.0.1:8443";
-        assert!(
-            rules::invalid_rule_lines(sample_rules).is_empty(),
-            "invalid lines: {:?}",
-            rules::invalid_rule_lines(sample_rules)
-        );
-        assert_eq!(rules::parse_rules(sample_rules).len(), 19);
-
-        let tools = tools_list_value();
-        let names: Vec<&str> = tools["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|t| t["name"].as_str())
-            .collect();
-        assert!(names.contains(&"get_session_summary"));
-        assert!(names.contains(&"annotate_flow"));
-        assert!(names.contains(&"clear_flows"));
-        assert!(names.contains(&"manage_breaks"));
-        assert!(names.contains(&"generate_openapi"));
-        assert_eq!(names.len(), 10);
-
-        let openapi_res =
-            parse_tool_payload(&tool_generate_openapi(&hub, &json!({ "filter": "" })));
-        assert_eq!(openapi_res["spec"]["openapi"], "3.0.3");
-        assert!(openapi_res["operations"].as_u64().unwrap_or(0) >= 1);
-
-        // English MCP error localization & client_cert timing metadata
-        assert_eq!(
-            crate::i18n::localize_error(
-                crate::i18n::Lang::En,
-                "客户端证书加载失败: 读取客户端证书 /tmp/a.crt: 证书文件 /tmp/a.crt 中未找到 CERTIFICATE",
-            ),
-            "Failed to load client certificate: reading client certificate /tmp/a.crt: no CERTIFICATE block found in /tmp/a.crt"
-        );
-        let _ = mcp_localize_error(
-            "客户端证书加载失败: 读取客户端证书 /tmp/a.crt: 证书文件 /tmp/a.crt 中未找到 CERTIFICATE",
-        );
-        hub.with_session(|s| {
-            let info = crate::session::ConnInfo {
-                client_cert: "/tmp/mtls-client.pem".into(),
-                ..Default::default()
-            };
-            s.set_conn_info(id1, info);
-        });
-        let detail = parse_tool_payload(&tool_get_flow_detail(&hub, &json!({ "id": id1 })));
-        assert_eq!(detail["timing"]["client_cert"], "/tmp/mtls-client.pem");
-        assert_eq!(detail["rule_hit"], "client-cert");
-        assert_eq!(
-            detail["rule_hits"],
-            json!([{ "group": null, "line": 0, "verb": "client-cert" }])
-        );
-
-        hub.with_session(|s| {
-            s.set_rule_hit_details(
-                id1,
-                "replace header",
-                vec![
-                    crate::session::RuleHit {
-                        group_name: None,
-                        line_no: 3,
-                        verb: "replace".into(),
-                    },
-                    crate::session::RuleHit {
-                        group_name: Some("dev".into()),
-                        line_no: 1,
-                        verb: "header".into(),
-                    },
-                ],
-            );
-        });
-        let detail2 = parse_tool_payload(&tool_get_flow_detail(&hub, &json!({ "id": id1 })));
-        assert_eq!(detail2["rule_hit"], "replace header");
-        assert_eq!(
-            detail2["rule_hits"],
-            json!([
-                { "group": null, "line": 3, "verb": "replace" },
-                { "group": "dev", "line": 1, "verb": "header" }
-            ])
-        );
-
-        // manage_breaks when queue is empty
-        let listed = parse_tool_payload(&tool_manage_breaks(&hub, &json!({ "action": "list" })));
-        assert_eq!(listed["paused_count"], 0);
-        let cont_err = tool_manage_breaks(&hub, &json!({ "action": "continue" }));
-        assert_eq!(cont_err["isError"], true);
-        let cont_all = parse_tool_payload(&tool_manage_breaks(
-            &hub,
-            &json!({ "action": "continue_all" }),
-        ));
-        assert_eq!(cont_all["released"], 0);
-
-        // clear_flows with keep_pinned: true keeps pinned id2 and drops unpinned id1
-        let kept = parse_tool_payload(&tool_clear_flows(&hub, &json!({ "keep_pinned": true })));
-        assert_eq!(kept["cleared"], 1);
-        assert_eq!(kept["remaining"], 1);
-        let cleared_all =
-            parse_tool_payload(&tool_clear_flows(&hub, &json!({ "keep_pinned": false })));
-        assert_eq!(cleared_all["cleared"], 1);
-        assert_eq!(cleared_all["remaining"], 0);
-    }
-}
+#[path = "mcp_tests.rs"]
+mod tests;
