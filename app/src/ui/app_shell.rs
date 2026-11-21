@@ -47,6 +47,7 @@ pub fn App() -> impl IntoElement {
     let selected = signal(None::<u64>);
     let rows = signal(Vec::<Arc<RowLine>>::new());
     let filtered_stats = signal(session::FilteredStats::default());
+    let empty_diagnosis = signal(EmptyFilterDiagnosis::default());
     let facets = signal(session::SessionFacets::default());
     let facets_open = signal(false);
     let flow_total = signal(0_usize);
@@ -334,7 +335,9 @@ pub fn App() -> impl IntoElement {
 
     let controls_tick = controls.clone();
     let filter_tick = filter;
+    let list_filter_tick = list_filter;
     let effective_filter_tick = effective_filter;
+    let empty_diagnosis_tick = empty_diagnosis;
     let profile_tick = profile_signals;
     let filter_pending = stored(filter.get());
     let filter_since = stored(None::<SystemTime>);
@@ -820,7 +823,9 @@ pub fn App() -> impl IntoElement {
             } else {
                 None
             };
-            let (lines, stats, next_facets, next_total, next_mem, next_dropped) = {
+            let filter_enabled_now = profile_tick.filter_enabled.get();
+            let list_filter_now = list_filter_tick.get();
+            let (lines, stats, next_facets, next_total, next_mem, next_dropped, diag_plan) = {
                 let mut cache = row_cache_tick.borrow_mut();
                 controls_tick.hub.with_session(|session| {
                     let lines = project_rows(
@@ -842,6 +847,17 @@ pub fn App() -> impl IntoElement {
                             ids.iter().filter_map(|(id, _)| session.get(*id)),
                         )
                     });
+                    let diag_plan = (matched.is_empty()
+                        && session.len() > 0
+                        && !effective_filter_now.trim().is_empty())
+                    .then(|| {
+                        plan_empty_filter_diagnosis(
+                            session,
+                            &filter_now,
+                            filter_enabled_now,
+                            &list_filter_now,
+                        )
+                    });
                     (
                         lines,
                         stats,
@@ -849,9 +865,16 @@ pub fn App() -> impl IntoElement {
                         session.len(),
                         format_bytes(session.memory_bytes()),
                         session.dropped(),
+                        diag_plan,
                     )
                 })
             };
+            let next_diagnosis = diag_plan
+                .map(FilterDiagnosisPlan::finish)
+                .unwrap_or_default();
+            if empty_diagnosis_tick.with(|cur| cur != &next_diagnosis) {
+                empty_diagnosis_tick.set(next_diagnosis);
+            }
             if total_tick.get_untracked() != next_total {
                 total_tick.set(next_total);
             }
@@ -1222,30 +1245,43 @@ pub fn App() -> impl IntoElement {
                             )
                         },
                     ))
-                    .child(flow_list(
-                        rows,
-                        facets,
-                        facets_open,
-                        selected,
-                        paused,
-                        compose,
-                        filter,
-                        list_filter,
-                        effective_filter,
-                        running,
-                        rules_text,
-                        list_width,
-                        profile_signals.list_height,
-                        profile_signals.layout_mode,
-                        profile_signals.sidebar_width,
-                        profile_signals.sidebar_collapsed,
-                        columns,
-                        sort,
-                        controls_list,
-                        shown,
-                        baseline,
-                        filter_focus,
-                    ))
+                    .child({
+                        let clear_controls = controls_list.clone();
+                        let empty_state = EmptyFilterState {
+                            effective_filter,
+                            main_filter: filter,
+                            filter_enabled,
+                            list_filter,
+                            diagnosis: empty_diagnosis,
+                            running,
+                            on_clear_primary: Some(Rc::new(move || {
+                                save_config_or_notify(&clear_controls, PrefName::Filter, |cfg| {
+                                    cfg.filter.clear();
+                                });
+                            })),
+                        };
+                        flow_list(
+                            rows,
+                            facets,
+                            facets_open,
+                            selected,
+                            paused,
+                            compose,
+                            empty_state,
+                            rules_text,
+                            list_width,
+                            profile_signals.list_height,
+                            profile_signals.layout_mode,
+                            profile_signals.sidebar_width,
+                            profile_signals.sidebar_collapsed,
+                            columns,
+                            sort,
+                            controls_list,
+                            shown,
+                            baseline,
+                            filter_focus,
+                        )
+                    })
                     .child(pane_splitter(
                         list_width,
                         profile_signals.list_height,

@@ -1,6 +1,17 @@
 #[allow(unused_imports)]
 use super::*;
 
+#[derive(Clone)]
+pub(crate) struct EmptyFilterState {
+    pub(crate) effective_filter: Signal<String>,
+    pub(crate) main_filter: Signal<String>,
+    pub(crate) filter_enabled: Signal<bool>,
+    pub(crate) list_filter: Signal<String>,
+    pub(crate) diagnosis: Signal<EmptyFilterDiagnosis>,
+    pub(crate) running: Signal<bool>,
+    pub(crate) on_clear_primary: Option<Rc<dyn Fn()>>,
+}
+
 pub(crate) fn list_empty_subtitle(lang: Lang, filtered: bool, running: bool) -> &'static str {
     if filtered {
         t(lang, "试试调整上方的过滤关键词", "Try a different filter")
@@ -19,7 +30,15 @@ pub(crate) fn list_empty_subtitle(lang: Lang, filtered: bool, running: bool) -> 
     }
 }
 
-pub(crate) fn list_empty(filter: Signal<String>, running: Signal<bool>) -> impl IntoElement {
+pub(crate) fn list_empty(state: EmptyFilterState) -> impl IntoElement {
+    let filter = state.effective_filter;
+    let main_filter = state.main_filter;
+    let filter_enabled = state.filter_enabled;
+    let list_filter = state.list_filter;
+    let diagnosis = state.diagnosis;
+    let running = state.running;
+    let on_clear_primary = state.on_clear_primary;
+
     view()
         .flex_1()
         .items_center()
@@ -32,7 +51,7 @@ pub(crate) fn list_empty(filter: Signal<String>, running: Signal<bool>) -> impl 
                 let langs = ui_langs();
                 move || -> SharedString {
                     let lang = ui_lang(langs);
-                    if filter.get().is_empty() {
+                    if filter.get().trim().is_empty() {
                         t(lang, "还没有流量", "No traffic yet").into()
                     } else {
                         t(lang, "没有匹配的流量", "No matching traffic").into()
@@ -48,13 +67,106 @@ pub(crate) fn list_empty(filter: Signal<String>, running: Signal<bool>) -> impl 
             text({
                 let langs = ui_langs();
                 move || -> SharedString {
-                    list_empty_subtitle(ui_lang(langs), !filter.get().is_empty(), running.get())
-                        .into()
+                    let lang = ui_lang(langs);
+                    let filtered = !filter.get().trim().is_empty();
+                    if filtered
+                        && let Some(diag_text) =
+                            diagnosis.with(|d| format_empty_filter_diagnosis(lang, d))
+                    {
+                        return diag_text.into();
+                    }
+                    list_empty_subtitle(lang, filtered, running.get()).into()
                 }
             })
             .text_center()
             .text_size(px(12.0))
             .text_color(fg_muted()),
+        )
+        .child(when(
+            move || !filter.get().trim().is_empty(),
+            move || {
+                let on_clear_primary = on_clear_primary.clone();
+                view()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .mt_2()
+                    .child(empty_clear_filter_button(
+                        main_filter,
+                        filter_enabled,
+                        list_filter,
+                        on_clear_primary,
+                    ))
+                    .child(when(
+                        move || filter_enabled.get() && !main_filter.get().trim().is_empty(),
+                        move || empty_pause_primary_button(filter_enabled),
+                    ))
+            },
+        ))
+}
+
+fn empty_clear_filter_button(
+    main_filter: Signal<String>,
+    filter_enabled: Signal<bool>,
+    list_filter: Signal<String>,
+    on_clear_primary: Option<Rc<dyn Fn()>>,
+) -> impl IntoElement {
+    view()
+        .h(px(28.0))
+        .px_3()
+        .flex_row()
+        .items_center()
+        .justify_center()
+        .rounded(px(CONTROL_RADIUS))
+        .border_1()
+        .border_color(accent_blue_border())
+        .bg(accent_blue_soft())
+        .hover(|style| style.bg(accent_blue_soft_hover()))
+        .active(|style| style.opacity(0.8))
+        .cursor(Cursor::Pointer)
+        .label(tr("清空过滤", "Clear filter"))
+        .on_press(move || {
+            if !list_filter.get_untracked().is_empty() {
+                list_filter.set(String::new());
+            }
+            if filter_enabled.get_untracked() && !main_filter.get_untracked().trim().is_empty() {
+                main_filter.set(String::new());
+                if let Some(cb) = &on_clear_primary {
+                    cb();
+                }
+            }
+        })
+        .child(
+            control_text(tr("清空过滤", "Clear filter"))
+                .text_size(px(12.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(accent_blue_text()),
+        )
+}
+
+fn empty_pause_primary_button(filter_enabled: Signal<bool>) -> impl IntoElement {
+    view()
+        .h(px(28.0))
+        .px_3()
+        .flex_row()
+        .items_center()
+        .justify_center()
+        .rounded(px(CONTROL_RADIUS))
+        .border_1()
+        .border_color(border_control())
+        .bg(bg_control())
+        .hover(|style| style.bg(bg_control_hover()))
+        .active(|style| style.opacity(0.8))
+        .cursor(Cursor::Pointer)
+        .label(tr("暂停主过滤", "Pause primary filter"))
+        .on_press(move || filter_enabled.set(false))
+        .child(
+            control_text(tr("暂停主过滤", "Pause primary filter"))
+                .text_size(px(12.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(fg_secondary()),
         )
 }
 
@@ -67,9 +179,7 @@ pub(crate) fn list_menu(
     columns: Signal<ListColumns>,
     sort: Signal<Option<ListSort>>,
     controls: Arc<Controls>,
-    list_filter: Signal<String>,
-    effective_filter: Signal<String>,
-    running: Signal<bool>,
+    empty_state: EmptyFilterState,
     shown: Shown,
     baseline: Signal<Option<u64>>,
     rules_text: Signal<String>,
@@ -80,6 +190,7 @@ pub(crate) fn list_menu(
 ) -> impl IntoElement {
     let header_menu = signal(false);
     let header_controls = controls.clone();
+    let list_filter = empty_state.list_filter;
     // The table is a direct flex child. Wrapping it in `context_menu` gave
     // that component a content-sized root, so the rows collapsed to nothing
     // while the toolbar count still updated.
@@ -95,8 +206,7 @@ pub(crate) fn list_menu(
             columns,
             sort,
             controls.clone(),
-            effective_filter,
-            running,
+            empty_state,
             layout_mode,
             picked,
             menu_open,
@@ -153,14 +263,14 @@ pub(crate) fn flow_table(
     columns: Signal<ListColumns>,
     sort: Signal<Option<ListSort>>,
     controls: Arc<Controls>,
-    filter: Signal<String>,
-    running: Signal<bool>,
+    empty_state: EmptyFilterState,
     layout_mode: Signal<config::LayoutMode>,
     picked: Signal<Option<u64>>,
     menu_open: Signal<bool>,
     header_menu: Signal<bool>,
     menu_at: Signal<Point<Points>>,
 ) -> impl IntoElement {
+    let filter = empty_state.effective_filter;
     let saved_cols = saved_config();
     let widths = signal(saved_cols.column_widths);
     let widths_top_bottom = signal(saved_cols.column_widths_top_bottom);
@@ -239,6 +349,7 @@ pub(crate) fn flow_table(
             let blur_select = Rc::clone(&blur_select);
             let controls = controls.clone();
             let move_controls = controls.clone();
+            let empty_state = empty_state.clone();
             Some(
                 data_table()
                     .component_ref(&table)
@@ -310,7 +421,7 @@ pub(crate) fn flow_table(
                             blur_header();
                         })
                     })
-                    .empty(list_empty(filter, running))
+                    .empty(list_empty(empty_state))
                     .on_row_press(move |_: &DataTablePress| blur_press())
                     .on_selection_change(move |selection: &Option<DataTableSelection>| {
                         blur_select();

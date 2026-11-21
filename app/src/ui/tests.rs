@@ -1641,6 +1641,8 @@ fn auto_height_popover_scroll_containers_never_use_flex_1() {
         "\n",
         include_str!("facet_drawer.rs"),
         "\n",
+        include_str!("filter_diagnose.rs"),
+        "\n",
         include_str!("filter_panel.rs"),
         "\n",
         include_str!("filter_tokens.rs"),
@@ -4198,6 +4200,10 @@ fn list_empty_subtitle_reflects_running_and_filter_state() {
         provide_context(signal(Some(Lang::En)));
         let step = signal(0_u8);
         let filter = signal(String::new());
+        let main_filter = signal(String::new());
+        let filter_enabled = signal(true);
+        let list_filter = signal(String::new());
+        let diagnosis = signal(super::EmptyFilterDiagnosis::default());
         let running = signal(false);
         view()
             .w(px(500.0))
@@ -4210,7 +4216,15 @@ fn list_empty_subtitle_reflects_running_and_filter_state() {
                     _ => filter.set("host:example.com".into()),
                 }
             })
-            .child(super::list_empty(filter, running))
+            .child(super::list_empty(super::EmptyFilterState {
+                effective_filter: filter,
+                main_filter,
+                filter_enabled,
+                list_filter,
+                diagnosis,
+                running,
+                on_clear_primary: None,
+            }))
     }
 
     let (mut core, mut tree) =
@@ -4239,7 +4253,201 @@ fn list_empty_subtitle_reflects_running_and_filter_state() {
     tree.pump(&mut core);
     assert_eq!(
         tree.collect_live_texts(2),
-        vec!["No matching traffic", "Try a different filter"]
+        vec![
+            "No matching traffic",
+            "Try a different filter",
+            "Clear filter"
+        ]
+    );
+}
+
+#[test]
+fn empty_filter_diagnosis_identifies_blocking_tokens_and_combinations() {
+    use crate::i18n::Lang;
+    use crate::session::{FlowDraft, Protocol, Session};
+
+    let mut session = Session::default();
+    // Empty session returns default diagnosis and no formatted text.
+    let empty_diag = super::diagnose_empty_filter(&session, "host:missing.local", true, "");
+    assert_eq!(empty_diag.total_flows, 0);
+    assert!(super::format_empty_filter_diagnosis(Lang::En, &empty_diag).is_none());
+
+    let id1 = session.open(FlowDraft {
+        method: "GET".into(),
+        url: "https://api.local/v1/users".into(),
+        host: "api.local".into(),
+        path: "/v1/users".into(),
+        protocol: Protocol::Http2,
+        request_headers: vec![("accept".into(), "application/json".into())],
+    });
+    session.set_response(id1, 200, vec![], None);
+
+    let id2 = session.open(FlowDraft {
+        method: "POST".into(),
+        url: "https://auth.local/login".into(),
+        host: "auth.local".into(),
+        path: "/login".into(),
+        protocol: Protocol::Http2,
+        request_headers: vec![],
+    });
+    session.set_response(id2, 500, vec![], None);
+
+    // Single blocking token
+    let d1 = super::diagnose_empty_filter(&session, "host:api.local status:404", true, "");
+    assert_eq!(d1.total_flows, 2);
+    assert_eq!(d1.blocking_tokens, vec!["status:404"]);
+    assert!(!d1.combined_mismatch);
+    assert_eq!(
+        super::format_empty_filter_diagnosis(Lang::En, &d1).as_deref(),
+        Some("2 flows in session, but \"status:404\" matched 0")
+    );
+    assert_eq!(
+        super::format_empty_filter_diagnosis(Lang::Zh, &d1).as_deref(),
+        Some("共 2 条流量，过滤词「status:404」未匹配到任何记录")
+    );
+
+    // Multiple blocking tokens + pipe OR preserved as one token
+    let d2 = super::diagnose_empty_filter(
+        &session,
+        "host:nope.local | ghost.local status:404 method:DELETE path:/missing",
+        true,
+        "",
+    );
+    assert_eq!(
+        d2.blocking_tokens,
+        vec![
+            "host:nope.local|ghost.local",
+            "status:404",
+            "method:DELETE",
+            "path:/missing",
+        ]
+    );
+    let en_multi = super::format_empty_filter_diagnosis(Lang::En, &d2).unwrap();
+    assert!(en_multi.contains("host:nope.local|ghost.local"));
+    assert!(en_multi.contains("(+1 more)"));
+    let zh_multi = super::format_empty_filter_diagnosis(Lang::Zh, &d2).unwrap();
+    assert!(zh_multi.contains("等 1 项"));
+
+    // Combined mismatch within a single filter (each token matches 1 flow, together 0)
+    let d3 = super::diagnose_empty_filter(&session, "host:api.local status:500", true, "");
+    assert!(d3.blocking_tokens.is_empty());
+    assert!(d3.combined_mismatch);
+    assert!(!d3.both_filters_active);
+    assert!(
+        super::format_empty_filter_diagnosis(Lang::En, &d3)
+            .unwrap()
+            .contains("combination matches 0")
+    );
+    assert!(
+        super::format_empty_filter_diagnosis(Lang::Zh, &d3)
+            .unwrap()
+            .contains("组合条件无交集")
+    );
+
+    // Combined mismatch across primary and secondary filters
+    let d4 = super::diagnose_empty_filter(&session, "host:api.local", true, "status:500");
+    assert!(d4.blocking_tokens.is_empty());
+    assert!(d4.combined_mismatch);
+    assert!(d4.both_filters_active);
+    assert!(!d4.primary_empty);
+    assert!(!d4.secondary_empty);
+    assert!(
+        super::format_empty_filter_diagnosis(Lang::En, &d4)
+            .unwrap()
+            .contains("primary and secondary filters do not overlap")
+    );
+    assert!(
+        super::format_empty_filter_diagnosis(Lang::Zh, &d4)
+            .unwrap()
+            .contains("主过滤与二次过滤叠加后无交集")
+    );
+
+    // Paused primary filter is ignored when diagnosing secondary filter
+    let d5 = super::diagnose_empty_filter(&session, "host:missing.local", false, "status:404");
+    assert_eq!(d5.blocking_tokens, vec!["status:404"]);
+    assert!(!d5.both_filters_active);
+}
+
+#[test]
+fn list_empty_action_buttons_pause_and_clear_filters() {
+    use crate::i18n::Lang;
+    use nsh_core::{EventKind, EventPayload, PressEvent};
+
+    #[component]
+    fn ActionableEmptyHarness() -> impl IntoElement {
+        provide_context(signal(Some(Lang::En)));
+        let main_filter = signal(String::from("host:api.local"));
+        let filter_enabled = signal(true);
+        let list_filter = signal(String::from("status:404"));
+        let effective_filter = signal(String::from("host:api.local\nstatus:404"));
+        effect(move || {
+            let primary = if filter_enabled.get() {
+                main_filter.get()
+            } else {
+                String::new()
+            };
+            effective_filter.set(crate::session::combine_filters(
+                &primary,
+                &list_filter.get(),
+            ));
+        });
+        let diagnosis = signal(super::EmptyFilterDiagnosis {
+            total_flows: 5,
+            blocking_tokens: vec!["status:404".into()],
+            ..super::EmptyFilterDiagnosis::default()
+        });
+        let running = signal(true);
+        view()
+            .w(px(500.0))
+            .h(px(300.0))
+            .child(super::list_empty(super::EmptyFilterState {
+                effective_filter,
+                main_filter,
+                filter_enabled,
+                list_filter,
+                diagnosis,
+                running,
+                on_clear_primary: None,
+            }))
+    }
+
+    let find_button = |tree: &HeadlessMountTree, label: &str| -> Option<u32> {
+        let text_id = tree.texts.iter().find_map(|(id, text)| {
+            (text == label && tree.parent.contains_key(id)).then_some(*id)
+        })?;
+        tree.parent.get(&text_id).copied()
+    };
+
+    let (mut core, mut tree) =
+        mount_headless_component::<ActionableEmptyHarness>(Size::new(px(500.0), px(300.0)));
+    let texts = tree.collect_live_texts(2);
+    assert!(texts.iter().any(|t| t.contains("\"status:404\" matched 0")));
+    assert!(texts.iter().any(|t| t == "Clear filter"));
+    assert!(texts.iter().any(|t| t == "Pause primary filter"));
+
+    // Press "Pause primary filter" -> pause button disappears, secondary filter still active.
+    let pause_id = find_button(&tree, "Pause primary filter").expect("pause button");
+    core.component_event(
+        pause_id,
+        EventKind::Press,
+        &EventPayload::Press(PressEvent::default()),
+    );
+    tree.pump(&mut core);
+    assert!(find_button(&tree, "Pause primary filter").is_none());
+    assert!(find_button(&tree, "Clear filter").is_some());
+
+    // Press "Clear filter" -> clears remaining secondary filter, returns to unfiltered empty state.
+    let clear_id = find_button(&tree, "Clear filter").expect("clear button");
+    core.component_event(
+        clear_id,
+        EventKind::Press,
+        &EventPayload::Press(PressEvent::default()),
+    );
+    tree.pump(&mut core);
+    let texts_after = tree.collect_live_texts(2);
+    assert_eq!(
+        texts_after,
+        vec!["No traffic yet", "Listening, waiting for HTTP(S) traffic"]
     );
 }
 

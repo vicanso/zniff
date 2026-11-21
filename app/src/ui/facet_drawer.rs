@@ -206,10 +206,7 @@ pub(crate) fn flow_list(
     selected: Signal<Option<u64>>,
     paused: Signal<Option<(u64, BreakSide)>>,
     compose: Compose,
-    main_filter: Signal<String>,
-    list_filter: Signal<String>,
-    effective_filter: Signal<String>,
-    running: Signal<bool>,
+    empty_state: EmptyFilterState,
     rules_text: Signal<String>,
     width: Signal<f32>,
     height: Signal<f32>,
@@ -223,6 +220,8 @@ pub(crate) fn flow_list(
     baseline: Signal<Option<u64>>,
     filter_focus: ElementRef,
 ) -> impl IntoElement {
+    let main_filter = empty_state.main_filter;
+    let list_filter = empty_state.list_filter;
     let row_controls = controls.clone();
     let merge_controls = controls.clone();
     let column_controls = controls;
@@ -397,9 +396,7 @@ pub(crate) fn flow_list(
                     columns,
                     sort,
                     row_controls,
-                    list_filter,
-                    effective_filter,
-                    running,
+                    empty_state,
                     shown,
                     baseline,
                     rules_text,
