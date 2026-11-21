@@ -39,6 +39,7 @@ pub enum PrefName {
     Rules,
     Upstream,
     ProxyAuth,
+    AllowHosts,
     Profiles,
     Port,
     Lan,
@@ -349,6 +350,9 @@ impl StatusMsg {
                     }
                     PrefName::ProxyAuth => {
                         t(lang, "代理认证没有记住:", "Proxy auth was not saved:")
+                    }
+                    PrefName::AllowHosts => {
+                        t(lang, "允许域名没有记住:", "Allowed hosts were not saved:")
                     }
                     PrefName::Profiles => {
                         t(lang, "预设配置没有记住:", "Saved setups were not saved:")
@@ -1044,6 +1048,10 @@ pub fn localize_error(lang: Lang, text: &str) -> String {
         (
             "响应断点读 body 失败: ",
             "Failed to read the body for a response break: ",
+        ),
+        (
+            "目标域名未在允许列表中: ",
+            "Target host is not in the allow-list: ",
         ),
     ];
     for (zh, en) in PREFIX {

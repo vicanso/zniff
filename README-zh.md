@@ -58,10 +58,11 @@ cargo install --git https://github.com/vicanso/zniff
 **Docker（Web 控制台）**
 ```bash
 docker run --rm -p 8080:8080 -p 8877:8877 \
+  -e ZNIFF_ALLOW_HOSTS="*.vicanso.dev" \
   -v "$PWD/zniff-data:/data" \
   vicanso/zniff-web:latest
 ```
-访问 `http://127.0.0.1:8080`，点击「开始」后开启抓包端口 `8877`。镜像同时暴露中继端口 `8879`（配合 `--relay --token <密钥>` 使用）。需要最新开发版可使用 `:nightly` 标签。
+访问 `http://127.0.0.1:8080`，点击「开始」后开启抓包端口 `8877`。Docker 镜像默认启用 `ZNIFF_STRICT_ALLOW_HOSTS=1`：若未设置（或留空）`ZNIFF_ALLOW_HOSTS` 且 `/data/config.toml` 也未配置，则默认拒绝所有代理域名（返回 `403`），需通过 `ZNIFF_ALLOW_HOSTS`（界面只读锁定）或在 Web 控制台底栏「安全」弹出层中填入允许域名（填写 `*` 可放行全部）。镜像同时暴露中继端口 `8879`（配合 `--relay --token <密钥>` 使用）。需要最新开发版可使用 `:nightly` 标签。
 
 ### 2. 配置客户端与根证书
 

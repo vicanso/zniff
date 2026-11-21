@@ -55,6 +55,8 @@ pub(crate) fn cli_info_output(args: &[String]) -> Option<String> {
                 "Options:\n",
                 "  --data-dir <dir>         Override CA & config directory (env: ZNIFF_DATA_DIR)\n",
                 "  --proxy-auth <user:pass> Require Basic auth on capture port (env: ZNIFF_PROXY_AUTH)\n",
+                "  --allow-hosts <hosts>    Restrict proxied domains, comma/line separated (env: ZNIFF_ALLOW_HOSTS)\n",
+                "  --strict-allow-hosts     Deny all proxied domains when allow_hosts is empty (env: ZNIFF_STRICT_ALLOW_HOSTS)\n",
                 "  --web-prefix <path>      URL path prefix for --web console (env: ZNIFF_WEB_PREFIX)\n",
                 "  --web-auth <user:pass>   Require Basic auth on the --web console\n",
                 "                           (env: ZNIFF_WEB_AUTH, config: web_auth)\n",
@@ -103,6 +105,22 @@ pub(crate) fn apply_global_cli_flags(args: &[String]) -> std::result::Result<(),
                 .get(idx)
                 .ok_or_else(|| "缺少代理认证参数 (--proxy-auth <user:pass>)".to_string())?;
             config::set_proxy_auth_override(next);
+        } else if let Some(rest) = arg.strip_prefix("--allow-hosts=") {
+            let trimmed = rest.trim();
+            if trimmed.is_empty() {
+                return Err("缺少允许域名列表 (--allow-hosts <hosts>)".to_string());
+            }
+            config::set_allow_hosts_override(trimmed);
+        } else if arg == "--allow-hosts" {
+            idx += 1;
+            let next = args
+                .get(idx)
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| "缺少允许域名列表 (--allow-hosts <hosts>)".to_string())?;
+            config::set_allow_hosts_override(next);
+        } else if arg == "--strict-allow-hosts" {
+            config::set_strict_allow_hosts_override(true);
         }
         idx += 1;
     }
@@ -296,6 +314,9 @@ pub(crate) struct ProfileSignals {
     pub(crate) breaks_on: Signal<bool>,
     pub(crate) show_tunnels: Signal<bool>,
     pub(crate) proxy_auth: Signal<String>,
+    pub(crate) allow_hosts: Signal<String>,
+    pub(crate) allow_hosts_strict: Signal<bool>,
+    pub(crate) allow_hosts_locked: Signal<bool>,
     pub(crate) relay_url: Signal<String>,
     pub(crate) relay_accept: Signal<bool>,
     pub(crate) list_width: Signal<f32>,

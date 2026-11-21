@@ -1613,6 +1613,8 @@ fn auto_height_popover_scroll_containers_never_use_flex_1() {
     let bundled_ui_src = concat!(
         include_str!("app_shell.rs"),
         "\n",
+        include_str!("access_popover.rs"),
+        "\n",
         include_str!("break_bar.rs"),
         "\n",
         include_str!("cli_state.rs"),
@@ -2924,6 +2926,9 @@ fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
             breaks_on: signal(true),
             show_tunnels: signal(false),
             proxy_auth: signal(String::new()),
+            allow_hosts: signal(String::new()),
+            allow_hosts_strict: signal(false),
+            allow_hosts_locked: signal(false),
             relay_url: signal(String::new()),
             relay_accept: signal(false),
             list_width: signal(660.0),
@@ -4445,4 +4450,140 @@ async fn body_section_header_keeps_gap_between_title_and_search_at_narrow_split(
     check_width(396.0, false, true);
     check_width(400.0, true, false);
     check_width(300.0, false, false);
+}
+
+#[tokio::test]
+async fn access_control_popover_reflects_strict_deny_all_and_locked_state() {
+    use nsh_core::ViewKind;
+    use std::cell::{Cell, RefCell};
+
+    thread_local! {
+        static ACCESS_STRICT: Cell<bool> = const { Cell::new(false) };
+        static ACCESS_LOCKED: Cell<bool> = const { Cell::new(false) };
+        static ACCESS_HOSTS: RefCell<String> = const { RefCell::new(String::new()) };
+    }
+
+    #[component]
+    fn AccessPopoverHarness() -> impl IntoElement {
+        provide_context(signal(Some(crate::i18n::Lang::En)));
+        super::provide_mono_font(false);
+        let controls = make_test_controls("access-popover-test");
+        let props = super::AccessControlProps {
+            proxy_auth: signal(String::new()),
+            allow_hosts: signal(ACCESS_HOSTS.with(|c| c.borrow().clone())),
+            allow_hosts_strict: signal(ACCESS_STRICT.with(Cell::get)),
+            allow_hosts_locked: signal(ACCESS_LOCKED.with(Cell::get)),
+            controls,
+        };
+        let open = signal(false);
+        let on_change: std::rc::Rc<dyn Fn(&str)> = std::rc::Rc::new(|_| {});
+        view()
+            .w(px(380.0))
+            .h(px(400.0))
+            .p_2()
+            .gap_2()
+            .child(super::access_trigger_pill(open, &props))
+            .child(super::allow_hosts_section(
+                props.allow_hosts,
+                props.allow_hosts_strict,
+                props.allow_hosts_locked,
+                on_change,
+            ))
+    }
+
+    assert_eq!(
+        super::access_summary_state("", "", false),
+        (false, false, false)
+    );
+    assert_eq!(
+        super::access_summary_state("", "", true),
+        (false, true, true)
+    );
+    assert_eq!(
+        super::access_summary_state("u:p", "*.vicanso.dev", true),
+        (true, false, true)
+    );
+    assert_eq!(
+        super::access_summary_state("", "*", true),
+        (false, false, false)
+    );
+
+    let mount_state = |strict: bool, locked: bool, hosts: &str| {
+        ACCESS_STRICT.with(|c| c.set(strict));
+        ACCESS_LOCKED.with(|c| c.set(locked));
+        ACCESS_HOSTS.with(|c| *c.borrow_mut() = hosts.to_string());
+        mount_headless_component::<AccessPopoverHarness>(Size::new(px(380.0), px(400.0))).1
+    };
+
+    let tree_default = mount_state(false, false, "");
+    assert!(tree_default.texts.values().any(|s| s == "Access"));
+    assert!(!tree_default.texts.values().any(|s| s == "Access · Denied"));
+    assert!(
+        !tree_default
+            .texts
+            .values()
+            .any(|s| s.contains("Strictly denying all proxied domains"))
+    );
+    assert!(tree_default.kinds.values().any(|k| *k == ViewKind::Input));
+
+    let tree_strict_deny = mount_state(true, false, "");
+    assert!(
+        tree_strict_deny
+            .texts
+            .values()
+            .any(|s| s == "Access · Denied")
+    );
+    assert!(
+        tree_strict_deny
+            .texts
+            .values()
+            .any(|s| s.contains("Strictly denying all proxied domains (403)"))
+    );
+    assert!(
+        tree_strict_deny
+            .kinds
+            .values()
+            .any(|k| *k == ViewKind::Input)
+    );
+
+    let tree_locked_deny = mount_state(true, true, "");
+    assert!(
+        tree_locked_deny
+            .texts
+            .values()
+            .any(|s| s == "Access · Denied")
+    );
+    assert!(
+        tree_locked_deny
+            .texts
+            .values()
+            .any(|s| s == "(empty · all denied)")
+    );
+    assert!(
+        !tree_locked_deny
+            .kinds
+            .values()
+            .any(|k| *k == ViewKind::Input)
+    );
+
+    let tree_locked_hosts = mount_state(true, true, "*.vicanso.dev");
+    assert!(tree_locked_hosts.texts.values().any(|s| s == "Access"));
+    assert!(
+        !tree_locked_hosts
+            .texts
+            .values()
+            .any(|s| s == "Access · Denied")
+    );
+    assert!(
+        tree_locked_hosts
+            .texts
+            .values()
+            .any(|s| s == "*.vicanso.dev")
+    );
+    assert!(
+        !tree_locked_hosts
+            .kinds
+            .values()
+            .any(|k| *k == ViewKind::Input)
+    );
 }

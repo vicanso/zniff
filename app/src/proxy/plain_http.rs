@@ -5,12 +5,15 @@ pub(super) async fn plain_http<S>(client: &mut S, head: &Head, hub: Arc<Hub>) ->
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    let (method, host, port, path) = request_target(head)?;
+    if !hub.host_allowed(&host) {
+        return write_host_not_allowed(client, &host, method.eq_ignore_ascii_case("HEAD")).await;
+    }
     let client = Prefixed {
         prefix: Vec::new(),
         pos: 0,
         inner: client,
     };
-    let (method, host, port, path) = request_target(head)?;
     let sanitized_headers: Vec<(String, String)> = head
         .headers
         .iter()
@@ -263,6 +266,19 @@ where
         }
         Some(Action::MapRemote { url, path_prefix }) => {
             if let Some((next_scheme, next_host, next_port, next_path)) = parse_http_url(url) {
+                if !hub.host_allowed(&next_host) {
+                    if !request_taken {
+                        let _ = drain_request(&mut client, &headers, &hub, id).await;
+                    }
+                    hub.set_error(id, format!("目标域名未在允许列表中: {next_host}"));
+                    hub.mark_finished(id);
+                    return write_host_not_allowed(
+                        &mut client,
+                        &next_host,
+                        method.eq_ignore_ascii_case("HEAD"),
+                    )
+                    .await;
+                }
                 scheme = if next_scheme == "https" {
                     "https"
                 } else {

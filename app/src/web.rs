@@ -295,6 +295,8 @@ pub fn run_cli(args: &[String], config_port: u16) -> i32 {
     hub.set_rules(&loaded.rules);
     hub.set_rule_groups(&loaded.rule_groups);
     hub.set_upstream(&loaded.upstream_proxy);
+    let allow = crate::config::runtime_allow_hosts(&loaded.allow_hosts);
+    hub.configure_allow_hosts(&allow.text, allow.strict, allow.locked);
     hub.set_proxy_auth(&crate::config::runtime_proxy_auth(&loaded.proxy_auth));
     hub.set_rules_enabled(loaded.rules_enabled);
     hub.set_breaks_enabled(loaded.breaks_enabled);
@@ -344,7 +346,7 @@ pub fn run_cli(args: &[String], config_port: u16) -> i32 {
     }
     let started = WebServer::start_with_prefs(
         settings.web_addr(),
-        hub,
+        hub.clone(),
         settings.capture_bind,
         settings.capture_port,
         web_root,
@@ -370,6 +372,12 @@ pub fn run_cli(args: &[String], config_port: u16) -> i32 {
         println!("只做中继 (--no-capture)：这个进程不会打开抓包端口");
     } else {
         println!("抓包端口 {} 在页面里开始之后才打开", settings.capture_port);
+        if hub.allow_hosts_denies_all() {
+            eprintln!(
+                "警告：严格域名限制已开启且未配置允许域名，所有代理请求均将返回 403；请设置 --allow-hosts / {} 或在控制台底栏「安全」中配置（全部放行可填 *）",
+                crate::config::ALLOW_HOSTS_ENV,
+            );
+        }
     }
     if web_auth.is_empty() {
         if !settings.web_bind.is_loopback() {
@@ -683,6 +691,9 @@ struct PrefsBody {
     rule_groups: Vec<crate::config::RuleGroup>,
     upstream: String,
     proxy_auth: String,
+    allow_hosts: String,
+    allow_hosts_strict: bool,
+    allow_hosts_locked: bool,
     rules_enabled: bool,
     breaks_enabled: bool,
     show_tunnels: bool,
@@ -704,6 +715,9 @@ struct PrefsBody {
 #[derive(Serialize)]
 struct PrefsLiteBody {
     proxy_auth: String,
+    allow_hosts: String,
+    allow_hosts_strict: bool,
+    allow_hosts_locked: bool,
     rules_enabled: bool,
     breaks_enabled: bool,
     show_tunnels: bool,
@@ -1192,6 +1206,9 @@ fn state_of(slot: &Slot) -> StateBody {
             rule_groups: slot.hub.rule_groups(),
             upstream: slot.hub.upstream_text(),
             proxy_auth: slot.hub.proxy_auth_text(),
+            allow_hosts: slot.hub.allow_hosts_text(),
+            allow_hosts_strict: slot.hub.allow_hosts_strict(),
+            allow_hosts_locked: slot.hub.allow_hosts_locked(),
             rules_enabled: slot.hub.rules_enabled(),
             breaks_enabled: slot.hub.breaks_enabled(),
             show_tunnels: slot.hub.tunnel_failures_shown(),
@@ -1231,6 +1248,9 @@ fn state_lite_value(slot: &Slot) -> Value {
         runtime: state_runtime(slot),
         prefs: PrefsLiteBody {
             proxy_auth: slot.hub.proxy_auth_text(),
+            allow_hosts: slot.hub.allow_hosts_text(),
+            allow_hosts_strict: slot.hub.allow_hosts_strict(),
+            allow_hosts_locked: slot.hub.allow_hosts_locked(),
             rules_enabled: slot.hub.rules_enabled(),
             breaks_enabled: slot.hub.breaks_enabled(),
             show_tunnels: slot.hub.tunnel_failures_shown(),
@@ -2273,6 +2293,14 @@ fn sync_hub_op(slot: &mut Slot, op: &str, value: &Value) -> Reply {
             slot.hub.set_proxy_auth(&text);
             let trimmed = text.trim().to_string();
             save_error = persist_slot_config(slot, |cfg| cfg.proxy_auth = trimmed);
+        }
+        "set_allow_hosts" => {
+            let text = json_text(value);
+            if let Err(err) = slot.hub.set_allow_hosts(&text) {
+                return json_reply(403, "Forbidden", &json!({"error": err}));
+            }
+            let trimmed = slot.hub.allow_hosts_text();
+            save_error = persist_slot_config(slot, |cfg| cfg.allow_hosts = trimmed);
         }
         "set_relay_token" => {
             let text = json_text(value);
@@ -3848,6 +3876,35 @@ mod tests {
         let state: Value = serde_json::from_str(body_of(&raw_state)).unwrap();
         assert_eq!(state["prefs"]["proxy_auth"], "admin:pass123");
 
+        let (status, _) = post(
+            web,
+            "/api/hub",
+            r#"{"op":"set_allow_hosts","text":"  api.vicanso.dev\n*.staging.vicanso.dev  "}"#,
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(
+            hub.allow_hosts_text(),
+            "api.vicanso.dev\n*.staging.vicanso.dev"
+        );
+
+        hub.configure_allow_hosts("locked.vicanso.dev", true, true);
+        let (status, locked_body) =
+            post(web, "/api/hub", r#"{"op":"set_allow_hosts","text":"*"}"#).await;
+        assert_eq!(status, 403, "{locked_body}");
+        assert_eq!(hub.allow_hosts_text(), "locked.vicanso.dev");
+
+        let (status, raw_state) = exchange(
+            web,
+            "GET /api/state HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert_eq!(status, 200);
+        let state: Value = serde_json::from_str(body_of(&raw_state)).unwrap();
+        assert_eq!(state["prefs"]["allow_hosts"], "locked.vicanso.dev");
+        assert_eq!(state["prefs"]["allow_hosts_strict"], true);
+        assert_eq!(state["prefs"]["allow_hosts_locked"], true);
+
         drop(server);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3912,6 +3969,9 @@ mod tests {
         assert_eq!(lite["share_id"], "");
         assert!(lite["paused_queue"].is_array());
         assert_eq!(lite["prefs"]["proxy_auth"], "u:p");
+        assert!(lite["prefs"].get("allow_hosts").is_some());
+        assert!(lite["prefs"].get("allow_hosts_strict").is_some());
+        assert!(lite["prefs"].get("allow_hosts_locked").is_some());
         assert!(lite["prefs"].get("rules_enabled").is_some());
         assert!(lite["prefs"].get("breaks_enabled").is_some());
         assert!(lite["prefs"].get("show_tunnels").is_some());

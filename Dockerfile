@@ -9,8 +9,13 @@
 # baked into the image out of the box:
 #
 #   docker run --rm -p 8080:8080 -p 8877:8877 \
+#     -e ZNIFF_ALLOW_HOSTS="api.example.com,*.example.com" \
 #     -v "$PWD/zniff-data:/data" \
 #     vicanso/zniff-web:nightly
+#
+# By default the container runs with `ZNIFF_STRICT_ALLOW_HOSTS=1`, denying all
+# proxied domains until allowed via `ZNIFF_ALLOW_HOSTS` (or `*` to allow all)
+# or configured in the web console's footer Access popover.
 #
 # `ZNIFF_WEB_ROOT` defaults to `/usr/share/zniff/web` and may still be
 # overridden to serve a custom UI directory.
@@ -87,7 +92,8 @@ COPY --from=build /zniff /usr/local/bin/zniff
 COPY --from=build --chown=zniff:zniff /web /usr/share/zniff/web
 
 ENV ZNIFF_DATA_DIR=/data \
-    ZNIFF_WEB_ROOT=/usr/share/zniff/web
+    ZNIFF_WEB_ROOT=/usr/share/zniff/web \
+    ZNIFF_STRICT_ALLOW_HOSTS=1
 VOLUME ["/data"]
 
 USER zniff

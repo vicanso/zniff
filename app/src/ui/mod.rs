@@ -47,16 +47,16 @@ pub(crate) use crate::icon::{Glyph, glyph, glyph_px};
 pub(crate) use crate::proxy::{BreakDecision, BreakSide, Capture, Hub, ReplayOverride};
 #[allow(unused_imports)]
 pub(crate) use crate::session::Direction;
+#[allow(unused_imports)]
+pub(crate) use crate::{
+    allow_hosts, ca, clock, config, i18n, icon, import_charles, import_whistle, llm_stream,
+    openapi, present, proxy, redact, rules, session,
+};
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(unused_imports)]
 pub(crate) use crate::{
     bypass, client_hello, decompress, external_ca, har, launcher, mcp, mock_gen, relay, share,
     sysproxy, updater, web, ws,
-};
-#[allow(unused_imports)]
-pub(crate) use crate::{
-    ca, clock, config, i18n, icon, import_charles, import_whistle, llm_stream, openapi, present,
-    proxy, redact, rules, session,
 };
 
 /// A desktop-only child. Native stays `parent.child(child)`. The web build
@@ -75,6 +75,7 @@ macro_rules! desktop_child {
 }
 
 mod about_modal;
+mod access_popover;
 mod app_icon;
 mod app_shell;
 mod break_bar;
@@ -124,6 +125,7 @@ mod toolbar;
 mod web_poll;
 
 pub(crate) use self::about_modal::*;
+pub(crate) use self::access_popover::*;
 pub(crate) use self::app_icon::*;
 pub use self::app_shell::App;
 pub(crate) use self::break_bar::*;

@@ -35,6 +35,7 @@ use tokio::sync::watch;
 use tokio::time::timeout;
 use tokio_rustls::TlsConnector;
 
+use crate::allow_hosts::AllowHostRules;
 use crate::bypass::BypassRules;
 use crate::ca::Ca;
 use crate::client_hello::{ReadHello, read_client_hello};
@@ -293,6 +294,9 @@ async fn handle_conn_inner(mut socket: TcpStream, hub: Arc<Hub>) -> Result<()> {
     }
     if method.eq_ignore_ascii_case("CONNECT") {
         let (host, port) = split_host_port(&target, 443)?;
+        if !hub.host_allowed(&host) {
+            return write_host_not_allowed(&mut socket, &host, false).await;
+        }
         socket
             .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             .await?;

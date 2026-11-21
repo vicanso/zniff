@@ -59,6 +59,9 @@ pub struct Hub {
     rules_rev: AtomicU64,
     upstream_text: Mutex<String>,
     proxy_auth: Mutex<String>,
+    allow_hosts: Mutex<String>,
+    allow_hosts_strict: AtomicBool,
+    allow_hosts_locked: AtomicBool,
     rules_on: AtomicBool,
     breaks_on: AtomicBool,
     show_tunnels: AtomicBool,
@@ -81,6 +84,9 @@ impl Hub {
             rules_rev: AtomicU64::new(0),
             upstream_text: Mutex::new(String::new()),
             proxy_auth: Mutex::new(String::new()),
+            allow_hosts: Mutex::new(String::new()),
+            allow_hosts_strict: AtomicBool::new(false),
+            allow_hosts_locked: AtomicBool::new(false),
             rules_on: AtomicBool::new(true),
             breaks_on: AtomicBool::new(true),
             show_tunnels: AtomicBool::new(false),
@@ -147,6 +153,29 @@ impl Hub {
                 .unwrap_or_else(|err| err.into_inner());
             if *guard != next {
                 *guard = next;
+                changed = true;
+            }
+        }
+        if let Some(prefs) = value.get("prefs") {
+            if let Some(hosts) = prefs.get("allow_hosts").and_then(Value::as_str) {
+                let next = hosts.trim().to_string();
+                let mut guard = self
+                    .allow_hosts
+                    .lock()
+                    .unwrap_or_else(|err| err.into_inner());
+                if *guard != next {
+                    *guard = next;
+                    changed = true;
+                }
+            }
+            if let Some(strict) = prefs.get("allow_hosts_strict").and_then(Value::as_bool)
+                && self.allow_hosts_strict.swap(strict, Ordering::Relaxed) != strict
+            {
+                changed = true;
+            }
+            if let Some(locked) = prefs.get("allow_hosts_locked").and_then(Value::as_bool)
+                && self.allow_hosts_locked.swap(locked, Ordering::Relaxed) != locked
+            {
                 changed = true;
             }
         }
@@ -351,6 +380,57 @@ impl Hub {
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .clone()
+    }
+
+    /// Configures allow-hosts state locally when seeding from runtime or tests.
+    pub fn configure_allow_hosts(&self, text: &str, strict: bool, locked: bool) {
+        *self
+            .allow_hosts
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = text.trim().to_string();
+        self.allow_hosts_strict.store(strict, Ordering::Relaxed);
+        self.allow_hosts_locked.store(locked, Ordering::Relaxed);
+    }
+
+    /// Updates allow-hosts on the server unless locked by CLI flags or environment variables.
+    pub fn set_allow_hosts(&self, text: &str) -> std::result::Result<(), String> {
+        if self.allow_hosts_locked.load(Ordering::Relaxed) {
+            return Err("允许域名已由启动参数或环境变量锁定".to_string());
+        }
+        let trimmed = text.trim().to_string();
+        *self
+            .allow_hosts
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = trimmed.clone();
+        post_op(json!({"op": "set_allow_hosts", "text": trimmed}));
+        Ok(())
+    }
+
+    /// Returns the cached allow-hosts text.
+    pub fn allow_hosts_text(&self) -> String {
+        self.allow_hosts
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+    }
+
+    /// Returns whether strict deny-by-default host mode is active.
+    pub fn allow_hosts_strict(&self) -> bool {
+        self.allow_hosts_strict.load(Ordering::Relaxed)
+    }
+
+    /// Returns whether allow-hosts editing is locked.
+    pub fn allow_hosts_locked(&self) -> bool {
+        self.allow_hosts_locked.load(Ordering::Relaxed)
+    }
+
+    /// Returns whether every proxied host is currently denied.
+    pub fn allow_hosts_denies_all(&self) -> bool {
+        crate::allow_hosts::AllowHostRules::parse(
+            &self.allow_hosts_text(),
+            self.allow_hosts_strict(),
+        )
+        .denies_all()
     }
 
     pub fn set_relay_ingress(&self, accept: bool, token: &str) {

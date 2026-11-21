@@ -133,6 +133,9 @@ pub(super) async fn replay_once_attempt(
             }
         );
     };
+    if !hub.host_allowed(&host) {
+        anyhow::bail!("目标域名未在允许列表中: {host}");
+    }
     let mut headers = edit.headers.unwrap_or_else(|| {
         source
             .as_ref()

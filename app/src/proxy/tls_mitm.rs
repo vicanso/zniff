@@ -31,6 +31,9 @@ where
             .map(|_| ());
     };
     let sni_host = hello.sni.clone().unwrap_or_else(|| host.to_string());
+    if !hub.host_allowed(&sni_host) {
+        return Ok(());
+    }
     if hub.skips_tls(&sni_host) {
         record_tunnel(&hub, &sni_host, port, "直通名单，未解密".into());
         return tunnel_after_hello(&mut client, hello.raw, host, port, &hub)

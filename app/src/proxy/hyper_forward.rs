@@ -146,6 +146,41 @@ impl HttpSender for H2Lane {
     }
 }
 
+fn inner_request_host_from(uri: &Uri, headers: &HeaderMap, default_port: u16) -> Option<String> {
+    if let Some(host) = uri.host() {
+        return Some(host.to_string());
+    }
+    let host_hdr = headers
+        .get(http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    split_host_port(host_hdr, default_port)
+        .ok()
+        .map(|(host, _)| host)
+}
+
+fn host_not_allowed_response(
+    host: &str,
+    omit_body: bool,
+) -> Result<Response<RecordingBody<Incoming>>> {
+    let body_text = host_not_allowed_body(host);
+    let headers = vec![
+        (
+            "Content-Type".to_string(),
+            "text/plain; charset=utf-8".to_string(),
+        ),
+        ("Content-Length".to_string(), body_text.len().to_string()),
+        ("Cache-Control".to_string(), "no-store".to_string()),
+    ];
+    let body = if omit_body {
+        Vec::new()
+    } else {
+        body_text.into_bytes()
+    };
+    response_from_headers(403, &headers, &body)
+}
+
 pub(super) async fn forward_request(
     sender: &mut impl HttpSender,
     mut req: Request<Incoming>,
@@ -155,6 +190,15 @@ pub(super) async fn forward_request(
     scheme: &str,
     protocol: Protocol,
 ) -> Result<Response<RecordingBody<Incoming>>> {
+    let inner_host = inner_request_host_from(req.uri(), req.headers(), port);
+    let blocked_host = if !hub.host_allowed(host) {
+        Some(host)
+    } else {
+        inner_host.as_deref().filter(|h| !hub.host_allowed(h))
+    };
+    if let Some(blocked) = blocked_host {
+        return host_not_allowed_response(blocked, *req.method() == Method::HEAD);
+    }
     let websocket = is_websocket(&req);
     let upgrade = if websocket {
         Some(hyper::upgrade::on(&mut req))
@@ -375,6 +419,15 @@ pub(super) async fn forward_request(
             }
             Some(Action::MapRemote { url, path_prefix }) => {
                 if let Some((next_scheme, next_host, next_port, next_path)) = parse_http_url(url) {
+                    if !hub.host_allowed(&next_host) {
+                        if let Some(left) = incoming.take() {
+                            let _ =
+                                drain_and_record_request(&hub, id, left, encoding.as_deref()).await;
+                        }
+                        hub.set_error(id, format!("目标域名未在允许列表中: {next_host}"));
+                        hub.mark_finished(id);
+                        return host_not_allowed_response(&next_host, req_method == Method::HEAD);
+                    }
                     let same = next_scheme == scheme && next_host == host && next_port == port;
                     host = next_host;
                     port = next_port;

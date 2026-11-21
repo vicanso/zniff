@@ -645,6 +645,8 @@ pub(crate) fn apply_saved_prefs(hub: &Hub) {
     hub.set_rule_groups(&saved.rule_groups);
     hub.set_upstream(&saved.upstream_proxy);
     hub.set_proxy_auth(&config::runtime_proxy_auth(&saved.proxy_auth));
+    let allow = config::runtime_allow_hosts(&saved.allow_hosts);
+    hub.configure_allow_hosts(&allow.text, allow.strict, allow.locked);
     hub.set_rules_enabled(saved.rules_enabled);
     hub.set_breaks_enabled(saved.breaks_enabled);
     hub.set_show_tunnel_failures(saved.show_tunnel_failures);

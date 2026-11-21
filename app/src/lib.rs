@@ -4,6 +4,7 @@
 #![allow(clippy::too_many_arguments)]
 #![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 
+mod allow_hosts;
 #[cfg(not(target_arch = "wasm32"))]
 mod bypass;
 #[cfg(not(target_arch = "wasm32"))]

@@ -58,10 +58,11 @@ cargo install --git https://github.com/vicanso/zniff
 **Docker (Web Console)**
 ```bash
 docker run --rm -p 8080:8080 -p 8877:8877 \
+  -e ZNIFF_ALLOW_HOSTS="*.vicanso.dev" \
   -v "$PWD/zniff-data:/data" \
   vicanso/zniff-web:latest
 ```
-Open `http://127.0.0.1:8080` and click **Start** to bind capture port `8877`. The image also exposes `8879` for the optional relay (`--relay --token <secret>`). Use `:nightly` for the latest development build.
+Open `http://127.0.0.1:8080` and click **Start** to bind capture port `8877`. The Docker image sets `ZNIFF_STRICT_ALLOW_HOSTS=1` by default: if `ZNIFF_ALLOW_HOSTS` is unset/empty and `/data/config.toml` has no entries, all proxied hosts are denied (`403`) until allowed via `ZNIFF_ALLOW_HOSTS` (read-only locked in UI) or in the Web console's **Access** footer popover (use `*` to allow all). The image also exposes `8879` for the optional relay (`--relay --token <secret>`). Use `:nightly` for the latest development build.
 
 ### 2. Configure Client & Root CA
 

@@ -599,6 +599,37 @@ where
     }
 }
 
+/// Builds the plain-text body returned for disallowed hosts without control characters.
+pub(super) fn host_not_allowed_body(host: &str) -> String {
+    let clean_host: String = host
+        .trim()
+        .chars()
+        .filter(|ch| !ch.is_control() && !ch.is_whitespace())
+        .collect();
+    format!("zniff: host not allowed: {clean_host}")
+}
+
+/// Sends an HTTP 403 Forbidden response when the requested host violates `allow_hosts`.
+pub(super) async fn write_host_not_allowed<S>(
+    socket: &mut S,
+    host: &str,
+    omit_body: bool,
+) -> Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
+    let body = host_not_allowed_body(host);
+    let head = format!(
+        "HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n",
+        body.len()
+    );
+    socket.write_all(head.as_bytes()).await?;
+    if !omit_body {
+        socket.write_all(body.as_bytes()).await?;
+    }
+    Ok(())
+}
+
 pub(super) async fn write_proxy_auth_required<S>(socket: &mut S, omit_body: bool) -> Result<()>
 where
     S: AsyncWrite + Unpin,

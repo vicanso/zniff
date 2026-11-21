@@ -35,6 +35,10 @@ pub struct Hub {
     pub(super) upstream: Mutex<Option<Upstream>>,
     pub(super) upstream_text: Mutex<String>,
     pub(super) proxy_auth: Mutex<String>,
+    pub(super) allow_hosts: Mutex<AllowHostRules>,
+    pub(super) allow_hosts_text: Mutex<String>,
+    pub(super) allow_hosts_strict: AtomicBool,
+    pub(super) allow_hosts_locked: AtomicBool,
     /// Idle plaintext origin sockets, used only on the proxy runtime.
     pub(super) pool: tokio::sync::Mutex<PlainPoolMap>,
     /// Origin HTTP/2 senders. Each browser connection keeps its own lane.
@@ -184,6 +188,10 @@ impl Hub {
             upstream: Mutex::new(None),
             upstream_text: Mutex::new(String::new()),
             proxy_auth: Mutex::new(String::new()),
+            allow_hosts: Mutex::new(AllowHostRules::default()),
+            allow_hosts_text: Mutex::new(String::new()),
+            allow_hosts_strict: AtomicBool::new(false),
+            allow_hosts_locked: AtomicBool::new(false),
             pool: tokio::sync::Mutex::new(HashMap::new()),
             h2_pool: Mutex::new(HashMap::new()),
             h2_generation: AtomicU64::new(1),
@@ -574,10 +582,15 @@ impl Hub {
     }
 
     pub fn pac_script(&self, proxy_authority: &str) -> String {
+        let allow = self
+            .allow_hosts
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone();
         self.bypass
             .lock()
             .unwrap_or_else(|err| err.into_inner())
-            .pac_script(proxy_authority)
+            .pac_script_with_allow_hosts(proxy_authority, &allow)
     }
 
     fn rebuild_rules(&self) {
@@ -750,6 +763,73 @@ impl Hub {
             .proxy_auth
             .lock()
             .unwrap_or_else(|err| err.into_inner()) = auth.trim().to_string();
+    }
+
+    /// Configures host allow-list policy, strictness, and CLI/env lock state on startup.
+    pub fn configure_allow_hosts(&self, text: &str, strict: bool, locked: bool) {
+        let trimmed = text.trim().to_string();
+        self.allow_hosts_strict.store(strict, Ordering::Relaxed);
+        self.allow_hosts_locked.store(locked, Ordering::Relaxed);
+        *self
+            .allow_hosts_text
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = trimmed.clone();
+        *self
+            .allow_hosts
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = AllowHostRules::parse(&trimmed, strict);
+    }
+
+    /// Updates editable allow-list rules unless locked by startup flags or environment variables.
+    pub fn set_allow_hosts(&self, text: &str) -> std::result::Result<(), String> {
+        if self.allow_hosts_locked.load(Ordering::Relaxed) {
+            return Err("允许域名已由启动参数或环境变量锁定".to_string());
+        }
+        let trimmed = text.trim().to_string();
+        let strict = self.allow_hosts_strict.load(Ordering::Relaxed);
+        *self
+            .allow_hosts_text
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = trimmed.clone();
+        *self
+            .allow_hosts
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = AllowHostRules::parse(&trimmed, strict);
+        Ok(())
+    }
+
+    /// Returns the raw configured allow-hosts text.
+    pub fn allow_hosts_text(&self) -> String {
+        self.allow_hosts_text
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+    }
+
+    /// Returns whether strict deny-by-default host mode is enabled.
+    pub fn allow_hosts_strict(&self) -> bool {
+        self.allow_hosts_strict.load(Ordering::Relaxed)
+    }
+
+    /// Returns whether allow-hosts editing is locked by startup CLI flags or environment variables.
+    pub fn allow_hosts_locked(&self) -> bool {
+        self.allow_hosts_locked.load(Ordering::Relaxed)
+    }
+
+    /// Returns whether the current policy denies every proxied host.
+    pub fn allow_hosts_denies_all(&self) -> bool {
+        self.allow_hosts
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .denies_all()
+    }
+
+    /// Checks whether `host` is permitted by the active allow-list policy.
+    pub(super) fn host_allowed(&self, host: &str) -> bool {
+        self.allow_hosts
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .allows(host)
     }
 
     pub fn proxy_auth_text(&self) -> String {

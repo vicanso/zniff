@@ -7070,3 +7070,137 @@ async fn pac_route_serves_dynamic_script_without_proxy_auth() {
     assert_eq!(hub.with_session(|s| s.len()), 0);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn allow_hosts_enforces_connect_plain_http_map_remote_replay_and_exempts_local_routes() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let dir = std::env::temp_dir().join(format!("zniff-allow-hosts-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let ca = Arc::new(Ca::open(&dir).unwrap());
+
+    let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin_addr = origin.local_addr().unwrap();
+    let origin_hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let hits_clone = Arc::clone(&origin_hits);
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = origin.accept().await {
+            hits_clone.fetch_add(1, Ordering::Relaxed);
+            let _ = read_header_block(&mut sock).await;
+            let _ = sock
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .await;
+        }
+    });
+
+    let hub = Arc::new(Hub::new(ca.clone()).unwrap());
+    // Strict mode with empty allow-list denies all proxied hosts while keeping local routes open.
+    hub.configure_allow_hosts("", true, false);
+    assert!(hub.allow_hosts_denies_all());
+
+    let proxy = listen().await.unwrap();
+    let proxy_addr = proxy.local_addr().unwrap();
+    serve_proxy(proxy, Arc::clone(&hub));
+
+    // Strict empty denies both CONNECT (even if in bypass) and plain HTTP without hitting origin.
+    hub.set_bypass("127.0.0.1");
+    {
+        let mut s = TcpStream::connect(proxy_addr).await.unwrap();
+        let req = format!("CONNECT {origin_addr} HTTP/1.1\r\nHost: {origin_addr}\r\n\r\n");
+        s.write_all(req.as_bytes()).await.unwrap();
+        let resp = read_h1_message(&mut s).await;
+        assert!(
+            String::from_utf8_lossy(&resp).starts_with("HTTP/1.1 403 Forbidden"),
+            "{}",
+            String::from_utf8_lossy(&resp)
+        );
+    }
+    {
+        let mut s = TcpStream::connect(proxy_addr).await.unwrap();
+        let req = format!(
+            "GET http://{origin_addr}/blocked HTTP/1.1\r\nHost: {origin_addr}\r\nConnection: close\r\n\r\n"
+        );
+        s.write_all(req.as_bytes()).await.unwrap();
+        let resp = read_h1_message(&mut s).await;
+        assert!(
+            String::from_utf8_lossy(&resp).starts_with("HTTP/1.1 403 Forbidden"),
+            "{}",
+            String::from_utf8_lossy(&resp)
+        );
+    }
+    assert_eq!(origin_hits.load(Ordering::Relaxed), 0);
+    assert_eq!(hub.with_session(|s| s.len()), 0);
+
+    // Local routes remain exempt even under strict deny-all.
+    for route in ["/zniff-ca.crt", "/zniff", "/proxy.pac"] {
+        let mut s = TcpStream::connect(proxy_addr).await.unwrap();
+        let req =
+            format!("GET {route} HTTP/1.1\r\nHost: {proxy_addr}\r\nConnection: close\r\n\r\n");
+        s.write_all(req.as_bytes()).await.unwrap();
+        let resp = read_h1_message(&mut s).await;
+        let text = String::from_utf8_lossy(&resp);
+        assert!(text.starts_with("HTTP/1.1 200 OK"), "{route}: {text}");
+        if route == "/proxy.pac" {
+            assert!(text.contains("return \"DIRECT\";\n}"), "{text}");
+        }
+    }
+
+    // Allow allowed.vicanso.dev and 127.0.0.1; keep blocked.vicanso.dev denied.
+    hub.configure_allow_hosts("127.0.0.1 allowed.vicanso.dev", true, false);
+    assert!(!hub.allow_hosts_denies_all());
+
+    // Plain HTTP to allowed 127.0.0.1 reaches origin and records flow.
+    {
+        let mut s = TcpStream::connect(proxy_addr).await.unwrap();
+        let req = format!(
+            "GET http://{origin_addr}/allowed HTTP/1.1\r\nHost: {origin_addr}\r\nConnection: close\r\n\r\n"
+        );
+        s.write_all(req.as_bytes()).await.unwrap();
+        let resp = read_h1_message(&mut s).await;
+        assert!(
+            String::from_utf8_lossy(&resp).starts_with("HTTP/1.1 200 OK"),
+            "{}",
+            String::from_utf8_lossy(&resp)
+        );
+    }
+    assert_eq!(origin_hits.load(Ordering::Relaxed), 1);
+
+    // map-remote to a disallowed domain returns 403 without dialing origin again.
+    hub.set_rules("map-remote 127.0.0.1/redirect http://blocked.vicanso.dev:9/target");
+    {
+        let mut s = TcpStream::connect(proxy_addr).await.unwrap();
+        let req = format!(
+            "GET http://{origin_addr}/redirect HTTP/1.1\r\nHost: {origin_addr}\r\nConnection: close\r\n\r\n"
+        );
+        s.write_all(req.as_bytes()).await.unwrap();
+        let resp = read_h1_message(&mut s).await;
+        let text = String::from_utf8_lossy(&resp);
+        assert!(text.starts_with("HTTP/1.1 403 Forbidden"), "{text}");
+        assert!(text.contains("blocked.vicanso.dev"), "{text}");
+    }
+    assert_eq!(origin_hits.load(Ordering::Relaxed), 1);
+
+    // replay_once to disallowed host fails before opening a flow or dialing.
+    let replay_err = replay_once(
+        Arc::clone(&hub),
+        None,
+        ReplayOverride {
+            method: Some("GET".into()),
+            url: Some("http://blocked.vicanso.dev/replay".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        replay_err.to_string().contains("blocked.vicanso.dev"),
+        "{replay_err:#}"
+    );
+
+    // Locked allow_hosts rejects runtime set_allow_hosts mutations.
+    hub.configure_allow_hosts("allowed.vicanso.dev", true, true);
+    assert!(hub.allow_hosts_locked());
+    assert!(hub.set_allow_hosts("*").is_err());
+    assert_eq!(hub.allow_hosts_text(), "allowed.vicanso.dev");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

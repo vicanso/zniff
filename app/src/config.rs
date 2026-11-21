@@ -6,7 +6,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{ErrorKind, Result};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -56,6 +57,84 @@ pub fn resolve_proxy_auth(cli: Option<&str>, env: Option<&str>, saved: &str) -> 
         return env.trim().to_string();
     }
     saved.trim().to_string()
+}
+
+pub const ALLOW_HOSTS_ENV: &str = "ZNIFF_ALLOW_HOSTS";
+pub const STRICT_ALLOW_HOSTS_ENV: &str = "ZNIFF_STRICT_ALLOW_HOSTS";
+
+/// Resolved machine-level proxy host allow-list state at startup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeAllowHosts {
+    pub text: String,
+    pub strict: bool,
+    pub locked: bool,
+}
+
+static ALLOW_HOSTS_OVERRIDE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+static STRICT_ALLOW_HOSTS_OVERRIDE: AtomicBool = AtomicBool::new(false);
+
+fn allow_hosts_override_slot() -> &'static Mutex<Option<String>> {
+    ALLOW_HOSTS_OVERRIDE.get_or_init(|| Mutex::new(None))
+}
+
+/// Overrides `allow_hosts` for the current process (used by `--allow-hosts`).
+pub fn set_allow_hosts_override(hosts: impl Into<String>) {
+    *allow_hosts_override_slot()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner()) = Some(hosts.into().trim().to_string());
+}
+
+/// Enables strict deny-by-default host policy for the current process (`--strict-allow-hosts`).
+pub fn set_strict_allow_hosts_override(strict: bool) {
+    STRICT_ALLOW_HOSTS_OVERRIDE.store(strict, Ordering::Relaxed);
+}
+
+/// Resolves whether strict deny-by-default host policy is enabled.
+pub fn resolve_strict_allow_hosts(cli: bool, env: Option<&str>) -> bool {
+    cli || is_dev_env(env)
+}
+
+/// Resolves effective allowed hosts and lock state with `CLI > env > config.toml` precedence.
+/// Empty `ZNIFF_ALLOW_HOSTS` falls back to saved config to stay friendly to Compose `${VAR:-}`.
+pub fn resolve_allow_hosts(
+    cli: Option<&str>,
+    env: Option<&str>,
+    saved: &str,
+    strict: bool,
+) -> RuntimeAllowHosts {
+    if let Some(cli) = cli.map(str::trim).filter(|s| !s.is_empty()) {
+        return RuntimeAllowHosts {
+            text: cli.to_string(),
+            strict,
+            locked: true,
+        };
+    }
+    if let Some(env) = env.map(str::trim).filter(|s| !s.is_empty()) {
+        return RuntimeAllowHosts {
+            text: env.to_string(),
+            strict,
+            locked: true,
+        };
+    }
+    RuntimeAllowHosts {
+        text: saved.trim().to_string(),
+        strict,
+        locked: false,
+    }
+}
+
+/// Resolves runtime allowed hosts from process flags, environment variables, and saved config.
+pub fn runtime_allow_hosts(saved: &str) -> RuntimeAllowHosts {
+    let cli_hosts = allow_hosts_override_slot()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .clone();
+    let env_hosts = std::env::var(ALLOW_HOSTS_ENV).ok();
+    let strict = resolve_strict_allow_hosts(
+        STRICT_ALLOW_HOSTS_OVERRIDE.load(Ordering::Relaxed),
+        std::env::var(STRICT_ALLOW_HOSTS_ENV).ok().as_deref(),
+    );
+    resolve_allow_hosts(cli_hosts.as_deref(), env_hosts.as_deref(), saved, strict)
 }
 
 pub fn runtime_proxy_auth(saved: &str) -> String {
@@ -581,6 +660,9 @@ pub struct Config {
     /// Optional HTTP Basic credential (`user:pass`) required on the capture port.
     /// Belongs to this machine; omitted from saved profiles.
     pub proxy_auth: String,
+    /// Optional allowed host rules enforced on the capture port, map-remote, and replay.
+    /// Belongs to this machine; omitted from saved profiles.
+    pub allow_hosts: String,
     /// Active external root CA provider id (`"whistle"`, `"mitmproxy"`, `"mkcert"`, `"proxyman"`),
     /// or empty when using zniff's own built-in root CA.
     pub external_ca: String,
@@ -708,6 +790,8 @@ struct RawConfig {
     web_auth: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     proxy_auth: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    allow_hosts: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     external_ca: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -895,6 +979,7 @@ impl From<RawConfig> for Config {
             relay_view_auth: raw.relay_view_auth,
             web_auth: raw.web_auth,
             proxy_auth: raw.proxy_auth,
+            allow_hosts: raw.allow_hosts,
             external_ca: normalize_external_ca(raw.external_ca.as_deref().unwrap_or("")),
         }
     }
@@ -999,6 +1084,7 @@ impl From<Config> for RawConfig {
             relay_view_auth: config.relay_view_auth,
             web_auth: config.web_auth,
             proxy_auth: config.proxy_auth,
+            allow_hosts: config.allow_hosts,
             external_ca: {
                 let norm = normalize_external_ca(&config.external_ca);
                 (!norm.is_empty()).then_some(norm)
@@ -1075,6 +1161,7 @@ impl Default for Config {
             relay_view_auth: String::new(),
             web_auth: String::new(),
             proxy_auth: String::new(),
+            allow_hosts: String::new(),
             external_ca: String::new(),
         }
     }
@@ -1497,6 +1584,7 @@ fn normalize_for(mut config: Config, dev: bool) -> Config {
     config.relay_view_auth = config.relay_view_auth.trim().to_string();
     config.web_auth = config.web_auth.trim().to_string();
     config.proxy_auth = config.proxy_auth.trim().to_string();
+    config.allow_hosts = config.allow_hosts.trim().to_string();
     config.external_ca = normalize_external_ca(&config.external_ca);
     clamp_saved_filters(&mut config.saved_filters);
     clamp_saved_rules(&mut config.saved_rules);
@@ -2196,6 +2284,64 @@ mod tests {
         );
         assert_eq!(resolve_proxy_auth(None, Some(""), "cfg:pw"), "");
         assert_eq!(resolve_proxy_auth(None, None, " cfg:pw "), "cfg:pw");
+    }
+
+    #[test]
+    fn allow_hosts_persists_at_machine_level_and_resolves_overrides() {
+        let dir = Scratch::new();
+        fs::write(dir.path().join("config.toml"), "listen_port = 9\n").unwrap();
+        let config = load(dir.path());
+        assert_eq!(config.allow_hosts, "");
+        let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(!text.contains("allow_hosts"), "{text}");
+
+        update(dir.path(), |config| {
+            config.allow_hosts = "  api.vicanso.dev\n*.staging.vicanso.dev  ".into();
+        })
+        .unwrap();
+        let config = load(dir.path());
+        assert_eq!(config.allow_hosts, "api.vicanso.dev\n*.staging.vicanso.dev");
+        let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(text.contains("allow_hosts ="), "{text}");
+
+        update(dir.path(), |config| config.allow_hosts.clear()).unwrap();
+        let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(!text.contains("allow_hosts"), "{text}");
+
+        assert!(!resolve_strict_allow_hosts(false, None));
+        assert!(!resolve_strict_allow_hosts(false, Some("0")));
+        assert!(resolve_strict_allow_hosts(false, Some("1")));
+        assert!(resolve_strict_allow_hosts(true, Some("0")));
+
+        assert_eq!(
+            resolve_allow_hosts(
+                Some(" cli.vicanso.dev "),
+                Some("env.vicanso.dev"),
+                "cfg.vicanso.dev",
+                true
+            ),
+            RuntimeAllowHosts {
+                text: "cli.vicanso.dev".into(),
+                strict: true,
+                locked: true,
+            }
+        );
+        assert_eq!(
+            resolve_allow_hosts(None, Some("  env.vicanso.dev  "), "cfg.vicanso.dev", true),
+            RuntimeAllowHosts {
+                text: "env.vicanso.dev".into(),
+                strict: true,
+                locked: true,
+            }
+        );
+        assert_eq!(
+            resolve_allow_hosts(None, Some("   "), " cfg.vicanso.dev ", false),
+            RuntimeAllowHosts {
+                text: "cfg.vicanso.dev".into(),
+                strict: false,
+                locked: false,
+            }
+        );
     }
 
     #[test]

@@ -115,6 +115,30 @@ fn apply_web_state_snapshot(
                 ui.profiles.relay_accept.set(on);
             }
         }
+        if let Some(auth) = prefs.get("proxy_auth").and_then(serde_json::Value::as_str)
+            && ui.profiles.proxy_auth.get_untracked() != auth
+        {
+            ui.profiles.proxy_auth.set(auth.to_string());
+        }
+        if let Some(hosts) = prefs.get("allow_hosts").and_then(serde_json::Value::as_str)
+            && ui.profiles.allow_hosts.get_untracked() != hosts
+        {
+            ui.profiles.allow_hosts.set(hosts.to_string());
+        }
+        if let Some(strict) = prefs
+            .get("allow_hosts_strict")
+            .and_then(serde_json::Value::as_bool)
+            && ui.profiles.allow_hosts_strict.get_untracked() != strict
+        {
+            ui.profiles.allow_hosts_strict.set(strict);
+        }
+        if let Some(locked) = prefs
+            .get("allow_hosts_locked")
+            .and_then(serde_json::Value::as_bool)
+            && ui.profiles.allow_hosts_locked.get_untracked() != locked
+        {
+            ui.profiles.allow_hosts_locked.set(locked);
+        }
         let cfg_err = prefs
             .get("config_error")
             .and_then(serde_json::Value::as_str)
@@ -598,6 +622,22 @@ pub(crate) fn seed_web_prefs(
     if let Some(auth) = prefs.get("proxy_auth").and_then(serde_json::Value::as_str) {
         cfg.proxy_auth = auth.to_string();
         profiles.proxy_auth.set(auth.to_string());
+    }
+    if let Some(hosts) = prefs.get("allow_hosts").and_then(serde_json::Value::as_str) {
+        cfg.allow_hosts = hosts.to_string();
+        profiles.allow_hosts.set(hosts.to_string());
+    }
+    if let Some(strict) = prefs
+        .get("allow_hosts_strict")
+        .and_then(serde_json::Value::as_bool)
+    {
+        profiles.allow_hosts_strict.set(strict);
+    }
+    if let Some(locked) = prefs
+        .get("allow_hosts_locked")
+        .and_then(serde_json::Value::as_bool)
+    {
+        profiles.allow_hosts_locked.set(locked);
     }
     if let Some(url) = prefs.get("relay_url").and_then(serde_json::Value::as_str) {
         cfg.relay_url = url.to_string();

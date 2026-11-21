@@ -210,6 +210,10 @@ pub fn App() -> impl IntoElement {
     let editing_group_sig = signal(None::<String>);
     let upstream_text = signal(saved.upstream_proxy);
     let proxy_auth_sig = signal(config::runtime_proxy_auth(&saved.proxy_auth));
+    let allow_runtime = config::runtime_allow_hosts(&saved.allow_hosts);
+    let allow_hosts_sig = signal(allow_runtime.text);
+    let allow_hosts_strict_sig = signal(allow_runtime.strict);
+    let allow_hosts_locked_sig = signal(allow_runtime.locked);
     let relay_url_sig = signal(saved.relay_url);
     let relay_accept_sig = signal(saved.relay_accept);
     let profile_signals = ProfileSignals {
@@ -227,6 +231,9 @@ pub fn App() -> impl IntoElement {
         breaks_on: signal(saved.breaks_enabled),
         show_tunnels: signal(saved.show_tunnel_failures),
         proxy_auth: proxy_auth_sig,
+        allow_hosts: allow_hosts_sig,
+        allow_hosts_strict: allow_hosts_strict_sig,
+        allow_hosts_locked: allow_hosts_locked_sig,
         relay_url: relay_url_sig,
         relay_accept: relay_accept_sig,
         list_width,
@@ -1284,7 +1291,13 @@ pub fn App() -> impl IntoElement {
             lan_addrs,
             qr_path,
             listen_all,
-            profile_signals.proxy_auth,
+            AccessControlProps {
+                proxy_auth: profile_signals.proxy_auth,
+                allow_hosts: profile_signals.allow_hosts,
+                allow_hosts_strict: profile_signals.allow_hosts_strict,
+                allow_hosts_locked: profile_signals.allow_hosts_locked,
+                controls: controls.clone(),
+            },
             config_broken,
             config_broken_dismissed,
             profile_signals.layout_mode,
