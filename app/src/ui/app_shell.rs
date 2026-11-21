@@ -242,6 +242,8 @@ pub fn App() -> impl IntoElement {
         sidebar_collapsed: signal(saved.sidebar_collapsed),
         layout_mode: signal(saved.layout_mode),
         panel_open: signal(false),
+        access_open: signal(false),
+        quick_rule_prefill: signal(None),
         machine_settings_open: signal(false),
         about_open: signal(false),
         default_json_tree: shown.default_json_tree,
@@ -1292,6 +1294,7 @@ pub fn App() -> impl IntoElement {
             qr_path,
             listen_all,
             AccessControlProps {
+                open: profile_signals.access_open,
                 proxy_auth: profile_signals.proxy_auth,
                 allow_hosts: profile_signals.allow_hosts,
                 allow_hosts_strict: profile_signals.allow_hosts_strict,

@@ -117,6 +117,8 @@ pub(crate) fn detail_pane(
     onboarding: OnboardingProps,
 ) -> impl IntoElement {
     let ready_controls = controls.clone();
+    let ready_profiles = onboarding.profiles;
+    let _ = layout_mode;
     scroll()
         .element_ref(&detail_scroll)
         .flex_1()
@@ -143,7 +145,7 @@ pub(crate) fn detail_pane(
                         rules_text,
                         baseline,
                         folded,
-                        layout_mode,
+                        ready_profiles,
                     )
                 },
             )
@@ -639,9 +641,9 @@ pub(crate) fn ready_detail(
     rules_text: Signal<String>,
     baseline: Signal<Option<u64>>,
     folded: Signal<u8>,
-    layout_mode: Signal<config::LayoutMode>,
+    profiles: ProfileSignals,
 ) -> impl IntoElement {
-    let side_by_side = move || layout_mode.get() == config::LayoutMode::TopBottom;
+    let side_by_side = move || profiles.layout_mode.get() == config::LayoutMode::TopBottom;
     let req_controls_split = controls.clone();
     let res_controls_split = controls.clone();
     let req_controls_stack = controls.clone();
@@ -660,7 +662,7 @@ pub(crate) fn ready_detail(
             filter,
             rules_text,
             baseline,
-            layout_mode,
+            profiles,
         ))
         .child(when(move || compose.composing.get(), {
             let controls = controls.clone();
@@ -868,9 +870,9 @@ pub(crate) fn summary(
     filter: Signal<String>,
     rules_text: Signal<String>,
     baseline: Signal<Option<u64>>,
-    layout_mode: Signal<config::LayoutMode>,
+    profiles: ProfileSignals,
 ) -> impl IntoElement {
-    let is_compact = move || layout_mode.get() == config::LayoutMode::TopBottom;
+    let is_compact = move || profiles.layout_mode.get() == config::LayoutMode::TopBottom;
     view()
         .px_3p5()
         .py(move || if is_compact() { px(9.0) } else { px(14.0) })
@@ -1089,31 +1091,7 @@ pub(crate) fn summary(
             move || shown.timing_bar.with(present::TimingBreakdown::has_content),
             move || summary_timing_bar(shown.timing_bar),
         ))
-        .child(when(
-            move || !shown.error.get().is_empty(),
-            move || {
-                view()
-                    .w_full()
-                    .overflow_hidden()
-                    .px_3()
-                    .py_2()
-                    .rounded(px(7.0))
-                    .bg(status_err_bg())
-                    .border_1()
-                    .border_color(status_err_fg())
-                    .child(
-                        text({
-                            let langs = ui_langs();
-                            move || localize_error(ui_lang(langs), &shown.error.get())
-                        })
-                        .selectable(true)
-                        .on_press_up(dismiss_keyboard)
-                        .text_size(px(12.0))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(status_err_fg()),
-                    )
-            },
-        ))
+        .child(error_summary_banner(shown, controls, profiles))
 }
 
 fn summary_url_box(shown: Shown, compact: bool) -> impl IntoElement {

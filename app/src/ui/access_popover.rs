@@ -3,6 +3,7 @@ use super::*;
 
 #[derive(Clone)]
 pub(crate) struct AccessControlProps {
+    pub(crate) open: Signal<bool>,
     pub(crate) proxy_auth: Signal<String>,
     pub(crate) allow_hosts: Signal<String>,
     pub(crate) allow_hosts_strict: Signal<bool>,
@@ -23,13 +24,14 @@ pub(crate) fn access_summary_state(
 
 /// Combined footer popover for machine-level proxy authentication and allowed host rules.
 pub(crate) fn access_control_popover(props: AccessControlProps) -> impl IntoElement {
-    let open = signal(false);
+    let open = props.open;
     let controls = props.controls.clone();
     let allow_hosts = props.allow_hosts;
     let allow_hosts_strict = props.allow_hosts_strict;
     let allow_hosts_locked = props.allow_hosts_locked;
     let proxy_auth = props.proxy_auth;
     popover()
+        .open(move || Some(open.get()))
         .placement(Placement::Top)
         .align(Align::End)
         .offset(px(6.0))

@@ -2937,6 +2937,8 @@ fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
             sidebar_collapsed: signal(false),
             layout_mode: signal(crate::config::LayoutMode::Split),
             panel_open: signal(false),
+            access_open: signal(false),
+            quick_rule_prefill: signal(None),
             machine_settings_open: signal(false),
             about_open: signal(false),
             default_json_tree: signal(false),
@@ -4468,14 +4470,15 @@ async fn access_control_popover_reflects_strict_deny_all_and_locked_state() {
         provide_context(signal(Some(crate::i18n::Lang::En)));
         super::provide_mono_font(false);
         let controls = make_test_controls("access-popover-test");
+        let open = signal(false);
         let props = super::AccessControlProps {
+            open,
             proxy_auth: signal(String::new()),
             allow_hosts: signal(ACCESS_HOSTS.with(|c| c.borrow().clone())),
             allow_hosts_strict: signal(ACCESS_STRICT.with(Cell::get)),
             allow_hosts_locked: signal(ACCESS_LOCKED.with(Cell::get)),
             controls,
         };
-        let open = signal(false);
         let on_change: std::rc::Rc<dyn Fn(&str)> = std::rc::Rc::new(|_| {});
         view()
             .w(px(380.0))

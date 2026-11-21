@@ -198,6 +198,18 @@ pub(crate) fn saved_filter_panel(
     let draft_modes = QuickRuleModeSignals::new();
     let draft_kind = signal(0_u8);
     let import_open = signal(false);
+    let prefill = profiles.quick_rule_prefill;
+    effect(move || {
+        if let Some((kind, host)) = prefill.get() {
+            draft_kind.set(kind);
+            draft_host.set(host);
+            draft_path.set(String::new());
+            draft_op.set(String::new());
+            draft_from.set(String::new());
+            draft_to.set(String::new());
+            prefill.set(None);
+        }
+    });
 
     view()
         .w(move || {
