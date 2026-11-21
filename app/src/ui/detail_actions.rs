@@ -1,6 +1,7 @@
 #[allow(unused_imports)]
 use super::*;
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn detail_actions(
     shown: Shown,
     controls: Arc<Controls>,
@@ -8,9 +9,10 @@ pub(crate) fn detail_actions(
     paused: Signal<Option<(u64, BreakSide)>>,
     compose: Compose,
     filter: Signal<String>,
-    rules_text: Signal<String>,
+    profiles: ProfileSignals,
     baseline: Signal<Option<u64>>,
 ) -> impl IntoElement {
+    let rules_text = profiles.rules;
     let copy_url = controls.clone();
     let copy_curl = controls.clone();
     let copy_fetch = controls.clone();
@@ -32,6 +34,7 @@ pub(crate) fn detail_actions(
     let send_controls = controls.clone();
     let break_controls = controls.clone();
     let map_local_controls = controls.clone();
+    let quick_rule_controls = controls.clone();
     let pretty_controls = controls;
     let pinned = shown.pinned;
     let pretty = shown.pretty;
@@ -254,6 +257,9 @@ pub(crate) fn detail_actions(
                 map_local_from_flow(map_local_controls.clone(), selected.get(), rules_text);
             },
         ))
+        .child(flow_quick_rule_section(can_local, move |action| {
+            open_quick_rule_for_flow(&quick_rule_controls, profiles, selected.get(), action);
+        }))
         .child(when(
             move || compose.composing.get() && !compose.response.get(),
             move || {

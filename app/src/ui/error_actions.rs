@@ -3,9 +3,6 @@
 #[allow(unused_imports)]
 use super::*;
 
-/// Quick-add rule tab index for `QuickRule::Resolve` (matches `column_picker::quick_kind`).
-const QUICK_RULE_RESOLVE_KIND: u8 = 14;
-
 /// High-level recovery category inferred from a flow's status code and error message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ErrorCategory {
@@ -373,7 +370,7 @@ fn execute_error_action(
             if !clean_host.is_empty() {
                 profiles
                     .quick_rule_prefill
-                    .set(Some((QUICK_RULE_RESOLVE_KIND, clean_host)));
+                    .set(Some(QuickRulePrefill::resolve_host(clean_host)));
             }
             profiles.panel_open.set(true);
         }

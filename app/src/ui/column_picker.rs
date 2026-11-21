@@ -437,9 +437,10 @@ pub(crate) fn row_context_menu(
     filter: Signal<String>,
     shown: Shown,
     baseline: Signal<Option<u64>>,
-    rules_text: Signal<String>,
+    profiles: ProfileSignals,
     menu_open: Signal<bool>,
 ) -> impl IntoElement {
+    let rules_text = profiles.rules;
     let copy_url = controls.clone();
     let break_controls = controls.clone();
     let copy_curl = controls.clone();
@@ -452,6 +453,7 @@ pub(crate) fn row_context_menu(
     let local_check = controls.clone();
     let map_label_check = controls.clone();
     let map_local_controls = controls.clone();
+    let quick_rule_controls = controls.clone();
     let repeat_controls = controls.clone();
     let edit_controls = controls.clone();
     let replay_controls = controls;
@@ -469,7 +471,8 @@ pub(crate) fn row_context_menu(
     let can_repeat = can_local.clone();
     let can_edit = can_local.clone();
     let can_break = can_local.clone();
-    let can_map = can_local;
+    let can_map = can_local.clone();
+    let can_quick_rule = can_local;
     view()
         .w(px(196.0))
         .max_w(move || px((window().width.0 - 16.0).max(160.0)))
@@ -645,7 +648,16 @@ pub(crate) fn row_context_menu(
                                     rules_text,
                                 );
                             }),
-                        )),
+                        ))
+                        .child(flow_quick_rule_section(can_quick_rule, move |action| {
+                            menu_open.set(false);
+                            open_quick_rule_for_flow(
+                                &quick_rule_controls,
+                                profiles,
+                                picked.get(),
+                                action,
+                            );
+                        })),
                 ),
         )
 }

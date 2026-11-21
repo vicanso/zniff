@@ -199,14 +199,18 @@ pub(crate) fn saved_filter_panel(
     let draft_kind = signal(0_u8);
     let import_open = signal(false);
     let prefill = profiles.quick_rule_prefill;
+    let draft_signals = QuickRuleDraftSignals {
+        kind: draft_kind,
+        host: draft_host,
+        path: draft_path,
+        op: draft_op,
+        from: draft_from,
+        to: draft_to,
+        modes: draft_modes,
+    };
     effect(move || {
-        if let Some((kind, host)) = prefill.get() {
-            draft_kind.set(kind);
-            draft_host.set(host);
-            draft_path.set(String::new());
-            draft_op.set(String::new());
-            draft_from.set(String::new());
-            draft_to.set(String::new());
+        if let Some(next) = prefill.get() {
+            apply_quick_rule_prefill(next, draft_signals);
             prefill.set(None);
         }
     });

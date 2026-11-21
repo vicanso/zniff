@@ -188,8 +188,7 @@ pub(crate) fn list_menu(
     empty_state: EmptyFilterState,
     shown: Shown,
     baseline: Signal<Option<u64>>,
-    rules_text: Signal<String>,
-    layout_mode: Signal<config::LayoutMode>,
+    profiles: ProfileSignals,
     picked: Signal<Option<u64>>,
     menu_open: Signal<bool>,
     menu_at: Signal<Point<Points>>,
@@ -197,6 +196,7 @@ pub(crate) fn list_menu(
     let header_menu = signal(false);
     let header_controls = controls.clone();
     let list_filter = empty_state.list_filter;
+    let layout_mode = profiles.layout_mode;
     // The table is a direct flex child. Wrapping it in `context_menu` gave
     // that component a content-sized root, so the rows collapsed to nothing
     // while the toolbar count still updated.
@@ -239,7 +239,7 @@ pub(crate) fn list_menu(
                         list_filter,
                         shown,
                         baseline,
-                        rules_text,
+                        profiles,
                         menu_open,
                     ))
             },

@@ -207,12 +207,7 @@ pub(crate) fn flow_list(
     paused: Signal<Option<(u64, BreakSide)>>,
     compose: Compose,
     empty_state: EmptyFilterState,
-    rules_text: Signal<String>,
-    width: Signal<f32>,
-    height: Signal<f32>,
-    layout_mode: Signal<config::LayoutMode>,
-    sidebar_width: Signal<f32>,
-    sidebar_collapsed: Signal<bool>,
+    profiles: ProfileSignals,
     columns: Signal<ListColumns>,
     sort: Signal<Option<ListSort>>,
     controls: Arc<Controls>,
@@ -220,6 +215,11 @@ pub(crate) fn flow_list(
     baseline: Signal<Option<u64>>,
     filter_focus: ElementRef,
 ) -> impl IntoElement {
+    let width = profiles.list_width;
+    let height = profiles.list_height;
+    let layout_mode = profiles.layout_mode;
+    let sidebar_width = profiles.sidebar_width;
+    let sidebar_collapsed = profiles.sidebar_collapsed;
     let main_filter = empty_state.main_filter;
     let list_filter = empty_state.list_filter;
     let row_controls = controls.clone();
@@ -382,8 +382,7 @@ pub(crate) fn flow_list(
                     empty_state,
                     shown,
                     baseline,
-                    rules_text,
-                    layout_mode,
+                    profiles,
                     picked,
                     menu_open,
                     menu_at,

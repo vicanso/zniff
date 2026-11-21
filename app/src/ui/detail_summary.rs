@@ -109,7 +109,6 @@ pub(crate) fn detail_pane(
     rows: Signal<Vec<Arc<RowLine>>>,
     list_filter: Signal<String>,
     effective_filter: Signal<String>,
-    rules_text: Signal<String>,
     baseline: Signal<Option<u64>>,
     folded: Signal<u8>,
     pane_px: Rc<Cell<f32>>,
@@ -144,7 +143,6 @@ pub(crate) fn detail_pane(
                         paused,
                         compose,
                         list_filter,
-                        rules_text,
                         baseline,
                         folded,
                         ready_profiles,
@@ -640,7 +638,6 @@ pub(crate) fn ready_detail(
     paused: Signal<Option<(u64, BreakSide)>>,
     compose: Compose,
     filter: Signal<String>,
-    rules_text: Signal<String>,
     baseline: Signal<Option<u64>>,
     folded: Signal<u8>,
     profiles: ProfileSignals,
@@ -662,7 +659,6 @@ pub(crate) fn ready_detail(
             paused,
             compose,
             filter,
-            rules_text,
             baseline,
             profiles,
         ))
@@ -870,7 +866,6 @@ pub(crate) fn summary(
     paused: Signal<Option<(u64, BreakSide)>>,
     compose: Compose,
     filter: Signal<String>,
-    rules_text: Signal<String>,
     baseline: Signal<Option<u64>>,
     profiles: ProfileSignals,
 ) -> impl IntoElement {
@@ -984,7 +979,7 @@ pub(crate) fn summary(
                     paused,
                     compose,
                     filter,
-                    rules_text,
+                    profiles,
                     baseline,
                 )),
         )
