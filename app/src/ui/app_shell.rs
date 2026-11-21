@@ -51,6 +51,8 @@ pub fn App() -> impl IntoElement {
     let filtered_stats = signal(session::FilteredStats::default());
     let empty_diagnosis = signal(EmptyFilterDiagnosis::default());
     let facets = signal(session::SessionFacets::default());
+    let filter_catalog = signal(FilterSuggestionsCatalog::default());
+    provide_context(filter_catalog);
     let facets_open = signal(false);
     let flow_total = signal(0_usize);
     let listen = signal(String::new());
@@ -375,6 +377,7 @@ pub fn App() -> impl IntoElement {
     let rows_tick = rows;
     let stats_tick = filtered_stats;
     let facets_tick = facets;
+    let filter_catalog_tick = filter_catalog;
     let facets_open_tick = facets_open;
     let total_tick = flow_total;
     let shown_tick = shown;
@@ -837,7 +840,16 @@ pub fn App() -> impl IntoElement {
             };
             let filter_enabled_now = profile_tick.filter_enabled.get();
             let list_filter_now = list_filter_tick.get();
-            let (lines, stats, next_facets, next_total, next_mem, next_dropped, diag_plan) = {
+            let (
+                lines,
+                stats,
+                next_facets,
+                next_catalog,
+                next_total,
+                next_mem,
+                next_dropped,
+                diag_plan,
+            ) = {
                 let mut cache = row_cache_tick.borrow_mut();
                 controls_tick.hub.with_session(|session| {
                     let lines = project_rows(
@@ -853,10 +865,16 @@ pub fn App() -> impl IntoElement {
                             matched.iter().filter_map(|(id, _)| session.get(*id)),
                         )
                     });
+                    let ids = facet_ids.as_ref().unwrap_or(&matched);
                     let next_facets = facets_needed.then(|| {
-                        let ids = facet_ids.as_ref().unwrap_or(&matched);
                         session::SessionFacets::from_flows(
                             ids.iter().filter_map(|(id, _)| session.get(*id)),
+                        )
+                    });
+                    let next_catalog = next_facets.as_ref().map(|f| {
+                        FilterSuggestionsCatalog::from_flows(
+                            ids.iter().filter_map(|(id, _)| session.get(*id)),
+                            f,
                         )
                     });
                     let diag_plan = (matched.is_empty()
@@ -874,6 +892,7 @@ pub fn App() -> impl IntoElement {
                         lines,
                         stats,
                         next_facets,
+                        next_catalog,
                         session.len(),
                         format_bytes(session.memory_bytes()),
                         session.dropped(),
@@ -881,6 +900,11 @@ pub fn App() -> impl IntoElement {
                     )
                 })
             };
+            if let Some(next_catalog) = next_catalog
+                && filter_catalog_tick.with(|cur| cur != &next_catalog)
+            {
+                filter_catalog_tick.set(next_catalog);
+            }
             let next_diagnosis = diag_plan
                 .map(FilterDiagnosisPlan::finish)
                 .unwrap_or_default();

@@ -274,34 +274,16 @@ pub(crate) fn flow_list(
                         .relative()
                         .flex_row()
                         .items_center()
-                        .child(
-                            input()
-                                .element_ref(&filter_focus)
-                                .value(list_filter)
-                                .placeholder(tr(
-                                    "在当前结果中再次过滤 (主机、路径、状态、body:…)",
-                                    "Filter current results (host, path, status, body:…)",
-                                ))
-                                .placeholder_color(move || color(fg_muted()))
-                                .w_full()
-                                .h(px(30.0))
-                                .pl_2p5()
-                                .pr(move || {
-                                    if list_filter.get().is_empty() {
-                                        px(10.0)
-                                    } else {
-                                        px(28.0)
-                                    }
-                                })
-                                .rounded(px(7.0))
-                                .bg(bg_code())
-                                .border_1()
-                                .border_color(border_control())
-                                .focus(|style| style.border_color(accent_blue()))
-                                .text_size(px(12.5))
-                                .text_color(fg_primary())
-                                .on_change(move |text: &str| list_filter.set(text.to_string())),
-                        )
+                        .child(filter_assist_input(
+                            list_filter,
+                            tr(
+                                "在当前结果中再次过滤 (主机、路径、状态、body:…)",
+                                "Filter current results (host, path, status, body:…)",
+                            ),
+                            30.0,
+                            28.0,
+                            filter_focus,
+                        ))
                         .child(when(
                             move || !list_filter.get().is_empty(),
                             move || {
@@ -379,6 +361,7 @@ pub(crate) fn flow_list(
                 ))
                 .child(column_menu(columns, column_controls)),
         )
+        .child(filter_syntax_error_strip(list_filter))
         .child(when(
             move || layout_mode.get() == config::LayoutMode::TopBottom || sidebar_collapsed.get(),
             move || facet_quick_bar(facets, facets_open, facet_tab, list_filter),

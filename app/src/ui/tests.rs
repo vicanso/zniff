@@ -1641,6 +1641,8 @@ fn auto_height_popover_scroll_containers_never_use_flex_1() {
         "\n",
         include_str!("facet_drawer.rs"),
         "\n",
+        include_str!("filter_autocomplete.rs"),
+        "\n",
         include_str!("filter_diagnose.rs"),
         "\n",
         include_str!("filter_panel.rs"),
@@ -4629,6 +4631,198 @@ fn keyboard_step_selected_auto_scrolls_row_into_viewport() {
     assert!(
         after_down.iter().any(|t| t.contains("/item/25")),
         "expected /item/25 in viewport after stepping down, got: {after_down:?}"
+    );
+}
+
+#[test]
+fn filter_syntax_validation_flags_errors_and_allows_in_progress_prefix() {
+    use crate::i18n::Lang;
+
+    // Valid expressions produce zero errors.
+    assert!(super::validate_filter_syntax("").is_empty());
+    assert!(
+        super::validate_filter_syntax("host:api.local status:2xx|500 -method:OPTIONS pin: slow:")
+            .is_empty()
+    );
+    assert!(
+        super::validate_filter_syntax("https://api.local/v1 example.com:8080 localhost:3000")
+            .is_empty()
+    );
+    // Trailing in-progress `host:` does not flash a false red error.
+    assert!(super::validate_filter_syntax("host:").is_empty());
+    assert!(super::validate_filter_syntax("status:200|").is_empty());
+
+    // Unknown prefix
+    let errs = super::validate_filter_syntax("staus:500");
+    assert_eq!(errs.len(), 1);
+    assert!(matches!(
+        errs[0].kind,
+        super::FilterSyntaxErrorKind::UnknownPrefix(ref p) if p == "staus:"
+    ));
+    assert!(super::format_filter_syntax_error(Lang::En, &errs[0]).contains("staus:"));
+    assert!(super::format_filter_syntax_error(Lang::Zh, &errs[0]).contains("staus:"));
+
+    // Invalid status value
+    let errs = super::validate_filter_syntax("status:200|bogus");
+    assert_eq!(errs.len(), 1);
+    assert!(matches!(
+        errs[0].kind,
+        super::FilterSyntaxErrorKind::InvalidStatus(ref v) if v == "bogus"
+    ));
+
+    // Missing value when followed by whitespace
+    let errs = super::validate_filter_syntax("host: api.local");
+    assert_eq!(errs.len(), 1);
+    assert!(matches!(
+        errs[0].kind,
+        super::FilterSyntaxErrorKind::MissingValue(ref p) if p == "host:"
+    ));
+
+    // Unexpected value on flag-only prefix
+    let errs = super::validate_filter_syntax("pin:yes");
+    assert_eq!(errs.len(), 1);
+    assert!(matches!(
+        errs[0].kind,
+        super::FilterSyntaxErrorKind::UnexpectedValue(ref p) if p == "pin:"
+    ));
+
+    // Empty OR segment
+    let errs = super::validate_filter_syntax("host:a.local||b.local");
+    assert_eq!(errs.len(), 1);
+    assert!(matches!(
+        errs[0].kind,
+        super::FilterSyntaxErrorKind::EmptyOrSegment(_)
+    ));
+}
+
+#[test]
+fn filter_autocomplete_suggests_prefixes_and_session_values_with_or_support() {
+    use crate::i18n::Lang;
+
+    let catalog = super::FilterSuggestionsCatalog {
+        hosts: vec![
+            "api.local".into(),
+            "auth.local".into(),
+            "cdn.example.com".into(),
+        ],
+        statuses: vec!["502".into(), "200".into(), "err".into()],
+        apps: vec!["curl".into(), "Chrome".into()],
+        graphql_ops: vec!["GetUser".into(), "UpdateCart".into()],
+        methods: vec!["POST".into(), "GET".into()],
+    };
+
+    // Prefix completion (including negated prefix)
+    let pref = super::suggest_filter_completions("-ho", &catalog, Lang::En);
+    assert_eq!(pref[0].insert_token, "-host:");
+    assert!(!pref[0].append_space);
+    assert_eq!(super::apply_filter_suggestion("-ho", &pref[0]), "-host:");
+
+    // Host value completion from session catalog (prefix matches first, then substring)
+    let hosts = super::suggest_filter_completions("host:a", &catalog, Lang::En);
+    let labels: Vec<&str> = hosts.iter().map(|s| s.label.as_str()).collect();
+    assert_eq!(labels, vec!["api.local", "auth.local", "cdn.example.com"]);
+    assert_eq!(
+        super::apply_filter_suggestion("host:a", &hosts[0]),
+        "host:api.local "
+    );
+
+    // OR-chain value completion excludes already-used host (`api.local`)
+    let or_hosts = super::suggest_filter_completions("host:api.local|a", &catalog, Lang::En);
+    assert!(!or_hosts.iter().any(|s| s.label == "api.local"));
+    assert_eq!(or_hosts[0].insert_token, "host:api.local|auth.local");
+
+    // Status, app, and GraphQL op completion from session catalog
+    let statuses = super::suggest_filter_completions("status:5", &catalog, Lang::En);
+    assert_eq!(statuses[0].label, "502");
+    let apps = super::suggest_filter_completions("app:cu", &catalog, Lang::En);
+    assert_eq!(apps[0].insert_token, "app:curl");
+    let ops = super::suggest_filter_completions("op:get", &catalog, Lang::En);
+    assert_eq!(ops[0].insert_token, "op:GetUser");
+}
+
+#[test]
+fn filter_assist_input_shows_inline_error_and_applies_autocomplete_click() {
+    use crate::i18n::Lang;
+    use nsh_core::{EventKind, EventPayload, PressEvent};
+
+    #[component]
+    fn FilterAssistHarness() -> impl IntoElement {
+        provide_context(signal(Some(Lang::En)));
+        provide_context(signal(super::FilterSuggestionsCatalog {
+            hosts: vec!["api.local".into(), "auth.local".into()],
+            ..super::FilterSuggestionsCatalog::default()
+        }));
+        let value = signal(String::new());
+        let focus = element_ref();
+        view()
+            .w(px(420.0))
+            .h(px(260.0))
+            .flex_col()
+            .child(super::filter_assist_input(
+                value, "Filter", 30.0, 10.0, focus,
+            ))
+            .child(super::filter_syntax_error_strip(value))
+            .child(
+                view()
+                    .label("set-bad")
+                    .on_press(move || value.set("staus:500".into())),
+            )
+    }
+
+    let (mut core, mut tree) =
+        mount_headless_component::<FilterAssistHarness>(Size::new(px(420.0), px(260.0)));
+
+    // Find the Input node and fire ChangeText("host:ap") to trigger autocomplete popup.
+    let input_id = tree
+        .kinds
+        .iter()
+        .find_map(|(id, kind)| (*kind == nsh_core::ViewKind::Input).then_some(*id))
+        .expect("input mounted");
+    core.component_event(
+        input_id,
+        EventKind::ChangeText,
+        &EventPayload::Text {
+            text: "host:ap".into(),
+            count: 1,
+        },
+    );
+    tree.pump(&mut core);
+    let texts = tree.collect_live_texts(1);
+    assert!(
+        texts.iter().any(|t| t == "api.local"),
+        "expected autocomplete popup to suggest api.local, got: {texts:?}"
+    );
+
+    // Click the suggestion row -> updates filter value.
+    let label_id = tree
+        .texts
+        .iter()
+        .find_map(|(id, text)| (text == "api.local" && tree.parent.contains_key(id)).then_some(*id))
+        .expect("suggestion text");
+    let row_id = tree.parent[&label_id];
+    core.component_event(
+        row_id,
+        EventKind::Press,
+        &EventPayload::Press(PressEvent::default()),
+    );
+    tree.pump(&mut core);
+
+    // Fire an invalid syntax change -> inline error strip renders.
+    core.component_event(
+        input_id,
+        EventKind::ChangeText,
+        &EventPayload::Text {
+            text: "staus:500".into(),
+            count: 2,
+        },
+    );
+    tree.pump(&mut core);
+    let err_texts = tree.collect_live_texts(2);
+    assert!(
+        err_texts
+            .iter()
+            .any(|t| t.contains("Unknown filter prefix \"staus:\"")),
+        "expected inline syntax error message, got: {err_texts:?}"
     );
 }
 

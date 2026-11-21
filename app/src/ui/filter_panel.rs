@@ -392,17 +392,21 @@ pub(crate) fn saved_filter_panel(
                         .child(config_field(
                             "过滤表达式",
                             "Filter Expression",
-                            focused_input(
-                                field,
-                                tr(
-                                    "host:a.com path:/api type:json，支持 | 表示 OR",
-                                    "host:a.com path:/api type:json, use | for OR",
-                                ),
-                                28.0,
-                                false,
-                                move |text| field.set(text.to_string()),
-                                None,
-                            ),
+                            view()
+                                .w_full()
+                                .flex_col()
+                                .gap_1()
+                                .child(filter_assist_input(
+                                    field,
+                                    tr(
+                                        "host:a.com path:/api type:json，支持 | 表示 OR",
+                                        "host:a.com path:/api type:json, use | for OR",
+                                    ),
+                                    28.0,
+                                    10.0,
+                                    element_ref(),
+                                ))
+                                .child(filter_syntax_error_inline(field)),
                         )),
                 )
                 .child(view().w(px(1.0)).self_stretch().bg(border_subtle()))
