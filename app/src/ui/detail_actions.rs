@@ -19,6 +19,11 @@ pub(crate) fn detail_actions(
     let copy_python = controls.clone();
     let copy_rust = controls.clone();
     let copy_go = controls.clone();
+    let copy_httpie = controls.clone();
+    let copy_powershell = controls.clone();
+    let copy_axios = controls.clone();
+    let copy_kotlin = controls.clone();
+    let copy_swift = controls.clone();
     let copy_types = controls.clone();
     let copy_rust_struct = controls.clone();
     let copy_request = controls.clone();
@@ -69,6 +74,21 @@ pub(crate) fn detail_actions(
         }))
         .child(action_item("Go (net/http)", move || {
             copy_snippet(&copy_go, selected.get(), Snippet::GoHttp);
+        }))
+        .child(action_item("HTTPie", move || {
+            copy_snippet(&copy_httpie, selected.get(), Snippet::Httpie);
+        }))
+        .child(action_item("PowerShell", move || {
+            copy_snippet(&copy_powershell, selected.get(), Snippet::PowerShell);
+        }))
+        .child(action_item("JS (axios)", move || {
+            copy_snippet(&copy_axios, selected.get(), Snippet::Axios);
+        }))
+        .child(action_item("Kotlin (OkHttp)", move || {
+            copy_snippet(&copy_kotlin, selected.get(), Snippet::KotlinOkHttp);
+        }))
+        .child(action_item("Swift (URLSession)", move || {
+            copy_snippet(&copy_swift, selected.get(), Snippet::SwiftUrlSession);
         }))
         .child(action_item(tr("TS 类型", "TS types"), move || {
             copy_snippet(&copy_types, selected.get(), Snippet::Types);

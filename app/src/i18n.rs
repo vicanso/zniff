@@ -171,6 +171,11 @@ pub enum StatusMsg {
     CopiedPython,
     CopiedRustReqwest,
     CopiedGoHttp,
+    CopiedHttpie,
+    CopiedPowerShell,
+    CopiedAxios,
+    CopiedKotlinOkHttp,
+    CopiedSwiftUrlSession,
     CopiedInterface,
     CopiedRustStruct,
     InterfaceUnavailable,
@@ -589,6 +594,15 @@ impl StatusMsg {
             }
             Self::CopiedRustReqwest => t(lang, "已复制 Rust reqwest", "Copied Rust reqwest").into(),
             Self::CopiedGoHttp => t(lang, "已复制 Go net/http", "Copied Go net/http").into(),
+            Self::CopiedHttpie => t(lang, "已复制 HTTPie", "Copied HTTPie").into(),
+            Self::CopiedPowerShell => t(lang, "已复制 PowerShell", "Copied PowerShell").into(),
+            Self::CopiedAxios => t(lang, "已复制 axios", "Copied axios").into(),
+            Self::CopiedKotlinOkHttp => {
+                t(lang, "已复制 Kotlin OkHttp", "Copied Kotlin OkHttp").into()
+            }
+            Self::CopiedSwiftUrlSession => {
+                t(lang, "已复制 Swift URLSession", "Copied Swift URLSession").into()
+            }
             Self::CopiedInterface => t(
                 lang,
                 "已复制 TypeScript interface",
@@ -834,6 +848,11 @@ impl StatusMsg {
             | Self::CopiedPython
             | Self::CopiedRustReqwest
             | Self::CopiedGoHttp
+            | Self::CopiedHttpie
+            | Self::CopiedPowerShell
+            | Self::CopiedAxios
+            | Self::CopiedKotlinOkHttp
+            | Self::CopiedSwiftUrlSession
             | Self::CopiedInterface
             | Self::CopiedRustStruct
             | Self::CopiedMermaid
@@ -925,6 +944,11 @@ impl StatusMsg {
             | Self::CopiedPython
             | Self::CopiedRustReqwest
             | Self::CopiedGoHttp
+            | Self::CopiedHttpie
+            | Self::CopiedPowerShell
+            | Self::CopiedAxios
+            | Self::CopiedKotlinOkHttp
+            | Self::CopiedSwiftUrlSession
             | Self::CopiedInterface
             | Self::CopiedRustStruct
             | Self::CopiedMermaid

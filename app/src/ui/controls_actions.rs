@@ -7,6 +7,11 @@ pub(crate) enum Snippet {
     Python,
     RustReqwest,
     GoHttp,
+    Httpie,
+    PowerShell,
+    Axios,
+    KotlinOkHttp,
+    SwiftUrlSession,
     Types,
     RustStruct,
 }
@@ -50,6 +55,26 @@ pub(crate) fn copy_snippet(controls: &Controls, id: Option<u64>, kind: Snippet) 
         Snippet::GoHttp => {
             set_clipboard(present::go_http(&flow));
             set_status(controls, StatusMsg::CopiedGoHttp);
+        }
+        Snippet::Httpie => {
+            set_clipboard(copy_formats::httpie_command(&flow));
+            set_status(controls, StatusMsg::CopiedHttpie);
+        }
+        Snippet::PowerShell => {
+            set_clipboard(copy_formats::powershell_command(&flow));
+            set_status(controls, StatusMsg::CopiedPowerShell);
+        }
+        Snippet::Axios => {
+            set_clipboard(copy_formats::axios_snippet(&flow));
+            set_status(controls, StatusMsg::CopiedAxios);
+        }
+        Snippet::KotlinOkHttp => {
+            set_clipboard(copy_formats::kotlin_okhttp(&flow));
+            set_status(controls, StatusMsg::CopiedKotlinOkHttp);
+        }
+        Snippet::SwiftUrlSession => {
+            set_clipboard(copy_formats::swift_urlsession(&flow));
+            set_status(controls, StatusMsg::CopiedSwiftUrlSession);
         }
         Snippet::Types => match std::str::from_utf8(&flow.response_body)
             .ok()

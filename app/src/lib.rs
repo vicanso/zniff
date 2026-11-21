@@ -17,6 +17,7 @@ mod ca;
 mod client_hello;
 mod clock;
 mod config;
+mod copy_formats;
 #[cfg(not(target_arch = "wasm32"))]
 mod decompress;
 mod diagnostics;

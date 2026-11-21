@@ -16,6 +16,7 @@ pub(crate) fn build_command_items(
     adb_count: usize,
 ) -> Vec<CommandItem> {
     let g_capture = t(lang, "抓包", "Capture");
+    let g_copy = t(lang, "复制代码片段", "Copy as Code");
     let g_export = t(lang, "导出与分析", "Export & Tools");
     let g_view = t(lang, "视图与设置", "View & Settings");
 
@@ -131,6 +132,67 @@ pub(crate) fn build_command_items(
     }
     #[cfg(target_arch = "wasm32")]
     let _ = (proxy_on, adb_count);
+
+    items.push(
+        CommandItem::new(
+            "copy_httpie",
+            t(lang, "复制为 HTTPie 命令", "Copy as HTTPie"),
+        )
+        .group(g_copy)
+        .disabled(!has_selection)
+        .keywords(["copy", "httpie", "http", "cli", "复制"]),
+    );
+    items.push(
+        CommandItem::new(
+            "copy_powershell",
+            t(
+                lang,
+                "复制为 PowerShell (Invoke-RestMethod)",
+                "Copy as PowerShell (Invoke-RestMethod)",
+            ),
+        )
+        .group(g_copy)
+        .disabled(!has_selection)
+        .keywords([
+            "copy",
+            "powershell",
+            "ps",
+            "invoke-restmethod",
+            "windows",
+            "复制",
+        ]),
+    );
+    items.push(
+        CommandItem::new(
+            "copy_axios",
+            t(lang, "复制为 JS (axios)", "Copy as JS (axios)"),
+        )
+        .group(g_copy)
+        .disabled(!has_selection)
+        .keywords(["copy", "axios", "js", "javascript", "node", "复制"]),
+    );
+    items.push(
+        CommandItem::new(
+            "copy_kotlin_okhttp",
+            t(lang, "复制为 Kotlin (OkHttp)", "Copy as Kotlin (OkHttp)"),
+        )
+        .group(g_copy)
+        .disabled(!has_selection)
+        .keywords(["copy", "kotlin", "okhttp", "android", "jvm", "复制"]),
+    );
+    items.push(
+        CommandItem::new(
+            "copy_swift_urlsession",
+            t(
+                lang,
+                "复制为 Swift (URLSession)",
+                "Copy as Swift (URLSession)",
+            ),
+        )
+        .group(g_copy)
+        .disabled(!has_selection)
+        .keywords(["copy", "swift", "urlsession", "ios", "macos", "复制"]),
+    );
 
     items.push(
         CommandItem::new("export_har", t(lang, "导出 HAR 1.2", "Export HAR 1.2"))
@@ -547,6 +609,21 @@ pub(crate) fn command_palette_modal(
                         "copy_env" => copy_proxy_env(&controls),
                         #[cfg(not(target_arch = "wasm32"))]
                         "copy_mcp" => copy_mcp_config(&controls),
+                        "copy_httpie" => {
+                            copy_snippet(&controls, selected.get(), Snippet::Httpie);
+                        }
+                        "copy_powershell" => {
+                            copy_snippet(&controls, selected.get(), Snippet::PowerShell);
+                        }
+                        "copy_axios" => {
+                            copy_snippet(&controls, selected.get(), Snippet::Axios);
+                        }
+                        "copy_kotlin_okhttp" => {
+                            copy_snippet(&controls, selected.get(), Snippet::KotlinOkHttp);
+                        }
+                        "copy_swift_urlsession" => {
+                            copy_snippet(&controls, selected.get(), Snippet::SwiftUrlSession);
+                        }
                         "export_har" => export_har_file(controls, &filter.get()),
                         "export_diagnostics" => export_diagnostics_file(controls),
                         "export_html" => {
@@ -675,6 +752,17 @@ mod tests {
         assert!(ids.contains("open_shortcuts"));
         assert!(ids.contains("focus_filter"));
         assert!(ids.contains("replay_selected"));
+        for copy_id in [
+            "copy_httpie",
+            "copy_powershell",
+            "copy_axios",
+            "copy_kotlin_okhttp",
+            "copy_swift_urlsession",
+        ] {
+            assert!(ids.contains(copy_id), "missing {copy_id}");
+            let item = items.iter().find(|it| it.id == copy_id).unwrap();
+            assert!(!item.disabled, "{copy_id} should be enabled when selected");
+        }
         for (id, expected_shortcut) in [
             ("clear_all", "mod+k"),
             ("focus_filter", "mod+f"),
