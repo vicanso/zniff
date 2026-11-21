@@ -5260,26 +5260,28 @@ fn all_app_shell_on_key_bindings_are_non_reserved_and_mount_cleanly() {
     use nsh_core::platform::Os;
 
     let src = include_str!("app_shell.rs");
-    let mut bindings = Vec::new();
-    for needle in ["on_key(\"", "on_key_with(\n", "on_key_with(\""] {
-        let mut rest = src;
-        while let Some(pos) = rest.find(needle) {
-            let after = &rest[pos + needle.len()..];
-            let trimmed = after.trim_start();
-            let lit = if needle.ends_with('"') {
-                trimmed
-            } else if let Some(s) = trimmed.strip_prefix('"') {
-                s
-            } else {
+    let extract_bindings = |source: &str| {
+        let mut out = Vec::new();
+        for needle in ["on_key(", "on_key_with("] {
+            let mut rest = source;
+            while let Some(pos) = rest.find(needle) {
+                let after = &rest[pos + needle.len()..];
+                let Some(lit) = after.trim_start().strip_prefix('"') else {
+                    rest = after;
+                    continue;
+                };
+                if let Some(end) = lit.find('"') {
+                    out.push(lit[..end].to_string());
+                }
                 rest = after;
-                continue;
-            };
-            if let Some(end) = lit.find('"') {
-                bindings.push(lit[..end].to_string());
             }
-            rest = after;
         }
-    }
+        out
+    };
+    let bindings = extract_bindings(src);
+    // Ensure Windows CRLF checkouts extract the exact same bindings as LF.
+    let crlf_src = src.replace("\r\n", "\n").replace('\n', "\r\n");
+    assert_eq!(bindings, extract_bindings(&crlf_src));
     assert!(
         bindings.len() >= 10,
         "expected to extract all on_key / on_key_with bindings from app_shell.rs, got {bindings:?}"
