@@ -64,6 +64,7 @@ RUN set -eux; \
 WORKDIR /src
 COPY app/Cargo.toml app/Cargo.lock app/build.rs app/nsh.json app/
 COPY app/assets app/assets
+COPY app/benches app/benches
 COPY app/src app/src
 COPY scripts/postprocess-web.sh scripts/postprocess-web.sh
 WORKDIR /src/app
