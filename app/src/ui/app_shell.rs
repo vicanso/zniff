@@ -301,7 +301,24 @@ pub fn App() -> impl IntoElement {
     let controls = open_controls();
     #[cfg(not(target_arch = "wasm32"))]
     {
-        install_system_tray(controls.clone(), langs, running, listen, use_system_proxy);
+        let tray_clear_controls = controls.clone();
+        install_system_tray(TrayProps {
+            controls: controls.clone(),
+            langs,
+            running,
+            listen,
+            use_system_proxy,
+            on_clear: Rc::new(move || {
+                clear_captured(
+                    &tray_clear_controls,
+                    selected,
+                    baseline,
+                    compose,
+                    seq_builder,
+                    shown,
+                );
+            }),
+        });
         install_minimize_to_tray_handler(profile_signals.minimize_to_tray);
     }
     let config_broken = signal(lock_config_error(&controls));
