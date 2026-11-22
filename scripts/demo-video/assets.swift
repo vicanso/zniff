@@ -135,7 +135,7 @@ case "card":
                          font: .systemFont(ofSize: 34, weight: .medium), color: rgb(0xcbd5e1), centerX: 960, y: 440)
             _ = drawText("原生、轻快的 HTTP(S) 抓包调试工具",
                          font: .systemFont(ofSize: 30, weight: .regular), color: rgb(0x94a3b8), centerX: 960, y: 388)
-            pillsRow(["HTTP/1.1 · HTTP/2 · WebSocket", "Breakpoints · 断点", "14 rewrite rules · 改写规则", "Built-in MCP"],
+            pillsRow(["HTTP/1.1 · HTTP/2 · WebSocket", "Breakpoints · 断点", "17 rewrite rules · 改写规则", "Built-in MCP"],
                      font: .systemFont(ofSize: 22, weight: .medium), centerX: 960, y: 270)
         } else {
             icon?.draw(in: NSRect(x: 960 - 64, y: 650, width: 128, height: 128))

@@ -51,11 +51,11 @@ echo "==> Recording window $WID..."
 "$WORK/recorder" "$WID" "$RAW" &
 REC_PID=$!
 sleep 1.5
-# Keep zniff frontmost so clicks land on it.
+# Keep our exact zniff PID frontmost so clicks land on it.
 for _ in {1..20}; do
     demo_front
     sleep 0.3
-    [ "$(osascript -e 'tell application "System Events" to get name of first process whose frontmost is true' 2>/dev/null)" = "zniff" ] && break
+    [ "$(osascript -e 'tell application "System Events" to get unix id of first process whose frontmost is true' 2>/dev/null)" = "$ZNIFF_PID" ] && break
 done
 sleep 0.8
 
@@ -79,8 +79,8 @@ d click 440 "$(row 3)" 0.5
 hold 2.2
 
 mark filter "Filter with a tiny query language" "简洁的过滤语法，随打随筛"
-cam 1.6 330 260 1.0
-d click 260 64
+cam 1.5 520 260 1.0
+d click 420 63
 hold 0.3
 d type "POST" 9
 hold 1.6
@@ -96,14 +96,14 @@ cam 1 640 360 0.9
 hold 0.8
 
 mark sequence "One click to a waterfall & sequence diagram" "一键生成瀑布图与时序图"
-d click 1140 20
-hold 0.7
-d click 987 164 0.6
-cam 1.5 965 390 1.0
+d click 824 21
+hold 0.6
+d click 1183 85 0.6
+cam 1.45 1040 380 1.0
 hold 2.6
-d click 809 371 0.6
+d click 1020 405 0.6
 hold 2.4
-d click 1218 78 0.7
+d click 1220 78 0.7
 cam 1 640 360 0.9
 hold 0.6
 
@@ -115,22 +115,22 @@ req POST "$MOCK/api/v1/checkout/confirm" -H 'Content-Type: application/json' -d 
 BP_PIDS="$BP_PIDS $!"
 hold 0.6
 cam 1.6 860 150 1.0
-d move 1080 61 0.9
+d move 1081 61 0.9
 hold 1.2
-d click 1080 61 0.2
+d click 1081 61 0.2
 hold 1.5
-d click 1173 61 0.6
+d click 1168 61 0.6
 hold 1.6
 cam 1 640 360 0.9
 hold 0.5
 
-mark rules "Rewrite traffic with 14 rule types" "14 种改写规则：映射、替换、延迟、阻断……"
-d click 953 20
-cam 1.4 610 310 1.0
+mark rules "Rewrite traffic with 17 rule types" "17 种改写规则：映射、替换、延迟、阻断……"
+d click 998 21
+cam 1.35 700 350 1.0
+hold 2.0
+d click 480 418 0.6
 hold 1.6
-d click 826 340 0.6
-hold 1.4
-d click 660 340 0.5
+d click 582 418 0.5
 hold 1.4
 d key 53
 cam 1 640 360 0.9

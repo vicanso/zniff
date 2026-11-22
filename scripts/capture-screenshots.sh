@@ -70,7 +70,10 @@ guard CommandLine.arguments.count > 1, let pid = Int(CommandLine.arguments[1]) e
 let opts = CGWindowListOption(arrayLiteral: .excludeDesktopElements, .optionOnScreenOnly)
 if let list = CGWindowListCopyWindowInfo(opts, kCGNullWindowID) as? [[String: Any]] {
     for w in list where (w[kCGWindowOwnerPID as String] as? Int) == pid {
-        if let id = w[kCGWindowNumber as String] as? Int { print(id); break }
+        if let bounds = w[kCGWindowBounds as String] as? [String: Any],
+           let width = bounds["Width"] as? Double, width >= 400,
+           let height = bounds["Height"] as? Double, height >= 300,
+           let id = w[kCGWindowNumber as String] as? Int { print(id); break }
     }
 }' "$pid"
 }
@@ -85,8 +88,8 @@ if let list = CGWindowListCopyWindowInfo(opts, kCGNullWindowID) as? [[String: An
         if let bounds = w[kCGWindowBounds as String] as? [String: Any],
            let x = bounds["X"] as? Double,
            let y = bounds["Y"] as? Double,
-           let width = bounds["Width"] as? Double,
-           let height = bounds["Height"] as? Double {
+           let width = bounds["Width"] as? Double, width >= 400,
+           let height = bounds["Height"] as? Double, height >= 300 {
             print("\(Int(x)),\(Int(y)),\(Int(width)),\(Int(height))")
             break
         }
@@ -94,12 +97,17 @@ if let list = CGWindowListCopyWindowInfo(opts, kCGNullWindowID) as? [[String: An
 }' "$pid"
 }
 
+activate_win() {
+    local pid="$1"
+    osascript -e "tell application \"System Events\" to set frontmost of (first process whose unix id is $pid) to true" 2>/dev/null || true
+    sleep 0.2
+}
+
 click_win() {
     local pid="$1"
     local rel_x="$2"
     local rel_y="$3"
-    osascript -e 'tell application "System Events" to tell process "zniff" to set frontmost to true' 2>/dev/null || true
-    sleep 0.1
+    activate_win "$pid"
     swift -e 'import CoreGraphics; import Foundation
 guard CommandLine.arguments.count > 3,
       let pid = Int(CommandLine.arguments[1]),
@@ -110,12 +118,16 @@ if let list = CGWindowListCopyWindowInfo(opts, kCGNullWindowID) as? [[String: An
     for w in list where (w[kCGWindowOwnerPID as String] as? Int) == pid {
         if let bounds = w[kCGWindowBounds as String] as? [String: Any],
            let x = bounds["X"] as? Double,
-           let y = bounds["Y"] as? Double {
+           let y = bounds["Y"] as? Double,
+           let width = bounds["Width"] as? Double, width >= 400,
+           let height = bounds["Height"] as? Double, height >= 300 {
             let clickPt = CGPoint(x: x + relX, y: y + relY)
+            CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: clickPt, mouseButton: .left)?.post(tap: .cghidEventTap)
+            usleep(60000)
             if let down = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: clickPt, mouseButton: .left),
                let up = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: clickPt, mouseButton: .left) {
                 down.post(tap: .cghidEventTap)
-                usleep(50000)
+                usleep(70000)
                 up.post(tap: .cghidEventTap)
             }
             break
@@ -129,8 +141,7 @@ right_click_win() {
     local pid="$1"
     local rel_x="$2"
     local rel_y="$3"
-    osascript -e 'tell application "System Events" to tell process "zniff" to set frontmost to true' 2>/dev/null || true
-    sleep 0.1
+    activate_win "$pid"
     swift -e 'import CoreGraphics; import Foundation
 guard CommandLine.arguments.count > 3,
       let pid = Int(CommandLine.arguments[1]),
@@ -141,12 +152,16 @@ if let list = CGWindowListCopyWindowInfo(opts, kCGNullWindowID) as? [[String: An
     for w in list where (w[kCGWindowOwnerPID as String] as? Int) == pid {
         if let bounds = w[kCGWindowBounds as String] as? [String: Any],
            let x = bounds["X"] as? Double,
-           let y = bounds["Y"] as? Double {
+           let y = bounds["Y"] as? Double,
+           let width = bounds["Width"] as? Double, width >= 400,
+           let height = bounds["Height"] as? Double, height >= 300 {
             let clickPt = CGPoint(x: x + relX, y: y + relY)
+            CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: clickPt, mouseButton: .right)?.post(tap: .cghidEventTap)
+            usleep(60000)
             if let down = CGEvent(mouseEventSource: nil, mouseType: .rightMouseDown, mouseCursorPosition: clickPt, mouseButton: .right),
                let up = CGEvent(mouseEventSource: nil, mouseType: .rightMouseUp, mouseCursorPosition: clickPt, mouseButton: .right) {
                 down.post(tap: .cghidEventTap)
-                usleep(50000)
+                usleep(70000)
                 up.post(tap: .cghidEventTap)
             }
             break
@@ -158,7 +173,16 @@ if let list = CGWindowListCopyWindowInfo(opts, kCGNullWindowID) as? [[String: An
 
 key_press() {
     local code="$1"
-    osascript -e "tell application \"System Events\" to key code $code" 2>/dev/null || true
+    swift -e 'import CoreGraphics; import Foundation
+guard CommandLine.arguments.count > 1, let code = CGKeyCode(CommandLine.arguments[1]) else { exit(0) }
+if let down = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: true),
+   let up = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false) {
+    down.flags = []
+    up.flags = []
+    down.post(tap: .cghidEventTap)
+    usleep(40000)
+    up.post(tap: .cghidEventTap)
+}' "$code"
     sleep 0.4
 }
 
@@ -280,12 +304,13 @@ with socketserver.TCPServer(('127.0.0.1', $MOCK_SERVER_PORT), MockHandler) as ht
 MOCK_PID=$!
 sleep 0.5
 
-# 2. Write initial config.dev.toml with capturing=true, 1280x720 window, and breakpoint rule
-cat << EOF > "$TEST_DATA_DIR/config.dev.toml"
+# 2. Write clean isolated config.toml (never touching user's personal config)
+cat << EOF > "$TEST_DATA_DIR/config.toml"
 listen_port = $PROXY_PORT
 capturing = true
 window_width = 1280
 window_height = 720
+language = "en"
 filter = ""
 saved_profiles = []
 rules = """
@@ -295,7 +320,11 @@ EOF
 
 # Find zniff binary
 TARGET_BIN=""
-if [ -x "/Users/tree/cargo-target/debug/zniff" ]; then
+if [ -n "${ZNIFF_BIN:-}" ] && [ -x "$ZNIFF_BIN" ]; then
+    TARGET_BIN="$ZNIFF_BIN"
+elif [ -x "/Users/tree/cargo-target/release/zniff" ]; then
+    TARGET_BIN="/Users/tree/cargo-target/release/zniff"
+elif [ -x "/Users/tree/cargo-target/debug/zniff" ]; then
     TARGET_BIN="/Users/tree/cargo-target/debug/zniff"
 elif [ -x "$REPO_ROOT/target/debug/zniff" ]; then
     TARGET_BIN="$REPO_ROOT/target/debug/zniff"
@@ -305,9 +334,9 @@ else
     TARGET_BIN="$(cargo metadata --manifest-path "$REPO_ROOT/app/Cargo.toml" --format-version 1 | grep -o '"target_directory":"[^"]*"' | cut -d'"' -f4)/debug/zniff"
 fi
 
-echo "==> Launching zniff desktop app with binary $TARGET_BIN..."
+echo "==> Launching zniff desktop app with binary $TARGET_BIN (isolated data dir: $TEST_DATA_DIR)..."
 set_dark_mode true
-ZNIFF_DEV=1 "$TARGET_BIN" --data-dir "$TEST_DATA_DIR" &
+env -u ZNIFF_DEV ZNIFF_DATA_DIR="$TEST_DATA_DIR" "$TARGET_BIN" --data-dir "$TEST_DATA_DIR" &
 ZNIFF_PID=$!
 
 echo "==> Waiting for zniff window to appear..."
@@ -326,9 +355,9 @@ if [ -z "$WID" ]; then
 fi
 echo "==> Detected zniff window ID: $WID"
 
-# Ensure frontmost and size 1280x720
-osascript -e 'tell application "System Events" to tell process "zniff" to set size of window 1 to {1280, 720}' 2>/dev/null || true
-osascript -e 'tell application "System Events" to tell process "zniff" to set frontmost to true' 2>/dev/null || true
+# Ensure our exact zniff PID is frontmost and sized 1280x720
+osascript -e "tell application \"System Events\" to tell (first process whose unix id is $ZNIFF_PID) to set size of window 1 to {1280, 720}" 2>/dev/null || true
+activate_win "$ZNIFF_PID"
 sleep 1.0
 
 WIN_BOUNDS=$(get_win_bounds "$ZNIFF_PID")
@@ -391,6 +420,7 @@ sleep 1.5
 # Scene 01: 01_traffic_table_dual_pane.png
 # -------------------------------------------------------------
 echo "==> Preparing Scene 01: Main Dual-Pane Traffic Table..."
+activate_win "$ZNIFF_PID"
 key_press 53 # Escape ensures no row selected and no popover open
 sleep 0.6
 capture_uniform_screenshot "01_traffic_table_dual_pane.png"
@@ -399,8 +429,8 @@ capture_uniform_screenshot "01_traffic_table_dual_pane.png"
 # Scene 02: 02_detail_json_graphql.png
 # -------------------------------------------------------------
 echo "==> Preparing Scene 02: Deep Inspection JSON & GraphQL..."
-# Row 5 (GraphQL at y=261)
-click_win "$ZNIFF_PID" 200 261
+# Row 5 (GraphQL at x=420, y=269 in v0.5 Split layout with left sidebar)
+click_win "$ZNIFF_PID" 420 269
 sleep 0.8
 capture_uniform_screenshot "02_detail_json_graphql.png"
 
@@ -408,8 +438,8 @@ capture_uniform_screenshot "02_detail_json_graphql.png"
 # Scene 03: 03_detail_protobuf_hex.png
 # -------------------------------------------------------------
 echo "==> Preparing Scene 03: Protobuf / gRPC & Hex View..."
-# Row 7 (Telemetry at y=329)
-click_win "$ZNIFF_PID" 200 329
+# Row 7 (Telemetry at x=420, y=337)
+click_win "$ZNIFF_PID" 420 337
 sleep 0.8
 capture_uniform_screenshot "03_detail_protobuf_hex.png"
 
@@ -417,29 +447,29 @@ capture_uniform_screenshot "03_detail_protobuf_hex.png"
 # Scene 04: 04_baseline_diff_view.png
 # -------------------------------------------------------------
 echo "==> Preparing Scene 04: Line-by-Line Baseline Diff View..."
-# Right click Row 1 to open context menu
-right_click_win "$ZNIFF_PID" 200 125
+# Right click Row 1 (x=420, y=133) to open context menu
+right_click_win "$ZNIFF_PID" 420 133
 sleep 0.5
-# Click '基准' (Baseline) at relative y=300
-click_win "$ZNIFF_PID" 260 300
+# Click 'Set baseline' in context menu
+click_win "$ZNIFF_PID" 480 305
 sleep 0.6
-# Left click Row 3 to trigger diff against Row 1
-click_win "$ZNIFF_PID" 200 193
+# Left click Row 3 (x=420, y=201) to trigger diff against Row 1
+click_win "$ZNIFF_PID" 420 201
 sleep 0.8
 capture_uniform_screenshot "04_baseline_diff_view.png"
 
 # Clear baseline
-right_click_win "$ZNIFF_PID" 200 125
+right_click_win "$ZNIFF_PID" 420 133
 sleep 0.5
-click_win "$ZNIFF_PID" 260 300
+click_win "$ZNIFF_PID" 480 305
 sleep 0.5
 
 # -------------------------------------------------------------
 # Scene 05: 05_filter_rules_popup.png
 # -------------------------------------------------------------
-echo "==> Preparing Scene 05: Filter & Rules Management Popover..."
-# Click '过滤' in toolbar (x=985, y=21)
-click_win "$ZNIFF_PID" 985 21
+echo "==> Preparing Scene 05: Rules & Rewrite Management Popover..."
+# Click 'Rules' in v0.5 split toolbar (x=998, y=21)
+click_win "$ZNIFF_PID" 998 21
 sleep 0.8
 capture_uniform_screenshot "05_filter_rules_popup.png"
 # Close popover with Escape
@@ -459,20 +489,22 @@ BREAK_PID2=$!
 sleep 1.2
 capture_uniform_screenshot "06_breakpoint_intercept_queue.png"
 
-# Resume/drop breakpoints by continuing or killing
+# Release all paused breakpoints via 'Continue all' (x=1168, y=61)
+click_win "$ZNIFF_PID" 1168 61
+sleep 0.8
 kill "$BREAK_PID1" "$BREAK_PID2" 2>/dev/null || true
-key_press 53
-sleep 0.5
+wait "$BREAK_PID1" "$BREAK_PID2" 2>/dev/null || true
+unset BREAK_PID1 BREAK_PID2
+sleep 0.4
 
 # -------------------------------------------------------------
 # Scene 07: 07_sequence_diagram_waterfall.png
 # -------------------------------------------------------------
 echo "==> Preparing Scene 07: Multi-View Sequence & Waterfall Preview..."
-# Click More menu in toolbar (x=1150, y=21)
-click_win "$ZNIFF_PID" 1150 21
+# Click 'Summary' in toolbar (x=824, y=21) then 'Sequence diagram' (x=1183, y=85)
+click_win "$ZNIFF_PID" 824 21
 sleep 0.5
-# Click '生成时序图' (x=1150, y=164)
-click_win "$ZNIFF_PID" 1150 164
+click_win "$ZNIFF_PID" 1183 85
 sleep 1.0
 capture_uniform_screenshot "07_sequence_diagram_waterfall.png"
 # Close dialog with Escape
@@ -482,28 +514,27 @@ sleep 0.5
 # -------------------------------------------------------------
 # Scene 08: 08_mobile_qr_cert_console.png
 # -------------------------------------------------------------
-echo "==> Preparing Scene 08: Mobile QR Code & CA Trust Management..."
-# Click More menu in toolbar (x=1150, y=21)
-click_win "$ZNIFF_PID" 1150 21
+echo "==> Preparing Scene 08: Mobile QR Code & CA Trust Console..."
+# Click 'Connect' in bottom bar (x=1028, y=702)
+click_win "$ZNIFF_PID" 1028 702
 sleep 0.8
 capture_uniform_screenshot "08_mobile_qr_cert_console.png"
-# Close menu with Escape
+# Close popover with Escape
 key_press 53
 sleep 0.5
 
 # -------------------------------------------------------------
 # Scene 09: 09_mcp_ai_integration.png
 # -------------------------------------------------------------
-echo "==> Preparing Scene 09: AI-Native MCP Server Integration..."
-# Select MCP flow row (latest row at y=431)
-click_win "$ZNIFF_PID" 200 431
-sleep 0.8
-# Copy MCP config from More menu to display status notification
-click_win "$ZNIFF_PID" 1150 21 # More menu
+echo "==> Preparing Scene 09: AI-Native MCP & More Console..."
+# Select GraphQL row (x=420, y=269) and open 'More' menu (x=1158, y=21)
+click_win "$ZNIFF_PID" 420 269
 sleep 0.5
-click_win "$ZNIFF_PID" 1230 325 # MCP pill in Copy Config
+click_win "$ZNIFF_PID" 1158 21
 sleep 0.6
 capture_uniform_screenshot "09_mcp_ai_integration.png"
+key_press 53
+sleep 0.4
 
 # -------------------------------------------------------------
 # Scene 10: 10_theme_light_contrast.png
@@ -511,8 +542,9 @@ capture_uniform_screenshot "09_mcp_ai_integration.png"
 echo "==> Preparing Scene 10: Adaptive Light Mode & High-Contrast Layout..."
 set_dark_mode false
 sleep 1.0
-key_press 53 # Escape to summary view
-sleep 0.5
+# Select GraphQL row so Light mode shows both table, sidebar, and rich detail view
+click_win "$ZNIFF_PID" 420 269
+sleep 0.6
 capture_uniform_screenshot "10_theme_light_contrast.png"
 set_dark_mode true
 sleep 0.5
@@ -672,7 +704,7 @@ drawCentered(
 let pills = [
     "Native GUI · 原生界面",
     "HTTP/2 & WebSocket",
-    "14 Rules · 14 项改写规则",
+    "17 Rules · 17 项改写规则",
     "Built-in MCP · AI 原生 MCP",
 ]
 let pillFont = NSFont.systemFont(ofSize: 20, weight: .medium)

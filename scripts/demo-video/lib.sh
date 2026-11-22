@@ -4,7 +4,7 @@
 
 DEMO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$DEMO_DIR/../.." && pwd)"
-WORK="${WORK:-/tmp/zniff-demo}"
+WORK="${WORK:-/tmp/zniff-demo-run}"
 DATA_DIR="$WORK/data"
 MOCK_PORT="${MOCK_PORT:-19876}"
 PROXY_PORT="${PROXY_PORT:-18878}"
@@ -53,7 +53,7 @@ demo_start_mock() {
 demo_write_config() {
     rm -rf "$DATA_DIR"
     mkdir -p "$DATA_DIR"
-    cat <<EOF >"$DATA_DIR/config.dev.toml"
+    cat <<EOF >"$DATA_DIR/config.toml"
 listen_port = $PROXY_PORT
 capturing = true
 window_width = $WIN_W
@@ -68,14 +68,14 @@ EOF
 }
 
 demo_launch_app() {
-    ZNIFF_DEV=1 "$ZNIFF_BIN" --data-dir "$DATA_DIR" &
+    env -u ZNIFF_DEV ZNIFF_DATA_DIR="$DATA_DIR" "$ZNIFF_BIN" --data-dir "$DATA_DIR" &
     ZNIFF_PID=$!
     for _ in {1..60}; do
         "$DRV" bounds "$ZNIFF_PID" >/dev/null 2>&1 && break
         sleep 0.25
     done
     osascript <<OSA >/dev/null 2>&1 || true
-tell application "System Events" to tell process "zniff"
+tell application "System Events" to tell (first process whose unix id is $ZNIFF_PID)
     set frontmost to true
     set size of window 1 to {$WIN_W, $WIN_H}
     set position of window 1 to {$WIN_X, $WIN_Y}
@@ -92,7 +92,7 @@ OSA
 }
 
 demo_front() {
-    osascript -e 'tell application "System Events" to tell process "zniff" to set frontmost to true' >/dev/null 2>&1 || true
+    osascript -e "tell application \"System Events\" to set frontmost of (first process whose unix id is $ZNIFF_PID) to true" >/dev/null 2>&1 || true
 }
 
 # One request through the proxy; extra curl args follow the path.
