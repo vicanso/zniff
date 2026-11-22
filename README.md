@@ -16,7 +16,7 @@
   <a href="#cli-modes--mcp"><img src="https://img.shields.io/badge/MCP-JSON--RPC%202.0-blueviolet.svg" alt="MCP Ready"></a>
 </p>
 
-https://github.com/user-attachments/assets/15117c1d-50a0-4578-8201-a305fb0d12a3
+https://github.com/user-attachments/assets/19339425-f1df-47fe-ab8a-88bb586fd4a1
 
 ---
 
