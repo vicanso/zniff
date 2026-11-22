@@ -211,7 +211,7 @@ pub(crate) fn menu_inline_pill(
         .focus_visible(apply_focus_ring)
         .cursor(Cursor::Pointer)
         .on_press(on_press)
-        .child(control_text(label).text_size(px(11.0)).text_color(move || {
+        .child(compact_control_text(label, 11.0).text_color(move || {
             if active() {
                 accent_blue_text()
             } else {
@@ -553,8 +553,7 @@ pub(crate) fn menu_share_row(
                                 end_share(&controls, share_id);
                             })
                             .child(
-                                control_text(tr("停止", "Stop"))
-                                    .text_size(px(11.0))
+                                compact_control_text(tr("停止", "Stop"), 11.0)
                                     .text_color(status_err_fg()),
                             )
                     },

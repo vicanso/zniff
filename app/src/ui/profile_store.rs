@@ -714,7 +714,7 @@ pub(crate) fn push_saved_profile(
     next
 }
 
-pub(crate) const SIDEBAR_WIDTH_DEFAULT: f32 = 250.0;
+pub(crate) const SIDEBAR_WIDTH_DEFAULT: f32 = 230.0;
 pub(crate) const SIDEBAR_WIDTH_MIN: f32 = 176.0;
 pub(crate) const SIDEBAR_WIDTH_MAX: f32 = 340.0;
 

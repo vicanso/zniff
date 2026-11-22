@@ -828,7 +828,7 @@ pub(crate) fn drawer_quick_chip(
     let is_active = computed(move || filter_has_token(&filter.get(), aliases));
     view()
         .h(px(22.0))
-        .px_2()
+        .px_1p5()
         .rounded(px(5.0))
         .border_1()
         .border_color(move || {
@@ -860,26 +860,22 @@ pub(crate) fn drawer_quick_chip(
         .tooltip(label_tip(tip_zh, tip_en))
         .flex_row()
         .items_center()
-        .gap_1()
+        .gap(px(3.5))
         .on_press(move || filter.set(toggle_filter_chip(&filter.get(), token, aliases)))
-        .child(view().w(px(5.0)).h(px(5.0)).rounded_full().bg(move || {
+        .child(view().w(px(4.5)).h(px(4.5)).rounded_full().bg(move || {
             if is_active.get() {
                 accent_blue()
             } else {
                 fg_muted()
             }
         }))
-        .child(
-            control_text(tr(zh, en))
-                .text_size(px(11.0))
-                .text_color(move || {
-                    if is_active.get() {
-                        accent_blue_text()
-                    } else {
-                        fg_secondary()
-                    }
-                }),
-        )
+        .child(compact_control_text(tr(zh, en), 11.0).text_color(move || {
+            if is_active.get() {
+                accent_blue_text()
+            } else {
+                fg_secondary()
+            }
+        }))
 }
 
 pub(crate) const JSON_ALIASES: &[&str] = &["type:json", "ct:json"];
