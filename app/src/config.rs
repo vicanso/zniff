@@ -1521,23 +1521,46 @@ enum Read {
 
 /// Reads `config.toml`, or the old one-file-per-setting layout the first time.
 /// A broken file stays on disk and this returns the defaults.
-#[cfg_attr(not(test), allow(dead_code))]
-static LAST_LOAD_ERROR: Mutex<Option<String>> = Mutex::new(None);
+///
+/// Keyed by full config file path (`config_path_for(dir, dev)`) so concurrent
+/// loads against distinct data directories (e.g. parallel tests or prod/dev)
+/// never clobber one another's error state.
+static LAST_LOAD_ERRORS: OnceLock<Mutex<HashMap<PathBuf, String>>> = OnceLock::new();
+
+fn load_error_map() -> &'static Mutex<HashMap<PathBuf, String>> {
+    LAST_LOAD_ERRORS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn set_load_error(dir: &Path, dev: bool, err: Option<String>) {
+    let key = config_path_for(dir, dev);
+    let mut map = load_error_map().lock().unwrap_or_else(|e| e.into_inner());
+    match err {
+        Some(msg) => {
+            map.insert(key, msg);
+        }
+        None => {
+            map.remove(&key);
+        }
+    }
+}
 
 #[allow(dead_code)]
-pub fn last_load_error() -> Option<String> {
-    LAST_LOAD_ERROR
+pub fn last_load_error_for(dir: &Path, dev: bool) -> Option<String> {
+    let key = config_path_for(dir, dev);
+    load_error_map()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .clone()
+        .get(&key)
+        .cloned()
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-pub fn take_last_load_error() -> Option<String> {
-    LAST_LOAD_ERROR
+pub fn take_last_load_error_for(dir: &Path, dev: bool) -> Option<String> {
+    let key = config_path_for(dir, dev);
+    load_error_map()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .take()
+        .remove(&key)
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -1555,18 +1578,18 @@ pub fn load_mode_ext(dir: &Path, dev: bool) -> (Config, Option<String>) {
             if migrated_active {
                 let _ = store_unlocked(dir, dev, &config);
             }
-            *LAST_LOAD_ERROR.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            set_load_error(dir, dev, None);
             (*config, None)
         }
         Read::Broken(err) => {
             let msg = err.to_string();
-            *LAST_LOAD_ERROR.lock().unwrap_or_else(|e| e.into_inner()) = Some(msg.clone());
+            set_load_error(dir, dev, Some(msg.clone()));
             (Config::default_for(dev), Some(msg))
         }
         Read::Missing if dev => {
             let config = Config::default_for(true);
             let _ = store_unlocked(dir, true, &config);
-            *LAST_LOAD_ERROR.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            set_load_error(dir, dev, None);
             (config, None)
         }
         Read::Missing => {
@@ -1574,7 +1597,7 @@ pub fn load_mode_ext(dir: &Path, dev: bool) -> (Config, Option<String>) {
             if store_unlocked(dir, false, &config).is_ok() {
                 remove_legacy(dir);
             }
-            *LAST_LOAD_ERROR.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            set_load_error(dir, dev, None);
             (config, None)
         }
     }
@@ -1618,7 +1641,7 @@ pub fn backup_and_reset_mode(
     }
     let normalized = normalize_for(current.clone(), dev);
     store_unlocked(dir, dev, &normalized)?;
-    *LAST_LOAD_ERROR.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    set_load_error(dir, dev, None);
     Ok(backup)
 }
 
@@ -1629,7 +1652,7 @@ pub fn update_mode(dir: &Path, dev: bool, change: impl FnOnce(&mut Config)) -> R
         Read::Missing if dev => Config::default_for(true),
         Read::Missing => migrate_legacy(dir),
         Read::Broken(err) => {
-            *LAST_LOAD_ERROR.lock().unwrap_or_else(|e| e.into_inner()) = Some(err.to_string());
+            set_load_error(dir, dev, Some(err.to_string()));
             return Err(err);
         }
     };
@@ -1639,7 +1662,7 @@ pub fn update_mode(dir: &Path, dev: bool, change: impl FnOnce(&mut Config)) -> R
     if !dev {
         remove_legacy(dir);
     }
-    *LAST_LOAD_ERROR.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    set_load_error(dir, dev, None);
     Ok(())
 }
 
@@ -2737,9 +2760,12 @@ mod tests {
             err_msg.contains("TOML parse error") || err_msg.contains("invalid data"),
             "{err_msg}"
         );
-        assert!(last_load_error().is_some());
-        assert_eq!(take_last_load_error().as_deref(), Some(err_msg.as_str()));
-        assert!(last_load_error().is_none());
+        assert!(last_load_error_for(dir.path(), false).is_some());
+        assert_eq!(
+            take_last_load_error_for(dir.path(), false).as_deref(),
+            Some(err_msg.as_str())
+        );
+        assert!(last_load_error_for(dir.path(), false).is_none());
     }
 
     #[test]
@@ -2763,7 +2789,7 @@ mod tests {
         let (config, err) = load_mode_ext(dir.path(), false);
         assert_eq!(config.listen_port, 8899);
         assert!(err.is_none());
-        assert!(last_load_error().is_none());
+        assert!(last_load_error_for(dir.path(), false).is_none());
     }
 
     #[test]
@@ -2957,7 +2983,7 @@ mod tests {
         let (cfg, broken_err) = load_mode_ext(dir.path(), false);
         assert_eq!(cfg.listen_port, 8877);
         assert!(broken_err.is_some());
-        assert!(last_load_error().is_some());
+        assert!(last_load_error_for(dir.path(), false).is_some());
 
         // Subsequent saves fail loudly without clobbering the user's broken file
         let err = update_mode(dir.path(), false, |c| c.filter = "host:api.test".into())
@@ -2974,7 +3000,7 @@ mod tests {
         let backup = backup_and_reset_mode(dir.path(), false, &reset_cfg).unwrap();
         assert_eq!(backup, dir.path().join("config.toml.broken"));
         assert_eq!(fs::read_to_string(&backup).unwrap(), broken_body);
-        assert!(last_load_error().is_none());
+        assert!(last_load_error_for(dir.path(), false).is_none());
 
         let reloaded = load_mode(dir.path(), false);
         assert_eq!(reloaded.filter, "host:recovered.test");

@@ -36,7 +36,7 @@ pub(crate) fn open_controls() -> Arc<Controls> {
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn open_controls() -> Arc<Controls> {
     let saved = saved_config();
-    let cfg_err = config::last_load_error();
+    let cfg_err = config::last_load_error_for(&ca::data_dir(), config::is_dev_mode());
     let cfg_path = config::config_path_for(&ca::data_dir(), config::is_dev_mode())
         .display()
         .to_string();
@@ -142,7 +142,7 @@ pub(crate) fn lock_config_error(controls: &Controls) -> Option<String> {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn current_config_error(controls: &Controls) -> Option<String> {
-    let err = config::last_load_error();
+    let err = config::last_load_error_for(&ca::data_dir(), config::is_dev_mode());
     *controls
         .config_error
         .lock()

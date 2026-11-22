@@ -1219,7 +1219,7 @@ fn config_status(slot: &Slot) -> (Option<String>, String) {
         .prefs
         .config_dir
         .as_ref()
-        .and_then(|_| crate::config::last_load_error());
+        .and_then(|dir| crate::config::last_load_error_for(dir, slot.prefs.dev_mode));
     let config_path = slot
         .prefs
         .config_dir
