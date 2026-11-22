@@ -330,7 +330,7 @@ pub(crate) fn profile_dock(
                                 dropdown_open.set(*next && !saved.with(Vec::is_empty));
                             }
                         })
-                        .placement(Placement::Top)
+                        .placement(Placement::Bottom)
                         .align(Align::Start)
                         .offset(px(6.0))
                         .margin(px(8.0))
@@ -836,7 +836,7 @@ pub(crate) fn profile_dock(
                                 }
                             }
                         })
-                        .placement(Placement::Top)
+                        .placement(Placement::Bottom)
                         .align(Align::Start)
                         .offset(px(6.0))
                         .margin(px(8.0))
