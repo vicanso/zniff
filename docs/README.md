@@ -16,6 +16,10 @@ Desktop 与 `zniff --web` 共用同一份 Rust 界面（`nsh 0.6.1`）与抓包�
 
 | 文档 | 语言 | 内容摘要 |
 | :--- | :--- | :--- |
+| **[使用指南](./guide-zh.md)** | 简体中文 | 完整功能导览、安装、客户端与根证书配置（桌面 / iOS 模拟器 / 移动真机）、Charles / Whistle 迁移对照、规则速览、快捷键、数据目录与内存上限、本地构建。 |
+| **[User Guide](./guide.md)** | English | Feature tour, install, client & root CA setup, Charles / Whistle migration, rules at a glance, shortcuts, data directory, building from source. |
+| **[命令行、Web 控制台与 MCP](./cli-web-mcp-zh.md)** | 简体中文 | 运行模式（`--web` / `--relay` / `--mcp`）、全局参数、Docker 与严格域名准入、端口安全控制、MCP 配置及工具 / 资源 / 提示词。 |
+| **[CLI, Web Console & MCP](./cli-web-mcp.md)** | English | Run modes, global flags, Docker & strict allow-hosts, access control, MCP config, tools, resources and prompts. |
 | **[规则与配置指南](./rules-zh.md)** | 简体中文 | 数据目录与配置隔离、流量过滤语法、TLS 直通名单、代理域名准入控制（`allow_hosts`）、17 类转发/改写/扩展规则、`{{...}}` 动态模板变量与签名、本地 HTTP `hook`、`.proto` Schema 解码、上游代理/外部根证书与本机设置、配置预设导入导出。 |
 | **[Rules & Configuration Guide](./rules.md)** | English | Complete English counterpart of the Rules & Configuration Guide. |
 
