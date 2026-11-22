@@ -6,6 +6,8 @@
 #[allow(unused_imports)]
 use super::*;
 
+const TRAY_ICON_PNG: &[u8] = include_bytes!("../../assets/tray-icon.png");
+
 /// Localized labels for the lightweight system tray menu.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TrayMenuLabels {
@@ -46,9 +48,12 @@ pub(crate) fn tray_menu_labels(lang: Lang, running: bool, listen_addr: &str) -> 
     }
 }
 
-/// Returns the embedded zniff app icon data URI for the system tray across all platforms.
+/// Returns the tightly cropped 64×64 zniff app icon data URI for the system tray across all platforms.
 pub(crate) fn tray_icon_uri() -> String {
-    about_logo_uri()
+    static TRAY_ICON_URI: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    TRAY_ICON_URI
+        .get_or_init(|| format!("data:image/png;base64,{}", encode_base64(TRAY_ICON_PNG)))
+        .clone()
 }
 
 /// Builds a monochrome 16×16 stroke SVG data URI for tray menu items.
@@ -224,6 +229,11 @@ mod tests {
 
     #[test]
     fn tray_icon_uri_is_embedded_png_data_uri() {
+        assert!(TRAY_ICON_PNG.len() < 20_000);
+        assert!(TRAY_ICON_PNG.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert_eq!(&TRAY_ICON_PNG[16..20], &64u32.to_be_bytes());
+        assert_eq!(&TRAY_ICON_PNG[20..24], &64u32.to_be_bytes());
+
         let uri = tray_icon_uri();
         assert!(uri.starts_with("data:image/png;base64,"));
         assert!(uri.len() > 64);
