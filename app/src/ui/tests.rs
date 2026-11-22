@@ -2947,6 +2947,7 @@ fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
             watch_open: signal(false),
             about_open: signal(false),
             default_json_tree: signal(false),
+            show_tray: signal(true),
             minimize_to_tray: signal(false),
             deselect_rev: signal(0),
         };

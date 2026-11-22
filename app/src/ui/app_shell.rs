@@ -279,6 +279,7 @@ pub fn App() -> impl IntoElement {
         watch_open: signal(false),
         about_open: signal(false),
         default_json_tree: shown.default_json_tree,
+        show_tray: signal(saved.show_tray),
         minimize_to_tray: signal(saved.minimize_to_tray),
         deselect_rev: signal(0),
     };
@@ -305,6 +306,7 @@ pub fn App() -> impl IntoElement {
         install_system_tray(TrayProps {
             controls: controls.clone(),
             langs,
+            show_tray: profile_signals.show_tray,
             running,
             listen,
             use_system_proxy,
@@ -319,7 +321,10 @@ pub fn App() -> impl IntoElement {
                 );
             }),
         });
-        install_minimize_to_tray_handler(profile_signals.minimize_to_tray);
+        install_minimize_to_tray_handler(
+            profile_signals.show_tray,
+            profile_signals.minimize_to_tray,
+        );
     }
     let config_broken = signal(lock_config_error(&controls));
     let default_json_tree_effect = shown.default_json_tree;

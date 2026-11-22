@@ -300,6 +300,7 @@ fn make_profiles() -> ProfileSignals {
         watch_open: signal(false),
         about_open: signal(false),
         default_json_tree: signal(false),
+        show_tray: signal(true),
         minimize_to_tray: signal(false),
         deselect_rev: signal(0),
     }

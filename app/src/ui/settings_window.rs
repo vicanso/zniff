@@ -420,21 +420,48 @@ fn settings_general_tab(props: SettingsWindowProps) -> impl IntoElement {
         settings_card(
             "窗口与托盘",
             "Window & Tray",
-            settings_toggle_row(
-                "关闭窗口时最小化到系统托盘",
-                "Minimize to system tray when closing window",
-                move || profiles.minimize_to_tray.get(),
-                {
+            view()
+                .w_full()
+                .gap_1()
+                .child(settings_toggle_row(
+                    "启用系统托盘图标",
+                    "Show system tray icon",
+                    move || profiles.show_tray.get(),
+                    {
+                        let c = controls.clone();
+                        move || {
+                            let next = !profiles.show_tray.get();
+                            profiles.show_tray.set(next);
+                            if !next {
+                                profiles.minimize_to_tray.set(false);
+                            }
+                            save_config_or_notify(&c, PrefName::Window, |cfg| {
+                                cfg.show_tray = next;
+                                if !next {
+                                    cfg.minimize_to_tray = false;
+                                }
+                            });
+                        }
+                    },
+                ))
+                .child(when(move || profiles.show_tray.get(), {
                     let c = controls.clone();
                     move || {
-                        let next = !profiles.minimize_to_tray.get();
-                        profiles.minimize_to_tray.set(next);
-                        save_config_or_notify(&c, PrefName::Window, |cfg| {
-                            cfg.minimize_to_tray = next;
-                        });
+                        let c = c.clone();
+                        settings_toggle_row(
+                            "关闭窗口时最小化到系统托盘",
+                            "Minimize to system tray when closing window",
+                            move || profiles.minimize_to_tray.get(),
+                            move || {
+                                let next = !profiles.minimize_to_tray.get();
+                                profiles.minimize_to_tray.set(next);
+                                save_config_or_notify(&c, PrefName::Window, |cfg| {
+                                    cfg.minimize_to_tray = next;
+                                });
+                            },
+                        )
                     }
-                },
-            ),
+                },)),
         )
     )
 }

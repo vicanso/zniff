@@ -86,6 +86,7 @@ fn tray_menu_icons(running: bool) -> [String; 5] {
 pub(crate) struct TrayProps {
     pub(crate) controls: Arc<Controls>,
     pub(crate) langs: Signal<Option<Lang>>,
+    pub(crate) show_tray: Signal<bool>,
     pub(crate) running: Signal<bool>,
     pub(crate) listen: Signal<String>,
     pub(crate) use_system_proxy: Signal<bool>,
@@ -100,6 +101,7 @@ pub(crate) fn install_system_tray(props: TrayProps) {
     let TrayProps {
         controls,
         langs,
+        show_tray,
         running,
         listen,
         use_system_proxy,
@@ -107,6 +109,10 @@ pub(crate) fn install_system_tray(props: TrayProps) {
     } = props;
 
     effect(move || {
+        if !show_tray.get() {
+            set_tray(None);
+            return;
+        }
         let lang = ui_lang(langs);
         let is_running = running.get();
         let listen_addr = listen.get();
@@ -160,21 +166,24 @@ pub(crate) fn install_system_tray(props: TrayProps) {
     });
 }
 
-/// Syncs `main_window` `close_on_press` with `minimize_to_tray` and hides the window
+/// Syncs `main_window` `close_on_press` with `show_tray && minimize_to_tray` and hides the window
 /// instead of quitting when the user has opted into tray residency.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn install_minimize_to_tray_handler(minimize_to_tray: Signal<bool>) {
+pub(crate) fn install_minimize_to_tray_handler(
+    show_tray: Signal<bool>,
+    minimize_to_tray: Signal<bool>,
+) {
     use nsh_core::element::desktop::main_window;
 
     effect(move || {
-        let keep_in_tray = minimize_to_tray.get();
+        let keep_in_tray = show_tray.get() && minimize_to_tray.get();
         let mut attrs = nsh_core::desktop::WindowAttributes::default();
         attrs.close_on_press = Some(!keep_in_tray);
         main_window().set(attrs);
     });
 
     main_window().on_close_press(move |_| {
-        if minimize_to_tray.get_untracked() {
+        if show_tray.get_untracked() && minimize_to_tray.get_untracked() {
             main_window().hide();
         } else {
             main_window().close();

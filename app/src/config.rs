@@ -721,6 +721,7 @@ pub struct Config {
     /// Window mode when not normal: `""` (normal), `"maximized"`, or `"fullscreen"`.
     pub window_mode: String,
     /// When true on desktop, closing the main window hides it to the system tray instead of quitting.
+    pub show_tray: bool,
     pub minimize_to_tray: bool,
     /// Pretty is the body default unless the file says otherwise.
     pub default_pretty: bool,
@@ -880,6 +881,8 @@ struct RawConfig {
     window_display_id: Option<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     window_mode: String,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    show_tray: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     minimize_to_tray: bool,
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
@@ -1083,7 +1086,8 @@ impl From<RawConfig> for Config {
             window_y: raw.window_y,
             window_display_id: raw.window_display_id,
             window_mode: raw.window_mode,
-            minimize_to_tray: raw.minimize_to_tray,
+            show_tray: raw.show_tray,
+            minimize_to_tray: raw.show_tray && raw.minimize_to_tray,
             default_pretty: raw.default_pretty,
             default_json_tree: raw.default_json_tree,
             show_tunnel_failures,
@@ -1200,7 +1204,8 @@ impl From<Config> for RawConfig {
             window_y: config.window_y,
             window_display_id: config.window_display_id,
             window_mode: config.window_mode,
-            minimize_to_tray: config.minimize_to_tray,
+            show_tray: config.show_tray,
+            minimize_to_tray: config.show_tray && config.minimize_to_tray,
             default_pretty: config.default_pretty,
             default_json_tree: config.default_json_tree,
             show_tunnel_failures,
@@ -1273,6 +1278,7 @@ impl Default for Config {
             window_y: None,
             window_display_id: None,
             window_mode: String::new(),
+            show_tray: true,
             minimize_to_tray: false,
             default_pretty: true,
             default_json_tree: false,
@@ -2324,14 +2330,21 @@ mod tests {
     #[test]
     fn minimize_to_tray_defaults_off_and_persists() {
         let dir = Scratch::new();
-        assert!(!load(dir.path()).minimize_to_tray);
+        let initial = load(dir.path());
+        assert!(initial.show_tray);
+        assert!(!initial.minimize_to_tray);
         update(dir.path(), |config| config.minimize_to_tray = true).unwrap();
         let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
         assert!(text.contains("minimize_to_tray = true"), "{text}");
+        assert!(!text.contains("show_tray"), "{text}");
         assert!(load(dir.path()).minimize_to_tray);
-        update(dir.path(), |config| config.minimize_to_tray = false).unwrap();
+        update(dir.path(), |config| config.show_tray = false).unwrap();
         let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(text.contains("show_tray = false"), "{text}");
         assert!(!text.contains("minimize_to_tray"), "{text}");
+        let disabled = load(dir.path());
+        assert!(!disabled.show_tray);
+        assert!(!disabled.minimize_to_tray);
     }
 
     #[test]

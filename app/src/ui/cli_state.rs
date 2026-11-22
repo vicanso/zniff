@@ -344,6 +344,7 @@ pub(crate) struct ProfileSignals {
     pub(crate) watch_open: Signal<bool>,
     pub(crate) about_open: Signal<bool>,
     pub(crate) default_json_tree: Signal<bool>,
+    pub(crate) show_tray: Signal<bool>,
     pub(crate) minimize_to_tray: Signal<bool>,
     pub(crate) deselect_rev: Signal<u64>,
 }
