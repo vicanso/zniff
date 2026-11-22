@@ -106,6 +106,7 @@ pub(crate) fn toolbar(
     let clear_unpinned = Rc::new(clear_unpinned);
     let remove = Rc::new(remove);
     let preset_controls = import_controls.clone();
+    let filter_controls = import_controls.clone();
     let rules_controls = import_controls.clone();
     let network_controls = import_controls.clone();
     let layout_controls = import_controls.clone();
@@ -447,7 +448,11 @@ pub(crate) fn toolbar(
         compose,
         seq_builder,
     ))
-    .child(saved_filter_menu(profiles))
+    .child(saved_filter_menu(
+        profiles,
+        filter_controls,
+        shared_rule_draft,
+    ))
     .child(rules_menu_popover(
         profiles,
         rules_controls,

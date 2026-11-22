@@ -511,7 +511,7 @@ fn a1_filter_rules_and_preset_popovers_mount_independently_zh_en() {
                     .flex_row()
                     .items_center()
                     .gap_2()
-                    .child(saved_filter_menu(profiles))
+                    .child(saved_filter_menu(profiles, controls.clone(), draft))
                     .child(rules_menu_popover(profiles, controls.clone(), draft))
                     .child(preset_pill_popover(profiles, controls, draft)),
             )
@@ -1571,5 +1571,106 @@ fn allow_hosts_denied_summary_unlocked_and_locked_zh_en() {
             !tree_locked.has_text(t(lang, "+ 允许", "+ Allow")),
             "CLI-locked mode must hide +Allow button in {lang:?}"
         );
+    }
+}
+
+#[test]
+fn preset_sync_bar_surfaces_unsaved_state_and_opens_presets_zh_en() {
+    #[component]
+    fn SyncHarness() -> impl IntoElement {
+        let lang = TEST_LANG.with(Cell::get);
+        provide_base_contexts(lang);
+        let controls = make_controls("preset-sync-bar");
+        let profiles = make_profiles();
+        let draft = make_rule_draft();
+        profiles.saved.set(vec![config::SavedProfile {
+            name: "test".into(),
+            filter: "host:api.example.com".into(),
+            bypass_hosts: String::new(),
+            rules: String::new(),
+            upstream_proxy: String::new(),
+            rules_enabled: true,
+            breaks_enabled: true,
+            show_tunnel_failures: false,
+        }]);
+        profiles.name.set("test".into());
+        profiles.filter.set("host:api.example.com".into());
+        profiles.filter_panel_open.set(true);
+        let step = signal(0_u8);
+
+        view()
+            .w(px(1200.0))
+            .h(px(760.0))
+            .flex_col()
+            .child(
+                view()
+                    .w_full()
+                    .h(px(42.0))
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(saved_filter_menu(profiles, controls.clone(), draft))
+                    .child(rules_menu_popover(profiles, controls.clone(), draft))
+                    .child(preset_pill_popover(profiles, controls, draft)),
+            )
+            .child(
+                view()
+                    .on_press(move || {
+                        let next = step.get() + 1;
+                        step.set(next);
+                        match next {
+                            1 => {
+                                profiles.filter.set("host:api.example.com path:/v2".into());
+                            }
+                            2 => {
+                                profiles.filter_panel_open.set(false);
+                                profiles.panel_open.set(true);
+                            }
+                            _ => {
+                                profiles.panel_open.set(false);
+                                profiles.filter_panel_open.set(true);
+                                profiles.name.set(String::new());
+                            }
+                        }
+                    })
+                    .child(text("SYNC_STEP")),
+            )
+            .child(text(move || {
+                format!(
+                    "OPEN:f={},r={},p={}",
+                    profiles.filter_panel_open.get(),
+                    profiles.panel_open.get(),
+                    profiles.preset_panel_open.get()
+                )
+            }))
+    }
+
+    for lang in [Lang::Zh, Lang::En] {
+        TEST_LANG.set(lang);
+        let (mut core, mut tree) = mount::<SyncHarness>(Size::new(px(1200.0), px(760.0)));
+
+        // Step 0: Active preset "test" is clean; sync footer stays hidden.
+        assert!(!tree.has_text(t(lang, "更新预设", "Update preset")));
+        assert!(!tree.has_text(t(lang, "存为预设…", "Save as preset…")));
+
+        // Step 1: Modify filter -> Filter popover surfaces unsaved preset status and Update button.
+        assert!(tree.press_text(&mut core, "SYNC_STEP"));
+        assert!(tree.has_text(t(
+            lang,
+            "预设「test」有未保存修改",
+            "Preset \"test\" has unsaved changes",
+        )));
+        assert!(tree.has_text(t(lang, "更新预设", "Update preset")));
+
+        // Step 2: Open Rules popover -> same quick-update bar appears inside Rules popover.
+        assert!(tree.press_text(&mut core, "SYNC_STEP"));
+        assert!(tree.has_text(t(lang, "规则与代理配置", "Rules & Proxy Config")));
+        assert!(tree.has_text(t(lang, "更新预设", "Update preset")));
+
+        // Step 3: Clear preset name with active filter -> shows "Save as preset…", clicking opens Presets.
+        assert!(tree.press_text(&mut core, "SYNC_STEP"));
+        assert!(tree.has_text(t(lang, "存为预设…", "Save as preset…")));
+        assert!(tree.press_text(&mut core, t(lang, "存为预设…", "Save as preset…")));
+        assert!(tree.has_text("OPEN:f=false,r=false,p=true"));
     }
 }

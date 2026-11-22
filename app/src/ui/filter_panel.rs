@@ -3,7 +3,11 @@ use super::*;
 
 pub(crate) const SAVED_RULE_CAP: usize = 16;
 
-pub(crate) fn saved_filter_menu(profiles: ProfileSignals) -> impl IntoElement {
+pub(crate) fn saved_filter_menu(
+    profiles: ProfileSignals,
+    controls: Arc<Controls>,
+    draft: QuickRuleDraftSignals,
+) -> impl IntoElement {
     let filter = profiles.filter;
     let filter_enabled = profiles.filter_enabled;
     let open = profiles.filter_panel_open;
@@ -94,16 +98,21 @@ pub(crate) fn saved_filter_menu(profiles: ProfileSignals) -> impl IntoElement {
                     }
                 })),
         )
-        .child(saved_filter_panel(profiles))
+        .child(saved_filter_panel(profiles, controls, draft))
 }
 
-pub(crate) fn saved_filter_panel(profiles: ProfileSignals) -> impl IntoElement {
+pub(crate) fn saved_filter_panel(
+    profiles: ProfileSignals,
+    controls: Arc<Controls>,
+    draft: QuickRuleDraftSignals,
+) -> impl IntoElement {
     let filter = profiles.filter;
     let field = filter;
     let reset_filter = filter;
     let host_field = signal(extract_host_or(&filter.get_untracked()));
     let path_field = signal(extract_path_or(&filter.get_untracked()));
     let exclude_field = signal(extract_exclude_or(&filter.get_untracked()));
+    let show_sync_bar = computed(move || live_preset_save_state(profiles, draft).show_bar());
     effect(move || {
         let current = filter.get();
         if extract_host_or(&set_host_or("", &host_field.get_untracked()))
@@ -138,7 +147,15 @@ pub(crate) fn saved_filter_panel(profiles: ProfileSignals) -> impl IntoElement {
             scroll()
                 .w_full()
                 .max_h(move || {
-                    px((adaptive_filter_panel_max_height(window().height.0) - 2.0).max(160.0))
+                    let reserve = if show_sync_bar.get() {
+                        PRESET_SYNC_BAR_HEIGHT
+                    } else {
+                        0.0
+                    };
+                    px(
+                        (adaptive_filter_panel_max_height(window().height.0) - 2.0 - reserve)
+                            .max(120.0),
+                    )
                 })
                 .child(
                     view()
@@ -305,6 +322,7 @@ pub(crate) fn saved_filter_panel(profiles: ProfileSignals) -> impl IntoElement {
                         )),
                 ),
         )
+        .child(preset_sync_bar(profiles, draft, controls))
 }
 
 pub(crate) fn matched_saved_profile(

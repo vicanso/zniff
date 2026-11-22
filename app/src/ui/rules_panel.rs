@@ -62,13 +62,25 @@ pub(crate) fn format_rules_pill_tooltip(
 }
 
 /// Formats the full hover tooltip for the top-bar preset pill.
-pub(crate) fn format_preset_pill_tooltip(active_name: Option<&str>, lang: Lang) -> String {
+pub(crate) fn format_preset_pill_tooltip(
+    active_name: Option<&str>,
+    dirty: bool,
+    lang: Lang,
+) -> String {
     let hint = t(
         lang,
         "切换或保存配置预设（包含过滤与规则）",
         "Switch or save presets (filter + rules)",
     );
     match active_name.map(str::trim).filter(|name| !name.is_empty()) {
+        Some(name) if dirty => match lang {
+            Lang::Zh => format!(
+                "当前预设: {name}（有未保存修改）\n点击打开预设面板保存，或在过滤/规则面板底部直接更新"
+            ),
+            Lang::En => format!(
+                "Active preset: {name} (unsaved changes)\nOpen Presets to save, or update from Filter/Rules"
+            ),
+        },
         Some(name) => {
             let prefix = t(lang, "当前预设: ", "Active preset: ");
             format!("{prefix}{name}\n{hint}")
@@ -297,7 +309,9 @@ fn rules_panel(
     let rules_clear_controls = controls.clone();
     let templates_controls = controls.clone();
     let upstream_controls = controls.clone();
+    let sync_controls = controls.clone();
     let tunnel_controls = controls;
+    let show_sync_bar = computed(move || live_preset_save_state(profiles, draft).show_bar());
 
     view()
         .w(move || px((window().width.0 - 32.0).clamp(480.0, 680.0)))
@@ -314,7 +328,15 @@ fn rules_panel(
             scroll()
                 .w_full()
                 .max_h(move || {
-                    px((adaptive_filter_panel_max_height(window().height.0) - 2.0).max(160.0))
+                    let reserve = if show_sync_bar.get() {
+                        PRESET_SYNC_BAR_HEIGHT
+                    } else {
+                        0.0
+                    };
+                    px(
+                        (adaptive_filter_panel_max_height(window().height.0) - 2.0 - reserve)
+                            .max(120.0),
+                    )
                 })
                 .child(
                     uncull_nested_scroll(view())
@@ -463,6 +485,7 @@ fn rules_panel(
                         )),
                 ),
         )
+        .child(preset_sync_bar(profiles, draft, sync_controls))
 }
 
 fn rules_panel_header(
@@ -628,6 +651,8 @@ pub(crate) fn preset_pill_popover(
         )
     };
     let is_active = move || open.get() || active_name().is_some();
+    let save_state = computed(move || live_preset_save_state(profiles, draft));
+    let is_dirty = move || save_state.with(PresetSaveState::is_dirty);
 
     popover()
         .open(move || Some(open.get()))
@@ -660,7 +685,9 @@ pub(crate) fn preset_pill_popover(
                 .cursor(Cursor::Pointer)
                 .border_1()
                 .border_color(move || {
-                    if is_active() {
+                    if is_dirty() && !open.get() {
+                        status_warn_fg()
+                    } else if is_active() {
                         accent_blue_border()
                     } else {
                         border_control()
@@ -697,6 +724,7 @@ pub(crate) fn preset_pill_popover(
                                 text(move || -> SharedString {
                                     format_preset_pill_tooltip(
                                         active_name().as_deref(),
+                                        is_dirty(),
                                         ui_lang(langs),
                                     )
                                     .into()
@@ -706,21 +734,34 @@ pub(crate) fn preset_pill_popover(
                             ),
                     ),
                 )
-                .child(glyph_px(
-                    10.5,
+                .child(when(is_dirty, move || {
+                    view()
+                        .w(px(6.0))
+                        .h(px(6.0))
+                        .rounded_full()
+                        .flex_shrink_0()
+                        .bg(status_warn_fg())
+                }))
+                .child(when(
+                    move || !is_dirty(),
                     move || {
-                        if active_name().is_some() {
-                            Glyph::Check
-                        } else {
-                            Glyph::Badge
-                        }
-                    },
-                    move || {
-                        color(if is_active() {
-                            accent_blue_text()
-                        } else {
-                            fg_muted()
-                        })
+                        glyph_px(
+                            10.5,
+                            move || {
+                                if active_name().is_some() {
+                                    Glyph::Check
+                                } else {
+                                    Glyph::Badge
+                                }
+                            },
+                            move || {
+                                color(if is_active() {
+                                    accent_blue_text()
+                                } else {
+                                    fg_muted()
+                                })
+                            },
+                        )
                     },
                 ))
                 .child(

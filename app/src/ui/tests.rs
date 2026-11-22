@@ -1645,6 +1645,7 @@ fn auto_height_popover_scroll_containers_never_use_flex_1() {
         include_str!("machine_settings.rs"),
         include_str!("more_menu.rs"),
         include_str!("more_menu_rows.rs"),
+        include_str!("preset_sync.rs"),
         include_str!("profile_dock.rs"),
         include_str!("profile_io.rs"),
         include_str!("profile_store.rs"),
@@ -5370,18 +5371,26 @@ fn toolbar_pill_tooltips_show_full_untruncated_content() {
     assert!(en_paused_with_secondary.contains("Secondary filter: app:curl"));
     assert!(en_paused_with_secondary.ends_with("Primary filter paused · Click to enable"));
 
-    // Preset pill: full preset name preserved on hover
+    // Preset pill: full preset name preserved on hover, plus dirty indicator copy
     let long_preset = "production-baidu-search-checkout-debug-profile";
     assert!(
-        super::format_preset_pill_tooltip(Some(long_preset), Lang::Zh)
+        super::format_preset_pill_tooltip(Some(long_preset), false, Lang::Zh)
             .starts_with(&format!("当前预设: {long_preset}\n"))
     );
     assert!(
-        super::format_preset_pill_tooltip(Some(long_preset), Lang::En)
+        super::format_preset_pill_tooltip(Some(long_preset), false, Lang::En)
             .starts_with(&format!("Active preset: {long_preset}\n"))
     );
+    assert!(
+        super::format_preset_pill_tooltip(Some(long_preset), true, Lang::Zh)
+            .contains("有未保存修改")
+    );
+    assert!(
+        super::format_preset_pill_tooltip(Some(long_preset), true, Lang::En)
+            .contains("(unsaved changes)")
+    );
     assert_eq!(
-        super::format_preset_pill_tooltip(None, Lang::En),
+        super::format_preset_pill_tooltip(None, false, Lang::En),
         "Switch or save presets (filter + rules)"
     );
 

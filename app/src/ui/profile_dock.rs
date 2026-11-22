@@ -1396,65 +1396,20 @@ pub(crate) fn profile_dock(
                                 return;
                             }
                             dropdown_open.set(false);
-                            // A row the user actually filled is part of this
-                            // setup. An untouched row must not become `*`.
-                            let host = draft_host.get();
-                            let path = draft_path.get();
-                            let op = draft_op.get();
-                            let from = draft_from.get();
-                            let to = draft_to.get();
-                            let kind_now = draft_kind.get();
-                            let current = rules_text.get();
-                            let rules_now = draft_rules_with_op(
-                                &current,
-                                &host,
-                                &path,
-                                &op,
-                                &from,
-                                &to,
-                                draft_modes.mode_for(kind_now),
-                                kind_now,
+                            commit_and_save_profile(
+                                profiles,
+                                QuickRuleDraftSignals {
+                                    kind: draft_kind,
+                                    host: draft_host,
+                                    path: draft_path,
+                                    op: draft_op,
+                                    from: draft_from,
+                                    to: draft_to,
+                                    modes: draft_modes,
+                                },
+                                None,
+                                &save_controls,
                             );
-                            if rules_now != current {
-                                rules_text.set(rules_now.clone());
-                                save_controls.hub.set_rules(&rules_now);
-                                draft_host.set(String::new());
-                                draft_path.set(String::new());
-                                draft_op.set(String::new());
-                                draft_from.set(String::new());
-                                draft_to.set(String::new());
-                            }
-                            let saved_name = resolve_profile_name(
-                                &rule_name.get(),
-                                filter.get().trim(),
-                                rules_now.trim(),
-                            );
-                            rule_name.set(saved_name.clone());
-                            match store_saved_profile(
-                                &saved_name,
-                                &filter.get(),
-                                &bypass_text.get(),
-                                &rules_now,
-                                &upstream_text.get(),
-                                rules_on.get(),
-                                breaks_on.get(),
-                                show_tunnels.get(),
-                                saved,
-                                history,
-                            ) {
-                                Ok(()) => {
-                                    set_status(&save_controls, StatusMsg::ProfileSaved(saved_name));
-                                }
-                                Err(err) => {
-                                    set_status(
-                                        &save_controls,
-                                        StatusMsg::PrefUnsaved {
-                                            name: PrefName::Profiles,
-                                            err: err.to_string(),
-                                        },
-                                    );
-                                }
-                            }
                         })
                         .child(
                             text(tr("保存", "Save"))
