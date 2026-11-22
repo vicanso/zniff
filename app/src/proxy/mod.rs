@@ -213,6 +213,10 @@ async fn handle_conn(socket: TcpStream, hub: Arc<Hub>) -> Result<()> {
             initial_label = format!("{base_ip} ({app})");
         } else {
             lookup_port = Some(addr.port());
+            // Hold off on populating bare loopback IP while async process lookup is in flight
+            // so the Apps sidebar does not flash a transient `127.0.0.1` row on every request.
+            #[cfg(not(test))]
+            initial_label.clear();
         }
     }
     let ctx = Arc::new(ClientConnCtx {
@@ -225,23 +229,26 @@ async fn handle_conn(socket: TcpStream, hub: Arc<Hub>) -> Result<()> {
         let hub_bg = Arc::clone(&hub);
         let ip_bg = base_ip;
         tokio::task::spawn_blocking(move || {
-            if let Some(app) = resolve_local_process_name(port) {
-                store_cached_local_app(port, app.clone());
-                let full = format!("{ip_bg} ({app})");
-                *ctx_bg.label.lock().unwrap_or_else(|e| e.into_inner()) = full.clone();
-                let ids = ctx_bg
-                    .opened_ids
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clone();
-                if !ids.is_empty() {
-                    hub_bg.with_session(|session| {
-                        for id in ids {
-                            session.set_client_ip(id, full.clone());
-                        }
-                    });
-                    hub_bg.touch();
+            let resolved = match resolve_local_process_name(port) {
+                Some(app) => {
+                    store_cached_local_app(port, app.clone());
+                    format!("{ip_bg} ({app})")
                 }
+                None => ip_bg,
+            };
+            *ctx_bg.label.lock().unwrap_or_else(|e| e.into_inner()) = resolved.clone();
+            let ids = ctx_bg
+                .opened_ids
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            if !ids.is_empty() {
+                hub_bg.with_session(|session| {
+                    for id in ids {
+                        session.set_client_ip(id, resolved.clone());
+                    }
+                });
+                hub_bg.touch();
             }
         });
     }
