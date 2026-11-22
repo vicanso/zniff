@@ -1,3 +1,13 @@
+## [0.5.1] - 2026-11-22
+
+### 🚀 Features
+
+- *(desktop)* Set zniff tray icon, menu item icons, and Clear Traffic action
+
+### 🐛 Bug Fixes
+
+- *(ui)* Allow copying response/request header and query values (fixes #30)
+- *(docker)* Copy app/benches so Cargo manifest parses large_session bench
 ## [0.5.0] - 2026-11-22
 
 ### 🚀 Features
