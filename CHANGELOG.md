@@ -1,3 +1,66 @@
+## [0.5.0] - 2026-11-22
+
+### 🚀 Features
+
+- *(ui)* Add actionable repair buttons for ERR flows (C1)
+- *(ui)* Add actionable empty-filter state with token diagnosis (D1)
+- *(ui)* Add 5-second undo toast for clear session (D5)
+- *(ui)* Add built-in demo HAR and load sample traffic button (I3)
+- *(ui)* Add keyboard shortcuts cheatsheet modal and command palette shortcuts (D4)
+- *(ui)* Auto-scroll selected row into viewport on keyboard navigation (D3)
+- *(ui)* Add theme mode, UI/mono font zoom, and CJK mono fallback (D6, D7, D8)
+- *(ui)* Add filter prefix/value autocomplete and inline syntax error highlight (D2)
+- *(ui)* Upgrade onboarding card with live 4-step setup checklist (C3)
+- *(rules)* Record per-flow rule hit lines and display badges in list/detail (B1)
+- *(ui)* Add contextual quick-rule actions from flow rows and detail menu (A4)
+- *(ui)* Add batch TLS handshake failure banner at top of flow list (C2)
+- *(rules)* Add per-line session hit counts and rule: filter token (B2)
+- *(diagnostics)* Add redacted diagnostics bundle export (C4)
+- *(ui)* Add tabbed Settings window and slim More menu into 3 groups (A2, A3)
+- *(rules)* Add pre-save rule dry-run preview against current session (B3)
+- *(ui)* Split Filter and Rules popovers and unify preset pill (A1)
+- *(allow-hosts)* Track and display denied request summary with quick-allow
+- *(ui)* Add built-in rule template library in rules panel (E4)
+- *(mobile)* Add Android 7+ network_security_config and cert guidance (G2)
+- *(copy)* Add HTTPie, PowerShell, axios, OkHttp, and URLSession copy formats (F1)
+- *(mobile)* Add iOS certificate verification checklist and HTTPS probe (G3)
+- *(ui)* Add network condition presets in toolbar and command palette (E3)
+- *(ai)* Add redacted 'Copy for AI' Markdown diagnostic summary (F3)
+- *(desktop)* Add system tray menu and opt-in minimize-to-tray (G1, ADR-23)
+- *(export)* Add Postman v2.1, Bruno (.bru), and .http API collection exporters (F2)
+- *(ui)* Add inline response mock editor with auto map-local rules (E1)
+- *(session)* Add timeline session markers and mark: filter (E5)
+- *(ui)* Auto-diff against source flow after replay and edit-resend (E2)
+- *(diagnostics)* Add cold-start and auto-capture recovery timing instrumentation (H3)
+- *(watch)* Add live watch alert rules, footer badge popover, and toast notifications (E6)
+- *(mcp)* Add wait_for_flow, mock_flow, diff_flows tools and resources/prompts (F4)
+- *(rules)* Add conditional breakpoints with header and body matching (E8, ADR-21)
+- *(a11y)* Add keyboard focus rings and WCAG 2.1 AA theme contrast audit (H4)
+- *(ui)* Open imported HAR/chlsj sessions as read-only tabs with cross-tab diff (E10)
+
+### 🐛 Bug Fixes
+
+- *(ui)* Replace reserved mod+m shortcut with mod+shift+m
+- *(ui)* Ellipsize toolbar filter pill and show full filter on hover
+- *(test)* Handle Windows CRLF line endings in on_key audit test
+
+### 📚 Documentation
+
+- Add v0.5 usability roadmap and ADR-17..23 decisions
+- *(packaging)* Add Charles/Whistle migration guide and package manager templates (I2, I1)
+- Mark v0.4.x usability optimizations as completed
+- Mark v0.5 core usability optimizations as completed
+- Mark remaining 19 v0.5.x features and ADR-21..23 as completed
+
+### ⚡ Performance
+
+- *(bench)* Add 10k/100k large-session benchmark suite and make bench target (H1)
+- *(session)* Optimize facets, stamp-based row projection, and adaptive refresh throttling (H2)
+
+### 🧪 Testing
+
+- *(e2e)* Add comprehensive v0.5 real-process E2E functional test script
+- *(ui)* Add headless functional UI test suite for v0.4.x & v0.5.x features
 ## [0.4.0] - 2026-11-21
 
 ### 🚀 Features
