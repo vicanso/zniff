@@ -114,6 +114,11 @@ pub enum StatusMsg {
         tool: String,
     },
     CopiedUrl,
+    CopiedHeaderValue(String),
+    CopiedHeaders {
+        zh: &'static str,
+        en: &'static str,
+    },
     CopiedCurl {
         binary: bool,
     },
@@ -447,6 +452,14 @@ impl StatusMsg {
                 Lang::En => format!("{tool} CA unavailable; fell back to zniff root CA"),
             },
             Self::CopiedUrl => t(lang, "已复制 URL", "Copied the URL").into(),
+            Self::CopiedHeaderValue(name) => match lang {
+                Lang::Zh => format!("已复制 {name}"),
+                Lang::En => format!("Copied {name}"),
+            },
+            Self::CopiedHeaders { zh, en } => match lang {
+                Lang::Zh => format!("已复制全部{zh}"),
+                Lang::En => format!("Copied all {}", en.to_lowercase()),
+            },
             Self::CopiedCurl { binary } => {
                 if *binary {
                     t(
@@ -877,6 +890,8 @@ impl StatusMsg {
             | Self::Imported { .. }
             | Self::Saved(_)
             | Self::CopiedUrl
+            | Self::CopiedHeaderValue(_)
+            | Self::CopiedHeaders { .. }
             | Self::CopiedCurl { .. }
             | Self::CopiedBody { .. }
             | Self::CopiedEnv
@@ -977,6 +992,8 @@ impl StatusMsg {
             }
             Self::ProfileRestored(_) => t(lang, "已恢复历史版本", "History Restored"),
             Self::CopiedUrl
+            | Self::CopiedHeaderValue(_)
+            | Self::CopiedHeaders { .. }
             | Self::CopiedCurl { .. }
             | Self::CopiedBody { .. }
             | Self::CopiedEnv

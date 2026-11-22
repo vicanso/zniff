@@ -798,15 +798,16 @@ fn response_cards(
                 }
             },
         ))
-        .child(header_section(
-            "响应头",
-            "Response headers",
-            shown.response_headers,
-            shown.res_headers_loading,
-            shown.pane_width,
+        .child(header_section(HeaderSectionProps {
+            zh: "响应头",
+            en: "Response headers",
+            lines: shown.response_headers,
+            loading: shown.res_headers_loading,
+            pane_width: shown.pane_width,
             folded,
-            FOLD_RES_HEADERS,
-        ))
+            bit: FOLD_RES_HEADERS,
+            controls: controls.clone(),
+        }))
 }
 
 fn request_cards(
@@ -853,29 +854,31 @@ fn request_cards(
                 }
             },
         ))
-        .child(when(
-            move || !shown.query.with(Vec::is_empty),
+        .child(when(move || !shown.query.with(Vec::is_empty), {
+            let controls = controls.clone();
             move || {
-                header_section(
-                    "查询参数",
-                    "Query",
-                    shown.query,
-                    no_loading,
-                    shown.pane_width,
+                header_section(HeaderSectionProps {
+                    zh: "查询参数",
+                    en: "Query",
+                    lines: shown.query,
+                    loading: no_loading,
+                    pane_width: shown.pane_width,
                     folded,
-                    FOLD_QUERY,
-                )
-            },
-        ))
-        .child(header_section(
-            "请求头",
-            "Request headers",
-            shown.request_headers,
-            shown.req_headers_loading,
-            shown.pane_width,
+                    bit: FOLD_QUERY,
+                    controls: controls.clone(),
+                })
+            }
+        }))
+        .child(header_section(HeaderSectionProps {
+            zh: "请求头",
+            en: "Request headers",
+            lines: shown.request_headers,
+            loading: shown.req_headers_loading,
+            pane_width: shown.pane_width,
             folded,
-            FOLD_REQ_HEADERS,
-        ))
+            bit: FOLD_REQ_HEADERS,
+            controls: controls.clone(),
+        }))
 }
 
 #[allow(clippy::too_many_arguments)]

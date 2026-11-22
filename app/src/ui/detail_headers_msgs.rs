@@ -154,15 +154,81 @@ pub(crate) fn detail_loading_box() -> impl IntoElement {
         )
 }
 
-pub(crate) fn header_section(
-    zh: &'static str,
-    en: &'static str,
-    lines: Signal<Vec<HeaderLine>>,
-    loading: Signal<bool>,
-    pane_width: Signal<f32>,
-    folded: Signal<u8>,
-    bit: u8,
+pub(crate) struct HeaderSectionProps {
+    pub(crate) zh: &'static str,
+    pub(crate) en: &'static str,
+    pub(crate) lines: Signal<Vec<HeaderLine>>,
+    pub(crate) loading: Signal<bool>,
+    pub(crate) pane_width: Signal<f32>,
+    pub(crate) folded: Signal<u8>,
+    pub(crate) bit: u8,
+    pub(crate) controls: Arc<Controls>,
+}
+
+fn format_header_lines_for_copy(lines: &[HeaderLine], is_query: bool) -> String {
+    lines
+        .iter()
+        .map(|line| {
+            if is_query {
+                format!("{}={}", line.name, line.value)
+            } else {
+                format!("{}: {}", line.name, line.value)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn row_copy_button(
+    zh_label: &'static str,
+    en_label: &'static str,
+    zh_tip: &'static str,
+    en_tip: &'static str,
+    on_copy: impl Fn() + 'static,
 ) -> impl IntoElement {
+    view()
+        .w(px(22.0))
+        .h(px(22.0))
+        .flex_shrink_0()
+        .flex_row()
+        .items_center()
+        .justify_center()
+        .rounded(px(5.0))
+        .border_1()
+        .border_color(border_control())
+        .bg(bg_control())
+        .hover(|style| style.bg(bg_control_hover()))
+        .active(|style| style.opacity(0.75))
+        .cursor(Cursor::Pointer)
+        .label(tr(zh_label, en_label))
+        .tooltip(label_tip(zh_tip, en_tip))
+        .on_press(on_copy)
+        .child(
+            canvas(move || {
+                Painter::new()
+                    .line_width(1.3)
+                    .stroke_color(color(fg_secondary()))
+                    .stroke_svg("M4.5 4.5 H10.5 V11.0 H4.5 Z M2.5 8.5 H2.0 V2.0 H8.0 V3.0")
+            })
+            .w(px(12.5))
+            .h(px(12.5)),
+        )
+}
+
+pub(crate) fn header_section(props: HeaderSectionProps) -> impl IntoElement {
+    let HeaderSectionProps {
+        zh,
+        en,
+        lines,
+        loading,
+        pane_width,
+        folded,
+        bit,
+        controls,
+    } = props;
+    let is_query = bit == FOLD_QUERY;
+    let copy_all_controls = controls.clone();
+    let row_controls = controls;
     view()
         .rounded(px(10.0))
         .border_1()
@@ -174,7 +240,8 @@ pub(crate) fn header_section(
                 .flex_shrink_0()
                 .flex_row()
                 .items_center()
-                .gap_1p5()
+                .justify_between()
+                .gap_2()
                 .px_3p5()
                 .py_2()
                 .border_b(move || {
@@ -185,48 +252,78 @@ pub(crate) fn header_section(
                     }
                 })
                 .border_b_color(border_subtle())
-                .hover(|style| style.bg(bg_control_hover()))
-                .active(|style| style.opacity(0.85))
-                .cursor(Cursor::Pointer)
-                .on_press(move || toggle_card(folded, bit))
-                .child(fold_mark(folded, bit))
-                .child(section_title(tr(zh, en)))
                 .child(
                     view()
-                        .px_1p5()
-                        .py(px(1.0))
-                        .rounded(px(4.0))
-                        .bg(bg_control())
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .flex_row()
+                        .items_center()
+                        .gap_1p5()
+                        .rounded(px(5.0))
+                        .hover(|style| style.bg(bg_control_hover()))
+                        .active(|style| style.opacity(0.85))
+                        .cursor(Cursor::Pointer)
+                        .on_press(move || toggle_card(folded, bit))
+                        .child(fold_mark(folded, bit))
+                        .child(section_title(tr(zh, en)))
                         .child(
-                            mono(move || {
-                                if loading.get() {
-                                    "…".to_string()
-                                } else {
-                                    format!("{}", lines.with(Vec::len))
-                                }
-                            })
-                            .tabular_nums()
-                            .text_size(px(11.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(fg_muted()),
+                            view()
+                                .px_1p5()
+                                .py(px(1.0))
+                                .rounded(px(4.0))
+                                .bg(bg_control())
+                                .child(
+                                    mono(move || {
+                                        if loading.get() {
+                                            "…".to_string()
+                                        } else {
+                                            format!("{}", lines.with(Vec::len))
+                                        }
+                                    })
+                                    .tabular_nums()
+                                    .text_size(px(11.0))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(fg_muted()),
+                                ),
                         ),
-                ),
+                )
+                .child(when(
+                    move || {
+                        !card_folded(folded, bit) && !loading.get() && !lines.with(Vec::is_empty)
+                    },
+                    move || {
+                        let controls = copy_all_controls.clone();
+                        detail_button(tr("复制全部", "Copy all"), move || {
+                            let payload =
+                                lines.with(|items| format_header_lines_for_copy(items, is_query));
+                            if !payload.is_empty() {
+                                set_clipboard(payload);
+                                set_status(&controls, StatusMsg::CopiedHeaders { zh, en });
+                            }
+                        })
+                    },
+                )),
         )
         .child(when(
             move || !card_folded(folded, bit),
             move || {
+                let row_controls = row_controls.clone();
                 when(move || loading.get(), detail_loading_row).otherwise(move || {
+                    let row_controls = row_controls.clone();
                     when(
                         move || lines.with(Vec::is_empty),
                         || view().px_3p5().py_2p5().child(muted_line(tr("无", "None"))),
                     )
                     .otherwise(move || {
+                        let row_controls = row_controls.clone();
                         each(
                             lines,
                             |line| line.key,
                             move |line, index| {
+                                let controls = row_controls.clone();
                                 view()
                                     .flex_row()
+                                    .items_start()
                                     .gap_3()
                                     .px_3p5()
                                     .py_2()
@@ -243,7 +340,6 @@ pub(crate) fn header_section(
                                         },
                                     )
                                     .border_t_color(border_subtle())
-                                    .on_press_up(dismiss_keyboard)
                                     .child(
                                         mono(move || line.with(|line| line.name.clone()))
                                             .w(move || px(kv_key_width(pane_width.get())))
@@ -256,6 +352,21 @@ pub(crate) fn header_section(
                                             .text_color(fg_muted()),
                                     )
                                     .child(kv_value_cell(line))
+                                    .child(row_copy_button(
+                                        "复制值",
+                                        "Copy value",
+                                        "复制此项的值",
+                                        "Copy value",
+                                        move || {
+                                            let (name, value) =
+                                                line.with(|l| (l.name.clone(), l.value.clone()));
+                                            set_clipboard(value);
+                                            set_status(
+                                                &controls,
+                                                StatusMsg::CopiedHeaderValue(name),
+                                            );
+                                        },
+                                    ))
                             },
                         )
                     })
@@ -662,7 +773,6 @@ pub(crate) fn messages_section(
                                         if index.get() > 0 { px(1.0) } else { px(0.0) }
                                     })
                                     .border_t_color(border_subtle())
-                                    .on_press_up(dismiss_keyboard)
                                     .child(
                                         mono(move || line.with(|line| line.name.clone()))
                                             .w(move || px(kv_key_width(pane_width.get())))
@@ -863,4 +973,59 @@ pub(crate) fn diff_key(
                 .text_size(px(11.0))
                 .text_color(fg_muted()),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_header_lines_for_copy_supports_headers_and_query() {
+        let lines = vec![
+            HeaderLine {
+                key: 1,
+                name: "content-type".into(),
+                value: "application/json".into(),
+                hint: None,
+            },
+            HeaderLine {
+                key: 2,
+                name: "x-trace-id".into(),
+                value: "abc-123".into(),
+                hint: None,
+            },
+        ];
+        assert_eq!(
+            format_header_lines_for_copy(&lines, false),
+            "content-type: application/json\nx-trace-id: abc-123"
+        );
+        assert_eq!(
+            format_header_lines_for_copy(&lines, true),
+            "content-type=application/json\nx-trace-id=abc-123"
+        );
+        assert_eq!(
+            StatusMsg::CopiedHeaderValue("x-trace-id".into()).text(Lang::Zh),
+            "已复制 x-trace-id"
+        );
+        assert_eq!(
+            StatusMsg::CopiedHeaderValue("x-trace-id".into()).text(Lang::En),
+            "Copied x-trace-id"
+        );
+        assert_eq!(
+            StatusMsg::CopiedHeaders {
+                zh: "响应头",
+                en: "Response headers"
+            }
+            .text(Lang::Zh),
+            "已复制全部响应头"
+        );
+        assert_eq!(
+            StatusMsg::CopiedHeaders {
+                zh: "响应头",
+                en: "Response headers"
+            }
+            .text(Lang::En),
+            "Copied all response headers"
+        );
+    }
 }
