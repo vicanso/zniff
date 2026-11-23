@@ -56,6 +56,143 @@ static NSArray<NSString *> *zniff_parse_targets_json(const char *targets_json) {
     return out;
 }
 
+static NSDictionary *zniff_read_app_plist(NSString *appPath) {
+    if (appPath.length == 0) {
+        return nil;
+    }
+    NSArray<NSString *> *candidates = @[
+        [appPath stringByAppendingPathComponent:@"Contents/Info.plist"],
+        [appPath stringByAppendingPathComponent:@"WrappedBundle/Info.plist"],
+    ];
+    for (NSString *plistPath in candidates) {
+        NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:plistPath];
+        if ([dict isKindOfClass:[NSDictionary class]]) {
+            return dict;
+        }
+    }
+    return nil;
+}
+
+static void zniff_add_alias(NSMutableSet<NSString *> *aliases, NSString *value) {
+    if (![value isKindOfClass:[NSString class]]) {
+        return;
+    }
+    NSString *trimmed = [value stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (trimmed.length > 0) {
+        [aliases addObject:trimmed.lowercaseString];
+    }
+}
+
+static void zniff_add_catalog_entry(
+    NSMutableArray<NSDictionary *> *catalog,
+    NSString *bundleId,
+    NSString *displayName,
+    NSString *execName,
+    NSSet<NSString *> *aliases
+) {
+    if (bundleId.length == 0 || [bundleId isEqualToString:@"dev.zniff.app"]) {
+        return;
+    }
+    NSString *label = displayName.length > 0 ? displayName : execName;
+    if (label.length == 0) {
+        label = bundleId;
+    }
+    [catalog addObject:@{
+        @"bundleId": bundleId,
+        @"displayName": label,
+        @"execName": execName ?: @"",
+        @"aliases": aliases,
+    }];
+}
+
+static void zniff_scan_bundle_path(
+    NSString *appPath,
+    NSString *fallbackName,
+    NSMutableArray<NSDictionary *> *catalog
+) {
+    NSDictionary *info = zniff_read_app_plist(appPath);
+    if (!info) {
+        return;
+    }
+    NSString *bundleId = [info[@"CFBundleIdentifier"] isKindOfClass:[NSString class]] ? info[@"CFBundleIdentifier"] : @"";
+    if (bundleId.length == 0) {
+        return;
+    }
+    NSString *cfDisplay = [info[@"CFBundleDisplayName"] isKindOfClass:[NSString class]] ? info[@"CFBundleDisplayName"] : @"";
+    NSString *cfName = [info[@"CFBundleName"] isKindOfClass:[NSString class]] ? info[@"CFBundleName"] : @"";
+    NSString *execName = [info[@"CFBundleExecutable"] isKindOfClass:[NSString class]] ? info[@"CFBundleExecutable"] : @"";
+    NSString *folderName = appPath.lastPathComponent;
+    if ([folderName.lowercaseString hasSuffix:@".app"] && folderName.length > 4) {
+        folderName = [folderName substringToIndex:folderName.length - 4];
+    }
+    NSString *localizedDisplay = [NSFileManager.defaultManager displayNameAtPath:appPath] ?: @"";
+    if ([localizedDisplay.lowercaseString hasSuffix:@".app"] && localizedDisplay.length > 4) {
+        localizedDisplay = [localizedDisplay substringToIndex:localizedDisplay.length - 4];
+    }
+
+    NSString *displayName = fallbackName.length > 0 ? fallbackName : (localizedDisplay.length > 0 ? localizedDisplay : (cfDisplay.length > 0 ? cfDisplay : (cfName.length > 0 ? cfName : folderName)));
+
+    NSMutableSet<NSString *> *aliases = [NSMutableSet set];
+    zniff_add_alias(aliases, bundleId);
+    zniff_add_alias(aliases, displayName);
+    zniff_add_alias(aliases, localizedDisplay);
+    zniff_add_alias(aliases, folderName);
+    zniff_add_alias(aliases, cfDisplay);
+    zniff_add_alias(aliases, cfName);
+    zniff_add_alias(aliases, execName);
+    zniff_add_catalog_entry(catalog, bundleId, displayName, execName, aliases);
+}
+
+static NSArray<NSDictionary *> *zniff_collect_app_catalog(void) {
+    NSMutableArray<NSDictionary *> *catalog = [NSMutableArray array];
+    NSMutableSet<NSString *> *seenBundleIds = [NSMutableSet set];
+
+    for (NSRunningApplication *app in NSWorkspace.sharedWorkspace.runningApplications) {
+        NSString *bundleId = app.bundleIdentifier ?: @"";
+        if (bundleId.length == 0 || [bundleId isEqualToString:@"dev.zniff.app"]) {
+            continue;
+        }
+        NSString *name = app.localizedName ?: @"";
+        NSString *execName = app.executableURL.lastPathComponent ?: @"";
+        NSString *bundlePath = app.bundleURL.path ?: @"";
+        if (bundlePath.length > 0) {
+            zniff_scan_bundle_path(bundlePath, name, catalog);
+        }
+        NSMutableSet<NSString *> *aliases = [NSMutableSet set];
+        zniff_add_alias(aliases, bundleId);
+        zniff_add_alias(aliases, name);
+        zniff_add_alias(aliases, execName);
+        zniff_add_catalog_entry(catalog, bundleId, name, execName, aliases);
+        [seenBundleIds addObject:bundleId.lowercaseString];
+    }
+
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSArray<NSString *> *roots = @[
+        @"/Applications",
+        @"/Applications/Utilities",
+        @"/System/Applications",
+        [NSHomeDirectory() stringByAppendingPathComponent:@"Applications"],
+    ];
+    for (NSString *root in roots) {
+        NSArray<NSString *> *entries = [fm contentsOfDirectoryAtPath:root error:nil];
+        for (NSString *entry in entries) {
+            if (![entry.lowercaseString hasSuffix:@".app"]) {
+                continue;
+            }
+            NSString *fullPath = [root stringByAppendingPathComponent:entry];
+            NSDictionary *info = zniff_read_app_plist(fullPath);
+            NSString *bid = [info[@"CFBundleIdentifier"] isKindOfClass:[NSString class]] ? info[@"CFBundleIdentifier"] : @"";
+            if (bid.length > 0 && ![seenBundleIds containsObject:bid.lowercaseString]) {
+                [seenBundleIds addObject:bid.lowercaseString];
+                zniff_scan_bundle_path(fullPath, @"", catalog);
+            } else if (bid.length > 0) {
+                zniff_scan_bundle_path(fullPath, @"", catalog);
+            }
+        }
+    }
+    return catalog;
+}
+
 static NSDictionary *zniff_build_provider_config(
     uint16_t port,
     const char *proxy_auth,
@@ -65,14 +202,64 @@ static NSDictionary *zniff_build_provider_config(
 ) {
     NSString *auth = proxy_auth ? [NSString stringWithUTF8String:proxy_auth] : @"";
     if (!auth) auth = @"";
-    NSArray<NSString *> *targets = zniff_parse_targets_json(targets_json);
+    NSArray<NSString *> *rawTargets = zniff_parse_targets_json(targets_json);
+    NSArray<NSDictionary *> *catalog = zniff_collect_app_catalog();
+
+    NSMutableArray<NSString *> *expandedTargets = [NSMutableArray array];
+    NSMutableSet<NSString *> *seenTargets = [NSMutableSet set];
+    void (^appendTarget)(NSString *) = ^(NSString *val) {
+        NSString *trimmed = [val stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (trimmed.length == 0) return;
+        NSString *lower = trimmed.lowercaseString;
+        if (![seenTargets containsObject:lower]) {
+            [seenTargets addObject:lower];
+            [expandedTargets addObject:trimmed];
+        }
+    };
+
+    for (NSString *raw in rawTargets) {
+        appendTarget(raw);
+        NSString *needle = raw.lowercaseString;
+        for (NSDictionary *entry in catalog) {
+            NSSet<NSString *> *aliases = entry[@"aliases"];
+            if ([aliases containsObject:needle]) {
+                appendTarget(entry[@"bundleId"]);
+                appendTarget(entry[@"execName"]);
+            }
+        }
+    }
+
+    NSMutableDictionary<NSString *, NSString *> *appLabels = [NSMutableDictionary dictionary];
+    for (NSDictionary *entry in catalog) {
+        if (appLabels.count >= 512) {
+            break;
+        }
+        NSString *bid = [(NSString *)entry[@"bundleId"] lowercaseString];
+        NSString *label = entry[@"displayName"];
+        if (bid.length > 0 && label.length > 0 && !appLabels[bid]) {
+            appLabels[bid] = label;
+        }
+    }
+
     return @{
         @"proxyPort": @(port),
         @"proxyAuth": auth,
         @"captureAll": @(capture_all),
-        @"targets": targets,
+        @"targets": expandedTargets,
+        @"appLabels": appLabels,
         @"blockQuic": @(block_quic),
     };
+}
+
+int zniff_tp_resolve_targets_json(const char *targets_json, char *buf, size_t len) {
+    @autoreleasepool {
+        NSDictionary *cfg = zniff_build_provider_config(8877, "", false, targets_json, true);
+        zniff_write_json(buf, len, @{
+            @"targets": cfg[@"targets"] ?: @[],
+            @"appLabels": cfg[@"appLabels"] ?: @{},
+        });
+        return 0;
+    }
 }
 
 @interface ZniffTpSharedState : NSObject

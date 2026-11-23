@@ -430,9 +430,13 @@ fn tp_targets_section(
                         })
                     },
                     move || {
-                        let name = app.with_untracked(|a| a.name.clone());
-                        let next =
-                            transparent_proxy::toggle_target(&targets.get_untracked(), &name);
+                        let next = app.with_untracked(|a| {
+                            transparent_proxy::toggle_target_aliases(
+                                &targets.get_untracked(),
+                                &a.name,
+                                &[&a.name, &a.bundle_id, &a.exec_name],
+                            )
+                        });
                         set_tp_targets(&controls, targets, &next);
                     },
                 )

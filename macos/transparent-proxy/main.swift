@@ -25,6 +25,7 @@ private final class ProxyConfigStore {
     private var proxyAuth: String = ""
     private var captureAll: Bool = false
     private var targets: [String] = []
+    private var appLabels: [String: String] = [:]
     private var blockQuic: Bool = true
 
     struct Snapshot {
@@ -32,6 +33,7 @@ private final class ProxyConfigStore {
         let proxyAuth: String
         let captureAll: Bool
         let targets: [String]
+        let appLabels: [String: String]
         let blockQuic: Bool
     }
 
@@ -43,6 +45,7 @@ private final class ProxyConfigStore {
             proxyAuth: proxyAuth,
             captureAll: captureAll,
             targets: targets,
+            appLabels: appLabels,
             blockQuic: blockQuic
         )
     }
@@ -64,6 +67,17 @@ private final class ProxyConfigStore {
         if let list = dict["targets"] as? [String] {
             targets = list.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
         }
+        if let labels = dict["appLabels"] as? [String: String] {
+            var lowered: [String: String] = [:]
+            for (k, v) in labels {
+                let key = k.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                let val = v.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !key.isEmpty && !val.isEmpty {
+                    lowered[key] = val
+                }
+            }
+            appLabels = lowered
+        }
         if let quic = dict["blockQuic"] as? Bool {
             blockQuic = quic
         }
@@ -72,13 +86,14 @@ private final class ProxyConfigStore {
             proxyAuth: proxyAuth,
             captureAll: captureAll,
             targets: targets,
+            appLabels: appLabels,
             blockQuic: blockQuic
         )
         return (oldBlockQuic != blockQuic, snap)
     }
 }
 
-private func extractSourceProcessInfo(from metaData: NEFlowMetaData?) -> (pid: Int32?, signingId: String, execName: String, appBundleName: String?) {
+private func extractSourceProcessInfo(from metaData: NEFlowMetaData?) -> (pid: Int32?, signingId: String, execName: String, appBundleNames: [String]) {
     let signingId = metaData?.sourceAppSigningIdentifier ?? ""
     var pid: Int32?
     if let token = metaData?.sourceAppAuditToken, token.count >= 24 {
@@ -90,7 +105,7 @@ private func extractSourceProcessInfo(from metaData: NEFlowMetaData?) -> (pid: I
         }
     }
     var execName = ""
-    var appBundleName: String?
+    var appBundleNames: [String] = []
     if let p = pid {
         var buf = [CChar](repeating: 0, count: Int(MAXPATHLEN) * 4)
         let len = zniffProcPidPath(p, &buf, UInt32(buf.count))
@@ -98,13 +113,12 @@ private func extractSourceProcessInfo(from metaData: NEFlowMetaData?) -> (pid: I
             let path = String(cString: buf)
             let url = URL(fileURLWithPath: path)
             execName = url.lastPathComponent
-            for component in url.pathComponents.reversed() where component.hasSuffix(".app") {
-                appBundleName = String(component.dropLast(4))
-                break
+            for component in url.pathComponents where component.hasSuffix(".app") {
+                appBundleNames.append(String(component.dropLast(4)))
             }
         }
     }
-    return (pid, signingId, execName, appBundleName)
+    return (pid, signingId, execName, appBundleNames)
 }
 
 private func isHardExcluded(pid: Int32?, signingId: String, execName: String) -> Bool {
@@ -121,7 +135,7 @@ private func isHardExcluded(pid: Int32?, signingId: String, execName: String) ->
     return false
 }
 
-private func matchesTargets(_ snapshot: ProxyConfigStore.Snapshot, signingId: String, execName: String, appBundleName: String?) -> Bool {
+private func matchesTargets(_ snapshot: ProxyConfigStore.Snapshot, signingId: String, execName: String, appBundleNames: [String]) -> Bool {
     if snapshot.captureAll {
         return true
     }
@@ -130,21 +144,46 @@ private func matchesTargets(_ snapshot: ProxyConfigStore.Snapshot, signingId: St
     }
     let lowerSigning = signingId.lowercased()
     let lowerExec = execName.lowercased()
-    let lowerApp = (appBundleName ?? "").lowercased()
+    let lowerApps = appBundleNames.map { $0.lowercased() }
     for rawTarget in snapshot.targets {
         let t = rawTarget.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if t.isEmpty { continue }
-        if !lowerSigning.isEmpty && lowerSigning == t {
+        if !lowerSigning.isEmpty && (lowerSigning == t || lowerSigning.hasPrefix(t + ".")) {
             return true
         }
         if !lowerExec.isEmpty && (lowerExec == t || lowerExec.hasPrefix(t + " ")) {
             return true
         }
-        if !lowerApp.isEmpty && lowerApp == t {
+        if lowerApps.contains(t) {
             return true
         }
     }
     return false
+}
+
+private func resolveDisplayLabel(snapshot: ProxyConfigStore.Snapshot, signingId: String, execName: String, appBundleNames: [String]) -> String {
+    let lowerSigning = signingId.lowercased()
+    if !lowerSigning.isEmpty {
+        if let exact = snapshot.appLabels[lowerSigning] {
+            return exact
+        }
+        var bestPrefixLen = 0
+        var bestLabel: String?
+        for (k, v) in snapshot.appLabels where lowerSigning.hasPrefix(k + ".") && k.count > bestPrefixLen {
+            bestPrefixLen = k.count
+            bestLabel = v
+        }
+        if let bestLabel {
+            return bestLabel
+        }
+    }
+    if let outerApp = appBundleNames.first, !outerApp.isEmpty {
+        return outerApp
+    }
+    if !execName.isEmpty {
+        return execName
+    }
+    return signingId
 }
 
 private func isBypassedHost(_ host: String) -> Bool {
@@ -484,7 +523,7 @@ final class TransparentProxyProvider: NETransparentProxyProvider {
             return false
         }
         let snapshot = configStore.snapshot()
-        guard matchesTargets(snapshot, signingId: info.signingId, execName: info.execName, appBundleName: info.appBundleName) else {
+        guard matchesTargets(snapshot, signingId: info.signingId, execName: info.execName, appBundleNames: info.appBundleNames) else {
             return false
         }
 
@@ -508,7 +547,7 @@ final class TransparentProxyProvider: NETransparentProxyProvider {
         }
 
         let authority = formatAuthority(host: host, port: port)
-        let sourceApp = info.appBundleName ?? (!info.execName.isEmpty ? info.execName : info.signingId)
+        let sourceApp = resolveDisplayLabel(snapshot: snapshot, signingId: info.signingId, execName: info.execName, appBundleNames: info.appBundleNames)
 
         relaysLock.lock()
         let relayId = nextRelayId

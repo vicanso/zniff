@@ -89,19 +89,33 @@ pub fn has_target(raw: &str, candidate: &str) -> bool {
 }
 
 /// Toggles `item` inside a comma-separated target list string, preserving order.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn toggle_target(raw: &str, item: &str) -> String {
-    let needle = item.trim();
-    if needle.is_empty() {
-        return parse_targets(raw).join(", ");
-    }
+    toggle_target_aliases(raw, item, &[item])
+}
+
+/// Toggles a target group represented by `aliases` (keeping `preferred` when adding),
+/// removing any matching alias when already present.
+pub fn toggle_target_aliases(raw: &str, preferred: &str, aliases: &[&str]) -> String {
     let mut items = parse_targets(raw);
-    if let Some(pos) = items
-        .iter()
-        .position(|existing| existing.eq_ignore_ascii_case(needle))
-    {
-        items.remove(pos);
+    let any_present = items.iter().any(|existing| {
+        existing.eq_ignore_ascii_case(preferred.trim())
+            || aliases.iter().any(|alias| {
+                !alias.trim().is_empty() && existing.eq_ignore_ascii_case(alias.trim())
+            })
+    });
+    if any_present {
+        items.retain(|existing| {
+            !existing.eq_ignore_ascii_case(preferred.trim())
+                && !aliases.iter().any(|alias| {
+                    !alias.trim().is_empty() && existing.eq_ignore_ascii_case(alias.trim())
+                })
+        });
     } else {
-        items.push(needle.to_string());
+        let trimmed = preferred.trim();
+        if !trimmed.is_empty() {
+            items.push(trimmed.to_string());
+        }
     }
     items.join(", ")
 }
@@ -220,6 +234,12 @@ mod native {
         ) -> c_int;
         fn zniff_tp_stop() -> c_int;
         fn zniff_tp_list_running_apps(buf: *mut c_char, len: usize) -> c_int;
+        #[cfg(test)]
+        fn zniff_tp_resolve_targets_json(
+            targets_json: *const c_char,
+            buf: *mut c_char,
+            len: usize,
+        ) -> c_int;
         fn zniff_tp_open_system_settings();
     }
 
@@ -307,6 +327,15 @@ mod native {
     pub(super) fn list_running_apps() -> Vec<super::RunningApp> {
         let json = read_c_buf::<65536>(|ptr, len| unsafe { zniff_tp_list_running_apps(ptr, len) });
         serde_json::from_str(&json).unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    pub(super) fn resolve_targets_json(targets: &[&str]) -> String {
+        let raw = serde_json::to_string(targets).unwrap_or_else(|_| "[]".to_string());
+        let raw_c = CString::new(raw).unwrap_or_default();
+        read_c_buf::<65536>(|ptr, len| unsafe {
+            zniff_tp_resolve_targets_json(raw_c.as_ptr(), ptr, len)
+        })
     }
 
     pub(super) fn open_system_settings() {
@@ -455,5 +484,46 @@ mod tests {
         );
         assert_eq!(running.state, TpState::Running);
         assert!(running.is_on_or_starting());
+    }
+
+    #[test]
+    fn toggle_target_aliases_removes_bundle_id_when_toggling_display_name() {
+        let next = toggle_target_aliases(
+            "cn.com.gf.etj, curl",
+            "广发易淘金",
+            &["广发易淘金", "cn.com.gf.etj", "gf_iphone"],
+        );
+        assert_eq!(next, "curl");
+
+        let added = toggle_target_aliases(
+            &next,
+            "广发易淘金",
+            &["广发易淘金", "cn.com.gf.etj", "gf_iphone"],
+        );
+        assert_eq!(added, "curl, 广发易淘金");
+    }
+
+    #[cfg(all(target_os = "macos", feature = "desktop"))]
+    #[test]
+    fn native_resolve_targets_expands_app_names_to_bundle_ids() {
+        let json = native::resolve_targets_json(&["Safari", "广发易淘金"]);
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+        let targets = parsed["targets"]
+            .as_array()
+            .expect("targets array")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>();
+        assert!(targets.contains(&"Safari"), "{targets:?}");
+        if std::path::Path::new("/Applications/Safari.app").exists() {
+            assert!(targets.contains(&"com.apple.Safari"), "{targets:?}");
+        }
+        if std::path::Path::new("/Applications/广发易淘金.app").exists() {
+            assert!(targets.contains(&"cn.com.gf.etj"), "{targets:?}");
+            assert_eq!(
+                parsed["appLabels"]["cn.com.gf.etj"].as_str(),
+                Some("广发易淘金")
+            );
+        }
     }
 }
