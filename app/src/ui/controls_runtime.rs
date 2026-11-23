@@ -385,6 +385,7 @@ pub(crate) fn shutdown_capture_for_exit(controls: &Controls) {
     controls.hub.end_share();
     ca::clear_ios_simulator_proxies();
     launcher::clear_android_adb_proxies();
+    transparent_proxy::cleanup_on_exit();
     if lock_bool(&controls.proxy_applied) {
         set_bool(&controls.proxy_applied, false);
         let _ = sysproxy::disable();
@@ -930,6 +931,9 @@ pub(crate) fn start_capture(controls: &Controls) {
         );
     }
     remember_capturing(controls, true);
+    if transparent_proxy::cached_status().is_on_or_starting() {
+        sync_transparent_proxy_config(controls);
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -947,6 +951,7 @@ pub(crate) fn stop_capture(controls: &Controls) {
     controls.hub.end_share();
     ca::clear_ios_simulator_proxies();
     launcher::clear_android_adb_proxies();
+    transparent_proxy::cleanup_on_exit();
     *controls
         .listen
         .lock()
@@ -1008,6 +1013,7 @@ pub(crate) fn switch_to_lan(controls: Arc<Controls>) {
             Err(err) => {
                 ca::clear_ios_simulator_proxies();
                 launcher::clear_android_adb_proxies();
+                transparent_proxy::cleanup_on_exit();
                 *controls
                     .listen
                     .lock()
@@ -1271,4 +1277,95 @@ pub(crate) fn lock_port(slot: &Mutex<u16>) -> u16 {
 
 pub(crate) fn set_port(slot: &Mutex<u16>, port: u16) {
     *slot.lock().unwrap_or_else(|err| err.into_inner()) = port;
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn transparent_proxy_config_from(
+    controls: &Controls,
+) -> transparent_proxy::TransparentProxyConfig {
+    let cfg = saved_config();
+    transparent_proxy::TransparentProxyConfig {
+        port: current_listen_port(controls),
+        proxy_auth: controls.hub.proxy_auth_text(),
+        capture_all: cfg.tp_capture_all,
+        targets: transparent_proxy::parse_targets(&cfg.tp_targets),
+        block_quic: cfg.tp_block_quic,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn sync_transparent_proxy_config(controls: &Controls) {
+    let status = transparent_proxy::cached_status();
+    if !status.embedded || !status.is_on_or_starting() {
+        return;
+    }
+    let tp_cfg = transparent_proxy_config_from(controls);
+    std::thread::spawn(move || {
+        let _ = transparent_proxy::update_config(&tp_cfg);
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn toggle_transparent_proxy(controls: Arc<Controls>) {
+    std::thread::spawn(move || {
+        let st = transparent_proxy::refresh_status();
+        if st.is_on_or_starting() {
+            match transparent_proxy::stop() {
+                Ok(()) => set_status(&controls, StatusMsg::TransparentProxyStopped),
+                Err(err) => set_status(&controls, StatusMsg::TransparentProxyFailed(err)),
+            }
+            return;
+        }
+        if !st.embedded {
+            set_status(
+                &controls,
+                StatusMsg::TransparentProxyFailed("当前构建未内嵌系统扩展".to_string()),
+            );
+            return;
+        }
+        if !st.in_applications {
+            set_status(&controls, StatusMsg::TransparentProxyNeedsApplications);
+            return;
+        }
+        if ensure_capture_port_for_launcher(&controls).is_none() {
+            return;
+        }
+        let tp_cfg = transparent_proxy_config_from(&controls);
+        match transparent_proxy::start(&tp_cfg) {
+            Ok(transparent_proxy::StartOutcome::Started) => {
+                set_status(&controls, StatusMsg::TransparentProxyStarted);
+            }
+            Ok(transparent_proxy::StartOutcome::NeedsApproval) => {
+                set_status(&controls, StatusMsg::TransparentProxyNeedsApproval);
+            }
+            Err(err) => {
+                set_status(&controls, StatusMsg::TransparentProxyFailed(err));
+            }
+        }
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn refresh_transparent_proxy_state_async() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static BUSY: AtomicBool = AtomicBool::new(false);
+    if BUSY.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    std::thread::spawn(|| {
+        let st = transparent_proxy::refresh_status();
+        if st.embedded {
+            let _ = transparent_proxy::refresh_running_apps();
+        }
+        BUSY.store(false, Ordering::Release);
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn poll_transparent_proxy_if_pending(last_poll: &std::cell::Cell<SystemTime>) {
+    if clock::elapsed(last_poll.get()) < Duration::from_secs(2) {
+        return;
+    }
+    last_poll.set(clock::now());
+    refresh_transparent_proxy_state_async();
 }

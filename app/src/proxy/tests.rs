@@ -7360,3 +7360,60 @@ async fn allow_hosts_enforces_connect_plain_http_map_remote_replay_and_exempts_l
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn connect_with_plain_http_and_source_app_header_records_flow_and_app_label() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let dir = std::env::temp_dir().join(format!("zniff-tp-connect-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let ca = Arc::new(Ca::open(&dir).unwrap());
+
+    let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin_addr = origin.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = origin.accept().await {
+            let _ = read_header_block(&mut sock).await;
+            let _ = sock
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
+                )
+                .await;
+        }
+    });
+
+    let hub = Arc::new(Hub::new(ca).unwrap());
+    let proxy = listen().await.unwrap();
+    let proxy_addr = proxy.local_addr().unwrap();
+    serve_proxy(proxy, Arc::clone(&hub));
+
+    let mut s = TcpStream::connect(proxy_addr).await.unwrap();
+    let connect_req = format!(
+        "CONNECT {origin_addr} HTTP/1.1\r\nHost: {origin_addr}\r\nX-Zniff-Source-App: Safari\r\n\r\n"
+    );
+    s.write_all(connect_req.as_bytes()).await.unwrap();
+    let (connect_head, _) = read_header_block(&mut s).await.unwrap();
+    let connect_text = String::from_utf8_lossy(&connect_head);
+    assert!(
+        connect_text.starts_with("HTTP/1.1 200 Connection Established"),
+        "{connect_text}"
+    );
+
+    let inner_req =
+        format!("GET /tp-plain HTTP/1.1\r\nHost: {origin_addr}\r\nConnection: close\r\n\r\n");
+    s.write_all(inner_req.as_bytes()).await.unwrap();
+    let resp = read_h1_message(&mut s).await;
+    let resp_text = String::from_utf8_lossy(&resp);
+    assert!(resp_text.starts_with("HTTP/1.1 200 OK"), "{resp_text}");
+    assert!(resp_text.ends_with("hello"), "{resp_text}");
+
+    let flows = hub.with_session(|session| session.flows());
+    assert_eq!(flows.len(), 1);
+    let flow = &flows[0];
+    assert_eq!(flow.method, "GET");
+    assert_eq!(flow.path, "/tp-plain");
+    assert_eq!(flow.status, Some(200));
+    assert_eq!(flow.client_ip, "127.0.0.1 (Safari)");
+    assert_eq!(flow.response_body, b"hello");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

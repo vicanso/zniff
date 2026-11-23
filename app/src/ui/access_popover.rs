@@ -473,6 +473,8 @@ fn apply_proxy_auth_change(controls: &Controls, proxy_auth: Signal<String>, raw:
     proxy_auth.set(raw.to_string());
     let stored = raw.trim().to_string();
     controls.hub.set_proxy_auth(&stored);
+    #[cfg(not(target_arch = "wasm32"))]
+    sync_transparent_proxy_config(controls);
     if let Err(err) = save_config(|config| config.proxy_auth = stored) {
         set_status(
             controls,

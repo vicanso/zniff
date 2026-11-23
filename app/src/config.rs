@@ -782,6 +782,12 @@ pub struct Config {
     /// Active external root CA provider id (`"whistle"`, `"mitmproxy"`, `"mkcert"`, `"proxyman"`),
     /// or empty when using zniff's own built-in root CA.
     pub external_ca: String,
+    /// macOS transparent proxy: capture all non-excluded apps rather than only `tp_targets`.
+    pub tp_capture_all: bool,
+    /// macOS transparent proxy: comma/newline-separated target app names or bundle IDs.
+    pub tp_targets: String,
+    /// macOS transparent proxy: drop outbound UDP 443 to force HTTP/3 fallback to HTTPS TCP.
+    pub tp_block_quic: bool,
 }
 
 pub fn normalize_external_ca(raw: &str) -> String {
@@ -923,6 +929,12 @@ struct RawConfig {
     allow_hosts: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     external_ca: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    tp_capture_all: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    tp_targets: String,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    tp_block_quic: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     saved_filters: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1119,6 +1131,9 @@ impl From<RawConfig> for Config {
             proxy_auth: raw.proxy_auth,
             allow_hosts: raw.allow_hosts,
             external_ca: normalize_external_ca(raw.external_ca.as_deref().unwrap_or("")),
+            tp_capture_all: raw.tp_capture_all,
+            tp_targets: raw.tp_targets,
+            tp_block_quic: raw.tp_block_quic,
         }
     }
 }
@@ -1232,6 +1247,9 @@ impl From<Config> for RawConfig {
                 let norm = normalize_external_ca(&config.external_ca);
                 (!norm.is_empty()).then_some(norm)
             },
+            tp_capture_all: config.tp_capture_all,
+            tp_targets: config.tp_targets,
+            tp_block_quic: config.tp_block_quic,
             saved_filters: config.saved_filters,
             saved_rules: config.saved_rules,
             saved_profiles: config.saved_profiles,
@@ -1313,6 +1331,9 @@ impl Default for Config {
             proxy_auth: String::new(),
             allow_hosts: String::new(),
             external_ca: String::new(),
+            tp_capture_all: false,
+            tp_targets: String::new(),
+            tp_block_quic: true,
         }
     }
 }

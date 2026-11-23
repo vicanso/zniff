@@ -8,7 +8,7 @@ NSH_JSON := app/nsh.json
 CARGO_FLAGS := --manifest-path $(MANIFEST)
 VERSION := $(shell sed -n 's/^version = "\([^"]*\)"/\1/p' $(MANIFEST) | head -1)
 
-.PHONY: all help build dev debug run web web-ui fmt lint test bench check check-wasm release bundle clean \
+.PHONY: all help build dev debug run web web-ui fmt lint test bench check check-wasm release bundle bundle-signed clean \
 	bloat udeps version sync-version version-patch version-minor version-major tag nightly changelog
 
 # --- develop ---------------------------------------------------------------
@@ -128,6 +128,25 @@ bundle: release
 	esac
 	@target_dir=$$($(CARGO) metadata $(CARGO_FLAGS) --format-version 1 --no-deps \
 	  | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p'); \
+	scripts/macos-app.sh "$$target_dir/release/zniff" "$$target_dir/release/zniff.app"
+
+# Signed macOS .app with embedded NETransparentProxyProvider System Extension.
+bundle-signed: release
+	@case "$$(uname -s)" in \
+	  Darwin) ;; \
+	  *) echo "bundle-signed builds a macOS .app; this machine is $$(uname -s)"; exit 1 ;; \
+	esac
+	@app_prof="$${ZNIFF_APP_PROFILE:-$$HOME/Downloads/zniff_Developer_ID.provisionprofile}"; \
+	sysext_prof="$${ZNIFF_SYSEXT_PROFILE:-$$HOME/Downloads/zniff_Transparent_Proxy___Developer_ID.provisionprofile}"; \
+	test -f "$$app_prof" || { echo "Missing ZNIFF_APP_PROFILE: $$app_prof" >&2; exit 1; }; \
+	test -f "$$sysext_prof" || { echo "Missing ZNIFF_SYSEXT_PROFILE: $$sysext_prof" >&2; exit 1; }; \
+	identity="$${ZNIFF_SIGN_IDENTITY:-$$(python3 -c 'import plistlib,subprocess,hashlib,sys; pl=plistlib.loads(subprocess.check_output(["security","cms","-D","-i",sys.argv[1]], stderr=subprocess.DEVNULL)); certs=pl.get("DeveloperCertificates", []); print(hashlib.sha1(certs[0]).hexdigest().upper() if certs else "")' "$$app_prof")}"; \
+	test -n "$$identity" || { echo "Missing ZNIFF_SIGN_IDENTITY and failed to extract certificate SHA-1 from $$app_prof" >&2; exit 1; }; \
+	target_dir=$$($(CARGO) metadata $(CARGO_FLAGS) --format-version 1 --no-deps \
+	  | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p'); \
+	ZNIFF_APP_PROFILE="$$app_prof" \
+	ZNIFF_SYSEXT_PROFILE="$$sysext_prof" \
+	ZNIFF_SIGN_IDENTITY="$$identity" \
 	scripts/macos-app.sh "$$target_dir/release/zniff" "$$target_dir/release/zniff.app"
 
 # Where the release binary's size goes, by crate.

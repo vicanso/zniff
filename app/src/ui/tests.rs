@@ -3729,15 +3729,30 @@ fn wave1_onboarding_predicate_and_connect_hub_labels() {
     assert!(!super::should_show_onboarding(super::Phase::Gone, 0));
     assert!(!super::should_show_onboarding(super::Phase::Ready, 0));
 
-    assert_eq!(super::connect_hub_trigger_label(Lang::Zh, 0), "接入");
+    assert_eq!(super::connect_hub_trigger_label(Lang::Zh, 0, false), "接入");
     assert_eq!(
-        super::connect_hub_trigger_label(Lang::Zh, 2),
+        super::connect_hub_trigger_label(Lang::Zh, 2, false),
         "接入 · ADB 2"
     );
-    assert_eq!(super::connect_hub_trigger_label(Lang::En, 0), "Connect");
     assert_eq!(
-        super::connect_hub_trigger_label(Lang::En, 1),
+        super::connect_hub_trigger_label(Lang::Zh, 0, true),
+        "接入 · 透明"
+    );
+    assert_eq!(
+        super::connect_hub_trigger_label(Lang::Zh, 2, true),
+        "接入 · 透明 · ADB 2"
+    );
+    assert_eq!(
+        super::connect_hub_trigger_label(Lang::En, 0, false),
+        "Connect"
+    );
+    assert_eq!(
+        super::connect_hub_trigger_label(Lang::En, 1, false),
         "Connect · ADB 1"
+    );
+    assert_eq!(
+        super::connect_hub_trigger_label(Lang::En, 1, true),
+        "Connect · TP · ADB 1"
     );
 }
 

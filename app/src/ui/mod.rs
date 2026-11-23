@@ -56,7 +56,7 @@ pub(crate) use crate::{
 #[allow(unused_imports)]
 pub(crate) use crate::{
     bypass, client_hello, decompress, external_ca, har, launcher, mcp, mock_gen, relay, share,
-    sysproxy, updater, web, ws,
+    sysproxy, transparent_proxy, updater, web, ws,
 };
 
 /// A desktop-only child. Native stays `parent.child(child)`. The web build
@@ -146,6 +146,8 @@ mod theme;
 mod tls_failure_banner;
 mod toast_overlay;
 mod toolbar;
+#[cfg(not(target_arch = "wasm32"))]
+mod transparent_proxy_card;
 mod tray;
 mod watch_popover;
 mod web_poll;
@@ -225,6 +227,8 @@ pub(crate) use self::theme::*;
 pub(crate) use self::tls_failure_banner::*;
 pub(crate) use self::toast_overlay::*;
 pub(crate) use self::toolbar::*;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use self::transparent_proxy_card::*;
 #[cfg_attr(target_arch = "wasm32", allow(unused_imports))]
 pub(crate) use self::tray::*;
 pub(crate) use self::watch_popover::*;

@@ -9,6 +9,11 @@ pub(crate) struct ConnectHubProps {
     pub(crate) ca_ui: CaSignals,
     pub(crate) use_system_proxy: Signal<bool>,
     pub(crate) adb_count: Signal<usize>,
+    pub(crate) tp_active: Signal<bool>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) tp_status: Signal<crate::transparent_proxy::TransparentProxyStatus>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) tp_apps: Signal<Vec<crate::transparent_proxy::RunningApp>>,
     pub(crate) selected: Signal<Option<u64>>,
     pub(crate) install_ca: Rc<dyn Fn()>,
     pub(crate) toggle_system_proxy: Rc<dyn Fn()>,
@@ -17,13 +22,16 @@ pub(crate) struct ConnectHubProps {
 }
 
 /// Formats the compact footer Connect Hub trigger text.
-pub(crate) fn connect_hub_trigger_label(lang: Lang, adb_count: usize) -> String {
+pub(crate) fn connect_hub_trigger_label(lang: Lang, adb_count: usize, tp_active: bool) -> String {
     let base = t(lang, "接入", "Connect");
-    if adb_count > 0 {
-        format!("{base} · ADB {adb_count}")
-    } else {
-        base.to_string()
+    let mut parts: Vec<String> = vec![base.to_string()];
+    if tp_active {
+        parts.push(t(lang, "透明", "TP").to_string());
     }
+    if adb_count > 0 {
+        parts.push(format!("ADB {adb_count}"));
+    }
+    parts.join(" · ")
 }
 
 /// Opens the mobile QR popover, starting capture automatically when idle.
@@ -46,6 +54,7 @@ pub(crate) fn trigger_mobile_qr(
 pub(crate) fn connect_hub_popover(props: ConnectHubProps) -> impl IntoElement {
     let open = signal(false);
     let adb_count = props.adb_count;
+    let tp_active = props.tp_active;
     let running = props.running;
     popover()
         .open(move || Some(open.get()))
@@ -56,9 +65,13 @@ pub(crate) fn connect_hub_popover(props: ConnectHubProps) -> impl IntoElement {
         .on_open_change(move |event: &nsh_base::PopoverEvent| {
             if let nsh_base::PopoverEvent::OpenChange(next, _) = event {
                 open.set(*next);
+                #[cfg(not(target_arch = "wasm32"))]
+                if *next {
+                    refresh_transparent_proxy_state_async();
+                }
             }
         })
-        .trigger(connect_hub_trigger(open, running, adb_count))
+        .trigger(connect_hub_trigger(open, running, adb_count, tp_active))
         .child(connect_hub_panel(props, open))
 }
 
@@ -66,8 +79,9 @@ fn connect_hub_trigger(
     open: Signal<bool>,
     running: Signal<bool>,
     adb_count: Signal<usize>,
+    tp_active: Signal<bool>,
 ) -> impl IntoElement {
-    let active = move || open.get() || adb_count.get() > 0;
+    let active = move || open.get() || adb_count.get() > 0 || tp_active.get();
     view()
         .h(px(22.0))
         .px_2()
@@ -124,7 +138,11 @@ fn connect_hub_trigger(
             text({
                 let langs = ui_langs();
                 move || {
-                    SharedString::from(connect_hub_trigger_label(ui_lang(langs), adb_count.get()))
+                    SharedString::from(connect_hub_trigger_label(
+                        ui_lang(langs),
+                        adb_count.get(),
+                        tp_active.get(),
+                    ))
                 }
             })
             .tabular_nums()
@@ -424,12 +442,19 @@ fn hub_desktop_section(props: &ConnectHubProps, open: Signal<bool>) -> impl Into
     let browser_controls = props.controls.clone();
     let term_controls = props.controls.clone();
     let env_controls = props.controls.clone();
+    let tp_controls = props.controls.clone();
+    let tp_status = props.tp_status;
+    let tp_apps = props.tp_apps;
     let selected = props.selected;
     view()
         .w_full()
         .gap_1p5()
         .flex_col()
         .child(hub_section_label(tr("桌面免配抓包", "Desktop Zero-Config")))
+        .child(when(
+            move || tp_status.with(|st| st.embedded),
+            move || transparent_proxy_card(tp_controls.clone(), tp_status, tp_apps, open),
+        ))
         .child(hub_action_row(
             Glyph::Globe,
             tr("隔离浏览器 (Chromium)", "Isolated Browser (Chromium)"),

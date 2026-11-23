@@ -175,10 +175,21 @@ jobs:
           RUSTFLAGS="--remap-path-prefix=${GITHUB_WORKSPACE}=. --remap-path-prefix=${cargo_home}=/cargo --remap-path-prefix=${rustup_home}=/rustup ${RUSTFLAGS:-}" \
             cargo build --manifest-path app/Cargo.toml --release --locked --target ${{ matrix.target }}
       - name: bundle app
+        env:
+          CERT_NAME: ${{ secrets.MACOS_CERTIFICATE_NAME }}
+          APP_PROFILE_B64: ${{ secrets.MACOS_APP_PROVISIONING_PROFILE }}
+          SYSEXT_PROFILE_B64: ${{ secrets.MACOS_SYSEXT_PROVISIONING_PROFILE }}
         run: |
           set -euo pipefail
           bin="app/target/${{ matrix.target }}/release/${{ env.APP_NAME }}"
           mkdir -p bundle-stage
+          if [ -n "${APP_PROFILE_B64:-}" ] && [ -n "${SYSEXT_PROFILE_B64:-}" ]; then
+            echo "$APP_PROFILE_B64" | base64 --decode > "$RUNNER_TEMP/app.provisionprofile"
+            echo "$SYSEXT_PROFILE_B64" | base64 --decode > "$RUNNER_TEMP/sysext.provisionprofile"
+            export ZNIFF_APP_PROFILE="$RUNNER_TEMP/app.provisionprofile"
+            export ZNIFF_SYSEXT_PROFILE="$RUNNER_TEMP/sysext.provisionprofile"
+            export ZNIFF_SIGN_IDENTITY="$CERT_NAME"
+          fi
           scripts/macos-app.sh "$bin" "bundle-stage/${{ env.APP_NAME }}.app"
       - name: sign app
         env:
@@ -186,20 +197,29 @@ jobs:
         run: |
           echo "Signing App with identity: $CERT_NAME"
           APP="bundle-stage/${{ env.APP_NAME }}.app"
-          for attempt in 1 2 3 4 5; do
-            if codesign --force --deep --verbose --options runtime --timestamp \
-              --sign "$CERT_NAME" \
-              "$APP"; then
-              echo "codesign succeeded on attempt $attempt"
-              break
-            fi
-            if [ "$attempt" -eq 5 ]; then
-              echo "codesign still failing after $attempt attempts" >&2
+          SYSEXT="$APP/Contents/Library/SystemExtensions/dev.zniff.app.transparent-proxy.systemextension"
+          if [ -d "$SYSEXT" ]; then
+            codesign --verify --strict --deep --verbose=2 "$APP"
+            if ! codesign -dvv "$SYSEXT" 2>&1 | grep -q "^Timestamp="; then
+              echo "no secure timestamp embedded in the sysext signature" >&2
               exit 1
             fi
-            echo "codesign attempt $attempt failed (timestamp server?); retrying in 15s…"
-            sleep 15
-          done
+          else
+            for attempt in 1 2 3 4 5; do
+              if codesign --force --deep --verbose --options runtime --timestamp \
+                --sign "$CERT_NAME" \
+                "$APP"; then
+                echo "codesign succeeded on attempt $attempt"
+                break
+              fi
+              if [ "$attempt" -eq 5 ]; then
+                echo "codesign still failing after $attempt attempts" >&2
+                exit 1
+              fi
+              echo "codesign attempt $attempt failed (timestamp server?); retrying in 15s…"
+              sleep 15
+            done
+          fi
           if ! codesign -dvv "$APP" 2>&1 | grep -q "^Timestamp="; then
             echo "no secure timestamp embedded in the signature" >&2
             exit 1

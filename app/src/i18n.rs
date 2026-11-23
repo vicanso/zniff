@@ -54,6 +54,7 @@ pub enum PrefName {
     MonoFont,
     Theme,
     UiZoom,
+    TransparentProxy,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -263,6 +264,11 @@ pub enum StatusMsg {
     UiZoomChanged(u16),
     ReadOnlyTab,
     TabLimitReached(usize),
+    TransparentProxyStarted,
+    TransparentProxyNeedsApproval,
+    TransparentProxyStopped,
+    TransparentProxyFailed(String),
+    TransparentProxyNeedsApplications,
 }
 
 fn port_in_use(err: &str) -> bool {
@@ -412,6 +418,11 @@ impl StatusMsg {
                     PrefName::MonoFont => t(lang, "等宽字体没有记住:", "Mono font was not saved:"),
                     PrefName::Theme => t(lang, "主题模式没有记住:", "Theme mode was not saved:"),
                     PrefName::UiZoom => t(lang, "界面缩放没有记住:", "UI zoom was not saved:"),
+                    PrefName::TransparentProxy => t(
+                        lang,
+                        "透明代理设置没有记住:",
+                        "Transparent proxy settings were not saved:",
+                    ),
                 };
                 format!("{name} {err}")
             }
@@ -873,6 +884,31 @@ impl StatusMsg {
                     format!("Up to {limit} imported tabs can be open at once; close one first")
                 }
             },
+            Self::TransparentProxyStarted => t(
+                lang,
+                "已开启透明按进程抓包（未改系统代理）",
+                "Transparent per-process capture enabled (system proxy unchanged)",
+            )
+            .into(),
+            Self::TransparentProxyNeedsApproval => t(
+                lang,
+                "请在系统设置 → 隐私与安全性 / 登录项与扩展中允许 zniff 网络扩展",
+                "Allow zniff network extension in System Settings → Privacy & Security / Login Items & Extensions",
+            )
+            .into(),
+            Self::TransparentProxyStopped => {
+                t(lang, "已关闭透明按进程抓包", "Transparent capture stopped").into()
+            }
+            Self::TransparentProxyFailed(err) => match lang {
+                Lang::Zh => format!("透明按进程抓包失败: {err}"),
+                Lang::En => format!("Transparent capture failed: {err}"),
+            },
+            Self::TransparentProxyNeedsApplications => t(
+                lang,
+                "请先将 zniff.app 拖入 /Applications 目录后再开启透明按进程抓包",
+                "Move zniff.app into /Applications first to activate Transparent Proxy",
+            )
+            .into(),
         }
     }
 
@@ -934,7 +970,9 @@ impl StatusMsg {
             | Self::CopiedSystemInfo
             | Self::UpdateUpToDate(_)
             | Self::UpdateAvailable(_)
-            | Self::ClearedFlows { .. } => Some(false),
+            | Self::ClearedFlows { .. }
+            | Self::TransparentProxyStarted
+            | Self::TransparentProxyStopped => Some(false),
             Self::ExportFailed(_)
             | Self::ImportFailed(_)
             | Self::SaveFailed(_)
@@ -974,7 +1012,10 @@ impl StatusMsg {
             | Self::WatchAlert { .. }
             | Self::ConfigBroken { .. }
             | Self::ReadOnlyTab
-            | Self::TabLimitReached(_) => Some(true),
+            | Self::TabLimitReached(_)
+            | Self::TransparentProxyNeedsApproval
+            | Self::TransparentProxyFailed(_)
+            | Self::TransparentProxyNeedsApplications => Some(true),
             _ => None,
         }
     }
@@ -1042,7 +1083,8 @@ impl StatusMsg {
             | Self::TerminalLaunchFailed(_)
             | Self::AdbFailed(_)
             | Self::UpdateCheckFailed(_)
-            | Self::UpdateFailed { .. } => t(lang, "操作失败", "Action Failed"),
+            | Self::UpdateFailed { .. }
+            | Self::TransparentProxyFailed(_) => t(lang, "操作失败", "Action Failed"),
             Self::ConfigBroken { .. } => t(lang, "配置错误", "Configuration Error"),
             _ if self.toast_kind() == Some(true) => t(lang, "操作提示", "Notice"),
             _ => t(lang, "操作成功", "Action Completed"),

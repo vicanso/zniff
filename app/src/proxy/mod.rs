@@ -72,6 +72,7 @@ tokio::task_local! {
 struct ClientConnCtx {
     label: Mutex<String>,
     opened_ids: Mutex<Vec<u64>>,
+    locked: AtomicBool,
 }
 
 fn current_client_ctx() -> Option<Arc<ClientConnCtx>> {
@@ -199,6 +200,16 @@ pub async fn listen() -> Result<TcpListener> {
     Ok(TcpListener::bind("127.0.0.1:0").await?)
 }
 
+fn sanitize_source_app(raw: &str) -> String {
+    raw.trim()
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(128)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
 async fn handle_conn(socket: TcpStream, hub: Arc<Hub>) -> Result<()> {
     let peer = socket.peer_addr().ok();
     let base_ip = peer
@@ -222,6 +233,7 @@ async fn handle_conn(socket: TcpStream, hub: Arc<Hub>) -> Result<()> {
     let ctx = Arc::new(ClientConnCtx {
         label: Mutex::new(initial_label),
         opened_ids: Mutex::new(Vec::new()),
+        locked: AtomicBool::new(false),
     });
     #[cfg(not(test))]
     if let Some(port) = lookup_port {
@@ -236,6 +248,9 @@ async fn handle_conn(socket: TcpStream, hub: Arc<Hub>) -> Result<()> {
                 }
                 None => ip_bg,
             };
+            if ctx_bg.locked.load(Ordering::Acquire) {
+                return;
+            }
             *ctx_bg.label.lock().unwrap_or_else(|e| e.into_inner()) = resolved.clone();
             let ids = ctx_bg
                 .opened_ids
@@ -260,6 +275,7 @@ async fn handle_conn(socket: TcpStream, hub: Arc<Hub>) -> Result<()> {
 async fn handle_conn_inner(mut socket: TcpStream, hub: Arc<Hub>) -> Result<()> {
     socket.set_nodelay(true).ok();
     let local_addr = socket.local_addr().ok();
+    let peer_addr = socket.peer_addr().ok();
     let (head_bytes, rest) = read_header_block(&mut socket).await?;
     let head = parse_head(&head_bytes)?;
     let mut parts = head.start.split_whitespace();
@@ -304,6 +320,20 @@ async fn handle_conn_inner(mut socket: TcpStream, hub: Arc<Hub>) -> Result<()> {
         if !is_tls_probe_host(&host) && !hub.host_allowed(&host) {
             hub.record_allow_denied(&host);
             return write_host_not_allowed(&mut socket, &host, false).await;
+        }
+        if let Some(peer) = peer_addr
+            && peer.ip().is_loopback()
+            && let Some(raw_app) = header_value(&head.headers, "x-zniff-source-app")
+        {
+            let app = sanitize_source_app(&raw_app);
+            if !app.is_empty()
+                && let Some(ctx) = current_client_ctx()
+            {
+                let base_ip = peer.ip().to_canonical().to_string();
+                let resolved = format!("{base_ip} ({app})");
+                ctx.locked.store(true, Ordering::Release);
+                *ctx.label.lock().unwrap_or_else(|e| e.into_inner()) = resolved;
+            }
         }
         socket
             .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")

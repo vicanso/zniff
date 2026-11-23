@@ -1,6 +1,19 @@
 #[allow(unused_imports)]
 use super::*;
 
+fn looks_like_http1_request(raw: &[u8]) -> bool {
+    const PREFIXES: &[&[u8]] = &[
+        b"GET ",
+        b"POST ",
+        b"PUT ",
+        b"DELETE ",
+        b"HEAD ",
+        b"OPTIONS ",
+        b"PATCH ",
+    ];
+    PREFIXES.iter().any(|prefix| raw.starts_with(prefix))
+}
+
 pub(super) async fn mitm_connect<S>(
     mut client: S,
     host: &str,
@@ -25,6 +38,25 @@ where
         let ReadHello::NotTls { raw } = hello else {
             unreachable!();
         };
+        if looks_like_http1_request(&raw) {
+            let mut prefixed = Prefixed {
+                prefix: raw,
+                pos: 0,
+                inner: client,
+            };
+            let (head_bytes, rest) = read_header_block(&mut prefixed).await?;
+            let mut head = parse_head(&head_bytes)?;
+            if header_value(&head.headers, "host").is_none() {
+                head.headers
+                    .push(("Host".to_string(), display_authority(host, port, "http")));
+            }
+            let mut rest_reader = Prefixed {
+                prefix: rest,
+                pos: 0,
+                inner: prefixed.inner,
+            };
+            return plain_http(&mut rest_reader, &head, hub).await;
+        }
         record_tunnel(&hub, host, port, "不是 TLS，已改为隧道".into());
         return tunnel_after_hello(&mut client, raw, host, port, &hub)
             .await

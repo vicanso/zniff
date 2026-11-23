@@ -58,9 +58,74 @@ fn emit_git_metadata() {
     println!("cargo:rustc-env=ZNIFF_BUILD_YEAR={year}");
 }
 
+fn compile_macos_transparent_proxy_bridge() {
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos")
+        || env::var_os("CARGO_FEATURE_DESKTOP").is_none()
+        || env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("wasm32")
+    {
+        return;
+    }
+    let manifest_dir =
+        PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+    let src = manifest_dir
+        .parent()
+        .map(|root| root.join("macos/transparent-proxy/host_bridge.m"))
+        .unwrap_or_else(|| manifest_dir.join("../macos/transparent-proxy/host_bridge.m"));
+    println!("cargo:rerun-if-changed={}", src.display());
+    if !src.is_file() {
+        panic!("missing macOS transparent proxy bridge: {}", src.display());
+    }
+
+    let arch = match env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
+        Ok("aarch64") => "arm64",
+        Ok("x86_64") => "x86_64",
+        other => panic!("unsupported macOS target arch: {other:?}"),
+    };
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
+    let obj = out_dir.join("zniff_tp_bridge.o");
+    let lib = out_dir.join("libzniff_tp_bridge.a");
+
+    let clang_status = Command::new("xcrun")
+        .args([
+            "clang",
+            "-c",
+            "-fobjc-arc",
+            "-O2",
+            "-mmacosx-version-min=12.0",
+            "-arch",
+            arch,
+            "-o",
+        ])
+        .arg(&obj)
+        .arg(&src)
+        .status()
+        .expect("failed to invoke xcrun clang for host_bridge.m");
+    if !clang_status.success() {
+        panic!("xcrun clang failed for host_bridge.m: {clang_status}");
+    }
+
+    let ar_status = Command::new("ar")
+        .arg("rcs")
+        .arg(&lib)
+        .arg(&obj)
+        .status()
+        .expect("failed to invoke ar for libzniff_tp_bridge.a");
+    if !ar_status.success() {
+        panic!("ar failed for libzniff_tp_bridge.a: {ar_status}");
+    }
+
+    println!("cargo:rustc-link-search=native={}", out_dir.display());
+    println!("cargo:rustc-link-lib=static=zniff_tp_bridge");
+    println!("cargo:rustc-link-lib=framework=SystemExtensions");
+    println!("cargo:rustc-link-lib=framework=NetworkExtension");
+    println!("cargo:rustc-link-lib=framework=Foundation");
+    println!("cargo:rustc-link-lib=framework=AppKit");
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     emit_git_metadata();
+    compile_macos_transparent_proxy_bridge();
     for (name, _) in FACES {
         println!("cargo:rerun-if-changed=assets/fonts/{name}");
     }

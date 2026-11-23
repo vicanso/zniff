@@ -302,6 +302,14 @@ pub fn App() -> impl IntoElement {
             0usize
         }
     });
+    let tp_active = signal(false);
+    #[cfg(not(target_arch = "wasm32"))]
+    let tp_status = signal(crate::transparent_proxy::cached_status());
+    #[cfg(not(target_arch = "wasm32"))]
+    let tp_apps = signal(crate::transparent_proxy::cached_running_apps());
+    #[cfg(not(target_arch = "wasm32"))]
+    refresh_transparent_proxy_state_async();
+    let tp_probe_at = Cell::new(clock::now());
     let controls = open_controls();
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -640,6 +648,28 @@ pub fn App() -> impl IntoElement {
             let adb_now = launcher::configured_adb_count();
             if adb_count.get_untracked() != adb_now {
                 adb_count.set(adb_now);
+            }
+            let tp_now = crate::transparent_proxy::cached_status();
+            let tp_on = tp_now.is_on_or_starting();
+            if tp_active.get_untracked() != tp_on {
+                tp_active.set(tp_on);
+            }
+            if tp_status.with_untracked(|cur| cur != &tp_now) {
+                tp_status.set(tp_now.clone());
+            }
+            let tp_apps_now = crate::transparent_proxy::cached_running_apps();
+            if tp_apps.with_untracked(|cur| cur != &tp_apps_now) {
+                tp_apps.set(tp_apps_now);
+            }
+            if tp_now.embedded
+                && matches!(
+                    tp_now.state,
+                    crate::transparent_proxy::TpState::NeedsApproval
+                        | crate::transparent_proxy::TpState::Starting
+                        | crate::transparent_proxy::TpState::Stopping
+                )
+            {
+                poll_transparent_proxy_if_pending(&tp_probe_at);
             }
         }
         if pending_qr.get_untracked() {
@@ -1671,6 +1701,11 @@ pub fn App() -> impl IntoElement {
                 ca_ui,
                 use_system_proxy,
                 adb_count,
+                tp_active,
+                #[cfg(not(target_arch = "wasm32"))]
+                tp_status,
+                #[cfg(not(target_arch = "wasm32"))]
+                tp_apps,
                 selected,
                 install_ca: {
                     let c = controls.clone();

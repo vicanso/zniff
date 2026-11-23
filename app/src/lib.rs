@@ -73,6 +73,9 @@ mod share;
 mod startup_metrics;
 #[cfg(not(target_arch = "wasm32"))]
 mod sysproxy;
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+mod transparent_proxy;
 mod ui;
 #[cfg(not(target_arch = "wasm32"))]
 mod updater;
@@ -94,6 +97,8 @@ pub use relay::shutdown_relay_push;
 pub use startup_metrics::mark_process_start;
 #[cfg(not(target_arch = "wasm32"))]
 pub use sysproxy::restore_if_dirty;
+#[cfg(not(target_arch = "wasm32"))]
+pub use transparent_proxy::cleanup_on_exit as cleanup_transparent_proxy;
 pub use ui::{App, initial_window_size};
 #[cfg(not(target_arch = "wasm32"))]
 pub use ui::{apply_initial_window_options, maybe_run_cli_mode};

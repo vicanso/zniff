@@ -30,6 +30,7 @@ fn main() -> impl std::process::Termination {
         }
         zniff::clear_ios_simulator_proxies();
         zniff::cleanup_launchers();
+        zniff::cleanup_transparent_proxy();
         zniff::shutdown_relay_push();
         previous(info);
     }));
@@ -59,6 +60,7 @@ fn main() -> impl std::process::Termination {
         log::error!("退出时恢复系统代理失败: {err:#}");
     }
     zniff::clear_ios_simulator_proxies();
+    zniff::cleanup_transparent_proxy();
     zniff::shutdown_relay_push();
     result
 }
