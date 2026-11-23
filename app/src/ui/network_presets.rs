@@ -187,7 +187,7 @@ pub(crate) fn toolbar_network_preset_popover(
             }
         })
         .placement(Placement::Bottom)
-        .align(Align::Start)
+        .align(Align::End)
         .offset(px(6.0))
         .margin(px(8.0))
         .trigger(
