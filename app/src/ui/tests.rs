@@ -5416,3 +5416,118 @@ fn toolbar_pill_tooltips_show_full_untruncated_content() {
             .starts_with("Rules paused (12 rules · 3 groups)\n")
     );
 }
+
+#[test]
+fn path_cell_rule_badge_centers_icons_with_gap_and_clears_path() {
+    use nsh_core::ViewKind;
+
+    #[component]
+    fn PathCellBadgeHarness() -> impl IntoElement {
+        provide_context(signal(Some(crate::i18n::Lang::En)));
+        super::provide_mono_font(false);
+        let _ = super::provide_appearance_prefs(crate::config::ThemeMode::System, 100);
+
+        let rows = signal(vec![Arc::new(super::RowLine {
+            id: 306,
+            method: "GET".into(),
+            status: Some(200),
+            time: "10 ms".into(),
+            gap_nanos: 10_000_000,
+            clock: "13:13:00.000".into(),
+            elapsed: "36.1 s".into(),
+            elapsed_nanos: Some(36_100_000_000),
+            elapsed_slow: true,
+            host: "test.example.com".into(),
+            client_ip: "127.0.0.1".into(),
+            path: "/finance-api/online-hall-v2/configs".into(),
+            host_path: "test.example.com/finance-api/online-hall-v2/configs".into(),
+            url: "https://test.example.com/finance-api/online-hall-v2/configs".into(),
+            comment: String::new(),
+            protocol: "HTTP/1.1".into(),
+            size: "1 KB".into(),
+            size_bytes: 1024,
+            failed: false,
+            pinned: false,
+            is_marker: false,
+            rule_marker: "✎⏱".into(),
+            rule_summary: "replace, delay".into(),
+            relay_short: String::new(),
+        })]);
+        let selected = signal(None::<u64>);
+        let baseline = signal(None::<u64>);
+        let columns = signal(super::ListColumns::from_config(
+            &crate::config::Config::default(),
+        ));
+        let effective_filter = signal(String::new());
+        let hover = super::CellHover {
+            text: signal(None),
+            at: signal(point(px(0.0), px(0.0))),
+        };
+
+        view().w(px(320.0)).h(px(34.0)).child(super::path_cell(
+            rows,
+            selected,
+            baseline,
+            columns,
+            effective_filter,
+            hover,
+            0,
+        ))
+    }
+
+    let (_core, tree) =
+        mount_headless_component::<PathCellBadgeHarness>(Size::new(px(320.0), px(34.0)));
+    let canvas_id = tree
+        .kinds
+        .iter()
+        .find_map(|(id, kind)| (*kind == ViewKind::Canvas).then_some(*id))
+        .expect("rule badge icon strip canvas");
+    let badge_id = tree.parent[&canvas_id];
+    let path_id = tree
+        .texts
+        .iter()
+        .find_map(|(id, text)| {
+            text.contains("/finance-api/online-hall-v2/configs")
+                .then_some(*id)
+        })
+        .expect("path text node");
+
+    let canvas = tree.abs_frame(canvas_id);
+    let badge = tree.abs_frame(badge_id);
+    let path = tree.abs_frame(path_id);
+
+    // Width = horizontal padding (5 + 5) + two 12px glyphs separated by 3.5px = 37.5px
+    let expected_canvas_w = crate::icon::glyph_strip_width(2, 12.0, 3.5);
+    assert!(
+        (canvas.size.width.0 - expected_canvas_w).abs() <= 0.5,
+        "expected canvas strip width {expected_canvas_w}, got {}",
+        canvas.size.width.0
+    );
+    assert!(
+        (badge.size.width.0 - (expected_canvas_w + 10.0)).abs() <= 0.5,
+        "expected badge width {}, got {}",
+        expected_canvas_w + 10.0,
+        badge.size.width.0
+    );
+
+    // Both pill and icon canvas must sit vertically centered inside the 34px row cell
+    let row_mid_y = 17.0;
+    let badge_mid_y = badge.origin.y.0 + badge.size.height.0 / 2.0;
+    let canvas_mid_y = canvas.origin.y.0 + canvas.size.height.0 / 2.0;
+    assert!(
+        (badge_mid_y - row_mid_y).abs() <= 0.5,
+        "badge center y={badge_mid_y} must align with row mid y={row_mid_y}"
+    );
+    assert!(
+        (canvas_mid_y - row_mid_y).abs() <= 0.5,
+        "icon strip center y={canvas_mid_y} must align with row mid y={row_mid_y}"
+    );
+
+    // Path text starts strictly after the badge pill + 6px right margin
+    let badge_right = badge.origin.x.0 + badge.size.width.0;
+    assert!(
+        path.origin.x.0 >= badge_right + 6.0 - 0.5,
+        "path x={} overlapped or crowded badge right edge={badge_right}",
+        path.origin.x.0
+    );
+}

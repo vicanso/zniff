@@ -1,15 +1,30 @@
 #[allow(unused_imports)]
 use super::*;
 
-/// Maps a rule verb to a compact category icon for the traffic list and detail badges.
-pub(crate) fn rule_marker_for_verb(verb: &str) -> &'static str {
+/// Maps a rule verb to a compact vector icon for the traffic list and detail badges.
+pub(crate) fn rule_glyph_for_verb(verb: &str) -> Glyph {
     match verb {
-        "break" | "break-res" => "⏸",
-        "block" => "⛔",
-        "map-local" | "map-remote" | "resolve" => "↪",
-        "delay" | "throttle" => "⏱",
-        _ => "✎",
+        "break" | "break-res" => Glyph::RuleBreak,
+        "block" => Glyph::RuleBlock,
+        "map-local" | "map-remote" | "resolve" => Glyph::RuleMap,
+        "delay" | "throttle" => Glyph::RuleTiming,
+        _ => Glyph::RuleRewrite,
     }
+}
+
+/// Converts a compact flow rule marker string (e.g. `"✎⏱"`) into ordered vector glyphs.
+pub(crate) fn rule_marker_glyphs(marker: &str) -> Vec<Glyph> {
+    marker
+        .chars()
+        .filter_map(|ch| match ch {
+            '⏸' => Some(Glyph::RuleBreak),
+            '⛔' => Some(Glyph::RuleBlock),
+            '↪' => Some(Glyph::RuleMap),
+            '✎' => Some(Glyph::RuleRewrite),
+            '⏱' => Some(Glyph::RuleTiming),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Builds a compact, deduplicated icon string (e.g. `✎`, `↪⏱`, `⏸`) for a flow row.
@@ -124,8 +139,8 @@ pub(crate) fn detail_rule_badges(shown: Shown, profiles: ProfileSignals) -> impl
                     move |entry, _| {
                         let (_, hit) = entry.get_untracked();
                         let (bg_col, border_col, fg_col) = rule_badge_colors(&hit.verb);
-                        let icon = rule_marker_for_verb(&hit.verb);
-                        let label = format!("{icon} {}", hit.format_badge());
+                        let glyph = rule_glyph_for_verb(&hit.verb);
+                        let label = hit.format_badge();
                         let click_hit = hit.clone();
                         view()
                             .max_w(px(220.0))
@@ -136,6 +151,9 @@ pub(crate) fn detail_rule_badges(shown: Shown, profiles: ProfileSignals) -> impl
                             .border_1()
                             .border_color(border_col)
                             .bg(bg_col)
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
                             .hover(|style| style.opacity(0.85))
                             .active(|style| style.opacity(0.7))
                             .cursor(Cursor::Pointer)
@@ -144,8 +162,11 @@ pub(crate) fn detail_rule_badges(shown: Shown, profiles: ProfileSignals) -> impl
                                 "Click to jump to this rule in editor",
                             ))
                             .on_press(move || focus_rule_hit(profiles, &click_hit))
+                            .child(glyph_px(11.0, move || glyph, move || color(fg_col)))
                             .child(
                                 mono(label)
+                                    .min_w(px(0.0))
+                                    .flex_shrink(1.0)
                                     .number_of_lines(1)
                                     .text_overflow(EllipsizeMode::Tail)
                                     .text_size(px(11.0))
@@ -241,6 +262,29 @@ mod tests {
             },
         ];
         assert_eq!(rule_marker_for_flow(&hits, ""), "⏸✎⏱");
+        assert_eq!(
+            rule_marker_glyphs("⏸⛔↪✎⏱"),
+            vec![
+                Glyph::RuleBreak,
+                Glyph::RuleBlock,
+                Glyph::RuleMap,
+                Glyph::RuleRewrite,
+                Glyph::RuleTiming,
+            ]
+        );
+        assert_eq!(
+            rule_marker_glyphs("✎⏱"),
+            vec![Glyph::RuleRewrite, Glyph::RuleTiming]
+        );
+        assert_eq!(rule_glyph_for_verb("break"), Glyph::RuleBreak);
+        assert_eq!(rule_glyph_for_verb("block"), Glyph::RuleBlock);
+        assert_eq!(rule_glyph_for_verb("map-local"), Glyph::RuleMap);
+        assert_eq!(rule_glyph_for_verb("delay"), Glyph::RuleTiming);
+        assert_eq!(rule_glyph_for_verb("replace"), Glyph::RuleRewrite);
+        assert_eq!(icon::glyph_strip_width(0, 12.0, 3.5), 0.0);
+        assert_eq!(icon::glyph_strip_width(1, 12.0, 3.5), 12.0);
+        assert_eq!(icon::glyph_strip_width(2, 12.0, 3.5), 27.5);
+        assert_eq!(icon::glyph_strip_width(3, 12.0, 3.5), 43.0);
         assert_eq!(
             rule_hover_summary(&hits, ""),
             "replace #3, [qa] break #2, delay #5"

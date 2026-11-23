@@ -3,7 +3,7 @@
 use nsh_core::canvas::{LineCap, LineJoin};
 use nsh_core::prelude::*;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Glyph {
     Trash,
     Play,
@@ -26,6 +26,11 @@ pub enum Glyph {
     LayoutTopBottom,
     Sidebar,
     SidebarOpen,
+    RuleBreak,
+    RuleBlock,
+    RuleMap,
+    RuleRewrite,
+    RuleTiming,
     DeviceMobile,
     DeviceDesktop,
     Globe,
@@ -51,9 +56,49 @@ pub fn glyph_px(
         .flex_shrink_0()
 }
 
-fn draw(kind: Glyph, paint: Hsla, size: f32) -> Painter {
+pub fn glyph_strip_width(count: usize, size: f32, gap: f32) -> f32 {
+    if count == 0 {
+        0.0
+    } else {
+        count as f32 * size + (count - 1) as f32 * gap
+    }
+}
+
+pub fn glyph_strip(
+    size: impl Fn() -> f32 + Copy + 'static,
+    gap: impl Fn() -> f32 + Copy + 'static,
+    kinds: impl Fn() -> Vec<Glyph> + Copy + 'static,
+    paint: impl Fn() -> Hsla + 'static,
+) -> impl IntoElement {
+    canvas(move || draw_glyph_strip(&kinds(), paint(), size(), gap()))
+        .w(move || px(glyph_strip_width(kinds().len(), size(), gap())))
+        .h(move || px(size()))
+        .flex_shrink_0()
+}
+
+pub fn draw_glyph_strip(kinds: &[Glyph], paint: Hsla, size: f32, gap: f32) -> Painter {
     let scale = (size - 2.0).max(1.0) / 16.0;
     let mut painter = Painter::new()
+        .line_cap(LineCap::Round)
+        .line_join(LineJoin::Round)
+        .stroke_color(paint)
+        .fill_color(paint);
+    for (idx, &kind) in kinds.iter().enumerate() {
+        let x = idx as f32 * (size + gap) + 1.0;
+        painter = painter
+            .save()
+            .translate(x, 1.0)
+            .scale(scale, scale)
+            .line_width(1.65);
+        painter = paint_glyph(painter, kind);
+        painter = painter.restore();
+    }
+    painter
+}
+
+fn draw(kind: Glyph, paint: Hsla, size: f32) -> Painter {
+    let scale = (size - 2.0).max(1.0) / 16.0;
+    let painter = Painter::new()
         .translate(1.0, 1.0)
         .scale(scale, scale)
         .line_width(1.65)
@@ -61,7 +106,11 @@ fn draw(kind: Glyph, paint: Hsla, size: f32) -> Painter {
         .line_join(LineJoin::Round)
         .stroke_color(paint)
         .fill_color(paint);
-    painter = match kind {
+    paint_glyph(painter, kind)
+}
+
+fn paint_glyph(painter: Painter, kind: Glyph) -> Painter {
+    match kind {
         Glyph::Trash => painter
             .stroke_svg("M3 5.2 H13")
             .stroke_svg("M6.2 5.2 V3.4 H9.8 V5.2")
@@ -131,6 +180,23 @@ fn draw(kind: Glyph, paint: Hsla, size: f32) -> Painter {
             .fill_svg("M2.4 3.2 H6.2 V12.8 H2.4 Z")
             .stroke_svg("M2.4 3.2 H13.6 V12.8 H2.4 Z")
             .stroke_svg("M6.2 3.2 V12.8"),
+        Glyph::RuleBreak => painter
+            .stroke_svg("M5.5 3.6 V12.4")
+            .stroke_svg("M10.5 3.6 V12.4"),
+        Glyph::RuleBlock => painter
+            .stroke_svg("M8 2.6 A5.4 5.4 0 1 0 8 13.4 A5.4 5.4 0 1 0 8 2.6 Z")
+            .stroke_svg("M4.4 4.4 L11.6 11.6"),
+        Glyph::RuleMap => painter
+            .stroke_svg("M3.2 4.2 V7.6 C3.2 9.0 4.2 9.8 5.8 9.8 H12.6")
+            .stroke_svg("M9.8 7.0 L12.8 9.8 L9.8 12.6"),
+        Glyph::RuleRewrite => painter
+            .stroke_svg("M3.0 13.0 L4.0 9.6 L10.6 3.0 L13.0 5.4 L6.4 12.0 Z")
+            .stroke_svg("M9.2 4.4 L11.6 6.8"),
+        Glyph::RuleTiming => painter
+            .stroke_svg("M6.4 2.2 H9.6")
+            .stroke_svg("M8 2.2 V4.0")
+            .stroke_svg("M8 4.0 A4.8 4.8 0 1 0 8 13.6 A4.8 4.8 0 1 0 8 4.0 Z")
+            .stroke_svg("M8 8.8 L10.4 6.8"),
         Glyph::DeviceMobile => painter
             .stroke_svg("M4.8 2.2 H11.2 V13.8 H4.8 Z")
             .stroke_svg("M7.0 11.6 H9.0"),
@@ -152,6 +218,5 @@ fn draw(kind: Glyph, paint: Hsla, size: f32) -> Painter {
             .stroke_svg("M2.6 9.4 H6.6 V13.4 H2.6 Z")
             .stroke_svg("M9.4 9.4 H11.2 V11.2")
             .stroke_svg("M13.4 9.4 V13.4 H10.2"),
-    };
-    painter
+    }
 }

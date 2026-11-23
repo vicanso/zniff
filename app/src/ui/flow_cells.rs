@@ -675,10 +675,14 @@ pub(crate) fn path_cell(
             },
             move || {
                 view()
+                    .h(move || scaled_px(18.0))
                     .mr(px(6.0))
                     .px(px(4.0))
                     .rounded(px(4.0))
                     .flex_shrink_0()
+                    .flex_row()
+                    .items_center()
+                    .justify_center()
                     .bg(accent_blue_soft())
                     .child(
                         text(move || {
@@ -705,24 +709,27 @@ pub(crate) fn path_cell(
             },
             move || {
                 view()
-                    .mr(px(4.0))
-                    .px(px(4.0))
+                    .h(move || scaled_px(18.0))
+                    .mr(px(6.0))
+                    .px(px(5.0))
                     .rounded(px(4.0))
                     .flex_shrink_0()
+                    .flex_row()
+                    .items_center()
+                    .justify_center()
                     .bg(accent_blue_soft())
-                    .child(
-                        text(move || {
+                    .child(icon::glyph_strip(
+                        move || scaled_px(12.0).0,
+                        move || scaled_px(3.5).0,
+                        move || {
                             rows.with(|rows| {
                                 rows.get(index)
-                                    .map(|row| row.rule_marker.clone())
+                                    .map(|row| rule_marker_glyphs(&row.rule_marker))
                                     .unwrap_or_default()
                             })
-                        })
-                        .number_of_lines(1)
-                        .text_size(move || scaled_px(10.5))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(accent_blue_text()),
-                    )
+                        },
+                        || color(accent_blue_text()),
+                    ))
             },
         ))
         .child(
@@ -734,7 +741,7 @@ pub(crate) fn path_cell(
                         .unwrap_or_default()
                 })
             })
-            .w_full()
+            .flex_1()
             .min_w(px(0.0))
             .number_of_lines(1)
             .text_overflow(move || columns.get().ellipsize_mode())
