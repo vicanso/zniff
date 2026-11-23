@@ -1661,8 +1661,6 @@ pub fn App() -> impl IntoElement {
             },
             config_broken,
             config_broken_dismissed,
-            profile_signals.layout_mode,
-            profile_signals.sidebar_collapsed,
             ConnectHubProps {
                 controls: controls.clone(),
                 running,

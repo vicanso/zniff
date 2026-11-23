@@ -223,6 +223,7 @@ fn provide_base_contexts(lang: Lang) -> (AppearancePrefs, Signal<FilterSuggestio
 }
 
 fn make_controls(tag: &str) -> Arc<Controls> {
+    reset_test_config();
     let n = TEST_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("zniff-v05-{tag}-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -1557,6 +1558,12 @@ fn allow_hosts_denied_summary_unlocked_and_locked_zh_en() {
                 && tree.has_text_containing("ALLOW:api.example.com"),
             "unlocked +Allow should append host to allow_hosts"
         );
+        assert_eq!(
+            saved_config().allow_hosts,
+            "api.example.com\nblocked.example.com"
+        );
+        assert!(!ca::data_dir().join("config.toml").exists());
+        assert!(ca::data_dir().starts_with(std::env::temp_dir()));
 
         assert!(tree.press_text(&mut core, t(lang, "清零", "Reset")));
         assert!(!tree.has_text(t(lang, "已拦截 3 次请求", "3 requests denied")));
@@ -1672,5 +1679,77 @@ fn preset_sync_bar_surfaces_unsaved_state_and_opens_presets_zh_en() {
         assert!(tree.has_text(t(lang, "存为预设…", "Save as preset…")));
         assert!(tree.press_text(&mut core, t(lang, "存为预设…", "Save as preset…")));
         assert!(tree.has_text("OPEN:f=false,r=false,p=true"));
+    }
+}
+
+#[test]
+fn title_bar_sidebar_toggle_only_renders_in_split_mode_zh_en() {
+    #[component]
+    fn SidebarToggleHarness() -> impl IntoElement {
+        let lang = TEST_LANG.with(Cell::get);
+        provide_base_contexts(lang);
+        let controls = make_controls("sidebar-toggle");
+        let profiles = make_profiles();
+        let step = signal(0_u8);
+
+        view()
+            .w(px(320.0))
+            .h(px(80.0))
+            .flex_row()
+            .items_center()
+            .child(toolbar_sidebar_toggle(
+                profiles.layout_mode,
+                profiles.sidebar_collapsed,
+                controls,
+            ))
+            .child(
+                view()
+                    .on_press(move || {
+                        let next = step.get() + 1;
+                        step.set(next);
+                        match next {
+                            1 => profiles.sidebar_collapsed.set(true),
+                            2 => profiles.layout_mode.set(config::LayoutMode::TopBottom),
+                            _ => {
+                                profiles.layout_mode.set(config::LayoutMode::Split);
+                                profiles.sidebar_collapsed.set(false);
+                            }
+                        }
+                    })
+                    .child(text("SIDEBAR_STEP")),
+            )
+            .child(text(move || {
+                format!(
+                    "MODE:{:?}:{}",
+                    profiles.layout_mode.get(),
+                    profiles.sidebar_collapsed.get()
+                )
+            }))
+    }
+
+    for lang in [Lang::Zh, Lang::En] {
+        TEST_LANG.set(lang);
+        let (mut core, mut tree) = mount::<SidebarToggleHarness>(Size::new(px(320.0), px(80.0)));
+        let canvas_count = |t: &HeadlessTree| {
+            t.kinds
+                .values()
+                .filter(|k| matches!(k, ViewKind::Canvas))
+                .count()
+        };
+
+        assert!(tree.has_text("MODE:Split:false"));
+        assert_eq!(canvas_count(&tree), 1);
+
+        assert!(tree.press_text(&mut core, "SIDEBAR_STEP"));
+        assert!(tree.has_text("MODE:Split:true"));
+        assert_eq!(canvas_count(&tree), 1);
+
+        assert!(tree.press_text(&mut core, "SIDEBAR_STEP"));
+        assert!(tree.has_text("MODE:TopBottom:true"));
+        assert_eq!(canvas_count(&tree), 0);
+
+        assert!(tree.press_text(&mut core, "SIDEBAR_STEP"));
+        assert!(tree.has_text("MODE:Split:false"));
+        assert_eq!(canvas_count(&tree), 1);
     }
 }

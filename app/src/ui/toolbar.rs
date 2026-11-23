@@ -29,6 +29,100 @@ pub(crate) fn toolbar_bar_height(title_top: f32) -> f32 {
     }
 }
 
+/// Title-bar toggle button for the left Domains & Apps sidebar in Split layout.
+pub(crate) fn toolbar_sidebar_toggle(
+    layout_mode: Signal<config::LayoutMode>,
+    sidebar_collapsed: Signal<bool>,
+    controls: Arc<Controls>,
+) -> impl IntoElement {
+    when(
+        move || layout_mode.get() == config::LayoutMode::Split,
+        move || {
+            let controls = controls.clone();
+            view()
+                .window_drag(false)
+                .w(px(28.0))
+                .h(px(CONTROL_H))
+                .mr_1()
+                .flex_shrink_0()
+                .rounded(px(CONTROL_RADIUS))
+                .bg(move || {
+                    if sidebar_collapsed.get() {
+                        AdaptiveColor::TRANSPARENT
+                    } else {
+                        bg_control()
+                    }
+                })
+                .hover(|s| s.bg(bg_control_hover()))
+                .active(|s| s.opacity(0.8))
+                .cursor(Cursor::Pointer)
+                .focus_visible(apply_focus_ring)
+                .flex_row()
+                .items_center()
+                .justify_center()
+                .label(move || {
+                    if sidebar_collapsed.get() {
+                        tr("展开域名与应用栏", "Expand Domains & Apps sidebar")()
+                    } else {
+                        tr("收起域名与应用栏", "Collapse Domains & Apps sidebar")()
+                    }
+                })
+                .tooltip(
+                    tooltip().child(
+                        view()
+                            .px_2()
+                            .py_1()
+                            .rounded(px(6.0))
+                            .bg(bg_card())
+                            .border_1()
+                            .border_color(border_strong())
+                            .child(
+                                text(move || {
+                                    if sidebar_collapsed.get() {
+                                        tr("展开侧边栏", "Expand sidebar")()
+                                    } else {
+                                        tr("收起侧边栏", "Collapse sidebar")()
+                                    }
+                                })
+                                .text_size(px(12.0))
+                                .text_color(fg_primary()),
+                            ),
+                    ),
+                )
+                .on_press(move || {
+                    let next = !sidebar_collapsed.get();
+                    sidebar_collapsed.set(next);
+                    if let Err(err) = save_config(|config| config.sidebar_collapsed = next) {
+                        set_status(
+                            &controls,
+                            StatusMsg::PrefUnsaved {
+                                name: PrefName::List,
+                                err: err.to_string(),
+                            },
+                        );
+                    }
+                })
+                .child(glyph_px(
+                    15.0,
+                    move || {
+                        if sidebar_collapsed.get() {
+                            Glyph::Sidebar
+                        } else {
+                            Glyph::SidebarOpen
+                        }
+                    },
+                    move || {
+                        color(if sidebar_collapsed.get() {
+                            fg_secondary()
+                        } else {
+                            fg_primary()
+                        })
+                    },
+                ))
+        },
+    )
+}
+
 /// Formats the hover tooltip for the toolbar primary filter pill, preserving the
 /// full untruncated filter expression (and any active secondary filter) plus the
 /// click-to-toggle hint.
@@ -110,6 +204,7 @@ pub(crate) fn toolbar(
     let rules_controls = import_controls.clone();
     let network_controls = import_controls.clone();
     let layout_controls = import_controls.clone();
+    let sidebar_controls = import_controls.clone();
     let shared_rule_draft = QuickRuleDraftSignals {
         kind: signal(0_u8),
         host: signal(String::new()),
@@ -163,6 +258,11 @@ pub(crate) fn toolbar(
         .bg(bg_chrome())
         .border_b_1()
         .border_b_color(border_strong())
+        .child(toolbar_sidebar_toggle(
+            profiles.layout_mode,
+            profiles.sidebar_collapsed,
+            sidebar_controls,
+        ))
         .child(
             view()
                 .flex_row()
@@ -458,7 +558,7 @@ pub(crate) fn toolbar(
         rules_controls,
         shared_rule_draft,
     ))
-    .child(toolbar_text_button(tr("清空", "Clear"), {
+    .child(toolbar_text_button({
         let clear = Rc::clone(&clear);
         move || clear()
     }))
@@ -502,10 +602,7 @@ pub(crate) fn toolbar(
     ))
 }
 
-pub(crate) fn toolbar_text_button(
-    label: impl IntoReactive<SharedString>,
-    on_press: impl Fn() + 'static,
-) -> impl IntoElement {
+pub(crate) fn toolbar_text_button(on_press: impl Fn() + 'static) -> impl IntoElement {
     view()
         .window_drag(false)
         .h(px(CONTROL_H))
@@ -522,13 +619,17 @@ pub(crate) fn toolbar_text_button(
         .cursor(Cursor::Pointer)
         .active(|style| style.opacity(0.8))
         .focus_visible(apply_focus_ring)
+        .label(tr("清空会话", "Clear session"))
         .tooltip(label_tip(
             "清空会话 (Cmd/Ctrl+K)",
             "Clear session (Cmd/Ctrl+K)",
         ))
         .on_press(on_press)
         .child(glyph_px(13.5, || Glyph::Trash, || color(fg_secondary())))
-        .child(control_text(label).text_color(fg_primary()))
+        .child(when(
+            move || window().width.0 >= 860.0,
+            move || control_text(tr("清空", "Clear")).text_color(fg_primary()),
+        ))
 }
 
 #[allow(clippy::too_many_arguments)]

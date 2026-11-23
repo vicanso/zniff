@@ -16,16 +16,13 @@ pub(crate) fn footer(
     access: AccessControlProps,
     config_broken: Signal<Option<String>>,
     config_broken_dismissed: Signal<bool>,
-    layout_mode: Signal<config::LayoutMode>,
-    sidebar_collapsed: Signal<bool>,
     connect_hub: ConnectHubProps,
     watch: WatchPopoverProps,
     controls: Arc<Controls>,
 ) -> impl IntoElement {
     let port_controls = controls.clone();
     let lan_controls = controls.clone();
-    let qr_controls = controls.clone();
-    let sidebar_controls = controls;
+    let qr_controls = controls;
     let qr_open = connect_hub.qr_open;
     view()
         .h(px(32.0))
@@ -45,81 +42,6 @@ pub(crate) fn footer(
                 .gap_2()
                 .min_w(px(0.0))
                 .overflow_hidden()
-                .child(when(
-                    move || layout_mode.get() == config::LayoutMode::Split,
-                    move || {
-                        let controls = sidebar_controls.clone();
-                        view()
-                            .h(px(20.0))
-                            .px_1p5()
-                            .flex_shrink_0()
-                            .rounded(px(5.0))
-                            .border_1()
-                            .border_color(border_control())
-                            .bg(bg_control())
-                            .hover(|s| s.bg(bg_control_hover()))
-                            .active(|s| s.opacity(0.8))
-                            .cursor(Cursor::Pointer)
-                            .flex_row()
-                            .items_center()
-                            .justify_center()
-                            .label(move || {
-                                if sidebar_collapsed.get() {
-                                    tr("展开域名与应用栏", "Expand Domains & Apps sidebar")()
-                                } else {
-                                    tr("收起域名与应用栏", "Collapse Domains & Apps sidebar")()
-                                }
-                            })
-                            .tooltip(
-                                tooltip().child(
-                                    view()
-                                        .px_2()
-                                        .py_1()
-                                        .rounded(px(6.0))
-                                        .bg(bg_card())
-                                        .border_1()
-                                        .border_color(border_strong())
-                                        .child(
-                                            text(move || {
-                                                if sidebar_collapsed.get() {
-                                                    tr("展开侧边栏", "Expand sidebar")()
-                                                } else {
-                                                    tr("收起侧边栏", "Collapse sidebar")()
-                                                }
-                                            })
-                                            .text_size(px(12.0))
-                                            .text_color(fg_primary()),
-                                        ),
-                                ),
-                            )
-                            .on_press(move || {
-                                let next = !sidebar_collapsed.get();
-                                sidebar_collapsed.set(next);
-                                if let Err(err) =
-                                    save_config(|config| config.sidebar_collapsed = next)
-                                {
-                                    set_status(
-                                        &controls,
-                                        StatusMsg::PrefUnsaved {
-                                            name: PrefName::List,
-                                            err: err.to_string(),
-                                        },
-                                    );
-                                }
-                            })
-                            .child(glyph_px(
-                                11.0,
-                                move || {
-                                    if sidebar_collapsed.get() {
-                                        Glyph::ChevronRight
-                                    } else {
-                                        Glyph::ChevronLeft
-                                    }
-                                },
-                                || color(fg_secondary()),
-                            ))
-                    },
-                ))
                 .child(
                     view()
                         .w(px(6.0))

@@ -3116,8 +3116,14 @@ fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
     assert_eq!(tree.window_drag.get(&toolbar_id), Some(&Some(true)));
 
     let toolbar_kids = &tree.children[&toolbar_id];
-    let brand_id = toolbar_kids[0];
+    let toggle_id = toolbar_kids[0];
+    let brand_id = toolbar_kids[1];
     let start_btn_id = *toolbar_kids.last().expect("Start button child");
+    assert_eq!(
+        tree.window_drag.get(&toggle_id),
+        Some(&Some(false)),
+        "Sidebar toggle button must opt out of window_drag"
+    );
     assert_eq!(
         tree.window_drag.get(&start_btn_id),
         Some(&Some(false)),
@@ -3125,7 +3131,8 @@ fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
     );
 
     // 1. Default environment (`title_bar` = 0): standard edge insets.
-    assert!((tree.frames[&brand_id].origin.x.0 - super::LIST_INSET).abs() < 0.5);
+    assert!((tree.frames[&toggle_id].origin.x.0 - super::LIST_INSET).abs() < 0.5);
+    assert!(tree.frames[&brand_id].origin.x.0 > tree.frames[&toggle_id].origin.x.0);
     let default_btn = tree.frames[&start_btn_id];
     assert!(
         (default_btn.origin.x.0 + default_btn.size.width.0 - (800.0 - super::TOOLBAR_PAD_END))
@@ -3155,7 +3162,7 @@ fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
         "Linux Start button right edge ({linux_btn_right}) must stay strictly clear of overlaid GTK WindowControls [696.0, 800.0]"
     );
     assert!(
-        (tree.frames[&brand_id].origin.x.0 - super::LIST_INSET).abs() < 0.5,
+        (tree.frames[&toggle_id].origin.x.0 - super::LIST_INSET).abs() < 0.5,
         "left edge stays at LIST_INSET when title_bar.left is 0"
     );
 
@@ -3191,8 +3198,12 @@ fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
         "toolbar height expands to cover taller native title bar"
     );
     assert!(
-        tree.frames[&brand_id].origin.x.0 >= 78.0 + super::TITLE_BAR_CONTROLS_GAP - 0.5,
-        "brand must clear macOS traffic lights on the left"
+        tree.frames[&toggle_id].origin.x.0 >= 78.0 + super::TITLE_BAR_CONTROLS_GAP - 0.5,
+        "sidebar toggle must clear macOS traffic lights on the left"
+    );
+    assert!(
+        tree.frames[&brand_id].origin.x.0 > tree.frames[&toggle_id].origin.x.0,
+        "brand must sit right of the sidebar toggle and clear macOS traffic lights"
     );
     let mac_btn = tree.frames[&start_btn_id];
     assert!(
@@ -4837,6 +4848,7 @@ fn filter_assist_input_shows_inline_error_and_applies_autocomplete_click() {
 }
 
 fn make_test_controls(tag: &str) -> Arc<Controls> {
+    super::reset_test_config();
     let dir = std::env::temp_dir().join(format!("zniff-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let ca = Arc::new(crate::ca::Ca::open(&dir).expect("ca"));
