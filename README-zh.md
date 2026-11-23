@@ -46,6 +46,12 @@ https://github.com/user-attachments/assets/19339425-f1df-47fe-ab8a-88bb586fd4a1
 ### 安装
 
 - **桌面端（macOS / Linux / Windows）**：从 [GitHub Releases](https://github.com/vicanso/zniff/releases) 下载——macOS 为已签名 `.dmg`，Linux 与 Windows 为 `.tar.gz`。Homebrew / Scoop / Winget 清单模板见 [`packaging/`](./packaging/README.md)。
+- **Linux（用户级安装脚本 [`scripts/install-linux.sh`](./scripts/install-linux.sh)）**：
+  ```bash
+  curl -fsSLO https://raw.githubusercontent.com/vicanso/zniff/main/scripts/install-linux.sh
+  sh install-linux.sh
+  ```
+  无需 `root`，自动下载对应 `x86_64` / `aarch64` 发行包并通过 `SHA256SUMS` 校验（GitHub 不可达时自动回落 Gitee 镜像），检查 GTK 4.14+ / `glibc 2.39` 运行依赖，并将二进制、图标、启动器项与开机自启安装到 `~/.local` 和 `~/.config`（也可解压 Linux `.tar.gz` 后直接运行包内 `./install-linux.sh`）。支持 `--no-autostart`、`--tag vX.Y.Z` 与 `--uninstall`。
 - **源码安装**：
   ```bash
   cargo install --git https://github.com/vicanso/zniff

@@ -289,6 +289,7 @@ fn make_profiles() -> ProfileSignals {
         sidebar_collapsed: signal(false),
         layout_mode: signal(config::LayoutMode::Split),
         panel_open: signal(false),
+        rules_panel_tab: signal(0),
         filter_panel_open: signal(false),
         preset_panel_open: signal(false),
         access_open: signal(false),
@@ -569,7 +570,7 @@ fn a1_filter_rules_and_preset_popovers_mount_independently_zh_en() {
         // Step 2: Switch to Rules popover only.
         assert!(tree.press_text(&mut core, "STEP_A1"));
         assert!(
-            tree.has_text(t(lang, "规则与代理配置", "Rules & Proxy Config")),
+            tree.has_text(t(lang, "直通与上游", "Bypass & Proxy")),
             "Rules panel should render in {lang:?}"
         );
 
@@ -796,13 +797,8 @@ fn b1_b2_b3_rule_badges_line_hits_and_dry_run_zh_en() {
             .child(rule_line_strip(
                 target,
                 controls.clone(),
-                draft.host,
-                draft.path,
-                draft.op,
-                draft.from,
-                draft.to,
-                draft.modes,
-                draft.kind,
+                draft,
+                signal(false),
             ))
             .child(rule_dry_run_strip(target, controls, move || {
                 dry_draft.get()
@@ -1207,6 +1203,8 @@ async fn e1_e3_e4_e5_e6_v05_interactive_components_zh_en() {
 
         let net_open = signal(true);
         let marker_count = signal(0_usize);
+        let draft = make_rule_draft();
+        let quick_open = signal(false);
         let count_controls = controls.clone();
 
         view()
@@ -1228,7 +1226,12 @@ async fn e1_e3_e4_e5_e6_v05_interactive_components_zh_en() {
                 profiles,
                 count_controls.clone(),
             ))
-            .child(rule_templates_section(target, count_controls.clone()))
+            .child(rule_templates_menu(
+                target,
+                count_controls.clone(),
+                draft,
+                quick_open,
+            ))
             .child(watch_popover(WatchPopoverProps {
                 open: profiles.watch_open,
                 rules: watch_rules,
@@ -1279,8 +1282,13 @@ async fn e1_e3_e4_e5_e6_v05_interactive_components_zh_en() {
         assert!(tree.has_text_containing("MOCK_OPEN:true"));
         assert!(tree.has_text(t(lang, "内联 Mock 响应", "Inline Mock Response")));
 
-        // E4: Press Dev CORS template -> appends `cors *` to rules.
+        // E4: Open "+ Add rule" dropdown and click Dev CORS -> appends `cors *` to rules.
+        assert!(tree.press_text(&mut core, t(lang, "+ 添加规则", "+ Add rule")));
         let cors_label = t(lang, "开发期 CORS", "Dev CORS");
+        assert!(
+            tree.has_text(cors_label),
+            "E4 template item missing after opening menu in {lang:?}"
+        );
         assert!(tree.press_text(&mut core, cors_label));
         assert!(
             tree.has_text_containing("RULES:cors *"),
@@ -1704,7 +1712,7 @@ fn preset_sync_bar_surfaces_unsaved_state_and_opens_presets_zh_en() {
 
         // Step 2: Open Rules popover -> same quick-update bar appears inside Rules popover.
         assert!(tree.press_text(&mut core, "SYNC_STEP"));
-        assert!(tree.has_text(t(lang, "规则与代理配置", "Rules & Proxy Config")));
+        assert!(tree.has_text(t(lang, "直通与上游", "Bypass & Proxy")));
         assert!(tree.has_text(t(lang, "更新预设", "Update preset")));
 
         // Step 3: Clear preset name with active filter -> shows "Save as preset…", clicking opens Presets.
@@ -2000,5 +2008,381 @@ fn header_and_message_rows_reveal_copy_icon_only_on_hover() {
         );
         tree.pump(&mut core);
         assert_eq!(live_canvas_count(&tree), 2);
+    }
+}
+
+#[test]
+fn facet_tab_has_filter_tracks_domain_mute_and_app_tokens() {
+    assert!(!facet_tab_has_filter("", 0));
+    assert!(!facet_tab_has_filter("", 1));
+
+    assert!(facet_tab_has_filter("host:api.example.com", 0));
+    assert!(!facet_tab_has_filter("host:api.example.com", 1));
+
+    assert!(facet_tab_has_filter("mute:ads.example.com", 0));
+    assert!(!facet_tab_has_filter("mute:ads.example.com", 1));
+
+    assert!(!facet_tab_has_filter("app:curl", 0));
+    assert!(facet_tab_has_filter("app:curl", 1));
+
+    assert!(facet_tab_has_filter("host:api.example.com app:curl", 0));
+    assert!(facet_tab_has_filter("host:api.example.com app:curl", 1));
+
+    assert!(!facet_tab_has_filter("type:json slow:", 0));
+    assert!(!facet_tab_has_filter("type:json slow:", 1));
+}
+
+#[test]
+fn rules_panel_redesign_tabs_grouped_kind_menu_and_collapsible_quick_add() {
+    use std::collections::BTreeSet;
+
+    assert_eq!(QUICK_KIND_GROUPS.len(), 4);
+    let seen: BTreeSet<u8> = QUICK_KIND_GROUPS
+        .iter()
+        .flat_map(|g| g.items.iter().map(|it| it.idx))
+        .collect();
+    assert_eq!(seen.len(), 16);
+    assert_eq!(*seen.first().unwrap(), 0);
+    assert_eq!(*seen.last().unwrap(), 15);
+
+    #[component]
+    fn RulesPanelHarness() -> impl IntoElement {
+        let lang = TEST_LANG.with(Cell::get);
+        provide_base_contexts(lang);
+        let controls = make_controls("rules-panel-redesign");
+        let profiles = make_profiles();
+        profiles.rules.set("cors *\ndelay * 2000ms".into());
+        let draft = make_rule_draft();
+        view()
+            .w(px(720.0))
+            .h(px(800.0))
+            .child(rules_panel(profiles, controls, draft))
+    }
+
+    for lang in [Lang::Zh, Lang::En] {
+        TEST_LANG.set(lang);
+        let (mut core, mut tree) = mount::<RulesPanelHarness>(Size::new(px(720.0), px(800.0)));
+
+        // Default Tab 0: underline tabs + mini toggles (`Enabled` / `Breaks`),
+        // single unified `+ Add rule` menu, no idle bottom form bar, and collapsed line chips.
+        assert!(tree.has_text(t(lang, "规则", "Rules")));
+        assert!(tree.has_text(t(lang, "直通与上游", "Bypass & Proxy")));
+        assert!(tree.has_text(t(lang, "启用", "Enabled")));
+        assert!(tree.has_text(t(lang, "断点", "Breaks")));
+        assert!(tree.has_text(t(lang, "+ 添加规则", "+ Add rule")));
+        assert!(tree.has_text(t(lang, "管理单条", "Manage")));
+        assert!(!tree.has_text(t(lang, "+ 表单添加规则", "+ Add rule via form")));
+        assert!(!tree.has_text(t(lang, "按类型配置规则", "Configure Rule")));
+        assert!(!tree.has_text("#1 cors *"));
+        assert!(!tree.has_text(t(lang, "直通名单 (不解密)", "TLS Bypass (No MITM)")));
+        assert!(!tree.has_text(t(lang, "上游代理", "Upstream Proxy")));
+        assert!(!tree.has_text(t(lang, "开发期 CORS", "Dev CORS")));
+
+        // Open `+ Add rule` -> click 1-click preset `Throttle (3G)` -> inserts directly without opening form.
+        assert!(tree.press_text(&mut core, t(lang, "+ 添加规则", "+ Add rule")));
+        assert!(tree.has_text(t(lang, "开发期 CORS", "Dev CORS")));
+        assert!(tree.has_text(t(lang, "弱网限速 (3G)", "Throttle (3G)")));
+        assert!(tree.press_text(&mut core, t(lang, "弱网限速 (3G)", "Throttle (3G)")));
+        assert!(tree.has_text_containing(t(lang, "3 条规则", "3 rules")));
+        assert!(!tree.has_text(t(lang, "按类型配置规则", "Configure Rule")));
+
+        // Expand per-line manage chips on demand.
+        assert!(tree.press_text(&mut core, t(lang, "管理单条", "Manage")));
+        assert!(tree.has_text("#1 cors *"));
+        assert!(tree.has_text("#3 throttle * 3g"));
+        assert!(tree.press_text(&mut core, t(lang, "收起", "Hide")));
+        assert!(!tree.has_text("#1 cors *"));
+
+        // Open `+ Add rule` -> choose parameterized common example `Force 500` -> pre-fills form.
+        assert!(tree.press_text(&mut core, t(lang, "+ 添加规则", "+ Add rule")));
+        assert!(tree.has_text(t(lang, "常用示例", "Common Examples")));
+        assert!(tree.press_text(&mut core, t(lang, "强制 500", "Force 500")));
+        assert!(tree.has_text(t(lang, "按类型配置规则", "Configure Rule")));
+        assert!(tree.has_text(t(lang, "填入示例", "Use example")));
+        assert!(tree.has_text("map-local api.example.com/v1 status=500"));
+        assert!(tree.press_text(&mut core, t(lang, "确认添加", "Add")));
+        assert!(tree.has_text_containing(t(lang, "4 条规则", "4 rules")));
+        assert!(!tree.has_text(t(lang, "按类型配置规则", "Configure Rule")));
+
+        // Open `+ Add rule` -> choose typed builder `Replace` -> opens form with contextual example.
+        assert!(tree.press_text(&mut core, t(lang, "+ 添加规则", "+ Add rule")));
+        let replace_label = t(lang, "替换", "Replace");
+        let resolve_label = t(lang, "解析", "Resolve");
+        assert!(tree.has_text(replace_label));
+        assert!(tree.press_text(&mut core, replace_label));
+        assert!(tree.has_text(t(lang, "按类型配置规则", "Configure Rule")));
+        assert!(tree.has_text(r#"replace api.example.com/v1 res "old" -> "new""#));
+        assert!(tree.press_text(&mut core, t(lang, "填入示例", "Use example")));
+        assert!(tree.press_text(&mut core, t(lang, "确认添加", "Add")));
+        assert!(tree.has_text_containing(t(lang, "5 条规则", "5 rules")));
+        assert!(!tree.has_text(t(lang, "按类型配置规则", "Configure Rule")));
+
+        // Open `+ Add rule` -> `Replace` -> test `GQL`, switch kind dropdown to `Resolve`, and close.
+        assert!(tree.press_text(&mut core, t(lang, "+ 添加规则", "+ Add rule")));
+        assert!(tree.press_text(&mut core, replace_label));
+        assert!(tree.has_text("GQL"));
+        assert!(tree.press_text(&mut core, "GQL"));
+
+        // Switch kind via form dropdown and confirm the contextual example updates, then close.
+        assert!(tree.press_text(&mut core, replace_label));
+        assert!(
+            tree.has_text(resolve_label),
+            "grouped rule kind dropdown should reveal '{resolve_label}' in {lang:?}"
+        );
+        assert!(tree.press_text(&mut core, resolve_label));
+        assert!(tree.has_text(resolve_label));
+        assert!(tree.has_text("resolve api.example.com 127.0.0.1 8080"));
+        assert!(tree.press_text(&mut core, t(lang, "关闭", "Close")));
+        assert!(!tree.has_text(t(lang, "按类型配置规则", "Configure Rule")));
+
+        // Switch to Tab 1 ("直通与上游" / "Bypass & Proxy").
+        assert!(tree.press_text(&mut core, t(lang, "直通与上游", "Bypass & Proxy")));
+        assert!(tree.has_text(t(lang, "直通名单 (不解密)", "TLS Bypass (No MITM)")));
+        assert!(tree.has_text(t(lang, "上游代理", "Upstream Proxy")));
+        assert!(tree.has_text(t(lang, "显示隧道失败", "Show tunnel failures")));
+    }
+}
+
+#[test]
+fn bug1_break_conditions_preserved_on_add_dry_run_and_save() {
+    assert_eq!(
+        effective_quick_inputs(4, false, "X-Debug:1", "error"),
+        ("X-Debug:1", "error")
+    );
+    assert_eq!(
+        effective_quick_inputs(5, false, "X-Trace:1", "timeout"),
+        ("X-Trace:1", "timeout")
+    );
+    assert_eq!(
+        draft_rules_with_op(
+            "",
+            "api.example.com",
+            "/v1",
+            "GetUser",
+            "X-Debug:1",
+            "error",
+            false,
+            4
+        ),
+        "break api.example.com/v1 header=X-Debug:1 body=error op=GetUser\n"
+    );
+    assert_eq!(
+        draft_rules_with_op("", "api.example.com", "/v1", "", "", "error", false, 5),
+        "break-res api.example.com/v1 body=error\n"
+    );
+
+    #[component]
+    fn BreakAddHarness() -> impl IntoElement {
+        let lang = TEST_LANG.with(Cell::get);
+        provide_base_contexts(lang);
+        let controls = make_controls("bug1-break-conds");
+        let profiles = make_profiles();
+        let draft = make_rule_draft();
+        view()
+            .w(px(720.0))
+            .h(px(800.0))
+            .flex_col()
+            .child(rules_panel(profiles, controls, draft))
+            .child(text(move || format!("RULES_NOW:{}", profiles.rules.get())))
+    }
+
+    for lang in [Lang::Zh, Lang::En] {
+        TEST_LANG.set(lang);
+        let (mut core, mut tree) = mount::<BreakAddHarness>(Size::new(px(720.0), px(800.0)));
+
+        // Kind 4 (`break`) example carries `header=X-Debug:1`.
+        assert!(tree.press_text(&mut core, t(lang, "+ 添加规则", "+ Add rule")));
+        assert!(tree.press_text(&mut core, "break"));
+        assert!(tree.has_text(t(lang, "按类型配置规则", "Configure Rule")));
+        assert!(tree.press_text(&mut core, t(lang, "填入示例", "Use example")));
+        assert!(tree.press_text(&mut core, t(lang, "确认添加", "Add")));
+        assert!(
+            tree.has_text_containing("break api.example.com/v1 header=X-Debug:1"),
+            "break header condition must survive Add in {lang:?}: {:?}",
+            tree.all_live_texts()
+        );
+
+        // Kind 5 (`break-res`) example carries `body=error`.
+        assert!(tree.press_text(&mut core, t(lang, "+ 添加规则", "+ Add rule")));
+        assert!(tree.press_text(&mut core, "break-res"));
+        assert!(tree.has_text(t(lang, "按类型配置规则", "Configure Rule")));
+        assert!(tree.press_text(&mut core, t(lang, "填入示例", "Use example")));
+        assert!(tree.press_text(&mut core, t(lang, "确认添加", "Add")));
+        assert!(
+            tree.has_text_containing("break-res api.example.com/v1 body=error"),
+            "break-res body condition must survive Add in {lang:?}: {:?}",
+            tree.all_live_texts()
+        );
+    }
+}
+
+#[test]
+fn bug2_closing_quick_add_clears_draft_and_preset_dirty_state() {
+    #[component]
+    fn CloseDraftHarness() -> impl IntoElement {
+        let lang = TEST_LANG.with(Cell::get);
+        provide_base_contexts(lang);
+        let controls = make_controls("bug2-close-draft");
+        let profiles = make_profiles();
+        let saved = config::SavedProfile {
+            name: "dev".into(),
+            filter: String::new(),
+            bypass_hosts: String::new(),
+            rules: "cors *".into(),
+            upstream_proxy: String::new(),
+            rules_enabled: true,
+            breaks_enabled: true,
+            show_tunnel_failures: false,
+        };
+        profiles.saved.set(vec![saved]);
+        profiles.name.set("dev".into());
+        profiles.rules.set("cors *".into());
+        let draft = make_rule_draft();
+        view()
+            .w(px(720.0))
+            .h(px(800.0))
+            .flex_col()
+            .child(rules_panel(profiles, controls, draft))
+            .child(text(move || {
+                format!("STATE:{:?}", live_preset_save_state(profiles, draft))
+            }))
+    }
+
+    for lang in [Lang::Zh, Lang::En] {
+        TEST_LANG.set(lang);
+        let (mut core, mut tree) = mount::<CloseDraftHarness>(Size::new(px(720.0), px(800.0)));
+        assert!(tree.has_text("STATE:Clean"));
+
+        // Pre-fill parameterized example `Force 500` -> marks preset dirty.
+        assert!(tree.press_text(&mut core, t(lang, "+ 添加规则", "+ Add rule")));
+        assert!(tree.press_text(&mut core, t(lang, "强制 500", "Force 500")));
+        assert!(tree.has_text(t(lang, "按类型配置规则", "Configure Rule")));
+        assert!(
+            tree.has_text("STATE:UpdateExisting(\"dev\")"),
+            "expected dirty preset state while draft is open in {lang:?}"
+        );
+
+        // Clicking Close clears draft and restores Clean preset state.
+        assert!(tree.press_text(&mut core, t(lang, "关闭", "Close")));
+        assert!(!tree.has_text(t(lang, "按类型配置规则", "Configure Rule")));
+        assert!(
+            tree.has_text("STATE:Clean"),
+            "closing quick-add form must clear draft and restore Clean state in {lang:?}"
+        );
+    }
+}
+
+#[test]
+fn bug3_external_jumps_switch_rules_panel_active_tab() {
+    #[component]
+    fn TabJumpHarness() -> impl IntoElement {
+        let lang = TEST_LANG.with(Cell::get);
+        provide_base_contexts(lang);
+        let controls = make_controls("bug3-tab-jump");
+        let profiles = make_profiles();
+        profiles
+            .rules
+            .set("map-local api.example.com/v1 status=201".into());
+        let draft = make_rule_draft();
+        let shown = make_shown(
+            "https://api.example.com/v1/orders",
+            None,
+            "connection refused",
+        );
+        shown.rule_hits.set(vec![session::RuleHit {
+            verb: "map-local".into(),
+            group_name: None,
+            line_no: 1,
+        }]);
+        view()
+            .w(px(760.0))
+            .h(px(860.0))
+            .flex_col()
+            .gap_2()
+            .child(detail_rule_badges(shown, profiles))
+            .child(error_summary_banner(shown, controls.clone(), profiles))
+            .child(rules_panel(profiles, controls, draft))
+    }
+
+    for lang in [Lang::Zh, Lang::En] {
+        TEST_LANG.set(lang);
+        let (mut core, mut tree) = mount::<TabJumpHarness>(Size::new(px(760.0), px(860.0)));
+
+        // Start on Tab 0, switch manually to Tab 1.
+        assert!(tree.press_text(&mut core, t(lang, "直通与上游", "Bypass & Proxy")));
+        assert!(tree.has_text(t(lang, "上游代理", "Upstream Proxy")));
+
+        // Clicking a detail rule badge jumps back to Tab 0 and highlights the rule chip.
+        assert!(tree.press_text(&mut core, "map-local #1"));
+        assert!(
+            tree.has_text("#1 map-local api.example.com/v1 status=201"),
+            "focus_rule_hit must switch to Tab 0 and reveal highlighted chip in {lang:?}"
+        );
+        assert!(!tree.has_text(t(lang, "上游代理", "Upstream Proxy")));
+
+        // Clicking `Check Upstream` jumps to Tab 1 where Upstream Proxy lives.
+        assert!(tree.press_text(&mut core, t(lang, "检查上游", "Check Upstream")));
+        assert!(
+            tree.has_text(t(lang, "上游代理", "Upstream Proxy")),
+            "ErrorAction::CheckUpstream must open Tab 1 in {lang:?}"
+        );
+
+        // Clicking `Add resolve` jumps back to Tab 0 and opens the pre-filled form.
+        assert!(tree.press_text(&mut core, t(lang, "添加 resolve", "Add resolve")));
+        assert!(
+            tree.has_text(t(lang, "按类型配置规则", "Configure Rule")),
+            "ErrorAction::AddResolve must switch back to Tab 0 and open quick-add in {lang:?}"
+        );
+        assert!(!tree.has_text(t(lang, "上游代理", "Upstream Proxy")));
+    }
+}
+
+#[test]
+fn bug4_proto_and_invalid_chips_do_not_open_stale_form() {
+    #[component]
+    fn ChipGuardHarness() -> impl IntoElement {
+        let lang = TEST_LANG.with(Cell::get);
+        provide_base_contexts(lang);
+        let controls = make_controls("bug4-chip-guard");
+        let profiles = make_profiles();
+        profiles
+            .rules
+            .set("cors *\nproto api.example.com/grpc /tmp/schema.proto\nbad syntax line".into());
+        let draft = make_rule_draft();
+        view()
+            .w(px(720.0))
+            .h(px(800.0))
+            .child(rules_panel(profiles, controls, draft))
+    }
+
+    for lang in [Lang::Zh, Lang::En] {
+        TEST_LANG.set(lang);
+        let (mut core, mut tree) = mount::<ChipGuardHarness>(Size::new(px(720.0), px(800.0)));
+
+        // Expand line chips.
+        assert!(tree.press_text(&mut core, t(lang, "管理单条", "Manage")));
+        assert!(tree.has_text("#2 proto api.example.com/grpc /tmp/schema.proto"));
+        assert!(tree.has_text("#3 bad syntax line"));
+
+        // Clicking proto chip must NOT open the quick-add form.
+        assert!(tree.press_text(&mut core, "#2 proto api.example.com/grpc /tmp/schema.proto"));
+        assert!(
+            !tree.has_text(t(lang, "按类型配置规则", "Configure Rule")),
+            "proto chip must not open quick-add form in {lang:?}"
+        );
+
+        // Clicking invalid chip must NOT open the quick-add form.
+        assert!(tree.press_text(&mut core, "#3 bad syntax line"));
+        assert!(
+            !tree.has_text(t(lang, "按类型配置规则", "Configure Rule")),
+            "invalid chip must not open quick-add form in {lang:?}"
+        );
+
+        // Clicking a supported rule chip (`cors *`) still opens the form.
+        assert!(tree.press_text(&mut core, "#1 cors *"));
+        assert!(
+            tree.has_text(t(lang, "按类型配置规则", "Configure Rule")),
+            "supported chip should open quick-add form in {lang:?}"
+        );
     }
 }

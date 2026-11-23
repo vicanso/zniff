@@ -159,6 +159,7 @@ pub(crate) fn open_quick_rule_for_flow(
         return;
     };
     profiles.quick_rule_prefill.set(Some(prefill));
+    profiles.rules_panel_tab.set(0);
     profiles.panel_open.set(true);
 }
 

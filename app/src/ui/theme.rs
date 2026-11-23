@@ -189,3 +189,11 @@ pub(crate) fn json_number_fg() -> AdaptiveColor {
 pub(crate) fn json_literal_fg() -> AdaptiveColor {
     AdaptiveColor::rgb(0x6d28d9, 0xc084fc)
 }
+
+pub(crate) fn switch_track_off() -> AdaptiveColor {
+    AdaptiveColor::rgb(0xcbd5e1, 0x334155)
+}
+
+pub(crate) fn switch_thumb() -> AdaptiveColor {
+    AdaptiveColor::rgb(0xffffff, 0xf8fafc)
+}

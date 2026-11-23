@@ -96,6 +96,7 @@ pub(crate) fn focus_rule_hit(profiles: ProfileSignals, hit: &session::RuleHit) {
     } else {
         None
     });
+    profiles.rules_panel_tab.set(0);
     profiles.panel_open.set(true);
 }
 

@@ -116,6 +116,21 @@ fn default_platform_data_dir() -> PathBuf {
     }
 }
 
+#[cfg(not(test))]
+fn default_data_dir() -> PathBuf {
+    default_platform_data_dir()
+}
+
+#[cfg(test)]
+fn default_data_dir() -> PathBuf {
+    static TEST_DATA_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    TEST_DATA_DIR
+        .get_or_init(|| {
+            std::env::temp_dir().join(format!("zniff-test-data-{}", std::process::id()))
+        })
+        .clone()
+}
+
 pub fn data_dir() -> PathBuf {
     let override_dir = DATA_DIR_OVERRIDE
         .lock()
@@ -123,7 +138,7 @@ pub fn data_dir() -> PathBuf {
         .clone();
     let env_dir = std::env::var("ZNIFF_DATA_DIR").ok();
     resolve_custom_data_dir(override_dir.as_deref(), env_dir.as_deref())
-        .unwrap_or_else(default_platform_data_dir)
+        .unwrap_or_else(default_data_dir)
 }
 
 pub struct ClientIdentity {
@@ -2107,6 +2122,23 @@ Cert 0: zniff CA
         );
         assert_eq!(resolve_custom_data_dir(None, Some("   ")), None);
         assert_eq!(resolve_custom_data_dir(Some(Path::new("")), None), None);
+    }
+
+    #[test]
+    fn data_dir_in_tests_is_isolated_from_platform_default() {
+        let platform_dir = default_platform_data_dir();
+        assert_eq!(
+            platform_dir.file_name().and_then(|s| s.to_str()),
+            Some("zniff")
+        );
+        let test_dir = default_data_dir();
+        assert_ne!(test_dir, platform_dir);
+        assert!(test_dir.starts_with(std::env::temp_dir()));
+        if std::env::var_os("ZNIFF_DATA_DIR").is_none() {
+            let resolved = data_dir();
+            assert_eq!(resolved, test_dir);
+            assert_ne!(resolved, platform_dir);
+        }
     }
 
     #[test]

@@ -269,6 +269,7 @@ pub fn App() -> impl IntoElement {
         sidebar_collapsed: signal(saved.sidebar_collapsed),
         layout_mode: signal(saved.layout_mode),
         panel_open: signal(false),
+        rules_panel_tab: signal(0),
         filter_panel_open: signal(false),
         preset_panel_open: signal(false),
         access_open: signal(false),

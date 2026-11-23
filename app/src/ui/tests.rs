@@ -2946,6 +2946,7 @@ fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
             sidebar_collapsed: signal(false),
             layout_mode: signal(crate::config::LayoutMode::Split),
             panel_open: signal(false),
+            rules_panel_tab: signal(0),
             filter_panel_open: signal(false),
             preset_panel_open: signal(false),
             access_open: signal(false),

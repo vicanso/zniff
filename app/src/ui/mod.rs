@@ -24,8 +24,8 @@ pub(crate) use nsh_base::{
     DataTableColumnMove, DataTableContextMenu, DataTableEvent, DataTableHeaderCell, DataTablePress,
     DataTableRange, DataTableRows, DataTableSelection, DiffLayout, ToastManager, ToastMotion,
     ToastOptions, ToastStackState, ToastTransitionStatus, Tree, TreeEntry, TreeEvent, TreeItem,
-    data_table, diff_view, editor, input, menu, menu_item, popover, progress, theme, toast,
-    toast_stack, tooltip, tree,
+    data_table, diff_view, editor, input, menu, menu_item, popover, progress, switch, tab, tabs,
+    theme, toast, toast_stack, tooltip, tree,
 };
 #[allow(unused_imports)]
 pub(crate) use nsh_core::EllipsizeMode;
@@ -131,6 +131,7 @@ mod rule_assist;
 mod rule_badges;
 mod rule_dry_run;
 mod rule_groups;
+mod rule_kind_menu;
 mod rule_templates;
 mod rules_panel;
 mod seq_dep_waterfall;
@@ -209,6 +210,7 @@ pub(crate) use self::rule_assist::*;
 pub(crate) use self::rule_badges::*;
 pub(crate) use self::rule_dry_run::*;
 pub(crate) use self::rule_groups::*;
+pub(crate) use self::rule_kind_menu::*;
 pub(crate) use self::rule_templates::*;
 pub(crate) use self::rules_panel::*;
 pub(crate) use self::seq_dep_waterfall::*;

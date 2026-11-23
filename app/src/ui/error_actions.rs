@@ -363,6 +363,7 @@ fn execute_error_action(
             let _ = (url, host);
         }
         ErrorAction::CheckUpstream => {
+            profiles.rules_panel_tab.set(1);
             profiles.panel_open.set(true);
         }
         ErrorAction::AddResolve => {
@@ -372,6 +373,7 @@ fn execute_error_action(
                     .quick_rule_prefill
                     .set(Some(QuickRulePrefill::resolve_host(clean_host)));
             }
+            profiles.rules_panel_tab.set(0);
             profiles.panel_open.set(true);
         }
         ErrorAction::OpenSecurity => {

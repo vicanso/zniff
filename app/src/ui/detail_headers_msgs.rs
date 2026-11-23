@@ -637,7 +637,7 @@ pub(crate) fn msg_search_box(
                                 kind.get(),
                             )
                             .len();
-                            format!("{matched} ×")
+                            format!("{} ×", present::format_thousands(matched as u64))
                         })
                         .tabular_nums()
                         .text_size(px(11.0))

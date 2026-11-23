@@ -1157,7 +1157,25 @@ pub(crate) fn web_config_slot() -> &'static Mutex<config::Config> {
     SLOT.get_or_init(|| Mutex::new(config::Config::default_for(false)))
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), test))]
+thread_local! {
+    static TEST_CONFIG_SLOT: std::cell::RefCell<config::Config> =
+        std::cell::RefCell::new(config::Config::default_for(false));
+}
+
+#[cfg(all(not(target_arch = "wasm32"), test))]
+pub(crate) fn reset_test_config() {
+    TEST_CONFIG_SLOT.with(|slot| {
+        *slot.borrow_mut() = config::Config::default_for(false);
+    });
+}
+
+#[cfg(all(not(target_arch = "wasm32"), test))]
+pub(crate) fn saved_config() -> config::Config {
+    TEST_CONFIG_SLOT.with(|slot| slot.borrow().clone())
+}
+
+#[cfg(all(not(target_arch = "wasm32"), not(test)))]
 pub(crate) fn saved_config() -> config::Config {
     config::load_mode(&ca::data_dir(), config::is_dev_mode())
 }
@@ -1170,7 +1188,16 @@ pub(crate) fn saved_config() -> config::Config {
         .clone()
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), test))]
+pub(crate) fn save_config(change: impl FnOnce(&mut config::Config)) -> std::io::Result<()> {
+    TEST_CONFIG_SLOT.with(|slot| {
+        let mut cfg = slot.borrow_mut();
+        change(&mut cfg);
+    });
+    Ok(())
+}
+
+#[cfg(all(not(target_arch = "wasm32"), not(test)))]
 pub(crate) fn save_config(change: impl FnOnce(&mut config::Config)) -> std::io::Result<()> {
     config::update_mode(&ca::data_dir(), config::is_dev_mode(), change)
 }

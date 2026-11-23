@@ -353,13 +353,6 @@ pub(crate) fn flow_list(
                             )
                     },
                 ))
-                .child(when(
-                    move || {
-                        layout_mode.get() == config::LayoutMode::TopBottom
-                            || sidebar_collapsed.get()
-                    },
-                    move || facet_toggle_button(facets_open, list_filter),
-                ))
                 .child(column_menu(columns, column_controls)),
         )
         .child(filter_syntax_error_strip(list_filter))
@@ -428,66 +421,12 @@ pub(crate) fn flow_list(
         )
 }
 
-pub(crate) fn facet_toggle_button(
-    facets_open: Signal<bool>,
-    filter: Signal<String>,
-) -> impl IntoElement {
-    let has_facet_filter = computed(move || {
-        let f = filter.get();
-        !extract_host_or(&f).is_empty()
-            || !extract_app_or(&f).is_empty()
-            || filter_has_token(&f, SLOW_ALIASES)
-            || filter_has_token(&f, ERR_ALIASES)
-            || filter_has_token(&f, JSON_ALIASES)
-            || filter_has_token(&f, PIN_ALIASES)
-    });
-    view()
-        .w(px(30.0))
-        .h(px(30.0))
-        .flex_shrink_0()
-        .flex_row()
-        .items_center()
-        .justify_center()
-        .rounded(px(CONTROL_RADIUS))
-        .border_1()
-        .border_color(move || {
-            if facets_open.get() || has_facet_filter.get() {
-                accent_blue_border()
-            } else {
-                border_control()
-            }
-        })
-        .bg(move || {
-            if facets_open.get() || has_facet_filter.get() {
-                accent_blue_soft()
-            } else {
-                bg_control()
-            }
-        })
-        .hover(|style| {
-            style.bg(move || {
-                if facets_open.get() || has_facet_filter.get() {
-                    accent_blue_soft_hover()
-                } else {
-                    bg_control_hover()
-                }
-            })
-        })
-        .active(|style| style.opacity(0.8))
-        .cursor(Cursor::Pointer)
-        .label(tr("域名与应用导航", "Domains & Apps"))
-        .tooltip(label_tip("域名与应用导航", "Domains & Apps"))
-        .on_press(move || facets_open.set(!facets_open.get()))
-        .child(glyph(
-            || Glyph::List,
-            move || {
-                if facets_open.get() || has_facet_filter.get() {
-                    color(accent_blue_text())
-                } else {
-                    color(fg_secondary())
-                }
-            },
-        ))
+pub(crate) fn facet_tab_has_filter(filter: &str, tab: u8) -> bool {
+    if tab == 0 {
+        !extract_host_or(filter).is_empty() || !extract_exclude_or(filter).is_empty()
+    } else {
+        !extract_app_or(filter).is_empty()
+    }
 }
 
 pub(crate) fn facet_quick_bar(
@@ -501,7 +440,8 @@ pub(crate) fn facet_quick_bar(
                         en: &'static str,
                         count_fn: fn(&session::SessionFacets) -> usize| {
         let langs = ui_langs();
-        let active = move || facets_open.get() && facet_tab.get() == idx;
+        let open_tab = move || facets_open.get() && facet_tab.get() == idx;
+        let highlighted = move || open_tab() || filter.with(|f| facet_tab_has_filter(f, idx));
         view()
             .h(px(22.0))
             .px_2()
@@ -511,7 +451,7 @@ pub(crate) fn facet_quick_bar(
             .items_center()
             .gap_1()
             .bg(move || {
-                if active() {
+                if highlighted() {
                     accent_blue_soft()
                 } else {
                     bg_control()
@@ -519,7 +459,7 @@ pub(crate) fn facet_quick_bar(
             })
             .border_1()
             .border_color(move || {
-                if active() {
+                if highlighted() {
                     accent_blue_border()
                 } else {
                     border_control()
@@ -527,7 +467,7 @@ pub(crate) fn facet_quick_bar(
             })
             .hover(|style| {
                 style.bg(move || {
-                    if active() {
+                    if highlighted() {
                         accent_blue_soft_hover()
                     } else {
                         bg_control_hover()
@@ -553,7 +493,7 @@ pub(crate) fn facet_quick_bar(
                 .text_size(px(11.0))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(move || {
-                    if active() {
+                    if highlighted() {
                         accent_blue_text()
                     } else {
                         fg_secondary()
@@ -563,14 +503,14 @@ pub(crate) fn facet_quick_bar(
             .child(glyph_px(
                 9.0,
                 move || {
-                    if active() {
+                    if open_tab() {
                         Glyph::ChevronUp
                     } else {
                         Glyph::Chevron
                     }
                 },
                 move || {
-                    if active() {
+                    if highlighted() {
                         color(accent_blue_text())
                     } else {
                         color(fg_muted())

@@ -42,23 +42,25 @@ pub(crate) fn format_rules_pill_tooltip(
     if rule_count == 0 && enabled_groups == 0 {
         return hint.to_string();
     }
+    let rules_str = present::format_thousands(rule_count as u64);
+    let groups_str = present::format_thousands(enabled_groups as u64);
     let summary = match (rules_on, enabled_groups > 0, lang) {
         (true, true, Lang::Zh) => {
-            format!("已启用 {rule_count} 条规则 · {enabled_groups} 个分组")
+            format!("已启用 {rules_str} 条规则 · {groups_str} 个分组")
         }
-        (true, false, Lang::Zh) => format!("已启用 {rule_count} 条规则"),
+        (true, false, Lang::Zh) => format!("已启用 {rules_str} 条规则"),
         (false, true, Lang::Zh) => {
-            format!("规则已暂停（{rule_count} 条规则 · {enabled_groups} 个分组）")
+            format!("规则已暂停（{rules_str} 条规则 · {groups_str} 个分组）")
         }
-        (false, false, Lang::Zh) => format!("规则已暂停（{rule_count} 条规则）"),
+        (false, false, Lang::Zh) => format!("规则已暂停（{rules_str} 条规则）"),
         (true, true, Lang::En) => {
-            format!("{rule_count} active rules · {enabled_groups} groups")
+            format!("{rules_str} active rules · {groups_str} groups")
         }
-        (true, false, Lang::En) => format!("{rule_count} active rules"),
+        (true, false, Lang::En) => format!("{rules_str} active rules"),
         (false, true, Lang::En) => {
-            format!("Rules paused ({rule_count} rules · {enabled_groups} groups)")
+            format!("Rules paused ({rules_str} rules · {groups_str} groups)")
         }
-        (false, false, Lang::En) => format!("Rules paused ({rule_count} rules)"),
+        (false, false, Lang::En) => format!("Rules paused ({rules_str} rules)"),
     };
     format!("{summary}\n{hint}")
 }
@@ -275,18 +277,13 @@ pub(crate) fn rules_menu_popover(
         .child(rules_panel(profiles, controls, draft))
 }
 
-fn rules_panel(
+pub(crate) fn rules_panel(
     profiles: ProfileSignals,
     controls: Arc<Controls>,
     draft: QuickRuleDraftSignals,
 ) -> impl IntoElement {
     let langs = ui_langs();
-    let bypass_text = profiles.bypass;
     let rule_target = RuleEditTarget::from_profiles(profiles);
-    let upstream_text = profiles.upstream;
-    let rules_on = profiles.rules_on;
-    let breaks_on = profiles.breaks_on;
-    let show_tunnels = profiles.show_tunnels;
     let parsed_rules_count = computed(move || {
         let effective =
             effective_rules_text(&rule_target.workspace.get(), &rule_target.groups.get());
@@ -294,25 +291,30 @@ fn rules_panel(
     });
     let invalid_lines =
         computed(move || crate::rules::invalid_rule_lines(&rule_target.current_text()));
-    let import_closed = signal(false);
+    let active_tab = profiles.rules_panel_tab;
+    let quick_add_open = signal(false);
 
     let prefill = profiles.quick_rule_prefill;
     effect(move || {
         if let Some(next) = prefill.get() {
             apply_quick_rule_prefill(next, draft);
+            active_tab.set(0);
+            quick_add_open.set(true);
             prefill.set(None);
         }
     });
 
-    let bypass_controls = controls.clone();
-    let rule_groups_controls = controls.clone();
-    let rules_controls = controls.clone();
-    let rule_strip_controls = controls.clone();
-    let rules_clear_controls = controls.clone();
-    let templates_controls = controls.clone();
-    let upstream_controls = controls.clone();
-    let sync_controls = controls.clone();
-    let tunnel_controls = controls;
+    let focused_rule_line = profiles.focused_rule_line;
+    effect(move || {
+        if focused_rule_line.with(Option::is_some) {
+            active_tab.set(0);
+        }
+    });
+
+    let top_controls = controls.clone();
+    let tab0_controls = controls.clone();
+    let tab1_controls = controls.clone();
+    let sync_controls = controls;
     let show_sync_bar = computed(move || live_preset_save_state(profiles, draft).show_bar());
 
     view()
@@ -344,292 +346,421 @@ fn rules_panel(
                     uncull_nested_scroll(view())
                         .w_full()
                         .p_3()
-                        .gap_2()
+                        .gap_2p5()
                         .flex_col()
-                        .child(rules_panel_header(parsed_rules_count, rules_on, langs))
-                        .child(
-                            view()
-                                .w_full()
-                                .flex_row()
-                                .gap_1p5()
-                                .child(enable_switch(rules_on, "启用规则", "Rules", {
-                                    let controls = rules_controls.clone();
-                                    move |enabled| {
-                                        controls.hub.set_rules_enabled(enabled);
-                                    }
-                                }))
-                                .child(enable_switch(breaks_on, "启用断点", "Breaks", {
-                                    let controls = rules_controls.clone();
-                                    move |enabled| {
-                                        controls.hub.set_breaks_enabled(enabled);
-                                    }
-                                }))
-                                .child(enable_switch(
-                                    show_tunnels,
-                                    "隧道失败",
-                                    "Tunnel errors",
-                                    move |on| {
-                                        tunnel_controls.hub.set_show_tunnel_failures(on);
-                                        save_config_or_notify(
-                                            &tunnel_controls,
-                                            PrefName::Tunnel,
-                                            |cfg| cfg.show_tunnel_failures = on,
-                                        );
-                                    },
-                                )),
-                        )
-                        .child(config_field(
-                            "直通名单 (不解密)",
-                            "TLS Bypass (No MITM)",
-                            side_input(
-                                bypass_text,
-                                tr(
-                                    "example.com | *.pin.dev 或 only:api.example.com",
-                                    "example.com | *.pin.dev or only:api.example.com",
-                                ),
-                                28.0,
-                                false,
-                                move |text| {
-                                    bypass_text.set(text.to_string());
-                                    bypass_controls.hub.set_bypass(text);
-                                    save_config_or_notify(
-                                        &bypass_controls,
-                                        PrefName::Bypass,
-                                        |cfg| cfg.bypass_hosts = text.to_string(),
-                                    );
-                                },
-                            ),
+                        .child(rules_panel_top_bar(
+                            profiles,
+                            active_tab,
+                            parsed_rules_count,
+                            top_controls,
                         ))
-                        .child(
-                            view()
-                                .gap_1()
-                                .w_full()
-                                .child(rules_editor_header(
+                        .child(when(
+                            move || active_tab.get() == 0,
+                            move || {
+                                rules_tab_body(
                                     rule_target,
                                     invalid_lines,
-                                    rules_clear_controls,
+                                    tab0_controls.clone(),
+                                    draft,
+                                    quick_add_open,
                                     langs,
-                                ))
-                                .child(rule_groups_bar(rule_target, rule_groups_controls))
-                                .child(rules_editor(
-                                    rule_target,
-                                    rules_controls.clone(),
-                                    import_closed,
-                                ))
-                                .child(rule_line_strip(
-                                    rule_target,
-                                    rule_strip_controls,
-                                    draft.host,
-                                    draft.path,
-                                    draft.op,
-                                    draft.from,
-                                    draft.to,
-                                    draft.modes,
-                                    draft.kind,
-                                ))
-                                .child(rule_dry_run_strip(
-                                    rule_target,
-                                    rules_controls.clone(),
-                                    move || {
-                                        let kind = draft.kind.get();
-                                        let response = draft.modes.mode_for(kind);
-                                        let line = draft_rules_with_op(
-                                            "",
-                                            &draft.host.get(),
-                                            &draft.path.get(),
-                                            &draft.op.get(),
-                                            &draft.from.get(),
-                                            &draft.to.get(),
-                                            response,
-                                            kind,
-                                        );
-                                        if line.trim().is_empty() {
-                                            None
-                                        } else {
-                                            Some(line)
-                                        }
-                                    },
-                                )),
-                        )
-                        .child(replace_row(
-                            rule_target,
-                            rules_controls,
-                            draft.host,
-                            draft.path,
-                            draft.op,
-                            draft.from,
-                            draft.to,
-                            draft.modes,
-                            draft.kind,
+                                )
+                            },
                         ))
-                        .child(rule_templates_section(rule_target, templates_controls))
-                        .child(config_field(
-                            "上游代理",
-                            "Upstream Proxy",
-                            side_input(
-                                upstream_text,
-                                tr(
-                                    "http://127.0.0.1:7890 或 socks5h://127.0.0.1:1080",
-                                    "http://127.0.0.1:7890 or socks5h://127.0.0.1:1080",
-                                ),
-                                28.0,
-                                false,
-                                move |text| {
-                                    upstream_text.set(text.to_string());
-                                    upstream_controls.hub.set_upstream(text);
-                                    save_config_or_notify(
-                                        &upstream_controls,
-                                        PrefName::Upstream,
-                                        |cfg| cfg.upstream_proxy = text.to_string(),
-                                    );
-                                },
-                            ),
+                        .child(when(
+                            move || active_tab.get() == 1,
+                            move || proxy_tab_body(profiles, tab1_controls.clone()),
                         )),
                 ),
         )
         .child(preset_sync_bar(profiles, draft, sync_controls))
 }
 
-fn rules_panel_header(
+fn rules_panel_top_bar(
+    profiles: ProfileSignals,
+    active_tab: Signal<u8>,
     parsed_rules_count: Memo<usize>,
-    rules_on: Signal<bool>,
-    langs: Signal<Option<Lang>>,
+    controls: Arc<Controls>,
 ) -> impl IntoElement {
-    view()
-        .h(px(28.0))
-        .flex_row()
-        .items_center()
-        .justify_between()
-        .child(
-            text(tr("规则与代理配置", "Rules & Proxy Config"))
-                .text_size(px(13.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(fg_primary()),
-        )
-        .child(when(
-            move || parsed_rules_count.get() > 0,
-            move || {
-                view()
-                    .h(px(20.0))
-                    .px_2()
-                    .rounded(px(99.0))
-                    .flex_row()
-                    .items_center()
-                    .bg(move || {
-                        if rules_on.get() {
-                            accent_blue_soft()
-                        } else {
-                            status_warn_bg()
-                        }
-                    })
-                    .child(
-                        text(move || {
-                            let count = present::format_thousands(parsed_rules_count.get() as u64);
-                            let lang = ui_lang(langs);
-                            if rules_on.get() {
-                                match lang {
-                                    Lang::Zh => format!("{count} 条规则生效"),
-                                    Lang::En => format!("{count} active"),
-                                }
-                            } else {
-                                match lang {
-                                    Lang::Zh => format!("{count} 条规则已暂停"),
-                                    Lang::En => format!("{count} paused"),
-                                }
-                            }
-                        })
-                        .tabular_nums()
-                        .text_size(px(11.0))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(move || {
-                            if rules_on.get() {
-                                accent_blue_text()
-                            } else {
-                                status_warn_fg()
-                            }
-                        }),
-                    )
-            },
-        ))
-}
+    let rules_on = profiles.rules_on;
+    let breaks_on = profiles.breaks_on;
+    let bypass_text = profiles.bypass;
+    let upstream_text = profiles.upstream;
+    let show_tunnels = profiles.show_tunnels;
+    let rules_controls = controls.clone();
+    let breaks_controls = controls;
+    let has_proxy_cfg = move || {
+        !bypass_text.get().trim().is_empty()
+            || !upstream_text.get().trim().is_empty()
+            || show_tunnels.get()
+    };
 
-fn rules_editor_header(
-    rule_target: RuleEditTarget,
-    invalid_lines: Memo<Vec<usize>>,
-    clear_controls: Arc<Controls>,
-    langs: Signal<Option<Lang>>,
-) -> impl IntoElement {
     view()
+        .w_full()
+        .pb_2()
+        .border_b_1()
+        .border_b_color(border_subtle())
         .flex_row()
+        .flex_wrap()
         .items_center()
         .justify_between()
+        .gap_2()
         .child(
-            text(tr("转发与改写规则", "Rules"))
-                .text_size(px(11.5))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(fg_muted()),
+            tabs()
+                .flex_row()
+                .items_center()
+                .gap_4()
+                .indicator_style(|s| {
+                    s.bottom(px(0.0))
+                        .h(px(2.0))
+                        .rounded(px(1.0))
+                        .bg(accent_blue())
+                })
+                .child(rules_panel_tab_button(
+                    active_tab,
+                    0,
+                    "规则",
+                    "Rules",
+                    move || parsed_rules_count.get(),
+                    || false,
+                ))
+                .child(rules_panel_tab_button(
+                    active_tab,
+                    1,
+                    "直通与上游",
+                    "Bypass & Proxy",
+                    || 0,
+                    has_proxy_cfg,
+                )),
         )
         .child(
             view()
                 .flex_row()
                 .items_center()
                 .gap_1p5()
-                .child(when(
-                    move || !invalid_lines.with(Vec::is_empty),
-                    move || {
-                        view()
-                            .h(px(20.0))
-                            .px_1p5()
-                            .rounded(px(4.0))
-                            .flex_row()
-                            .items_center()
-                            .bg(status_warn_bg())
-                            .child(
-                                text(move || {
-                                    let lines = invalid_lines.with(|bad| {
-                                        bad.iter()
-                                            .map(usize::to_string)
-                                            .collect::<Vec<_>>()
-                                            .join(", ")
-                                    });
-                                    match ui_lang(langs) {
-                                        Lang::Zh => format!("第 {lines} 行语法有误"),
-                                        Lang::En => format!("Syntax error on line {lines}"),
-                                    }
-                                })
-                                .text_size(px(10.5))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(status_warn_fg()),
-                            )
+                .child(mini_toggle_switch(
+                    rules_on,
+                    "启用",
+                    "Enabled",
+                    move |enabled| {
+                        rules_controls.hub.set_rules_enabled(enabled);
                     },
                 ))
-                .child(when(
-                    move || !rule_target.current_text().trim().is_empty(),
-                    move || {
-                        let clear_controls = clear_controls.clone();
-                        view()
-                            .h(px(24.0))
-                            .px_2()
-                            .flex_shrink_0()
-                            .rounded(px(6.0))
-                            .border_1()
-                            .border_color(border_control())
-                            .bg(bg_control())
-                            .hover(|style| style.bg(bg_control_hover()))
-                            .active(|style| style.opacity(0.8))
-                            .flex_row()
-                            .items_center()
-                            .cursor(Cursor::Pointer)
-                            .on_press(move || {
-                                rule_target.commit(&clear_controls, String::new());
-                            })
-                            .child(
-                                text(tr("清空", "Clear"))
-                                    .text_size(px(11.5))
-                                    .text_color(fg_secondary()),
-                            )
+                .child(mini_toggle_switch(
+                    breaks_on,
+                    "断点",
+                    "Breaks",
+                    move |enabled| {
+                        breaks_controls.hub.set_breaks_enabled(enabled);
                     },
                 )),
+        )
+}
+
+fn rules_panel_tab_button(
+    active_tab: Signal<u8>,
+    tab_idx: u8,
+    zh: &'static str,
+    en: &'static str,
+    badge_count: impl Fn() -> usize + Copy + 'static,
+    show_dot: impl Fn() -> bool + Copy + 'static,
+) -> impl IntoElement {
+    let selected = move || active_tab.get() == tab_idx;
+    tab()
+        .selected(selected)
+        .on_press(move |_: &()| active_tab.set(tab_idx))
+        .h(px(26.0))
+        .px_0p5()
+        .pb_1()
+        .flex_row()
+        .items_center()
+        .gap_1p5()
+        .cursor(Cursor::Pointer)
+        .active(|style| style.opacity(0.85))
+        .child(
+            text(tr(zh, en))
+                .number_of_lines(1)
+                .text_size(px(12.5))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(move || if selected() { fg_primary() } else { fg_muted() }),
+        )
+        .child(when(
+            move || badge_count() > 0,
+            move || {
+                view()
+                    .h(px(16.0))
+                    .px_1p5()
+                    .rounded(px(99.0))
+                    .flex_row()
+                    .items_center()
+                    .bg(bg_control())
+                    .child(
+                        mono(move || present::format_thousands(badge_count() as u64))
+                            .tabular_nums()
+                            .text_size(px(10.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(fg_secondary()),
+                    )
+            },
+        ))
+        .child(when(show_dot, move || {
+            view()
+                .w(px(5.5))
+                .h(px(5.5))
+                .rounded_full()
+                .bg(accent_blue())
+        }))
+}
+
+fn rules_tab_body(
+    rule_target: RuleEditTarget,
+    invalid_lines: Memo<Vec<usize>>,
+    controls: Arc<Controls>,
+    draft: QuickRuleDraftSignals,
+    quick_add_open: Signal<bool>,
+    langs: Signal<Option<Lang>>,
+) -> impl IntoElement {
+    let groups_controls = controls.clone();
+    let toolbar_controls = controls.clone();
+    let editor_controls = controls.clone();
+    let strip_controls = controls.clone();
+    let dry_run_controls = controls.clone();
+    let quick_controls = controls;
+    view()
+        .w_full()
+        .gap_2()
+        .flex_col()
+        .child(
+            view()
+                .w_full()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(
+                    view()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .child(rule_groups_bar(rule_target, groups_controls)),
+                )
+                .child(rules_editor_toolbar(
+                    rule_target,
+                    invalid_lines,
+                    toolbar_controls,
+                    draft,
+                    quick_add_open,
+                    langs,
+                )),
+        )
+        .child(rules_editor(rule_target, editor_controls, quick_add_open))
+        .child(rule_line_strip(
+            rule_target,
+            strip_controls,
+            draft,
+            quick_add_open,
+        ))
+        .child(rule_dry_run_strip(
+            rule_target,
+            dry_run_controls,
+            move || {
+                if !quick_add_open.get() {
+                    return None;
+                }
+                let kind = draft.kind.get();
+                let response = draft.modes.mode_for(kind);
+                let line = draft_rules_with_op(
+                    "",
+                    &draft.host.get(),
+                    &draft.path.get(),
+                    &draft.op.get(),
+                    &draft.from.get(),
+                    &draft.to.get(),
+                    response,
+                    kind,
+                );
+                if line.trim().is_empty() {
+                    None
+                } else {
+                    Some(line)
+                }
+            },
+        ))
+        .child(quick_add_section(
+            rule_target,
+            quick_controls,
+            draft,
+            quick_add_open,
+        ))
+}
+
+fn rules_editor_toolbar(
+    rule_target: RuleEditTarget,
+    invalid_lines: Memo<Vec<usize>>,
+    controls: Arc<Controls>,
+    draft: QuickRuleDraftSignals,
+    quick_add_open: Signal<bool>,
+    langs: Signal<Option<Lang>>,
+) -> impl IntoElement {
+    let templates_controls = controls.clone();
+    let clear_controls = controls;
+    view()
+        .flex_shrink_0()
+        .flex_row()
+        .items_center()
+        .gap_1p5()
+        .child(when(
+            move || !invalid_lines.with(Vec::is_empty),
+            move || {
+                view()
+                    .h(px(20.0))
+                    .px_1p5()
+                    .rounded(px(4.0))
+                    .flex_row()
+                    .items_center()
+                    .bg(status_warn_bg())
+                    .child(
+                        text(move || {
+                            let lines = invalid_lines.with(|bad| {
+                                bad.iter()
+                                    .map(usize::to_string)
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            });
+                            match ui_lang(langs) {
+                                Lang::Zh => format!("第 {lines} 行语法有误"),
+                                Lang::En => format!("Syntax error on line {lines}"),
+                            }
+                        })
+                        .text_size(px(10.5))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(status_warn_fg()),
+                    )
+            },
+        ))
+        .child(rule_templates_menu(
+            rule_target,
+            templates_controls,
+            draft,
+            quick_add_open,
+        ))
+        .child(when(
+            move || !rule_target.current_text().trim().is_empty(),
+            move || {
+                let clear_controls = clear_controls.clone();
+                view()
+                    .h(px(24.0))
+                    .px_1p5()
+                    .flex_shrink_0()
+                    .rounded(px(5.0))
+                    .bg(AdaptiveColor::TRANSPARENT)
+                    .hover(|style| style.bg(bg_control_hover()))
+                    .active(|style| style.opacity(0.8))
+                    .flex_row()
+                    .items_center()
+                    .cursor(Cursor::Pointer)
+                    .on_press(move || {
+                        rule_target.commit(&clear_controls, String::new());
+                    })
+                    .child(
+                        text(tr("清空", "Clear"))
+                            .text_size(px(11.5))
+                            .text_color(fg_muted()),
+                    )
+            },
+        ))
+}
+
+fn proxy_tab_body(profiles: ProfileSignals, controls: Arc<Controls>) -> impl IntoElement {
+    let bypass_text = profiles.bypass;
+    let upstream_text = profiles.upstream;
+    let show_tunnels = profiles.show_tunnels;
+    let bypass_controls = controls.clone();
+    let upstream_controls = controls.clone();
+    let tunnel_controls = controls;
+    view()
+        .w_full()
+        .gap_2p5()
+        .flex_col()
+        .child(config_field(
+            "直通名单 (不解密)",
+            "TLS Bypass (No MITM)",
+            side_input(
+                bypass_text,
+                tr(
+                    "每行或用 | 分隔：example.com | *.pin.dev 或 only:api.example.com",
+                    "example.com | *.pin.dev or only:api.example.com",
+                ),
+                72.0,
+                true,
+                move |text| {
+                    bypass_text.set(text.to_string());
+                    bypass_controls.hub.set_bypass(text);
+                    save_config_or_notify(&bypass_controls, PrefName::Bypass, |cfg| {
+                        cfg.bypass_hosts = text.to_string();
+                    });
+                },
+            ),
+        ))
+        .child(config_field(
+            "上游代理",
+            "Upstream Proxy",
+            side_input(
+                upstream_text,
+                tr(
+                    "http://127.0.0.1:7890 或 socks5h://127.0.0.1:1080",
+                    "http://127.0.0.1:7890 or socks5h://127.0.0.1:1080",
+                ),
+                28.0,
+                false,
+                move |text| {
+                    upstream_text.set(text.to_string());
+                    upstream_controls.hub.set_upstream(text);
+                    save_config_or_notify(&upstream_controls, PrefName::Upstream, |cfg| {
+                        cfg.upstream_proxy = text.to_string();
+                    });
+                },
+            ),
+        ))
+        .child(
+            view()
+                .w_full()
+                .px_2p5()
+                .py_2()
+                .rounded(px(8.0))
+                .border_1()
+                .border_color(border_subtle())
+                .bg(bg_canvas())
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .child(
+                    view()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .gap_0p5()
+                        .flex_col()
+                        .child(
+                            text(tr("显示隧道失败", "Show tunnel failures"))
+                                .text_size(px(12.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(fg_primary()),
+                        )
+                        .child(
+                            text(tr(
+                                "在流量列表显示直通或源站 TLS 握手失败的隧道记录",
+                                "Show bypassed or failed TLS CONNECT tunnels in the flow list",
+                            ))
+                            .text_size(px(11.0))
+                            .text_color(fg_muted()),
+                        ),
+                )
+                .child(mini_toggle_switch(show_tunnels, "开启", "On", move |on| {
+                    tunnel_controls.hub.set_show_tunnel_failures(on);
+                    save_config_or_notify(&tunnel_controls, PrefName::Tunnel, |cfg| {
+                        cfg.show_tunnel_failures = on;
+                    });
+                })),
         )
 }
 
@@ -855,6 +986,14 @@ mod tests {
         assert_eq!(format_rules_indicator(5, 2, Lang::En), "5 · 2g");
         assert_eq!(format_rules_indicator(0, 1, Lang::Zh), "0 条 · 1 组");
         assert_eq!(format_rules_indicator(0, 1, Lang::En), "0 · 1g");
+        assert!(
+            format_rules_pill_tooltip(1234, 12, true, Lang::En)
+                .starts_with("1,234 active rules · 12 groups\n")
+        );
+        assert!(
+            format_rules_pill_tooltip(1234, 0, false, Lang::Zh)
+                .starts_with("规则已暂停（1,234 条规则）\n")
+        );
     }
 
     #[test]

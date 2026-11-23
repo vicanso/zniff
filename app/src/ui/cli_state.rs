@@ -332,6 +332,7 @@ pub(crate) struct ProfileSignals {
     pub(crate) sidebar_collapsed: Signal<bool>,
     pub(crate) layout_mode: Signal<config::LayoutMode>,
     pub(crate) panel_open: Signal<bool>,
+    pub(crate) rules_panel_tab: Signal<u8>,
     pub(crate) filter_panel_open: Signal<bool>,
     pub(crate) preset_panel_open: Signal<bool>,
     pub(crate) access_open: Signal<bool>,

@@ -46,6 +46,12 @@ https://github.com/user-attachments/assets/19339425-f1df-47fe-ab8a-88bb586fd4a1
 ### Install
 
 - **Desktop (macOS / Linux / Windows)**: download from [GitHub Releases](https://github.com/vicanso/zniff/releases) — signed `.dmg` for macOS, `.tar.gz` for Linux and Windows. Homebrew / Scoop / Winget templates live in [`packaging/`](./packaging/README.md).
+- **Linux (user-level install via [`scripts/install-linux.sh`](./scripts/install-linux.sh))**:
+  ```bash
+  curl -fsSLO https://raw.githubusercontent.com/vicanso/zniff/main/scripts/install-linux.sh
+  sh install-linux.sh
+  ```
+  Downloads the matching `x86_64` / `aarch64` release (verified with `SHA256SUMS`, falling back to Gitee if GitHub is unreachable), checks GTK 4.14+ / `glibc 2.39` dependencies, and installs the binary, icon, desktop entry, and autostart under `~/.local` and `~/.config` without root (or run `./install-linux.sh` from an unpacked Linux `.tar.gz`). Supports `--no-autostart`, `--tag vX.Y.Z`, and `--uninstall`.
 - **From source**:
   ```bash
   cargo install --git https://github.com/vicanso/zniff

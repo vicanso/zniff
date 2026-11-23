@@ -53,8 +53,8 @@ pub(crate) fn effective_quick_inputs<'a>(
     to: &'a str,
 ) -> (&'a str, &'a str) {
     let k = kind % 16;
-    let from_used = !matches!(k, 4 | 5 | 8 | 12) && !(k == 13 && mode);
-    let to_used = matches!(k, 0 | 2 | 6 | 7 | 9 | 10 | 11 | 14 | 15);
+    let from_used = !matches!(k, 8 | 12) && !(k == 13 && mode);
+    let to_used = matches!(k, 0 | 2 | 4 | 5 | 6 | 7 | 9 | 10 | 11 | 14 | 15);
     (
         if from_used { from } else { "" },
         if to_used { to } else { "" },
@@ -828,8 +828,11 @@ pub(crate) fn adaptive_filter_panel_width_for_layout(
 }
 
 pub(crate) const FILTER_PANEL_CHROME_CLEARANCE: f32 = 80.0;
+#[cfg(test)]
 pub(crate) const FILTER_PANEL_DOCK_HEIGHT: f32 = 54.0;
+#[cfg(test)]
 pub(crate) const FILTER_PANEL_IMPORT_EXTRA_HEIGHT: f32 = 182.0;
+#[cfg(test)]
 pub(crate) const FILTER_PANEL_RIGHT_FIXED_HEIGHT: f32 = 620.0;
 
 pub(crate) fn adaptive_filter_panel_max_height(window_h: f32) -> f32 {
@@ -842,6 +845,7 @@ pub(crate) fn adaptive_filter_panel_max_height(window_h: f32) -> f32 {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn adaptive_filter_body_max_height(window_h: f32, import_open: bool) -> f32 {
     let import_h = if import_open {
         FILTER_PANEL_IMPORT_EXTRA_HEIGHT
@@ -858,6 +862,7 @@ pub(crate) fn adaptive_rules_editor_height(window_h: f32) -> f32 {
     adaptive_rules_editor_height_for(window_h, false)
 }
 
+#[cfg(test)]
 pub(crate) fn adaptive_rules_editor_height_for(window_h: f32, import_open: bool) -> f32 {
     if window_h.is_finite() && window_h > 0.0 {
         let body_budget = adaptive_filter_body_max_height(window_h, import_open);

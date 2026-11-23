@@ -215,9 +215,7 @@ pub(crate) fn rule_groups_bar(target: RuleEditTarget, controls: Arc<Controls>) -
                     .items_center()
                     .gap_1()
                     .rounded(px(5.0))
-                    .border_1()
-                    .border_color(border_control())
-                    .bg(bg_control())
+                    .bg(AdaptiveColor::TRANSPARENT)
                     .hover(|s| s.bg(bg_control_hover()))
                     .active(|s| s.opacity(0.8))
                     .cursor(Cursor::Pointer)
@@ -232,9 +230,9 @@ pub(crate) fn rule_groups_bar(target: RuleEditTarget, controls: Arc<Controls>) -
                     .child(
                         text(tr("+ 分组", "+ Group"))
                             .number_of_lines(1)
-                            .text_size(px(10.5))
+                            .text_size(px(11.0))
                             .font_weight(FontWeight::MEDIUM)
-                            .text_color(fg_secondary()),
+                            .text_color(fg_muted()),
                     )
             }),
         )
@@ -242,6 +240,7 @@ pub(crate) fn rule_groups_bar(target: RuleEditTarget, controls: Arc<Controls>) -
 
 fn workspace_pill(target: RuleEditTarget) -> impl IntoElement {
     let is_selected = move || target.editing.get().is_none();
+    let has_groups = move || !target.groups.with(Vec::is_empty);
     view()
         .h(px(22.0))
         .px_2()
@@ -252,14 +251,14 @@ fn workspace_pill(target: RuleEditTarget) -> impl IntoElement {
         .rounded(px(5.0))
         .border_1()
         .border_color(move || {
-            if is_selected() {
+            if is_selected() && has_groups() {
                 accent_blue_border()
             } else {
-                border_control()
+                border_subtle()
             }
         })
         .bg(move || {
-            if is_selected() {
+            if is_selected() && has_groups() {
                 accent_blue_soft()
             } else {
                 bg_control()
@@ -267,7 +266,7 @@ fn workspace_pill(target: RuleEditTarget) -> impl IntoElement {
         })
         .hover(|s| {
             s.bg(move || {
-                if is_selected() {
+                if is_selected() && has_groups() {
                     accent_blue_soft_hover()
                 } else {
                     bg_control_hover()
@@ -284,7 +283,7 @@ fn workspace_pill(target: RuleEditTarget) -> impl IntoElement {
                     .with(|text| crate::rules::parse_rules(text).len());
                 let base = tr("当前规则", "Workspace")();
                 if count > 0 {
-                    format!("{base} ({count})").into()
+                    format!("{base} ({})", present::format_thousands(count as u64)).into()
                 } else {
                     base.into()
                 }
@@ -293,8 +292,10 @@ fn workspace_pill(target: RuleEditTarget) -> impl IntoElement {
             .text_size(px(11.0))
             .font_weight(FontWeight::MEDIUM)
             .text_color(move || {
-                if is_selected() {
+                if is_selected() && has_groups() {
                     accent_blue_text()
+                } else if is_selected() {
+                    fg_primary()
                 } else {
                     fg_secondary()
                 }
@@ -399,7 +400,11 @@ fn group_pill(
                             .with(|g| {
                                 let count = crate::rules::parse_rules(&g.rules).len();
                                 if count > 0 {
-                                    format!("{} ({count})", g.name)
+                                    format!(
+                                        "{} ({})",
+                                        g.name,
+                                        present::format_thousands(count as u64)
+                                    )
                                 } else {
                                     g.name.clone()
                                 }
