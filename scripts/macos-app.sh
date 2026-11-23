@@ -141,7 +141,7 @@ print(tid.strip())
     -o "$sysext_bundle/Contents/MacOS/ZniffTransparentProxy"
   chmod 755 "$sysext_bundle/Contents/MacOS/ZniffTransparentProxy"
 
-  sed -e "s/__VERSION__/${version}/g" -e "s/__TEAM_ID__/${team_id}/g" \
+  sed -e "s/__VERSION__/${version}/g" -e "s/__BUILD_VERSION__/${version}/g" -e "s/__TEAM_ID__/${team_id}/g" \
     "$tp_dir/Info.plist.template" > "$sysext_bundle/Contents/Info.plist"
   plutil -lint "$sysext_bundle/Contents/Info.plist"
 

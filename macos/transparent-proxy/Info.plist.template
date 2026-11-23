@@ -23,7 +23,7 @@
 		<string>MacOSX</string>
 	</array>
 	<key>CFBundleVersion</key>
-	<string>__VERSION__</string>
+	<string>__BUILD_VERSION__</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>12.0</string>
 	<key>NSAppTransportSecurity</key>

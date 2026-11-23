@@ -127,6 +127,12 @@ pub(crate) fn apply_global_cli_flags(args: &[String]) -> std::result::Result<(),
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub fn apply_runtime_cli_flags_best_effort() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let _ = apply_global_cli_flags(&args);
+}
+
 /// Headless modes exit before the desktop window. `--web` serves the operator
 /// console and leaves the capture port closed. `--relay` and `--mcp` are separate.
 #[cfg(not(target_arch = "wasm32"))]

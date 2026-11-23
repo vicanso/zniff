@@ -3,14 +3,18 @@
   "id": "dev.zniff.app",
   "version": "0.5.1",
   "build": 1,
+  "icon": "assets/icon.png",
+  "appearance": "system",
   "rust": ".",
   "root": "App",
-  "icon": "assets/icon.png",
   "window": {
+    "defaultSize": { "width": 1200, "height": 760 },
+    "minSize": { "width": 960, "height": 640 },
     "titleBar": {
       "style": "hidden",
       "height": 42
-    }
+    },
+    "restoreBounds": true
   }
 }
 

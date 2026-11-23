@@ -32,6 +32,7 @@ fn emit_git_metadata() {
         }
     }
     let sha = Command::new("git")
+        .current_dir(&manifest_dir)
         .args(["rev-parse", "--short=8", "HEAD"])
         .output()
         .ok()
@@ -42,6 +43,7 @@ fn emit_git_metadata() {
     println!("cargo:rustc-env=ZNIFF_GIT_SHA={sha}");
 
     let year = Command::new("git")
+        .current_dir(&manifest_dir)
         .args(["log", "-1", "--format=%cs"])
         .output()
         .ok()
@@ -68,8 +70,9 @@ fn compile_macos_transparent_proxy_bridge() {
     let manifest_dir =
         PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let src = manifest_dir
-        .parent()
-        .map(|root| root.join("macos/transparent-proxy/host_bridge.m"))
+        .ancestors()
+        .map(|dir| dir.join("macos/transparent-proxy/host_bridge.m"))
+        .find(|path| path.is_file())
         .unwrap_or_else(|| manifest_dir.join("../macos/transparent-proxy/host_bridge.m"));
     println!("cargo:rerun-if-changed={}", src.display());
     if !src.is_file() {

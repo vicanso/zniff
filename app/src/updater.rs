@@ -14,8 +14,11 @@
 //!   the volume, and spawns a detached shell to reopen the bundle as soon as
 //!   this process exits. Any obstacle (running via bare `cargo run` or an
 //!   unwritable `/Applications`) falls back to opening the DMG in Finder.
-//! - On Linux and Windows, unpacks the release `.tar.gz`, swaps the binary in
-//!   place, and spawns a detached shell to relaunch the new binary.
+//! - On Linux, unpacks the release `.tar.gz`, swaps the binary in place,
+//!   and spawns a detached shell to relaunch the new binary.
+//! - On Windows, unpacks the release `.zip` (supporting `nsh package` and
+//!   legacy archive layouts), swaps the binary in place, and spawns a
+//!   detached command shell to relaunch the new binary.
 
 use std::env;
 use std::fs;
@@ -58,12 +61,11 @@ pub const fn version() -> &'static str {
 
 fn asset_name_for(os: &str, arch: &str) -> Option<&'static str> {
     match (os, arch) {
-        ("macos", "aarch64") => Some("zniff-aarch64.dmg"),
-        ("macos", "x86_64") => Some("zniff-x86_64.dmg"),
+        ("macos", "aarch64" | "x86_64") => Some("zniff-macos-universal.dmg"),
         ("linux", "x86_64") => Some("zniff-linux-x86_64.tar.gz"),
         ("linux", "aarch64") => Some("zniff-linux-aarch64.tar.gz"),
-        ("windows", "x86_64") => Some("zniff-windows-x86_64.tar.gz"),
-        ("windows", "aarch64") => Some("zniff-windows-aarch64.tar.gz"),
+        ("windows", "x86_64") => Some("zniff-windows-x86_64.zip"),
+        ("windows", "aarch64") => Some("zniff-windows-aarch64.zip"),
         _ => None,
     }
 }
@@ -886,6 +888,35 @@ fn bundle_plist_value(app: &Path, key: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
 }
 
+// ---- Shared archive layout helper ---------------------------------------
+
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+fn find_unpacked_binary(
+    unpack: &Path,
+    bin_name: &str,
+    legacy_dir: Option<&str>,
+) -> Option<PathBuf> {
+    let mut candidates = vec![unpack.join("zniff").join(bin_name)];
+    if let Some(dir) = legacy_dir {
+        candidates.push(unpack.join(dir).join(bin_name));
+    }
+    candidates.push(unpack.join(bin_name));
+    if let Some(found) = candidates.into_iter().find(|path| path.is_file()) {
+        return Some(found);
+    }
+    let entries = fs::read_dir(unpack).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let candidate = path.join(bin_name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
 // ---- Linux: tarball over the running binary ----------------------------
 
 #[cfg(target_os = "linux")]
@@ -932,10 +963,8 @@ fn unpack_and_replace(tarball: &Path, unpack: &Path, target: &Path) -> Result<()
         ));
     }
     let member = tarball_member_dir().ok_or("no release build for this architecture")?;
-    let fresh = unpack.join(member).join("zniff");
-    if !fresh.is_file() {
-        return Err(format!("the tarball has no {member}/zniff in it"));
-    }
+    let fresh = find_unpacked_binary(unpack, "zniff", Some(member))
+        .ok_or_else(|| format!("the tarball has no zniff or {member}/zniff in it"))?;
     replace_binary(target, &fresh)
 }
 
@@ -1024,7 +1053,7 @@ pub fn sweep_installer_mounts() {
     }
 }
 
-// ---- Windows: tarball over the running .exe ----------------------------
+// ---- Windows: archive over the running .exe ----------------------------
 
 #[cfg(target_os = "windows")]
 static INSTALLED_AT: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
@@ -1033,34 +1062,42 @@ static INSTALLED_AT: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(N
 const UNPACK_PREFIX: &str = "zniff-update-";
 
 #[cfg(target_os = "windows")]
-pub fn install(tarball: &Path) -> Result<Delivery, String> {
+pub fn install(archive: &Path) -> Result<Delivery, String> {
     let target = env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
     let unpack = env::temp_dir().join(format!("{UNPACK_PREFIX}{}", process::id()));
     let _ = fs::remove_dir_all(&unpack);
     fs::create_dir_all(&unpack)
         .map_err(|e| format!("could not create {}: {e}", unpack.display()))?;
-    let out = Command::new("tar")
-        .arg("-xzf")
-        .arg(tarball.as_os_str())
+    let tar_ok = Command::new("tar")
+        .arg("-xf")
+        .arg(archive.as_os_str())
         .arg("-C")
         .arg(unpack.as_os_str())
         .output()
-        .map_err(|e| format!("tar: {e}"))?;
-    if !out.status.success() {
-        let _ = fs::remove_dir_all(&unpack);
-        return Err(format!(
-            "tar -xzf: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+        .is_ok_and(|out| out.status.success());
+    if !tar_ok {
+        let escaped_archive = archive.display().to_string().replace('\'', "''");
+        let escaped_unpack = unpack.display().to_string().replace('\'', "''");
+        let ps_cmd = format!(
+            "Expand-Archive -LiteralPath '{escaped_archive}' -DestinationPath '{escaped_unpack}' -Force"
+        );
+        let out = Command::new("powershell")
+            .args(["-NoProfile", "-Command", &ps_cmd])
+            .output()
+            .map_err(|e| format!("Expand-Archive: {e}"))?;
+        if !out.status.success() {
+            let _ = fs::remove_dir_all(&unpack);
+            return Err(format!(
+                "Expand-Archive: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
     }
-    let member = asset_name()
-        .and_then(|n| n.strip_suffix(".tar.gz"))
-        .ok_or("no release build for this architecture")?;
-    let fresh = unpack.join(member).join("zniff.exe");
-    if !fresh.is_file() {
+    let legacy_member = asset_name().and_then(|n| n.strip_suffix(".zip"));
+    let Some(fresh) = find_unpacked_binary(&unpack, "zniff.exe", legacy_member) else {
         let _ = fs::remove_dir_all(&unpack);
-        return Err(format!("the archive has no {member}/zniff.exe in it"));
-    }
+        return Err("the archive has no zniff.exe in it".into());
+    };
     let old = target.with_extension("exe.old");
     let _ = fs::remove_file(&old);
     fs::rename(&target, &old).map_err(|e| format!("could not rename running exe aside: {e}"))?;
@@ -1641,10 +1678,10 @@ mod tests {
     #[test]
     fn release_download_url_targets_github_only() {
         let tag = "v0.3.2";
-        let name = "zniff-aarch64.dmg";
+        let name = "zniff-macos-universal.dmg";
         assert_eq!(
             release_download_url(tag, name),
-            "https://github.com/vicanso/zniff/releases/download/v0.3.2/zniff-aarch64.dmg"
+            "https://github.com/vicanso/zniff/releases/download/v0.3.2/zniff-macos-universal.dmg"
         );
     }
 
@@ -1652,9 +1689,12 @@ mod tests {
     fn asset_name_maps_all_supported_os_and_arch_pairs() {
         assert_eq!(
             asset_name_for("macos", "aarch64"),
-            Some("zniff-aarch64.dmg")
+            Some("zniff-macos-universal.dmg")
         );
-        assert_eq!(asset_name_for("macos", "x86_64"), Some("zniff-x86_64.dmg"));
+        assert_eq!(
+            asset_name_for("macos", "x86_64"),
+            Some("zniff-macos-universal.dmg")
+        );
         assert_eq!(
             asset_name_for("linux", "x86_64"),
             Some("zniff-linux-x86_64.tar.gz")
@@ -1665,13 +1705,47 @@ mod tests {
         );
         assert_eq!(
             asset_name_for("windows", "x86_64"),
-            Some("zniff-windows-x86_64.tar.gz")
+            Some("zniff-windows-x86_64.zip")
         );
         assert_eq!(
             asset_name_for("windows", "aarch64"),
-            Some("zniff-windows-aarch64.tar.gz")
+            Some("zniff-windows-aarch64.zip")
         );
         assert_eq!(asset_name_for("freebsd", "x86_64"), None);
+    }
+
+    #[test]
+    fn find_unpacked_binary_handles_nsh_package_and_legacy_layouts() {
+        let dir = env::temp_dir().join(format!("zniff-unpack-layout-{}", process::id()));
+        let _ = fs::remove_dir_all(&dir);
+
+        let nsh_dir = dir.join("nsh-layout").join("zniff");
+        fs::create_dir_all(&nsh_dir).unwrap();
+        let nsh_bin = nsh_dir.join("zniff");
+        fs::write(&nsh_bin, b"nsh").unwrap();
+        assert_eq!(
+            find_unpacked_binary(
+                dir.join("nsh-layout").as_path(),
+                "zniff",
+                Some("zniff-linux-x86_64")
+            ),
+            Some(nsh_bin)
+        );
+
+        let legacy_dir = dir.join("legacy-layout").join("zniff-windows-x86_64");
+        fs::create_dir_all(&legacy_dir).unwrap();
+        let legacy_exe = legacy_dir.join("zniff.exe");
+        fs::write(&legacy_exe, b"legacy").unwrap();
+        assert_eq!(
+            find_unpacked_binary(
+                dir.join("legacy-layout").as_path(),
+                "zniff.exe",
+                Some("zniff-windows-x86_64")
+            ),
+            Some(legacy_exe)
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1850,9 +1924,9 @@ mod tests {
         let file = dir.join("sample.bin");
         fs::write(&file, b"hello zniff").unwrap();
         let hash = file_sha256(&file).unwrap();
-        let sums = format!("{hash}  zniff-aarch64.dmg\n");
+        let sums = format!("{hash}  zniff-macos-universal.dmg\n");
         assert_eq!(
-            parse_checksum_line(&sums, "zniff-aarch64.dmg").as_deref(),
+            parse_checksum_line(&sums, "zniff-macos-universal.dmg").as_deref(),
             Some(hash.as_str())
         );
 
@@ -1872,11 +1946,12 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
 
         let payload = b"macos-dmg-installer-bytes";
-        let dmg = dir.join("v0.2.0-zniff-aarch64.dmg");
+        let dmg = dir.join("v0.2.0-zniff-macos-universal.dmg");
 
         // 1. Missing SHA256SUMS -> rejected and downloaded asset removed (including on macOS)
         fs::write(&dmg, payload).unwrap();
-        let err_none = verify_downloaded_asset(&dmg, "zniff-aarch64.dmg", None).unwrap_err();
+        let err_none =
+            verify_downloaded_asset(&dmg, "zniff-macos-universal.dmg", None).unwrap_err();
         assert!(
             err_none.contains("no SHA256SUMS"),
             "unexpected error: {err_none}"
@@ -1891,10 +1966,10 @@ mod tests {
         let other_hash = file_sha256(&dmg).unwrap();
         let sums_missing_asset = format!("{other_hash}  zniff-linux-x86_64.tar.gz\n");
         let err_missing_entry =
-            verify_downloaded_asset(&dmg, "zniff-aarch64.dmg", Some(&sums_missing_asset))
+            verify_downloaded_asset(&dmg, "zniff-macos-universal.dmg", Some(&sums_missing_asset))
                 .unwrap_err();
         assert!(
-            err_missing_entry.contains("zniff-aarch64.dmg"),
+            err_missing_entry.contains("zniff-macos-universal.dmg"),
             "unexpected error: {err_missing_entry}"
         );
         assert!(
@@ -1904,9 +1979,10 @@ mod tests {
 
         // 3. SHA256SUMS present with wrong SHA-256 -> rejected & removed
         fs::write(&dmg, payload).unwrap();
-        let wrong_sums = format!("{}  zniff-aarch64.dmg\n", "0".repeat(64));
+        let wrong_sums = format!("{}  zniff-macos-universal.dmg\n", "0".repeat(64));
         let err_mismatch =
-            verify_downloaded_asset(&dmg, "zniff-aarch64.dmg", Some(&wrong_sums)).unwrap_err();
+            verify_downloaded_asset(&dmg, "zniff-macos-universal.dmg", Some(&wrong_sums))
+                .unwrap_err();
         assert!(
             err_mismatch.contains("checksum mismatch"),
             "unexpected error: {err_mismatch}"
@@ -1920,15 +1996,15 @@ mod tests {
         fs::write(&dmg, payload).unwrap();
         let expected_upper = other_hash.to_ascii_uppercase();
         let valid_sums = format!(
-            "{}  zniff-x86_64.dmg\n{expected_upper} *zniff-aarch64.dmg\n",
+            "{}  zniff-linux-x86_64.tar.gz\n{expected_upper} *zniff-macos-universal.dmg\n",
             "a".repeat(64)
         );
-        verify_downloaded_asset(&dmg, "zniff-aarch64.dmg", Some(&valid_sums))
+        verify_downloaded_asset(&dmg, "zniff-macos-universal.dmg", Some(&valid_sums))
             .expect("matching SHA256SUMS entry must pass");
         assert!(dmg.exists(), "verified download must remain on disk");
 
-        let dot_slash_sums = format!("{other_hash}  ./zniff-aarch64.dmg\n");
-        verify_downloaded_asset(&dmg, "zniff-aarch64.dmg", Some(&dot_slash_sums))
+        let dot_slash_sums = format!("{other_hash}  ./zniff-macos-universal.dmg\n");
+        verify_downloaded_asset(&dmg, "zniff-macos-universal.dmg", Some(&dot_slash_sums))
             .expect("./asset form must also pass");
 
         let _ = fs::remove_dir_all(&dir);

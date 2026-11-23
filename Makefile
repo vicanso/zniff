@@ -8,8 +8,9 @@ NSH_JSON := app/nsh.json
 CARGO_FLAGS := --manifest-path $(MANIFEST)
 VERSION := $(shell sed -n 's/^version = "\([^"]*\)"/\1/p' $(MANIFEST) | head -1)
 
-.PHONY: all help build dev debug run web web-ui fmt lint test bench check check-wasm release bundle bundle-signed clean \
-	bloat udeps version sync-version version-patch version-minor version-major tag nightly changelog
+.PHONY: all help build dev dev-app dev-cargo debug run web web-ui fmt lint test test-app bench check check-wasm \
+	build-app package-macos package-macos-universal package-macos-signed release release-cli bundle bundle-signed \
+	clean bloat udeps version sync-version version-patch version-minor version-major tag nightly changelog
 
 # --- develop ---------------------------------------------------------------
 
@@ -17,42 +18,57 @@ all: build
 
 help:
 	@printf '%s\n' \
-		'build    compile the debug binary' \
-		'dev      bacon: rebuild and open the window, console stays attached' \
-		'debug    dev with RUST_LOG=debug' \
-		'run      same as dev' \
-		'web      shared UI at http://127.0.0.1:8080, capture stays closed' \
-		'web-ui   rebuild the shared page with nsh $(NSH_VERSION)' \
-		'fmt      cargo fmt' \
-		'lint     clippy, warnings denied' \
-		'check    type-check every target (plus wasm32 when installed)' \
-		'check-wasm  type-check the shared wasm32 UI library' \
-		'test     run the library and binary tests' \
-		'bench    run large-session performance benchmarks (10k / 100k flows)' \
-		'release  compile the release binary' \
-		'bundle   release binary wrapped as zniff.app with icons/zniff.icns' \
-		'clean    remove this package from the cargo target directory' \
-		'bloat    release binary size by crate' \
-		'udeps    unused dependencies (nightly)' \
+		'build                  compile the debug binary' \
+		'dev-app | dev | run    run desktop app via nsh $(NSH_VERSION) (`ZNIFF_DEV=1`)' \
+		'dev-cargo              bacon: rebuild and open the window directly via cargo' \
+		'debug                  dev with RUST_LOG=debug' \
+		'web                    shared UI at http://127.0.0.1:8080, capture stays closed' \
+		'web-ui                 rebuild the shared page with nsh $(NSH_VERSION)' \
+		'fmt                    cargo fmt' \
+		'lint                   clippy, warnings denied' \
+		'check                  type-check every target (plus wasm32 when installed)' \
+		'check-wasm             type-check the shared wasm32 UI library' \
+		'test                   run the library and binary tests' \
+		'test-app               run fmt/lint/test + nsh check && nsh test in app/' \
+		'bench                  run large-session performance benchmarks (10k / 100k flows)' \
+		'build-app              build desktop nsh runtime artifacts' \
+		'package-macos          package zniff.app via nsh package --target macos' \
+		'package-macos-universal  package universal arm64+x86_64 zniff.app via nsh' \
+		'package-macos-signed   package zniff.app via nsh and embed/sign system extension' \
+		'release                compile the release binary' \
+		'release-cli            compile the headless CLI binary (--no-default-features)' \
+		'clean                  remove this package from the cargo target directory' \
+		'bloat                  release binary size by crate' \
+		'udeps                  unused dependencies (nightly)' \
 		'' \
 		'version-patch | version-minor | version-major' \
-		'         bump app/Cargo.toml, sync app/nsh.json, then prepend CHANGELOG.md' \
-		'sync-version  copy the app/Cargo.toml version into app/nsh.json' \
-		'tag      annotate v$(VERSION) (push it yourself)' \
-		'nightly  move and push the nightly tag; CI ships the pre-release and vicanso/zniff-web:nightly' \
-		'changelog  regenerate CHANGELOG.md from conventional commits' \
+		'                       bump app/Cargo.toml, sync app/nsh.json, then prepend CHANGELOG.md' \
+		'sync-version           copy the app/Cargo.toml version into app/nsh.json' \
+		'tag                    annotate v$(VERSION) (push it yourself)' \
+		'nightly                move and push the nightly tag; CI ships pre-release and vicanso/zniff-web:nightly' \
+		'changelog              regenerate CHANGELOG.md from conventional commits' \
 		'' \
-		'Extra cargo arguments go in ARGS, for example: make test ARGS=--offline'
+		'Extra arguments go in ARGS, for example: make test ARGS=--offline'
 
-# Debug build + launch. bacon keeps the console attached, so tracing and
-# panics land in the terminal (a release build detaches on Windows).
-dev:
+# Standard NSH desktop run in dev mode (`config.dev.toml` / port 8878).
+dev-app:
+	@test -n "$(NSH_BIN)" || { echo "需要 nsh $(NSH_VERSION) 才能运行桌面应用"; exit 1; }
+	@case "$$($(NSH_BIN) --version 2>/dev/null)" in \
+		*$(NSH_VERSION)*) ;; \
+		*) echo "nsh 必须是 $(NSH_VERSION)，当前是 $$($(NSH_BIN) --version 2>/dev/null || printf '<none>')"; exit 1 ;; \
+	esac
+	cd app && ZNIFF_DEV=1 $(NSH_BIN) run $(ARGS)
+
+dev: dev-app
+
+# Direct Cargo debug build + launch with bacon keeping console attached.
+dev-cargo:
 	ZNIFF_DEV=1 bacon --project app run $(if $(ARGS),-- $(ARGS))
 
 debug:
 	RUST_LOG=debug $(MAKE) dev
 
-run: dev
+run: dev-app
 
 # Headless operator console. No window, no system-proxy change, and the
 # capture port stays closed until the page starts it. The server captures
@@ -109,10 +125,26 @@ check-wasm:
 test:
 	$(CARGO) test $(CARGO_FLAGS) --workspace $(ARGS)
 
+test-app: fmt lint test
+	@test -n "$(NSH_BIN)" || { echo "需要 nsh $(NSH_VERSION) 才能运行 nsh check / nsh test"; exit 1; }
+	@case "$$($(NSH_BIN) --version 2>/dev/null)" in \
+		*$(NSH_VERSION)*) ;; \
+		*) echo "nsh 必须是 $(NSH_VERSION)，当前是 $$($(NSH_BIN) --version 2>/dev/null || printf '<none>')"; exit 1 ;; \
+	esac
+	cd app && $(NSH_BIN) check && $(NSH_BIN) test
+
 bench:
 	$(CARGO) bench $(CARGO_FLAGS) --bench large_session $(ARGS)
 
 # --- release ---------------------------------------------------------------
+
+build-app:
+	@test -n "$(NSH_BIN)" || { echo "需要 nsh $(NSH_VERSION) 才能运行 nsh build"; exit 1; }
+	@case "$$($(NSH_BIN) --version 2>/dev/null)" in \
+		*$(NSH_VERSION)*) ;; \
+		*) echo "nsh 必须是 $(NSH_VERSION)，当前是 $$($(NSH_BIN) --version 2>/dev/null || printf '<none>')"; exit 1 ;; \
+	esac
+	cd app && $(NSH_BIN) build $(ARGS)
 
 release:
 	@cargo_home="$${CARGO_HOME:-$$HOME/.cargo}"; \
@@ -120,34 +152,64 @@ release:
 	RUSTFLAGS="--remap-path-prefix=$(CURDIR)=. --remap-path-prefix=$$cargo_home=/cargo --remap-path-prefix=$$rustup_home=/rustup $${RUSTFLAGS:-}" \
 	$(CARGO) build $(CARGO_FLAGS) --release $(ARGS)
 
-# macOS .app. The Dock and Finder icon is icons/zniff.icns.
-bundle: release
+release-cli:
+	@cargo_home="$${CARGO_HOME:-$$HOME/.cargo}"; \
+	rustup_home="$${RUSTUP_HOME:-$$HOME/.rustup}"; \
+	RUSTFLAGS="--remap-path-prefix=$(CURDIR)=. --remap-path-prefix=$$cargo_home=/cargo --remap-path-prefix=$$rustup_home=/rustup $${RUSTFLAGS:-}" \
+	$(CARGO) build $(CARGO_FLAGS) --release --no-default-features $(ARGS)
+
+# Standard NSH macOS packaging (.app under app/.nsh/out/zniff.app).
+package-macos:
 	@case "$$(uname -s)" in \
 	  Darwin) ;; \
-	  *) echo "bundle builds a macOS .app; this machine is $$(uname -s)"; exit 1 ;; \
+	  *) echo "package-macos builds a macOS .app; this machine is $$(uname -s)"; exit 1 ;; \
 	esac
-	@target_dir=$$($(CARGO) metadata $(CARGO_FLAGS) --format-version 1 --no-deps \
-	  | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p'); \
-	scripts/macos-app.sh "$$target_dir/release/zniff" "$$target_dir/release/zniff.app"
+	@test -n "$(NSH_BIN)" || { echo "需要 nsh $(NSH_VERSION) 才能打包 macOS 应用"; exit 1; }
+	@case "$$($(NSH_BIN) --version 2>/dev/null)" in \
+		*$(NSH_VERSION)*) ;; \
+		*) echo "nsh 必须是 $(NSH_VERSION)，当前是 $$($(NSH_BIN) --version 2>/dev/null || printf '<none>')"; exit 1 ;; \
+	esac
+	cd app && $(NSH_BIN) package --target macos $(ARGS)
+
+package-macos-universal:
+	@case "$$(uname -s)" in \
+	  Darwin) ;; \
+	  *) echo "package-macos-universal builds a macOS .app; this machine is $$(uname -s)"; exit 1 ;; \
+	esac
+	@test -n "$(NSH_BIN)" || { echo "需要 nsh $(NSH_VERSION) 才能打包 macOS 应用"; exit 1; }
+	@case "$$($(NSH_BIN) --version 2>/dev/null)" in \
+		*$(NSH_VERSION)*) ;; \
+		*) echo "nsh 必须是 $(NSH_VERSION)，当前是 $$($(NSH_BIN) --version 2>/dev/null || printf '<none>')"; exit 1 ;; \
+	esac
+	cd app && $(NSH_BIN) package --target macos --arch universal $(ARGS)
 
 # Signed macOS .app with embedded NETransparentProxyProvider System Extension.
-bundle-signed: release
+# Pass ARCH=universal to package arm64+x86_64 via nsh before embedding sysext.
+package-macos-signed:
 	@case "$$(uname -s)" in \
 	  Darwin) ;; \
-	  *) echo "bundle-signed builds a macOS .app; this machine is $$(uname -s)"; exit 1 ;; \
+	  *) echo "package-macos-signed builds a macOS .app; this machine is $$(uname -s)"; exit 1 ;; \
 	esac
+	@if [ "$(ARCH)" = "universal" ]; then \
+	  $(MAKE) package-macos-universal; \
+	else \
+	  $(MAKE) package-macos; \
+	fi
 	@app_prof="$${ZNIFF_APP_PROFILE:-$$HOME/Downloads/zniff_Developer_ID.provisionprofile}"; \
 	sysext_prof="$${ZNIFF_SYSEXT_PROFILE:-$$HOME/Downloads/zniff_Transparent_Proxy___Developer_ID.provisionprofile}"; \
 	test -f "$$app_prof" || { echo "Missing ZNIFF_APP_PROFILE: $$app_prof" >&2; exit 1; }; \
 	test -f "$$sysext_prof" || { echo "Missing ZNIFF_SYSEXT_PROFILE: $$sysext_prof" >&2; exit 1; }; \
 	identity="$${ZNIFF_SIGN_IDENTITY:-$$(python3 -c 'import plistlib,subprocess,hashlib,sys; pl=plistlib.loads(subprocess.check_output(["security","cms","-D","-i",sys.argv[1]], stderr=subprocess.DEVNULL)); certs=pl.get("DeveloperCertificates", []); print(hashlib.sha1(certs[0]).hexdigest().upper() if certs else "")' "$$app_prof")}"; \
 	test -n "$$identity" || { echo "Missing ZNIFF_SIGN_IDENTITY and failed to extract certificate SHA-1 from $$app_prof" >&2; exit 1; }; \
-	target_dir=$$($(CARGO) metadata $(CARGO_FLAGS) --format-version 1 --no-deps \
-	  | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p'); \
+	APP_PATH="$(CURDIR)/app/.nsh/out/zniff.app" \
 	ZNIFF_APP_PROFILE="$$app_prof" \
 	ZNIFF_SYSEXT_PROFILE="$$sysext_prof" \
 	ZNIFF_SIGN_IDENTITY="$$identity" \
-	scripts/macos-app.sh "$$target_dir/release/zniff" "$$target_dir/release/zniff.app"
+	.github/workflows/sign_and_package_macos.sh --embed-sysext
+
+bundle: package-macos
+
+bundle-signed: package-macos-signed
 
 # Where the release binary's size goes, by crate.
 bloat:

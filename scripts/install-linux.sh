@@ -154,7 +154,15 @@ fetch_release() {
         say "  $host: $tarball verified against SHA256SUMS"
 
         (cd "$tmpdir" && tar -xzf "$tarball")
-        unpacked="$tmpdir/$APP-linux-$arch"
+        if [ -x "$tmpdir/$APP/$APP" ]; then
+            unpacked="$tmpdir/$APP"
+        elif [ -x "$tmpdir/$APP-linux-$arch/$APP" ]; then
+            unpacked="$tmpdir/$APP-linux-$arch"
+        else
+            found_bin=$(find "$tmpdir" -maxdepth 2 -type f -name "$APP" -perm -u+x | head -n 1 || true)
+            [ -n "$found_bin" ] || die "the tarball has no $APP binary in it"
+            unpacked=$(dirname "$found_bin")
+        fi
         [ -x "$unpacked/$APP" ] || die "the tarball has no $APP binary in it"
         return 0
     done
@@ -174,7 +182,13 @@ else
     say "no local binary — fetching the latest release for $arch"
     fetch_release
     binary="$unpacked/$APP"
-    icon="$unpacked/$APP.png"
+    if [ -f "$unpacked/$APP.png" ]; then
+        icon="$unpacked/$APP.png"
+    elif [ -f "$unpacked/icon.png" ]; then
+        icon="$unpacked/icon.png"
+    else
+        icon=""
+    fi
 fi
 [ -f "$icon" ] || icon=""
 

@@ -20,6 +20,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_TOOLCHAIN: 1.99.1
+  NSH_VERSION: v0.6.1
 
 jobs:
   test:
@@ -42,12 +43,19 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: GTK 4 & GStreamer
-        # nsh 0.5's Linux backend links GTK 4 and GStreamer (gstreamer-1.0,
-        # gstreamer-base-1.0, gstreamer-app-1.0, gstreamer-audio-1.0).
+        # nsh 0.6's Linux backend links GTK 4, GStreamer, and fontconfig/freetype (plus clang for bindgen/skia).
         if: matrix.name == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends pkg-config libgtk-4-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+          sudo apt-get install -y --no-install-recommends \
+            clang \
+            libclang-dev \
+            pkg-config \
+            libfontconfig-dev \
+            libfreetype-dev \
+            libgtk-4-dev \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev
       - name: Ensure Clang for ring (Windows ARM64)
         if: matrix.os == 'windows-11-arm'
         shell: pwsh
@@ -97,6 +105,9 @@ jobs:
         run: cargo fmt --manifest-path app/Cargo.toml --check
       - name: lint
         run: cargo clippy --manifest-path app/Cargo.toml --all-targets -- --deny=warnings
+      - name: check headless cli
+        if: matrix.name == 'linux' || matrix.name == 'macos'
+        run: cargo check --manifest-path app/Cargo.toml --no-default-features
       - name: lint wasm32
         if: matrix.name == 'linux'
         run: |
@@ -104,3 +115,23 @@ jobs:
           cargo clippy --manifest-path app/Cargo.toml --lib --no-default-features --target wasm32-unknown-unknown -- --deny=warnings
       - name: test
         run: cargo test --manifest-path app/Cargo.toml --workspace
+      - name: nsh check (macOS & Linux)
+        if: matrix.name == 'macos' || matrix.name == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ matrix.name }}" in
+            macos) nsh_platform="macos-arm64"; sha_cmd="shasum -a 256 -c" ;;
+            linux) nsh_platform="linux-x86_64"; sha_cmd="sha256sum -c" ;;
+          esac
+          asset="nsh-${nsh_platform}.tar.gz"
+          base_url="https://github.com/longbridge/nsh/releases/download/${NSH_VERSION}"
+          dl_dir="${RUNNER_TEMP}/nsh-dl"
+          rm -rf "$dl_dir" "${RUNNER_TEMP}/nsh"
+          mkdir -p "$dl_dir"
+          curl -fsSL --retry 3 "${base_url}/${asset}" -o "${dl_dir}/${asset}"
+          curl -fsSL --retry 3 "${base_url}/${asset}.sha256" -o "${dl_dir}/${asset}.sha256"
+          (cd "$dl_dir" && $sha_cmd "${asset}.sha256")
+          tar -xzf "${dl_dir}/${asset}" -C "$RUNNER_TEMP"
+          rm -rf "$dl_dir"
+          (cd app && "${RUNNER_TEMP}/nsh/bin/nsh" check)

@@ -4,6 +4,8 @@ use super::*;
 /// The root view: a flow list and the selected flow.
 #[component]
 pub fn App() -> impl IntoElement {
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::ensure_desktop_runtime_init();
     crate::startup_metrics::mark_app_mount();
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -311,6 +313,19 @@ pub fn App() -> impl IntoElement {
     refresh_transparent_proxy_state_async();
     let tp_probe_at = Cell::new(clock::now());
     let controls = open_controls();
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let exit_controls = controls.clone();
+        cleanup(move || {
+            #[cfg(not(test))]
+            {
+                shutdown_capture_for_exit(&exit_controls);
+                crate::cleanup_desktop_runtime();
+            }
+            #[cfg(test)]
+            let _ = &exit_controls;
+        });
+    }
     #[cfg(not(target_arch = "wasm32"))]
     {
         let tray_clear_controls = controls.clone();

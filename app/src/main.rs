@@ -18,22 +18,7 @@ fn main() -> impl std::process::Termination {
     if let Some(code) = zniff::maybe_run_cli_mode() {
         std::process::exit(code);
     }
-    env_logger::init();
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    if let Err(err) = zniff::restore_if_dirty() {
-        log::error!("启动时恢复系统代理失败: {err:#}");
-    }
-    let previous = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        if let Err(err) = zniff::restore_if_dirty() {
-            eprintln!("panic 时恢复系统代理失败: {err:#}");
-        }
-        zniff::clear_ios_simulator_proxies();
-        zniff::cleanup_launchers();
-        zniff::cleanup_transparent_proxy();
-        zniff::shutdown_relay_push();
-        previous(info);
-    }));
+    zniff::ensure_desktop_runtime_init();
     let mut title_bar = nsh_core::desktop::TitleBarOptions::default();
     title_bar.style = nsh_core::desktop::TitleBarStyle::Hidden;
     title_bar.height = Some(nsh_core::geometry::px(42.0));
@@ -56,12 +41,7 @@ fn main() -> impl std::process::Termination {
             ..Default::default()
         },
     );
-    if let Err(err) = zniff::restore_if_dirty() {
-        log::error!("退出时恢复系统代理失败: {err:#}");
-    }
-    zniff::clear_ios_simulator_proxies();
-    zniff::cleanup_transparent_proxy();
-    zniff::shutdown_relay_push();
+    zniff::cleanup_desktop_runtime();
     result
 }
 

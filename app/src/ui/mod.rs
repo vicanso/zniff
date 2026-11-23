@@ -163,7 +163,9 @@ pub(crate) use self::break_bar::*;
 pub use self::cli_state::initial_window_size;
 pub(crate) use self::cli_state::*;
 #[cfg(not(target_arch = "wasm32"))]
-pub use self::cli_state::{apply_initial_window_options, maybe_run_cli_mode};
+pub use self::cli_state::{
+    apply_initial_window_options, apply_runtime_cli_flags_best_effort, maybe_run_cli_mode,
+};
 pub(crate) use self::column_picker::*;
 pub(crate) use self::command_palette::*;
 pub(crate) use self::compose_box::*;

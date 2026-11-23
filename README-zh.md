@@ -45,7 +45,7 @@ https://github.com/user-attachments/assets/19339425-f1df-47fe-ab8a-88bb586fd4a1
 
 ### 安装
 
-- **桌面端（macOS / Linux / Windows）**：从 [GitHub Releases](https://github.com/vicanso/zniff/releases) 下载——macOS 为已签名 `.dmg`，Linux 与 Windows 为 `.tar.gz`。Homebrew / Scoop / Winget 清单模板见 [`packaging/`](./packaging/README.md)。
+- **桌面端（macOS / Linux / Windows）**：从 [GitHub Releases](https://github.com/vicanso/zniff/releases) 下载——macOS 为已签名 Universal `.dmg`（及 `.tar.gz`），Linux 为 `.tar.gz`，Windows 为 `.zip`。用于 `--web`、`--relay`、`--mcp` 的独立无头命令行程序以 `zniff-cli-*` 同步发布。Homebrew / Scoop / Winget 清单模板见 [`packaging/`](./packaging/README.md)。
 - **Linux（用户级安装脚本 [`scripts/install-linux.sh`](./scripts/install-linux.sh)）**：
   ```bash
   curl -fsSLO https://raw.githubusercontent.com/vicanso/zniff/main/scripts/install-linux.sh

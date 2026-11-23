@@ -1,9 +1,11 @@
 name: Publish
 
-# Tagged releases. The version lives in app/Cargo.toml, and the tag must
-# match it (v0.1.0 for version 0.1.0). macOS builds signed and notarized
-# DMGs wrapping zniff.app with icons/zniff.icns. Windows and Linux archives
-# contain the binary. The Linux archive also carries install-linux.sh.
+# Tagged releases. The version lives in app/Cargo.toml (mirrored in
+# app/nsh.json), and the tag must match it (v0.1.0 for version 0.1.0).
+# Desktop apps are packaged with `nsh package` (`zniff-macos-universal.dmg` +
+# `.tar.gz`, `zniff-linux-*.tar.gz`, `zniff-windows-*.zip`); standalone headless
+# CLI binaries (`--no-default-features` for `--web`, `--relay`, `--mcp`) ship
+# alongside them as `zniff-cli-*`.
 # The same tag publishes `vicanso/zniff-web:<version>` and, for a stable
 # version, `vicanso/zniff-web:latest` (docker.yml).
 
@@ -18,13 +20,14 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_TOOLCHAIN: 1.99.1
+  NSH_VERSION: v0.6.1
   APP_NAME: zniff
 
 jobs:
   prepare:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
         with:
           # Full history so git-cliff can see the previous tag.
           fetch-depth: 0
@@ -60,62 +63,57 @@ jobs:
             gh release create "$tag" --draft --title "$tag" --notes-file /tmp/notes.md
           fi
 
-  macos:
+  app-macos:
     needs: prepare
-    name: macos-${{ matrix.dmg_suffix }}
-    runs-on: ${{ matrix.os }}
     timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            dmg_suffix: aarch64
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-            dmg_suffix: x86_64
+    runs-on: macos-latest
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/app/target
     steps:
-      - name: preflight notary credentials
+      - uses: actions/checkout@v4
+
+      - name: Preflight Apple notary credentials
         env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
           AC_USERNAME: ${{ secrets.AC_USERNAME }}
           AC_PASSWORD: ${{ secrets.AC_PASSWORD }}
           AC_TEAM_ID: ${{ secrets.AC_TEAM_ID }}
-        run: |
-          xcrun notarytool history --apple-id "$AC_USERNAME" \
-            --password "$AC_PASSWORD" --team-id "$AC_TEAM_ID" >/dev/null
-          echo "notary credentials OK"
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+        run: ./.github/workflows/sign_and_package_macos.sh --preflight
+
+      - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-          targets: ${{ matrix.target }}
-      - name: rust cache
-        uses: Swatinem/rust-cache@v2
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: app
-          key: macos-build-${{ matrix.target }}
-      - name: install tools
-        run: |
-          brew install create-dmg
-      - name: Import Code-Signing Certificates
+          workspaces: "app -> target"
+          shared-key: publish-app-macos
+          cache-on-failure: true
+
+      - name: Install create-dmg
+        run: brew install create-dmg
+
+      - name: Install NSH CLI (${{ env.NSH_VERSION }})
         env:
-          p12_certificate: ${{ secrets.MACOS_CERTIFICATE }}
-          p12_password: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+          NSH_PLATFORM: macos-arm64
         run: |
-          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
-          security create-keychain -p "" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "" "$KEYCHAIN_PATH"
+          set -euo pipefail
+          asset="nsh-${NSH_PLATFORM}.tar.gz"
+          base_url="https://github.com/longbridge/nsh/releases/download/${NSH_VERSION}"
+          dl_dir="${RUNNER_TEMP}/nsh-dl"
+          rm -rf "$dl_dir" "${RUNNER_TEMP}/nsh"
+          mkdir -p "$dl_dir"
+          curl -fsSL --retry 3 "${base_url}/${asset}" -o "${dl_dir}/${asset}"
+          curl -fsSL --retry 3 "${base_url}/${asset}.sha256" -o "${dl_dir}/${asset}.sha256"
+          (cd "$dl_dir" && shasum -a 256 -c "${asset}.sha256")
+          tar -xzf "${dl_dir}/${asset}" -C "$RUNNER_TEMP"
+          rm -rf "$dl_dir"
+          echo "${RUNNER_TEMP}/nsh/bin" >> "$GITHUB_PATH"
+          "${RUNNER_TEMP}/nsh/bin/nsh" --version
 
-          CERT_PATH="$RUNNER_TEMP/certificate.p12"
-          echo "$p12_certificate" | base64 --decode > "$CERT_PATH"
-          security import "$CERT_PATH" -k "$KEYCHAIN_PATH" -P "$p12_password" -T /usr/bin/codesign
-          rm -f "$CERT_PATH"
-
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" "$KEYCHAIN_PATH"
-          security list-keychains -d user -s "$KEYCHAIN_PATH"
-      - name: workspace must be clean before the build
+      - name: Workspace must be clean before the build
         run: |
           if [ -n "$(git status --porcelain)" ]; then
             echo "workspace is dirty" >&2
@@ -123,142 +121,201 @@ jobs:
             exit 1
           fi
           echo "clean at $(git rev-parse --short=12 HEAD)"
-      - name: release
-        run: |
-          cargo_home="${CARGO_HOME:-${USERPROFILE:-$HOME}/.cargo}"
-          rustup_home="${RUSTUP_HOME:-${USERPROFILE:-$HOME}/.rustup}"
-          RUSTFLAGS="--remap-path-prefix=${GITHUB_WORKSPACE}=. --remap-path-prefix=${cargo_home}=/cargo --remap-path-prefix=${rustup_home}=/rustup ${RUSTFLAGS:-}" \
-            cargo build --manifest-path app/Cargo.toml --release --locked --target ${{ matrix.target }}
-      - name: bundle app
+
+      - name: Package, sign, and notarize zniff Desktop (macOS universal)
+        working-directory: app
         env:
-          CERT_NAME: ${{ secrets.MACOS_CERTIFICATE_NAME }}
-          APP_PROFILE_B64: ${{ secrets.MACOS_APP_PROVISIONING_PROFILE }}
-          SYSEXT_PROFILE_B64: ${{ secrets.MACOS_SYSEXT_PROVISIONING_PROFILE }}
-        run: |
-          set -euo pipefail
-          bin="app/target/${{ matrix.target }}/release/${{ env.APP_NAME }}"
-          mkdir -p bundle-stage
-          if [ -n "${APP_PROFILE_B64:-}" ] && [ -n "${SYSEXT_PROFILE_B64:-}" ]; then
-            echo "$APP_PROFILE_B64" | base64 --decode > "$RUNNER_TEMP/app.provisionprofile"
-            echo "$SYSEXT_PROFILE_B64" | base64 --decode > "$RUNNER_TEMP/sysext.provisionprofile"
-            export ZNIFF_APP_PROFILE="$RUNNER_TEMP/app.provisionprofile"
-            export ZNIFF_SYSEXT_PROFILE="$RUNNER_TEMP/sysext.provisionprofile"
-            export ZNIFF_SIGN_IDENTITY="$CERT_NAME"
-          fi
-          scripts/macos-app.sh "$bin" "bundle-stage/${{ env.APP_NAME }}.app"
-      - name: sign app
-        env:
-          CERT_NAME: ${{ secrets.MACOS_CERTIFICATE_NAME }}
-        run: |
-          echo "Signing App with identity: $CERT_NAME"
-          APP="bundle-stage/${{ env.APP_NAME }}.app"
-          SYSEXT="$APP/Contents/Library/SystemExtensions/dev.zniff.app.transparent-proxy.systemextension"
-          if [ -d "$SYSEXT" ]; then
-            codesign --verify --strict --deep --verbose=2 "$APP"
-            if ! codesign -dvv "$SYSEXT" 2>&1 | grep -q "^Timestamp="; then
-              echo "no secure timestamp embedded in the sysext signature" >&2
-              exit 1
-            fi
-          else
-            for attempt in 1 2 3 4 5; do
-              if codesign --force --deep --verbose --options runtime --timestamp \
-                --sign "$CERT_NAME" \
-                "$APP"; then
-                echo "codesign succeeded on attempt $attempt"
-                break
-              fi
-              if [ "$attempt" -eq 5 ]; then
-                echo "codesign still failing after $attempt attempts" >&2
-                exit 1
-              fi
-              echo "codesign attempt $attempt failed (timestamp server?); retrying in 15s…"
-              sleep 15
-            done
-          fi
-          if ! codesign -dvv "$APP" 2>&1 | grep -q "^Timestamp="; then
-            echo "no secure timestamp embedded in the signature" >&2
-            exit 1
-          fi
-      - name: create dmg
-        run: |
-          mkdir -p release
-          DMG_NAME="release/${{ env.APP_NAME }}-${{ matrix.dmg_suffix }}.dmg"
-          APP_PATH="bundle-stage/${{ env.APP_NAME }}.app"
-          create-dmg \
-            --volname "${{ env.APP_NAME }} Installer" \
-            --window-pos 200 120 \
-            --window-size 800 400 \
-            --icon-size 100 \
-            --icon "${{ env.APP_NAME }}.app" 200 190 \
-            --hide-extension "${{ env.APP_NAME }}.app" \
-            --app-drop-link 600 185 \
-            "$DMG_NAME" \
-            "$APP_PATH"
-      - name: notarize dmg
-        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+          MACOS_CERTIFICATE_NAME: ${{ secrets.MACOS_CERTIFICATE_NAME }}
+          MACOS_APP_PROVISIONING_PROFILE: ${{ secrets.MACOS_APP_PROVISIONING_PROFILE }}
+          MACOS_SYSEXT_PROVISIONING_PROFILE: ${{ secrets.MACOS_SYSEXT_PROVISIONING_PROFILE }}
           AC_USERNAME: ${{ secrets.AC_USERNAME }}
           AC_PASSWORD: ${{ secrets.AC_PASSWORD }}
           AC_TEAM_ID: ${{ secrets.AC_TEAM_ID }}
         run: |
-          DMG_NAME="release/${{ env.APP_NAME }}-${{ matrix.dmg_suffix }}.dmg"
-          echo "Submitting DMG for notarization..."
-          xcrun notarytool submit "$DMG_NAME" \
-            --apple-id "$AC_USERNAME" \
-            --password "$AC_PASSWORD" \
-            --team-id "$AC_TEAM_ID" \
-            --wait
-      - name: wait for propagation
-        run: sleep 30
-      - name: staple DMG
-        run: |
-          DMG_NAME="release/${{ env.APP_NAME }}-${{ matrix.dmg_suffix }}.dmg"
-          xcrun stapler staple "$DMG_NAME"
-      - name: upload asset (tag)
+          set -euo pipefail
+          out_dir="${RUNNER_TEMP}/zniff-app-out"
+          stage_dir="${RUNNER_TEMP}/zniff-app-stage"
+          rm -rf "$out_dir" "$stage_dir"
+          mkdir -p "$out_dir" "$stage_dir"
+
+          cargo_ver="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
+          app_version="${GITHUB_REF_NAME#v}"
+          case "$GITHUB_REF" in
+            refs/tags/v*) ;;
+            *) app_version="$cargo_ver" ;;
+          esac
+
+          cargo_home="${CARGO_HOME:-${USERPROFILE:-$HOME}/.cargo}"
+          rustup_home="${RUSTUP_HOME:-${USERPROFILE:-$HOME}/.rustup}"
+          export RUSTFLAGS="--remap-path-prefix=${GITHUB_WORKSPACE}=. --remap-path-prefix=${cargo_home}=/cargo --remap-path-prefix=${rustup_home}=/rustup ${RUSTFLAGS:-}"
+
+          nsh package --target macos --arch universal \
+            --app-version "$app_version" \
+            --build "$GITHUB_RUN_NUMBER" \
+            --out "$out_dir"
+
+          APP_PATH="${out_dir}/${APP_NAME}.app" \
+          STAGE_DIR="$stage_dir" \
+          DMG_NAME="${APP_NAME}-macos-universal.dmg" \
+          TAR_NAME="${APP_NAME}-macos-universal.tar.gz" \
+          VOL_NAME="${APP_NAME} Installer" \
+            ../.github/workflows/sign_and_package_macos.sh --package
+
+      - name: Upload zniff Desktop assets (tag)
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload "$GITHUB_REF_NAME" \
-            "release/${{ env.APP_NAME }}-${{ matrix.dmg_suffix }}.dmg" --clobber
+          set -euo pipefail
+          gh release upload "$GITHUB_REF_NAME" "${RUNNER_TEMP}/zniff-app-stage"/* -R "$GITHUB_REPOSITORY" --clobber
 
-  build:
+      - name: Clean up signing keychain
+        if: always()
+        run: ./.github/workflows/sign_and_package_macos.sh --cleanup
+
+  app-linux:
     needs: prepare
-    name: ${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: windows-x86_64
-            os: windows-latest
-            target: x86_64-pc-windows-msvc
-            bin: zniff.exe
-          - name: windows-aarch64
-            os: windows-11-arm
-            target: aarch64-pc-windows-msvc
-            bin: zniff.exe
-          - name: linux-x86_64
-            os: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-            bin: zniff
-          - name: linux-aarch64
-            os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-            bin: zniff
+        platform:
+          - arch: x86_64
+            nsh_platform: linux-x86_64
+            runs_on: ubuntu-24.04
+          - arch: aarch64
+            nsh_platform: linux-arm64
+            runs_on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.platform.runs_on }}
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/app/target
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install GTK 4 and GStreamer dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            clang \
+            libclang-dev \
+            pkg-config \
+            libfontconfig-dev \
+            libfreetype-dev \
+            libgtk-4-dev \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "app -> target"
+          shared-key: publish-app-linux-${{ matrix.platform.arch }}
+          cache-on-failure: true
+
+      - name: Install NSH CLI (${{ env.NSH_VERSION }})
+        env:
+          NSH_PLATFORM: ${{ matrix.platform.nsh_platform }}
+        run: |
+          set -euo pipefail
+          asset="nsh-${NSH_PLATFORM}.tar.gz"
+          base_url="https://github.com/longbridge/nsh/releases/download/${NSH_VERSION}"
+          dl_dir="${RUNNER_TEMP}/nsh-dl"
+          rm -rf "$dl_dir" "${RUNNER_TEMP}/nsh"
+          mkdir -p "$dl_dir"
+          curl -fsSL --retry 3 "${base_url}/${asset}" -o "${dl_dir}/${asset}"
+          curl -fsSL --retry 3 "${base_url}/${asset}.sha256" -o "${dl_dir}/${asset}.sha256"
+          (cd "$dl_dir" && sha256sum -c "${asset}.sha256")
+          tar -xzf "${dl_dir}/${asset}" -C "$RUNNER_TEMP"
+          rm -rf "$dl_dir"
+          echo "${RUNNER_TEMP}/nsh/bin" >> "$GITHUB_PATH"
+          "${RUNNER_TEMP}/nsh/bin/nsh" --version
+
+      - name: Package zniff Desktop (Linux ${{ matrix.platform.arch }})
+        working-directory: app
+        env:
+          TARGET_ARCH: ${{ matrix.platform.arch }}
+        run: |
+          set -euo pipefail
+          out_dir="${RUNNER_TEMP}/zniff-app-out"
+          stage_dir="${RUNNER_TEMP}/zniff-app-stage"
+          rm -rf "$out_dir" "$stage_dir"
+          mkdir -p "$out_dir" "$stage_dir"
+
+          cargo_ver="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
+          app_version="${GITHUB_REF_NAME#v}"
+          case "$GITHUB_REF" in
+            refs/tags/v*) ;;
+            *) app_version="$cargo_ver" ;;
+          esac
+
+          cargo_home="${CARGO_HOME:-${USERPROFILE:-$HOME}/.cargo}"
+          rustup_home="${RUSTUP_HOME:-${USERPROFILE:-$HOME}/.rustup}"
+          export RUSTFLAGS="--remap-path-prefix=${GITHUB_WORKSPACE}=. --remap-path-prefix=${cargo_home}=/cargo --remap-path-prefix=${rustup_home}=/rustup ${RUSTFLAGS:-}"
+
+          nsh package --target linux \
+            --app-version "$app_version" \
+            --build "$GITHUB_RUN_NUMBER" \
+            --out "$out_dir"
+
+          bin="${out_dir}/${APP_NAME}/${APP_NAME}"
+          if [ ! -f "$bin" ]; then
+            bin="$(find "$out_dir" -maxdepth 3 -type f -name "$APP_NAME" | head -n 1)"
+          fi
+          max_glibc="$(objdump -T "$bin" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sed 's/GLIBC_//' | sort -uV | tail -n1)"
+          echo "Max required GLIBC version: ${max_glibc}"
+          max_allowed="2.39"
+          if [ "$(printf '%s\n%s\n' "$max_allowed" "$max_glibc" | sort -V | tail -n1)" != "$max_allowed" ]; then
+            echo "Binary requires GLIBC_${max_glibc}, which exceeds the allowed baseline GLIBC_${max_allowed}" >&2
+            exit 1
+          fi
+
+          archive="$(find "$out_dir" -maxdepth 1 -type f -name '*.tar.gz' | head -n 1)"
+          if [ -z "$archive" ]; then
+            echo "::error::Expected a .tar.gz package from nsh package --target linux"
+            ls -la "$out_dir"
+            exit 1
+          fi
+          cp "$archive" "${stage_dir}/${APP_NAME}-linux-${TARGET_ARCH}.tar.gz"
+
+      - name: Upload zniff Desktop asset (tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release upload "$GITHUB_REF_NAME" "${RUNNER_TEMP}/zniff-app-stage"/* -R "$GITHUB_REPOSITORY" --clobber
+
+  app-windows:
+    needs: prepare
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - arch: x86_64
+            nsh_platform: windows-x86_64
+            runs_on: windows-latest
+          - arch: aarch64
+            nsh_platform: windows-arm64
+            runs_on: windows-11-arm
+    runs-on: ${{ matrix.platform.runs_on }}
     defaults:
       run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v7
-      - name: GTK 4 & GStreamer
-        if: startsWith(matrix.name, 'linux-')
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends pkg-config libgtk-4-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
-      - name: Ensure Clang for ring (Windows ARM64)
-        if: matrix.os == 'windows-11-arm'
         shell: pwsh
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/app/target
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ensure Clang for ring (Windows ARM64)
+        if: matrix.platform.runs_on == 'windows-11-arm'
         run: |
           if (-not (Get-Command clang -ErrorAction SilentlyContinue)) {
             $candidates = @("C:\Program Files\LLVM\bin")
@@ -286,26 +343,165 @@ jobs:
           }
           clang --version
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-          targets: ${{ matrix.target }}
-      - name: rust cache
-        uses: Swatinem/rust-cache@v2
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "app -> target"
+          shared-key: publish-app-windows-${{ matrix.platform.arch }}
+          cache-on-failure: true
+
+      - name: Install NSH CLI (${{ env.NSH_VERSION }})
+        env:
+          NSH_PLATFORM: ${{ matrix.platform.nsh_platform }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          $asset = "nsh-$($env:NSH_PLATFORM).zip"
+          $baseUrl = "https://github.com/longbridge/nsh/releases/download/$env:NSH_VERSION"
+          $dlDir = Join-Path $env:RUNNER_TEMP 'nsh-dl'
+          $nshDir = Join-Path $env:RUNNER_TEMP 'nsh'
+          Remove-Item -Recurse -Force $dlDir, $nshDir -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $dlDir | Out-Null
+
+          $zip = Join-Path $dlDir $asset
+          $shaFile = "$zip.sha256"
+          Invoke-WebRequest -UseBasicParsing -Uri "$baseUrl/$asset" -OutFile $zip
+          Invoke-WebRequest -UseBasicParsing -Uri "$baseUrl/$asset.sha256" -OutFile $shaFile
+
+          $expected = ((Get-Content $shaFile -Raw).Trim() -split '\s+')[0].ToUpperInvariant()
+          $actual = (Get-FileHash -Algorithm SHA256 -Path $zip).Hash.ToUpperInvariant()
+          if ($actual -ne $expected) {
+            throw "SHA256 mismatch for ${asset}: expected $expected, got $actual"
+          }
+
+          Expand-Archive -Path $zip -DestinationPath $env:RUNNER_TEMP
+          Remove-Item -Recurse -Force $dlDir
+          $binDir = Join-Path $nshDir 'bin'
+          $nshExe = Join-Path $binDir 'nsh.exe'
+          if (-not (Test-Path $nshExe)) {
+            throw "Missing $nshExe after extracting $asset"
+          }
+          $binDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & $nshExe --version
+          if ($LASTEXITCODE -ne 0) {
+            throw "nsh.exe --version failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Package zniff Desktop (Windows ${{ matrix.platform.arch }})
+        working-directory: app
+        env:
+          TARGET_ARCH: ${{ matrix.platform.arch }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $outDir = Join-Path $env:RUNNER_TEMP 'zniff-app-out'
+          $stageDir = Join-Path $env:RUNNER_TEMP 'zniff-app-stage'
+          Remove-Item -Recurse -Force $outDir, $stageDir -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $outDir, $stageDir | Out-Null
+
+          $cargoVer = (Select-String -Path 'Cargo.toml' -Pattern '^version = "([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          $appVersion = if ($env:GITHUB_REF -like 'refs/tags/v*') { $env:GITHUB_REF_NAME -replace '^v', '' } else { $cargoVer }
+
+          & nsh.exe package --target windows `
+            --app-version $appVersion `
+            --build $env:GITHUB_RUN_NUMBER `
+            --out $outDir
+          if ($LASTEXITCODE -ne 0) {
+            throw "nsh package --target windows failed with exit code $LASTEXITCODE"
+          }
+
+          $zip = Get-ChildItem -Path $outDir -File -Filter '*.zip' | Select-Object -First 1
+          if (-not $zip) {
+            Get-ChildItem -Path $outDir | Format-Table Name, Length
+            throw 'Expected a .zip package from nsh package --target windows'
+          }
+          Copy-Item $zip.FullName (Join-Path $stageDir "$($env:APP_NAME)-windows-$($env:TARGET_ARCH).zip")
+
+          $setup = Get-ChildItem -Path $outDir -File -Filter '*-setup.exe' | Select-Object -First 1
+          if ($setup) {
+            Copy-Item $setup.FullName (Join-Path $stageDir "$($env:APP_NAME)-windows-$($env:TARGET_ARCH)-setup.exe")
+          }
+
+      - name: Upload zniff Desktop artifact (tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $stageDir = Join-Path $env:RUNNER_TEMP 'zniff-app-stage'
+          $files = Get-ChildItem -Path $stageDir -File | ForEach-Object { $_.FullName }
+          & gh release upload $env:GITHUB_REF_NAME @files -R $env:GITHUB_REPOSITORY --clobber
+          if ($LASTEXITCODE -ne 0) {
+            throw "gh release upload failed with exit code $LASTEXITCODE"
+          }
+
+  cli-macos:
+    needs: prepare
+    timeout-minutes: 60
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
         with:
           workspaces: app
-          key: release-${{ matrix.os }}-${{ matrix.target }}
-      - name: release
-        run: |
-          cargo_home="${CARGO_HOME:-${USERPROFILE:-$HOME}/.cargo}"
-          rustup_home="${RUSTUP_HOME:-${USERPROFILE:-$HOME}/.rustup}"
-          RUSTFLAGS="--remap-path-prefix=${GITHUB_WORKSPACE}=. --remap-path-prefix=${cargo_home}=/cargo --remap-path-prefix=${rustup_home}=/rustup ${RUSTFLAGS:-}" \
-            cargo build --manifest-path app/Cargo.toml --release --locked --target ${{ matrix.target }}
-      - name: check glibc symbol baseline
-        if: startsWith(matrix.name, 'linux-')
+          shared-key: publish-cli-macos
+          cache-on-failure: true
+      - name: Build headless CLI binaries (macOS aarch64 + x86_64)
         run: |
           set -euo pipefail
-          bin="app/target/${{ matrix.target }}/release/${{ matrix.bin }}"
+          cargo_home="${CARGO_HOME:-${USERPROFILE:-$HOME}/.cargo}"
+          rustup_home="${RUSTUP_HOME:-${USERPROFILE:-$HOME}/.rustup}"
+          export RUSTFLAGS="--remap-path-prefix=${GITHUB_WORKSPACE}=. --remap-path-prefix=${cargo_home}=/cargo --remap-path-prefix=${rustup_home}=/rustup ${RUSTFLAGS:-}"
+          mkdir -p dist
+          cargo build --manifest-path app/Cargo.toml --release --locked --no-default-features --target aarch64-apple-darwin
+          cp app/target/aarch64-apple-darwin/release/zniff dist/zniff-cli-darwin-aarch64
+          cargo build --manifest-path app/Cargo.toml --release --locked --no-default-features --target x86_64-apple-darwin
+          cp app/target/x86_64-apple-darwin/release/zniff dist/zniff-cli-darwin-x86_64
+      - name: Upload CLI binaries (tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release upload "$GITHUB_REF_NAME" dist/* -R "$GITHUB_REPOSITORY" --clobber
+
+  cli-linux:
+    needs: prepare
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - arch: x86_64
+            runs_on: ubuntu-24.04
+          - arch: aarch64
+            runs_on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.platform.runs_on }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app
+          shared-key: publish-cli-linux-${{ matrix.platform.arch }}
+          cache-on-failure: true
+      - name: Build headless CLI binary (Linux ${{ matrix.platform.arch }})
+        run: |
+          set -euo pipefail
+          cargo_home="${CARGO_HOME:-${USERPROFILE:-$HOME}/.cargo}"
+          rustup_home="${RUSTUP_HOME:-${USERPROFILE:-$HOME}/.rustup}"
+          export RUSTFLAGS="--remap-path-prefix=${GITHUB_WORKSPACE}=. --remap-path-prefix=${cargo_home}=/cargo --remap-path-prefix=${rustup_home}=/rustup ${RUSTFLAGS:-}"
+          cargo build --manifest-path app/Cargo.toml --release --locked --no-default-features
+          bin="app/target/release/zniff"
           max_glibc="$(objdump -T "$bin" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sed 's/GLIBC_//' | sort -uV | tail -n1)"
           echo "Max required GLIBC version: ${max_glibc}"
           max_allowed="2.39"
@@ -313,29 +509,89 @@ jobs:
             echo "Binary requires GLIBC_${max_glibc}, which exceeds the allowed baseline GLIBC_${max_allowed}" >&2
             exit 1
           fi
-      - name: package
-        run: |
-          set -euo pipefail
-          bin="app/target/${{ matrix.target }}/release/${{ matrix.bin }}"
-          stage="${{ env.APP_NAME }}-${{ matrix.name }}"
-          rm -rf "$stage"
-          mkdir -p "$stage"
-          cp "$bin" "$stage/"
-          case "${{ matrix.name }}" in
-            linux-*)
-              cp scripts/install-linux.sh "$stage/install-linux.sh"
-              chmod 755 "$stage/install-linux.sh"
-              ;;
-          esac
-          tar -czf "$stage.tar.gz" "$stage"
-          ls -l "$stage.tar.gz"
-      - name: upload
+          mkdir -p dist
+          cp "$bin" "dist/zniff-cli-linux-${{ matrix.platform.arch }}"
+          chmod 755 "dist/zniff-cli-linux-${{ matrix.platform.arch }}"
+      - name: Upload CLI binary (tag)
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload "$GITHUB_REF_NAME" \
-            "${{ env.APP_NAME }}-${{ matrix.name }}.tar.gz" --clobber
+          set -euo pipefail
+          gh release upload "$GITHUB_REF_NAME" dist/* -R "$GITHUB_REPOSITORY" --clobber
+
+  cli-windows:
+    needs: prepare
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - arch: x86_64
+            runs_on: windows-latest
+          - arch: aarch64
+            runs_on: windows-11-arm
+    runs-on: ${{ matrix.platform.runs_on }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - name: Ensure Clang for ring (Windows ARM64)
+        if: matrix.platform.runs_on == 'windows-11-arm'
+        run: |
+          if (-not (Get-Command clang -ErrorAction SilentlyContinue)) {
+            $candidates = @("C:\Program Files\LLVM\bin")
+            $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+            if (Test-Path $vswhere) {
+              $vsPath = & $vswhere -latest -products * -property installationPath
+              if ($vsPath) {
+                $candidates += (Join-Path $vsPath "VC\Tools\Llvm\ARM64\bin")
+                $candidates += (Join-Path $vsPath "VC\Tools\Llvm\x64\bin")
+              }
+            }
+            $found = $candidates | Where-Object { Test-Path (Join-Path $_ "clang.exe") } | Select-Object -First 1
+            if ($found) {
+              Add-Content -Path $env:GITHUB_PATH -Value $found
+              $env:PATH = "$found;$env:PATH"
+            } else {
+              winget install --id LLVM.LLVM -e --silent --accept-package-agreements --accept-source-agreements
+              $llvmBin = "C:\Program Files\LLVM\bin"
+              if (-not (Test-Path (Join-Path $llvmBin "clang.exe"))) {
+                choco install llvm -y --no-progress
+              }
+              Add-Content -Path $env:GITHUB_PATH -Value $llvmBin
+              $env:PATH = "$llvmBin;$env:PATH"
+            }
+          }
+          clang --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app
+          shared-key: publish-cli-windows-${{ matrix.platform.arch }}
+          cache-on-failure: true
+      - name: Build headless CLI binary (Windows ${{ matrix.platform.arch }})
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & cargo build --manifest-path app/Cargo.toml --release --locked --no-default-features
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item 'app/target/release/zniff.exe' "dist/zniff-cli-windows-$($env:TARGET_ARCH).exe"
+        env:
+          TARGET_ARCH: ${{ matrix.platform.arch }}
+      - name: Upload CLI binary (tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $files = Get-ChildItem -Path dist -File | ForEach-Object { $_.FullName }
+          & gh release upload $env:GITHUB_REF_NAME @files -R $env:GITHUB_REPOSITORY --clobber
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   docker:
     needs: prepare
@@ -346,17 +602,19 @@ jobs:
     secrets: inherit
 
   checksums:
-    needs: [macos, build]
+    needs: [app-macos, app-linux, app-windows, cli-macos, cli-linux, cli-windows]
     if: startsWith(github.ref, 'refs/tags/')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - name: SHA256SUMS
+      - name: SHA256SUMS and publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          gh release download "$GITHUB_REF_NAME" --pattern '*.dmg' --pattern '*.tar.gz' --dir downloaded
+          rm -rf downloaded
+          gh release download "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --dir downloaded
+          rm -f downloaded/SHA256SUMS
           (cd downloaded && sha256sum -- * | sort -k2 > ../SHA256SUMS)
           cat SHA256SUMS
-          gh release upload "$GITHUB_REF_NAME" SHA256SUMS --clobber
+          gh release upload "$GITHUB_REF_NAME" SHA256SUMS -R "$GITHUB_REPOSITORY" --clobber
+          gh release edit "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --draft=false
