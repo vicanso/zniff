@@ -82,6 +82,8 @@ pub fn App() -> impl IntoElement {
         response_headers: signal(Vec::new()),
         request_body: signal(String::new()),
         response_body: signal(String::new()),
+        request_body_bytes: signal(0),
+        response_body_bytes: signal(0),
         request_hex: signal(Vec::new()),
         response_hex: signal(Vec::new()),
         pane_width: signal(0.0),
@@ -145,7 +147,7 @@ pub fn App() -> impl IntoElement {
     let paused_count = signal(0_usize);
     let paused_queue = signal(Vec::<(u64, BreakSide)>::new());
     let baseline = signal(None::<u64>);
-    let folded = signal(0_u8);
+    let folded = signal(folded_bits_from_config(&saved.folded_cards));
     let compose = Compose {
         composing: signal(false),
         response: signal(false),

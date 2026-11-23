@@ -408,7 +408,7 @@ pub(crate) const LIST_INSET: f32 = 14.0;
 /// Most checked flows the sequence-diagram previews draw. Copy keeps them all.
 pub(crate) const SEQ_PREVIEW_CAP: usize = 200;
 pub(crate) const LIST_PAD_END: f32 = 12.0;
-/// A set bit collapses that detail card. Zero leaves every card open for this window only.
+/// A set bit collapses that detail card. All content cards persist in config; only diff stays window-only.
 pub(crate) const FOLD_QUERY: u8 = 1;
 pub(crate) const FOLD_DIFF: u8 = 1 << 1;
 pub(crate) const FOLD_MESSAGES: u8 = 1 << 2;

@@ -182,7 +182,7 @@ pub(crate) fn footer(
                         .text_color(fg_muted()),
                 )
                 .child(
-                    mono(move || dropped.get().to_string())
+                    mono(move || present::format_thousands(dropped.get()))
                         .tabular_nums()
                         .text_size(px(11.5))
                         .text_color(fg_muted()),

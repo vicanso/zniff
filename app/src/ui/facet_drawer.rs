@@ -546,7 +546,7 @@ pub(crate) fn facet_quick_bar(
             })
             .child(
                 control_text(move || -> SharedString {
-                    let count = facets.with(count_fn);
+                    let count = present::format_thousands(facets.with(count_fn) as u64);
                     format!("{} ({count})", t(ui_lang(langs), zh, en)).into()
                 })
                 .tabular_nums()

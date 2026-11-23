@@ -343,21 +343,5 @@ pub(crate) fn png_gray(zlib_data: &[u8], width: u32, height: u32) -> Vec<u8> {
 }
 
 pub(crate) fn format_bytes(bytes: usize) -> String {
-    if bytes >= 1024 * 1024 {
-        let mb = bytes as f64 / (1024.0 * 1024.0);
-        if mb >= 99.95 {
-            format!("{mb:.0} MB")
-        } else {
-            format!("{mb:.1} MB")
-        }
-    } else if bytes >= 1024 {
-        let kb = bytes as f64 / 1024.0;
-        if kb >= 99.95 {
-            format!("{kb:.0} KB")
-        } else {
-            format!("{kb:.1} KB")
-        }
-    } else {
-        format!("{bytes} B")
-    }
+    present::bytes(bytes)
 }

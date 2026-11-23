@@ -21,12 +21,13 @@ pub(crate) fn body_section(
     bit: u8,
     loading: Signal<bool>,
 ) -> impl IntoElement {
-    let (preview_flag, json, tree_flag, side) = if embed_image {
+    let (preview_flag, json, tree_flag, side, body_bytes) = if embed_image {
         (
             shown.res_doc_preview,
             shown.response_json,
             shown.res_json_tree,
             Side::Response,
+            shown.response_body_bytes,
         )
     } else {
         (
@@ -34,6 +35,7 @@ pub(crate) fn body_section(
             shown.request_json,
             shown.req_json_tree,
             Side::Request,
+            shown.request_body_bytes,
         )
     };
     let image_on = move || embed_image && shown.pretty.get() && !shown.preview.get().is_empty();
@@ -48,7 +50,9 @@ pub(crate) fn body_section(
             && !doc_on()
             && (tree_on() || !form.with(Vec::is_empty) || !body.get().is_empty())
     };
+    let langs = ui_langs();
     let pane_width = shown.pane_width;
+    let fold_controls = controls.clone();
     let nav_controls = controls.clone();
     let search_controls = controls.clone();
     let switch_controls = controls.clone();
@@ -92,96 +96,152 @@ pub(crate) fn body_section(
                         .hover(|style| style.bg(bg_control_hover()))
                         .active(|style| style.opacity(0.85))
                         .cursor(Cursor::Pointer)
-                        .on_press(move || toggle_card(folded, bit))
+                        .on_press(move || toggle_card_and_persist(folded, bit, &fold_controls))
                         .child(fold_mark(folded, bit))
                         .child(
                             section_title(tr(zh, en))
                                 .number_of_lines(1)
                                 .text_overflow(EllipsizeMode::Tail),
-                        ),
+                        )
+                        .child(when(
+                            move || loading.get() || body_bytes.get() > 0,
+                            move || {
+                                view()
+                                    .flex_shrink_0()
+                                    .px_1p5()
+                                    .py(px(1.0))
+                                    .rounded(px(4.0))
+                                    .bg(bg_control())
+                                    .tooltip(
+                                        tooltip().child(
+                                            view()
+                                                .px_2()
+                                                .py_1()
+                                                .rounded(px(6.0))
+                                                .bg(bg_card())
+                                                .border_1()
+                                                .border_color(border_strong())
+                                                .child(
+                                                    mono(move || {
+                                                        if loading.get() {
+                                                            t(ui_lang(langs), "加载中…", "Loading…")
+                                                                .to_string()
+                                                        } else {
+                                                            present::format_exact_bytes(
+                                                                body_bytes.get() as u64,
+                                                            )
+                                                        }
+                                                    })
+                                                    .tabular_nums()
+                                                    .text_size(px(11.5))
+                                                    .text_color(fg_primary()),
+                                                ),
+                                        ),
+                                    )
+                                    .child(
+                                        mono(move || {
+                                            if loading.get() {
+                                                "…".to_string()
+                                            } else {
+                                                format_bytes(body_bytes.get())
+                                            }
+                                        })
+                                        .tabular_nums()
+                                        .text_size(px(11.0))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(fg_muted()),
+                                    )
+                            },
+                        )),
                 )
-                .child(
-                    when(
-                        move || loading.get(),
-                        || {
-                            view()
-                                .py(px(2.0))
-                                .child(muted_line(tr("加载中…", "Loading…")))
-                        },
-                    )
-                    .otherwise(move || {
+                .child(when(
+                    move || !card_folded(folded, bit),
+                    move || {
                         let nav_controls = nav_controls.clone();
                         let search_controls = search_controls.clone();
                         let switch_controls = switch_controls.clone();
-                        view()
-                            .flex_row()
-                            .flex_wrap()
-                            .items_center()
-                            .gap_1p5()
-                            .child(when(
-                                move || {
-                                    if tree_on() {
-                                        return false;
-                                    }
-                                    let window = if embed_image {
-                                        shown.response_window.get()
-                                    } else {
-                                        shown.request_window.get()
+                        when(
+                            move || loading.get(),
+                            || {
+                                view()
+                                    .py(px(2.0))
+                                    .child(muted_line(tr("加载中…", "Loading…")))
+                            },
+                        )
+                        .otherwise(move || {
+                            let nav_controls = nav_controls.clone();
+                            let search_controls = search_controls.clone();
+                            let switch_controls = switch_controls.clone();
+                            view()
+                                .flex_row()
+                                .flex_wrap()
+                                .items_center()
+                                .gap_1p5()
+                                .child(when(
+                                    move || {
+                                        if tree_on() {
+                                            return false;
+                                        }
+                                        let window = if embed_image {
+                                            shown.response_window.get()
+                                        } else {
+                                            shown.request_window.get()
+                                        };
+                                        window.has_prev() || window.has_more()
+                                    },
+                                    move || {
+                                        body_window_nav(
+                                            embed_image,
+                                            shown,
+                                            nav_controls.clone(),
+                                            selected,
+                                            baseline,
+                                        )
+                                    },
+                                ))
+                                .child(when(can_search, move || {
+                                    let is_paged = move || {
+                                        if tree_on() {
+                                            return false;
+                                        }
+                                        let window = if embed_image {
+                                            shown.response_window.get()
+                                        } else {
+                                            shown.request_window.get()
+                                        };
+                                        window.has_prev() || window.has_more()
                                     };
-                                    window.has_prev() || window.has_more()
-                                },
-                                move || {
-                                    body_window_nav(
-                                        embed_image,
+                                    body_search_box(
+                                        search,
+                                        body,
+                                        hex,
+                                        form,
+                                        json,
+                                        tree_flag,
                                         shown,
-                                        nav_controls.clone(),
+                                        embed_image,
+                                        search_controls.clone(),
                                         selected,
                                         baseline,
+                                        is_paged,
                                     )
-                                },
-                            ))
-                            .child(when(can_search, move || {
-                                let is_paged = move || {
-                                    if tree_on() {
-                                        return false;
-                                    }
-                                    let window = if embed_image {
-                                        shown.response_window.get()
-                                    } else {
-                                        shown.request_window.get()
-                                    };
-                                    window.has_prev() || window.has_more()
-                                };
-                                body_search_box(
-                                    search,
-                                    body,
-                                    hex,
-                                    form,
+                                }))
+                                .child(when(
+                                    move || doc.with(Option::is_some),
+                                    move || doc_preview_chip(preview_flag),
+                                ))
+                                .child(pretty_switch(
+                                    shown,
+                                    preview_flag,
                                     json,
                                     tree_flag,
-                                    shown,
-                                    embed_image,
-                                    search_controls.clone(),
+                                    switch_controls,
                                     selected,
                                     baseline,
-                                    is_paged,
-                                )
-                            }))
-                            .child(when(
-                                move || doc.with(Option::is_some),
-                                move || doc_preview_chip(preview_flag),
-                            ))
-                            .child(pretty_switch(
-                                shown,
-                                preview_flag,
-                                json,
-                                tree_flag,
-                                switch_controls,
-                                selected,
-                                baseline,
-                            ))
-                    }),
-                ),
+                                ))
+                        })
+                    },
+                )),
         )
         .child(when(
             move || !card_folded(folded, bit) && loading.get(),
@@ -641,7 +701,7 @@ fn jump_next_body_match(
 }
 
 pub(crate) fn body_search_width(pane_width: f32) -> f32 {
-    if pane_width > 0.0 && pane_width < 460.0 {
+    if pane_width > 0.0 && pane_width < 520.0 {
         76.0
     } else {
         120.0
@@ -754,18 +814,16 @@ pub(crate) fn body_search_box(
                             .on_press(move || search.set(String::new()))
                             .child(
                                 mono(move || {
-                                    format!(
-                                        "{} ×",
-                                        body_search_hit_count(
-                                            body,
-                                            hex,
-                                            form,
-                                            json,
-                                            tree_flag,
-                                            pane_width,
-                                            &search.get()
-                                        )
-                                    )
+                                    let hits = body_search_hit_count(
+                                        body,
+                                        hex,
+                                        form,
+                                        json,
+                                        tree_flag,
+                                        pane_width,
+                                        &search.get(),
+                                    );
+                                    format!("{} ×", present::format_thousands(hits as u64))
                                 })
                                 .tabular_nums()
                                 .text_size(px(11.0))

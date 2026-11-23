@@ -149,9 +149,19 @@ fn watch_trigger(
                 let lang = ui_lang(langs);
                 let (hits, active) = eval.with(|e| (e.total_hits, e.active_rules));
                 if hits > 0 {
-                    format!("{} · {hits}", t(lang, "提醒", "Watch")).into()
+                    format!(
+                        "{} · {}",
+                        t(lang, "提醒", "Watch"),
+                        present::format_thousands(hits as u64)
+                    )
+                    .into()
                 } else if active > 0 {
-                    format!("{} ({active})", t(lang, "提醒", "Watch")).into()
+                    format!(
+                        "{} ({})",
+                        t(lang, "提醒", "Watch"),
+                        present::format_thousands(active as u64)
+                    )
+                    .into()
                 } else {
                     t(lang, "提醒", "Watch").into()
                 }
@@ -528,17 +538,19 @@ fn watch_rule_row(
                     }
                 })
                 .child(
-                    mono(move || -> SharedString { hit_info().0.to_string().into() })
-                        .tabular_nums()
-                        .text_size(px(11.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(move || {
-                            if hit_info().0 > 0 {
-                                status_warn_fg()
-                            } else {
-                                fg_muted()
-                            }
-                        }),
+                    mono(move || -> SharedString {
+                        present::format_thousands(hit_info().0 as u64).into()
+                    })
+                    .tabular_nums()
+                    .text_size(px(11.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(move || {
+                        if hit_info().0 > 0 {
+                            status_warn_fg()
+                        } else {
+                            fg_muted()
+                        }
+                    }),
                 ),
         )
         .child(

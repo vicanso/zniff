@@ -151,6 +151,7 @@ pub(crate) fn access_trigger_pill(
                 let (_, denies_all, _) = state();
                 let blocked = denied_total();
                 if blocked > 0 {
+                    let blocked = present::format_thousands(blocked);
                     match lang {
                         Lang::Zh => format!("安全 · 拦截 {blocked}").into(),
                         Lang::En => format!("Access · {blocked} denied").into(),

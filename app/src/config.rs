@@ -727,6 +727,8 @@ pub struct Config {
     pub default_pretty: bool,
     /// JSON bodies open in the interactive tree view by default when pretty is enabled.
     pub default_json_tree: bool,
+    /// Persisted collapsed detail cards (`req_headers`, `res_headers`, `query`, `req_body`, `res_body`, `messages`).
+    pub folded_cards: Vec<String>,
     /// Origin TLS probe failures stay out of the list unless this is on.
     pub show_tunnel_failures: bool,
     /// Restored into the filter box on the next launch.
@@ -889,6 +891,8 @@ struct RawConfig {
     default_pretty: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     default_json_tree: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    folded_cards: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     show_tunnel_failures: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1090,6 +1094,7 @@ impl From<RawConfig> for Config {
             minimize_to_tray: raw.show_tray && raw.minimize_to_tray,
             default_pretty: raw.default_pretty,
             default_json_tree: raw.default_json_tree,
+            folded_cards: normalize_folded_cards(&raw.folded_cards),
             show_tunnel_failures,
             filter,
             capturing: raw.capturing,
@@ -1208,6 +1213,7 @@ impl From<Config> for RawConfig {
             minimize_to_tray: config.show_tray && config.minimize_to_tray,
             default_pretty: config.default_pretty,
             default_json_tree: config.default_json_tree,
+            folded_cards: normalize_folded_cards(&config.folded_cards),
             show_tunnel_failures,
             filter,
             capturing: config.capturing,
@@ -1282,6 +1288,7 @@ impl Default for Config {
             minimize_to_tray: false,
             default_pretty: true,
             default_json_tree: false,
+            folded_cards: Vec::new(),
             show_tunnel_failures: false,
             filter: String::new(),
             capturing: false,
@@ -1444,6 +1451,29 @@ pub fn normalize_column_order(order: &[String]) -> Vec<String> {
     } else {
         resolved
     }
+}
+
+/// Detail cards whose collapsed state persists across launches (canonical order).
+pub const PERSISTED_FOLDED_CARDS: [&str; 6] = [
+    "req_headers",
+    "res_headers",
+    "query",
+    "req_body",
+    "res_body",
+    "messages",
+];
+
+/// Keeps only recognized persisted card keys in canonical order without duplicates.
+pub fn normalize_folded_cards(cards: &[String]) -> Vec<String> {
+    PERSISTED_FOLDED_CARDS
+        .iter()
+        .filter(|&&key| {
+            cards
+                .iter()
+                .any(|item| item.trim().eq_ignore_ascii_case(key))
+        })
+        .map(|&key| key.to_string())
+        .collect()
 }
 
 /// Drops unknown keys and clamps the rest to [`column_width_limit`].
@@ -1746,6 +1776,7 @@ fn normalize_for(mut config: Config, dev: bool) -> Config {
     clamp_column_widths(&mut config.column_widths);
     clamp_column_widths(&mut config.column_widths_top_bottom);
     config.column_order = normalize_column_order(&config.column_order);
+    config.folded_cards = normalize_folded_cards(&config.folded_cards);
     config.relay_url = config.relay_url.trim().to_string();
     config.relay_token = config.relay_token.trim().to_string();
     config.relay_view_auth = config.relay_view_auth.trim().to_string();
@@ -2742,6 +2773,44 @@ mod tests {
         assert!(reset.column_order.is_empty());
         let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
         assert!(!text.contains("column_order"), "{text}");
+    }
+
+    #[test]
+    fn folded_cards_defaults_empty_normalizes_and_omits_when_empty() {
+        let dir = Scratch::new();
+        let initial = load(dir.path());
+        assert!(initial.folded_cards.is_empty());
+        let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(!text.contains("folded_cards"), "{text}");
+
+        update(dir.path(), |config| {
+            config.folded_cards = vec![
+                "messages".into(),
+                "query".into(),
+                "RES_BODY".into(),
+                "REQ_HEADERS".into(),
+                "req_headers".into(),
+                "diff".into(),
+                "unknown".into(),
+            ];
+        })
+        .unwrap();
+        let loaded = load(dir.path());
+        assert_eq!(
+            loaded.folded_cards,
+            vec!["req_headers", "query", "res_body", "messages"]
+        );
+        let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(text.contains("folded_cards"), "{text}");
+
+        update(dir.path(), |config| {
+            config.folded_cards.clear();
+        })
+        .unwrap();
+        let reset = load(dir.path());
+        assert!(reset.folded_cards.is_empty());
+        let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(!text.contains("folded_cards"), "{text}");
     }
 
     #[test]

@@ -57,7 +57,7 @@ fn denied_summary_header(
                 .child(glyph_px(12.0, || Glyph::Alert, || color(status_warn_fg())))
                 .child(
                     text(move || -> SharedString {
-                        let total = denied.with(|summary| summary.total);
+                        let total = present::format_thousands(denied.with(|summary| summary.total));
                         match ui_lang(langs) {
                             Lang::Zh => format!("已拦截 {total} 次请求").into(),
                             Lang::En => format!("{total} requests denied").into(),
@@ -143,11 +143,13 @@ fn denied_host_row(
                 .text_color(fg_primary()),
         )
         .child(
-            mono(move || entry.with(|(_, count)| format!("×{count}")))
-                .flex_shrink_0()
-                .tabular_nums()
-                .text_size(px(10.5))
-                .text_color(fg_muted()),
+            mono(move || {
+                entry.with(|(_, count)| format!("×{}", present::format_thousands(*count)))
+            })
+            .flex_shrink_0()
+            .tabular_nums()
+            .text_size(px(10.5))
+            .text_color(fg_muted()),
         )
         .child(when(
             move || !allow_hosts_locked.get(),
@@ -189,7 +191,9 @@ fn denied_overflow_note(denied: Signal<allow_hosts::AllowDeniedSummary>) -> impl
         move || denied.with(|summary| summary.hosts.len() > VISIBLE_DENIED_HOSTS),
         move || {
             text(move || -> SharedString {
-                let extra = denied.with(|s| s.hosts.len().saturating_sub(VISIBLE_DENIED_HOSTS));
+                let extra = present::format_thousands(
+                    denied.with(|s| s.hosts.len().saturating_sub(VISIBLE_DENIED_HOSTS)) as u64,
+                );
                 match ui_lang(langs) {
                     Lang::Zh => format!("另有 {extra} 个被拦截域名未展开").into(),
                     Lang::En => format!("+{extra} more denied hosts").into(),

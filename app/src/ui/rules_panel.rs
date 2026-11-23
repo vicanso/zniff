@@ -17,11 +17,13 @@ pub(crate) fn format_rules_indicator(
     if rule_count == 0 && enabled_groups == 0 {
         return String::new();
     }
+    let rules_str = present::format_thousands(rule_count as u64);
+    let groups_str = present::format_thousands(enabled_groups as u64);
     match (enabled_groups > 0, lang) {
-        (true, Lang::Zh) => format!("{rule_count} 条 · {enabled_groups} 组"),
-        (true, Lang::En) => format!("{rule_count} · {enabled_groups}g"),
-        (false, Lang::Zh) => format!("{rule_count} 条"),
-        (false, Lang::En) => rule_count.to_string(),
+        (true, Lang::Zh) => format!("{rules_str} 条 · {groups_str} 组"),
+        (true, Lang::En) => format!("{rules_str} · {groups_str}g"),
+        (false, Lang::Zh) => format!("{rules_str} 条"),
+        (false, Lang::En) => rules_str,
     }
 }
 
@@ -522,7 +524,7 @@ fn rules_panel_header(
                     })
                     .child(
                         text(move || {
-                            let count = parsed_rules_count.get();
+                            let count = present::format_thousands(parsed_rules_count.get() as u64);
                             let lang = ui_lang(langs);
                             if rules_on.get() {
                                 match lang {

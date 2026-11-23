@@ -572,7 +572,11 @@ pub(crate) fn rule_line_strip(
                                             mono(move || -> SharedString {
                                                 let count = hit_count();
                                                 if count > 0 {
-                                                    format!("×{count}").into()
+                                                    format!(
+                                                        "×{}",
+                                                        present::format_thousands(count as u64)
+                                                    )
+                                                    .into()
                                                 } else {
                                                     "0".into()
                                                 }

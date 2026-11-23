@@ -438,9 +438,14 @@ pub(crate) fn sequence_diagram_panel(
                                                         .count();
                                                     (c, items.len())
                                                 });
+                                            let checked_str =
+                                                present::format_thousands(checked as u64);
+                                            let total_str = present::format_thousands(total as u64);
                                             match ui_lang(langs) {
-                                                Lang::Zh => format!("已选 {checked} / {total}"),
-                                                Lang::En => format!("{checked} / {total} selected"),
+                                                Lang::Zh => format!("已选 {checked_str} / {total_str}"),
+                                                Lang::En => {
+                                                    format!("{checked_str} / {total_str} selected")
+                                                }
                                             }
                                         }
                                     })
@@ -692,9 +697,12 @@ pub(crate) fn sequence_diagram_panel(
                             .child(glyph_px(13.0, || Glyph::Alert, || color(status_warn_fg())))
                             .child(
                                 text(move || {
-                                    let checked = seq_builder
-                                        .items
-                                        .with(|items| items.iter().filter(|i| i.checked).count());
+                                    let checked = present::format_thousands(
+                                        seq_builder
+                                            .items
+                                            .with(|items| items.iter().filter(|i| i.checked).count())
+                                            as u64,
+                                    );
                                     match ui_lang(langs) {
                                         Lang::Zh => format!(
                                             "仅预览最近 {SEQ_PREVIEW_CAP} 条；复制 Mermaid / Markdown 仍包含全部 {checked} 条"

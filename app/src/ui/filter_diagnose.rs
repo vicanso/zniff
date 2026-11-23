@@ -196,7 +196,7 @@ pub(crate) fn format_empty_filter_diagnosis(
         return None;
     }
     if !diag.blocking_tokens.is_empty() {
-        let total = diag.total_flows;
+        let total = crate::present::format_thousands(diag.total_flows as u64);
         if diag.blocking_tokens.len() == 1 {
             let tok = &diag.blocking_tokens[0];
             return Some(match lang {
@@ -211,11 +211,12 @@ pub(crate) fn format_empty_filter_diagnosis(
             .map(String::as_str)
             .collect();
         let extra = diag.blocking_tokens.len().saturating_sub(shown.len());
+        let extra_str = crate::present::format_thousands(extra as u64);
         return Some(match lang {
             Lang::Zh => {
                 let joined = shown.join("、");
                 if extra > 0 {
-                    format!("共 {total} 条流量，以下过滤词未匹配：{joined} 等 {extra} 项")
+                    format!("共 {total} 条流量，以下过滤词未匹配：{joined} 等 {extra_str} 项")
                 } else {
                     format!("共 {total} 条流量，以下过滤词未匹配：{joined}")
                 }
@@ -223,7 +224,7 @@ pub(crate) fn format_empty_filter_diagnosis(
             Lang::En => {
                 let joined = shown.join(", ");
                 if extra > 0 {
-                    format!("{total} flows in session; 0 matches for: {joined} (+{extra} more)")
+                    format!("{total} flows in session; 0 matches for: {joined} (+{extra_str} more)")
                 } else {
                     format!("{total} flows in session; 0 matches for: {joined}")
                 }
@@ -231,7 +232,7 @@ pub(crate) fn format_empty_filter_diagnosis(
         });
     }
     if diag.combined_mismatch {
-        let total = diag.total_flows;
+        let total = crate::present::format_thousands(diag.total_flows as u64);
         if diag.both_filters_active && !diag.primary_empty && !diag.secondary_empty {
             return Some(match lang {
                 Lang::Zh => format!("共 {total} 条流量，主过滤与二次过滤叠加后无交集"),

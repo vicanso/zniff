@@ -9,6 +9,68 @@ pub(crate) fn toggle_card(folded: Signal<u8>, bit: u8) {
     folded.set(folded.get() ^ bit);
 }
 
+pub(crate) const PERSISTED_FOLD_MASK: u8 = FOLD_REQ_HEADERS
+    | FOLD_RES_HEADERS
+    | FOLD_QUERY
+    | FOLD_REQ_BODY
+    | FOLD_RES_BODY
+    | FOLD_MESSAGES;
+
+pub(crate) fn folded_bits_from_config(cards: &[String]) -> u8 {
+    let mut bits = 0_u8;
+    for card in cards {
+        match card.trim().to_ascii_lowercase().as_str() {
+            "req_headers" => bits |= FOLD_REQ_HEADERS,
+            "res_headers" => bits |= FOLD_RES_HEADERS,
+            "query" => bits |= FOLD_QUERY,
+            "req_body" => bits |= FOLD_REQ_BODY,
+            "res_body" => bits |= FOLD_RES_BODY,
+            "messages" => bits |= FOLD_MESSAGES,
+            _ => {}
+        }
+    }
+    bits
+}
+
+pub(crate) fn folded_cards_from_bits(bits: u8) -> Vec<String> {
+    let mut out = Vec::new();
+    if bits & FOLD_REQ_HEADERS != 0 {
+        out.push("req_headers".to_string());
+    }
+    if bits & FOLD_RES_HEADERS != 0 {
+        out.push("res_headers".to_string());
+    }
+    if bits & FOLD_QUERY != 0 {
+        out.push("query".to_string());
+    }
+    if bits & FOLD_REQ_BODY != 0 {
+        out.push("req_body".to_string());
+    }
+    if bits & FOLD_RES_BODY != 0 {
+        out.push("res_body".to_string());
+    }
+    if bits & FOLD_MESSAGES != 0 {
+        out.push("messages".to_string());
+    }
+    out
+}
+
+pub(crate) fn toggle_card_bits(current: u8, bit: u8) -> (u8, Option<Vec<String>>) {
+    let next = current ^ bit;
+    let persisted = (bit & PERSISTED_FOLD_MASK != 0).then(|| folded_cards_from_bits(next));
+    (next, persisted)
+}
+
+pub(crate) fn toggle_card_and_persist(folded: Signal<u8>, bit: u8, controls: &Controls) {
+    let (next, persisted) = toggle_card_bits(folded.get(), bit);
+    folded.set(next);
+    if let Some(cards) = persisted {
+        save_config_or_notify(controls, PrefName::Pretty, move |cfg| {
+            cfg.folded_cards = cards;
+        });
+    }
+}
+
 pub(crate) fn fold_mark(folded: Signal<u8>, bit: u8) -> impl IntoElement {
     glyph(
         move || {
@@ -188,15 +250,13 @@ fn row_copy_button(
 ) -> impl IntoElement {
     view()
         .w(px(22.0))
-        .h(px(22.0))
+        .h(px(20.0))
         .flex_shrink_0()
         .flex_row()
         .items_center()
         .justify_center()
-        .rounded(px(5.0))
-        .border_1()
-        .border_color(border_control())
-        .bg(bg_control())
+        .rounded(px(4.0))
+        .bg(AdaptiveColor::TRANSPARENT)
         .hover(|style| style.bg(bg_control_hover()))
         .active(|style| style.opacity(0.75))
         .cursor(Cursor::Pointer)
@@ -215,6 +275,62 @@ fn row_copy_button(
         )
 }
 
+fn row_copy_slot(
+    visible: impl Fn() -> bool + 'static,
+    zh_label: &'static str,
+    en_label: &'static str,
+    zh_tip: &'static str,
+    en_tip: &'static str,
+    on_copy: impl Fn() + Clone + 'static,
+) -> impl IntoElement {
+    view()
+        .w(px(22.0))
+        .h(px(20.0))
+        .flex_shrink_0()
+        .flex_row()
+        .items_center()
+        .justify_center()
+        .child(when(visible, move || {
+            row_copy_button(zh_label, en_label, zh_tip, en_tip, on_copy.clone())
+        }))
+}
+
+fn hoverable_kv_row(
+    index: ReadSignal<usize>,
+    hovered_key: Signal<Option<u32>>,
+    row_key: impl Fn() -> u32 + Copy + 'static,
+) -> View {
+    view()
+        .flex_row()
+        .items_start()
+        .gap_3()
+        .px_3p5()
+        .py_2()
+        .bg(move || {
+            if hovered_key.get() == Some(row_key()) {
+                bg_control()
+            } else if index.get() % 2 == 1 {
+                bg_code()
+            } else {
+                bg_card()
+            }
+        })
+        .border_t(move || if index.get() > 0 { px(1.0) } else { px(0.0) })
+        .border_t_color(border_subtle())
+        .on_mouse_enter(move |_: &MouseEvent| hovered_key.set(Some(row_key())))
+        .on_mouse_move(move |_: &MouseEvent| {
+            let key = row_key();
+            if hovered_key.get_untracked() != Some(key) {
+                hovered_key.set(Some(key));
+            }
+        })
+        .on_mouse_leave(move |_: &MouseEvent| {
+            if hovered_key.get_untracked() == Some(row_key()) {
+                hovered_key.set(None);
+            }
+        })
+}
+
 pub(crate) fn header_section(props: HeaderSectionProps) -> impl IntoElement {
     let HeaderSectionProps {
         zh,
@@ -227,6 +343,8 @@ pub(crate) fn header_section(props: HeaderSectionProps) -> impl IntoElement {
         controls,
     } = props;
     let is_query = bit == FOLD_QUERY;
+    let hovered_key = signal(None::<u32>);
+    let fold_controls = controls.clone();
     let copy_all_controls = controls.clone();
     let row_controls = controls;
     view()
@@ -235,6 +353,7 @@ pub(crate) fn header_section(props: HeaderSectionProps) -> impl IntoElement {
         .border_color(border_strong())
         .bg(bg_card())
         .overflow_hidden()
+        .on_mouse_leave(move |_: &MouseEvent| hovered_key.set(None))
         .child(
             view()
                 .flex_shrink_0()
@@ -263,7 +382,7 @@ pub(crate) fn header_section(props: HeaderSectionProps) -> impl IntoElement {
                         .hover(|style| style.bg(bg_control_hover()))
                         .active(|style| style.opacity(0.85))
                         .cursor(Cursor::Pointer)
-                        .on_press(move || toggle_card(folded, bit))
+                        .on_press(move || toggle_card_and_persist(folded, bit, &fold_controls))
                         .child(fold_mark(folded, bit))
                         .child(section_title(tr(zh, en)))
                         .child(
@@ -277,7 +396,7 @@ pub(crate) fn header_section(props: HeaderSectionProps) -> impl IntoElement {
                                         if loading.get() {
                                             "…".to_string()
                                         } else {
-                                            format!("{}", lines.with(Vec::len))
+                                            present::format_thousands(lines.with(Vec::len) as u64)
                                         }
                                     })
                                     .tabular_nums()
@@ -321,25 +440,8 @@ pub(crate) fn header_section(props: HeaderSectionProps) -> impl IntoElement {
                             |line| line.key,
                             move |line, index| {
                                 let controls = row_controls.clone();
-                                view()
-                                    .flex_row()
-                                    .items_start()
-                                    .gap_3()
-                                    .px_3p5()
-                                    .py_2()
-                                    .bg(move || {
-                                        if index.get() % 2 == 1 {
-                                            bg_code()
-                                        } else {
-                                            bg_card()
-                                        }
-                                    })
-                                    .border_t(
-                                        move || {
-                                            if index.get() > 0 { px(1.0) } else { px(0.0) }
-                                        },
-                                    )
-                                    .border_t_color(border_subtle())
+                                let row_key = move || line.with(|l| l.key);
+                                hoverable_kv_row(index, hovered_key, row_key)
                                     .child(
                                         mono(move || line.with(|line| line.name.clone()))
                                             .w(move || px(kv_key_width(pane_width.get())))
@@ -352,7 +454,8 @@ pub(crate) fn header_section(props: HeaderSectionProps) -> impl IntoElement {
                                             .text_color(fg_muted()),
                                     )
                                     .child(kv_value_cell(line))
-                                    .child(row_copy_button(
+                                    .child(row_copy_slot(
+                                        move || hovered_key.get() == Some(row_key()),
                                         "复制值",
                                         "Copy value",
                                         "复制此项的值",
@@ -558,8 +661,10 @@ pub(crate) fn messages_section(
     let msg_llm_view = shown.msg_llm_view;
     let pane_width = shown.pane_width;
     let copy_all_controls = controls.clone();
+    let fold_controls = controls.clone();
     let llm_controls = controls.clone();
     let row_controls = controls;
+    let hovered_key = signal(None::<u32>);
     let has_ws_dirs =
         move || lines.with(|items| items.iter().any(|line| present::is_ws_message(&line.name)));
     let has_llm_view = move || llm_stream.with(Option::is_some);
@@ -570,6 +675,7 @@ pub(crate) fn messages_section(
         .border_color(border_strong())
         .bg(bg_card())
         .overflow_hidden()
+        .on_mouse_leave(move |_: &MouseEvent| hovered_key.set(None))
         .child(
             view()
                 .flex_shrink_0()
@@ -599,7 +705,9 @@ pub(crate) fn messages_section(
                         .hover(|style| style.bg(bg_control_hover()))
                         .active(|style| style.opacity(0.85))
                         .cursor(Cursor::Pointer)
-                        .on_press(move || toggle_card(folded, FOLD_MESSAGES))
+                        .on_press(move || {
+                            toggle_card_and_persist(folded, FOLD_MESSAGES, &fold_controls)
+                        })
                         .child(fold_mark(folded, FOLD_MESSAGES))
                         .child(section_title(tr("消息", "Messages")))
                         .child(
@@ -614,11 +722,12 @@ pub(crate) fn messages_section(
                                             return "…".to_string();
                                         }
                                         let total = lines.with(Vec::len);
+                                        let total_str = present::format_thousands(total as u64);
                                         if search.get().trim().is_empty()
                                             && dir.get() == 0
                                             && kind.get() == 0
                                         {
-                                            format!("{total}")
+                                            total_str
                                         } else {
                                             let matched = filter_message_lines(
                                                 &lines.get(),
@@ -627,7 +736,10 @@ pub(crate) fn messages_section(
                                                 kind.get(),
                                             )
                                             .len();
-                                            format!("{matched}/{total}")
+                                            format!(
+                                                "{}/{total_str}",
+                                                present::format_thousands(matched as u64)
+                                            )
                                         }
                                     })
                                     .tabular_nums()
@@ -654,34 +766,45 @@ pub(crate) fn messages_section(
                                     .border_1()
                                     .border_color(border_control())
                                     .overflow_hidden()
-                                    .child(llm_mode_chip(msg_llm_view, true, "AI 聚合", "AI Stream"))
+                                    .child(llm_mode_chip(
+                                        msg_llm_view,
+                                        true,
+                                        "AI 聚合",
+                                        "AI Stream",
+                                    ))
                                     .child(llm_mode_chip(msg_llm_view, false, "原始帧", "Raw"))
                             }))
-                            .child(when(move || !is_llm_ai_mode() && has_ws_dirs(), move || {
-                                view()
-                                    .flex_row()
-                                    .h(px(22.0))
-                                    .rounded(px(6.0))
-                                    .border_1()
-                                    .border_color(border_control())
-                                    .overflow_hidden()
-                                    .child(msg_filter_chip(dir, 0, "全部", "All"))
-                                    .child(msg_filter_chip(dir, 1, "↑ 客户端", "↑ Client"))
-                                    .child(msg_filter_chip(dir, 2, "↓ 源站", "↓ Origin"))
-                            }))
-                            .child(when(move || !is_llm_ai_mode() && has_ws_dirs(), move || {
-                                view()
-                                    .flex_row()
-                                    .h(px(22.0))
-                                    .rounded(px(6.0))
-                                    .border_1()
-                                    .border_color(border_control())
-                                    .overflow_hidden()
-                                    .child(msg_filter_chip(kind, 0, "全部", "All"))
-                                    .child(msg_filter_chip(kind, 1, "文本", "Text"))
-                                    .child(msg_filter_chip(kind, 2, "二进制", "Binary"))
-                                    .child(msg_filter_chip(kind, 3, "控制", "Control"))
-                            }))
+                            .child(when(
+                                move || !is_llm_ai_mode() && has_ws_dirs(),
+                                move || {
+                                    view()
+                                        .flex_row()
+                                        .h(px(22.0))
+                                        .rounded(px(6.0))
+                                        .border_1()
+                                        .border_color(border_control())
+                                        .overflow_hidden()
+                                        .child(msg_filter_chip(dir, 0, "全部", "All"))
+                                        .child(msg_filter_chip(dir, 1, "↑ 客户端", "↑ Client"))
+                                        .child(msg_filter_chip(dir, 2, "↓ 源站", "↓ Origin"))
+                                },
+                            ))
+                            .child(when(
+                                move || !is_llm_ai_mode() && has_ws_dirs(),
+                                move || {
+                                    view()
+                                        .flex_row()
+                                        .h(px(22.0))
+                                        .rounded(px(6.0))
+                                        .border_1()
+                                        .border_color(border_control())
+                                        .overflow_hidden()
+                                        .child(msg_filter_chip(kind, 0, "全部", "All"))
+                                        .child(msg_filter_chip(kind, 1, "文本", "Text"))
+                                        .child(msg_filter_chip(kind, 2, "二进制", "Binary"))
+                                        .child(msg_filter_chip(kind, 3, "控制", "Control"))
+                                },
+                            ))
                             .child(when(
                                 move || !is_llm_ai_mode(),
                                 move || msg_search_box(search, lines, dir, kind),
@@ -737,82 +860,57 @@ pub(crate) fn messages_section(
                 let filtered = move || {
                     filter_message_lines(&lines.get(), &search.get(), dir.get(), kind.get())
                 };
-                when(move || shown.messages_loading.get(), detail_loading_row).otherwise(move || {
-                    let row_controls = row_controls.clone();
-                    let ai_controls = ai_controls.clone();
-                    when(is_llm_ai_mode, move || {
-                        llm_stream_panel(llm_stream, ai_controls.clone())
-                    })
-                    .otherwise(move || {
+                when(move || shown.messages_loading.get(), detail_loading_row).otherwise(
+                    move || {
                         let row_controls = row_controls.clone();
-                        when(
-                            move || filtered().is_empty(),
-                            || view().px_3p5().py_2p5().child(muted_line(tr("无", "None"))),
-                        )
+                        let ai_controls = ai_controls.clone();
+                        when(is_llm_ai_mode, move || {
+                            llm_stream_panel(llm_stream, ai_controls.clone())
+                        })
                         .otherwise(move || {
-                        let row_controls = row_controls.clone();
-                        each(
-                            filtered,
-                            |line| line.key,
-                            move |line, index| {
-                                let controls = row_controls.clone();
-                                view()
-                                    .flex_row()
-                                    .items_start()
-                                    .gap_3()
-                                    .px_3p5()
-                                    .py_2()
-                                    .bg(move || {
-                                        if index.get() % 2 == 1 {
-                                            bg_code()
-                                        } else {
-                                            bg_card()
-                                        }
-                                    })
-                                    .border_t(move || {
-                                        if index.get() > 0 { px(1.0) } else { px(0.0) }
-                                    })
-                                    .border_t_color(border_subtle())
-                                    .child(
-                                        mono(move || line.with(|line| line.name.clone()))
-                                            .w(move || px(kv_key_width(pane_width.get())))
-                                            .flex_shrink_0()
-                                            .selectable(true)
-                                            .number_of_lines(1)
-                                            .text_overflow(EllipsizeMode::Tail)
-                                            .text_size(px(12.0))
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(fg_muted()),
-                                    )
-                                    .child(
-                                        mono(move || line.with(|line| line.value.clone()))
-                                            .flex_1()
-                                            .min_w(px(0.0))
-                                            .selectable(true)
-                                            .text_size(px(12.0))
-                                            .text_color(fg_primary()),
-                                    )
-                                    .child(when(
-                                        move || line.with(|l| l.name != "…"),
-                                        move || {
-                                            let controls = controls.clone();
-                                            view()
-                                                .w(px(22.0))
-                                                .h(px(22.0))
-                                                .flex_shrink_0()
-                                                .flex_row()
-                                                .items_center()
-                                                .justify_center()
-                                                .rounded(px(5.0))
-                                                .border_1()
-                                                .border_color(border_control())
-                                                .bg(bg_control())
-                                                .hover(|style| style.bg(bg_control_hover()))
-                                                .active(|style| style.opacity(0.75))
-                                                .cursor(Cursor::Pointer)
-                                                .label(tr("复制消息", "Copy message"))
-                                                .tooltip(label_tip("复制此条消息", "Copy message"))
-                                                .on_press(move || {
+                            let row_controls = row_controls.clone();
+                            when(
+                                move || filtered().is_empty(),
+                                || view().px_3p5().py_2p5().child(muted_line(tr("无", "None"))),
+                            )
+                            .otherwise(move || {
+                                let row_controls = row_controls.clone();
+                                each(
+                                    filtered,
+                                    |line| line.key,
+                                    move |line, index| {
+                                        let controls = row_controls.clone();
+                                        let row_key = move || line.with(|l| l.key);
+                                        hoverable_kv_row(index, hovered_key, row_key)
+                                            .child(
+                                                mono(move || line.with(|line| line.name.clone()))
+                                                    .w(move || px(kv_key_width(pane_width.get())))
+                                                    .flex_shrink_0()
+                                                    .selectable(true)
+                                                    .number_of_lines(1)
+                                                    .text_overflow(EllipsizeMode::Tail)
+                                                    .text_size(px(12.0))
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .text_color(fg_muted()),
+                                            )
+                                            .child(
+                                                mono(move || line.with(|line| line.value.clone()))
+                                                    .flex_1()
+                                                    .min_w(px(0.0))
+                                                    .selectable(true)
+                                                    .text_size(px(12.0))
+                                                    .text_color(fg_primary()),
+                                            )
+                                            .child(row_copy_slot(
+                                                move || {
+                                                    hovered_key.get() == Some(row_key())
+                                                        && line.with(|l| l.name != "…")
+                                                },
+                                                "复制消息",
+                                                "Copy message",
+                                                "复制此条消息",
+                                                "Copy message",
+                                                move || {
                                                     let payload = line.with(|l| l.value.clone());
                                                     set_clipboard(payload);
                                                     set_status(
@@ -822,26 +920,14 @@ pub(crate) fn messages_section(
                                                             hex: false,
                                                         },
                                                     );
-                                                })
-                                                .child(
-                                                    canvas(move || {
-                                                        Painter::new()
-                                                            .line_width(1.3)
-                                                            .stroke_color(color(fg_secondary()))
-                                                            .stroke_svg(
-                                                                "M4.5 4.5 H10.5 V11.0 H4.5 Z M2.5 8.5 H2.0 V2.0 H8.0 V3.0",
-                                                            )
-                                                    })
-                                                    .w(px(12.5))
-                                                    .h(px(12.5)),
-                                                )
-                                        },
-                                    ))
-                            },
-                        )
-                    })
-                    })
-                })
+                                                },
+                                            ))
+                                    },
+                                )
+                            })
+                        })
+                    },
+                )
             },
         ))
 }

@@ -379,7 +379,7 @@ fn sidebar_section_header(
         .child(
             mono(move || -> SharedString {
                 let _ = langs;
-                count().to_string().into()
+                present::format_thousands(count() as u64).into()
             })
             .tabular_nums()
             .text_size(px(10.5))
@@ -401,11 +401,13 @@ fn sidebar_error_pill(errors: impl Fn() -> usize + Copy + 'static) -> impl IntoE
                 .items_center()
                 .justify_center()
                 .child(
-                    mono(move || -> SharedString { errors().to_string().into() })
-                        .tabular_nums()
-                        .text_size(px(9.5))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(status_err_fg()),
+                    mono(move || -> SharedString {
+                        present::format_thousands(errors() as u64).into()
+                    })
+                    .tabular_nums()
+                    .text_size(px(9.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(status_err_fg()),
                 )
         },
     )
@@ -492,10 +494,14 @@ pub(crate) fn sidebar_app_row(
         )
         .child(sidebar_error_pill(move || entry.with(|e| e.error_count)))
         .child(
-            mono(move || -> SharedString { entry.with(|e| e.count.to_string()).into() })
-                .tabular_nums()
-                .text_size(px(10.5))
-                .text_color(fg_muted()),
+            mono(move || -> SharedString {
+                entry
+                    .with(|e| present::format_thousands(e.count as u64))
+                    .into()
+            })
+            .tabular_nums()
+            .text_size(px(10.5))
+            .text_color(fg_muted()),
         )
 }
 
@@ -630,7 +636,9 @@ pub(crate) fn sidebar_domain_group_view(
                             .child(sidebar_error_pill(move || group.with(|g| g.total_errors)))
                             .child(
                                 mono(move || -> SharedString {
-                                    group.with(|g| g.total_count.to_string()).into()
+                                    group
+                                        .with(|g| present::format_thousands(g.total_count as u64))
+                                        .into()
                                 })
                                 .tabular_nums()
                                 .text_size(px(10.5))
@@ -781,10 +789,14 @@ fn sidebar_domain_leaf_row(
                 )
                 .child(sidebar_error_pill(move || entry.with(|e| e.error_count)))
                 .child(
-                    mono(move || -> SharedString { entry.with(|e| e.count.to_string()).into() })
-                        .tabular_nums()
-                        .text_size(px(10.5))
-                        .text_color(fg_muted()),
+                    mono(move || -> SharedString {
+                        entry
+                            .with(|e| present::format_thousands(e.count as u64))
+                            .into()
+                    })
+                    .tabular_nums()
+                    .text_size(px(10.5))
+                    .text_color(fg_muted()),
                 ),
         )
         .child(

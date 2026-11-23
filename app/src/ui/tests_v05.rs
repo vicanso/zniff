@@ -386,6 +386,8 @@ fn make_shown(url: &str, status: Option<u16>, error: &str) -> Shown {
         response_headers: signal(Vec::new()),
         request_body: signal(String::new()),
         response_body: signal(r#"{"ok":true}"#.into()),
+        request_body_bytes: signal(0),
+        response_body_bytes: signal(11),
         request_hex: signal(Vec::new()),
         response_hex: signal(Vec::new()),
         pane_width: signal(520.0),
@@ -1582,6 +1584,37 @@ fn allow_hosts_denied_summary_unlocked_and_locked_zh_en() {
 }
 
 #[test]
+fn allow_denied_summary_formats_thousands() {
+    #[component]
+    fn LargeAllowDeniedHarness() -> impl IntoElement {
+        let lang = TEST_LANG.with(Cell::get);
+        provide_base_contexts(lang);
+        let controls = make_controls("allow-denied-large");
+        let denied = signal(allow_hosts::AllowDeniedSummary {
+            total: 1545,
+            hosts: vec![("localhost".into(), 1435), ("www.google.com".into(), 44)],
+        });
+        view()
+            .w(px(420.0))
+            .h(px(220.0))
+            .child(allow_denied_summary_section(
+                denied,
+                signal("api.example.com".to_string()),
+                signal(false),
+                controls,
+            ))
+    }
+
+    for lang in [Lang::Zh, Lang::En] {
+        TEST_LANG.set(lang);
+        let (_core, tree) = mount::<LargeAllowDeniedHarness>(Size::new(px(420.0), px(220.0)));
+        assert!(tree.has_text(t(lang, "已拦截 1,545 次请求", "1,545 requests denied")));
+        assert!(tree.has_text("×1,435"));
+        assert!(tree.has_text("×44"));
+    }
+}
+
+#[test]
 fn preset_sync_bar_surfaces_unsaved_state_and_opens_presets_zh_en() {
     #[component]
     fn SyncHarness() -> impl IntoElement {
@@ -1751,5 +1784,221 @@ fn title_bar_sidebar_toggle_only_renders_in_split_mode_zh_en() {
         assert!(tree.press_text(&mut core, "SIDEBAR_STEP"));
         assert!(tree.has_text("MODE:Split:false"));
         assert_eq!(canvas_count(&tree), 1);
+    }
+}
+
+#[test]
+fn persisted_folded_cards_cover_content_cards_and_skip_diff() {
+    let restored = folded_bits_from_config(&[
+        " QUERY ".to_string(),
+        "Req_Headers".to_string(),
+        "res_headers".to_string(),
+        "REQ_BODY".to_string(),
+        "res_body".to_string(),
+        "messages".to_string(),
+        "diff".to_string(),
+        "unknown".to_string(),
+    ]);
+    assert_eq!(
+        restored,
+        FOLD_REQ_HEADERS
+            | FOLD_RES_HEADERS
+            | FOLD_QUERY
+            | FOLD_REQ_BODY
+            | FOLD_RES_BODY
+            | FOLD_MESSAGES
+    );
+
+    let canonical = folded_cards_from_bits(
+        FOLD_REQ_HEADERS
+            | FOLD_RES_HEADERS
+            | FOLD_QUERY
+            | FOLD_REQ_BODY
+            | FOLD_RES_BODY
+            | FOLD_MESSAGES
+            | FOLD_DIFF,
+    );
+    assert_eq!(
+        canonical,
+        vec![
+            "req_headers",
+            "res_headers",
+            "query",
+            "req_body",
+            "res_body",
+            "messages",
+        ]
+    );
+
+    let (next, persisted) = toggle_card_bits(FOLD_DIFF, FOLD_RES_BODY);
+    assert_eq!(next, FOLD_DIFF | FOLD_RES_BODY);
+    assert_eq!(persisted, Some(vec!["res_body".to_string()]));
+
+    let (next, persisted) = toggle_card_bits(next, FOLD_MESSAGES);
+    assert_eq!(next, FOLD_DIFF | FOLD_RES_BODY | FOLD_MESSAGES);
+    assert_eq!(
+        persisted,
+        Some(vec!["res_body".to_string(), "messages".to_string()])
+    );
+
+    let (next, persisted) = toggle_card_bits(next, FOLD_REQ_HEADERS);
+    assert_eq!(
+        next,
+        FOLD_DIFF | FOLD_RES_BODY | FOLD_MESSAGES | FOLD_REQ_HEADERS
+    );
+    assert_eq!(
+        persisted,
+        Some(vec![
+            "req_headers".to_string(),
+            "res_body".to_string(),
+            "messages".to_string(),
+        ])
+    );
+
+    let (next, persisted) = toggle_card_bits(next, FOLD_RES_BODY);
+    assert_eq!(next, FOLD_DIFF | FOLD_MESSAGES | FOLD_REQ_HEADERS);
+    assert_eq!(
+        persisted,
+        Some(vec!["req_headers".to_string(), "messages".to_string()])
+    );
+
+    let (toggled_diff, persisted) = toggle_card_bits(next, FOLD_DIFF);
+    assert_eq!(toggled_diff, next ^ FOLD_DIFF);
+    assert_eq!(persisted, None);
+
+    assert_eq!(effective_body_bytes(256, 256, false), 256);
+    assert_eq!(effective_body_bytes(12_698, 2048, false), 12_698);
+    assert_eq!(effective_body_bytes(80, 100, false), 80);
+    assert_eq!(effective_body_bytes(1_048_576, 5_242_880, true), 5_242_880);
+    assert_eq!(effective_body_bytes(0, 3_145_728, false), 3_145_728);
+}
+
+#[test]
+fn header_and_message_rows_reveal_copy_icon_only_on_hover() {
+    #[component]
+    fn HoverRowHarness() -> impl IntoElement {
+        let lang = TEST_LANG.with(Cell::get);
+        provide_base_contexts(lang);
+        let controls = make_controls("hover-row-copy");
+        let headers = signal(vec![
+            HeaderLine {
+                key: 0,
+                name: "content-type".into(),
+                value: "application/json".into(),
+                hint: None,
+            },
+            HeaderLine {
+                key: 1,
+                name: "x-trace-id".into(),
+                value: "trace-xyz".into(),
+                hint: None,
+            },
+            HeaderLine {
+                key: 2,
+                name: "authorization".into(),
+                value: "Bearer secret".into(),
+                hint: None,
+            },
+        ]);
+        let shown = make_shown("http://127.0.0.1:8877/ws", Some(101), "");
+        shown.messages.set(vec![
+            HeaderLine {
+                key: 0,
+                name: "↑ text".into(),
+                value: "msg-alpha".into(),
+                hint: None,
+            },
+            HeaderLine {
+                key: 1,
+                name: "↓ text".into(),
+                value: "msg-beta".into(),
+                hint: None,
+            },
+        ]);
+        view()
+            .w(px(520.0))
+            .h(px(640.0))
+            .gap_3()
+            .child(header_section(HeaderSectionProps {
+                zh: "响应头",
+                en: "Response headers",
+                lines: headers,
+                loading: signal(false),
+                pane_width: shown.pane_width,
+                folded: signal(0_u8),
+                bit: FOLD_RES_HEADERS,
+                controls: controls.clone(),
+            }))
+            .child(messages_section(shown, controls, signal(0_u8)))
+    }
+
+    let live_canvas_count = |tree: &HeadlessTree| -> usize {
+        tree.live_node_ids()
+            .into_iter()
+            .filter(|id| tree.kinds.get(id) == Some(&ViewKind::Canvas))
+            .count()
+    };
+
+    let enter_row_by_text =
+        |tree: &mut HeadlessTree, core: &mut Core<ApproxTextEngine>, exact: &str| -> NodeId {
+            let text_id = tree
+                .live_node_ids()
+                .into_iter()
+                .find(|id| tree.texts.get(id).is_some_and(|s| s == exact))
+                .expect("target row text");
+            let mut cur = tree.parent.get(&text_id).copied().expect("row text parent");
+            for _ in 0..3 {
+                core.component_event(
+                    cur,
+                    EventKind::MouseEnter,
+                    &EventPayload::Mouse(MouseEvent::default()),
+                );
+                if tree.pump(core) {
+                    return cur;
+                }
+                cur = tree.parent.get(&cur).copied().expect("ancestor view");
+            }
+            panic!("MouseEnter on {exact} ancestors did not trigger hover state");
+        };
+
+    for lang in [Lang::Zh, Lang::En] {
+        TEST_LANG.set(lang);
+        let (mut core, mut tree) = mount::<HoverRowHarness>(Size::new(px(520.0), px(640.0)));
+        assert!(tree.has_text("x-trace-id"));
+        assert!(tree.has_text("msg-alpha"));
+        assert!(tree.has_text(t(lang, "复制全部", "Copy all")));
+        assert_eq!(
+            live_canvas_count(&tree),
+            2,
+            "at rest, only the 2 card chevrons should render canvases in {lang:?}"
+        );
+
+        let hdr_row = enter_row_by_text(&mut tree, &mut core, "x-trace-id");
+        assert_eq!(
+            live_canvas_count(&tree),
+            3,
+            "hovering a header row must reveal strictly 1 copy icon in {lang:?}"
+        );
+        core.component_event(
+            hdr_row,
+            EventKind::MouseLeave,
+            &EventPayload::Mouse(MouseEvent::default()),
+        );
+        tree.pump(&mut core);
+        assert_eq!(live_canvas_count(&tree), 2);
+
+        let msg_row = enter_row_by_text(&mut tree, &mut core, "msg-alpha");
+        assert_eq!(
+            live_canvas_count(&tree),
+            3,
+            "hovering a message row must reveal strictly 1 copy icon in {lang:?}"
+        );
+        core.component_event(
+            msg_row,
+            EventKind::MouseLeave,
+            &EventPayload::Mouse(MouseEvent::default()),
+        );
+        tree.pump(&mut core);
+        assert_eq!(live_canvas_count(&tree), 2);
     }
 }

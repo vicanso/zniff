@@ -12,6 +12,14 @@ fn prepend_body_note(note: &mut String, extra: &str) {
     }
 }
 
+pub(crate) fn effective_body_bytes(raw_len: usize, flow_bytes: usize, truncated: bool) -> usize {
+    if raw_len > 0 && !truncated {
+        raw_len
+    } else {
+        raw_len.max(flow_bytes)
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn resolve_preview_hook_override(
     hub: &Hub,
@@ -180,6 +188,16 @@ fn publish_detail_with_flows(
         resolve_preview_hook_override(hub, &flow, true, pretty, lang);
     let req_body_bytes = req_preview_body.as_deref().unwrap_or(&flow.request_body);
     let res_body_bytes = res_preview_body.as_deref().unwrap_or(&flow.response_body);
+    let req_display_bytes = effective_body_bytes(
+        req_body_bytes.len(),
+        flow.req_bytes(),
+        flow.request_truncated,
+    );
+    let res_display_bytes = effective_body_bytes(
+        res_body_bytes.len(),
+        flow.res_bytes(),
+        flow.response_truncated,
+    );
     let req_effective_type = req_preview_ct.as_deref().or(request_type);
     let res_effective_type = res_preview_ct.as_deref().or(response_type);
     let mut request = display_body(
@@ -370,6 +388,8 @@ fn publish_detail_with_flows(
     shown
         .response_hex
         .set(response_hex_for_view(pretty, &preview, response_hex));
+    shown.request_body_bytes.set(req_display_bytes);
+    shown.response_body_bytes.set(res_display_bytes);
     shown.request_note.set(request.note);
     shown.response_note.set(response.note);
     if shown.request_window.get_untracked() != request_window {
@@ -733,10 +753,11 @@ pub(crate) fn body_text(
             if !note.is_empty() {
                 note.push('\n');
             }
-            let total = body.len();
+            let shown_str = present::format_thousands(shown as u64);
+            let total_str = present::format_thousands(body.len() as u64);
             note.push_str(&match lang {
-                Lang::Zh => format!("十六进制只显示前 {shown} 字节，共 {total} 字节。"),
-                Lang::En => format!("Hex shows the first {shown} of {total} bytes."),
+                Lang::Zh => format!("十六进制只显示前 {shown_str} 字节，共 {total_str} 字节。"),
+                Lang::En => format!("Hex shows the first {shown_str} of {total_str} bytes."),
             });
         }
         out

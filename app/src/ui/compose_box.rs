@@ -1114,6 +1114,8 @@ pub(crate) fn clear_shown(shown: Shown) {
     shown.response_headers.set(Vec::new());
     shown.request_body.set(String::new());
     shown.response_body.set(String::new());
+    shown.request_body_bytes.set(0);
+    shown.response_body_bytes.set(0);
     shown.request_hex.set(Vec::new());
     shown.response_hex.set(Vec::new());
     shown.request_language.set(String::new());

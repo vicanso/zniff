@@ -31,6 +31,8 @@ pub(crate) struct Shown {
     pub(crate) response_headers: Signal<Vec<HeaderLine>>,
     pub(crate) request_body: Signal<String>,
     pub(crate) response_body: Signal<String>,
+    pub(crate) request_body_bytes: Signal<usize>,
+    pub(crate) response_body_bytes: Signal<usize>,
     pub(crate) request_hex: Signal<Vec<u8>>,
     pub(crate) response_hex: Signal<Vec<u8>>,
     /// Detail-pane viewport width. The hex line uses it after the pane is shown.
@@ -419,7 +421,7 @@ pub(crate) fn filtered_summary_card(
                 .gap_2p5()
                 .child(summary_stat_tile(
                     tr("总请求", "Total requests"),
-                    move || stats.with(|s| s.total_count.to_string()),
+                    move || stats.with(|s| present::format_thousands(s.total_count as u64)),
                     || None,
                     1.0,
                     92.0,
@@ -503,7 +505,7 @@ pub(crate) fn filtered_summary_card(
                                 format!(
                                     "{} {}",
                                     t(ui_lang(langs), "进行中", "Pending"),
-                                    stats.with(|s| s.pending)
+                                    present::format_thousands(stats.with(|s| s.pending) as u64)
                                 )
                             })
                             .tabular_nums()
@@ -637,7 +639,7 @@ pub(crate) fn status_count_badge(
         .rounded(px(5.0))
         .bg(bg_color)
         .child(
-            mono(move || format!("{tag} {}", count()))
+            mono(move || format!("{tag} {}", present::format_thousands(count() as u64)))
                 .tabular_nums()
                 .number_of_lines(1)
                 .text_size(px(11.0))

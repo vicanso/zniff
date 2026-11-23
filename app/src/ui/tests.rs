@@ -300,7 +300,11 @@ fn body_text_cuts_on_a_char_boundary() {
     assert_eq!(binary_shown.hex.len(), 4096);
     assert!(!binary_shown.window.has_more());
     assert!(!binary_shown.window.has_prev());
-    assert!(binary_shown.note.contains("4096"), "{}", binary_shown.note);
+    assert!(
+        binary_shown.note.contains("4,096") && binary_shown.note.contains("5,000"),
+        "{}",
+        binary_shown.note
+    );
 
     let payload = format!("{{\"k\":\"{}\"}}", "a".repeat(super::BODY_DISPLAY_CAP));
     let mut pretty_first =
@@ -356,6 +360,8 @@ fn flow_count_shows_total_or_filtered_over_total() {
     assert_eq!(super::flow_count_text(0, 0, false), "0");
     assert_eq!(super::flow_count_text(4, 4, false), "4");
     assert_eq!(super::flow_count_text(2, 9, true), "2 / 9");
+    assert_eq!(super::flow_count_text(1435, 12545, true), "1,435 / 12,545");
+    assert_eq!(super::flow_count_text(0, 12545, false), "12,545");
 }
 
 #[test]
@@ -1386,19 +1392,21 @@ fn push_profile_history_keeps_last_ten_distinct_versions() {
 fn format_bytes_avoids_clipping_for_large_values() {
     assert_eq!(super::format_bytes(0), "0 B");
     assert_eq!(super::format_bytes(512), "512 B");
+    assert_eq!(super::format_bytes(1023), "1,023 B");
     assert_eq!(super::format_bytes(1024), "1.0 KB");
     assert_eq!(super::format_bytes(2048), "2.0 KB");
     assert_eq!(super::format_bytes(99 * 1024), "99.0 KB");
     // Values >= 100 KB omit decimal .0 to prevent cell clipping
     assert_eq!(super::format_bytes(100 * 1024), "100 KB");
     assert_eq!(super::format_bytes(256 * 1024), "256 KB");
-    assert_eq!(super::format_bytes(1023 * 1024), "1023 KB");
+    assert_eq!(super::format_bytes(1023 * 1024), "1,023 KB");
     // MB formatting
     assert_eq!(super::format_bytes(1024 * 1024), "1.0 MB");
     assert_eq!(super::format_bytes(12 * 1024 * 1024), "12.0 MB");
     assert_eq!(super::format_bytes(99 * 1024 * 1024), "99.0 MB");
     assert_eq!(super::format_bytes(100 * 1024 * 1024), "100 MB");
     assert_eq!(super::format_bytes(256 * 1024 * 1024), "256 MB");
+    assert_eq!(super::format_bytes(1024 * 1024 * 1024), "1,024 MB");
 }
 
 #[test]
@@ -2594,6 +2602,8 @@ fn web_cached_flow_detail_publishes_loading_then_hydrates_cleanly() {
             response_headers: signal(Vec::new()),
             request_body: signal(String::new()),
             response_body: signal(String::new()),
+            request_body_bytes: signal(0),
+            response_body_bytes: signal(0),
             request_hex: signal(Vec::new()),
             response_hex: signal(Vec::new()),
             pane_width: signal(0.0),
@@ -4899,6 +4909,8 @@ fn make_test_json_shown(pane_w: f32) -> super::Shown {
         response_headers: signal(Vec::new()),
         request_body: signal(String::new()),
         response_body: signal("{\"ok\":true}".into()),
+        request_body_bytes: signal(0),
+        response_body_bytes: signal(11),
         request_hex: signal(Vec::new()),
         response_hex: signal(Vec::new()),
         pane_width: signal(pane_w),
@@ -4970,6 +4982,7 @@ async fn body_section_header_keeps_gap_between_title_and_search_at_narrow_split(
     thread_local! {
         static BODY_PANE_W: Cell<f32> = const { Cell::new(400.0) };
         static BODY_SEARCH_Q: Cell<bool> = const { Cell::new(false) };
+        static BODY_FOLDED: Cell<bool> = const { Cell::new(false) };
     }
 
     #[component]
@@ -4984,7 +4997,11 @@ async fn body_section_header_keeps_gap_between_title_and_search_at_narrow_split(
         }
         let selected = signal(Some(2_u64));
         let baseline = signal(None::<u64>);
-        let folded = signal(0_u8);
+        let folded = signal(if BODY_FOLDED.with(Cell::get) {
+            super::FOLD_RES_BODY
+        } else {
+            0_u8
+        });
         view()
             .w(px(pane_w))
             .h(px(400.0))
@@ -5012,6 +5029,7 @@ async fn body_section_header_keeps_gap_between_title_and_search_at_narrow_split(
             ))
     }
 
+    BODY_FOLDED.with(|c| c.set(false));
     let check_width = |pane_w: f32, with_query: bool, expect_single_row: bool| {
         BODY_PANE_W.with(|c| c.set(pane_w));
         BODY_SEARCH_Q.with(|c| c.set(with_query));
@@ -5022,6 +5040,11 @@ async fn body_section_header_keeps_gap_between_title_and_search_at_narrow_split(
             .iter()
             .find_map(|(id, text)| (text == "Response body").then_some(*id))
             .expect("Response body title");
+        let badge_id = tree
+            .texts
+            .iter()
+            .find_map(|(id, text)| (text == "11 B").then_some(*id))
+            .expect("Response body byte badge");
         let search_id = tree
             .kinds
             .iter()
@@ -5032,20 +5055,26 @@ async fn body_section_header_keeps_gap_between_title_and_search_at_narrow_split(
             })
             .expect("Search input");
         let title = tree.abs_frame(title_id);
+        let badge = tree.abs_frame(badge_id);
         let search = tree.abs_frame(search_id);
+        assert!(
+            (title.origin.y.0 - badge.origin.y.0).abs() < 10.0
+                && badge.origin.x.0 >= title.origin.x.0 + title.size.width.0,
+            "pane_w={pane_w}: byte badge must stay on title row right of title: title={title:?} badge={badge:?}"
+        );
         let same_row = (title.origin.y.0 - search.origin.y.0).abs() < 10.0;
         if expect_single_row {
             assert!(
                 same_row,
                 "pane_w={pane_w}: expected single-row header, got title={title:?} search={search:?}"
             );
-            let gap = search.origin.x.0 - (title.origin.x.0 + title.size.width.0);
+            let gap = search.origin.x.0 - (badge.origin.x.0 + badge.size.width.0);
             assert!(
                 gap >= 8.0,
-                "pane_w={pane_w}: Response body must keep >= 8px gap before Search..., got {gap:.1}px (title={title:?}, search={search:?})"
+                "pane_w={pane_w}: byte badge must keep >= 8px gap before Search..., got {gap:.1}px (badge={badge:?}, search={search:?})"
             );
         } else if same_row {
-            let gap = search.origin.x.0 - (title.origin.x.0 + title.size.width.0);
+            let gap = search.origin.x.0 - (badge.origin.x.0 + badge.size.width.0);
             assert!(
                 gap >= 8.0,
                 "pane_w={pane_w}: same-row gap must stay >= 8px, got {gap:.1}px"
@@ -5058,10 +5087,33 @@ async fn body_section_header_keeps_gap_between_title_and_search_at_narrow_split(
         }
     };
 
-    check_width(400.0, false, true);
-    check_width(396.0, false, true);
+    check_width(460.0, false, true);
+    check_width(400.0, false, false);
+    check_width(396.0, false, false);
     check_width(400.0, true, false);
     check_width(300.0, false, false);
+
+    BODY_PANE_W.with(|c| c.set(460.0));
+    BODY_SEARCH_Q.with(|c| c.set(false));
+    BODY_FOLDED.with(|c| c.set(true));
+    let (_core, folded_tree) =
+        mount_headless_component::<NarrowBodyHeaderHarness>(Size::new(px(460.0), px(400.0)));
+    assert!(folded_tree.texts.values().any(|t| t == "Response body"));
+    assert!(folded_tree.texts.values().any(|t| t == "11 B"));
+    assert!(
+        !folded_tree
+            .kinds
+            .values()
+            .any(|kind| *kind == ViewKind::Input),
+        "folded body card must hide search input"
+    );
+    assert!(
+        !folded_tree
+            .texts
+            .values()
+            .any(|t| t == "Pretty" || t == "Raw"),
+        "folded body card must hide format switches"
+    );
 }
 
 #[tokio::test]

@@ -700,10 +700,14 @@ pub(crate) fn toolbar_menu(
 /// Session size for the toolbar Summary button. A filter shows
 /// `matched / total`; an empty filter shows the total alone.
 pub(crate) fn flow_count_text(filtered: usize, total: usize, filtering: bool) -> String {
+    let total_str = present::format_thousands(total as u64);
     if filtering {
-        format!("{filtered} / {total}")
+        format!(
+            "{} / {total_str}",
+            present::format_thousands(filtered as u64)
+        )
     } else {
-        total.to_string()
+        total_str
     }
 }
 

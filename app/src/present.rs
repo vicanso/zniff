@@ -802,6 +802,29 @@ pub fn message_matches_filter(name: &str, value: &str, query: &str, dir: u8, kin
     true
 }
 
+/// Formats a non-negative integer with ASCII thousands separators (`1545` -> `"1,545"`).
+pub fn format_thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let len = digits.len();
+    if len <= 3 {
+        return digits;
+    }
+    let mut out = String::with_capacity(len + (len - 1) / 3);
+    let first = len % 3;
+    let first = if first == 0 { 3 } else { first };
+    out.push_str(&digits[..first]);
+    for chunk in digits.as_bytes()[first..].chunks(3) {
+        out.push(',');
+        out.push_str(std::str::from_utf8(chunk).unwrap_or_default());
+    }
+    out
+}
+
+/// Formats an exact byte count with thousands separators (`12698` -> `"12,698 B"`).
+pub fn format_exact_bytes(bytes: u64) -> String {
+    format!("{} B", format_thousands(bytes))
+}
+
 pub fn bytes(bytes: usize) -> String {
     format_count(bytes as u64)
 }
@@ -3424,19 +3447,19 @@ fn format_count(bytes: u64) -> String {
     if bytes >= 1024 * 1024 {
         let mb = bytes as f64 / (1024.0 * 1024.0);
         if mb >= 99.95 {
-            format!("{mb:.0} MB")
+            format!("{} MB", format_thousands(mb.round() as u64))
         } else {
             format!("{mb:.1} MB")
         }
     } else if bytes >= 1024 {
         let kb = bytes as f64 / 1024.0;
         if kb >= 99.95 {
-            format!("{kb:.0} KB")
+            format!("{} KB", format_thousands(kb.round() as u64))
         } else {
             format!("{kb:.1} KB")
         }
     } else {
-        format!("{bytes} B")
+        format!("{} B", format_thousands(bytes))
     }
 }
 
@@ -5503,13 +5526,28 @@ Content-Type: image/png\r\n\r\n\
     #[test]
     fn format_count_large_values_drop_decimal() {
         assert_eq!(format_count(0), "0 B");
+        assert_eq!(format_count(1023), "1,023 B");
         assert_eq!(format_count(1024), "1.0 KB");
         assert_eq!(format_count(99 * 1024), "99.0 KB");
         assert_eq!(format_count(100 * 1024), "100 KB");
         assert_eq!(format_count(256 * 1024), "256 KB");
+        assert_eq!(format_count(1023 * 1024), "1,023 KB");
         assert_eq!(format_count(1024 * 1024), "1.0 MB");
         assert_eq!(format_count(99 * 1024 * 1024), "99.0 MB");
         assert_eq!(format_count(100 * 1024 * 1024), "100 MB");
+        assert_eq!(format_count(1024 * 1024 * 1024), "1,024 MB");
+
+        assert_eq!(format_thousands(0), "0");
+        assert_eq!(format_thousands(44), "44");
+        assert_eq!(format_thousands(999), "999");
+        assert_eq!(format_thousands(1000), "1,000");
+        assert_eq!(format_thousands(1545), "1,545");
+        assert_eq!(format_thousands(1_234_567), "1,234,567");
+
+        assert_eq!(format_exact_bytes(0), "0 B");
+        assert_eq!(format_exact_bytes(11), "11 B");
+        assert_eq!(format_exact_bytes(12_698), "12,698 B");
+        assert_eq!(format_exact_bytes(1_048_576), "1,048,576 B");
     }
 
     #[test]

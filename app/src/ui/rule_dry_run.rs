@@ -25,23 +25,15 @@ pub(crate) fn format_dry_run_message(
         };
         return (msg, true);
     }
+    let matched = present::format_thousands(summary.matched_flows as u64);
+    let total = present::format_thousands(summary.total_flows as u64);
     let msg = match (lang, is_draft) {
-        (Lang::Zh, true) => format!(
-            "草稿试跑：将命中 {} / {} 条已有流量",
-            summary.matched_flows, summary.total_flows
-        ),
-        (Lang::Zh, false) => format!(
-            "试跑预览：将命中 {} / {} 条已有流量",
-            summary.matched_flows, summary.total_flows
-        ),
-        (Lang::En, true) => format!(
-            "Draft dry-run: will match {} of {} existing flows",
-            summary.matched_flows, summary.total_flows
-        ),
-        (Lang::En, false) => format!(
-            "Dry-run: will match {} of {} existing flows",
-            summary.matched_flows, summary.total_flows
-        ),
+        (Lang::Zh, true) => format!("草稿试跑：将命中 {matched} / {total} 条已有流量"),
+        (Lang::Zh, false) => format!("试跑预览：将命中 {matched} / {total} 条已有流量"),
+        (Lang::En, true) => {
+            format!("Draft dry-run: will match {matched} of {total} existing flows")
+        }
+        (Lang::En, false) => format!("Dry-run: will match {matched} of {total} existing flows"),
     };
     (msg, false)
 }
