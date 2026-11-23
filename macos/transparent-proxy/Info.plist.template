@@ -35,8 +35,6 @@
 	<string>zniff uses a transparent network proxy system extension to capture HTTP/HTTPS traffic for user-selected processes without modifying macOS system proxy settings.</string>
 	<key>NetworkExtension</key>
 	<dict>
-		<key>NEMachServiceName</key>
-		<string>__TEAM_ID__.dev.zniff.app.transparent-proxy</string>
 		<key>NEProviderClasses</key>
 		<dict>
 			<key>com.apple.networkextension.app-proxy</key>

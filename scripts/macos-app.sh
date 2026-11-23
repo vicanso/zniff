@@ -114,11 +114,20 @@ if [ -n "$app_profile" ] && [ -n "$sysext_profile" ]; then
       ;;
   esac
 
-  team_id=$(security cms -D -i "$sysext_profile" 2>/dev/null \
-    | plutil -extract Entitlements.com\.apple\.developer\.team-identifier raw -o - - 2>/dev/null || true)
-  if [ -z "$team_id" ]; then
-    team_id="4G5PXJXZTU"
-  fi
+  team_id=$(python3 -c '
+import plistlib, subprocess, sys
+raw = subprocess.check_output(["security", "cms", "-D", "-i", sys.argv[1]], stderr=subprocess.DEVNULL)
+pl = plistlib.loads(raw)
+tid = pl.get("Entitlements", {}).get("com.apple.developer.team-identifier", "")
+if not tid:
+    tids = pl.get("TeamIdentifier", [])
+    tid = tids[0] if tids else ""
+print(tid.strip())
+' "$sysext_profile" 2>/dev/null || true)
+  case "$team_id" in
+    [A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9]) ;;
+    *) team_id="4G5PXJXZTU" ;;
+  esac
 
   sysext_bundle="$dest/Contents/Library/SystemExtensions/dev.zniff.app.transparent-proxy.systemextension"
   mkdir -p "$sysext_bundle/Contents/MacOS"
@@ -134,6 +143,7 @@ if [ -n "$app_profile" ] && [ -n "$sysext_profile" ]; then
 
   sed -e "s/__VERSION__/${version}/g" -e "s/__TEAM_ID__/${team_id}/g" \
     "$tp_dir/Info.plist.template" > "$sysext_bundle/Contents/Info.plist"
+  plutil -lint "$sysext_bundle/Contents/Info.plist"
 
   cp "$sysext_profile" "$sysext_bundle/Contents/embedded.provisionprofile"
   cp "$app_profile" "$dest/Contents/embedded.provisionprofile"
@@ -144,6 +154,7 @@ if [ -n "$app_profile" ] && [ -n "$sysext_profile" ]; then
   ent_sysext="$ent_tmp_dir/entitlements-sysext.plist"
   sed "s/__TEAM_ID__/${team_id}/g" "$tp_dir/entitlements-app.plist" > "$ent_app"
   sed "s/__TEAM_ID__/${team_id}/g" "$tp_dir/entitlements-sysext.plist" > "$ent_sysext"
+  plutil -lint "$ent_app" "$ent_sysext"
 
   if [ -n "$sign_identity" ]; then
     sign_with_retry "$sysext_bundle" "$ent_sysext" "$sign_identity"

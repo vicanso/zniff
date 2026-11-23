@@ -421,7 +421,6 @@ private final class TcpFlowRelay {
     }
 }
 
-@objc(TransparentProxyProvider)
 final class TransparentProxyProvider: NETransparentProxyProvider {
     private let configStore = ProxyConfigStore()
     private let relayQueue = DispatchQueue(label: "dev.zniff.app.transparent-proxy.relay", attributes: .concurrent)
