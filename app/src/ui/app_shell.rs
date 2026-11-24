@@ -118,6 +118,7 @@ pub fn App() -> impl IntoElement {
         diff: signal(String::new()),
         diff_old: signal(String::new()),
         diff_new: signal(String::new()),
+        diff_baseline_label: signal(String::new()),
         diff_scope: signal(0_u8),
         pinned: signal(false),
         is_marker: signal(false),
@@ -364,7 +365,7 @@ pub fn App() -> impl IntoElement {
         shown_tree_effect.res_json_tree.set(active);
     });
     #[cfg(target_os = "macos")]
-    install_macos_application_menu(profile_signals.about_open);
+    install_macos_application_menu(profile_signals.about_open, profile_signals.settings_open);
     let config_broken_dismissed = signal(false);
     if let Some(err) = config_broken.get() {
         #[cfg(not(target_arch = "wasm32"))]
@@ -498,6 +499,8 @@ pub fn App() -> impl IntoElement {
     let session_tabs_tick = session_tabs_sig;
     let active_tab_tick = active_tab_sig;
     let seen_listen = stored(String::new());
+    #[cfg(target_arch = "wasm32")]
+    let seen_lan_rev = stored(u64::MAX);
     let seen_lang = stored(ui_lang(langs));
     let baseline_tick = baseline;
     let sort_tick = sort;
@@ -775,7 +778,18 @@ pub fn App() -> impl IntoElement {
                 reset_compose(compose_tick);
             }
         }
-        if listen_now != seen_listen.get() {
+        #[cfg(target_arch = "wasm32")]
+        let lan_changed = {
+            let rev = proxy::lan_revision();
+            let changed = rev != seen_lan_rev.get();
+            if changed {
+                seen_lan_rev.replace(rev);
+            }
+            changed && is_listening_lan(&listen_now)
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let lan_changed = false;
+        if listen_now != seen_listen.get() || lan_changed {
             seen_listen.replace(listen_now.clone());
             publish_lan(
                 &listen_now,
@@ -1186,6 +1200,8 @@ pub fn App() -> impl IntoElement {
             shown_tick.res_json_tree.set(tree_default);
             shown_tick.editing_comment.set(false);
             shown_tick.repeating.set(false);
+            shown_tick.req_search.set(String::new());
+            shown_tick.res_search.set(String::new());
             shown_tick.msg_search.set(String::new());
             shown_tick.msg_dir.set(0);
             shown_tick.msg_kind.set(0);
@@ -1350,6 +1366,7 @@ pub fn App() -> impl IntoElement {
     let compose_submit_key = compose;
     let selected_submit_key = selected;
     let paused_submit_key = paused;
+    let profiles_submit_key = profile_signals;
     on_key_with(
         "mod+enter",
         KeyOptions {
@@ -1363,6 +1380,12 @@ pub fn App() -> impl IntoElement {
                     compose_submit_key,
                     selected_submit_key,
                     paused_submit_key,
+                );
+            } else if compose_submit_key.inline_mock.open.get() {
+                save_inline_mock(
+                    &controls_submit_key,
+                    compose_submit_key,
+                    profiles_submit_key,
                 );
             }
         },
@@ -1762,6 +1785,8 @@ pub fn App() -> impl IntoElement {
             profiles: profile_signals,
             controls: controls.clone(),
             ca_ui,
+            running,
+            listen,
             proxy_on: use_system_proxy,
             port_text,
             listen_all,

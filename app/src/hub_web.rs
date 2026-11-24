@@ -224,6 +224,28 @@ impl Hub {
                 changed = true;
             }
         }
+        if let Some(raw_addrs) = value.get("lan_addrs").and_then(Value::as_array) {
+            let parsed_addrs: Vec<crate::ui::LanAddr> = raw_addrs
+                .iter()
+                .filter_map(|item| {
+                    let ip_str = item.get("ip").and_then(Value::as_str)?;
+                    let ip = ip_str.parse::<std::net::Ipv4Addr>().ok()?;
+                    let name = item
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    Some(crate::ui::LanAddr { name, ip })
+                })
+                .collect();
+            let parsed_routed = value
+                .get("routed_v4")
+                .and_then(Value::as_str)
+                .and_then(|s| s.parse::<std::net::Ipv4Addr>().ok());
+            if update_server_lan(parsed_addrs, parsed_routed) {
+                changed = true;
+            }
+        }
         if changed {
             self.bump();
         }
@@ -778,6 +800,36 @@ impl Hub {
         Ok(())
     }
 
+    pub fn apply_saved_inline_mock(&self, next_rules: &str) {
+        *self
+            .rules_text
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = next_rules.to_string();
+        self.rules_on.store(true, Ordering::Relaxed);
+        self.rules_rev.fetch_add(1, Ordering::Relaxed);
+        self.bump();
+    }
+
+    pub async fn save_inline_mock_remote(
+        &self,
+        payload: Value,
+    ) -> anyhow::Result<(String, String)> {
+        let bytes = serde_json::to_vec(&payload)?;
+        let response = post_json(bytes).await?;
+        let next_rules = response
+            .get("rules")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("missing rules in save_inline_mock response"))?
+            .to_string();
+        let mock_path = response
+            .get("mock_path")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        self.apply_saved_inline_mock(&next_rules);
+        Ok((next_rules, mock_path))
+    }
+
     fn bump(&self) {
         self.generation.fetch_add(1, Ordering::Relaxed);
     }
@@ -834,6 +886,81 @@ fn web_base_slot() -> &'static Mutex<String> {
     &BASE
 }
 
+static WEB_LAN_ADDRS: Mutex<Vec<crate::ui::LanAddr>> = Mutex::new(Vec::new());
+static WEB_ROUTED_V4: Mutex<Option<std::net::Ipv4Addr>> = Mutex::new(None);
+static WEB_LAN_REV: AtomicU64 = AtomicU64::new(0);
+
+fn update_server_lan(addrs: Vec<crate::ui::LanAddr>, routed: Option<std::net::Ipv4Addr>) -> bool {
+    let mut changed = false;
+    {
+        let mut guard = WEB_LAN_ADDRS.lock().unwrap_or_else(|err| err.into_inner());
+        if *guard != addrs {
+            *guard = addrs;
+            changed = true;
+        }
+    }
+    {
+        let mut guard = WEB_ROUTED_V4.lock().unwrap_or_else(|err| err.into_inner());
+        if *guard != routed {
+            *guard = routed;
+            changed = true;
+        }
+    }
+    if changed {
+        WEB_LAN_REV.fetch_add(1, Ordering::Relaxed);
+    }
+    changed
+}
+
+pub fn server_lan_addrs() -> Vec<crate::ui::LanAddr> {
+    WEB_LAN_ADDRS
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .clone()
+}
+
+pub fn server_routed_v4() -> Option<std::net::Ipv4Addr> {
+    *WEB_ROUTED_V4.lock().unwrap_or_else(|err| err.into_inner())
+}
+
+pub fn lan_revision() -> u64 {
+    WEB_LAN_REV.load(Ordering::Relaxed)
+}
+
+pub fn parse_non_loopback_host(url: &str) -> Option<String> {
+    let rest = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = if let Some(inner) = authority.strip_prefix('[') {
+        let end = inner.find(']')?;
+        let raw = &inner[..end];
+        if raw.is_empty() {
+            return None;
+        }
+        format!("[{raw}]")
+    } else {
+        authority.split(':').next().unwrap_or("").to_string()
+    };
+    let bare = host.trim_matches(['[', ']']);
+    if bare.is_empty()
+        || bare.eq_ignore_ascii_case("localhost")
+        || bare == "127.0.0.1"
+        || bare == "::1"
+    {
+        None
+    } else {
+        Some(host)
+    }
+}
+
+pub fn web_base_host() -> Option<String> {
+    let guard = web_base_slot()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    parse_non_loopback_host(guard.as_str())
+}
+
 pub fn note_web_state_url(final_url: &str) {
     let clean = final_url.split(['?', '#']).next().unwrap_or("");
     if let Some(base) = clean.strip_suffix("api/state")
@@ -845,6 +972,7 @@ pub fn note_web_state_url(final_url: &str) {
             .unwrap_or_else(|err| err.into_inner());
         if guard.as_str() != base {
             *guard = base.to_string();
+            WEB_LAN_REV.fetch_add(1, Ordering::Relaxed);
         }
     }
 }

@@ -56,6 +56,7 @@ pub(crate) fn body_section(
     let nav_controls = controls.clone();
     let search_controls = controls.clone();
     let switch_controls = controls.clone();
+    let copy_controls = controls.clone();
     let tree_controls = controls;
     view()
         .rounded(px(RADIUS_LG))
@@ -155,6 +156,7 @@ pub(crate) fn body_section(
                         let nav_controls = nav_controls.clone();
                         let search_controls = search_controls.clone();
                         let switch_controls = switch_controls.clone();
+                        let copy_controls = copy_controls.clone();
                         when(
                             move || loading.get(),
                             || {
@@ -167,6 +169,7 @@ pub(crate) fn body_section(
                             let nav_controls = nav_controls.clone();
                             let search_controls = search_controls.clone();
                             let switch_controls = switch_controls.clone();
+                            let copy_controls = copy_controls.clone();
                             view()
                                 .flex_row()
                                 .flex_wrap()
@@ -220,6 +223,25 @@ pub(crate) fn body_section(
                                         baseline,
                                         is_paged,
                                     )
+                                }))
+                                .child(detail_button(tr("复制", "Copy"), move || {
+                                    let part = if embed_image {
+                                        CopyPart::Response
+                                    } else {
+                                        CopyPart::Request
+                                    };
+                                    if shown.pretty.get_untracked() && !doc_on() {
+                                        let visible = body.get_untracked();
+                                        if !visible.is_empty() {
+                                            set_clipboard(visible);
+                                            set_status(
+                                                &copy_controls,
+                                                StatusMsg::CopiedBody { side, hex: false },
+                                            );
+                                            return;
+                                        }
+                                    }
+                                    copy_part(&copy_controls, selected.get_untracked(), part);
                                 }))
                                 .child(when(
                                     move || doc.with(Option::is_some),
@@ -350,50 +372,64 @@ pub(crate) fn body_section(
                 let height_body = body;
                 let height_hex = hex;
                 let height_search = search;
-                view()
-                    .w_full()
-                    .min_w(move || px(hex_area_width(shown.pane_width.get())))
-                    .on_layout(move |bounds: &Bounds<Points>| {
-                        let pane = bounds.size.width.0 + HEX_AREA_CHROME;
-                        if hex_cols_for_pane(pane)
-                            != hex_cols_for_pane(shown.pane_width.get_untracked())
-                        {
-                            shown.pane_width.set(pane);
-                        }
-                    })
-                    .bg(bg_code())
-                    .h(move || {
-                        let text = filtered_plain_body(
-                            &height_body.get(),
-                            &height_hex.with(|bytes| bytes.clone()),
-                            shown.pane_width.get(),
-                            &height_search.get(),
-                        );
-                        px(body_box_height(body_line_count(&text)))
-                    })
-                    .overflow_hidden()
-                    .border_t(move || if divided { px(1.0) } else { px(0.0) })
-                    .border_t_color(border_subtle())
-                    .child(
-                        scroll().size_full().child(
-                            mono(move || {
-                                let bytes = hex.with(|bytes| bytes.clone());
-                                filtered_plain_body(
-                                    &body.get(),
-                                    &bytes,
-                                    shown.pane_width.get(),
-                                    &search.get(),
-                                )
-                            })
-                            .pl_3p5()
-                            .pr_5()
-                            .py_2()
-                            .selectable(true)
-                            .on_press_up(dismiss_keyboard)
-                            .text_size(px(12.0))
-                            .text_color(fg_primary()),
-                        ),
-                    )
+                let no_match = move || {
+                    !search.get().trim().is_empty()
+                        && hex.with(|bytes| {
+                            filtered_plain_body(
+                                &body.get(),
+                                bytes,
+                                shown.pane_width.get(),
+                                &search.get(),
+                            )
+                            .is_empty()
+                        })
+                };
+                when(no_match, move || body_search_empty_state(search)).otherwise(move || {
+                    view()
+                        .w_full()
+                        .min_w(move || px(hex_area_width(shown.pane_width.get())))
+                        .on_layout(move |bounds: &Bounds<Points>| {
+                            let pane = bounds.size.width.0 + HEX_AREA_CHROME;
+                            if hex_cols_for_pane(pane)
+                                != hex_cols_for_pane(shown.pane_width.get_untracked())
+                            {
+                                shown.pane_width.set(pane);
+                            }
+                        })
+                        .bg(bg_code())
+                        .h(move || {
+                            let text = filtered_plain_body(
+                                &height_body.get(),
+                                &height_hex.with(|bytes| bytes.clone()),
+                                shown.pane_width.get(),
+                                &height_search.get(),
+                            );
+                            px(body_box_height(body_line_count(&text)))
+                        })
+                        .overflow_hidden()
+                        .border_t(move || if divided { px(1.0) } else { px(0.0) })
+                        .border_t_color(border_subtle())
+                        .child(
+                            scroll().size_full().child(
+                                mono(move || {
+                                    let bytes = hex.with(|bytes| bytes.clone());
+                                    filtered_plain_body(
+                                        &body.get(),
+                                        &bytes,
+                                        shown.pane_width.get(),
+                                        &search.get(),
+                                    )
+                                })
+                                .pl_3p5()
+                                .pr_5()
+                                .py_2()
+                                .selectable(true)
+                                .on_press_up(dismiss_keyboard)
+                                .text_size(px(12.0))
+                                .text_color(fg_primary()),
+                            ),
+                        )
+                })
             },
         ))
         .child(when(
@@ -408,10 +444,16 @@ pub(crate) fn body_section(
             },
             move || {
                 let divided = image_on() || !note.get().is_empty();
-                view()
-                    .border_t(move || if divided { px(1.0) } else { px(0.0) })
-                    .border_t_color(border_subtle())
-                    .child(code_body(body, code, search))
+                let no_match = move || {
+                    let q = search.get();
+                    !q.trim().is_empty() && present::filter_body_lines(&body.get(), &q).0 == 0
+                };
+                when(no_match, move || body_search_empty_state(search)).otherwise(move || {
+                    view()
+                        .border_t(move || if divided { px(1.0) } else { px(0.0) })
+                        .border_t_color(border_subtle())
+                        .child(code_body(body, code, search))
+                })
             },
         ))
         .child(when(
@@ -423,39 +465,45 @@ pub(crate) fn body_section(
                     && !form.with(Vec::is_empty)
             },
             move || {
-                each(
-                    move || filtered_form_lines(&form.get(), &search.get()),
-                    |line| line.key,
-                    move |line, index| {
-                        view()
-                            .flex_row()
-                            .gap_3()
-                            .px_3p5()
-                            .py_2()
-                            .bg(move || {
-                                if index.get() % 2 == 1 {
-                                    bg_code()
-                                } else {
-                                    bg_card()
-                                }
-                            })
-                            .border_t(move || if index.get() > 0 { px(1.0) } else { px(0.0) })
-                            .border_t_color(border_subtle())
-                            .on_press_up(dismiss_keyboard)
-                            .child(
-                                mono(move || line.with(|line| line.name.clone()))
-                                    .w(move || px(kv_key_width(pane_width.get())))
-                                    .flex_shrink_0()
-                                    .selectable(true)
-                                    .number_of_lines(1)
-                                    .text_overflow(EllipsizeMode::Tail)
-                                    .text_size(px(12.0))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(fg_muted()),
-                            )
-                            .child(kv_value_cell(line))
-                    },
-                )
+                let no_match = move || {
+                    let q = search.get();
+                    !q.trim().is_empty() && filtered_form_lines(&form.get(), &q).is_empty()
+                };
+                when(no_match, move || body_search_empty_state(search)).otherwise(move || {
+                    each(
+                        move || filtered_form_lines(&form.get(), &search.get()),
+                        |line| line.key,
+                        move |line, index| {
+                            view()
+                                .flex_row()
+                                .gap_3()
+                                .px_3p5()
+                                .py_2()
+                                .bg(move || {
+                                    if index.get() % 2 == 1 {
+                                        bg_code()
+                                    } else {
+                                        bg_card()
+                                    }
+                                })
+                                .border_t(move || if index.get() > 0 { px(1.0) } else { px(0.0) })
+                                .border_t_color(border_subtle())
+                                .on_press_up(dismiss_keyboard)
+                                .child(
+                                    mono(move || line.with(|line| line.name.clone()))
+                                        .w(move || px(kv_key_width(pane_width.get())))
+                                        .flex_shrink_0()
+                                        .selectable(true)
+                                        .number_of_lines(1)
+                                        .text_overflow(EllipsizeMode::Tail)
+                                        .text_size(px(12.0))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(fg_muted()),
+                                )
+                                .child(kv_value_cell(line))
+                        },
+                    )
+                })
             },
         ))
 }
@@ -887,6 +935,34 @@ pub(crate) fn wrapped_line_count(text: &str, cols: usize) -> usize {
 
 pub(crate) fn editor_box_height(text: &str, width: f32) -> f32 {
     body_box_height(wrapped_line_count(text, editor_wrap_cols(width)))
+}
+
+pub(crate) fn body_search_empty_state(search: Signal<String>) -> impl IntoElement {
+    let langs = ui_langs();
+    view()
+        .w_full()
+        .px_3p5()
+        .py_3()
+        .bg(bg_code())
+        .border_t_1()
+        .border_t_color(border_subtle())
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .child(
+            text(tr("当前正文无匹配内容", "No matching lines in body"))
+                .text_size(px(TEXT_SM))
+                .text_color(fg_muted()),
+        )
+        .child(
+            ui_button(ButtonVariant::Outline, ControlSize::Xs)
+                .accessibility_label(move || {
+                    Some(t(ui_lang(langs), "清空搜索", "Clear search").into())
+                })
+                .on_press(move || search.set(String::new()))
+                .child(control_text(tr("清空搜索", "Clear search")).text_color(fg_secondary())),
+        )
 }
 
 pub(crate) fn code_body(

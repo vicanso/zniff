@@ -76,7 +76,7 @@ pub(crate) fn build_command_items(state: CommandPaletteState) -> Vec<CommandItem
         .keywords(["replay", "resend", "repeat", "重放", "重发"]),
         CommandItem::new(
             "focus_filter",
-            t(lang, "聚焦主过滤框", "Focus filter input"),
+            t(lang, "聚焦列表过滤框", "Focus list filter input"),
         )
         .group(g_capture)
         .shortcut("mod+f")

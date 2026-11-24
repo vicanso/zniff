@@ -1321,6 +1321,10 @@ impl Session {
     }
 
     pub fn rename_marker(&mut self, id: u64, label: impl Into<String>) -> bool {
+        let trimmed = label.into().trim().to_string();
+        if trimmed.is_empty() {
+            return false;
+        }
         let Some(flow) = self.flows.get_mut(&id) else {
             return false;
         };
@@ -1328,7 +1332,7 @@ impl Session {
             return false;
         }
         self.next_rev += 1;
-        flow.path = label.into().trim().to_string();
+        flow.path = trimmed;
         flow.rev = self.next_rev;
         true
     }

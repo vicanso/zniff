@@ -163,6 +163,17 @@ fn publish_detail_with_flows(
     let diff_loading = base_state
         .as_ref()
         .is_some_and(|base| unloaded || base.detail_unloaded());
+    let diff_baseline_label = match &base_state {
+        Some(base) => {
+            let target = if base.path.is_empty() {
+                base.host.as_str()
+            } else {
+                base.path.as_str()
+            };
+            format!("#{} {} {target}", base.id, base.method)
+        }
+        None => String::new(),
+    };
     let (diff_old, diff_new) = match base_state {
         Some(base) if !diff_loading => {
             let scope = shown.diff_scope.get();
@@ -416,6 +427,7 @@ fn publish_detail_with_flows(
     shown.diff.set(diff);
     shown.diff_old.set(diff_old);
     shown.diff_new.set(diff_new);
+    shown.diff_baseline_label.set(diff_baseline_label);
     shown.req_headers_loading.set(req_headers_loading);
     shown.res_headers_loading.set(res_headers_loading);
     shown.req_body_loading.set(req_body_loading);

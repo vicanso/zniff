@@ -285,6 +285,9 @@ pub(crate) fn marker_detail_card(
         edit_label.set(cur);
     });
     let controls_count = controls.clone();
+    let controls_ro = controls.clone();
+    let controls_ro_del = controls.clone();
+    let controls_ro_note = controls.clone();
     let controls_rename = controls.clone();
     let controls_rename_enter = controls.clone();
     let controls_copy = controls.clone();
@@ -367,64 +370,102 @@ pub(crate) fn marker_detail_card(
                     .text_size(px(TEXT_SM))
                     .text_color(fg_secondary()),
                 )
-                .child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .gap_2()
-                        .child(
-                            input()
-                                .flex_1()
-                                .h(px(ControlSize::Sm.height()))
-                                .px_2()
-                                .rounded(px(RADIUS_MD))
-                                .border_1()
-                                .border_color(border_control())
-                                .bg(bg_canvas())
-                                .text_size(px(TEXT_SM))
-                                .text_color(fg_primary())
-                                .placeholder(tr("重命名标记…", "Rename marker…"))
-                                .value(move || edit_label.get())
-                                .on_change(move |v: &str| edit_label.set(v.to_string()))
-                                .on_submit(move |_: &str| {
-                                    if let Some(id) = selected.get_untracked() {
-                                        controls_rename_enter
-                                            .hub
-                                            .rename_marker(id, edit_label.get_untracked());
-                                    }
-                                }),
-                        )
-                        .child(
-                            view()
-                                .role(AccessibilityRole::Button)
-                                .h(px(ControlSize::Sm.height()))
-                                .px_2p5()
-                                .rounded(px(RADIUS_MD))
-                                .border_1()
-                                .border_color(border_control())
-                                .bg(bg_control())
-                                .hover(|s| s.bg(bg_control_hover()))
-                                .active(|s| s.bg(bg_control_active()))
-                                .transition_colors()
-                                .duration(MOTION_INSTANT_MS)
-                                .ease_out()
-                                .focus_visible(apply_focus_ring)
-                                .items_center()
-                                .justify_center()
-                                .on_press(move || {
-                                    if let Some(id) = selected.get_untracked() {
-                                        controls_rename
-                                            .hub
-                                            .rename_marker(id, edit_label.get_untracked());
-                                    }
-                                })
-                                .child(
-                                    control_text(tr("重命名", "Rename"))
-                                        .text_size(px(TEXT_SM))
-                                        .text_color(fg_secondary()),
-                                ),
-                        ),
-                )
+                .child(when(
+                    move || !is_active_tab_read_only(&controls_ro),
+                    move || {
+                        let controls_rename_enter = controls_rename_enter.clone();
+                        let controls_rename = controls_rename.clone();
+                        let rename_empty = move || edit_label.get().trim().is_empty();
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                input()
+                                    .flex_1()
+                                    .h(px(ControlSize::Sm.height()))
+                                    .px_2()
+                                    .rounded(px(RADIUS_MD))
+                                    .border_1()
+                                    .border_color(border_control())
+                                    .bg(bg_canvas())
+                                    .text_size(px(TEXT_SM))
+                                    .text_color(fg_primary())
+                                    .placeholder(tr("重命名标记…", "Rename marker…"))
+                                    .placeholder_color(move || color(fg_muted()))
+                                    .value(move || edit_label.get())
+                                    .on_change(move |v: &str| edit_label.set(v.to_string()))
+                                    .on_submit(move |_: &str| {
+                                        if guard_read_only_tab(&controls_rename_enter) {
+                                            return;
+                                        }
+                                        let next = edit_label.get_untracked();
+                                        if next.trim().is_empty() {
+                                            return;
+                                        }
+                                        if let Some(id) = selected.get_untracked() {
+                                            controls_rename_enter.hub.rename_marker(id, next);
+                                        }
+                                    }),
+                            )
+                            .child(
+                                view()
+                                    .role(AccessibilityRole::Button)
+                                    .h(px(ControlSize::Sm.height()))
+                                    .px_2p5()
+                                    .rounded(px(RADIUS_MD))
+                                    .border_1()
+                                    .border_color(border_control())
+                                    .bg(bg_control())
+                                    .hover(|s| {
+                                        s.bg(move || {
+                                            if rename_empty() {
+                                                bg_control()
+                                            } else {
+                                                bg_control_hover()
+                                            }
+                                        })
+                                    })
+                                    .active(|s| s.bg(bg_control_active()))
+                                    .transition_colors()
+                                    .duration(MOTION_INSTANT_MS)
+                                    .ease_out()
+                                    .focus_visible(apply_focus_ring)
+                                    .disabled(rename_empty)
+                                    .disabled_style(|s| s.opacity(0.5))
+                                    .items_center()
+                                    .justify_center()
+                                    .on_press(move || {
+                                        if guard_read_only_tab(&controls_rename) {
+                                            return;
+                                        }
+                                        let next = edit_label.get_untracked();
+                                        if next.trim().is_empty() {
+                                            return;
+                                        }
+                                        if let Some(id) = selected.get_untracked() {
+                                            controls_rename.hub.rename_marker(id, next);
+                                        }
+                                    })
+                                    .child(
+                                        control_text(tr("重命名", "Rename"))
+                                            .text_size(px(TEXT_SM))
+                                            .text_color(fg_secondary()),
+                                    ),
+                            )
+                    },
+                ))
+                .child(when(
+                    move || is_active_tab_read_only(&controls_ro_note),
+                    move || {
+                        text(tr(
+                            "只读导入会话：无法重命名或删除时间标记",
+                            "Read-only imported tab: markers cannot be renamed or deleted",
+                        ))
+                        .text_size(px(TEXT_XS))
+                        .text_color(fg_muted())
+                    },
+                ))
                 .child(
                     view()
                         .flex_row()
@@ -480,43 +521,50 @@ pub(crate) fn marker_detail_card(
                                 .on_press(move || {
                                     let label = shown.url.get_untracked();
                                     set_clipboard(label);
-                                    let _ = &controls_copy;
+                                    set_status(&controls_copy, StatusMsg::CopiedMarker);
                                 })
                                 .child(
-                                    control_text(tr("复制标签", "Copy label"))
+                                    control_text(tr("复制标记名称", "Copy marker label"))
                                         .text_size(px(TEXT_SM))
                                         .text_color(fg_secondary()),
                                 ),
                         )
-                        .child(
-                            view()
-                                .role(AccessibilityRole::Button)
-                                .h(px(ControlSize::Sm.height()))
-                                .px_3()
-                                .rounded(px(RADIUS_MD))
-                                .border_1()
-                                .border_color(status_err_bg())
-                                .bg(bg_control())
-                                .hover(|s| s.bg(status_err_bg()))
-                                .active(|s| s.bg(bg_control_active()))
-                                .transition_colors()
-                                .duration(MOTION_INSTANT_MS)
-                                .ease_out()
-                                .focus_visible(apply_focus_ring)
-                                .items_center()
-                                .justify_center()
-                                .on_press(move || {
-                                    if let Some(id) = selected.get_untracked() {
-                                        controls_del.hub.remove_marker(id);
-                                        selected.set(None);
-                                    }
-                                })
-                                .child(
-                                    control_text(tr("删除标记", "Delete marker"))
-                                        .text_size(px(TEXT_SM))
-                                        .text_color(status_err_fg()),
-                                ),
-                        ),
+                        .child(when(
+                            move || !is_active_tab_read_only(&controls_ro_del),
+                            move || {
+                                let controls_del = controls_del.clone();
+                                view()
+                                    .role(AccessibilityRole::Button)
+                                    .h(px(ControlSize::Sm.height()))
+                                    .px_3()
+                                    .rounded(px(RADIUS_MD))
+                                    .border_1()
+                                    .border_color(status_err_bg())
+                                    .bg(bg_control())
+                                    .hover(|s| s.bg(status_err_bg()))
+                                    .active(|s| s.bg(bg_control_active()))
+                                    .transition_colors()
+                                    .duration(MOTION_INSTANT_MS)
+                                    .ease_out()
+                                    .focus_visible(apply_focus_ring)
+                                    .items_center()
+                                    .justify_center()
+                                    .on_press(move || {
+                                        if guard_read_only_tab(&controls_del) {
+                                            return;
+                                        }
+                                        if let Some(id) = selected.get_untracked() {
+                                            controls_del.hub.remove_marker(id);
+                                            selected.set(None);
+                                        }
+                                    })
+                                    .child(
+                                        control_text(tr("删除标记", "Delete marker"))
+                                            .text_size(px(TEXT_SM))
+                                            .text_color(status_err_fg()),
+                                    )
+                            },
+                        )),
                 ),
         )
 }

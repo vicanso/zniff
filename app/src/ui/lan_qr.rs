@@ -42,12 +42,48 @@ pub(crate) fn publish_lan(
     let ip = chosen.as_ref().map(|addr| addr.ip);
     addrs_out.set(addrs);
     choice.set(ip.map(|ip| ip.to_string()).unwrap_or_default());
-    let url = cert_url(listen, ip);
-    url_out.set(url.clone());
-    qr_out.set(match ip {
+    #[cfg_attr(not(target_arch = "wasm32"), allow(unused_mut))]
+    let mut url = cert_url(listen, ip);
+    #[cfg_attr(not(target_arch = "wasm32"), allow(unused_mut))]
+    let mut qr = match ip {
         Some(ip) if !url.is_empty() => write_ca_qr(&url, ip).unwrap_or_default(),
         _ => String::new(),
-    });
+    };
+    #[cfg(target_arch = "wasm32")]
+    if url.is_empty()
+        && let Some((_, port)) = listen.rsplit_once(':')
+        && let Ok(port_num) = port.parse::<u16>()
+        && port_num > 0
+        && let Some(host) = proxy::web_base_host()
+    {
+        url = format!("http://{host}:{port_num}/zniff");
+        qr = write_ca_qr(&url, Ipv4Addr::LOCALHOST).unwrap_or_default();
+    }
+    url_out.set(url);
+    qr_out.set(qr);
+}
+
+/// Returns the HTTP proxy base URL (`http://<host>:<port>`) suitable for pointing
+/// clients at this zniff instance.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub(crate) fn client_proxy_url(controls: &Controls) -> String {
+    let port = lock_port(&controls.listen_port);
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        format!("http://127.0.0.1:{port}")
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        if let Some(host) = proxy::web_base_host() {
+            return format!("http://{host}:{port}");
+        }
+        if lock_bool(&controls.listen_all)
+            && let Some(ip) = choose_lan(&lan_addrs(), routed_v4(), "").map(|a| a.ip)
+        {
+            return format!("http://{ip}:{port}");
+        }
+        format!("http://127.0.0.1:{port}")
+    }
 }
 
 pub(crate) fn cert_url(listen: &str, ip: Option<Ipv4Addr>) -> String {
@@ -153,7 +189,7 @@ pub(crate) fn usable_v4(ip: Ipv4Addr) -> bool {
 pub(crate) fn routed_v4() -> Option<Ipv4Addr> {
     #[cfg(target_arch = "wasm32")]
     {
-        None
+        proxy::server_routed_v4()
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -168,6 +204,20 @@ pub(crate) fn routed_v4() -> Option<Ipv4Addr> {
 
 pub(crate) fn lan_addrs() -> Vec<LanAddr> {
     let mut addrs = list_v4_addrs();
+    #[cfg(target_arch = "wasm32")]
+    if let Some(host) = proxy::web_base_host()
+        && let Ok(ip) = host.parse::<Ipv4Addr>()
+        && usable_v4(ip)
+        && !addrs.iter().any(|item| item.ip == ip)
+    {
+        addrs.insert(
+            0,
+            LanAddr {
+                name: "web".to_string(),
+                ip,
+            },
+        );
+    }
     addrs.sort_by(|left, right| {
         lan_rank(left)
             .cmp(&lan_rank(right))
@@ -278,7 +328,12 @@ pub(crate) fn c_array_to_string(bytes: &[i8]) -> String {
     String::from_utf8_lossy(&raw).into_owned()
 }
 
-#[cfg(not(any(unix, windows)))]
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn list_v4_addrs() -> Vec<LanAddr> {
+    proxy::server_lan_addrs()
+}
+
+#[cfg(all(not(target_arch = "wasm32"), not(any(unix, windows))))]
 pub(crate) fn list_v4_addrs() -> Vec<LanAddr> {
     Vec::new()
 }

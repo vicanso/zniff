@@ -30,6 +30,10 @@ pub(crate) fn submit_compose(
     let url_now = compose.url.get();
     let headers_now = compose.headers.get();
     let body_now = compose.body.get();
+    if selected.get().is_none() && url_now.trim().is_empty() {
+        set_status(controls, StatusMsg::NeedUrl);
+        return;
+    }
     if !url_now.trim().is_empty() {
         let entry = (
             if method_now.trim().is_empty() {
@@ -265,7 +269,17 @@ pub(crate) fn compose_box(
                                     .focus_visible(apply_focus_ring)
                                     .flex_row()
                                     .items_center()
-                                    .tooltip(label_tip("Cmd/Ctrl+Enter 发送", "Cmd/Ctrl+Enter to send"))
+                                    .tooltip(tooltip().child(ui_tooltip_surface(
+                                        text(move || -> SharedString {
+                                            if is_req_break() {
+                                                t(ui_lang(langs), "Cmd/Ctrl+Enter 放行", "Cmd/Ctrl+Enter to continue").into()
+                                            } else {
+                                                t(ui_lang(langs), "Cmd/Ctrl+Enter 发送", "Cmd/Ctrl+Enter to send").into()
+                                            }
+                                        })
+                                        .text_size(px(TEXT_SM))
+                                        .text_color(fg_primary()),
+                                    )))
                                     .on_press(move || {
                                         submit_compose(&controls, compose, selected, paused);
                                     })
@@ -610,20 +624,72 @@ pub(crate) fn compose_box(
                             },
                         )),
                 )
-                .child(compose_editor(
-                    compose.headers,
-                    tr("一行一个 Name: value", "One Name: value per line"),
-                    120.0,
-                    "plaintext",
-                    controls_touch_headers,
-                ))
-                .child(compose_body_editor(
-                    compose.body,
-                    compose.headers,
-                    tr("body", "body"),
-                    160.0,
-                    controls_touch_body,
-                )),
+                .child(
+                    view()
+                        .w_full()
+                        .gap_1()
+                        .flex_col()
+                        .child(
+                            text({
+                                let langs = ui_langs();
+                                move || -> SharedString {
+                                    if compose.response.get() {
+                                        t(
+                                            ui_lang(langs),
+                                            "响应头 (Name: Value)",
+                                            "Response headers (Name: Value)",
+                                        )
+                                        .into()
+                                    } else {
+                                        t(
+                                            ui_lang(langs),
+                                            "请求头 (Name: Value)",
+                                            "Request headers (Name: Value)",
+                                        )
+                                        .into()
+                                    }
+                                }
+                            })
+                            .text_size(px(TEXT_XS))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(fg_secondary()),
+                        )
+                        .child(compose_editor(
+                            compose.headers,
+                            tr("一行一个 Name: value", "One Name: value per line"),
+                            120.0,
+                            "plaintext",
+                            controls_touch_headers,
+                        )),
+                )
+                .child(
+                    view()
+                        .w_full()
+                        .gap_1()
+                        .flex_col()
+                        .child(
+                            text({
+                                let langs = ui_langs();
+                                move || -> SharedString {
+                                    if compose.response.get() {
+                                        t(ui_lang(langs), "响应正文", "Response body").into()
+                                    } else {
+                                        t(ui_lang(langs), "请求正文", "Request body").into()
+                                    }
+                                }
+                            })
+                            .text_size(px(TEXT_XS))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(fg_secondary()),
+                        )
+                        .child(compose_body_editor(
+                            compose.body,
+                            compose.headers,
+                            tr("body", "body"),
+                            160.0,
+                            controls_touch_body,
+                        )),
+                ),
         )
 }
 
@@ -981,17 +1047,17 @@ fn compose_recent_menu(compose: Compose) -> impl IntoElement {
                                         recent_open.set(false);
                                     })
                                     .child(
-                                        text(move || {
+                                        mono(move || {
                                             SharedString::from(read_m.with(|it| it.0.clone()))
                                         })
                                         .number_of_lines(1)
                                         .flex_shrink_0()
                                         .text_size(px(TEXT_XS))
                                         .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(accent_blue()),
+                                        .text_color(move || read_m.with(|it| method_fg(&it.0))),
                                     )
                                     .child(
-                                        text(move || {
+                                        mono(move || {
                                             SharedString::from(read_u.with(|it| it.1.clone()))
                                         })
                                         .flex_1()

@@ -889,10 +889,14 @@ pub(crate) fn end_share(controls: &Controls, share_id: Signal<String>) {
 /// Address other people can open. `local_only` when the listener is not on every interface.
 pub(crate) fn share_base(controls: &Controls) -> (String, bool) {
     let port = lock_port(&controls.listen_port);
-    if lock_bool(&controls.listen_all)
-        && let Some(ip) = choose_lan(&lan_addrs(), routed_v4(), "").map(|addr| addr.ip)
-    {
-        return (format!("http://{ip}:{port}"), false);
+    if lock_bool(&controls.listen_all) {
+        if let Some(ip) = choose_lan(&lan_addrs(), routed_v4(), "").map(|addr| addr.ip) {
+            return (format!("http://{ip}:{port}"), false);
+        }
+        #[cfg(target_arch = "wasm32")]
+        if let Some(host) = proxy::web_base_host() {
+            return (format!("http://{host}:{port}"), false);
+        }
     }
     (format!("http://127.0.0.1:{port}"), true)
 }

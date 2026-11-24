@@ -262,7 +262,10 @@ fn about_meta_badge(label: impl IntoReactive<SharedString>) -> impl IntoElement 
 /// instead of macOS's default `orderFrontStandardAboutPanel:`, while keeping standard
 /// Hide/Quit/Edit/Window roles and shortcuts intact.
 #[cfg(target_os = "macos")]
-pub(crate) fn install_macos_application_menu(about_open: Signal<bool>) {
+pub(crate) fn install_macos_application_menu(
+    about_open: Signal<bool>,
+    settings_open: Signal<bool>,
+) {
     use nsh_core::desktop::MenuRole;
     use nsh_core::element::desktop::{MenuItem, set_application_menu};
 
@@ -275,6 +278,9 @@ pub(crate) fn install_macos_application_menu(about_open: Signal<bool>) {
                 [
                     MenuItem::new(t(lang, "关于 zniff", "About zniff"))
                         .on_select(move || about_open.set(true)),
+                    MenuItem::new(t(lang, "设置…", "Settings…"))
+                        .shortcut("cmd+,")
+                        .on_select(move || settings_open.set(true)),
                     MenuItem::separator(),
                     MenuItem::role(MenuRole::Hide),
                     MenuItem::role(MenuRole::HideOthers),
@@ -284,7 +290,7 @@ pub(crate) fn install_macos_application_menu(about_open: Signal<bool>) {
                 ],
             ),
             MenuItem::submenu(
-                "Edit",
+                t(lang, "编辑", "Edit"),
                 [
                     MenuItem::role(MenuRole::Undo),
                     MenuItem::role(MenuRole::Redo),
@@ -296,7 +302,7 @@ pub(crate) fn install_macos_application_menu(about_open: Signal<bool>) {
                 ],
             ),
             MenuItem::submenu(
-                "Window",
+                t(lang, "窗口", "Window"),
                 [
                     MenuItem::role(MenuRole::Minimize),
                     MenuItem::role(MenuRole::Zoom),

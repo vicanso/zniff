@@ -30,8 +30,8 @@ pub(crate) const SHORTCUT_SECTIONS: &[ShortcutSection] = &[
             },
             ShortcutEntry {
                 keys: &["mod+f"],
-                zh: "聚焦主过滤输入框",
-                en: "Focus main filter input",
+                zh: "聚焦列表过滤输入框",
+                en: "Focus list filter input",
             },
             ShortcutEntry {
                 keys: &["escape"],

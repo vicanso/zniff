@@ -128,6 +128,11 @@ pub enum StatusMsg {
         side: Side,
         hex: bool,
     },
+    CopiedJsonValue,
+    CopiedMessage,
+    CopiedThinking,
+    CopiedToolArgs,
+    CopiedMarker,
     EmptyResponse,
     SaveCancelled,
     SaveFailed(String),
@@ -135,6 +140,7 @@ pub enum StatusMsg {
     FlowGone,
     BreakDone,
     NeedSelection,
+    NeedUrl,
     Replayed(u64),
     Repeated {
         id: u64,
@@ -424,6 +430,7 @@ impl StatusMsg {
                         "Transparent proxy settings were not saved:",
                     ),
                 };
+                let err = localize_error(lang, err);
                 format!("{name} {err}")
             }
             Self::ConfigBroken { err } => match lang {
@@ -503,21 +510,37 @@ impl StatusMsg {
                     format!("{} {side} body", t(lang, "已复制", "Copied"))
                 }
             }
+            Self::CopiedJsonValue => t(lang, "已复制 JSON 值", "Copied JSON value").into(),
+            Self::CopiedMessage => t(lang, "已复制消息", "Copied message").into(),
+            Self::CopiedThinking => t(lang, "已复制思考过程", "Copied thinking").into(),
+            Self::CopiedToolArgs => t(lang, "已复制工具参数", "Copied tool arguments").into(),
+            Self::CopiedMarker => t(lang, "已复制标记名称", "Copied marker label").into(),
             Self::EmptyResponse => t(lang, "响应 body 是空的", "Response body is empty").into(),
             Self::SaveCancelled => t(lang, "已取消保存", "Save cancelled").into(),
             Self::SaveFailed(err) => format!(
-                "{} {err}",
-                t(lang, "没有写成文件:", "Could not write the file:")
+                "{} {}",
+                t(lang, "没有写成文件:", "Could not write the file:"),
+                localize_error(lang, err)
             ),
             Self::Saved(path) => format!("{} {path}", t(lang, "已保存", "Saved")),
             Self::FlowGone => t(lang, "这条记录已经不在了", "That flow is gone").into(),
             Self::BreakDone => t(lang, "这个断点已经结束", "That break already finished").into(),
             Self::NeedSelection => t(lang, "先选一条流量", "Select a flow first").into(),
+            Self::NeedUrl => t(
+                lang,
+                "请输入请求 URL（或粘贴 cURL 命令）",
+                "Enter a request URL (or paste a cURL command)",
+            )
+            .into(),
             Self::Replayed(id) => format!("{} #{id}", t(lang, "已重放为", "Replayed as")),
             Self::Repeated { id, count } => {
                 format!("{} #{id} ×{count}", t(lang, "已批量重放", "Repeated"))
             }
-            Self::ReplayFailed(err) => format!("{} {err}", t(lang, "重放失败:", "Replay failed:")),
+            Self::ReplayFailed(err) => format!(
+                "{} {}",
+                t(lang, "重放失败:", "Replay failed:"),
+                localize_error(lang, err)
+            ),
             Self::ExportCancelled => t(lang, "已取消导出", "Export cancelled").into(),
             Self::ExportFailed(err) => format!("{} {err}", t(lang, "导出失败:", "Export failed:")),
             Self::Exported(path) => format!("{} {path}", t(lang, "已导出", "Exported")),
@@ -594,7 +617,11 @@ impl StatusMsg {
             )
             .into(),
             Self::RelayPushFailed(err) => {
-                format!("{} {err}", t(lang, "中转推送失败:", "Relay push failed:"))
+                format!(
+                    "{} {}",
+                    t(lang, "中转推送失败:", "Relay push failed:"),
+                    localize_error(lang, err)
+                )
             }
             Self::RelayConnected(url) => {
                 format!(
@@ -901,7 +928,7 @@ impl StatusMsg {
             }
             Self::TransparentProxyFailed(err) => match lang {
                 Lang::Zh => format!("透明按进程抓包失败: {err}"),
-                Lang::En => format!("Transparent capture failed: {err}"),
+                Lang::En => format!("Transparent capture failed: {}", localize_error(lang, err)),
             },
             Self::TransparentProxyNeedsApplications => if cfg!(target_os = "linux") {
                 t(
@@ -938,6 +965,11 @@ impl StatusMsg {
             | Self::CopiedHeaders { .. }
             | Self::CopiedCurl { .. }
             | Self::CopiedBody { .. }
+            | Self::CopiedJsonValue
+            | Self::CopiedMessage
+            | Self::CopiedThinking
+            | Self::CopiedToolArgs
+            | Self::CopiedMarker
             | Self::CopiedEnv
             | Self::CopiedMcpConfig(_)
             | Self::CopiedFetch
@@ -979,6 +1011,8 @@ impl StatusMsg {
             | Self::UpdateUpToDate(_)
             | Self::UpdateAvailable(_)
             | Self::ClearedFlows { .. }
+            | Self::UiZoomChanged(_)
+            | Self::UpdateOpenedInstaller(_)
             | Self::TransparentProxyStarted
             | Self::TransparentProxyStopped => Some(false),
             Self::ExportFailed(_)
@@ -987,6 +1021,7 @@ impl StatusMsg {
             | Self::PrefUnsaved { .. }
             | Self::PortUnsaved { .. }
             | Self::ProxyOptionUnsaved(_)
+            | Self::ProxyManual(_)
             | Self::ReplayFailed(_)
             | Self::InstallFailed(_)
             | Self::RemoveFailed(_)
@@ -1008,7 +1043,9 @@ impl StatusMsg {
             | Self::RelayViewOnly
             | Self::RelayPushFailed(_)
             | Self::NeedSelection
+            | Self::NeedUrl
             | Self::FlowGone
+            | Self::BreakDone
             | Self::IosSimNoneBooted
             | Self::IosSimFailed(_)
             | Self::BrowserLaunchFailed(_)
@@ -1045,6 +1082,11 @@ impl StatusMsg {
             | Self::CopiedHeaders { .. }
             | Self::CopiedCurl { .. }
             | Self::CopiedBody { .. }
+            | Self::CopiedJsonValue
+            | Self::CopiedMessage
+            | Self::CopiedThinking
+            | Self::CopiedToolArgs
+            | Self::CopiedMarker
             | Self::CopiedEnv
             | Self::CopiedMcpConfig(_)
             | Self::CopiedFetch
@@ -1067,8 +1109,8 @@ impl StatusMsg {
             | Self::CopiedConfigPath(_)
             | Self::CopiedOpenApi { .. }
             | Self::CopiedSystemInfo
-            | Self::Shared { .. }
-            | Self::RelayConnected(_) => t(lang, "已复制到剪贴板", "Copied to Clipboard"),
+            | Self::Shared { .. } => t(lang, "已复制到剪贴板", "Copied to Clipboard"),
+            Self::RelayConnected(_) => t(lang, "中继已恢复", "Relay Reconnected"),
             Self::ConfigReset { .. } => t(lang, "配置已重置", "Config Reset"),
             Self::PrefUnsaved { .. } | Self::PortUnsaved { .. } | Self::ProxyOptionUnsaved(_) => {
                 t(lang, "保存失败", "Save Failed")
@@ -1078,6 +1120,8 @@ impl StatusMsg {
                 t(lang, "检查更新", "Update Check")
             }
             Self::ClearedFlows { .. } => t(lang, "已清空会话", "Session Cleared"),
+            Self::UiZoomChanged(_) => t(lang, "界面缩放", "UI Zoom"),
+            Self::NeedUrl => t(lang, "缺少 URL", "Missing URL"),
             Self::WatchAlert { .. } => t(lang, "匹配提醒命中", "Watch Alert"),
             Self::ExportFailed(_)
             | Self::ImportFailed(_)
@@ -1176,6 +1220,20 @@ pub fn localize_error(lang: Lang, text: &str) -> String {
         ),
         ("客户端 TLS 超时", "Client TLS timed out"),
         ("断点丢弃", "Dropped at the break"),
+        ("没有这条记录", "Flow not found"),
+        ("会话标记不能重放", "Markers cannot be replayed"),
+        ("隧道不能重放", "Tunnel flows cannot be replayed"),
+        ("中继流量只能查看", "Relay flows are read-only"),
+        ("没有连上", "Could not connect to server"),
+        ("没有分享地址", "No share URL returned"),
+        (
+            "允许域名已由启动参数或环境变量锁定",
+            "Allowed hosts are locked by CLI flags or environment variables",
+        ),
+        (
+            "当前构建未内嵌系统扩展",
+            "This build does not include the embedded system extension",
+        ),
         (
             "规则阻断 (连接已断开)",
             "Blocked by rule (connection dropped)",

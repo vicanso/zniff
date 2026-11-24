@@ -247,7 +247,7 @@ pub(crate) fn toolbar_network_preset_popover(
                 ))
                 .child(glyph_px(
                     ControlSize::Sm.icon_size(),
-                    || Glyph::Globe,
+                    || Glyph::Gauge,
                     move || {
                         color(if is_throttled() {
                             status_warn_fg()

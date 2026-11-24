@@ -521,7 +521,7 @@ pub(crate) fn toolbar_update_pill(
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn update_menu_section(
-    open: Signal<bool>,
+    open: Option<Signal<bool>>,
     update_state: Signal<UpdateState>,
     controls: Arc<Controls>,
 ) -> impl IntoElement {
@@ -559,7 +559,9 @@ pub(crate) fn update_menu_section(
                                 SharedString::from(format!("v{} → {ver}", updater::version()))
                             },
                             move || {
-                                open.set(false);
+                                if let Some(menu_open) = open {
+                                    menu_open.set(false);
+                                }
                                 if let Some(ver) = update_state.get().nudge {
                                     start_upgrade(controls_up.clone(), ver);
                                 }
@@ -636,7 +638,9 @@ pub(crate) fn update_menu_section(
                         _ => SharedString::default(),
                     },
                     move || {
-                        open.set(false);
+                        if let Some(menu_open) = open {
+                            menu_open.set(false);
+                        }
                         relaunch_and_exit(&controls);
                     },
                 )
@@ -659,7 +663,9 @@ pub(crate) fn update_menu_section(
                         _ => SharedString::default(),
                     },
                     move || {
-                        open.set(false);
+                        if let Some(menu_open) = open {
+                            menu_open.set(false);
+                        }
                         quit_for_manual_install(&controls);
                     },
                 )
@@ -709,7 +715,9 @@ pub(crate) fn update_menu_section(
             },
             move || !update_state.get().is_busy(),
             move || {
-                open.set(false);
+                if let Some(menu_open) = open {
+                    menu_open.set(false);
+                }
                 check_update_manual(controls_check.clone());
             },
         ))

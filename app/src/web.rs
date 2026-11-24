@@ -663,6 +663,14 @@ struct StateRuntime {
     paused_queue: Vec<PausedBody>,
     allow_denied_total: u64,
     allow_denied_hosts: Vec<(String, u64)>,
+    lan_addrs: Vec<LanAddrBody>,
+    routed_v4: Option<String>,
+}
+
+#[derive(Serialize)]
+struct LanAddrBody {
+    name: String,
+    ip: String,
 }
 
 #[derive(Serialize)]
@@ -1211,6 +1219,14 @@ fn state_runtime(slot: &Slot) -> StateRuntime {
             .collect(),
         allow_denied_total: denied.total,
         allow_denied_hosts: denied.hosts,
+        lan_addrs: crate::ui::lan_addrs()
+            .into_iter()
+            .map(|addr| LanAddrBody {
+                name: addr.name,
+                ip: addr.ip.to_string(),
+            })
+            .collect(),
+        routed_v4: crate::ui::routed_v4().map(|ip| ip.to_string()),
     }
 }
 
@@ -2341,8 +2357,63 @@ fn persist_slot_config(
     }
 }
 
+fn save_inline_mock_op(
+    slot: &mut Slot,
+    value: &Value,
+    save_error: &mut Option<String>,
+) -> std::result::Result<(String, String), Reply> {
+    let host = value
+        .get("host")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    let path = value.get("path").and_then(Value::as_str).unwrap_or("");
+    let flow_id = json_id(value).unwrap_or(0);
+    let status = value
+        .get("status")
+        .and_then(Value::as_u64)
+        .and_then(|c| u16::try_from(c).ok())
+        .filter(|c| (100..600).contains(c))
+        .ok_or_else(|| json_reply(400, "Bad Request", &json!({"error": "invalid status"})))?;
+    let edited_headers = json_headers(value.get("headers")).unwrap_or_default();
+    let original_headers = json_headers(value.get("original_headers")).unwrap_or_default();
+    let body_bytes = json_body(value).unwrap_or_default();
+    let base_dir = slot
+        .prefs
+        .config_dir
+        .clone()
+        .unwrap_or_else(crate::ca::data_dir);
+    let input = crate::ui::InlineMockSaveInput {
+        host,
+        path,
+        flow_id,
+        status,
+        edited_headers: &edited_headers,
+        original_headers: &original_headers,
+        body_bytes: &body_bytes,
+    };
+    let (target, next_rules) =
+        crate::ui::persist_inline_mock_files(&base_dir, &slot.hub.rules_text(), &input).map_err(
+            |err| {
+                json_reply(
+                    500,
+                    "Internal Server Error",
+                    &json!({"error": err.to_string()}),
+                )
+            },
+        )?;
+    slot.hub.set_rules(&next_rules);
+    slot.hub.set_rules_enabled(true);
+    *save_error = persist_slot_config(slot, |cfg| {
+        cfg.rules = next_rules.clone();
+        cfg.rules_enabled = true;
+    });
+    Ok((target.display().to_string(), next_rules))
+}
+
 fn sync_hub_op(slot: &mut Slot, op: &str, value: &Value) -> Reply {
     let mut save_error = None;
+    let mut mock_meta: Option<(String, String)> = None;
     match op {
         "set_bypass" => {
             let text = json_text(value);
@@ -2662,6 +2733,10 @@ fn sync_hub_op(slot: &mut Slot, op: &str, value: &Value) -> Reply {
             let document = value.get("value").unwrap_or(&Value::Null);
             slot.hub.import_har(document);
         }
+        "save_inline_mock" => match save_inline_mock_op(slot, value, &mut save_error) {
+            Ok(meta) => mock_meta = Some(meta),
+            Err(reply) => return reply,
+        },
         _ => return json_reply(400, "Bad Request", &json!({"error": "unknown op"})),
     }
     if matches!(
@@ -2676,10 +2751,17 @@ fn sync_hub_op(slot: &mut Slot, op: &str, value: &Value) -> Reply {
             | "delete_profile"
             | "sync_profiles"
             | "set_redact"
+            | "save_inline_mock"
     ) {
         slot.hub.touch();
     }
     let mut body = serde_json::to_value(state_value(slot)).unwrap_or_else(|_| json!({}));
+    if let Some((mock_path, rules)) = mock_meta
+        && let Some(obj) = body.as_object_mut()
+    {
+        obj.insert("mock_path".to_string(), json!(mock_path));
+        obj.insert("rules".to_string(), json!(rules));
+    }
     if let Some(err) = save_error
         && let Some(obj) = body.as_object_mut()
     {
@@ -4550,6 +4632,64 @@ mod tests {
         );
         let wake_json: Value = serde_json::from_str(body_of(&wake_resp)).unwrap();
         assert!(wake_json["session_rev"].as_u64().unwrap() > rev0);
+
+        drop(server);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn web_save_inline_mock_writes_body_file_and_exposes_lan_addrs() {
+        let dir = std::env::temp_dir().join(format!("zniff-web-mock-lan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+        let capture_port = reserve_port();
+        let prefs = WebPrefs {
+            config_dir: Some(dir.clone()),
+            ..WebPrefs::default()
+        };
+        let server = WebServer::start_with_prefs(
+            "127.0.0.1:0".parse().unwrap(),
+            hub.clone(),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            capture_port,
+            None,
+            prefs,
+        )
+        .unwrap();
+        let web = server.addr();
+
+        let (status, raw_state) = exchange(
+            web,
+            "GET /api/state HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert_eq!(status, 200);
+        let state: Value = serde_json::from_str(body_of(&raw_state)).unwrap();
+        assert!(state["lan_addrs"].is_array());
+
+        let body_bytes = br#"{"mocked":true,"service":"api.vicanso.dev"}"#;
+        let payload = json!({
+            "op": "save_inline_mock",
+            "host": "api.vicanso.dev",
+            "path": "/v1/hello",
+            "flow_id": 42,
+            "status": 201,
+            "headers": [["Content-Type", "application/json"], ["X-Test", "ok"]],
+            "original_headers": [["Content-Type", "application/json"]],
+            "body_b64": session::base64_encode(body_bytes),
+        });
+        let (status, raw_mock) = post(web, "/api/hub", &payload.to_string()).await;
+        assert_eq!(status, 200, "{raw_mock}");
+        let mock_resp: Value = serde_json::from_str(body_of(&raw_mock)).unwrap();
+        let mock_path = mock_resp["mock_path"].as_str().unwrap();
+        assert_eq!(std::fs::read(mock_path).unwrap(), body_bytes);
+        let rules = mock_resp["rules"].as_str().unwrap();
+        assert!(rules.contains("map-local api.vicanso.dev/v1/hello"));
+        assert!(rules.contains(mock_path));
+        assert!(hub.rules_text().contains(mock_path));
+        assert!(hub.rules_enabled());
 
         drop(server);
         let _ = std::fs::remove_dir_all(&dir);

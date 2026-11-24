@@ -413,63 +413,57 @@ fn checklist_step_row(
     let props_hint_color = props.clone();
     let langs = ui_langs();
 
-    let row = view()
+    let content = view()
+        .flex_1()
+        .min_w(px(0.0))
+        .flex_col()
+        .gap_0p5()
+        .child(
+            text(move || -> SharedString {
+                let lang = ui_lang(langs);
+                let steps =
+                    compute_onboarding_checklist(&current_checklist_input(&props_title), lang);
+                steps[index].title.clone().into()
+            })
+            .text_size(px(TEXT_MD))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(fg_primary()),
+        )
+        .child(
+            text(move || -> SharedString {
+                let lang = ui_lang(langs);
+                let steps =
+                    compute_onboarding_checklist(&current_checklist_input(&props_hint), lang);
+                steps[index].hint.clone().into()
+            })
+            .text_size(px(TEXT_XS))
+            .text_color(move || {
+                let lang = ui_lang(langs);
+                let steps =
+                    compute_onboarding_checklist(&current_checklist_input(&props_hint_color), lang);
+                if step_id == ChecklistStepId::FirstHttps
+                    && steps[index].status == StepStatus::ActionRequired
+                {
+                    status_warn_fg()
+                } else {
+                    fg_muted()
+                }
+            }),
+        );
+
+    let content = match step_id {
+        ChecklistStepId::ProxyListening => content.child(step_proxy_actions(props)),
+        ChecklistStepId::RootCaTrusted => content.child(step_ca_actions(props)),
+        ChecklistStepId::FirstHttp | ChecklistStepId::FirstHttps => content,
+    };
+
+    view()
         .w_full()
         .flex_row()
         .items_start()
         .gap_2p5()
         .child(checklist_step_badge(props_status, index, step_id))
-        .child(
-            view()
-                .flex_1()
-                .min_w(px(0.0))
-                .flex_col()
-                .gap_0p5()
-                .child(
-                    text(move || -> SharedString {
-                        let lang = ui_lang(langs);
-                        let steps = compute_onboarding_checklist(
-                            &current_checklist_input(&props_title),
-                            lang,
-                        );
-                        steps[index].title.clone().into()
-                    })
-                    .text_size(px(TEXT_MD))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(fg_primary()),
-                )
-                .child(
-                    text(move || -> SharedString {
-                        let lang = ui_lang(langs);
-                        let steps = compute_onboarding_checklist(
-                            &current_checklist_input(&props_hint),
-                            lang,
-                        );
-                        steps[index].hint.clone().into()
-                    })
-                    .text_size(px(TEXT_XS))
-                    .text_color(move || {
-                        let lang = ui_lang(langs);
-                        let steps = compute_onboarding_checklist(
-                            &current_checklist_input(&props_hint_color),
-                            lang,
-                        );
-                        if step_id == ChecklistStepId::FirstHttps
-                            && steps[index].status == StepStatus::ActionRequired
-                        {
-                            status_warn_fg()
-                        } else {
-                            fg_muted()
-                        }
-                    }),
-                ),
-        );
-
-    match step_id {
-        ChecklistStepId::ProxyListening => row.child(step_proxy_actions(props)),
-        ChecklistStepId::RootCaTrusted => row.child(step_ca_actions(props)),
-        ChecklistStepId::FirstHttp | ChecklistStepId::FirstHttps => row,
-    }
+        .child(content)
 }
 
 fn checklist_step_status(props: &OnboardingProps, index: usize, lang: Lang) -> StepStatus {
@@ -561,9 +555,15 @@ fn step_proxy_actions(props: &OnboardingProps) -> impl IntoElement {
         move || !running.get(),
         move || {
             let c = controls.clone();
-            checklist_action_chip(tr("开始", "Start"), true, move || {
-                toggle_capture(c.clone())
-            })
+            view()
+                .w_full()
+                .pt_1()
+                .flex_row()
+                .child(checklist_action_chip(
+                    tr("开始", "Start"),
+                    true,
+                    move || toggle_capture(c.clone()),
+                ))
         },
     )
 }
@@ -581,12 +581,12 @@ fn step_ca_actions(props: &OnboardingProps) -> impl IntoElement {
     let untrusted = move || ca_ui.status.get() != ca::CaStatus::Trusted;
 
     view()
+        .w_full()
+        .pt_1()
         .flex_row()
         .flex_wrap()
         .items_center()
-        .justify_end()
         .gap_1p5()
-        .flex_shrink_0()
         .child(when(
             move || untrusted() && ca_ui.detected_external.with(|items| !items.is_empty()),
             move || {
@@ -642,8 +642,25 @@ fn step_ca_actions(props: &OnboardingProps) -> impl IntoElement {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn step_ca_actions(_props: &OnboardingProps) -> impl IntoElement {
+fn step_ca_actions(props: &OnboardingProps) -> impl IntoElement {
+    let controls = props.controls.clone();
+    let running = props.running;
+    let pending_qr = props.pending_qr;
+    let qr_open = props.qr_open;
     view()
+        .w_full()
+        .pt_1()
+        .flex_row()
+        .flex_wrap()
+        .items_center()
+        .gap_1p5()
+        .child(checklist_action_chip(
+            tr("手机扫码", "Mobile QR"),
+            false,
+            move || {
+                trigger_mobile_qr(&controls, running, pending_qr, qr_open);
+            },
+        ))
 }
 
 fn checklist_action_chip(

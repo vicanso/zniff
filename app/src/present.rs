@@ -13,6 +13,56 @@ pub fn parse_port(text: &str) -> Option<u16> {
     if port == 0 { None } else { Some(port) }
 }
 
+pub fn is_valid_port_input(text: &str) -> bool {
+    parse_port(text).is_some()
+}
+
+pub fn is_valid_upstream_proxy(text: &str) -> bool {
+    let text = text.trim();
+    if text.is_empty() {
+        return true;
+    }
+    if text.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let (rest, default_port) = if let Some((scheme, after)) = text.split_once("://") {
+        match scheme.to_ascii_lowercase().as_str() {
+            "http" => (after, 8080_u16),
+            "socks5" | "socks5h" => (after, 1080_u16),
+            _ => return false,
+        }
+    } else {
+        (text, 80_u16)
+    };
+    let authority = rest.split('/').next().unwrap_or(rest);
+    if authority.is_empty() || authority.contains('?') || authority.contains('#') {
+        return false;
+    }
+    let host_port = match authority.rsplit_once('@') {
+        Some((_, hp)) => hp,
+        None => authority,
+    };
+    if !host_port.starts_with('[') && host_port.matches(':').count() > 1 {
+        return false;
+    }
+    if let Some(after_open) = host_port.strip_prefix('[') {
+        let Some((host, tail)) = after_open.split_once(']') else {
+            return false;
+        };
+        if host.is_empty() {
+            return false;
+        }
+        if let Some(port_text) = tail.strip_prefix(':') {
+            return parse_port(port_text).is_some();
+        }
+        return tail.is_empty() && default_port > 0;
+    }
+    match host_port.rsplit_once(':') {
+        Some((host, port_text)) => !host.is_empty() && parse_port(port_text).is_some(),
+        None => !host_port.is_empty() && default_port > 0,
+    }
+}
+
 pub fn curl_command(flow: &Flow) -> String {
     let mut command = format!(
         "curl -X {} {}",

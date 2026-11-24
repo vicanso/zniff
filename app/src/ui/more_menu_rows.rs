@@ -962,7 +962,7 @@ fn cert_menu_row_actions(
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn external_ca_menu_row(
-    open: Signal<bool>,
+    open: Option<Signal<bool>>,
     ca_ui: CaSignals,
     controls: Arc<Controls>,
 ) -> impl IntoElement {
@@ -991,7 +991,7 @@ pub(crate) fn external_ca_menu_row(
 
 #[cfg(not(target_arch = "wasm32"))]
 fn external_ca_pill(
-    open: Signal<bool>,
+    open: Option<Signal<bool>>,
     ca_ui: CaSignals,
     controls: Arc<Controls>,
     kind: external_ca::ExternalCaKind,
@@ -1014,7 +1014,9 @@ fn external_ca_pill(
                         .with(|cur| cur.as_ref().is_some_and(|item| item.id == id))
                 },
                 move || {
-                    open.set(false);
+                    if let Some(menu_open) = open {
+                        menu_open.set(false);
+                    }
                     let already_active = ca_ui
                         .active_external
                         .with(|cur| cur.as_ref().is_some_and(|item| item.id == id));

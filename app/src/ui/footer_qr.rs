@@ -168,6 +168,15 @@ pub(crate) fn footer(
                 .flex_row()
                 .items_center()
                 .gap_1()
+                .tooltip(label_tip(
+                    "当前会话占用的估计内存；超过上限时优先淘汰未星标旧流量",
+                    "Estimated session memory footprint; oldest unstarred flows evict first at the cap",
+                ))
+                .child(
+                    text(tr("内存", "Mem"))
+                        .text_size(px(TEXT_XS))
+                        .text_color(fg_muted()),
+                )
                 .child(
                     mono(move || memory.get())
                         .tabular_nums()
@@ -744,15 +753,42 @@ pub(crate) fn lan_choice_row(
 
 pub(crate) fn port_field(port_text: Signal<String>, controls: Arc<Controls>) -> impl IntoElement {
     let dismiss = popover_dismiss_context();
+    let langs = ui_langs();
+    let port_invalid = move || !present::is_valid_port_input(&port_text.get());
     view()
         .flex_row()
         .items_center()
         .gap_1p5()
         .flex_shrink_0()
+        .tooltip(
+            tooltip().child(ui_tooltip_surface(
+                text(move || -> SharedString {
+                    let lang = ui_lang(langs);
+                    if port_invalid() {
+                        t(
+                            lang,
+                            "端口无效：请输入 1–65535 之间的数字（当前沿用旧端口）",
+                            "Invalid port: enter 1–65535 (previous port remains active)",
+                        )
+                        .into()
+                    } else {
+                        t(lang, "监听端口（1–65535）", "Listen port (1–65535)").into()
+                    }
+                })
+                .text_size(px(TEXT_SM))
+                .text_color(fg_primary()),
+            )),
+        )
         .child(
             text(tr("端口", "Port"))
                 .text_size(px(TEXT_XS))
-                .text_color(fg_muted()),
+                .text_color(move || {
+                    if port_invalid() {
+                        status_err_fg()
+                    } else {
+                        fg_muted()
+                    }
+                }),
         )
         .child(
             input()
@@ -765,8 +801,22 @@ pub(crate) fn port_field(port_text: Signal<String>, controls: Arc<Controls>) -> 
                 .rounded(px(RADIUS_SM))
                 .bg(bg_code())
                 .border_1()
-                .border_color(border_control())
-                .focus(|style| style.border_color(accent_blue()))
+                .border_color(move || {
+                    if port_invalid() {
+                        status_err_fg()
+                    } else {
+                        border_control()
+                    }
+                })
+                .focus(|style| {
+                    style.border_color(move || {
+                        if port_invalid() {
+                            status_err_fg()
+                        } else {
+                            accent_blue()
+                        }
+                    })
+                })
                 .text_size(px(TEXT_XS))
                 .text_color(fg_primary())
                 .on_focus(move || {

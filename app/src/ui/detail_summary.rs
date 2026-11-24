@@ -65,6 +65,7 @@ pub(crate) struct Shown {
     pub(crate) diff: Signal<String>,
     pub(crate) diff_old: Signal<String>,
     pub(crate) diff_new: Signal<String>,
+    pub(crate) diff_baseline_label: Signal<String>,
     pub(crate) diff_scope: Signal<u8>,
     pub(crate) pinned: Signal<bool>,
     pub(crate) is_marker: Signal<bool>,
@@ -431,7 +432,7 @@ pub(crate) fn filtered_summary_card(
                     92.0,
                 ))
                 .child(summary_stat_tile(
-                    tr("总流量", "Total transfer"),
+                    tr("总传输", "Total transfer"),
                     move || stats.with(|s| present::bytes(s.total_bytes)),
                     move || {
                         stats.with(|s| {
@@ -752,7 +753,10 @@ pub(crate) fn ready_detail(
         )
         .child(when(
             move || shown.diff_loading.get() || !shown.diff.get().is_empty(),
-            move || diff_card(shown, folded),
+            {
+                let diff_controls = controls.clone();
+                move || diff_card(shown, diff_controls.clone(), selected, baseline, folded)
+            },
         ))
         .child(when(
             move || {
@@ -1009,6 +1013,7 @@ pub(crate) fn summary(
                     },
                 ))
                 .child(view().flex_1())
+                .child(summary_primary_actions(shown, controls.clone(), selected))
                 .child(inline_mock_trigger_button(
                     shown,
                     controls.clone(),

@@ -44,7 +44,6 @@ pub(crate) fn settings_toggle_row(
 pub(crate) fn settings_certificate_tab(props: SettingsWindowProps) -> impl IntoElement {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let open = props.profiles.settings_open;
         let controls = props.controls;
         let ca_ui = props.ca_ui;
         let install = props.install_ca;
@@ -67,7 +66,7 @@ pub(crate) fn settings_certificate_tab(props: SettingsWindowProps) -> impl IntoE
                         Rc::new(move || (remove)()),
                         move || use_builtin_ca(switch_controls.clone()),
                     ))
-                    .child(external_ca_menu_row(open, ca_ui, controls.clone()))
+                    .child(external_ca_menu_row(None, ca_ui, controls.clone()))
                     .child(platform_ca_extra_menu_item(&controls)),
             ))
             .child(
@@ -97,15 +96,82 @@ pub(crate) fn settings_certificate_tab(props: SettingsWindowProps) -> impl IntoE
     }
 }
 
-pub(crate) fn settings_network_tab(props: SettingsWindowProps) -> impl IntoElement {
-    let controls = props.controls;
-    let profiles = props.profiles;
-    let upstream_text = profiles.upstream;
-    let bypass_text = profiles.bypass;
-    let show_tunnels = profiles.show_tunnels;
-    let upstream_controls = controls.clone();
-    let bypass_controls = controls.clone();
-    let tunnel_controls = controls.clone();
+fn listener_needs_restart(active_listen: &str, port_text: &str, listen_all: bool) -> bool {
+    if active_listen.is_empty() {
+        return false;
+    }
+    let Some(desired_port) = present::parse_port(port_text) else {
+        return false;
+    };
+    let active_port = active_listen
+        .rsplit_once(':')
+        .and_then(|(_, port)| port.parse::<u16>().ok());
+    if active_port != Some(desired_port) {
+        return true;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let active_all = active_listen.starts_with("0.0.0.0:");
+        if active_all != listen_all {
+            return true;
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    let _ = listen_all;
+    false
+}
+
+fn restart_capture_banner(
+    controls: Arc<Controls>,
+    langs: Signal<Option<Lang>>,
+) -> impl IntoElement {
+    view()
+        .w_full()
+        .px_2()
+        .py_1p5()
+        .gap_2()
+        .rounded(px(RADIUS_MD))
+        .border_1()
+        .border_color(accent_blue_border())
+        .bg(accent_blue_soft())
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .child(
+            text(tr(
+                "监听端口或范围已修改，重启抓包后生效",
+                "Listener settings changed — restart capture to apply",
+            ))
+            .flex_1()
+            .text_size(px(TEXT_XS))
+            .text_color(status_warn_fg()),
+        )
+        .child(
+            ui_button(ButtonVariant::Secondary, ControlSize::Xs)
+                .accessibility_label(move || {
+                    Some(t(ui_lang(langs), "重启抓包", "Restart Capture").into())
+                })
+                .on_press(move || restart_capture(controls.clone()))
+                .child(
+                    text(move || -> SharedString {
+                        t(ui_lang(langs), "重启抓包", "Restart Capture").into()
+                    })
+                    .number_of_lines(1)
+                    .text_size(px(TEXT_XS))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(fg_primary()),
+                ),
+        )
+}
+
+fn capture_listener_card(props: &SettingsWindowProps) -> impl IntoElement {
+    let controls = props.controls.clone();
+    let restart_controls = controls.clone();
+    let port_text = props.port_text;
+    let listen_all = props.listen_all;
+    let running = props.running;
+    let listen = props.listen;
+    let langs = ui_langs();
 
     let listener_row = view()
         .w_full()
@@ -114,34 +180,117 @@ pub(crate) fn settings_network_tab(props: SettingsWindowProps) -> impl IntoEleme
         .flex_wrap()
         .items_center()
         .gap_3()
-        .child(port_field(props.port_text, controls.clone()));
-    let listener_row = desktop_child!(listener_row, lan_toggle(props.listen_all, controls.clone()));
+        .child(port_field(port_text, controls));
+    let listener_row = desktop_child!(listener_row, lan_toggle(listen_all, props.controls.clone()));
+
+    let port_invalid = move || !present::is_valid_port_input(&port_text.get());
+    let needs_restart = move || {
+        running.get()
+            && !port_invalid()
+            && listen
+                .with(|active| listener_needs_restart(active, &port_text.get(), listen_all.get()))
+    };
+
+    settings_card(
+        "监听地址",
+        "Capture Listener",
+        view()
+            .w_full()
+            .gap_1p5()
+            .flex_col()
+            .child(listener_row)
+            .child(when(port_invalid, || {
+                text(tr(
+                    "端口无效：请输入 1–65535 之间的数字（当前沿用旧端口）",
+                    "Invalid port: enter 1–65535 (previous port remains active)",
+                ))
+                .px_1()
+                .text_size(px(TEXT_XS))
+                .text_color(status_err_fg())
+            }))
+            .child(when(needs_restart, move || {
+                restart_capture_banner(restart_controls.clone(), langs)
+            })),
+    )
+}
+
+fn upstream_proxy_card(upstream_text: Signal<String>, controls: Arc<Controls>) -> impl IntoElement {
+    let invalid = move || !present::is_valid_upstream_proxy(&upstream_text.get());
+    settings_card(
+        "上游代理",
+        "Upstream Proxy",
+        view()
+            .w_full()
+            .gap_1p5()
+            .flex_col()
+            .child(
+                input()
+                    .value(upstream_text)
+                    .placeholder(tr(
+                        "http://127.0.0.1:7890 或 socks5h://127.0.0.1:1080",
+                        "http://127.0.0.1:7890 or socks5h://127.0.0.1:1080",
+                    ))
+                    .placeholder_color(move || color(fg_muted()))
+                    .w_full()
+                    .h(px(30.0))
+                    .px_2p5()
+                    .rounded(px(RADIUS_MD))
+                    .bg(bg_code())
+                    .border_1()
+                    .border_color(move || {
+                        if invalid() {
+                            status_err_fg()
+                        } else {
+                            border_control()
+                        }
+                    })
+                    .focus(|style| {
+                        style.border_color(move || {
+                            if invalid() {
+                                status_err_fg()
+                            } else {
+                                accent_blue()
+                            }
+                        })
+                    })
+                    .text_size(px(TEXT_SM))
+                    .text_color(fg_primary())
+                    .on_change(move |text: &str| {
+                        upstream_text.set(text.to_string());
+                        if present::is_valid_upstream_proxy(text) {
+                            controls.hub.set_upstream(text);
+                            save_config_or_notify(&controls, PrefName::Upstream, |cfg| {
+                                cfg.upstream_proxy = text.to_string();
+                            });
+                        }
+                    }),
+            )
+            .child(when(invalid, || {
+                text(tr(
+                    "上游代理格式无效，请使用 http://、socks5:// 或 socks5h://host:port（当前沿用旧配置）",
+                    "Invalid upstream proxy URL: use http://, socks5://, or socks5h://host:port (previous setting remains active)",
+                ))
+                .px_1()
+                .text_size(px(TEXT_XS))
+                .text_color(status_err_fg())
+            })),
+    )
+}
+
+pub(crate) fn settings_network_tab(props: SettingsWindowProps) -> impl IntoElement {
+    let controls = props.controls.clone();
+    let profiles = props.profiles;
+    let bypass_text = profiles.bypass;
+    let show_tunnels = profiles.show_tunnels;
+    let bypass_controls = controls.clone();
+    let tunnel_controls = controls.clone();
 
     view()
         .w_full()
         .gap_3()
         .flex_col()
-        .child(settings_card("监听地址", "Capture Listener", listener_row))
-        .child(settings_card(
-            "上游代理",
-            "Upstream Proxy",
-            side_input(
-                upstream_text,
-                tr(
-                    "http://127.0.0.1:7890 或 socks5h://127.0.0.1:1080",
-                    "http://127.0.0.1:7890 or socks5h://127.0.0.1:1080",
-                ),
-                30.0,
-                false,
-                move |text| {
-                    upstream_text.set(text.to_string());
-                    upstream_controls.hub.set_upstream(text);
-                    save_config_or_notify(&upstream_controls, PrefName::Upstream, |cfg| {
-                        cfg.upstream_proxy = text.to_string();
-                    });
-                },
-            ),
-        ))
+        .child(capture_listener_card(&props))
+        .child(upstream_proxy_card(profiles.upstream, controls))
         .child(settings_card(
             "TLS 直通名单",
             "TLS Bypass",
@@ -285,6 +434,10 @@ pub(crate) fn settings_security_tab(
                                     props.selected,
                                     props.shown_phase,
                                 );
+                                #[cfg(not(target_arch = "wasm32"))]
+                                if !close_on_preview {
+                                    nsh_core::element::desktop::main_window().focus();
+                                }
                             },
                         )),
                 ),

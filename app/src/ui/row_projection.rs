@@ -13,11 +13,24 @@ pub(crate) fn list_status(status: Option<u16>, failed: bool) -> String {
     }
 }
 
-pub(crate) fn list_path(path: &str, error: Option<&str>, failed: bool, lang: Lang) -> String {
-    if failed {
-        localize_error(lang, error.unwrap_or(""))
+fn format_failed_endpoint(endpoint: &str, error: Option<&str>, lang: Lang) -> String {
+    let reason = localize_error(lang, error.unwrap_or(""));
+    let reason = reason.trim();
+    if endpoint.is_empty() {
+        reason.to_string()
+    } else if reason.is_empty() {
+        endpoint.to_string()
     } else {
-        path.split('?').next().unwrap_or(path).to_string()
+        format!("{endpoint} · {reason}")
+    }
+}
+
+pub(crate) fn list_path(path: &str, error: Option<&str>, failed: bool, lang: Lang) -> String {
+    let clean_path = path.split('?').next().unwrap_or(path);
+    if failed {
+        format_failed_endpoint(clean_path, error, lang)
+    } else {
+        clean_path.to_string()
     }
 }
 
@@ -28,11 +41,8 @@ pub(crate) fn list_host_path(
     failed: bool,
     lang: Lang,
 ) -> String {
-    if failed {
-        return localize_error(lang, error.unwrap_or(""));
-    }
     let clean_path = path.split('?').next().unwrap_or(path);
-    if host.is_empty() {
+    let endpoint = if host.is_empty() {
         clean_path.to_string()
     } else if clean_path.is_empty() {
         host.to_string()
@@ -42,6 +52,11 @@ pub(crate) fn list_host_path(
         clean_path.to_string()
     } else {
         format!("{host}/{clean_path}")
+    };
+    if failed {
+        format_failed_endpoint(&endpoint, error, lang)
+    } else {
+        endpoint
     }
 }
 
@@ -52,12 +67,11 @@ pub(crate) fn list_url(
     failed: bool,
     lang: Lang,
 ) -> String {
+    let endpoint = if url.is_empty() { path } else { url };
     if failed {
-        localize_error(lang, error.unwrap_or(""))
-    } else if url.is_empty() {
-        path.to_string()
+        format_failed_endpoint(endpoint, error, lang)
     } else {
-        url.to_string()
+        endpoint.to_string()
     }
 }
 

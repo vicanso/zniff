@@ -65,6 +65,7 @@ pub(crate) fn begin_new_request(compose: Compose, selected: Signal<Option<u64>>)
 }
 
 pub(crate) fn begin_compose(controls: &Controls, id: Option<u64>, compose: Compose) {
+    compose.inline_mock.close();
     if refuse_relay(controls, id) {
         return;
     }
@@ -153,6 +154,8 @@ pub(crate) fn clear_shown(shown: Shown) {
     shown.request_form.set(Vec::new());
     shown.request_note.set(String::new());
     shown.response_note.set(String::new());
+    shown.req_search.set(String::new());
+    shown.res_search.set(String::new());
     reset_body_offsets(shown);
     shown.request_window.set(TextWindow::default());
     shown.response_window.set(TextWindow::default());
@@ -169,6 +172,7 @@ pub(crate) fn clear_shown(shown: Shown) {
     shown.diff.set(String::new());
     shown.diff_old.set(String::new());
     shown.diff_new.set(String::new());
+    shown.diff_baseline_label.set(String::new());
     shown.pinned.set(false);
     shown.is_marker.set(false);
     shown.relay.set(String::new());

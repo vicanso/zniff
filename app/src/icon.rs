@@ -34,9 +34,13 @@ pub enum Glyph {
     DeviceMobile,
     DeviceDesktop,
     Globe,
+    Gauge,
     AppWindow,
     QrCode,
     Info,
+    Star,
+    StarFilled,
+    Replay,
 }
 
 pub fn glyph(
@@ -210,6 +214,10 @@ fn paint_glyph(painter: Painter, kind: Glyph) -> Painter {
             .stroke_svg("M2.4 8 H13.6")
             .stroke_svg("M8 2.2 C10.2 4.6 10.2 11.4 8 13.8")
             .stroke_svg("M8 2.2 C5.8 4.6 5.8 11.4 8 13.8"),
+        Glyph::Gauge => painter
+            .stroke_svg("M2.8 11.6 A5.8 5.8 0 1 1 13.2 11.6")
+            .stroke_svg("M8.0 9.4 L11.4 5.8")
+            .fill_svg("M8.0 9.4 m-0.95 0 a0.95 0.95 0 1 0 1.9 0 a0.95 0.95 0 1 0 -1.9 0"),
         Glyph::AppWindow => painter
             .stroke_svg("M2.6 3.2 H13.4 V12.8 H2.6 Z")
             .stroke_svg("M2.6 6.2 H13.4"),
@@ -222,5 +230,14 @@ fn paint_glyph(painter: Painter, kind: Glyph) -> Painter {
         Glyph::Info => painter
             .fill_svg("M8 4.4 m-0.95 0 a0.95 0.95 0 1 0 1.9 0 a0.95 0.95 0 1 0 -1.9 0")
             .stroke_svg("M8 7.4 V12.2"),
+        Glyph::Star => painter.stroke_svg(
+            "M8 2.4 L9.4 5.9 L13.2 6.2 L10.3 8.7 L11.2 12.5 L8 10.4 L4.8 12.5 L5.7 8.7 L2.8 6.2 L6.6 5.9 Z",
+        ),
+        Glyph::StarFilled => painter.fill_svg(
+            "M8 2.4 L9.4 5.9 L13.2 6.2 L10.3 8.7 L11.2 12.5 L8 10.4 L4.8 12.5 L5.7 8.7 L2.8 6.2 L6.6 5.9 Z",
+        ),
+        Glyph::Replay => painter
+            .stroke_svg("M12.4 7.4 A4.6 4.6 0 1 0 11.2 11.6")
+            .stroke_svg("M10.4 4.8 H13.2 V7.6"),
     }
 }

@@ -768,6 +768,43 @@ pub(crate) fn toggle_capture(controls: Arc<Controls>) {
     });
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn restart_capture(controls: Arc<Controls>) {
+    std::thread::spawn(move || {
+        if lock_bool(&controls.running) {
+            stop_capture(&controls);
+        }
+        start_capture(&controls);
+    });
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn restart_capture(controls: Arc<Controls>) {
+    let listen_all = lock_bool(&controls.listen_all);
+    let port = lock_port(&controls.listen_port);
+    spawn(async move {
+        if lock_bool(&controls.running) {
+            let stop_req = HttpRequest::post("api/capture", b"{\"on\":false}".to_vec())
+                .header("content-type", "application/json");
+            let _ = fetch(stop_req).await;
+        }
+        let body = serde_json::json!({"on": true, "listen_all": listen_all, "port": port})
+            .to_string()
+            .into_bytes();
+        let request =
+            HttpRequest::post("api/capture", body).header("content-type", "application/json");
+        match fetch(request).await {
+            Ok(response) => {
+                let value: serde_json::Value =
+                    serde_json::from_str(&response.text()).unwrap_or(serde_json::json!({}));
+                apply_capture_state(&controls, &value, response.ok());
+                proxy::notify_poll_wake();
+            }
+            Err(err) => set_status(&controls, StatusMsg::BindFailed { port, err }),
+        }
+    });
+}
+
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn switch_to_lan(controls: Arc<Controls>) {
     set_bool(&controls.listen_all, true);

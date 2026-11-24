@@ -196,8 +196,7 @@ fn onboarding_web_section(props: &OnboardingProps, pane_width: Signal<f32>) -> i
             tr("将客户端代理指向服务端端口", "Point client HTTP proxy here"),
             || false,
             move || {
-                let port = lock_port(&controls.listen_port);
-                set_clipboard(format!("http://127.0.0.1:{port}"));
+                set_clipboard(client_proxy_url(&controls));
                 set_status(&controls, StatusMsg::CopiedUrl);
             },
         ))

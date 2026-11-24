@@ -57,6 +57,8 @@ pub(crate) fn connect_hub_popover(props: ConnectHubProps) -> impl IntoElement {
     let adb_count = props.adb_count;
     let tp_active = props.tp_active;
     let running = props.running;
+    let ca_status = props.ca_ui.status;
+    let use_system_proxy = props.use_system_proxy;
     popover()
         .open(move || Some(open.get()))
         .popup_style(ui_popup_style)
@@ -74,7 +76,14 @@ pub(crate) fn connect_hub_popover(props: ConnectHubProps) -> impl IntoElement {
                 }
             }
         })
-        .trigger(connect_hub_trigger(open, running, adb_count, tp_active))
+        .trigger(connect_hub_trigger(
+            open,
+            running,
+            adb_count,
+            tp_active,
+            ca_status,
+            use_system_proxy,
+        ))
         .child(connect_hub_panel(props, open))
 }
 
@@ -83,8 +92,15 @@ fn connect_hub_trigger(
     running: Signal<bool>,
     adb_count: Signal<usize>,
     tp_active: Signal<bool>,
+    ca_status: Signal<ca::CaStatus>,
+    use_system_proxy: Signal<bool>,
 ) -> impl IntoElement {
-    let active = move || open.get() || adb_count.get() > 0 || tp_active.get();
+    let langs = ui_langs();
+    let active =
+        move || open.get() || adb_count.get() > 0 || tp_active.get() || use_system_proxy.get();
+    let ca_untrusted =
+        move || !cfg!(target_arch = "wasm32") && ca_status.get() != ca::CaStatus::Trusted;
+    let show_dot = move || ca_untrusted() || use_system_proxy.get();
     view()
         .role(AccessibilityRole::Button)
         .h(px(ControlSize::Xs.height()))
@@ -123,10 +139,46 @@ fn connect_hub_trigger(
         .duration(MOTION_INSTANT_MS)
         .ease_out()
         .focus_visible(apply_focus_ring)
-        .tooltip(label_tip(
-            "接入中心：免配浏览器 / 终端 / ADB / 手机扫码",
-            "Connect Hub: Browser / Terminal / ADB / Mobile QR",
-        ))
+        .tooltip(
+            tooltip().child(ui_tooltip_surface(
+                text(move || -> SharedString {
+                    let lang = ui_lang(langs);
+                    let mut parts = vec![
+                        t(
+                            lang,
+                            "接入中心：免配浏览器 / 终端 / ADB / 手机扫码",
+                            "Connect Hub: Browser / Terminal / ADB / Mobile QR",
+                        )
+                        .to_string(),
+                    ];
+                    if use_system_proxy.get() {
+                        parts.push(t(lang, "系统代理已接管", "System proxy active").to_string());
+                    }
+                    if ca_untrusted() {
+                        parts.push(
+                            t(
+                                lang,
+                                "本机根证书未安装或未信任",
+                                "Host root CA not installed or untrusted",
+                            )
+                            .to_string(),
+                        );
+                    }
+                    parts.join(" · ").into()
+                })
+                .text_size(px(TEXT_SM))
+                .text_color(fg_primary()),
+            )),
+        )
+        .child(when(show_dot, move || {
+            view().w(px(6.0)).h(px(6.0)).rounded_full().bg(move || {
+                if ca_untrusted() {
+                    status_warn_fg()
+                } else {
+                    accent_blue()
+                }
+            })
+        }))
         .child(glyph_px(
             ControlSize::Xs.icon_size(),
             || Glyph::Globe,
@@ -730,8 +782,7 @@ fn hub_web_section(props: &ConnectHubProps, open: Signal<bool>) -> impl IntoElem
             ),
             || false,
             move || {
-                let port = lock_port(&controls.listen_port);
-                set_clipboard(format!("http://127.0.0.1:{port}"));
+                set_clipboard(client_proxy_url(&controls));
                 set_status(&controls, StatusMsg::CopiedUrl);
                 open.set(false);
             },

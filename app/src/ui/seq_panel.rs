@@ -404,6 +404,7 @@ pub(crate) fn sequence_diagram_panel(
     let copy_mermaid_controls = controls.clone();
     let copy_md_controls = controls.clone();
     let source_controls = controls;
+    let langs = ui_langs();
     let has_checked = move || {
         seq_builder
             .items
@@ -619,17 +620,35 @@ pub(crate) fn sequence_diagram_panel(
                                             );
                                         })
                                         .child(
-                                            text(tr("复制 Mermaid", "Copy Mermaid"))
-                                                .number_of_lines(1)
-                                                .text_size(px(TEXT_SM))
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .text_color(move || {
-                                                    if has_checked() {
-                                                        fg_on_accent()
-                                                    } else {
-                                                        fg_muted()
-                                                    }
-                                                }),
+                                            text(move || {
+                                                let lang = ui_lang(langs);
+                                                let is_flow = seq_builder.view_mode.get() == 2
+                                                    || (seq_builder.view_mode.get() == 3
+                                                        && seq_builder.source_flowchart.get());
+                                                if is_flow {
+                                                    t(
+                                                        lang,
+                                                        "复制 Mermaid (流程图)",
+                                                        "Copy Mermaid (Flowchart)",
+                                                    )
+                                                } else {
+                                                    t(
+                                                        lang,
+                                                        "复制 Mermaid (时序图)",
+                                                        "Copy Mermaid (Sequence)",
+                                                    )
+                                                }
+                                            })
+                                            .number_of_lines(1)
+                                            .text_size(px(TEXT_SM))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(move || {
+                                                if has_checked() {
+                                                    fg_on_accent()
+                                                } else {
+                                                    fg_muted()
+                                                }
+                                            }),
                                         ),
                                 )
                                 .child(seq_action_button(
@@ -722,11 +741,20 @@ pub(crate) fn sequence_diagram_panel(
                                             .with(|items| items.iter().filter(|i| i.checked).count())
                                             as u64,
                                     );
-                                    match ui_lang(langs) {
-                                        Lang::Zh => format!(
+                                    let is_flow = seq_builder.view_mode.get() == 2
+                                        || (seq_builder.view_mode.get() == 3
+                                            && seq_builder.source_flowchart.get());
+                                    match (ui_lang(langs), is_flow) {
+                                        (Lang::Zh, true) => format!(
+                                            "依赖图 / 流程图仅覆盖最近 {SEQ_PREVIEW_CAP} 条；切回「时序图」可复制全部 {checked} 条"
+                                        ),
+                                        (Lang::En, true) => format!(
+                                            "Dependency / Flowchart covers newest {SEQ_PREVIEW_CAP} flows; switch to Sequence to copy all {checked}"
+                                        ),
+                                        (Lang::Zh, false) => format!(
                                             "仅预览最近 {SEQ_PREVIEW_CAP} 条；复制 Mermaid / Markdown 仍包含全部 {checked} 条"
                                         ),
-                                        Lang::En => format!(
+                                        (Lang::En, false) => format!(
                                             "Previewing newest {SEQ_PREVIEW_CAP} flows; Copy Mermaid / Markdown still includes all {checked}"
                                         ),
                                     }

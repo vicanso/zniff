@@ -798,13 +798,23 @@ fn failed_rows_show_err_and_the_short_reason() {
     );
     assert_eq!(
         super::list_path("/", Some("证书被拒绝"), true, super::Lang::Zh),
-        "证书被拒绝"
+        "/ · 证书被拒绝"
     );
     assert_eq!(
         super::list_path(":443", Some("证书被拒绝"), true, super::Lang::En),
-        "Certificate rejected"
+        ":443 · Certificate rejected"
     );
-    assert_eq!(super::list_path("/", None, true, super::Lang::En), "");
+    assert_eq!(
+        super::list_host_path(
+            "api.vicanso.dev",
+            "/v1/fail?x=1",
+            Some("证书被拒绝"),
+            true,
+            super::Lang::En
+        ),
+        "api.vicanso.dev/v1/fail · Certificate rejected"
+    );
+    assert_eq!(super::list_path("/", None, true, super::Lang::En), "/");
 }
 
 #[test]
@@ -2636,6 +2646,7 @@ fn web_cached_flow_detail_publishes_loading_then_hydrates_cleanly() {
             diff: signal(String::new()),
             diff_old: signal(String::new()),
             diff_new: signal(String::new()),
+            diff_baseline_label: signal(String::new()),
             diff_scope: signal(0_u8),
             pinned: signal(false),
             is_marker: signal(false),
@@ -4962,6 +4973,7 @@ fn make_test_json_shown(pane_w: f32) -> super::Shown {
         diff: signal(String::new()),
         diff_old: signal(String::new()),
         diff_new: signal(String::new()),
+        diff_baseline_label: signal(String::new()),
         diff_scope: signal(0_u8),
         pinned: signal(false),
         is_marker: signal(false),

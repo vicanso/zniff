@@ -52,7 +52,7 @@ pub(crate) fn redact_preview_panel(
             );
         };
         let fallback_id = rows.with(|list| list.last().map(|r| r.id));
-        let Some(flow) = preview_controls.hub.with_session(|session| {
+        let Some(flow) = with_active_session(&preview_controls, |session| {
             session.hydrated(id).or_else(|| {
                 fallback_id
                     .filter(|&last_id| last_id != id)
@@ -281,6 +281,34 @@ pub(crate) fn redact_preview_panel(
             view()
                 .p_3p5()
                 .gap_2p5()
+                .child(when(
+                    move || !seq_builder.redact_export.get(),
+                    move || {
+                        view()
+                            .w_full()
+                            .px_3()
+                            .py_2()
+                            .rounded(px(RADIUS_MD))
+                            .bg(status_warn_bg())
+                            .border_1()
+                            .border_color(status_warn_fg())
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .child(glyph_px(13.0, || Glyph::Alert, || color(status_warn_fg())))
+                            .child(
+                                text(tr(
+                                    "导出脱敏当前已关闭：直接导出 HAR/HTML 将包含原始明文；下方仅为开启脱敏后的模拟对比。",
+                                    "Export redaction is currently OFF — HAR/HTML exports will include raw values; preview below simulates redaction ON.",
+                                ))
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .text_size(px(TEXT_SM))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(status_warn_fg()),
+                            )
+                    },
+                ))
                 .child(
                     text(tr(
                         "默认脱敏：Authorization、Proxy-Authorization、Cookie、Set-Cookie、X-Api-Key，以及 URL 查询参数、JSON 和表单中的 password、token、access_token、secret、api_key、session_id、jwt 等字段。仅作用于导出的 HAR/HTML 与实时分享副本，不改动抓包记录或重放数据。",

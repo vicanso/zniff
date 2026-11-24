@@ -528,6 +528,7 @@ pub(crate) fn toolbar(
         flow_total,
         filter,
         selected,
+        shown_phase,
         compose,
         seq_builder,
     ))
@@ -858,6 +859,7 @@ pub(crate) fn toolbar_summary_button(
     flow_total: Signal<usize>,
     filter: Signal<String>,
     selected: Signal<Option<u64>>,
+    shown_phase: Signal<Phase>,
     compose: Compose,
     seq_builder: SeqBuilder,
 ) -> impl IntoElement {
@@ -874,6 +876,7 @@ pub(crate) fn toolbar_summary_button(
                 reset_compose(compose);
                 close_sequence_diagram(seq_builder);
                 selected.set(None);
+                shown_phase.set(Phase::Empty);
             })
             .child(control_text(tr("统计", "Summary")).text_color(move || {
                 if is_summary_active() {
@@ -922,10 +925,9 @@ pub(crate) fn more_trigger(
     update_state: Signal<UpdateState>,
     open: Signal<bool>,
 ) -> impl IntoElement {
-    let dot_status = ca_status;
-    let dot_proxy = proxy_on;
+    let _ = (ca_status, proxy_on);
     let dot_update = update_state;
-    let is_tinted = move || open.get() || proxy_on.get();
+    let is_tinted = move || open.get();
     view()
         .window_drag(false)
         .role(AccessibilityRole::Button)
@@ -969,28 +971,20 @@ pub(crate) fn more_trigger(
             move || {
                 #[cfg(target_arch = "wasm32")]
                 {
-                    let _ = (
-                        dot_proxy.get(),
-                        dot_status.get(),
-                        dot_update.get().nudge.is_some(),
-                    );
+                    let _ = dot_update.get().nudge.is_some();
                     false
                 }
                 #[cfg(not(target_arch = "wasm32"))]
                 {
-                    dot_proxy.get()
-                        || dot_status.get() != ca::CaStatus::Trusted
-                        || dot_update.get().nudge.is_some()
+                    dot_update.get().nudge.is_some()
                 }
             },
             move || {
-                view().w(px(6.0)).h(px(6.0)).rounded_full().bg(move || {
-                    if dot_status.get() != ca::CaStatus::Trusted {
-                        status_warn_fg()
-                    } else {
-                        accent_blue()
-                    }
-                })
+                view()
+                    .w(px(6.0))
+                    .h(px(6.0))
+                    .rounded_full()
+                    .bg(accent_blue())
             },
         ))
         .child(control_text(tr("更多", "More")).text_color(move || {

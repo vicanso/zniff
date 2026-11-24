@@ -873,13 +873,7 @@ pub(crate) fn messages_section(
                                             .join("\n\n");
                                         if !payload.is_empty() {
                                             set_clipboard(payload);
-                                            set_status(
-                                                &controls,
-                                                StatusMsg::CopiedBody {
-                                                    side: Side::Response,
-                                                    hex: false,
-                                                },
-                                            );
+                                            set_status(&controls, StatusMsg::CopiedMessage);
                                         }
                                     })
                                 },
@@ -948,13 +942,7 @@ pub(crate) fn messages_section(
                                                 move || {
                                                     let payload = line.with(|l| l.value.clone());
                                                     set_clipboard(payload);
-                                                    set_status(
-                                                        &controls,
-                                                        StatusMsg::CopiedBody {
-                                                            side: Side::Response,
-                                                            hex: false,
-                                                        },
-                                                    );
+                                                    set_status(&controls, StatusMsg::CopiedMessage);
                                                 },
                                             ))
                                     },
@@ -967,8 +955,16 @@ pub(crate) fn messages_section(
         ))
 }
 
-pub(crate) fn diff_card(shown: Shown, folded: Signal<u8>) -> impl IntoElement {
+pub(crate) fn diff_card(
+    shown: Shown,
+    controls: Arc<Controls>,
+    selected: Signal<Option<u64>>,
+    baseline: Signal<Option<u64>>,
+    folded: Signal<u8>,
+) -> impl IntoElement {
     let scope_sig = shown.diff_scope;
+    let langs = ui_langs();
+    let clear_controls = controls;
     view()
         .rounded(px(RADIUS_LG))
         .border_1()
@@ -997,7 +993,7 @@ pub(crate) fn diff_card(shown: Shown, folded: Signal<u8>) -> impl IntoElement {
                     view()
                         .role(AccessibilityRole::Button)
                         .flex_1()
-                        .min_w(px(96.0))
+                        .min_w(px(120.0))
                         .flex_row()
                         .items_center()
                         .gap_1p5()
@@ -1012,21 +1008,72 @@ pub(crate) fn diff_card(shown: Shown, folded: Signal<u8>) -> impl IntoElement {
                         .focus_visible(apply_focus_ring)
                         .on_press(move || toggle_card(folded, FOLD_DIFF))
                         .child(fold_mark(folded, FOLD_DIFF))
-                        .child(section_title(tr("对比", "Diff"))),
+                        .child(section_title(tr("对比", "Diff")))
+                        .child(when(
+                            move || !shown.diff_baseline_label.with(String::is_empty),
+                            move || {
+                                mono(move || -> SharedString {
+                                    let base = shown.diff_baseline_label.get();
+                                    let prefix = t(ui_lang(langs), "基准", "vs");
+                                    format!("{prefix} {base}").into()
+                                })
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .number_of_lines(1)
+                                .text_overflow(EllipsizeMode::Tail)
+                                .text_size(px(TEXT_XS))
+                                .text_color(fg_muted())
+                            },
+                        )),
                 )
                 .child(when(
                     move || !card_folded(folded, FOLD_DIFF),
                     move || {
+                        let clear_controls = clear_controls.clone();
                         view()
                             .flex_row()
-                            .h(px(ControlSize::Xs.height()))
-                            .rounded(px(RADIUS_MD))
-                            .border_1()
-                            .border_color(border_control())
-                            .overflow_hidden()
-                            .child(msg_filter_chip(scope_sig, 0, "全部", "All"))
-                            .child(msg_filter_chip(scope_sig, 1, "仅正文", "Bodies"))
-                            .child(msg_filter_chip(scope_sig, 2, "仅头部", "Headers"))
+                            .items_center()
+                            .gap_1p5()
+                            .child(
+                                view()
+                                    .flex_row()
+                                    .h(px(ControlSize::Xs.height()))
+                                    .rounded(px(RADIUS_MD))
+                                    .border_1()
+                                    .border_color(border_control())
+                                    .overflow_hidden()
+                                    .child(msg_filter_chip(scope_sig, 0, "全部", "All"))
+                                    .child(msg_filter_chip(scope_sig, 1, "仅正文", "Bodies"))
+                                    .child(msg_filter_chip(scope_sig, 2, "仅头部", "Headers")),
+                            )
+                            .child(
+                                ui_button(ButtonVariant::Outline, ControlSize::Xs)
+                                    .accessibility_label(move || {
+                                        Some(t(ui_lang(langs), "清除基准", "Clear baseline").into())
+                                    })
+                                    .on_press(move || {
+                                        {
+                                            let mut store = clear_controls
+                                                .session_tabs
+                                                .lock()
+                                                .unwrap_or_else(|err| err.into_inner());
+                                            store.clear_baseline();
+                                        }
+                                        baseline.set(None);
+                                        set_status(&clear_controls, StatusMsg::BaselineCleared);
+                                        publish_detail_for_controls(
+                                            &shown,
+                                            &clear_controls,
+                                            selected.get_untracked(),
+                                            ui_lang(langs),
+                                            None,
+                                        );
+                                    })
+                                    .child(
+                                        control_text(tr("清除基准", "Clear baseline"))
+                                            .text_color(fg_secondary()),
+                                    ),
+                            )
                     },
                 )),
         )

@@ -168,6 +168,16 @@ pub(crate) fn flow_quick_rule_section(
     enabled: impl Fn() -> bool + Clone + 'static,
     on_pick: impl Fn(FlowQuickRuleAction) + Clone + 'static,
 ) -> impl IntoElement {
+    flow_quick_rule_section_opts(true, enabled, on_pick)
+}
+
+/// Variant of [`flow_quick_rule_section`] that can omit `Mock this response` when a dedicated
+/// Mock trigger is already shown beside the menu.
+pub(crate) fn flow_quick_rule_section_opts(
+    include_mock: bool,
+    enabled: impl Fn() -> bool + Clone + 'static,
+    on_pick: impl Fn(FlowQuickRuleAction) + Clone + 'static,
+) -> impl IntoElement {
     view()
         .w_full()
         .gap_0p5()
@@ -181,11 +191,16 @@ pub(crate) fn flow_quick_rule_section(
                     .text_color(fg_muted()),
             ),
         )
-        .children(FlowQuickRuleAction::ALL.into_iter().map(move |action| {
-            let (zh, en) = action.label();
-            let on_pick = on_pick.clone();
-            action_item_enabled(tr(zh, en), enabled.clone(), move || on_pick(action))
-        }))
+        .children(
+            FlowQuickRuleAction::ALL
+                .into_iter()
+                .filter(move |action| include_mock || *action != FlowQuickRuleAction::MockResponse)
+                .map(move |action| {
+                    let (zh, en) = action.label();
+                    let on_pick = on_pick.clone();
+                    action_item_enabled(tr(zh, en), enabled.clone(), move || on_pick(action))
+                }),
+        )
 }
 
 #[cfg(test)]

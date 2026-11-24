@@ -1,6 +1,209 @@
 #[allow(unused_imports)]
 use super::*;
 
+pub(crate) fn summary_primary_actions(
+    shown: Shown,
+    controls: Arc<Controls>,
+    selected: Signal<Option<u64>>,
+) -> impl IntoElement {
+    let langs = ui_langs();
+    let pin_controls = controls.clone();
+    let replay_controls = controls.clone();
+    let pin_guard = controls.clone();
+    let replay_guard = controls;
+    let can_pin = move || {
+        let _ = selected.get();
+        shown.relay.get().is_empty() && !is_active_tab_read_only(&pin_guard)
+    };
+    let can_replay = move || {
+        let _ = selected.get();
+        shown.relay.get().is_empty() && !is_active_tab_read_only(&replay_guard)
+    };
+    view()
+        .flex_row()
+        .items_center()
+        .gap_1p5()
+        .child(
+            view()
+                .tooltip(label_tip(
+                    "星标此流量（清空未星标时保留）",
+                    "Star flow (kept when clearing unstarred)",
+                ))
+                .child(
+                    ui_toggle_button(ControlSize::Sm, move || shown.pinned.get())
+                        .accessibility_label(move || {
+                            let lang = ui_lang(langs);
+                            Some(
+                                if shown.pinned.get() {
+                                    t(lang, "取消星标", "Unstar")
+                                } else {
+                                    t(lang, "星标", "Star")
+                                }
+                                .into(),
+                            )
+                        })
+                        .disabled(move || !can_pin())
+                        .border_color(move || {
+                            if shown.pinned.get() {
+                                accent_blue_border()
+                            } else {
+                                border_control()
+                            }
+                        })
+                        .bg(move || {
+                            if shown.pinned.get() {
+                                accent_blue_soft()
+                            } else {
+                                bg_control()
+                            }
+                        })
+                        .on_press(move || toggle_pin(&pin_controls, selected.get()))
+                        .child(glyph(
+                            move || {
+                                if shown.pinned.get() {
+                                    Glyph::StarFilled
+                                } else {
+                                    Glyph::Star
+                                }
+                            },
+                            move || {
+                                color(if shown.pinned.get() {
+                                    accent_blue_text()
+                                } else {
+                                    fg_secondary()
+                                })
+                            },
+                        ))
+                        .child(
+                            text(move || -> SharedString {
+                                let lang = ui_lang(langs);
+                                if shown.pinned.get() {
+                                    t(lang, "已星标", "Starred").into()
+                                } else {
+                                    t(lang, "星标", "Star").into()
+                                }
+                            })
+                            .number_of_lines(1)
+                            .text_size(px(TEXT_SM))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(move || {
+                                if shown.pinned.get() {
+                                    accent_blue_text()
+                                } else {
+                                    fg_secondary()
+                                }
+                            }),
+                        ),
+                ),
+        )
+        .child(
+            view()
+                .tooltip(label_tip(
+                    "重放请求 (Cmd/Ctrl+R)",
+                    "Replay request (Cmd/Ctrl+R)",
+                ))
+                .child(
+                    ui_button(ButtonVariant::Outline, ControlSize::Sm)
+                        .accessibility_label(move || {
+                            Some(t(ui_lang(langs), "重放", "Replay").into())
+                        })
+                        .disabled(move || !can_replay())
+                        .on_press(move || {
+                            replay_flow(
+                                &replay_controls,
+                                selected.get(),
+                                ReplayOverride::default(),
+                            );
+                        })
+                        .child(glyph(|| Glyph::Replay, || color(fg_secondary())))
+                        .child(control_text(tr("重放", "Replay")).text_color(fg_secondary())),
+                ),
+        )
+}
+
+fn code_snippets_section(
+    controls: Arc<Controls>,
+    selected: Signal<Option<u64>>,
+    code_open: Signal<bool>,
+) -> impl IntoElement {
+    let langs = ui_langs();
+    let entries: [(Option<(&'static str, &'static str)>, &'static str, Snippet); 11] = [
+        (None, "fetch", Snippet::Fetch),
+        (None, "Python", Snippet::Python),
+        (None, "Rust (reqwest)", Snippet::RustReqwest),
+        (None, "Go (net/http)", Snippet::GoHttp),
+        (None, "HTTPie", Snippet::Httpie),
+        (None, "PowerShell", Snippet::PowerShell),
+        (None, "JS (axios)", Snippet::Axios),
+        (None, "Kotlin (OkHttp)", Snippet::KotlinOkHttp),
+        (None, "Swift (URLSession)", Snippet::SwiftUrlSession),
+        (Some(("TS 类型", "TS types")), "TS types", Snippet::Types),
+        (
+            Some(("Rust 结构体", "Rust struct")),
+            "Rust struct",
+            Snippet::RustStruct,
+        ),
+    ];
+    view()
+        .w_full()
+        .gap_0p5()
+        .child(
+            menu_item()
+                .close_on_select(false)
+                .on_select(move || code_open.update(|v| *v = !*v))
+                .h(px(30.0))
+                .px_2p5()
+                .gap_1p5()
+                .rounded(px(RADIUS_MD))
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .hover(|style| style.bg(bg_control_hover()))
+                .active(|style| style.bg(bg_control_active()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .focus_visible(apply_focus_ring)
+                .child(
+                    control_text(move || -> SharedString {
+                        t(ui_lang(langs), "复制为代码 (11)", "Copy as code (11)").into()
+                    })
+                    .text_color(fg_secondary()),
+                )
+                .child(glyph_px(
+                    11.0,
+                    move || {
+                        if code_open.get() {
+                            Glyph::Chevron
+                        } else {
+                            Glyph::ChevronRight
+                        }
+                    },
+                    || color(fg_muted()),
+                )),
+        )
+        .child(when(
+            move || code_open.get(),
+            move || {
+                let mut group = view().w_full().pl_2().gap_0p5();
+                for (localized, raw, snippet) in entries {
+                    let cb = controls.clone();
+                    group = group.child(match localized {
+                        Some((zh, en)) => action_item(tr(zh, en), move || {
+                            copy_snippet(&cb, selected.get(), snippet);
+                        })
+                        .into_element(),
+                        None => action_item(raw, move || {
+                            copy_snippet(&cb, selected.get(), snippet);
+                        })
+                        .into_element(),
+                    });
+                }
+                group
+            },
+        ))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn detail_actions(
     shown: Shown,
@@ -16,17 +219,7 @@ pub(crate) fn detail_actions(
     let copy_url = controls.clone();
     let copy_curl = controls.clone();
     let copy_ai = controls.clone();
-    let copy_fetch = controls.clone();
-    let copy_python = controls.clone();
-    let copy_rust = controls.clone();
-    let copy_go = controls.clone();
-    let copy_httpie = controls.clone();
-    let copy_powershell = controls.clone();
-    let copy_axios = controls.clone();
-    let copy_kotlin = controls.clone();
-    let copy_swift = controls.clone();
-    let copy_types = controls.clone();
-    let copy_rust_struct = controls.clone();
+    let code_controls = controls.clone();
     let copy_request = controls.clone();
     let copy_response = controls.clone();
     let save = controls.clone();
@@ -40,14 +233,18 @@ pub(crate) fn detail_actions(
     let send_controls = controls.clone();
     let break_controls = controls.clone();
     let map_local_controls = controls.clone();
-    let inline_mock_controls = controls.clone();
     let quick_rule_controls = controls.clone();
+    let mutate_guard = controls.clone();
     let pretty_controls = controls;
     let pinned = shown.pinned;
     let pretty = shown.pretty;
     let baseline_mark = baseline;
     let selected_mark = selected;
     let can_local = move || shown.relay.get().is_empty();
+    let can_mutate = move || {
+        let _ = selected.get();
+        shown.relay.get().is_empty() && !is_active_tab_read_only(&mutate_guard)
+    };
     let is_req_break = move || {
         !compose.response.get()
             && paused
@@ -55,6 +252,7 @@ pub(crate) fn detail_actions(
                 .is_some_and(|(id, side)| selected.get() == Some(id) && side == BreakSide::Request)
     };
     let open = signal(false);
+    let code_open = signal(false);
     let items = view()
         .w_full()
         .p_1()
@@ -62,48 +260,13 @@ pub(crate) fn detail_actions(
         .child(action_item(tr("复制 URL", "Copy URL"), move || {
             copy_part(&copy_url, selected.get(), CopyPart::Url);
         }))
-        .child(action_item("cURL", move || {
+        .child(action_item(tr("复制 cURL", "Copy cURL"), move || {
             copy_part(&copy_curl, selected.get(), CopyPart::Curl);
         }))
         .child(action_item(tr("复制给 AI", "Copy for AI"), move || {
             copy_snippet(&copy_ai, selected.get(), Snippet::AiContext);
         }))
-        .child(action_item("fetch", move || {
-            copy_snippet(&copy_fetch, selected.get(), Snippet::Fetch);
-        }))
-        .child(action_item("Python", move || {
-            copy_snippet(&copy_python, selected.get(), Snippet::Python);
-        }))
-        .child(action_item("Rust (reqwest)", move || {
-            copy_snippet(&copy_rust, selected.get(), Snippet::RustReqwest);
-        }))
-        .child(action_item("Go (net/http)", move || {
-            copy_snippet(&copy_go, selected.get(), Snippet::GoHttp);
-        }))
-        .child(action_item("HTTPie", move || {
-            copy_snippet(&copy_httpie, selected.get(), Snippet::Httpie);
-        }))
-        .child(action_item("PowerShell", move || {
-            copy_snippet(&copy_powershell, selected.get(), Snippet::PowerShell);
-        }))
-        .child(action_item("JS (axios)", move || {
-            copy_snippet(&copy_axios, selected.get(), Snippet::Axios);
-        }))
-        .child(action_item("Kotlin (OkHttp)", move || {
-            copy_snippet(&copy_kotlin, selected.get(), Snippet::KotlinOkHttp);
-        }))
-        .child(action_item("Swift (URLSession)", move || {
-            copy_snippet(&copy_swift, selected.get(), Snippet::SwiftUrlSession);
-        }))
-        .child(action_item(tr("TS 类型", "TS types"), move || {
-            copy_snippet(&copy_types, selected.get(), Snippet::Types);
-        }))
-        .child(action_item(
-            tr("Rust 结构体", "Rust struct"),
-            move || {
-                copy_snippet(&copy_rust_struct, selected.get(), Snippet::RustStruct);
-            },
-        ))
+        .child(code_snippets_section(code_controls, selected, code_open))
         .child(action_item(tr("复制请求", "Copy request"), move || {
             copy_part(&copy_request, selected.get(), CopyPart::Request);
         }))
@@ -226,14 +389,14 @@ pub(crate) fn detail_actions(
         .child(menu_rule())
         .child(action_item_enabled(
             tr("重放", "Replay"),
-            can_local,
+            can_mutate.clone(),
             move || {
                 replay_flow(&replay_controls, selected.get(), ReplayOverride::default());
             },
         ))
         .child(action_item_enabled(
             tr("批量重放…", "Repeat…"),
-            can_local,
+            can_mutate.clone(),
             move || {
                 if refuse_relay(&repeat_controls, selected.get()) {
                     return;
@@ -249,7 +412,7 @@ pub(crate) fn detail_actions(
                     edit_action_label(ui_lang(langs), selected.get(), paused.get()).into()
                 }
             },
-            can_local,
+            can_mutate,
             move || {
                 begin_compose(&edit_controls, selected.get(), compose);
             },
@@ -282,16 +445,13 @@ pub(crate) fn detail_actions(
                 map_local_from_flow(map_local_controls.clone(), selected.get(), rules_text);
             },
         ))
-        .child(action_item_enabled(
-            tr("内联 Mock 响应", "Inline mock response"),
+        .child(flow_quick_rule_section_opts(
+            false,
             can_local,
-            move || {
-                begin_inline_mock(&inline_mock_controls, selected.get(), compose);
+            move |action| {
+                open_quick_rule_for_flow(&quick_rule_controls, profiles, selected.get(), action);
             },
         ))
-        .child(flow_quick_rule_section(can_local, move |action| {
-            open_quick_rule_for_flow(&quick_rule_controls, profiles, selected.get(), action);
-        }))
         .child(when(
             move || compose.composing.get() && !compose.response.get(),
             move || {

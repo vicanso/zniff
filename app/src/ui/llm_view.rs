@@ -209,13 +209,7 @@ fn llm_thinking_card(
                     });
                     if !text.is_empty() {
                         set_clipboard(text);
-                        set_status(
-                            &controls,
-                            StatusMsg::CopiedBody {
-                                side: Side::Response,
-                                hex: false,
-                            },
-                        );
+                        set_status(&controls, StatusMsg::CopiedThinking);
                     }
                 })),
         )
@@ -276,13 +270,7 @@ fn llm_output_card(
                             });
                             if !text.is_empty() {
                                 set_clipboard(text);
-                                set_status(
-                                    &copy_controls,
-                                    StatusMsg::CopiedBody {
-                                        side: Side::Response,
-                                        hex: false,
-                                    },
-                                );
+                                set_status(&copy_controls, StatusMsg::CopiedMessage);
                             }
                         })
                     },
@@ -384,13 +372,7 @@ fn llm_tool_calls_card(
                                 let raw = tc.with_untracked(|item| item.arguments.clone());
                                 let pretty = format_tool_args(&raw);
                                 set_clipboard(pretty);
-                                set_status(
-                                    &copy_controls,
-                                    StatusMsg::CopiedBody {
-                                        side: Side::Response,
-                                        hex: false,
-                                    },
-                                );
+                                set_status(&copy_controls, StatusMsg::CopiedToolArgs);
                             })),
                     )
                     .child(

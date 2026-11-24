@@ -885,6 +885,7 @@ pub(crate) fn map_local_from_flow(
             return;
         }
         set_status(&controls, StatusMsg::MappedLocal(format!("{host}{path}")));
+        return;
     }
     #[cfg(not(target_arch = "wasm32"))]
     {

@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Copy)]
 pub(crate) struct InlineMockSignals {
     pub(crate) open: Signal<bool>,
+    pub(crate) saving: Signal<bool>,
     pub(crate) flow_id: Signal<u64>,
     pub(crate) host: Signal<String>,
     pub(crate) path: Signal<String>,
@@ -24,6 +25,7 @@ impl InlineMockSignals {
     pub(crate) fn new() -> Self {
         Self {
             open: signal(false),
+            saving: signal(false),
             flow_id: signal(0),
             host: signal(String::new()),
             path: signal(String::new()),
@@ -35,6 +37,7 @@ impl InlineMockSignals {
     }
 
     pub(crate) fn close(self) {
+        self.saving.set(false);
         self.open.set(false);
     }
 }
@@ -219,6 +222,55 @@ pub(crate) fn build_inline_mock_rules(
     Some(next)
 }
 
+/// Payload used to persist an edited mock response body and generate rules.
+pub(crate) struct InlineMockSaveInput<'a> {
+    pub(crate) host: &'a str,
+    pub(crate) path: &'a str,
+    pub(crate) flow_id: u64,
+    pub(crate) status: u16,
+    pub(crate) edited_headers: &'a [(String, String)],
+    pub(crate) original_headers: &'a [(String, String)],
+    pub(crate) body_bytes: &'a [u8],
+}
+
+/// Writes the edited mock body under `<base_dir>/mocks/` and computes updated rules.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn persist_inline_mock_files(
+    base_dir: &Path,
+    existing_rules: &str,
+    input: &InlineMockSaveInput<'_>,
+) -> std::io::Result<(PathBuf, String)> {
+    let target = mock_file_path(
+        base_dir,
+        input.host,
+        input.path,
+        input.flow_id,
+        input.edited_headers,
+        input.body_bytes,
+    );
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&target, input.body_bytes)?;
+    let saved_str = target.display().to_string();
+    let next_rules = build_inline_mock_rules(
+        existing_rules,
+        input.host,
+        input.path,
+        Some(saved_str.as_str()),
+        input.status,
+        input.edited_headers,
+        input.original_headers,
+    )
+    .ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid host or path for inline mock",
+        )
+    })?;
+    Ok((target, next_rules))
+}
+
 /// Opens the inline response mock editor prefilled from the selected flow.
 pub(crate) fn begin_inline_mock(controls: &Arc<Controls>, id: Option<u64>, compose: Compose) {
     if refuse_relay(controls, id) {
@@ -230,6 +282,7 @@ pub(crate) fn begin_inline_mock(controls: &Arc<Controls>, id: Option<u64>, compo
     };
     compose.composing.set(false);
     let mock = compose.inline_mock;
+    mock.saving.set(false);
     mock.flow_id.set(flow.id);
     mock.host.set(flow.host.clone());
     mock.path.set(flow.path.clone());
@@ -251,6 +304,9 @@ pub(crate) fn save_inline_mock(
     profiles: ProfileSignals,
 ) {
     let mock = compose.inline_mock;
+    if mock.saving.get_untracked() {
+        return;
+    }
     let raw_status = mock.status.get_untracked();
     let Some(status) = parse_status_code(&raw_status) else {
         return;
@@ -263,57 +319,78 @@ pub(crate) fn save_inline_mock(
     let body_bytes = mock.body.get_untracked().into_bytes();
 
     #[cfg(not(target_arch = "wasm32"))]
-    let saved_file = {
-        let target = mock_file_path(
-            &ca::data_dir(),
-            &host,
-            &path,
+    {
+        let input = InlineMockSaveInput {
+            host: &host,
+            path: &path,
             flow_id,
-            &edited_headers,
-            &body_bytes,
+            status,
+            edited_headers: &edited_headers,
+            original_headers: &original_headers,
+            body_bytes: &body_bytes,
+        };
+        let (target, next_rules) = match persist_inline_mock_files(
+            &ca::data_dir(),
+            &profiles.rules.get_untracked(),
+            &input,
+        ) {
+            Ok(res) => res,
+            Err(err) => {
+                set_status(controls, StatusMsg::SaveFailed(err.to_string()));
+                return;
+            }
+        };
+        profiles.rules.set(next_rules.clone());
+        controls.hub.set_rules(&next_rules);
+        if !profiles.rules_on.get_untracked() {
+            profiles.rules_on.set(true);
+            controls.hub.set_rules_enabled(true);
+        }
+        save_config_or_notify(controls, PrefName::Rules, |cfg| {
+            cfg.rules = next_rules;
+            cfg.rules_enabled = true;
+        });
+        set_status(
+            controls,
+            StatusMsg::MappedLocal(target.display().to_string()),
         );
-        if let Some(parent) = target.parent()
-            && let Err(err) = std::fs::create_dir_all(parent)
-        {
-            set_status(controls, StatusMsg::SaveFailed(err.to_string()));
-            return;
-        }
-        if let Err(err) = std::fs::write(&target, &body_bytes) {
-            set_status(controls, StatusMsg::SaveFailed(err.to_string()));
-            return;
-        }
-        Some(target.display().to_string())
-    };
-    #[cfg(target_arch = "wasm32")]
-    let saved_file: Option<String> = {
-        let _ = (flow_id, &body_bytes);
-        None
-    };
-
-    let Some(next_rules) = build_inline_mock_rules(
-        &profiles.rules.get_untracked(),
-        &host,
-        &path,
-        saved_file.as_deref(),
-        status,
-        &edited_headers,
-        &original_headers,
-    ) else {
-        return;
-    };
-
-    profiles.rules.set(next_rules.clone());
-    controls.hub.set_rules(&next_rules);
-    if !profiles.rules_on.get_untracked() {
-        profiles.rules_on.set(true);
-        controls.hub.set_rules_enabled(true);
+        mock.close();
     }
-    save_config_or_notify(controls, PrefName::Rules, |cfg| {
-        cfg.rules = next_rules;
-    });
-    let label = saved_file.unwrap_or_else(|| format!("{host}{path}"));
-    set_status(controls, StatusMsg::MappedLocal(label));
-    mock.close();
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        let payload = serde_json::json!({
+            "op": "save_inline_mock",
+            "host": host,
+            "path": path,
+            "flow_id": flow_id,
+            "status": status,
+            "headers": edited_headers,
+            "original_headers": original_headers,
+            "body_b64": session::base64_encode(&body_bytes),
+        });
+        mock.saving.set(true);
+        let controls = Arc::clone(controls);
+        spawn(async move {
+            let result = controls.hub.save_inline_mock_remote(payload).await;
+            mock.saving.set(false);
+            match result {
+                Ok((next_rules, mock_path)) => {
+                    profiles.rules.set(next_rules.clone());
+                    profiles.rules_on.set(true);
+                    let _ = save_config(|cfg| {
+                        cfg.rules = next_rules;
+                        cfg.rules_enabled = true;
+                    });
+                    set_status(&controls, StatusMsg::MappedLocal(mock_path));
+                    mock.close();
+                }
+                Err(err) => {
+                    set_status(&controls, StatusMsg::SaveFailed(format!("{err:#}")));
+                }
+            }
+        });
+    }
 }
 
 /// Compact one-click Mock trigger button shown beside `detail_actions` in the detail summary.
@@ -330,9 +407,10 @@ pub(crate) fn inline_mock_trigger_button(
             let is_open = move || compose.inline_mock.open.get();
             view()
                 .role(AccessibilityRole::Button)
-                .h(px(26.0))
+                .h(px(ControlSize::Sm.height()))
                 .px_2()
                 .rounded(px(RADIUS_MD))
+                .label("Mock")
                 .border_1()
                 .border_color(move || {
                     if is_open() {
@@ -432,6 +510,7 @@ fn inline_mock_header(
     status_invalid: impl Fn() -> bool + Copy + 'static,
 ) -> impl IntoElement {
     let mock = compose.inline_mock;
+    let save_disabled = move || status_invalid() || mock.saving.get();
     view()
         .flex_row()
         .flex_wrap()
@@ -500,7 +579,7 @@ fn inline_mock_header(
                         .px_2p5()
                         .rounded(px(RADIUS_MD))
                         .bg(move || {
-                            if status_invalid() {
+                            if save_disabled() {
                                 bg_control()
                             } else {
                                 accent_blue()
@@ -508,7 +587,7 @@ fn inline_mock_header(
                         })
                         .hover(|style| {
                             style.bg(move || {
-                                if status_invalid() {
+                                if save_disabled() {
                                     bg_control()
                                 } else {
                                     accent_blue_hover()
@@ -517,7 +596,7 @@ fn inline_mock_header(
                         })
                         .active(|style| {
                             style.bg(move || {
-                                if status_invalid() {
+                                if save_disabled() {
                                     bg_control()
                                 } else {
                                     accent_blue_active()
@@ -528,8 +607,12 @@ fn inline_mock_header(
                         .duration(MOTION_INSTANT_MS)
                         .ease_out()
                         .focus_visible(apply_focus_ring)
-                        .disabled(status_invalid)
+                        .disabled(save_disabled)
                         .disabled_style(|style| style.opacity(0.55))
+                        .tooltip(label_tip(
+                            "保存并生成 map-local 规则 (Cmd/Ctrl+Enter)",
+                            "Save & apply map-local rule (Cmd/Ctrl+Enter)",
+                        ))
                         .flex_row()
                         .items_center()
                         .on_press(move || {
@@ -541,7 +624,7 @@ fn inline_mock_header(
                                 .text_size(px(TEXT_SM))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(move || {
-                                    if status_invalid() {
+                                    if save_disabled() {
                                         fg_muted()
                                     } else {
                                         fg_on_accent()
@@ -576,7 +659,7 @@ fn inline_mock_status_row(
                 .border_1()
                 .border_color(move || {
                     if status_invalid() {
-                        status_warn_fg()
+                        status_err_fg()
                     } else {
                         border_control()
                     }
@@ -635,8 +718,8 @@ fn inline_mock_headers_editor(mock: InlineMockSignals) -> impl IntoElement {
                         .line_numbers(false)
                         .folding(false)
                         .soft_wrap(true)
-                        .font_size(Points(12.0))
-                        .line_height(Points(18.0))
+                        .font_size(move || scaled_px(12.0))
+                        .line_height(move || scaled_px(18.0))
                         .scroll_beyond_last_line(false)
                         .on_change(move |text: &SharedString| {
                             mock.headers.set(text.to_string());
@@ -669,12 +752,19 @@ fn inline_mock_body_editor(mock: InlineMockSignals) -> impl IntoElement {
                 .child(
                     editor()
                         .value(move || SharedString::from(mock.body.get()))
-                        .language("json")
+                        .language(move || {
+                            let parsed = parse_header_text(&mock.headers.get());
+                            let ct = present::content_type(&parsed);
+                            SharedString::from(
+                                present::editor_language(ct, &mock.body.get())
+                                    .unwrap_or("plaintext"),
+                            )
+                        })
                         .line_numbers(true)
                         .folding(false)
                         .soft_wrap(true)
-                        .font_size(Points(12.0))
-                        .line_height(Points(18.0))
+                        .font_size(move || scaled_px(12.0))
+                        .line_height(move || scaled_px(18.0))
                         .scroll_beyond_last_line(false)
                         .on_change(move |text: &SharedString| {
                             mock.body.set(text.to_string());

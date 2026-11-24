@@ -57,6 +57,8 @@ pub(crate) struct SettingsWindowProps {
     pub(crate) profiles: ProfileSignals,
     pub(crate) controls: Arc<Controls>,
     pub(crate) ca_ui: CaSignals,
+    pub(crate) running: Signal<bool>,
+    pub(crate) listen: Signal<String>,
     pub(crate) proxy_on: Signal<bool>,
     pub(crate) port_text: Signal<String>,
     pub(crate) listen_all: Signal<bool>,
@@ -74,6 +76,26 @@ pub(crate) struct SettingsWindowProps {
 
 /// Renders the Settings window as a native desktop window, or as a modal overlay on wasm32.
 #[cfg(not(target_arch = "wasm32"))]
+fn settings_window_body(props: SettingsWindowProps) -> impl IntoElement {
+    let esc_open = props.profiles.settings_open;
+    on_key("escape", move |_| esc_open.set(false));
+    let mod_open = props.profiles.settings_open;
+    on_key_with(
+        "mod+,",
+        KeyOptions {
+            when: nsh_core::keymap::When::Always,
+            ..KeyOptions::default()
+        },
+        move |_| mod_open.set(false),
+    );
+    view()
+        .w_full()
+        .h_full()
+        .bg(bg_card())
+        .child(settings_shell(props, false))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn settings_window(props: SettingsWindowProps) -> impl IntoElement {
     let open = props.profiles.settings_open;
     nsh_core::element::desktop::window()
@@ -89,13 +111,7 @@ pub(crate) fn settings_window(props: SettingsWindowProps) -> impl IntoElement {
                 open.set(false);
             }
         })
-        .content(move || {
-            view()
-                .w_full()
-                .h_full()
-                .bg(bg_card())
-                .child(settings_shell(props.clone(), false))
-        })
+        .content(move || settings_window_body(props.clone()))
 }
 
 /// Renders the Settings window as a modal overlay in the browser console (`wasm32`).
@@ -494,8 +510,6 @@ fn settings_layout_row(
 
 fn settings_updates_tab(props: SettingsWindowProps) -> impl IntoElement {
     let profiles = props.profiles;
-    #[cfg(not(target_arch = "wasm32"))]
-    let open = profiles.settings_open;
     let version_card = settings_card(
         "当前版本",
         "Version",
@@ -517,6 +531,10 @@ fn settings_updates_tab(props: SettingsWindowProps) -> impl IntoElement {
                 || false,
                 move || {
                     profiles.about_open.set(true);
+                    #[cfg(not(target_arch = "wasm32"))]
+                    nsh_core::element::desktop::main_window().focus();
+                    #[cfg(target_arch = "wasm32")]
+                    profiles.settings_open.set(false);
                 },
             )),
     );
@@ -526,7 +544,7 @@ fn settings_updates_tab(props: SettingsWindowProps) -> impl IntoElement {
         settings_card(
             "软件更新",
             "Software Update",
-            update_menu_section(open, props.update_state, props.controls),
+            update_menu_section(None, props.update_state, props.controls),
         )
     )
 }

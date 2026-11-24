@@ -606,29 +606,63 @@ fn render_node_row(
                     .text_size(px(TEXT_XS))
                     .text_color(fg_muted()),
             ),
-        kind => row
-            .child(
-                mono(meta.key)
-                    .flex_shrink_0()
-                    .text_size(px(TEXT_SM))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(key_color),
-            )
-            .child(
-                mono(" : ")
-                    .flex_shrink_0()
-                    .text_size(px(TEXT_SM))
-                    .text_color(fg_muted()),
-            )
-            .child(
-                mono(meta.preview)
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .number_of_lines(1)
-                    .text_overflow(EllipsizeMode::Tail)
-                    .text_size(px(TEXT_SM))
-                    .text_color(value_color(kind)),
-            ),
+        kind => {
+            let show_tip = matches!(kind, JsonNodeKind::Str)
+                && (meta.preview.chars().count() > 48 || meta.preview.ends_with("…\""));
+            let tip_preview = meta.preview.clone();
+            let row = row
+                .child(
+                    mono(meta.key)
+                        .flex_shrink_0()
+                        .text_size(px(TEXT_SM))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(key_color),
+                )
+                .child(
+                    mono(" : ")
+                        .flex_shrink_0()
+                        .text_size(px(TEXT_SM))
+                        .text_color(fg_muted()),
+                )
+                .child(
+                    mono(meta.preview)
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .number_of_lines(1)
+                        .text_overflow(EllipsizeMode::Tail)
+                        .text_size(px(TEXT_SM))
+                        .text_color(value_color(kind)),
+                );
+            if show_tip {
+                row.tooltip(
+                    tooltip().child(ui_tooltip_surface(
+                        view()
+                            .max_w(px(420.0))
+                            .gap_1()
+                            .flex_col()
+                            .child(
+                                mono(tip_preview)
+                                    .text_size(px(TEXT_XS))
+                                    .text_color(fg_primary()),
+                            )
+                            .child(
+                                text(move || -> SharedString {
+                                    t(
+                                        ui_lang(langs),
+                                        "双击或按 Enter 复制完整值",
+                                        "Double-click or press Enter to copy full value",
+                                    )
+                                    .into()
+                                })
+                                .text_size(px(TEXT_XS))
+                                .text_color(fg_muted()),
+                            ),
+                    )),
+                )
+            } else {
+                row
+            }
+        }
     }
 }
 
@@ -694,6 +728,8 @@ fn empty_tree_placeholder() -> impl IntoElement {
     )
 }
 
+const TREE_BAR_H: f32 = 26.0;
+
 fn tree_container_height(
     is_empty: Memo<bool>,
     tree_view: Memo<TreeViewArc>,
@@ -704,7 +740,7 @@ fn tree_container_height(
     } else {
         let rows = tree_view
             .with(|v| effective_expanded.with(|exp| visible_tree_row_count(&v.0.items, exp)));
-        px(tree_box_height(rows))
+        px(tree_box_height(rows) + TREE_BAR_H)
     }
 }
 
@@ -714,9 +750,10 @@ pub(crate) fn json_tree_body(
     side: Side,
     controls: Arc<Controls>,
 ) -> impl IntoElement {
+    let _ = side;
     json_tree_panel(json, search, move |payload| {
         set_clipboard(payload);
-        set_status(&controls, StatusMsg::CopiedBody { side, hex: false });
+        set_status(&controls, StatusMsg::CopiedJsonValue);
     })
 }
 
@@ -742,51 +779,118 @@ pub(crate) fn json_tree_panel(
                 return empty_tree_placeholder().into_element();
             }
             let on_copy = on_copy.clone();
-            tree()
+            let on_copy_btn = on_copy.clone();
+            view()
                 .size_full()
-                .accessibility_label("JSON Tree")
-                .items(move || tree_view.with(|v| v.0.items.clone()))
-                .expanded(move || Some(effective_expanded.get()))
-                .selected(move || selected_node.get())
-                .on_expanded_change(move |ids: &Vec<SharedString>| {
-                    let q = search.get_untracked();
-                    let trimmed = q.trim();
-                    if trimmed.is_empty() {
-                        user_expanded.set(ids.clone());
-                    } else {
-                        search_expanded.set(Some((trimmed.to_string(), ids.clone())));
-                    }
-                })
-                .on_selected_change(move |id: &SharedString| {
-                    selected_node.set(Some(id.clone()));
-                })
-                .on_action(move |id: &SharedString| {
-                    let copied = json.with_untracked(|jb| {
-                        jb.as_ref()
-                            .and_then(|body| copy_json_node_value(&body.value, id.as_ref()))
-                    });
-                    if let Some(payload) = copied {
-                        on_copy(payload);
-                    }
-                })
-                .list_style(|s| s.py_1p5())
-                .item_class("group")
-                .item_style(|s| s.w_full().h(px(TREE_ROW_H)).flex_row().items_center())
-                .render_item(move |entry: &TreeEntry| {
-                    let node_id = entry.id.clone();
-                    let sel_id = entry.id.clone();
-                    let depth = entry.depth;
-                    let folder = entry.folder;
-                    let is_selected =
-                        computed(move || selected_node.with(|s| s.as_ref() == Some(&sel_id)));
-                    let node_meta =
-                        computed(move || tree_view.with(|v| v.0.meta.get(&node_id).cloned()));
-                    dynamic(move || {
-                        node_meta
-                            .get()
-                            .map(|meta| render_node_row(depth, folder, meta, langs, is_selected))
-                    })
-                })
+                .flex_col()
+                .child(
+                    view()
+                        .w_full()
+                        .h(px(TREE_BAR_H))
+                        .px_2p5()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .border_b_1()
+                        .border_b_color(border_subtle())
+                        .child(
+                            text(tr(
+                                "双击或按 Enter 复制节点值",
+                                "Double-click or press Enter to copy value",
+                            ))
+                            .number_of_lines(1)
+                            .text_overflow(EllipsizeMode::Tail)
+                            .text_size(px(TEXT_XS))
+                            .text_color(fg_muted()),
+                        )
+                        .child(
+                            ui_button(ButtonVariant::Ghost, ControlSize::Xs)
+                                .accessibility_label(move || {
+                                    Some(t(ui_lang(langs), "复制选中值", "Copy value").into())
+                                })
+                                .disabled(move || selected_node.with(Option::is_none))
+                                .on_press(move || {
+                                    let Some(id) = selected_node.get_untracked() else {
+                                        return;
+                                    };
+                                    let copied = json.with_untracked(|jb| {
+                                        jb.as_ref().and_then(|body| {
+                                            copy_json_node_value(&body.value, id.as_ref())
+                                        })
+                                    });
+                                    if let Some(payload) = copied {
+                                        on_copy_btn(payload);
+                                    }
+                                })
+                                .child(
+                                    text(move || -> SharedString {
+                                        t(ui_lang(langs), "复制值", "Copy value").into()
+                                    })
+                                    .number_of_lines(1)
+                                    .text_size(px(TEXT_XS))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(move || {
+                                        if selected_node.with(Option::is_some) {
+                                            accent_blue_text()
+                                        } else {
+                                            fg_muted()
+                                        }
+                                    }),
+                                ),
+                        ),
+                )
+                .child(
+                    tree()
+                        .flex_1()
+                        .min_h(px(0.0))
+                        .w_full()
+                        .accessibility_label("JSON Tree")
+                        .items(move || tree_view.with(|v| v.0.items.clone()))
+                        .expanded(move || Some(effective_expanded.get()))
+                        .selected(move || selected_node.get())
+                        .on_expanded_change(move |ids: &Vec<SharedString>| {
+                            let q = search.get_untracked();
+                            let trimmed = q.trim();
+                            if trimmed.is_empty() {
+                                user_expanded.set(ids.clone());
+                            } else {
+                                search_expanded.set(Some((trimmed.to_string(), ids.clone())));
+                            }
+                        })
+                        .on_selected_change(move |id: &SharedString| {
+                            selected_node.set(Some(id.clone()));
+                        })
+                        .on_action(move |id: &SharedString| {
+                            let copied = json.with_untracked(|jb| {
+                                jb.as_ref()
+                                    .and_then(|body| copy_json_node_value(&body.value, id.as_ref()))
+                            });
+                            if let Some(payload) = copied {
+                                on_copy(payload);
+                            }
+                        })
+                        .list_style(|s| s.py_1p5())
+                        .item_class("group")
+                        .item_style(|s| s.w_full().h(px(TREE_ROW_H)).flex_row().items_center())
+                        .render_item(move |entry: &TreeEntry| {
+                            let node_id = entry.id.clone();
+                            let sel_id = entry.id.clone();
+                            let depth = entry.depth;
+                            let folder = entry.folder;
+                            let is_selected = computed(move || {
+                                selected_node.with(|s| s.as_ref() == Some(&sel_id))
+                            });
+                            let node_meta = computed(move || {
+                                tree_view.with(|v| v.0.meta.get(&node_id).cloned())
+                            });
+                            dynamic(move || {
+                                node_meta.get().map(|meta| {
+                                    render_node_row(depth, folder, meta, langs, is_selected)
+                                })
+                            })
+                        }),
+                )
                 .into_element()
         }))
 }
