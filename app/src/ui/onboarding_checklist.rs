@@ -150,14 +150,14 @@ fn step_root_ca_trusted(input: &ChecklistInput, lang: Lang) -> ChecklistStep {
     } else if input.ca_trusted {
         let hint = if let Some(tool) = input.active_external_ca.as_deref() {
             match lang {
-                Lang::Zh => format!("已复用 {tool} 证书，可解密 HTTPS"),
-                Lang::En => format!("Reusing {tool} CA for HTTPS"),
+                Lang::Zh => format!("本机已复用 {tool} 证书 · 手机抓包请扫码或访问 /zniff 安装"),
+                Lang::En => format!("Host reusing {tool} CA · Mobile: scan QR or open /zniff"),
             }
         } else {
             t(
                 lang,
-                "根证书已信任，可直接解密 HTTPS",
-                "Root CA trusted for HTTPS decryption",
+                "本机系统库已信任 · 手机抓包请扫码或访问 /zniff 安装",
+                "Host system store trusted · Mobile: scan QR or open /zniff",
             )
             .to_string()
         };
@@ -167,26 +167,30 @@ fn step_root_ca_trusted(input: &ChecklistInput, lang: Lang) -> ChecklistStep {
             StepStatus::ActionRequired,
             t(
                 lang,
-                "证书已安装但尚未信任；点击信任或改用免装证书的隔离浏览器",
-                "CA installed but not trusted; trust it or use Isolated Browser",
+                "本机证书已安装但尚未信任；点击信任，或改用隔离浏览器 / 手机扫码",
+                "Host CA installed but untrusted; trust it, or use Isolated Browser / Mobile QR",
             )
             .to_string(),
         )
     } else if let Some(tool) = input.detected_external_ca.as_deref() {
         let hint = match lang {
-            Lang::Zh => format!("检测到 {tool} 证书可一键复用，也可安装证书或使用隔离浏览器"),
+            Lang::Zh => {
+                format!("本机未安装（可选，检测到 {tool} 证书可复用）· 手机抓包请扫码访问 /zniff")
+            }
             Lang::En => {
-                format!("Detected {tool} CA to reuse, or install CA / open Isolated Browser")
+                format!(
+                    "Host CA not installed (optional, {tool} CA detected) · Mobile: scan QR /zniff"
+                )
             }
         };
-        (StepStatus::ActionRequired, hint)
+        (StepStatus::Optional, hint)
     } else {
         (
-            StepStatus::ActionRequired,
+            StepStatus::Optional,
             t(
                 lang,
-                "解密 HTTPS 需信任根证书，或直接使用下方隔离浏览器免装证书抓包",
-                "Trust the CA to decrypt HTTPS, or open Isolated Browser without installing",
+                "本机未安装（仅本机系统代理需要）· 手机抓包请扫码访问 /zniff",
+                "Host CA not installed (only needed for host system proxy) · Mobile: scan QR /zniff",
             )
             .to_string(),
         )
@@ -194,7 +198,12 @@ fn step_root_ca_trusted(input: &ChecklistInput, lang: Lang) -> ChecklistStep {
     ChecklistStep {
         id: ChecklistStepId::RootCaTrusted,
         status,
-        title: t(lang, "证书已信任", "Root CA trusted").to_string(),
+        title: t(
+            lang,
+            "证书准备（本机 / 移动端）",
+            "Certificate Setup (Host / Mobile)",
+        )
+        .to_string(),
         hint,
     }
 }
@@ -552,75 +561,73 @@ fn step_proxy_actions(props: &OnboardingProps) -> impl IntoElement {
 fn step_ca_actions(props: &OnboardingProps) -> impl IntoElement {
     let ca_ui = props.ca_ui;
     let controls = props.controls.clone();
-    let selected = props.selected;
+    let running = props.running;
+    let pending_qr = props.pending_qr;
+    let qr_open = props.qr_open;
     let install_ca = props.install_ca.clone();
     let langs = ui_langs();
+    let qr_controls = controls.clone();
+    let untrusted = move || ca_ui.status.get() != ca::CaStatus::Trusted;
 
-    when(
-        move || ca_ui.status.get() != ca::CaStatus::Trusted,
-        move || {
-            let ext_controls = controls.clone();
-            let browser_controls = controls.clone();
-            let install_cb = install_ca.clone();
-            view()
-                .flex_row()
-                .flex_wrap()
-                .items_center()
-                .justify_end()
-                .gap_1p5()
-                .flex_shrink_0()
-                .child(when(
-                    move || ca_ui.detected_external.with(|items| !items.is_empty()),
-                    move || {
-                        let c = ext_controls.clone();
-                        checklist_action_chip(
-                            move || -> SharedString {
-                                let lang = ui_lang(langs);
-                                let tool = ca_ui
-                                    .detected_external
-                                    .with(|items| items.first().map(|i| i.tool_name.clone()))
-                                    .unwrap_or_default();
-                                match lang {
-                                    Lang::Zh => format!("复用 {tool}").into(),
-                                    Lang::En => format!("Reuse {tool}").into(),
-                                }
-                            },
-                            true,
-                            move || {
-                                if let Some(first) =
-                                    ca_ui.detected_external.with(|items| items.first().cloned())
-                                {
-                                    use_external_ca(c.clone(), first.id);
-                                }
-                            },
-                        )
-                    },
-                ))
-                .child(checklist_action_chip(
+    view()
+        .flex_row()
+        .flex_wrap()
+        .items_center()
+        .justify_end()
+        .gap_1p5()
+        .flex_shrink_0()
+        .child(when(
+            move || untrusted() && ca_ui.detected_external.with(|items| !items.is_empty()),
+            move || {
+                let c = controls.clone();
+                checklist_action_chip(
                     move || -> SharedString {
                         let lang = ui_lang(langs);
-                        match ca_ui.status.get() {
-                            ca::CaStatus::InstalledUntrusted => {
-                                t(lang, "信任证书", "Trust CA").into()
-                            }
-                            ca::CaStatus::NotInstalled | ca::CaStatus::Trusted => {
-                                t(lang, "安装证书", "Install CA").into()
-                            }
+                        let tool = ca_ui
+                            .detected_external
+                            .with(|items| items.first().map(|i| i.tool_name.clone()))
+                            .unwrap_or_default();
+                        match lang {
+                            Lang::Zh => format!("复用 {tool}").into(),
+                            Lang::En => format!("Reuse {tool}").into(),
                         }
                     },
-                    false,
-                    move || install_cb.as_ref()(),
-                ))
-                .child(checklist_action_chip(
-                    tr("隔离浏览器", "Isolated Browser"),
-                    false,
+                    true,
                     move || {
-                        let url = selected_browser_start_url(&browser_controls, selected.get());
-                        launch_browser_action(browser_controls.clone(), url);
+                        if let Some(first) =
+                            ca_ui.detected_external.with(|items| items.first().cloned())
+                        {
+                            use_external_ca(c.clone(), first.id);
+                        }
                     },
-                ))
-        },
-    )
+                )
+            },
+        ))
+        .child(when(untrusted, move || {
+            let install_cb = install_ca.clone();
+            checklist_action_chip(
+                move || -> SharedString {
+                    let lang = ui_lang(langs);
+                    match ca_ui.status.get() {
+                        ca::CaStatus::InstalledUntrusted => {
+                            t(lang, "信任本机证书", "Trust Host CA").into()
+                        }
+                        ca::CaStatus::NotInstalled | ca::CaStatus::Trusted => {
+                            t(lang, "安装本机证书", "Install Host CA").into()
+                        }
+                    }
+                },
+                false,
+                move || install_cb.as_ref()(),
+            )
+        }))
+        .child(checklist_action_chip(
+            tr("手机扫码", "Mobile QR"),
+            false,
+            move || {
+                trigger_mobile_qr(&qr_controls, running, pending_qr, qr_open);
+            },
+        ))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -698,12 +705,13 @@ mod tests {
     fn checklist_initial_stopped_and_untrusted() {
         let steps = compute_onboarding_checklist(&base_input(), Lang::En);
         assert_eq!(steps[0].status, StepStatus::ActionRequired);
-        assert_eq!(steps[1].status, StepStatus::ActionRequired);
+        assert_eq!(steps[1].status, StepStatus::Optional);
         assert_eq!(steps[2].status, StepStatus::Waiting);
         assert_eq!(steps[3].status, StepStatus::Waiting);
-        assert_eq!(completed_checklist_count(&steps), 0);
+        assert_eq!(completed_checklist_count(&steps), 1);
         assert!(steps[0].hint.contains("Start"));
-        assert!(steps[1].hint.contains("Isolated Browser"));
+        assert!(steps[1].title.contains("Host / Mobile"));
+        assert!(steps[1].hint.contains("/zniff"));
     }
 
     #[test]
@@ -714,17 +722,20 @@ mod tests {
         let steps = compute_onboarding_checklist(&input, Lang::Zh);
         assert_eq!(steps[0].status, StepStatus::Done);
         assert!(steps[0].hint.contains("127.0.0.1:8877"));
-        assert_eq!(steps[1].status, StepStatus::ActionRequired);
-        assert_eq!(completed_checklist_count(&steps), 1);
+        assert_eq!(steps[1].status, StepStatus::Optional);
+        assert_eq!(completed_checklist_count(&steps), 2);
+        assert!(steps[1].hint.contains("/zniff"));
 
         input.ca_trusted = true;
         let steps = compute_onboarding_checklist(&input, Lang::En);
         assert_eq!(steps[1].status, StepStatus::Done);
         assert_eq!(completed_checklist_count(&steps), 2);
+        assert!(steps[1].hint.contains("/zniff"));
 
         input.active_external_ca = Some("Charles".into());
         let steps = compute_onboarding_checklist(&input, Lang::Zh);
         assert!(steps[1].hint.contains("Charles"));
+        assert!(steps[1].hint.contains("/zniff"));
     }
 
     #[test]
@@ -733,13 +744,14 @@ mod tests {
         input.ca_installed_untrusted = true;
         let steps = compute_onboarding_checklist(&input, Lang::En);
         assert_eq!(steps[1].status, StepStatus::ActionRequired);
-        assert!(steps[1].hint.contains("not trusted"));
+        assert!(steps[1].hint.contains("untrusted"));
 
         input.ca_installed_untrusted = false;
         input.detected_external_ca = Some("Whistle".into());
         let steps = compute_onboarding_checklist(&input, Lang::Zh);
-        assert_eq!(steps[1].status, StepStatus::ActionRequired);
+        assert_eq!(steps[1].status, StepStatus::Optional);
         assert!(steps[1].hint.contains("Whistle"));
+        assert!(steps[1].hint.contains("/zniff"));
     }
 
     #[test]

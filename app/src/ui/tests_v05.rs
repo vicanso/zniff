@@ -992,11 +992,16 @@ fn c1_c2_c3_error_actions_tls_banner_and_onboarding_checklist_zh_en() {
             assert!(tree.press_text(&mut core, "NEXT_ERR_KIND"));
             assert!(tree.has_text(t(lang, "打开安全设置", "Open Security")));
 
-            // C3: 4-step onboarding checklist renders progress counter (e.g. 2/4 or 4/4).
-            let expected_progress = if ca_trusted { "4 / 4" } else { "2 / 4" };
+            // C3: 4-step onboarding checklist renders progress counter (3/4 when host CA optional, 4/4 when trusted)
+            // and always surfaces the Mobile QR action.
+            assert!(
+                tree.has_text(t(lang, "手机扫码", "Mobile QR")),
+                "Mobile QR chip should render in Step 2 (ca_trusted={ca_trusted})"
+            );
+            let expected_progress = if ca_trusted { "4 / 4" } else { "3 / 4" };
             assert!(
                 tree.has_text_containing(expected_progress)
-                    || tree.has_text_containing(if ca_trusted { "4/4" } else { "2/4" }),
+                    || tree.has_text_containing(if ca_trusted { "4/4" } else { "3/4" }),
                 "C3 checklist progress ({expected_progress}) missing in {lang:?}; texts={:?}",
                 tree.all_live_texts()
             );
