@@ -239,6 +239,7 @@ pub(crate) fn rule_groups_bar(target: RuleEditTarget, controls: Arc<Controls>) -
     let langs = ui_langs();
     let creating = signal(false);
     let draft_name = signal(String::new());
+    let confirm_delete = signal(None::<String>);
     let group_controls = controls.clone();
     let add_controls = controls;
     let at_cap = move || {
@@ -252,11 +253,11 @@ pub(crate) fn rule_groups_bar(target: RuleEditTarget, controls: Arc<Controls>) -
         .flex_wrap()
         .items_center()
         .gap_1()
-        .child(workspace_pill(target))
+        .child(workspace_pill(target, confirm_delete))
         .child(each(
             move || target.groups.get(),
             |group| group.name.to_ascii_lowercase(),
-            move |group, _| group_pill(target, group, group_controls.clone()),
+            move |group, _| group_pill(target, group, group_controls.clone(), confirm_delete),
         ))
         .child(
             when(
@@ -323,6 +324,7 @@ pub(crate) fn rule_groups_bar(target: RuleEditTarget, controls: Arc<Controls>) -
                         if at_cap() {
                             return;
                         }
+                        confirm_delete.set(None);
                         draft_name.set(String::new());
                         creating.set(true);
                     })
@@ -337,7 +339,10 @@ pub(crate) fn rule_groups_bar(target: RuleEditTarget, controls: Arc<Controls>) -
         )
 }
 
-fn workspace_pill(target: RuleEditTarget) -> impl IntoElement {
+fn workspace_pill(
+    target: RuleEditTarget,
+    confirm_delete: Signal<Option<String>>,
+) -> impl IntoElement {
     let is_selected = move || target.editing.get().is_none();
     let has_groups = move || !target.groups.with(Vec::is_empty);
     view()
@@ -378,7 +383,10 @@ fn workspace_pill(target: RuleEditTarget) -> impl IntoElement {
         .duration(MOTION_INSTANT_MS)
         .ease_out()
         .focus_visible(apply_focus_ring)
-        .on_press(move || target.editing.set(None))
+        .on_press(move || {
+            confirm_delete.set(None);
+            target.editing.set(None);
+        })
         .child(
             text(move || -> SharedString {
                 let count = target
@@ -532,6 +540,7 @@ fn group_pill(
     target: RuleEditTarget,
     group: ReadSignal<config::RuleGroup>,
     controls: Arc<Controls>,
+    confirm_delete: Signal<Option<String>>,
 ) -> impl IntoElement {
     let langs = ui_langs();
     let toggle_controls = controls.clone();
@@ -657,6 +666,7 @@ fn group_pill(
                     .ease_out()
                     .focus_visible(apply_focus_ring)
                     .on_press(move || {
+                        confirm_delete.set(None);
                         let name = group.with_untracked(|g| g.name.clone());
                         target.editing.set(Some(name));
                     })
@@ -711,41 +721,107 @@ fn group_pill(
                     .label(tr("重命名分组", "Rename group"))
                     .tooltip(label_tip("重命名此规则分组", "Rename rule group"))
                     .on_press(move || {
+                        confirm_delete.set(None);
                         rename_draft.set(group.with_untracked(|g| g.name.clone()));
                         renaming.set(true);
                     })
                     .child(glyph_px(10.0, || Glyph::RuleRewrite, || color(fg_muted())))
             }))
+            .child(group_delete_button(
+                target,
+                group,
+                remove_controls,
+                confirm_delete,
+            ))
+    })
+}
+
+fn group_delete_button(
+    target: RuleEditTarget,
+    group: ReadSignal<config::RuleGroup>,
+    controls: Arc<Controls>,
+    confirm_delete: Signal<Option<String>>,
+) -> impl IntoElement {
+    let is_confirming = move || {
+        group.with(|g| {
+            confirm_delete.with(|pending| {
+                pending
+                    .as_deref()
+                    .is_some_and(|p| p.eq_ignore_ascii_case(&g.name))
+            })
+        })
+    };
+    when(is_confirming, move || {
+        let remove_controls = controls.clone();
+        view()
+            .role(AccessibilityRole::Button)
+            .h(px(20.0))
+            .px_1()
+            .flex_shrink_0()
+            .rounded(px(RADIUS_SM))
+            .items_center()
+            .justify_center()
+            .bg(danger_button_bg())
+            .hover(|s| s.bg(danger_button_hover()))
+            .active(|s| s.bg(danger_button_active()))
+            .transition_colors()
+            .duration(MOTION_INSTANT_MS)
+            .ease_out()
+            .focus_visible(apply_focus_ring)
+            .label(tr(
+                "再次点击确认删除分组",
+                "Click again to delete rule group",
+            ))
+            .tooltip(label_tip(
+                "再次点击确认删除此分组",
+                "Click again to delete rule group",
+            ))
+            .on_press(move || {
+                let name = group.with_untracked(|g| g.name.clone());
+                confirm_delete.set(None);
+                if target.editing.with_untracked(|sel| {
+                    sel.as_deref()
+                        .is_some_and(|s| s.eq_ignore_ascii_case(&name))
+                }) {
+                    target.editing.set(None);
+                }
+                let next = remove_rule_group(&target.groups.get_untracked(), &name);
+                commit_groups(target, &remove_controls, next);
+                set_status(&remove_controls, StatusMsg::RuleGroupDeleted(name));
+            })
             .child(
-                view()
-                    .role(AccessibilityRole::Button)
-                    .w(px(18.0))
-                    .h(px(18.0))
-                    .flex_shrink_0()
-                    .rounded(px(RADIUS_SM))
-                    .items_center()
-                    .justify_center()
-                    .hover(|s| s.bg(bg_control_hover()))
-                    .active(|s| s.bg(bg_control_active()))
-                    .transition_colors()
-                    .duration(MOTION_INSTANT_MS)
-                    .ease_out()
-                    .focus_visible(apply_focus_ring)
-                    .label(tr("删除分组", "Delete rule group"))
-                    .tooltip(label_tip("删除此规则分组", "Delete rule group"))
-                    .on_press(move || {
-                        let name = group.with_untracked(|g| g.name.clone());
-                        if target.editing.with_untracked(|sel| {
-                            sel.as_deref()
-                                .is_some_and(|s| s.eq_ignore_ascii_case(&name))
-                        }) {
-                            target.editing.set(None);
-                        }
-                        let next = remove_rule_group(&target.groups.get_untracked(), &name);
-                        commit_groups(target, &remove_controls, next);
-                    })
-                    .child(text("×").text_size(px(TEXT_XS)).text_color(fg_muted())),
+                text(tr("确认？", "Del?"))
+                    .number_of_lines(1)
+                    .text_size(px(TEXT_XS))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(fg_on_accent()),
             )
+    })
+    .otherwise(move || {
+        view()
+            .role(AccessibilityRole::Button)
+            .w(px(20.0))
+            .h(px(20.0))
+            .flex_shrink_0()
+            .rounded(px(RADIUS_SM))
+            .items_center()
+            .justify_center()
+            .hover(|s| s.bg(bg_control_hover()))
+            .active(|s| s.bg(bg_control_active()))
+            .transition_colors()
+            .duration(MOTION_INSTANT_MS)
+            .ease_out()
+            .focus_visible(apply_focus_ring)
+            .label(tr("删除分组", "Delete rule group"))
+            .tooltip(label_tip(
+                "删除此规则分组（点击两次确认）",
+                "Delete rule group (click twice to confirm)",
+            ))
+            .on_press(move || {
+                let name = group.with_untracked(|g| g.name.clone());
+                confirm_delete.set(Some(name));
+            })
+            .child(glyph_px(10.0, || Glyph::Close, || color(fg_muted())))
     })
 }
 

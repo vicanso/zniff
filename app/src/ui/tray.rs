@@ -152,6 +152,9 @@ pub(crate) fn install_system_tray(props: TrayProps) {
             MenuItem::new(labels.clear_traffic)
                 .icon(clear_icon)
                 .on_select(move || {
+                    let win = main_window();
+                    win.show();
+                    win.focus();
                     clear_action();
                 }),
             MenuItem::separator(),

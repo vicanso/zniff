@@ -304,6 +304,7 @@ fn make_profiles() -> ProfileSignals {
         default_json_tree: signal(false),
         show_tray: signal(true),
         minimize_to_tray: signal(false),
+        onboarding_strip_dismissed: signal(false),
         deselect_rev: signal(0),
     }
 }

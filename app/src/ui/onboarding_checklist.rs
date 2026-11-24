@@ -308,7 +308,7 @@ fn step_first_https(input: &ChecklistInput, lang: Lang) -> ChecklistStep {
     }
 }
 
-fn current_checklist_input(props: &OnboardingProps) -> ChecklistInput {
+pub(crate) fn current_checklist_input(props: &OnboardingProps) -> ChecklistInput {
     #[cfg(target_arch = "wasm32")]
     let (ca_trusted, ca_installed_untrusted, ca_optional_web, active_ext, detected_ext) =
         (false, false, true, None, None);
@@ -663,7 +663,7 @@ fn step_ca_actions(props: &OnboardingProps) -> impl IntoElement {
         ))
 }
 
-fn checklist_action_chip(
+pub(crate) fn checklist_action_chip(
     label: impl IntoReactive<SharedString>,
     accent: bool,
     on_press: impl Fn() + 'static,

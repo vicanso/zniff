@@ -2973,6 +2973,7 @@ fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
             default_json_tree: signal(false),
             show_tray: signal(true),
             minimize_to_tray: signal(false),
+            onboarding_strip_dismissed: signal(false),
             deselect_rev: signal(0),
         };
         let compose = Compose {

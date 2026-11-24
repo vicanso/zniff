@@ -731,6 +731,7 @@ pub struct Config {
     /// When true on desktop, closing the main window hides it to the system tray instead of quitting.
     pub show_tray: bool,
     pub minimize_to_tray: bool,
+    pub onboarding_strip_dismissed: bool,
     /// Pretty is the body default unless the file says otherwise.
     pub default_pretty: bool,
     /// JSON bodies open in the interactive tree view by default when pretty is enabled.
@@ -906,6 +907,8 @@ struct RawConfig {
     show_tray: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     minimize_to_tray: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    onboarding_strip_dismissed: bool,
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     default_pretty: bool,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -1118,6 +1121,7 @@ impl From<RawConfig> for Config {
             window_mode: raw.window_mode,
             show_tray: raw.show_tray,
             minimize_to_tray: raw.show_tray && raw.minimize_to_tray,
+            onboarding_strip_dismissed: raw.onboarding_strip_dismissed,
             default_pretty: raw.default_pretty,
             default_json_tree: raw.default_json_tree,
             folded_cards: normalize_folded_cards(&raw.folded_cards),
@@ -1241,6 +1245,7 @@ impl From<Config> for RawConfig {
             window_mode: config.window_mode,
             show_tray: config.show_tray,
             minimize_to_tray: config.show_tray && config.minimize_to_tray,
+            onboarding_strip_dismissed: config.onboarding_strip_dismissed,
             default_pretty: config.default_pretty,
             default_json_tree: config.default_json_tree,
             folded_cards: normalize_folded_cards(&config.folded_cards),
@@ -1320,6 +1325,7 @@ impl Default for Config {
             window_mode: String::new(),
             show_tray: true,
             minimize_to_tray: false,
+            onboarding_strip_dismissed: false,
             default_pretty: true,
             default_json_tree: false,
             folded_cards: Vec::new(),
@@ -3277,5 +3283,13 @@ mod tests {
         assert_eq!(reloaded.watch_rules[0].name, "API 5xx");
         assert_eq!(reloaded.watch_rules[0].filter, "status:5xx host:api.x.com");
         assert!(reloaded.watch_rules[0].enabled);
+    }
+
+    #[test]
+    fn onboarding_strip_dismissed_defaults_false_and_roundtrips() {
+        let dir = Scratch::new();
+        assert!(!load(dir.path()).onboarding_strip_dismissed);
+        update(dir.path(), |cfg| cfg.onboarding_strip_dismissed = true).unwrap();
+        assert!(load(dir.path()).onboarding_strip_dismissed);
     }
 }

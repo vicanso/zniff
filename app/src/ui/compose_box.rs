@@ -98,6 +98,7 @@ pub(crate) fn compose_box(
     let controls_touch_headers = controls.clone();
     let controls_touch_body = controls.clone();
     let controls_submit_status = controls.clone();
+    let controls_recent = controls.clone();
     let status_invalid = move || {
         compose.response.get()
             && !compose.status.get().trim().is_empty()
@@ -151,7 +152,7 @@ pub(crate) fn compose_box(
                                     && !is_req_break()
                                     && !compose.recent.with(Vec::is_empty)
                             },
-                            move || compose_recent_menu(compose),
+                            move || compose_recent_menu(compose, controls_recent.clone()),
                         ))
                         .child(when(
                             move || {
@@ -929,13 +930,17 @@ fn compose_clear_button(compose: Compose) -> impl IntoElement {
         )
 }
 
-fn compose_recent_menu(compose: Compose) -> impl IntoElement {
+fn compose_recent_menu(compose: Compose, controls: Arc<Controls>) -> impl IntoElement {
     let recent_open = signal(false);
+    let confirm_clear = signal(false);
     popover()
         .open(move || Some(recent_open.get()))
         .on_open_change(move |event: &nsh_base::PopoverEvent| {
             if let nsh_base::PopoverEvent::OpenChange(next, _) = event {
                 recent_open.set(*next);
+                if !*next {
+                    confirm_clear.set(false);
+                }
             }
         })
         .placement(Placement::Bottom)
@@ -1044,6 +1049,7 @@ fn compose_recent_menu(compose: Compose) -> impl IntoElement {
                                         compose.url.set(u);
                                         compose.headers.set(h);
                                         compose.body.set(b);
+                                        confirm_clear.set(false);
                                         recent_open.set(false);
                                     })
                                     .child(
@@ -1073,6 +1079,7 @@ fn compose_recent_menu(compose: Compose) -> impl IntoElement {
                 .child(when(
                     move || !compose.recent.with(Vec::is_empty),
                     move || {
+                        let controls = controls.clone();
                         view()
                             .w_full()
                             .px_2()
@@ -1101,23 +1108,81 @@ fn compose_recent_menu(compose: Compose) -> impl IntoElement {
                                     .px_1p5()
                                     .py_0p5()
                                     .rounded(px(RADIUS_SM))
-                                    .hover(|s| s.bg(bg_control_hover()))
-                                    .active(|s| s.bg(bg_control_active()))
+                                    .bg(move || {
+                                        if confirm_clear.get() {
+                                            danger_button_bg()
+                                        } else {
+                                            AdaptiveColor::TRANSPARENT
+                                        }
+                                    })
+                                    .hover(|s| {
+                                        s.bg(move || {
+                                            if confirm_clear.get() {
+                                                danger_button_hover()
+                                            } else {
+                                                bg_control_hover()
+                                            }
+                                        })
+                                    })
+                                    .active(|s| {
+                                        s.bg(move || {
+                                            if confirm_clear.get() {
+                                                danger_button_active()
+                                            } else {
+                                                bg_control_active()
+                                            }
+                                        })
+                                    })
                                     .transition_colors()
                                     .duration(MOTION_INSTANT_MS)
                                     .ease_out()
                                     .focus_visible(apply_focus_ring)
+                                    .label(move || -> SharedString {
+                                        let lang = ui_lang(ui_langs());
+                                        if confirm_clear.get() {
+                                            t(
+                                                lang,
+                                                "再次点击确认清空构造历史",
+                                                "Click again to clear compose history",
+                                            )
+                                            .into()
+                                        } else {
+                                            t(lang, "清空历史", "Clear history").into()
+                                        }
+                                    })
                                     .on_press(move || {
+                                        if !confirm_clear.get_untracked() {
+                                            confirm_clear.set(true);
+                                            return;
+                                        }
+                                        confirm_clear.set(false);
                                         compose.recent.set(Vec::new());
                                         let _ = save_config(|config| {
                                             config.compose_history.clear();
                                         });
                                         recent_open.set(false);
+                                        set_status(&controls, StatusMsg::ComposeHistoryCleared);
                                     })
                                     .child(
-                                        text(tr("清空历史", "Clear history"))
-                                            .text_size(px(TEXT_XS))
-                                            .text_color(status_warn_fg()),
+                                        text(move || -> SharedString {
+                                            let lang = ui_lang(ui_langs());
+                                            if confirm_clear.get() {
+                                                t(lang, "确认清空？", "Confirm clear?").into()
+                                            } else {
+                                                t(lang, "清空历史", "Clear history").into()
+                                            }
+                                        })
+                                        .text_size(px(TEXT_XS))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(
+                                            move || {
+                                                if confirm_clear.get() {
+                                                    fg_on_accent()
+                                                } else {
+                                                    status_warn_fg()
+                                                }
+                                            },
+                                        ),
                                     ),
                             )
                     },

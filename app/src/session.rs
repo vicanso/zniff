@@ -2161,6 +2161,7 @@ impl Session {
         let mut merged_order = VecDeque::with_capacity(snapshot.order.len() + self.order.len());
         let mut old_flows = snapshot.flows;
         let mut restored = 0usize;
+        let mut remapped = false;
         for id in snapshot.order {
             let Some(mut flow) = old_flows.remove(&id) else {
                 continue;
@@ -2168,6 +2169,7 @@ impl Session {
             if self.flows.contains_key(&flow.id) {
                 self.next_id += 1;
                 flow.id = self.next_id;
+                remapped = true;
             } else {
                 self.next_id = self.next_id.max(flow.id);
             }
@@ -2177,8 +2179,16 @@ impl Session {
             merged_order.push_back(fid);
             restored += 1;
         }
-        merged_order.extend(self.order.drain(..));
-        self.order = merged_order;
+        if !remapped
+            && !self.order.is_empty()
+            && is_strictly_ascending(&merged_order)
+            && is_strictly_ascending(&self.order)
+        {
+            self.order = merge_ascending_ids(merged_order, std::mem::take(&mut self.order));
+        } else {
+            merged_order.extend(self.order.drain(..));
+            self.order = merged_order;
+        }
         self.bytes = self.flows.values().map(|flow| flow.accounted).sum();
         self.dropped = self.dropped.saturating_add(snapshot.dropped);
         if let Some(old_total) = snapshot.cached_total {
@@ -2217,26 +2227,83 @@ impl Session {
     }
 
     /// Removes all unpinned flows while keeping pinned flows intact.
+    /// Cleared unpinned flows remain recoverable via [`Self::undo_clear`] during `CLEAR_UNDO_TTL`.
     /// Returns the number of flows removed.
     pub fn clear_unpinned(&mut self) -> usize {
-        let before = self.flows.len();
-        self.flows.retain(|_, flow| flow.pinned);
-        let removed = before.saturating_sub(self.flows.len());
-        self.order.retain(|id| self.flows.contains_key(id));
+        self.clear_unpinned_with_undo_at(crate::clock::now(), CLEAR_UNDO_TTL)
+    }
+
+    pub fn clear_unpinned_with_undo_at(&mut self, now: SystemTime, ttl: Duration) -> usize {
+        if self.flows.is_empty() {
+            self.expire_clear_undo_at(now);
+            return 0;
+        }
+        let mut stashed_order = VecDeque::new();
+        let mut kept_order = VecDeque::with_capacity(self.order.len());
+        let mut stashed_flows = HashMap::new();
+        for id in self.order.drain(..) {
+            let Some(flow) = self.flows.get(&id) else {
+                continue;
+            };
+            if flow.pinned {
+                kept_order.push_back(id);
+            } else if let Some(flow) = self.flows.remove(&id) {
+                stashed_order.push_back(id);
+                stashed_flows.insert(id, flow);
+            }
+        }
+        self.order = kept_order;
+        let removed = stashed_flows.len();
+        if removed == 0 {
+            self.expire_clear_undo_at(now);
+            return 0;
+        }
+        self.clear_undo = None;
+        self.next_rev += 1;
         self.order.shrink_to_fit();
         self.flows.shrink_to_fit();
-        if self.flows.is_empty() {
-            self.spill.clear();
-        }
         self.bytes = self.flows.values().map(|flow| flow.accounted).sum();
-        self.dropped = 0;
-        if let Some(total) = &mut self.cached_total {
-            *total = total.saturating_sub(removed);
-        }
-        self.next_rev += 1;
+        let dropped = std::mem::take(&mut self.dropped);
+        let stashed_total = self.cached_total.map(|total| {
+            let kept = total.saturating_sub(removed);
+            self.cached_total = Some(kept);
+            removed
+        });
+        self.clear_undo = Some(ClearUndoSnapshot {
+            order: stashed_order,
+            flows: stashed_flows,
+            dropped,
+            cached_total: stashed_total,
+            expires_at: now + ttl,
+        });
         trim_memory();
         removed
     }
+}
+
+fn is_strictly_ascending(ids: &VecDeque<u64>) -> bool {
+    let mut prev: Option<u64> = None;
+    for &id in ids {
+        if prev.is_some_and(|p| id <= p) {
+            return false;
+        }
+        prev = Some(id);
+    }
+    true
+}
+
+fn merge_ascending_ids(mut left: VecDeque<u64>, mut right: VecDeque<u64>) -> VecDeque<u64> {
+    let mut out = VecDeque::with_capacity(left.len() + right.len());
+    while let (Some(&l), Some(&r)) = (left.front(), right.front()) {
+        if l <= r {
+            out.push_back(left.pop_front().unwrap());
+        } else {
+            out.push_back(right.pop_front().unwrap());
+        }
+    }
+    out.extend(left);
+    out.extend(right);
+    out
 }
 
 /// Hints to the OS allocator to release freed and purgeable pages back to the kernel.
@@ -5637,5 +5704,52 @@ mod tests {
         assert!(!s.remove_marker(f1));
         assert!(s.remove_marker(m2));
         assert_eq!(s.ids_matching("mark:"), vec![m1]);
+    }
+
+    #[test]
+    fn clear_unpinned_is_undoable_and_preserves_pinned() {
+        let mut s = Session::default();
+        let make_draft = |path: &str| FlowDraft {
+            protocol: Protocol::Http11,
+            method: "GET".into(),
+            host: "api.test".into(),
+            path: path.into(),
+            url: format!("https://api.test{path}"),
+            request_headers: vec![],
+        };
+        let f1 = s.open(make_draft("/u1"));
+        let p1 = s.open(make_draft("/p1"));
+        assert!(s.set_pinned(p1, true));
+        let f2 = s.open(make_draft("/u2"));
+        let p2 = s.open(make_draft("/p2"));
+        assert!(s.set_pinned(p2, true));
+        let f3 = s.open(make_draft("/u3"));
+
+        let base = crate::clock::now();
+        assert_eq!(
+            s.clear_unpinned_with_undo_at(base, Duration::from_secs(5)),
+            3
+        );
+        assert_eq!(s.ids_matching(""), vec![p1, p2]);
+        assert!(s.get(f1).is_none() && s.get(f2).is_none() && s.get(f3).is_none());
+
+        let f4 = s.open(make_draft("/new"));
+        assert_eq!(s.ids_matching(""), vec![p1, p2, f4]);
+
+        // Clearing when only pinned flows exist returns 0? No, f4 is unpinned so test empty-unpinned separately.
+        assert_eq!(s.undo_clear_at(base + Duration::from_secs(2)), 3);
+        assert_eq!(s.ids_matching(""), vec![f1, p1, f2, p2, f3, f4]);
+
+        // Expired undo drops unpinned stash cleanly while keeping pinned flows intact.
+        assert_eq!(
+            s.clear_unpinned_with_undo_at(base + Duration::from_secs(10), Duration::from_secs(5)),
+            4
+        );
+        assert_eq!(
+            s.clear_unpinned_with_undo_at(base + Duration::from_secs(11), Duration::from_secs(5)),
+            0
+        );
+        assert_eq!(s.undo_clear_at(base + Duration::from_secs(20)), 0);
+        assert_eq!(s.ids_matching(""), vec![p1, p2]);
     }
 }

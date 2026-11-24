@@ -420,7 +420,13 @@ pub(crate) fn install_ca(controls: Arc<Controls>) {
             let _ = save_config(|cfg| cfg.external_ca.clear());
         }
         match ca::install(&ca) {
-            Ok(_) => set_ca_status(&controls, ca::trust_status(&ca)),
+            Ok(_) => {
+                let status = ca::trust_status(&ca);
+                set_ca_status(&controls, status);
+                if status == ca::CaStatus::Trusted {
+                    set_status(&controls, StatusMsg::CaInstalled);
+                }
+            }
             Err(err) => {
                 set_ca_status(&controls, ca::trust_status(&ca));
                 set_status(&controls, StatusMsg::InstallFailed(format!("{err:#}")));
@@ -499,7 +505,10 @@ pub(crate) fn remove_ca(controls: Arc<Controls>) {
     std::thread::spawn(move || {
         let ca = controls.hub.ca.clone();
         match ca::remove(&ca) {
-            Ok(_) => set_ca_status(&controls, ca::trust_status(&ca)),
+            Ok(_) => {
+                set_ca_status(&controls, ca::trust_status(&ca));
+                set_status(&controls, StatusMsg::CaRemoved);
+            }
             Err(err) => {
                 set_ca_status(&controls, ca::trust_status(&ca));
                 set_status(&controls, StatusMsg::RemoveFailed(format!("{err:#}")));

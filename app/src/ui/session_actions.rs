@@ -50,7 +50,7 @@ pub(crate) fn clear_unpinned_captured(
     if guard_read_only_tab(controls) {
         return;
     }
-    controls.hub.clear_unpinned();
+    let cleared = controls.hub.clear_unpinned();
     if let Some(id) = selected.get()
         && controls
             .hub
@@ -84,6 +84,9 @@ pub(crate) fn clear_unpinned_captured(
         } else {
             refresh_seq_diagram(controls, seq_builder);
         }
+    }
+    if cleared > 0 {
+        set_status(controls, StatusMsg::ClearedFlows { count: cleared });
     }
     crate::session::trim_memory();
 }

@@ -55,6 +55,7 @@ pub enum PrefName {
     Theme,
     UiZoom,
     TransparentProxy,
+    Onboarding,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -225,6 +226,12 @@ pub enum StatusMsg {
     PresetSwitched(String),
     TemplateRuleAdded(String),
     TemplateRuleAlreadyPresent(String),
+    CaInstalled,
+    CaRemoved,
+    RulesCleared,
+    RuleGroupDeleted(String),
+    PresetDeleted(String),
+    ComposeHistoryCleared,
     SequenceGenerated {
         count: usize,
     },
@@ -444,6 +451,11 @@ impl StatusMsg {
                         lang,
                         "透明代理设置没有记住:",
                         "Transparent proxy settings were not saved:",
+                    ),
+                    PrefName::Onboarding => t(
+                        lang,
+                        "引导提示状态没有记住:",
+                        "Onboarding banner preference was not saved:",
                     ),
                 };
                 let err = localize_error(lang, err);
@@ -768,6 +780,29 @@ impl StatusMsg {
                 "Edit proto rules in the text editor above",
             )
             .into(),
+            Self::CaInstalled => {
+                t(lang, "已安装并信任 zniff 根证书", "Installed and trusted zniff root CA").into()
+            }
+            Self::CaRemoved => t(
+                lang,
+                "已从系统移除 zniff 根证书",
+                "Removed zniff root CA from system trust",
+            )
+            .into(),
+            Self::RulesCleared => {
+                t(lang, "已清空当前规则内容", "Cleared rules editor").into()
+            }
+            Self::RuleGroupDeleted(name) => match lang {
+                Lang::Zh => format!("已删除规则分组「{name}」"),
+                Lang::En => format!("Deleted rule group \"{name}\""),
+            },
+            Self::PresetDeleted(name) => match lang {
+                Lang::Zh => format!("已删除预设「{name}」"),
+                Lang::En => format!("Deleted preset \"{name}\""),
+            },
+            Self::ComposeHistoryCleared => {
+                t(lang, "已清空最近构造记录", "Cleared recent compose history").into()
+            }
             Self::NetworkPresetApplied { name, re_enabled } => match (lang, re_enabled) {
                 (Lang::Zh, true) => format!("已开启规则引擎并应用网络预设 · {name}"),
                 (Lang::Zh, false) => format!("已应用网络预设 · {name}"),
@@ -1070,6 +1105,12 @@ impl StatusMsg {
             | Self::RuleGroupExists(_)
             | Self::PresetSwitched(_)
             | Self::TemplateRuleAdded(_)
+            | Self::CaInstalled
+            | Self::CaRemoved
+            | Self::RulesCleared
+            | Self::RuleGroupDeleted(_)
+            | Self::PresetDeleted(_)
+            | Self::ComposeHistoryCleared
             | Self::BaselineSet
             | Self::BaselineCleared
             | Self::Replayed(_)
@@ -1160,6 +1201,10 @@ impl StatusMsg {
             | Self::BreakRuleAdded(_) => t(lang, "保存成功", "Saved Successfully"),
             Self::PrimaryFilterPausedForWatch => t(lang, "已暂停主过滤", "Primary Filter Paused"),
             Self::PresetSwitched(_) => t(lang, "已切换预设", "Preset Switched"),
+            Self::CaInstalled => t(lang, "证书已安装", "CA Installed"),
+            Self::CaRemoved => t(lang, "证书已移除", "CA Removed"),
+            Self::RulesCleared | Self::ComposeHistoryCleared => t(lang, "已清空", "Cleared"),
+            Self::RuleGroupDeleted(_) | Self::PresetDeleted(_) => t(lang, "已删除", "Deleted"),
             Self::ProfileRestored(_) => t(lang, "已恢复历史版本", "History Restored"),
             Self::CopiedUrl
             | Self::CopiedHeaderValue(_)

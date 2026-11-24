@@ -240,6 +240,35 @@ pub(crate) fn menu_inline_pill(
         }))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn menu_danger_inline_pill(
+    label: impl IntoReactive<SharedString>,
+    on_press: impl Fn() + 'static,
+) -> impl IntoElement {
+    view()
+        .role(AccessibilityRole::Button)
+        .h(px(ControlSize::Xs.height()))
+        .px_2()
+        .rounded(px(RADIUS_SM))
+        .flex_shrink_0()
+        .flex_row()
+        .items_center()
+        .justify_center()
+        .bg(danger_button_bg())
+        .hover(|style| style.bg(danger_button_hover()))
+        .active(|style| style.bg(danger_button_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
+        .on_press(on_press)
+        .child(
+            compact_control_text(label, TEXT_XS)
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(fg_on_accent()),
+        )
+}
+
 pub(crate) fn menu_export_row(
     open: Signal<bool>,
     export_har: impl Fn() + 'static,
@@ -917,10 +946,12 @@ fn cert_menu_row_actions(
     let switch_cb = Rc::new(switch_builtin);
     let install_untrusted = install.clone();
     let install_fresh = install;
+    let confirm_remove = signal(false);
 
     when(
         move || ca_ui.active_external.get().is_some(),
         move || {
+            confirm_remove.set(false);
             let cb = Rc::clone(&switch_cb);
             menu_inline_pill(
                 tr("切回 zniff", "Use zniff"),
@@ -941,7 +972,14 @@ fn cert_menu_row_actions(
                 move || ca_ui.status.get() == ca::CaStatus::InstalledUntrusted,
                 move || {
                     let install = install_untrusted.clone();
-                    menu_inline_pill(tr("信任", "Trust"), || true, move || install.as_ref()())
+                    menu_inline_pill(
+                        tr("信任", "Trust"),
+                        || true,
+                        move || {
+                            confirm_remove.set(false);
+                            install.as_ref()();
+                        },
+                    )
                 },
             ))
             .child(
@@ -949,10 +987,32 @@ fn cert_menu_row_actions(
                     move || ca_ui.status.get().is_installed(),
                     move || {
                         let remove = remove.clone();
-                        menu_inline_pill(tr("移除", "Remove"), || false, move || remove.as_ref()())
+                        when(
+                            move || confirm_remove.get(),
+                            move || {
+                                let remove = remove.clone();
+                                menu_danger_inline_pill(
+                                    tr("确认移除？", "Remove CA?"),
+                                    move || {
+                                        confirm_remove.set(false);
+                                        remove.as_ref()();
+                                    },
+                                )
+                            },
+                        )
+                        .otherwise(move || {
+                            menu_inline_pill(
+                                tr("移除", "Remove"),
+                                || false,
+                                move || {
+                                    confirm_remove.set(true);
+                                },
+                            )
+                        })
                     },
                 )
                 .otherwise(move || {
+                    confirm_remove.set(false);
                     let install = install_fresh.clone();
                     menu_inline_pill(tr("安装", "Install"), || true, move || install.as_ref()())
                 }),

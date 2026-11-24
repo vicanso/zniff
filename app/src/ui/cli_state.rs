@@ -353,6 +353,7 @@ pub(crate) struct ProfileSignals {
     pub(crate) default_json_tree: Signal<bool>,
     pub(crate) show_tray: Signal<bool>,
     pub(crate) minimize_to_tray: Signal<bool>,
+    pub(crate) onboarding_strip_dismissed: Signal<bool>,
     pub(crate) deselect_rev: Signal<u64>,
 }
 

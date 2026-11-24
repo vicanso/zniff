@@ -289,6 +289,7 @@ pub fn App() -> impl IntoElement {
         default_json_tree: shown.default_json_tree,
         show_tray: signal(saved.show_tray),
         minimize_to_tray: signal(saved.minimize_to_tray),
+        onboarding_strip_dismissed: signal(saved.onboarding_strip_dismissed),
         deselect_rev: signal(0),
     };
     let lan_url = signal(String::new());
@@ -533,6 +534,7 @@ pub fn App() -> impl IntoElement {
     let toast_state = ToastStackState::new();
     let toast_overlay_gen = signal(0_u64);
     let clear_toast_id = stored(None::<u64>);
+    let zoom_toast_id = stored(None::<u64>);
     let toast_manager_tick = toast_manager;
     let toast_shown_tick = toast_shown;
     let watch_rules = signal(saved_config().watch_rules);
@@ -546,6 +548,7 @@ pub fn App() -> impl IntoElement {
     let toast_state_tick = toast_state;
     let toast_gen_tick = toast_overlay_gen;
     let clear_toast_tick = clear_toast_id;
+    let zoom_toast_tick = zoom_toast_id;
     // The hex text's own box is only as wide as the current line, so measuring
     // it always says 16 bytes fit. The pane viewport is the width the card
     // actually has. Publishing it from this tick rebuilds the text; a signal
@@ -578,8 +581,15 @@ pub fn App() -> impl IntoElement {
                         }
                         clear_toast_tick.replace(Some(tid));
                     }
+                    if matches!(msg, StatusMsg::UiZoomChanged(_)) {
+                        if let Some(prev_id) = zoom_toast_tick.get() {
+                            m.dismiss(&prev_id, now);
+                        }
+                        zoom_toast_tick.replace(Some(tid));
+                    }
                     let timeout_ms = match &msg {
                         StatusMsg::ClearedFlows { .. } => 5000,
+                        StatusMsg::UiZoomChanged(_) => 1600,
                         StatusMsg::UpdateUpToDate(_)
                         | StatusMsg::UpdateAvailable(_)
                         | StatusMsg::UpdateCheckFailed(_) => 4000,
@@ -1621,6 +1631,7 @@ pub fn App() -> impl IntoElement {
                 qr_open,
                 pending_qr,
             };
+            let onboarding_strip_props = onboarding_base.clone();
             let workspace_ref = element_ref();
             workspace_ref.on_focus_in(move || popover_dismiss.dismiss());
             let on_clear: Rc<dyn Fn()> = Rc::new(move || {
@@ -1726,11 +1737,21 @@ pub fn App() -> impl IntoElement {
             });
             let build_col = Rc::clone(&build_split);
             let build_row = build_split;
-            when(
-                move || profile_signals.layout_mode.get() == config::LayoutMode::TopBottom,
-                move || build_col(true),
-            )
-            .otherwise(move || build_row(false))
+            view()
+                .flex_1()
+                .min_h(px(0.0))
+                .flex_col()
+                .child(onboarding_progress_strip(
+                    onboarding_strip_props,
+                    shown.phase,
+                ))
+                .child(
+                    when(
+                        move || profile_signals.layout_mode.get() == config::LayoutMode::TopBottom,
+                        move || build_col(true),
+                    )
+                    .otherwise(move || build_row(false)),
+                )
         })
         .child(footer(
             listen,

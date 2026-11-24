@@ -667,28 +667,93 @@ fn rules_editor_toolbar(
             move || !rule_target.current_text().trim().is_empty(),
             move || {
                 let clear_controls = clear_controls.clone();
+                let confirm_key = signal(None::<(Option<String>, String)>);
+                let current_key = move || (rule_target.editing.get(), rule_target.current_text());
+                let is_confirming =
+                    move || confirm_key.with(|k| k.as_ref() == Some(&current_key()));
                 view()
                     .role(AccessibilityRole::Button)
                     .h(px(ControlSize::Xs.height()))
                     .px_1p5()
                     .flex_shrink_0()
                     .rounded(px(RADIUS_SM))
-                    .bg(AdaptiveColor::TRANSPARENT)
-                    .hover(|style| style.bg(bg_control_hover()))
-                    .active(|style| style.bg(bg_control_active()))
+                    .bg(move || {
+                        if is_confirming() {
+                            danger_button_bg()
+                        } else {
+                            AdaptiveColor::TRANSPARENT
+                        }
+                    })
+                    .hover(|style| {
+                        style.bg(move || {
+                            if is_confirming() {
+                                danger_button_hover()
+                            } else {
+                                bg_control_hover()
+                            }
+                        })
+                    })
+                    .active(|style| {
+                        style.bg(move || {
+                            if is_confirming() {
+                                danger_button_active()
+                            } else {
+                                bg_control_active()
+                            }
+                        })
+                    })
                     .transition_colors()
                     .duration(MOTION_INSTANT_MS)
                     .ease_out()
                     .focus_visible(apply_focus_ring)
                     .flex_row()
                     .items_center()
+                    .label(move || -> SharedString {
+                        let lang = ui_lang(langs);
+                        if is_confirming() {
+                            t(
+                                lang,
+                                "再次点击确认清空当前规则",
+                                "Click again to clear rules",
+                            )
+                            .into()
+                        } else {
+                            t(lang, "清空", "Clear").into()
+                        }
+                    })
+                    .tooltip(label_tip(
+                        "清空当前规则内容（点击两次确认）",
+                        "Clear current rules (click twice to confirm)",
+                    ))
                     .on_press(move || {
-                        rule_target.commit(&clear_controls, String::new());
+                        let key = current_key();
+                        if confirm_key.with_untracked(|k| k.as_ref() == Some(&key)) {
+                            confirm_key.set(None);
+                            rule_target.commit(&clear_controls, String::new());
+                            set_status(&clear_controls, StatusMsg::RulesCleared);
+                        } else {
+                            confirm_key.set(Some(key));
+                        }
                     })
                     .child(
-                        text(tr("清空", "Clear"))
-                            .text_size(px(TEXT_XS))
-                            .text_color(fg_muted()),
+                        text(move || -> SharedString {
+                            let lang = ui_lang(langs);
+                            if is_confirming() {
+                                t(lang, "确认清空？", "Confirm clear?").into()
+                            } else {
+                                t(lang, "清空", "Clear").into()
+                            }
+                        })
+                        .number_of_lines(1)
+                        .text_size(px(TEXT_XS))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(move || {
+                            if is_confirming() {
+                                fg_on_accent()
+                            } else {
+                                fg_muted()
+                            }
+                        }),
                     )
             },
         ))
