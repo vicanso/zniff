@@ -293,8 +293,10 @@ pub(crate) fn flow_table_theme_classes() -> DataTableClasses {
     classes.header = Some(
         "bg-[#f1f5f9] dark:bg-[#151b26] border-b border-b-[#e2e8f0] dark:border-b-[#222938]".into(),
     );
-    classes.header_cell =
-        Some("bg-[#f1f5f9] dark:bg-[#151b26] cursor-grab active:cursor-grabbing".into());
+    classes.header_cell = Some(
+        "bg-[#f1f5f9] dark:bg-[#151b26] hover:bg-[#e2e8f0] dark:hover:bg-[#252e40] transition-colors cursor-grab active:cursor-grabbing"
+            .into(),
+    );
     classes.header_cell_dragging = Some("opacity-60 bg-[#e2e8f0] dark:bg-[#222938]".into());
     classes.move_indicator = Some("bg-[#2563eb] dark:bg-[#3b82f6]".into());
     classes.row = Some(
