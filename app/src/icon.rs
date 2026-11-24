@@ -36,6 +36,7 @@ pub enum Glyph {
     Globe,
     AppWindow,
     QrCode,
+    Info,
 }
 
 pub fn glyph(
@@ -218,5 +219,8 @@ fn paint_glyph(painter: Painter, kind: Glyph) -> Painter {
             .stroke_svg("M2.6 9.4 H6.6 V13.4 H2.6 Z")
             .stroke_svg("M9.4 9.4 H11.2 V11.2")
             .stroke_svg("M13.4 9.4 V13.4 H10.2"),
+        Glyph::Info => painter
+            .fill_svg("M8 4.4 m-0.95 0 a0.95 0.95 0 1 0 1.9 0 a0.95 0.95 0 1 0 -1.9 0")
+            .stroke_svg("M8 7.4 V12.2"),
     }
 }

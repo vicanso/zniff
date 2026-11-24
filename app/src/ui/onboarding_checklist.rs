@@ -60,10 +60,13 @@ pub(crate) enum ChecklistStepId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StepStatus {
     Done,
-    Optional,
+    Info,
     ActionRequired,
     Waiting,
 }
+
+/// Number of checklist steps whose readiness can be objectively verified on the host.
+pub(crate) const VERIFIABLE_CHECKLIST_TOTAL: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ChecklistInput {
@@ -98,11 +101,14 @@ pub(crate) fn compute_onboarding_checklist(
     ]
 }
 
-/// Counts steps that are either completed or optional on the current platform.
+/// Counts verifiable steps that are completed (`ProxyListening`, `FirstHttp`, `FirstHttps`).
+///
+/// `RootCaTrusted` is excluded because desktop cannot verify whether mobile/remote clients
+/// have trusted the CA until real HTTPS traffic arrives.
 pub(crate) fn completed_checklist_count(steps: &[ChecklistStep; 4]) -> usize {
     steps
         .iter()
-        .filter(|s| matches!(s.status, StepStatus::Done | StepStatus::Optional))
+        .filter(|s| s.id != ChecklistStepId::RootCaTrusted && s.status == StepStatus::Done)
         .count()
 }
 
@@ -139,58 +145,60 @@ fn step_proxy_listening(input: &ChecklistInput, lang: Lang) -> ChecklistStep {
 fn step_root_ca_trusted(input: &ChecklistInput, lang: Lang) -> ChecklistStep {
     let (status, hint) = if input.ca_optional_web {
         (
-            StepStatus::Optional,
+            StepStatus::Info,
             t(
                 lang,
-                "服务端模式（可选）· 在客户端设备信任服务端 CA 即可解密 HTTPS",
-                "Server-side (optional) · Trust the server CA on client devices for HTTPS",
+                "服务端模式 · 请在客户端设备信任服务端 CA，是否生效将在收到首条 HTTPS 时验证",
+                "Server mode · Trust the server CA on client devices; verified on the first HTTPS flow",
             )
             .to_string(),
         )
     } else if input.ca_trusted {
         let hint = if let Some(tool) = input.active_external_ca.as_deref() {
             match lang {
-                Lang::Zh => format!("本机已复用 {tool} 证书 · 手机抓包请扫码或访问 /zniff 安装"),
-                Lang::En => format!("Host reusing {tool} CA · Mobile: scan QR or open /zniff"),
+                Lang::Zh => format!(
+                    "本机已复用 {tool} 证书 · 手机等远程设备需扫码或访问 /zniff，无法由本机检测是否已信任"
+                ),
+                Lang::En => format!(
+                    "Host reusing {tool} CA · Mobile/remote clients need /zniff and cannot be detected from host"
+                ),
             }
         } else {
             t(
                 lang,
-                "本机系统库已信任 · 手机抓包请扫码或访问 /zniff 安装",
-                "Host system store trusted · Mobile: scan QR or open /zniff",
+                "本机系统库已信任 · 手机等远程设备需扫码或访问 /zniff，无法由本机检测是否已信任",
+                "Host store trusted · Mobile/remote clients need /zniff and cannot be detected from host",
             )
             .to_string()
         };
-        (StepStatus::Done, hint)
+        (StepStatus::Info, hint)
     } else if input.ca_installed_untrusted {
         (
             StepStatus::ActionRequired,
             t(
                 lang,
-                "本机证书已安装但尚未信任；点击信任，或改用隔离浏览器 / 手机扫码",
-                "Host CA installed but untrusted; trust it, or use Isolated Browser / Mobile QR",
+                "本机证书已安装但尚未信任；点击信任，或改用隔离浏览器 / 手机扫码（远程设备状态无法提前检测）",
+                "Host CA installed but untrusted; trust it, or use Isolated Browser / Mobile QR (remote trust cannot be pre-checked)",
             )
             .to_string(),
         )
     } else if let Some(tool) = input.detected_external_ca.as_deref() {
         let hint = match lang {
-            Lang::Zh => {
-                format!("本机未安装（可选，检测到 {tool} 证书可复用）· 手机抓包请扫码访问 /zniff")
-            }
-            Lang::En => {
-                format!(
-                    "Host CA not installed (optional, {tool} CA detected) · Mobile: scan QR /zniff"
-                )
-            }
+            Lang::Zh => format!(
+                "本机未安装（可复用 {tool} 证书）· 手机抓包请扫码访问 /zniff；客户端信任状态将在首条 HTTPS 时验证"
+            ),
+            Lang::En => format!(
+                "Host CA not installed ({tool} CA detected) · Mobile: scan QR /zniff; client trust is verified on first HTTPS"
+            ),
         };
-        (StepStatus::Optional, hint)
+        (StepStatus::Info, hint)
     } else {
         (
-            StepStatus::Optional,
+            StepStatus::Info,
             t(
                 lang,
-                "本机未安装（仅本机系统代理需要）· 手机抓包请扫码访问 /zniff",
-                "Host CA not installed (only needed for host system proxy) · Mobile: scan QR /zniff",
+                "本机未安装（仅系统代理需要）· 手机抓包请扫码访问 /zniff；客户端信任状态将在首条 HTTPS 时验证",
+                "Host CA not installed (host proxy only) · Mobile: scan QR /zniff; client trust is verified on first HTTPS",
             )
             .to_string(),
         )
@@ -356,8 +364,8 @@ pub(crate) fn onboarding_checklist(props: &OnboardingProps) -> impl IntoElement 
                     compute_onboarding_checklist(&current_checklist_input(&props_hdr), lang);
                 let done = completed_checklist_count(&steps);
                 match lang {
-                    Lang::Zh => format!("{done}/4 已完成").into(),
-                    Lang::En => format!("{done}/4 ready").into(),
+                    Lang::Zh => format!("{done}/{VERIFIABLE_CHECKLIST_TOTAL} 已完成").into(),
+                    Lang::En => format!("{done}/{VERIFIABLE_CHECKLIST_TOTAL} ready").into(),
                 }
             })
             .text_size(px(TEXT_XS))
@@ -410,7 +418,7 @@ fn checklist_step_row(
         .flex_row()
         .items_start()
         .gap_2p5()
-        .child(checklist_step_badge(props_status, index))
+        .child(checklist_step_badge(props_status, index, step_id))
         .child(
             view()
                 .flex_1()
@@ -464,15 +472,32 @@ fn checklist_step_row(
     }
 }
 
-fn checklist_step_badge(props: OnboardingProps, index: usize) -> impl IntoElement {
+fn checklist_step_status(props: &OnboardingProps, index: usize, lang: Lang) -> StepStatus {
+    compute_onboarding_checklist(&current_checklist_input(props), lang)[index].status
+}
+
+fn checklist_step_number(step_id: ChecklistStepId) -> &'static str {
+    match step_id {
+        ChecklistStepId::ProxyListening => "1",
+        ChecklistStepId::RootCaTrusted => "",
+        ChecklistStepId::FirstHttp => "2",
+        ChecklistStepId::FirstHttps => "3",
+    }
+}
+
+fn checklist_step_badge(
+    props: OnboardingProps,
+    index: usize,
+    step_id: ChecklistStepId,
+) -> impl IntoElement {
     let p_bg = props.clone();
     let p_done = props.clone();
-    let p_warn = props.clone();
-    let p_icon_color = props;
+    let p_info = props.clone();
+    let p_warn = props;
     let langs = ui_langs();
-    let num_label = (index + 1).to_string();
+    let num_label = checklist_step_number(step_id);
 
-    view()
+    let badge = view()
         .w(px(18.0))
         .h(px(18.0))
         .mt(px(1.0))
@@ -480,67 +505,53 @@ fn checklist_step_badge(props: OnboardingProps, index: usize) -> impl IntoElemen
         .flex_shrink_0()
         .items_center()
         .justify_center()
-        .bg(move || {
-            let status =
-                compute_onboarding_checklist(&current_checklist_input(&p_bg), ui_lang(langs))
-                    [index]
-                    .status;
-            match status {
+        .bg(
+            move || match checklist_step_status(&p_bg, index, ui_lang(langs)) {
                 StepStatus::Done => status_ok_bg(),
+                StepStatus::Info => accent_blue_soft(),
                 StepStatus::ActionRequired => status_warn_bg(),
-                StepStatus::Optional | StepStatus::Waiting => bg_control(),
-            }
-        })
+                StepStatus::Waiting => bg_control(),
+            },
+        )
         .child(
             when(
-                move || {
-                    let status = compute_onboarding_checklist(
-                        &current_checklist_input(&p_done),
-                        ui_lang(langs),
-                    )[index]
-                        .status;
-                    matches!(status, StepStatus::Done | StepStatus::Optional)
-                },
-                move || {
-                    let p_ic = p_icon_color.clone();
-                    glyph_px(
-                        11.0,
-                        || Glyph::Check,
-                        move || {
-                            let status = compute_onboarding_checklist(
-                                &current_checklist_input(&p_ic),
-                                ui_lang(langs),
-                            )[index]
-                                .status;
-                            color(if status == StepStatus::Done {
-                                status_ok_fg()
-                            } else {
-                                fg_muted()
-                            })
-                        },
-                    )
-                },
+                move || checklist_step_status(&p_done, index, ui_lang(langs)) == StepStatus::Done,
+                move || glyph_px(11.0, || Glyph::Check, || color(status_ok_fg())),
             )
             .otherwise(move || {
+                let p_i = p_info.clone();
                 let p_w = p_warn.clone();
-                let num = num_label.clone();
                 when(
-                    move || {
-                        compute_onboarding_checklist(&current_checklist_input(&p_w), ui_lang(langs))
-                            [index]
-                            .status
-                            == StepStatus::ActionRequired
-                    },
-                    move || glyph_px(11.0, || Glyph::Alert, || color(status_warn_fg())),
+                    move || checklist_step_status(&p_i, index, ui_lang(langs)) == StepStatus::Info,
+                    move || glyph_px(11.0, || Glyph::Info, || color(accent_blue_text())),
                 )
                 .otherwise(move || {
-                    mono(num.clone())
-                        .text_size(px(TEXT_XS))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(fg_muted())
+                    let p_w2 = p_w.clone();
+                    when(
+                        move || {
+                            checklist_step_status(&p_w2, index, ui_lang(langs))
+                                == StepStatus::ActionRequired
+                        },
+                        move || glyph_px(11.0, || Glyph::Alert, || color(status_warn_fg())),
+                    )
+                    .otherwise(move || {
+                        mono(num_label)
+                            .text_size(px(TEXT_XS))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(fg_muted())
+                    })
                 })
             }),
-        )
+        );
+
+    if step_id == ChecklistStepId::RootCaTrusted {
+        badge.tooltip(label_tip(
+            "为何不打勾：本机无法读取手机或远程设备的证书信任状态，实际是否就绪会在收到第一条解密的 HTTPS 流量时自动确认",
+            "Why no checkmark: desktop cannot inspect mobile or remote trust stores; readiness is confirmed automatically once the first decrypted HTTPS flow arrives",
+        ))
+    } else {
+        badge
+    }
 }
 
 fn step_proxy_actions(props: &OnboardingProps) -> impl IntoElement {
@@ -705,13 +716,14 @@ mod tests {
     fn checklist_initial_stopped_and_untrusted() {
         let steps = compute_onboarding_checklist(&base_input(), Lang::En);
         assert_eq!(steps[0].status, StepStatus::ActionRequired);
-        assert_eq!(steps[1].status, StepStatus::Optional);
+        assert_eq!(steps[1].status, StepStatus::Info);
         assert_eq!(steps[2].status, StepStatus::Waiting);
         assert_eq!(steps[3].status, StepStatus::Waiting);
-        assert_eq!(completed_checklist_count(&steps), 1);
+        assert_eq!(completed_checklist_count(&steps), 0);
         assert!(steps[0].hint.contains("Start"));
         assert!(steps[1].title.contains("Host / Mobile"));
         assert!(steps[1].hint.contains("/zniff"));
+        assert!(steps[1].hint.contains("verified on first HTTPS"));
     }
 
     #[test]
@@ -722,20 +734,24 @@ mod tests {
         let steps = compute_onboarding_checklist(&input, Lang::Zh);
         assert_eq!(steps[0].status, StepStatus::Done);
         assert!(steps[0].hint.contains("127.0.0.1:8877"));
-        assert_eq!(steps[1].status, StepStatus::Optional);
-        assert_eq!(completed_checklist_count(&steps), 2);
+        assert_eq!(steps[1].status, StepStatus::Info);
+        assert_eq!(completed_checklist_count(&steps), 1);
         assert!(steps[1].hint.contains("/zniff"));
 
+        // Even when host CA is trusted, Step 2 stays Info and does not count as Done.
         input.ca_trusted = true;
         let steps = compute_onboarding_checklist(&input, Lang::En);
-        assert_eq!(steps[1].status, StepStatus::Done);
-        assert_eq!(completed_checklist_count(&steps), 2);
+        assert_eq!(steps[1].status, StepStatus::Info);
+        assert_eq!(completed_checklist_count(&steps), 1);
         assert!(steps[1].hint.contains("/zniff"));
+        assert!(steps[1].hint.contains("cannot be detected from host"));
 
         input.active_external_ca = Some("Charles".into());
         let steps = compute_onboarding_checklist(&input, Lang::Zh);
+        assert_eq!(steps[1].status, StepStatus::Info);
         assert!(steps[1].hint.contains("Charles"));
         assert!(steps[1].hint.contains("/zniff"));
+        assert!(steps[1].hint.contains("无法由本机检测"));
     }
 
     #[test]
@@ -745,23 +761,24 @@ mod tests {
         let steps = compute_onboarding_checklist(&input, Lang::En);
         assert_eq!(steps[1].status, StepStatus::ActionRequired);
         assert!(steps[1].hint.contains("untrusted"));
+        assert!(steps[1].hint.contains("cannot be pre-checked"));
 
         input.ca_installed_untrusted = false;
         input.detected_external_ca = Some("Whistle".into());
         let steps = compute_onboarding_checklist(&input, Lang::Zh);
-        assert_eq!(steps[1].status, StepStatus::Optional);
+        assert_eq!(steps[1].status, StepStatus::Info);
         assert!(steps[1].hint.contains("Whistle"));
         assert!(steps[1].hint.contains("/zniff"));
     }
 
     #[test]
-    fn checklist_wasm_marks_ca_optional() {
+    fn checklist_wasm_marks_ca_info() {
         let mut input = base_input();
         input.running = true;
         input.ca_optional_web = true;
         let steps = compute_onboarding_checklist(&input, Lang::En);
-        assert_eq!(steps[1].status, StepStatus::Optional);
-        assert_eq!(completed_checklist_count(&steps), 2);
+        assert_eq!(steps[1].status, StepStatus::Info);
+        assert_eq!(completed_checklist_count(&steps), 1);
     }
 
     #[test]
@@ -770,7 +787,7 @@ mod tests {
         input.running = true;
         input.ca_trusted = true;
 
-        // Plain HTTP only
+        // Plain HTTP only -> 2/3 verifiable steps ready
         input.traffic = OnboardingTraffic {
             total_flows: 2,
             has_decrypted_https: false,
@@ -780,7 +797,7 @@ mod tests {
         assert_eq!(steps[2].status, StepStatus::Done);
         assert_eq!(steps[3].status, StepStatus::Waiting);
         assert!(steps[3].hint.contains("plain HTTP"));
-        assert_eq!(completed_checklist_count(&steps), 3);
+        assert_eq!(completed_checklist_count(&steps), 2);
 
         // TLS error without decrypted HTTPS
         input.traffic.has_tls_error = true;
@@ -789,11 +806,14 @@ mod tests {
         assert_eq!(steps[3].status, StepStatus::ActionRequired);
         assert!(steps[3].hint.contains("TLS"));
 
-        // Decrypted HTTPS succeeds -> all 4 done
+        // Decrypted HTTPS succeeds -> all 3 verifiable steps done
         input.traffic.has_decrypted_https = true;
         let steps = compute_onboarding_checklist(&input, Lang::En);
         assert_eq!(steps[3].status, StepStatus::Done);
-        assert_eq!(completed_checklist_count(&steps), 4);
+        assert_eq!(
+            completed_checklist_count(&steps),
+            VERIFIABLE_CHECKLIST_TOTAL
+        );
     }
 
     #[test]
