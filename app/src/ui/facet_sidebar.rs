@@ -206,7 +206,7 @@ pub(crate) fn facet_sidebar(
                                     .w_full()
                                     .flex_row()
                                     .flex_wrap()
-                                    .gap_1()
+                                    .gap(px(3.0))
                                     .child(drawer_quick_chip(
                                         filter,
                                         "慢请求",

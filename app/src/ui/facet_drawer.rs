@@ -875,7 +875,7 @@ pub(crate) fn drawer_quick_chip(
     view()
         .role(AccessibilityRole::Button)
         .h(px(ControlSize::Xs.height()))
-        .px_1p5()
+        .px(px(5.0))
         .rounded(px(RADIUS_SM))
         .border_1()
         .border_color(move || {
@@ -910,9 +910,9 @@ pub(crate) fn drawer_quick_chip(
         .tooltip(label_tip(tip_zh, tip_en))
         .flex_row()
         .items_center()
-        .gap_1()
+        .gap(px(3.0))
         .on_press(move || filter.set(toggle_filter_chip(&filter.get(), token, aliases)))
-        .child(view().w(px(5.0)).h(px(5.0)).rounded_full().bg(move || {
+        .child(view().w(px(4.0)).h(px(4.0)).rounded_full().bg(move || {
             if is_active.get() {
                 accent_blue()
             } else {

@@ -681,9 +681,9 @@ pub(crate) fn push_saved_profile(
     next
 }
 
-pub(crate) const SIDEBAR_WIDTH_DEFAULT: f32 = 230.0;
-pub(crate) const SIDEBAR_WIDTH_MIN: f32 = 176.0;
-pub(crate) const SIDEBAR_WIDTH_MAX: f32 = 340.0;
+pub(crate) const SIDEBAR_WIDTH_DEFAULT: f32 = config::SIDEBAR_WIDTH_DEFAULT as f32;
+pub(crate) const SIDEBAR_WIDTH_MIN: f32 = config::SIDEBAR_WIDTH_MIN as f32;
+pub(crate) const SIDEBAR_WIDTH_MAX: f32 = config::SIDEBAR_WIDTH_MAX as f32;
 
 pub(crate) fn clamp_sidebar_px(width: f32) -> f32 {
     if width.is_finite() && width > 0.0 {

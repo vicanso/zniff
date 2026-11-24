@@ -4240,6 +4240,68 @@ fn single_entry_domain_group_updates_count_error_badge_and_label_reactively() {
     assert_eq!(row_texts(&tree, "api.local"), vec!["api.local", "8"]);
 }
 
+#[tokio::test]
+async fn sidebar_quick_filter_chips_fit_on_single_row_zh_en() {
+    use crate::session::SessionFacets;
+    use std::cell::Cell;
+
+    thread_local! {
+        static CHIP_SIDEBAR_W: Cell<f32> = const { Cell::new(240.0) };
+        static CHIP_SIDEBAR_LANG: Cell<crate::i18n::Lang> = const { Cell::new(crate::i18n::Lang::Zh) };
+    }
+
+    #[component]
+    fn QuickChipSidebarHarness() -> impl IntoElement {
+        provide_context(signal(Some(CHIP_SIDEBAR_LANG.with(Cell::get))));
+        super::provide_mono_font(false);
+        let facets = signal(SessionFacets::default());
+        let filter = signal(String::new());
+        let width = signal(CHIP_SIDEBAR_W.with(Cell::get));
+        let collapsed = signal(false);
+        view()
+            .w(px(300.0))
+            .h(px(400.0))
+            .child(super::facet_sidebar(facets, filter, width, collapsed))
+    }
+
+    for (lang, labels) in [
+        (crate::i18n::Lang::Zh, ["慢请求", "出错", "JSON", "星标"]),
+        (crate::i18n::Lang::En, ["Slow", "Error", "JSON", "Star"]),
+    ] {
+        for sidebar_w in [super::SIDEBAR_WIDTH_DEFAULT, 220.0] {
+            CHIP_SIDEBAR_LANG.with(|c| c.set(lang));
+            CHIP_SIDEBAR_W.with(|c| c.set(sidebar_w));
+            let (_core, tree) = mount_headless_component::<QuickChipSidebarHarness>(Size::new(
+                px(300.0),
+                px(400.0),
+            ));
+            let chip_frames: Vec<_> = labels
+                .iter()
+                .map(|label| {
+                    let text_id = tree
+                        .texts
+                        .iter()
+                        .find_map(|(id, t)| (t == label).then_some(*id))
+                        .unwrap_or_else(|| panic!("missing chip {label:?} at width={sidebar_w}"));
+                    let chip_id = tree.parent[&text_id];
+                    (*label, tree.abs_frame(chip_id))
+                })
+                .collect();
+            let y0 = chip_frames[0].1.origin.y.0;
+            for (label, frame) in &chip_frames {
+                assert!(
+                    (frame.origin.y.0 - y0).abs() < 4.0,
+                    "{lang:?} width={sidebar_w}: chip {label:?} wrapped to second row: {chip_frames:?}"
+                );
+                assert!(
+                    frame.origin.x.0 + frame.size.width.0 <= sidebar_w,
+                    "{lang:?} width={sidebar_w}: chip {label:?} overflowed sidebar: {frame:?}"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn list_empty_subtitle_reflects_running_and_filter_state() {
     use crate::i18n::Lang;
