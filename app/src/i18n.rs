@@ -903,11 +903,19 @@ impl StatusMsg {
                 Lang::Zh => format!("透明按进程抓包失败: {err}"),
                 Lang::En => format!("Transparent capture failed: {err}"),
             },
-            Self::TransparentProxyNeedsApplications => t(
-                lang,
-                "请先将 zniff.app 拖入 /Applications 目录后再开启透明按进程抓包",
-                "Move zniff.app into /Applications first to activate Transparent Proxy",
-            )
+            Self::TransparentProxyNeedsApplications => if cfg!(target_os = "linux") {
+                t(
+                    lang,
+                    "需要 Linux 5.12+ 且启用 cgroup v2 (/sys/fs/cgroup) 才能开启透明按进程抓包",
+                    "Linux 5.12+ with cgroup v2 (/sys/fs/cgroup) is required for Transparent Proxy",
+                )
+            } else {
+                t(
+                    lang,
+                    "请先将 zniff.app 拖入 /Applications 目录后再开启透明按进程抓包",
+                    "Move zniff.app into /Applications first to activate Transparent Proxy",
+                )
+            }
             .into(),
         }
     }
