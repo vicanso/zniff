@@ -122,11 +122,7 @@ pub(crate) fn shortcuts_modal(open: Signal<bool>) -> impl IntoElement {
         move || {
             let langs = ui_langs();
             let apple = is_apple_platform();
-            let backdrop = view()
-                .absolute()
-                .inset_0()
-                .bg(backdrop_scrim())
-                .on_press(move || open.set(false));
+            let backdrop = ui_modal_backdrop(move || open.set(false));
 
             let header = view()
                 .w_full()
@@ -144,27 +140,13 @@ pub(crate) fn shortcuts_modal(open: Signal<bool>) -> impl IntoElement {
                         .gap_2()
                         .child(
                             text(tr("快捷键速查", "Keyboard Shortcuts"))
-                                .text_size(px(14.0))
+                                .text_size(px(TEXT_LG))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(fg_primary()),
                         )
                         .child(keycap_badge(format_shortcut_badge("mod+/", apple))),
                 )
-                .child(
-                    view()
-                        .w(px(24.0))
-                        .h(px(24.0))
-                        .rounded(px(6.0))
-                        .flex_row()
-                        .items_center()
-                        .justify_center()
-                        .cursor(Cursor::Pointer)
-                        .hover(|s| s.bg(bg_control_hover()))
-                        .active(|s| s.opacity(0.75))
-                        .label(tr("关闭", "Close"))
-                        .on_press(move || open.set(false))
-                        .child(glyph_px(12.0, || Glyph::Close, || color(fg_muted()))),
-                );
+                .child(ui_modal_close_button(move || open.set(false)));
 
             let lang = ui_lang(langs);
             let body = SHORTCUT_SECTIONS
@@ -187,37 +169,34 @@ pub(crate) fn shortcuts_modal(open: Signal<bool>) -> impl IntoElement {
                         "非输入状态下按 ? 随时呼出，Esc 关闭",
                         "Press ? outside inputs anytime, Esc to close",
                     ))
-                    .text_size(px(11.5))
+                    .text_size(px(TEXT_XS))
                     .text_color(fg_muted()),
                 )
                 .child(
                     view()
-                        .h(px(26.0))
+                        .role(AccessibilityRole::Button)
+                        .h(px(ControlSize::Sm.height()))
                         .px_3()
                         .flex_row()
                         .items_center()
                         .justify_center()
-                        .rounded(px(6.0))
+                        .rounded(px(RADIUS_MD))
                         .border_1()
                         .border_color(accent_blue_border())
                         .bg(accent_blue_soft())
                         .hover(|s| s.bg(accent_blue_soft_hover()))
-                        .active(|s| s.opacity(0.8))
-                        .cursor(Cursor::Pointer)
+                        .active(|s| s.bg(bg_control_active()))
+                        .transition_colors()
+                        .duration(MOTION_INSTANT_MS)
+                        .ease_out()
+                        .focus_visible(apply_focus_ring)
                         .on_press(move || open.set(false))
                         .child(control_text(tr("关闭", "Close")).text_color(accent_blue_text())),
                 );
 
-            let card = view()
+            let card = ui_modal_card()
                 .w(move || px((window().width.0 - 32.0).clamp(320.0, 520.0)))
                 .max_h(move || px((window().height.0 - 64.0).max(240.0)))
-                .flex_col()
-                .overflow_hidden()
-                .rounded(px(12.0))
-                .border_1()
-                .border_color(border_strong())
-                .bg(bg_card())
-                .shadow_lg()
                 .child(header)
                 .child(
                     scroll()
@@ -227,22 +206,25 @@ pub(crate) fn shortcuts_modal(open: Signal<bool>) -> impl IntoElement {
                 )
                 .child(footer);
 
-            overlay().inset_0().child(
-                view()
-                    .w_full()
-                    .h_full()
-                    .items_center()
-                    .justify_center()
-                    .child(backdrop)
-                    .child(card),
-            )
+            overlay()
+                .inset_0()
+                .on_cancel(move || open.set(false))
+                .child(
+                    view()
+                        .w_full()
+                        .h_full()
+                        .items_center()
+                        .justify_center()
+                        .child(backdrop)
+                        .child(card),
+                )
         },
     )
 }
 
 fn shortcut_section_view(section: &ShortcutSection, lang: Lang, apple: bool) -> impl IntoElement {
     let title = text(t(lang, section.title_zh, section.title_en))
-        .text_size(px(11.5))
+        .text_size(px(TEXT_XS))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(fg_muted());
 
@@ -254,7 +236,7 @@ fn shortcut_section_view(section: &ShortcutSection, lang: Lang, apple: bool) -> 
                 view().flex_row().items_center().gap_1().flex_shrink_0(),
                 |row, (idx, spec)| {
                     let row = if idx > 0 {
-                        row.child(text("/").text_size(px(11.0)).text_color(fg_muted()))
+                        row.child(text("/").text_size(px(TEXT_XS)).text_color(fg_muted()))
                     } else {
                         row
                     };
@@ -267,7 +249,7 @@ fn shortcut_section_view(section: &ShortcutSection, lang: Lang, apple: bool) -> 
                     .w_full()
                     .px_2p5()
                     .py_1p5()
-                    .rounded(px(6.0))
+                    .rounded(px(RADIUS_MD))
                     .bg(bg_code())
                     .flex_row()
                     .items_center()
@@ -277,7 +259,7 @@ fn shortcut_section_view(section: &ShortcutSection, lang: Lang, apple: bool) -> 
                         text(t(lang, item.zh, item.en))
                             .flex_1()
                             .min_w(px(0.0))
-                            .text_size(px(12.5))
+                            .text_size(px(TEXT_SM))
                             .text_color(fg_primary()),
                     )
                     .child(badges),
@@ -294,10 +276,10 @@ fn shortcut_section_view(section: &ShortcutSection, lang: Lang, apple: bool) -> 
 
 fn keycap_badge(label: String) -> impl IntoElement {
     mono(label)
-        .text_size(px(11.0))
+        .text_size(px(TEXT_XS))
         .px_1p5()
         .py_0p5()
-        .rounded(px(4.0))
+        .rounded(px(RADIUS_SM))
         .border_1()
         .border_color(border_control())
         .bg(bg_control())

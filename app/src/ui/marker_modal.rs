@@ -78,7 +78,7 @@ pub(crate) fn marker_modal(open: Signal<bool>, controls: Arc<Controls>) -> impl 
                                 .w(move || px((window().width.0 - 32.0).clamp(280.0, 420.0)))
                                 .p_4()
                                 .gap_3()
-                                .rounded(px(12.0))
+                                .rounded(px(RADIUS_LG))
                                 .border_1()
                                 .border_color(border_strong())
                                 .bg(bg_card())
@@ -90,13 +90,14 @@ pub(crate) fn marker_modal(open: Signal<bool>, controls: Arc<Controls>) -> impl 
                                         input()
                                             .element_ref(&focus)
                                             .w_full()
-                                            .h(px(32.0))
+                                            .h(px(ControlSize::Md.height()))
                                             .px_2p5()
-                                            .rounded(px(CONTROL_RADIUS))
+                                            .rounded(px(RADIUS_MD))
                                             .border_1()
                                             .border_color(border_control())
+                                            .focus(|s| s.border_color(accent_blue()))
                                             .bg(bg_canvas())
-                                            .text_size(px(12.5))
+                                            .text_size(px(TEXT_SM))
                                             .text_color(fg_primary())
                                             .placeholder(tr(
                                                 "输入标记名称（如：开始测登录）",
@@ -135,7 +136,7 @@ fn marker_modal_header(open: Signal<bool>, badge: String) -> impl IntoElement {
                 .gap_2()
                 .child(
                     text(tr("插入会话标记", "Insert session marker"))
-                        .text_size(px(14.0))
+                        .text_size(px(TEXT_LG))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(fg_primary()),
                 )
@@ -143,24 +144,12 @@ fn marker_modal_header(open: Signal<bool>, badge: String) -> impl IntoElement {
                     view()
                         .px_1p5()
                         .py_0p5()
-                        .rounded(px(4.0))
+                        .rounded(px(RADIUS_SM))
                         .bg(bg_control())
-                        .child(mono(badge).text_size(px(10.5)).text_color(fg_muted())),
+                        .child(mono(badge).text_size(px(TEXT_XS)).text_color(fg_muted())),
                 ),
         )
-        .child(
-            view()
-                .w(px(24.0))
-                .h(px(24.0))
-                .rounded(px(6.0))
-                .items_center()
-                .justify_center()
-                .hover(|s| s.bg(bg_control_hover()))
-                .cursor(Cursor::Pointer)
-                .label(tr("关闭", "Close"))
-                .on_press(move || open.set(false))
-                .child(glyph_px(12.0, || Glyph::Close, || color(fg_muted()))),
-        )
+        .child(ui_modal_close_button(move || open.set(false)))
 }
 
 fn marker_preset_chips(
@@ -176,22 +165,27 @@ fn marker_preset_chips(
         .gap_1p5()
         .child(
             text(tr("常用：", "Quick:"))
-                .text_size(px(11.5))
+                .text_size(px(TEXT_XS))
                 .text_color(fg_muted()),
         )
         .children((0..PRESETS_ZH.len()).map(move |idx| {
             let controls = controls.clone();
             view()
+                .role(AccessibilityRole::Button)
                 .h(px(24.0))
                 .px_2()
-                .rounded(px(6.0))
+                .rounded(px(RADIUS_MD))
                 .border_1()
                 .border_color(border_control())
                 .bg(bg_control())
                 .hover(|s| s.bg(bg_control_hover()))
+                .active(|s| s.bg(bg_control_active()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .focus_visible(apply_focus_ring)
                 .items_center()
                 .justify_center()
-                .cursor(Cursor::Pointer)
                 .on_press(move || {
                     if guard_read_only_tab(&controls) {
                         open.set(false);
@@ -208,7 +202,7 @@ fn marker_preset_chips(
                 })
                 .child(
                     text(tr(PRESETS_ZH[idx], PRESETS_EN[idx]))
-                        .text_size(px(11.5))
+                        .text_size(px(TEXT_XS))
                         .text_color(fg_secondary()),
                 )
         }))
@@ -228,39 +222,49 @@ fn marker_modal_footer(
         .pt_1()
         .child(
             view()
-                .h(px(28.0))
+                .role(AccessibilityRole::Button)
+                .h(px(ControlSize::Sm.height()))
                 .px_3()
-                .rounded(px(CONTROL_RADIUS))
+                .rounded(px(RADIUS_MD))
                 .border_1()
                 .border_color(border_control())
                 .bg(bg_control())
                 .hover(|s| s.bg(bg_control_hover()))
+                .active(|s| s.bg(bg_control_active()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .focus_visible(apply_focus_ring)
                 .items_center()
                 .justify_center()
-                .cursor(Cursor::Pointer)
                 .on_press(move || open.set(false))
                 .child(
                     control_text(tr("取消", "Cancel"))
-                        .text_size(px(12.0))
+                        .text_size(px(TEXT_SM))
                         .text_color(fg_secondary()),
                 ),
         )
         .child(
             view()
-                .h(px(28.0))
+                .role(AccessibilityRole::Button)
+                .h(px(ControlSize::Sm.height()))
                 .px_3()
-                .rounded(px(CONTROL_RADIUS))
+                .rounded(px(RADIUS_MD))
                 .border_1()
                 .border_color(accent_blue_border())
                 .bg(accent_blue())
                 .hover(|s| s.bg(accent_blue_hover()))
+                .active(|s| s.bg(accent_blue_active()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .focus_visible(apply_focus_ring)
                 .items_center()
                 .justify_center()
-                .cursor(Cursor::Pointer)
                 .on_press(move || submit_marker(&controls, open, draft, ui_lang(langs)))
                 .child(
                     control_text(tr("插入标记", "Add marker"))
-                        .text_size(px(12.0))
+                        .text_size(px(TEXT_SM))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(fg_on_accent()),
                 ),
@@ -295,7 +299,7 @@ pub(crate) fn marker_detail_card(
             view()
                 .p_4()
                 .gap_3()
-                .rounded(px(10.0))
+                .rounded(px(RADIUS_LG))
                 .border_1()
                 .border_color(accent_blue_border())
                 .bg(bg_card())
@@ -314,11 +318,11 @@ pub(crate) fn marker_detail_card(
                                     view()
                                         .px_2()
                                         .py_0p5()
-                                        .rounded(px(4.0))
+                                        .rounded(px(RADIUS_SM))
                                         .bg(accent_blue_soft())
                                         .child(
                                             mono("MARK")
-                                                .text_size(px(11.0))
+                                                .text_size(px(TEXT_XS))
                                                 .font_weight(FontWeight::BOLD)
                                                 .text_color(accent_blue_text()),
                                         ),
@@ -332,14 +336,14 @@ pub(crate) fn marker_detail_card(
                                             label.into()
                                         }
                                     })
-                                    .text_size(px(15.0))
+                                    .text_size(px(TEXT_LG))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(fg_primary()),
                                 ),
                         )
                         .child(
                             mono(move || -> SharedString { shown.metrics.get().into() })
-                                .text_size(px(11.5))
+                                .text_size(px(TEXT_XS))
                                 .text_color(fg_muted()),
                         ),
                 )
@@ -360,7 +364,7 @@ pub(crate) fn marker_detail_card(
                         }
                         .into()
                     })
-                    .text_size(px(12.0))
+                    .text_size(px(TEXT_SM))
                     .text_color(fg_secondary()),
                 )
                 .child(
@@ -371,13 +375,13 @@ pub(crate) fn marker_detail_card(
                         .child(
                             input()
                                 .flex_1()
-                                .h(px(28.0))
+                                .h(px(ControlSize::Sm.height()))
                                 .px_2()
-                                .rounded(px(CONTROL_RADIUS))
+                                .rounded(px(RADIUS_MD))
                                 .border_1()
                                 .border_color(border_control())
                                 .bg(bg_canvas())
-                                .text_size(px(12.0))
+                                .text_size(px(TEXT_SM))
                                 .text_color(fg_primary())
                                 .placeholder(tr("重命名标记…", "Rename marker…"))
                                 .value(move || edit_label.get())
@@ -392,16 +396,21 @@ pub(crate) fn marker_detail_card(
                         )
                         .child(
                             view()
-                                .h(px(28.0))
+                                .role(AccessibilityRole::Button)
+                                .h(px(ControlSize::Sm.height()))
                                 .px_2p5()
-                                .rounded(px(CONTROL_RADIUS))
+                                .rounded(px(RADIUS_MD))
                                 .border_1()
                                 .border_color(border_control())
                                 .bg(bg_control())
                                 .hover(|s| s.bg(bg_control_hover()))
+                                .active(|s| s.bg(bg_control_active()))
+                                .transition_colors()
+                                .duration(MOTION_INSTANT_MS)
+                                .ease_out()
+                                .focus_visible(apply_focus_ring)
                                 .items_center()
                                 .justify_center()
-                                .cursor(Cursor::Pointer)
                                 .on_press(move || {
                                     if let Some(id) = selected.get_untracked() {
                                         controls_rename
@@ -411,7 +420,7 @@ pub(crate) fn marker_detail_card(
                                 })
                                 .child(
                                     control_text(tr("重命名", "Rename"))
-                                        .text_size(px(12.0))
+                                        .text_size(px(TEXT_SM))
                                         .text_color(fg_secondary()),
                                 ),
                         ),
@@ -425,39 +434,49 @@ pub(crate) fn marker_detail_card(
                         .pt_1()
                         .child(
                             view()
-                                .h(px(28.0))
+                                .role(AccessibilityRole::Button)
+                                .h(px(ControlSize::Sm.height()))
                                 .px_3()
-                                .rounded(px(CONTROL_RADIUS))
+                                .rounded(px(RADIUS_MD))
                                 .border_1()
                                 .border_color(accent_blue_border())
                                 .bg(accent_blue_soft())
                                 .hover(|s| s.bg(accent_blue_soft_hover()))
+                                .active(|s| s.bg(bg_control_active()))
+                                .transition_colors()
+                                .duration(MOTION_INSTANT_MS)
+                                .ease_out()
+                                .focus_visible(apply_focus_ring)
                                 .items_center()
                                 .justify_center()
-                                .cursor(Cursor::Pointer)
                                 .on_press(move || {
                                     let tok = marker_filter_token(&shown.url.get_untracked());
                                     list_filter.set(tok);
                                 })
                                 .child(
                                     control_text(tr("只看此标记段", "Filter this section"))
-                                        .text_size(px(12.0))
+                                        .text_size(px(TEXT_SM))
                                         .font_weight(FontWeight::MEDIUM)
                                         .text_color(accent_blue_text()),
                                 ),
                         )
                         .child(
                             view()
-                                .h(px(28.0))
+                                .role(AccessibilityRole::Button)
+                                .h(px(ControlSize::Sm.height()))
                                 .px_3()
-                                .rounded(px(CONTROL_RADIUS))
+                                .rounded(px(RADIUS_MD))
                                 .border_1()
                                 .border_color(border_control())
                                 .bg(bg_control())
                                 .hover(|s| s.bg(bg_control_hover()))
+                                .active(|s| s.bg(bg_control_active()))
+                                .transition_colors()
+                                .duration(MOTION_INSTANT_MS)
+                                .ease_out()
+                                .focus_visible(apply_focus_ring)
                                 .items_center()
                                 .justify_center()
-                                .cursor(Cursor::Pointer)
                                 .on_press(move || {
                                     let label = shown.url.get_untracked();
                                     set_clipboard(label);
@@ -465,22 +484,27 @@ pub(crate) fn marker_detail_card(
                                 })
                                 .child(
                                     control_text(tr("复制标签", "Copy label"))
-                                        .text_size(px(12.0))
+                                        .text_size(px(TEXT_SM))
                                         .text_color(fg_secondary()),
                                 ),
                         )
                         .child(
                             view()
-                                .h(px(28.0))
+                                .role(AccessibilityRole::Button)
+                                .h(px(ControlSize::Sm.height()))
                                 .px_3()
-                                .rounded(px(CONTROL_RADIUS))
+                                .rounded(px(RADIUS_MD))
                                 .border_1()
                                 .border_color(status_err_bg())
                                 .bg(bg_control())
                                 .hover(|s| s.bg(status_err_bg()))
+                                .active(|s| s.bg(bg_control_active()))
+                                .transition_colors()
+                                .duration(MOTION_INSTANT_MS)
+                                .ease_out()
+                                .focus_visible(apply_focus_ring)
                                 .items_center()
                                 .justify_center()
-                                .cursor(Cursor::Pointer)
                                 .on_press(move || {
                                     if let Some(id) = selected.get_untracked() {
                                         controls_del.hub.remove_marker(id);
@@ -489,7 +513,7 @@ pub(crate) fn marker_detail_card(
                                 })
                                 .child(
                                     control_text(tr("删除标记", "Delete marker"))
-                                        .text_size(px(12.0))
+                                        .text_size(px(TEXT_SM))
                                         .text_color(status_err_fg()),
                                 ),
                         ),

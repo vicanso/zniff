@@ -106,7 +106,7 @@ pub(crate) fn compose_box(
                 .is_some_and(|(id, side)| selected.get() == Some(id) && side == BreakSide::Request)
     };
     view()
-        .rounded(px(10.0))
+        .rounded(px(RADIUS_LG))
         .border_1()
         .border_color(border_strong())
         .bg(bg_card())
@@ -161,22 +161,26 @@ pub(crate) fn compose_box(
                         ))
                         .child(
                             view()
+                                .role(AccessibilityRole::Button)
                                 .h(px(26.0))
                                 .px_2p5()
-                                .rounded(px(6.0))
+                                .rounded(px(RADIUS_MD))
                                 .border_1()
                                 .border_color(border_control())
                                 .bg(bg_control())
                                 .hover(|style| style.bg(bg_control_hover()))
-                                .active(|style| style.opacity(0.75))
-                                .cursor(Cursor::Pointer)
+                                .active(|style| style.bg(bg_control_active()))
+                                .transition_colors()
+                                .duration(MOTION_INSTANT_MS)
+                                .ease_out()
+                                .focus_visible(apply_focus_ring)
                                 .flex_row()
                                 .items_center()
                                 .on_press(move || reset_compose(compose))
                                 .child(
                                     text(tr("取消", "Cancel"))
                                         .number_of_lines(1)
-                                        .text_size(px(12.0))
+                                        .text_size(px(TEXT_SM))
                                         .font_weight(FontWeight::MEDIUM)
                                         .text_color(fg_secondary()),
                                 ),
@@ -186,9 +190,10 @@ pub(crate) fn compose_box(
                             move || {
                                 let controls = controls_continue.clone();
                                 view()
+                                    .role(AccessibilityRole::Button)
                                     .h(px(26.0))
                                     .px_2p5()
-                                    .rounded(px(6.0))
+                                    .rounded(px(RADIUS_MD))
                                     .bg(move || {
                                         if status_invalid() {
                                             bg_control()
@@ -206,13 +211,20 @@ pub(crate) fn compose_box(
                                         })
                                     })
                                     .active(|style| {
-                                        style.opacity(move || {
-                                            if status_invalid() { 1.0_f32 } else { 0.85_f32 }
+                                        style.bg(move || {
+                                            if status_invalid() {
+                                                bg_control()
+                                            } else {
+                                                accent_blue_active()
+                                            }
                                         })
                                     })
-                                    .cursor(Cursor::Pointer)
+                                    .transition_colors()
+                                    .duration(MOTION_INSTANT_MS)
+                                    .ease_out()
+                                    .focus_visible(apply_focus_ring)
                                     .disabled(status_invalid)
-                                    .disabled_style(|style| style.cursor(Cursor::Default))
+                                    .disabled_style(|style| style.opacity(0.55))
                                     .flex_row()
                                     .items_center()
                                     .tooltip(label_tip("Cmd/Ctrl+Enter 放行", "Cmd/Ctrl+Enter to continue"))
@@ -222,7 +234,7 @@ pub(crate) fn compose_box(
                                     .child(
                                         text(tr("放行", "Continue"))
                                             .number_of_lines(1)
-                                            .text_size(px(12.0))
+                                            .text_size(px(TEXT_SM))
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(move || {
                                                 if status_invalid() {
@@ -240,13 +252,17 @@ pub(crate) fn compose_box(
                                 let controls = controls.clone();
                                 let langs = ui_langs();
                                 view()
+                                    .role(AccessibilityRole::Button)
                                     .h(px(26.0))
                                     .px_2p5()
-                                    .rounded(px(6.0))
+                                    .rounded(px(RADIUS_MD))
                                     .bg(accent_blue())
                                     .hover(|style| style.bg(accent_blue_hover()))
-                                    .active(|style| style.opacity(0.85))
-                                    .cursor(Cursor::Pointer)
+                                    .active(|style| style.bg(accent_blue_active()))
+                                    .transition_colors()
+                                    .duration(MOTION_INSTANT_MS)
+                                    .ease_out()
+                                    .focus_visible(apply_focus_ring)
                                     .flex_row()
                                     .items_center()
                                     .tooltip(label_tip("Cmd/Ctrl+Enter 发送", "Cmd/Ctrl+Enter to send"))
@@ -262,7 +278,7 @@ pub(crate) fn compose_box(
                                             }
                                         })
                                         .number_of_lines(1)
-                                        .text_size(px(12.0))
+                                        .text_size(px(TEXT_SM))
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(fg_on_accent()),
                                     )
@@ -356,7 +372,7 @@ pub(crate) fn compose_box(
                                             .items_center()
                                             .gap_2()
                                             .px_2p5()
-                                            .rounded(px(7.0))
+                                            .rounded(px(RADIUS_MD))
                                             .border_1()
                                             .border_color(border_subtle())
                                             .bg(bg_code())
@@ -365,11 +381,11 @@ pub(crate) fn compose_box(
                                                     .px_2()
                                                     .py_0p5()
                                                     .flex_shrink_0()
-                                                    .rounded(px(5.0))
+                                                    .rounded(px(RADIUS_SM))
                                                     .bg(move || method_bg(&compose.method.get()))
                                                     .child(
                                                         mono(move || compose.method.get())
-                                                            .text_size(px(11.5))
+                                                            .text_size(px(TEXT_XS))
                                                             .font_weight(FontWeight::BOLD)
                                                             .text_color(move || {
                                                                 method_fg(&compose.method.get())
@@ -382,7 +398,7 @@ pub(crate) fn compose_box(
                                                     .min_w(px(0.0))
                                                     .number_of_lines(1)
                                                     .text_overflow(EllipsizeMode::Middle)
-                                                    .text_size(px(12.0))
+                                                    .text_size(px(TEXT_SM))
                                                     .text_color(fg_secondary()),
                                             )
                                     },
@@ -621,7 +637,7 @@ pub(crate) fn compose_body_editor(
     guard_culled_pointer_events(view())
         .w_full()
         .h(px(height))
-        .rounded(px(7.0))
+        .rounded(px(RADIUS_MD))
         .border_1()
         .border_color(border_control())
         .bg(bg_code())
@@ -661,7 +677,7 @@ pub(crate) fn compose_editor(
     guard_culled_pointer_events(view())
         .w_full()
         .h(px(height))
-        .rounded(px(7.0))
+        .rounded(px(RADIUS_MD))
         .border_1()
         .border_color(border_control())
         .bg(bg_code())
@@ -699,74 +715,36 @@ pub(crate) fn compose_input_on(
         .w_full()
         .h(px(height))
         .px_2p5()
-        .rounded(px(7.0))
+        .rounded(px(RADIUS_MD))
         .bg(bg_code())
         .border_1()
         .border_color(border_control())
         .focus(|style| style.border_color(accent_blue()))
-        .text_size(px(12.0))
+        .text_size(px(TEXT_SM))
         .text_color(fg_primary())
         .multiline(multiline)
         .on_change(on_change)
 }
 
-pub(crate) fn apply_url_edit(compose: Compose, text: &str) {
-    if looks_like_curl(text)
-        && let Some(parsed) = present::parse_curl(text)
-    {
-        compose.method.set(parsed.method);
-        compose.url.set(parsed.url);
-        compose.headers.set(header_text(&parsed.headers));
-        compose.body.set(parsed.body);
-        return;
-    }
-    compose.url.set(text.to_string());
-}
-
-pub(crate) fn looks_like_curl(text: &str) -> bool {
-    let text = text.trim_start();
-    text == "curl"
-        || text.starts_with("curl ")
-        || text.starts_with("curl\t")
-        || text.starts_with("curl\n")
-        || text.starts_with("curl\r")
-}
-
-pub(crate) fn parse_status_code(text: &str) -> Option<u16> {
-    let code = text.split_whitespace().next()?.parse::<u16>().ok()?;
-    (100..600).contains(&code).then_some(code)
-}
-
-pub(crate) fn edited_status(compose: Compose) -> Option<u16> {
-    if !compose.response.get() {
-        return None;
-    }
-    parse_status_code(&compose.status.get())
-}
-
 pub(crate) fn lan_toggle(on: Signal<bool>, controls: Arc<Controls>) -> impl IntoElement {
-    view()
-        .h(px(22.0))
-        .px_2()
+    let langs = ui_langs();
+    switch()
+        .h(px(24.0))
+        .px_1p5()
         .flex_shrink_0()
         .flex_row()
         .items_center()
-        .gap_1()
-        .rounded(px(6.0))
-        .border_1()
-        .border_color(move || {
-            if on.get() {
-                accent_blue_border()
-            } else {
-                border_control()
-            }
-        })
-        .bg(bg_control())
+        .gap_1p5()
+        .rounded(px(RADIUS_MD))
         .hover(|style| style.bg(bg_control_hover()))
-        .active(|style| style.opacity(0.8))
-        .cursor(Cursor::Pointer)
-        .on_press(move || {
-            let next = !on.get();
+        .active(|style| style.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
+        .checked(move || on.get())
+        .on_change(move |next: &bool| {
+            let next = *next;
             on.set(next);
             set_bool(&controls.listen_all, next);
             if let Err(err) = store_listen_all(next) {
@@ -779,26 +757,41 @@ pub(crate) fn lan_toggle(on: Signal<bool>, controls: Arc<Controls>) -> impl Into
                 );
             }
         })
-        .child(
-            view()
-                .w(px(6.0))
-                .h(px(6.0))
+        .track_style(|s| {
+            s.w(px(26.0))
+                .h(px(14.0))
+                .p(px(2.0))
+                .flex_row()
+                .items_center()
                 .rounded_full()
-                .bg(move || if on.get() { status_ok_fg() } else { fg_muted() }),
-        )
+                .bg(switch_track_off())
+                .checked(|c| c.bg(accent_blue()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+        })
+        .thumb_style(|s| {
+            s.w(px(10.0))
+                .h(px(10.0))
+                .rounded_full()
+                .bg(switch_thumb())
+                .checked(|c| c.translate_x(px(12.0)))
+                .transition_transform()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+        })
         .child(
-            text({
-                let langs = ui_langs();
-                move || -> SharedString {
-                    if on.get() {
-                        t(ui_lang(langs), "局域网 开", "LAN on").into()
-                    } else {
-                        t(ui_lang(langs), "局域网 关", "LAN off").into()
-                    }
+            text(move || -> SharedString {
+                if on.get() {
+                    t(ui_lang(langs), "局域网 开", "LAN on").into()
+                } else {
+                    t(ui_lang(langs), "局域网 关", "LAN off").into()
                 }
             })
-            .text_size(px(11.5))
-            .text_color(fg_secondary()),
+            .number_of_lines(1)
+            .text_size(px(TEXT_XS))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(move || if on.get() { fg_primary() } else { fg_muted() }),
         )
 }
 
@@ -834,15 +827,19 @@ pub(crate) fn prompt_import_har(controls: Arc<Controls>) {
 
 fn compose_clear_button(compose: Compose) -> impl IntoElement {
     view()
+        .role(AccessibilityRole::Button)
         .h(px(26.0))
         .px_2p5()
-        .rounded(px(6.0))
+        .rounded(px(RADIUS_MD))
         .border_1()
         .border_color(border_control())
         .bg(bg_control())
         .hover(|style| style.bg(bg_control_hover()))
-        .active(|style| style.opacity(0.75))
-        .cursor(Cursor::Pointer)
+        .active(|style| style.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .flex_row()
         .items_center()
         .on_press(move || {
@@ -860,7 +857,7 @@ fn compose_clear_button(compose: Compose) -> impl IntoElement {
         .child(
             text(tr("清空", "Clear"))
                 .number_of_lines(1)
-                .text_size(px(12.0))
+                .text_size(px(TEXT_SM))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(fg_secondary()),
         )
@@ -1060,182 +1057,4 @@ fn compose_recent_menu(compose: Compose) -> impl IntoElement {
                     },
                 )),
         )
-}
-
-fn restore_or_reset_new_draft(compose: Compose) {
-    let (m, u, h, b) = compose.draft_saved.get();
-    if !(m.trim().is_empty() && u.trim().is_empty() && h.trim().is_empty() && b.trim().is_empty()) {
-        compose.method.set(if m.trim().is_empty() {
-            "GET".to_string()
-        } else {
-            m
-        });
-        compose.url.set(u);
-        compose.headers.set(h);
-        compose.body.set(b);
-    } else {
-        compose.method.set("GET".to_string());
-        compose.url.set(String::new());
-        compose.headers.set(String::new());
-        compose.body.set(String::new());
-    }
-    compose.response.set(false);
-    compose.status.set(String::new());
-    compose.composing.set(true);
-}
-
-pub(crate) fn begin_new_request(compose: Compose, selected: Signal<Option<u64>>) {
-    selected.set(None);
-    restore_or_reset_new_draft(compose);
-}
-
-pub(crate) fn begin_compose(controls: &Controls, id: Option<u64>, compose: Compose) {
-    if refuse_relay(controls, id) {
-        return;
-    }
-    if id.is_none() {
-        restore_or_reset_new_draft(compose);
-        return;
-    }
-    let Some(flow) = selected_flow(controls, id) else {
-        set_status(controls, StatusMsg::NeedSelection);
-        return;
-    };
-    controls.hub.touch_break();
-    let response = controls
-        .hub
-        .paused()
-        .is_some_and(|(paused_id, side)| id == Some(paused_id) && side == BreakSide::Response);
-    compose.response.set(response);
-    compose.method.set(flow.method);
-    compose.url.set(flow.url);
-    if response {
-        compose
-            .status
-            .set(flow.status.map(|code| code.to_string()).unwrap_or_default());
-        compose.headers.set(header_text(&flow.response_headers));
-        compose
-            .body
-            .set(String::from_utf8_lossy(&flow.response_body).into_owned());
-    } else {
-        compose.status.set(String::new());
-        compose.headers.set(header_text(&flow.request_headers));
-        compose
-            .body
-            .set(String::from_utf8_lossy(&flow.request_body).into_owned());
-    }
-    compose.composing.set(true);
-}
-
-pub(crate) fn header_text(headers: &[(String, String)]) -> String {
-    headers
-        .iter()
-        .map(|(name, value)| format!("{name}: {value}"))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-pub(crate) fn reset_compose(compose: Compose) {
-    compose.composing.set(false);
-    compose.response.set(false);
-    compose.method.set(String::new());
-    compose.url.set(String::new());
-    compose.headers.set(String::new());
-    compose.body.set(String::new());
-    compose.status.set(String::new());
-    compose.inline_mock.close();
-}
-
-pub(crate) fn clear_shown(shown: Shown) {
-    shown.phase.set(Phase::Empty);
-    shown.method.set(String::new());
-    shown.url.set(String::new());
-    shown.protocol.set(String::new());
-    shown.rules.set(String::new());
-    shown.rule_hits.set(Vec::new());
-    shown.gql_badge.set(String::new());
-    shown.status.set(None);
-    shown.error.set(String::new());
-    shown.request_headers.set(Vec::new());
-    shown.response_headers.set(Vec::new());
-    shown.request_body.set(String::new());
-    shown.response_body.set(String::new());
-    shown.request_body_bytes.set(0);
-    shown.response_body_bytes.set(0);
-    shown.request_hex.set(Vec::new());
-    shown.response_hex.set(Vec::new());
-    shown.request_language.set(String::new());
-    shown.response_language.set(String::new());
-    shown.request_doc.set(None);
-    shown.response_doc.set(None);
-    shown.req_doc_preview.set(false);
-    shown.res_doc_preview.set(false);
-    shown.request_json.set(None);
-    shown.response_json.set(None);
-    let tree_default = shown.default_json_tree.get() && shown.pretty.get();
-    shown.req_json_tree.set(tree_default);
-    shown.res_json_tree.set(tree_default);
-    shown.request_form.set(Vec::new());
-    shown.request_note.set(String::new());
-    shown.response_note.set(String::new());
-    reset_body_offsets(shown);
-    shown.request_window.set(TextWindow::default());
-    shown.response_window.set(TextWindow::default());
-    shown.metrics.set(String::new());
-    shown.timing_bar.set(present::TimingBreakdown::default());
-    shown.query.set(Vec::new());
-    shown.preview.set(String::new());
-    shown.preview_w.set(0.0);
-    shown.preview_h.set(0.0);
-    shown.image_caption.set(String::new());
-    shown.messages.set(Vec::new());
-    shown.llm_stream.set(None);
-    shown.msg_llm_view.set(true);
-    shown.diff.set(String::new());
-    shown.diff_old.set(String::new());
-    shown.diff_new.set(String::new());
-    shown.pinned.set(false);
-    shown.is_marker.set(false);
-    shown.relay.set(String::new());
-    shown.comment.set(String::new());
-    shown.editing_comment.set(false);
-    shown.repeating.set(false);
-    shown.req_headers_loading.set(false);
-    shown.res_headers_loading.set(false);
-    shown.req_body_loading.set(false);
-    shown.res_body_loading.set(false);
-    shown.messages_loading.set(false);
-    shown.diff_loading.set(false);
-}
-
-/// Only hides the panels. The panel's views and memos are still mounted until
-/// the next frame, so clearing their data here would make them read signals
-/// that are being torn down. [`release_sequence_data`] frees the data later.
-pub(crate) fn close_sequence_diagram(seq_builder: SeqBuilder) {
-    seq_builder.open.set(false);
-    seq_builder.redact_open.set(false);
-}
-
-/// Frees the sequence-diagram data once both panels are closed. Runs from the
-/// periodic tick, after the closed panels have been unmounted.
-pub(crate) fn release_sequence_data(seq_builder: SeqBuilder) {
-    if seq_builder.open.get_untracked() || seq_builder.redact_open.get_untracked() {
-        return;
-    }
-    let has_data = seq_builder.items.with_untracked(|items| !items.is_empty())
-        || seq_builder
-            .diagram
-            .with_untracked(|d| !d.steps.is_empty() || !d.bars.is_empty());
-    if !has_data {
-        return;
-    }
-    seq_builder.hover_bar.set(None);
-    seq_builder.source_flowchart.set(false);
-    seq_builder.items.set(Vec::new());
-    seq_builder.output.set(String::new());
-    seq_builder
-        .diagram
-        .set(present::SequenceDiagramData::default());
-    seq_builder.redact_flow_id.set(None);
-    crate::session::trim_memory();
 }

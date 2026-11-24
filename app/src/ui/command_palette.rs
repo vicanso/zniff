@@ -565,11 +565,7 @@ pub(crate) fn command_palette_modal(
         move || {
             let langs = ui_langs();
             let exec_controls = controls.clone();
-            let backdrop = view()
-                .absolute()
-                .inset_0()
-                .bg(backdrop_scrim())
-                .on_press(move || open.set(false));
+            let backdrop = ui_modal_backdrop(move || open.set(false));
 
             let palette = nsh_base::command()
                 .auto_focus(true)
@@ -611,14 +607,12 @@ pub(crate) fn command_palette_modal(
                 )
                 .search_class("flex-1 text-sm bg-transparent")
                 .list_style(|s| s.max_h(px(360.0)))
-                .item_class(
-                    "w-full px-3 py-2 rounded-md cursor-pointer focus:bg-accent hover:bg-accent",
-                )
+                .item_class("w-full px-3 py-2 rounded-md focus:bg-accent hover:bg-accent")
                 .group_class("px-3 pt-2 pb-1 text-xs font-semibold text-muted-foreground")
                 .separator_class("my-1 h-px bg-border")
                 .render_group(|group: &CommandGroup| {
                     text(group.heading.clone())
-                        .text_size(px(11.0))
+                        .text_size(px(TEXT_XS))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(fg_muted())
                         .into_element()
@@ -639,16 +633,16 @@ pub(crate) fn command_palette_modal(
                             text(entry.label.clone())
                                 .flex_1()
                                 .number_of_lines(1)
-                                .text_size(px(12.5))
+                                .text_size(px(TEXT_SM))
                                 .text_color(label_color),
                         );
                     if let Some(shortcut) = entry.shortcut_label.clone() {
                         row.child(
                             mono(shortcut)
-                                .text_size(px(11.0))
+                                .text_size(px(TEXT_XS))
                                 .px_1p5()
                                 .py_0p5()
-                                .rounded(px(4.0))
+                                .rounded(px(RADIUS_SM))
                                 .border_1()
                                 .border_color(border_control())
                                 .bg(bg_control())
@@ -667,7 +661,7 @@ pub(crate) fn command_palette_modal(
                         .justify_center()
                         .child(
                             text(tr("没有匹配的命令", "No matching commands"))
-                                .text_size(px(12.0))
+                                .text_size(px(TEXT_SM))
                                 .text_color(fg_muted()),
                         ),
                 )
@@ -840,17 +834,12 @@ pub(crate) fn command_palette_modal(
                 .items_center()
                 .pt(px(72.0))
                 .px_4()
+                .on_cancel(move || open.set(false))
                 .child(backdrop)
                 .child(
-                    view()
+                    ui_modal_card()
                         .w(move || px((window().width.0 - 32.0).clamp(300.0, 560.0)))
                         .max_h(move || px((window().height.0 - 110.0).max(200.0)))
-                        .rounded(px(12.0))
-                        .border_1()
-                        .border_color(border_strong())
-                        .bg(bg_card())
-                        .shadow_lg()
-                        .overflow_hidden()
                         .child(palette),
                 )
         },

@@ -5,7 +5,120 @@ use super::super::*;
 
 use nsh_core::element::StyleRefinement;
 
-use super::tokens::{BadgeTone, MOTION_FAST_MS, RADIUS_LG, RADIUS_MD, RADIUS_SM, TEXT_MD, TEXT_XS};
+use super::tokens::{
+    BadgeTone, ControlSize, MOTION_FAST_MS, MOTION_INSTANT_MS, RADIUS_LG, RADIUS_MD, RADIUS_SM,
+    TEXT_MD, TEXT_SM, TEXT_XS,
+};
+
+/// Full-viewport modal backdrop scrim that dismisses on press.
+#[allow(dead_code)]
+pub(crate) fn ui_modal_backdrop(on_close: impl Fn() + 'static) -> View {
+    view()
+        .absolute()
+        .inset_0()
+        .bg(backdrop_scrim())
+        .on_press(on_close)
+}
+
+/// Shared modal dialog card chrome.
+#[allow(dead_code)]
+pub(crate) fn ui_modal_card() -> View {
+    view()
+        .flex_col()
+        .overflow_hidden()
+        .rounded(px(RADIUS_LG))
+        .border_1()
+        .border_color(border_strong())
+        .bg(bg_card())
+        .shadow_lg()
+}
+
+/// Shared accessible icon close button for modal dialog headers.
+#[allow(dead_code)]
+pub(crate) fn ui_modal_close_button(on_close: impl Fn() + 'static) -> impl IntoElement {
+    view()
+        .role(AccessibilityRole::Button)
+        .w(px(24.0))
+        .h(px(24.0))
+        .rounded(px(RADIUS_MD))
+        .flex_shrink_0()
+        .flex_row()
+        .items_center()
+        .justify_center()
+        .hover(|s| s.bg(bg_control_hover()))
+        .active(|s| s.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
+        .label(tr("关闭", "Close"))
+        .on_press(on_close)
+        .child(glyph_px(12.0, || Glyph::Close, || color(fg_muted())))
+}
+
+/// Full-width semantic toggle switch row built on `nsh_base::switch()`.
+#[allow(dead_code)]
+pub(crate) fn ui_switch_row(
+    label: impl IntoReactive<SharedString>,
+    checked: impl Fn() -> bool + 'static + Clone,
+    on_toggle: impl Fn(bool) + 'static,
+) -> impl IntoElement {
+    let checked_text = checked.clone();
+    switch()
+        .w_full()
+        .min_h(px(ControlSize::Md.height()))
+        .px_2p5()
+        .py_1()
+        .gap_2p5()
+        .rounded(px(RADIUS_MD))
+        .flex_row()
+        .items_center()
+        .hover(|s| s.bg(bg_control_hover()))
+        .active(|s| s.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
+        .checked(checked)
+        .on_change(move |next: &bool| on_toggle(*next))
+        .track_style(|s| {
+            s.w(px(28.0))
+                .h(px(16.0))
+                .p(px(2.0))
+                .flex_shrink_0()
+                .flex_row()
+                .items_center()
+                .rounded_full()
+                .bg(switch_track_off())
+                .checked(|c| c.bg(accent_blue()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+        })
+        .thumb_style(|s| {
+            s.w(px(12.0))
+                .h(px(12.0))
+                .rounded_full()
+                .bg(switch_thumb())
+                .checked(|c| c.translate_x(px(12.0)))
+                .transition_transform()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+        })
+        .child(
+            text(label)
+                .flex_1()
+                .min_w(px(0.0))
+                .text_size(px(TEXT_SM))
+                .text_color(move || {
+                    if checked_text() {
+                        fg_primary()
+                    } else {
+                        fg_secondary()
+                    }
+                }),
+        )
+}
 
 /// Shared popup container treatment for every `Popover` and `Menu`.
 #[allow(dead_code)]

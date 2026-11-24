@@ -76,7 +76,7 @@ pub(crate) fn redact_preview_panel(
     });
 
     view()
-        .rounded(px(10.0))
+        .rounded(px(RADIUS_LG))
         .border_1()
         .border_color(border_strong())
         .bg(bg_card())
@@ -104,9 +104,10 @@ pub(crate) fn redact_preview_panel(
                         )))
                         .child(
                             view()
+                                .role(AccessibilityRole::Button)
                                 .h(px(24.0))
                                 .px_2p5()
-                                .rounded(px(5.0))
+                                .rounded(px(RADIUS_MD))
                                 .border_1()
                                 .border_color(move || {
                                     if seq_builder.redact_export.get() {
@@ -131,10 +132,13 @@ pub(crate) fn redact_preview_panel(
                                         }
                                     })
                                 })
-                                .active(|style| style.opacity(0.8))
+                                .active(|style| style.bg(bg_control_active()))
+                                .transition_colors()
+                                .duration(MOTION_INSTANT_MS)
+                                .ease_out()
+                                .focus_visible(apply_focus_ring)
                                 .flex_row()
                                 .items_center()
-                                .cursor(Cursor::Pointer)
                                 .on_press(move || {
                                     let next = !seq_builder.redact_export.get();
                                     seq_builder.redact_export.set(next);
@@ -163,7 +167,7 @@ pub(crate) fn redact_preview_panel(
                                         }
                                     })
                                     .number_of_lines(1)
-                                    .text_size(px(11.0))
+                                    .text_size(px(TEXT_XS))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(move || {
                                         if seq_builder.redact_export.get() {
@@ -176,9 +180,10 @@ pub(crate) fn redact_preview_panel(
                         )
                         .child(
                             view()
+                                .role(AccessibilityRole::Button)
                                 .h(px(24.0))
                                 .px_2p5()
-                                .rounded(px(5.0))
+                                .rounded(px(RADIUS_MD))
                                 .border_1()
                                 .border_color(move || {
                                     if seq_builder.redact_strict.get() {
@@ -203,10 +208,13 @@ pub(crate) fn redact_preview_panel(
                                         }
                                     })
                                 })
-                                .active(|style| style.opacity(0.8))
+                                .active(|style| style.bg(bg_control_active()))
+                                .transition_colors()
+                                .duration(MOTION_INSTANT_MS)
+                                .ease_out()
+                                .focus_visible(apply_focus_ring)
                                 .flex_row()
                                 .items_center()
-                                .cursor(Cursor::Pointer)
                                 .label(tr("严格遮罩", "Strict mask"))
                                 .tooltip(label_tip(
                                     "开启后将无法按字段脱敏的非结构化或二进制正文替换为占位文本",
@@ -228,7 +236,7 @@ pub(crate) fn redact_preview_panel(
                                 .child(
                                     text(tr("严格遮罩", "Strict mask"))
                                         .number_of_lines(1)
-                                        .text_size(px(11.0))
+                                        .text_size(px(TEXT_XS))
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(move || {
                                             if seq_builder.redact_strict.get() {
@@ -278,7 +286,7 @@ pub(crate) fn redact_preview_panel(
                         "默认脱敏：Authorization、Proxy-Authorization、Cookie、Set-Cookie、X-Api-Key，以及 URL 查询参数、JSON 和表单中的 password、token、access_token、secret、api_key、session_id、jwt 等字段。仅作用于导出的 HAR/HTML 与实时分享副本，不改动抓包记录或重放数据。",
                         "Defaults: Authorization, Proxy-Authorization, Cookie, Set-Cookie, X-Api-Key, plus password, token, access_token, secret, api_key, session_id, jwt in query/JSON/form. Sanitizes exported/shared copies only without modifying captured flows or replay data.",
                     ))
-                    .text_size(px(11.5))
+                    .text_size(px(TEXT_SM))
                     .text_color(fg_muted()),
                 )
                 .child(
@@ -289,7 +297,7 @@ pub(crate) fn redact_preview_panel(
                                 "附加敏感字段或请求头名（逗号或空格分隔）",
                                 "Extra sensitive field or header names (comma or space separated)",
                             ))
-                            .text_size(px(11.5))
+                            .text_size(px(TEXT_SM))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(fg_secondary()),
                         )
@@ -303,12 +311,12 @@ pub(crate) fn redact_preview_panel(
                                 .placeholder_color(move || color(fg_muted()))
                                 .h(px(30.0))
                                 .px_2p5()
-                                .rounded(px(6.0))
+                                .rounded(px(RADIUS_MD))
                                 .border_1()
                                 .border_color(border_control())
                                 .focus(|style| style.border_color(accent_blue()))
                                 .bg(bg_code())
-                                .text_size(px(12.0))
+                                .text_size(px(TEXT_SM))
                                 .text_color(fg_primary())
                                 .on_change(move |val: &str| {
                                     let text_val = val.to_string();
@@ -328,7 +336,7 @@ pub(crate) fn redact_preview_panel(
                 .child({
                     view()
                         .mt_1()
-                        .rounded(px(8.0))
+                        .rounded(px(RADIUS_MD))
                         .border_1()
                         .border_color(border_subtle())
                         .bg(bg_code())
@@ -377,7 +385,7 @@ pub(crate) fn redact_preview_panel(
                                     .min_w(px(160.0))
                                     .number_of_lines(1)
                                     .text_overflow(EllipsizeMode::Middle)
-                                    .text_size(px(11.5))
+                                    .text_size(px(TEXT_XS))
                                     .text_color(fg_secondary()),
                                 )
                                 .child(when(
@@ -392,7 +400,7 @@ pub(crate) fn redact_preview_panel(
                                         view()
                                             .px_2()
                                             .py_0p5()
-                                            .rounded(px(5.0))
+                                            .rounded(px(RADIUS_SM))
                                             .bg(status_warn_bg())
                                             .border_1()
                                             .border_color(status_warn_fg())
@@ -429,7 +437,7 @@ pub(crate) fn redact_preview_panel(
                                                     }
                                                 })
                                                 .number_of_lines(1)
-                                                .text_size(px(11.0))
+                                                .text_size(px(TEXT_XS))
                                                 .font_weight(FontWeight::MEDIUM)
                                                 .text_color(status_warn_fg()),
                                             )

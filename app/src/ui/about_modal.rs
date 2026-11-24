@@ -218,17 +218,22 @@ fn about_link_chip(
     controls: Arc<Controls>,
 ) -> impl IntoElement {
     view()
-        .h(px(28.0))
+        .role(AccessibilityRole::Link)
+        .h(px(ControlSize::Sm.height()))
         .px_2p5()
         .gap_1p5()
         .flex_row()
         .items_center()
-        .rounded(px(6.0))
+        .rounded(px(RADIUS_MD))
         .border_1()
         .border_color(border_control())
         .bg(bg_control())
         .hover(|s| s.bg(bg_control_hover()))
-        .active(|s| s.opacity(0.8))
+        .active(|s| s.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .cursor(Cursor::Pointer)
         .on_press(move || open_about_link(controls.clone(), url))
         .child(glyph_px(12.0, move || glyph, || color(fg_muted())))
@@ -241,13 +246,13 @@ fn about_meta_badge(label: impl IntoReactive<SharedString>) -> impl IntoElement 
         .px_2()
         .flex_row()
         .items_center()
-        .rounded(px(5.0))
+        .rounded(px(RADIUS_SM))
         .border_1()
         .border_color(border_subtle())
         .bg(bg_control())
         .child(
             text(label)
-                .text_size(px(11.0))
+                .text_size(px(TEXT_XS))
                 .text_color(fg_muted())
                 .number_of_lines(1),
         )
@@ -321,11 +326,7 @@ pub(crate) fn about_modal(
             #[cfg(not(target_arch = "wasm32"))]
             let controls_check = controls.clone();
 
-            let backdrop = view()
-                .absolute()
-                .inset_0()
-                .bg(backdrop_scrim())
-                .on_press(move || profiles.about_open.set(false));
+            let backdrop = ui_modal_backdrop(move || profiles.about_open.set(false));
 
             let header = view()
                 .w_full()
@@ -344,26 +345,13 @@ pub(crate) fn about_modal(
                 .child(
                     text(tr("关于 zniff", "About zniff"))
                         .flex_1()
-                        .text_size(px(14.0))
+                        .text_size(px(TEXT_LG))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(fg_primary()),
                 )
-                .child(
-                    view()
-                        .w(px(24.0))
-                        .h(px(24.0))
-                        .rounded(px(6.0))
-                        .flex_shrink_0()
-                        .flex_row()
-                        .items_center()
-                        .justify_center()
-                        .hover(|s| s.bg(bg_control_hover()))
-                        .active(|s| s.opacity(0.75))
-                        .cursor(Cursor::Pointer)
-                        .label(tr("关闭", "Close"))
-                        .on_press(move || profiles.about_open.set(false))
-                        .child(glyph_px(11.0, || Glyph::Close, || color(fg_muted()))),
-                );
+                .child(ui_modal_close_button(move || {
+                    profiles.about_open.set(false)
+                }));
 
             let hero = view()
                 .w_full()
@@ -375,7 +363,7 @@ pub(crate) fn about_modal(
                         .w(px(64.0))
                         .h(px(64.0))
                         .flex_shrink_0()
-                        .rounded(px(14.0))
+                        .rounded(px(RADIUS_LG))
                         .border_1()
                         .border_color(border_subtle())
                         .bg(bg_control())
@@ -408,13 +396,13 @@ pub(crate) fn about_modal(
                                         .px_2()
                                         .flex_row()
                                         .items_center()
-                                        .rounded(px(5.0))
+                                        .rounded(px(RADIUS_SM))
                                         .border_1()
                                         .border_color(accent_blue_border())
                                         .bg(accent_blue_soft())
                                         .child(
                                             mono(format!("v{APP_VERSION}"))
-                                                .text_size(px(11.0))
+                                                .text_size(px(TEXT_XS))
                                                 .font_weight(FontWeight::MEDIUM)
                                                 .text_color(accent_blue_text()),
                                         ),
@@ -426,7 +414,7 @@ pub(crate) fn about_modal(
                                 "轻量级桌面与 Web HTTP(S) 抓包调试工具",
                                 "Lightweight desktop & web HTTP(S) traffic inspector",
                             ))
-                            .text_size(px(12.5))
+                            .text_size(px(TEXT_MD))
                             .text_color(fg_secondary()),
                         )
                         .child(
@@ -471,31 +459,35 @@ pub(crate) fn about_modal(
                 .justify_between()
                 .child(
                     text(tr("系统与运行环境", "System & Runtime"))
-                        .text_size(px(11.5))
+                        .text_size(px(TEXT_XS))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(fg_muted()),
                 )
                 .child(
                     view()
+                        .role(AccessibilityRole::Button)
                         .h(px(24.0))
                         .px_2()
                         .gap_1()
                         .flex_row()
                         .items_center()
-                        .rounded(px(5.0))
+                        .rounded(px(RADIUS_MD))
                         .border_1()
                         .border_color(border_control())
                         .bg(bg_control())
                         .hover(|s| s.bg(bg_control_hover()))
-                        .active(|s| s.opacity(0.8))
-                        .cursor(Cursor::Pointer)
+                        .active(|s| s.bg(bg_control_active()))
+                        .transition_colors()
+                        .duration(MOTION_INSTANT_MS)
+                        .ease_out()
+                        .focus_visible(apply_focus_ring)
                         .on_press(move || {
                             set_clipboard(format_system_info_text(ui_lang(langs)));
                             set_status(&controls_copy, StatusMsg::CopiedSystemInfo);
                         })
                         .child(
                             text(tr("复制环境信息", "Copy System Info"))
-                                .text_size(px(11.0))
+                                .text_size(px(TEXT_XS))
                                 .text_color(fg_primary()),
                         ),
                 );
@@ -513,14 +505,14 @@ pub(crate) fn about_modal(
                                 text(key)
                                     .w(px(76.0))
                                     .flex_shrink_0()
-                                    .text_size(px(11.5))
+                                    .text_size(px(TEXT_XS))
                                     .text_color(fg_muted()),
                             )
                             .child(
                                 mono(val)
                                     .flex_1()
                                     .selectable(true)
-                                    .text_size(px(11.5))
+                                    .text_size(px(TEXT_XS))
                                     .text_color(fg_primary()),
                             ),
                     )
@@ -531,7 +523,7 @@ pub(crate) fn about_modal(
                 .w_full()
                 .p_3()
                 .gap_2()
-                .rounded(px(8.0))
+                .rounded(px(RADIUS_LG))
                 .border_1()
                 .border_color(border_subtle())
                 .bg(bg_code())
@@ -539,7 +531,7 @@ pub(crate) fn about_modal(
                 .child(rows_list);
 
             let copyright_line = text(copyright_notice(BUILD_YEAR))
-                .text_size(px(11.0))
+                .text_size(px(TEXT_XS))
                 .text_color(fg_muted());
 
             let body = view()
@@ -589,7 +581,7 @@ pub(crate) fn about_modal(
                             .w_full()
                             .px_3()
                             .py_2()
-                            .rounded(px(8.0))
+                            .rounded(px(RADIUS_MD))
                             .border_1()
                             .border_color(border_col)
                             .bg(bg_col)
@@ -621,7 +613,7 @@ pub(crate) fn about_modal(
                                 .flex_1()
                                 .min_w(px(0.0))
                                 .number_of_lines(2)
-                                .text_size(px(12.0))
+                                .text_size(px(TEXT_SM))
                                 .text_color(fg_col),
                             )
                             .child(when(
@@ -634,15 +626,20 @@ pub(crate) fn about_modal(
                                 move || {
                                     let controls_go = controls_up.clone();
                                     view()
+                                        .role(AccessibilityRole::Button)
                                         .h(px(24.0))
                                         .px_2p5()
                                         .flex_shrink_0()
                                         .flex_row()
                                         .items_center()
-                                        .rounded(px(5.0))
+                                        .rounded(px(RADIUS_MD))
                                         .bg(accent_blue())
                                         .hover(|s| s.bg(accent_blue_hover()))
-                                        .cursor(Cursor::Pointer)
+                                        .active(|s| s.bg(accent_blue_active()))
+                                        .transition_colors()
+                                        .duration(MOTION_INSTANT_MS)
+                                        .ease_out()
+                                        .focus_visible(apply_focus_ring)
                                         .on_press(move || {
                                             if let Some(UpdateCheckNotice::Available(ver)) =
                                                 update_state.get().last_check
@@ -654,7 +651,7 @@ pub(crate) fn about_modal(
                                         .child(
                                             text(tr("升级", "Upgrade"))
                                                 .number_of_lines(1)
-                                                .text_size(px(11.5))
+                                                .text_size(px(TEXT_XS))
                                                 .font_weight(FontWeight::SEMIBOLD)
                                                 .text_color(fg_on_accent()),
                                         )
@@ -678,12 +675,13 @@ pub(crate) fn about_modal(
             #[cfg(not(target_arch = "wasm32"))]
             let footer = footer.child(
                 view()
-                    .h(px(28.0))
+                    .role(AccessibilityRole::Button)
+                    .h(px(ControlSize::Sm.height()))
                     .px_3()
                     .flex_row()
                     .items_center()
                     .justify_center()
-                    .rounded(px(6.0))
+                    .rounded(px(RADIUS_MD))
                     .border_1()
                     .border_color(border_control())
                     .bg(bg_control())
@@ -697,17 +695,20 @@ pub(crate) fn about_modal(
                         })
                     })
                     .active(|s| {
-                        s.opacity(move || {
+                        s.bg(move || {
                             if update_state.get().is_busy() {
-                                0.5_f32
+                                bg_control()
                             } else {
-                                0.8_f32
+                                bg_control_active()
                             }
                         })
                     })
-                    .cursor(Cursor::Pointer)
+                    .transition_colors()
+                    .duration(MOTION_INSTANT_MS)
+                    .ease_out()
+                    .focus_visible(apply_focus_ring)
                     .disabled(move || update_state.get().is_busy())
-                    .disabled_style(|s| s.opacity(0.55).cursor(Cursor::Default))
+                    .disabled_style(|s| s.opacity(0.55))
                     .on_press(move || {
                         check_update_manual(controls_check.clone());
                     })
@@ -726,32 +727,29 @@ pub(crate) fn about_modal(
 
             let footer = footer.child(
                 view()
-                    .h(px(28.0))
+                    .role(AccessibilityRole::Button)
+                    .h(px(ControlSize::Sm.height()))
                     .px_3p5()
                     .flex_row()
                     .items_center()
                     .justify_center()
-                    .rounded(px(6.0))
+                    .rounded(px(RADIUS_MD))
                     .border_1()
                     .border_color(accent_blue_border())
                     .bg(accent_blue_soft())
                     .hover(|s| s.bg(accent_blue_soft_hover()))
-                    .active(|s| s.opacity(0.8))
-                    .cursor(Cursor::Pointer)
+                    .active(|s| s.bg(bg_control_active()))
+                    .transition_colors()
+                    .duration(MOTION_INSTANT_MS)
+                    .ease_out()
+                    .focus_visible(apply_focus_ring)
                     .on_press(move || profiles.about_open.set(false))
                     .child(control_text(tr("关闭", "Close")).text_color(accent_blue_text())),
             );
 
-            let card = view()
+            let card = ui_modal_card()
                 .w(move || px((window().width.0 - 32.0).clamp(340.0, 520.0)))
                 .max_h(move || px((window().height.0 - 56.0).max(260.0)))
-                .flex_col()
-                .overflow_hidden()
-                .rounded(px(12.0))
-                .border_1()
-                .border_color(border_strong())
-                .bg(bg_card())
-                .shadow_lg()
                 .child(header)
                 .child(
                     scroll()
@@ -761,15 +759,18 @@ pub(crate) fn about_modal(
                 )
                 .child(footer);
 
-            overlay().inset_0().child(
-                view()
-                    .w_full()
-                    .h_full()
-                    .items_center()
-                    .justify_center()
-                    .child(backdrop)
-                    .child(card),
-            )
+            overlay()
+                .inset_0()
+                .on_cancel(move || profiles.about_open.set(false))
+                .child(
+                    view()
+                        .w_full()
+                        .h_full()
+                        .items_center()
+                        .justify_center()
+                        .child(backdrop)
+                        .child(card),
+                )
         },
     )
 }

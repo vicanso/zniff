@@ -106,21 +106,10 @@ pub(crate) fn settings_window(props: SettingsWindowProps) -> impl IntoElement {
         move || open.get(),
         move || {
             let props = props.clone();
-            let backdrop = view()
-                .absolute()
-                .inset_0()
-                .bg(backdrop_scrim())
-                .on_press(move || open.set(false));
-            let card = view()
+            let backdrop = ui_modal_backdrop(move || open.set(false));
+            let card = ui_modal_card()
                 .w(move || px((window().width.0 - 40.0).clamp(520.0, 760.0)))
                 .h(move || px((window().height.0 - 64.0).clamp(360.0, 560.0)))
-                .flex_col()
-                .overflow_hidden()
-                .rounded(px(12.0))
-                .border_1()
-                .border_color(border_strong())
-                .bg(bg_card())
-                .shadow_lg()
                 .child(settings_modal_header(open))
                 .child(
                     view()
@@ -129,15 +118,18 @@ pub(crate) fn settings_window(props: SettingsWindowProps) -> impl IntoElement {
                         .w_full()
                         .child(settings_shell(props, true)),
                 );
-            overlay().inset_0().child(
-                view()
-                    .w_full()
-                    .h_full()
-                    .items_center()
-                    .justify_center()
-                    .child(backdrop)
-                    .child(card),
-            )
+            overlay()
+                .inset_0()
+                .on_cancel(move || open.set(false))
+                .child(
+                    view()
+                        .w_full()
+                        .h_full()
+                        .items_center()
+                        .justify_center()
+                        .child(backdrop)
+                        .child(card),
+                )
         },
     )
 }
@@ -162,26 +154,11 @@ fn settings_modal_header(open: Signal<bool>) -> impl IntoElement {
         .child(
             text(tr("设置", "Settings"))
                 .flex_1()
-                .text_size(px(14.0))
+                .text_size(px(TEXT_LG))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(fg_primary()),
         )
-        .child(
-            view()
-                .w(px(24.0))
-                .h(px(24.0))
-                .rounded(px(6.0))
-                .flex_shrink_0()
-                .flex_row()
-                .items_center()
-                .justify_center()
-                .hover(|s| s.bg(bg_control_hover()))
-                .active(|s| s.opacity(0.75))
-                .cursor(Cursor::Pointer)
-                .label(tr("关闭", "Close"))
-                .on_press(move || open.set(false))
-                .child(glyph_px(11.0, || Glyph::Close, || color(fg_muted()))),
-        )
+        .child(ui_modal_close_button(move || open.set(false)))
 }
 
 pub(crate) fn settings_shell(props: SettingsWindowProps, is_modal: bool) -> impl IntoElement {
@@ -254,11 +231,12 @@ fn settings_sidebar(tab: Signal<SettingsTab>) -> impl IntoElement {
             let icon = item.glyph();
             let active = move || tab.get() == item;
             view()
+                .role(AccessibilityRole::Tab)
                 .w_full()
-                .h(px(32.0))
+                .h(px(ControlSize::Md.height()))
                 .px_2p5()
                 .gap_2()
-                .rounded(px(7.0))
+                .rounded(px(RADIUS_MD))
                 .flex_row()
                 .items_center()
                 .border_1()
@@ -285,12 +263,14 @@ fn settings_sidebar(tab: Signal<SettingsTab>) -> impl IntoElement {
                         }
                     })
                 })
-                .active(|s| s.opacity(0.8))
+                .active(|s| s.bg(bg_control_active()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
                 .focus_visible(apply_focus_ring)
-                .cursor(Cursor::Pointer)
                 .on_press(move || tab.set(item))
                 .child(glyph_px(
-                    13.5,
+                    14.0,
                     move || icon,
                     move || {
                         color(if active() {
@@ -323,7 +303,7 @@ fn settings_tab_header(tab: Signal<SettingsTab>) -> impl IntoElement {
                 let (zh, en) = tab.get().label();
                 t(ui_lang(langs), zh, en).into()
             })
-            .text_size(px(14.5))
+            .text_size(px(TEXT_LG))
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(fg_primary()),
         )
@@ -473,10 +453,10 @@ fn settings_layout_row(
     let c_split = controls.clone();
     let c_tb = controls;
     view()
-        .h(px(32.0))
+        .h(px(ControlSize::Md.height()))
         .px_2p5()
         .gap_2()
-        .rounded(px(6.0))
+        .rounded(px(RADIUS_MD))
         .flex_row()
         .items_center()
         .child(
@@ -528,7 +508,7 @@ fn settings_updates_tab(props: SettingsWindowProps) -> impl IntoElement {
             .justify_between()
             .child(
                 mono(format!("zniff v{}", env!("CARGO_PKG_VERSION")))
-                    .text_size(px(12.5))
+                    .text_size(px(TEXT_MD))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(fg_primary()),
             )

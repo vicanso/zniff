@@ -86,6 +86,7 @@ mod cli_state;
 mod column_picker;
 mod command_palette;
 mod compose_box;
+mod compose_state;
 mod connect_hub;
 mod controls_actions;
 mod controls_runtime;
@@ -171,6 +172,7 @@ pub use self::cli_state::{
 pub(crate) use self::column_picker::*;
 pub(crate) use self::command_palette::*;
 pub(crate) use self::compose_box::*;
+pub(crate) use self::compose_state::*;
 pub(crate) use self::connect_hub::*;
 pub(crate) use self::controls_actions::*;
 pub(crate) use self::controls_runtime::*;

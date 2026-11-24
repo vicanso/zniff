@@ -329,9 +329,10 @@ pub(crate) fn inline_mock_trigger_button(
             let controls = controls.clone();
             let is_open = move || compose.inline_mock.open.get();
             view()
+                .role(AccessibilityRole::Button)
                 .h(px(26.0))
                 .px_2()
-                .rounded(px(6.0))
+                .rounded(px(RADIUS_MD))
                 .border_1()
                 .border_color(move || {
                     if is_open() {
@@ -356,8 +357,11 @@ pub(crate) fn inline_mock_trigger_button(
                         }
                     })
                 })
-                .active(|style| style.opacity(0.8))
-                .cursor(Cursor::Pointer)
+                .active(|style| style.bg(bg_control_active()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .focus_visible(apply_focus_ring)
                 .flex_row()
                 .items_center()
                 .tooltip(label_tip(
@@ -374,7 +378,7 @@ pub(crate) fn inline_mock_trigger_button(
                 .child(
                     text(tr("Mock", "Mock"))
                         .number_of_lines(1)
-                        .text_size(px(11.5))
+                        .text_size(px(TEXT_SM))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(move || {
                             if is_open() {
@@ -399,7 +403,7 @@ pub(crate) fn inline_mock_box(
     let status_invalid = move || parse_status_code(&mock.status.get()).is_none();
 
     view()
-        .rounded(px(10.0))
+        .rounded(px(RADIUS_LG))
         .border_1()
         .border_color(accent_blue_border())
         .bg(bg_card())
@@ -454,7 +458,7 @@ fn inline_mock_header(
                     .min_w(px(0.0))
                     .number_of_lines(1)
                     .text_overflow(EllipsizeMode::Middle)
-                    .text_size(px(11.0))
+                    .text_size(px(TEXT_XS))
                     .text_color(fg_muted()),
                 ),
         )
@@ -465,31 +469,36 @@ fn inline_mock_header(
                 .gap_1p5()
                 .child(
                     view()
+                        .role(AccessibilityRole::Button)
                         .h(px(26.0))
                         .px_2p5()
-                        .rounded(px(6.0))
+                        .rounded(px(RADIUS_MD))
                         .border_1()
                         .border_color(border_control())
                         .bg(bg_control())
                         .hover(|style| style.bg(bg_control_hover()))
-                        .active(|style| style.opacity(0.75))
-                        .cursor(Cursor::Pointer)
+                        .active(|style| style.bg(bg_control_active()))
+                        .transition_colors()
+                        .duration(MOTION_INSTANT_MS)
+                        .ease_out()
+                        .focus_visible(apply_focus_ring)
                         .flex_row()
                         .items_center()
                         .on_press(move || mock.close())
                         .child(
                             text(tr("取消", "Cancel"))
                                 .number_of_lines(1)
-                                .text_size(px(12.0))
+                                .text_size(px(TEXT_SM))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(fg_secondary()),
                         ),
                 )
                 .child(
                     view()
+                        .role(AccessibilityRole::Button)
                         .h(px(26.0))
                         .px_2p5()
-                        .rounded(px(6.0))
+                        .rounded(px(RADIUS_MD))
                         .bg(move || {
                             if status_invalid() {
                                 bg_control()
@@ -507,11 +516,20 @@ fn inline_mock_header(
                             })
                         })
                         .active(|style| {
-                            style.opacity(move || if status_invalid() { 1.0_f32 } else { 0.85_f32 })
+                            style.bg(move || {
+                                if status_invalid() {
+                                    bg_control()
+                                } else {
+                                    accent_blue_active()
+                                }
+                            })
                         })
-                        .cursor(Cursor::Pointer)
+                        .transition_colors()
+                        .duration(MOTION_INSTANT_MS)
+                        .ease_out()
+                        .focus_visible(apply_focus_ring)
                         .disabled(status_invalid)
-                        .disabled_style(|style| style.cursor(Cursor::Default))
+                        .disabled_style(|style| style.opacity(0.55))
                         .flex_row()
                         .items_center()
                         .on_press(move || {
@@ -520,7 +538,7 @@ fn inline_mock_header(
                         .child(
                             text(tr("保存并生效", "Save & Apply"))
                                 .number_of_lines(1)
-                                .text_size(px(12.0))
+                                .text_size(px(TEXT_SM))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(move || {
                                     if status_invalid() {
@@ -545,16 +563,16 @@ fn inline_mock_status_row(
         .gap_2()
         .child(
             text(tr("状态码", "Status"))
-                .text_size(px(11.5))
+                .text_size(px(TEXT_SM))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(fg_secondary()),
         )
         .child(
             view()
                 .w(px(88.0))
-                .h(px(28.0))
+                .h(px(ControlSize::Sm.height()))
                 .px_2()
-                .rounded(px(6.0))
+                .rounded(px(RADIUS_MD))
                 .border_1()
                 .border_color(move || {
                     if status_invalid() {
@@ -585,7 +603,7 @@ fn inline_mock_status_row(
             .min_w(px(0.0))
             .number_of_lines(1)
             .text_overflow(EllipsizeMode::Tail)
-            .text_size(px(11.0))
+            .text_size(px(TEXT_XS))
             .text_color(fg_muted()),
         )
 }
@@ -597,7 +615,7 @@ fn inline_mock_headers_editor(mock: InlineMockSignals) -> impl IntoElement {
         .flex_col()
         .child(
             text(tr("响应头 (Name: Value)", "Response headers (Name: Value)"))
-                .text_size(px(11.5))
+                .text_size(px(TEXT_SM))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(fg_secondary()),
         )
@@ -605,7 +623,7 @@ fn inline_mock_headers_editor(mock: InlineMockSignals) -> impl IntoElement {
             guard_culled_pointer_events(view())
                 .w_full()
                 .h(px(96.0))
-                .rounded(px(7.0))
+                .rounded(px(RADIUS_MD))
                 .border_1()
                 .border_color(border_control())
                 .bg(bg_code())
@@ -635,7 +653,7 @@ fn inline_mock_body_editor(mock: InlineMockSignals) -> impl IntoElement {
         .flex_col()
         .child(
             text(tr("响应正文", "Response body"))
-                .text_size(px(11.5))
+                .text_size(px(TEXT_SM))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(fg_secondary()),
         )
@@ -643,7 +661,7 @@ fn inline_mock_body_editor(mock: InlineMockSignals) -> impl IntoElement {
             guard_culled_pointer_events(view())
                 .w_full()
                 .h(px(180.0))
-                .rounded(px(7.0))
+                .rounded(px(RADIUS_MD))
                 .border_1()
                 .border_color(border_control())
                 .bg(bg_code())

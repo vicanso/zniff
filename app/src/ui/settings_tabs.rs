@@ -14,7 +14,7 @@ pub(crate) fn settings_card(
         .flex_col()
         .child(
             text(tr(title_zh, title_en))
-                .text_size(px(11.5))
+                .text_size(px(TEXT_XS))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(fg_muted()),
         )
@@ -24,7 +24,7 @@ pub(crate) fn settings_card(
                 .p_2p5()
                 .gap_2()
                 .flex_col()
-                .rounded(px(8.0))
+                .rounded(px(RADIUS_LG))
                 .border_1()
                 .border_color(border_subtle())
                 .bg(bg_canvas())
@@ -38,51 +38,7 @@ pub(crate) fn settings_toggle_row(
     marked: impl Fn() -> bool + 'static + Clone,
     on_toggle: impl Fn() + 'static,
 ) -> impl IntoElement {
-    let dot_border = marked.clone();
-    let dot_bg = marked.clone();
-    view()
-        .h(px(32.0))
-        .px_2p5()
-        .gap_2()
-        .rounded(px(6.0))
-        .flex_row()
-        .items_center()
-        .hover(|s| s.bg(bg_control_hover()))
-        .active(|s| s.opacity(0.8))
-        .focus_visible(apply_focus_ring)
-        .cursor(Cursor::Pointer)
-        .on_press(on_toggle)
-        .child(
-            view()
-                .w(px(13.0))
-                .h(px(13.0))
-                .flex_shrink_0()
-                .flex_row()
-                .items_center()
-                .justify_center()
-                .child(
-                    view()
-                        .w(px(10.0))
-                        .h(px(10.0))
-                        .rounded(px(2.5))
-                        .border_1()
-                        .border_color(move || {
-                            if dot_border() {
-                                accent_blue()
-                            } else {
-                                border_control()
-                            }
-                        })
-                        .bg(move || if dot_bg() { accent_blue() } else { bg_card() }),
-                ),
-        )
-        .child(control_text(tr(zh, en)).text_color(move || {
-            if marked() {
-                accent_blue_text()
-            } else {
-                fg_secondary()
-            }
-        }))
+    ui_switch_row(tr(zh, en), marked, move |_| on_toggle())
 }
 
 pub(crate) fn settings_certificate_tab(props: SettingsWindowProps) -> impl IntoElement {
@@ -119,7 +75,7 @@ pub(crate) fn settings_certificate_tab(props: SettingsWindowProps) -> impl IntoE
                     "手机或模拟器证书安装请通过底栏「接入」中心扫码或访问代理端口的 /zniff 页面。",
                     "For mobile devices or emulators, use the footer Connect hub or visit /zniff on the proxy port.",
                 ))
-                .text_size(px(11.5))
+                .text_size(px(TEXT_SM))
                 .line_height(Points(17.0))
                 .text_color(fg_muted()),
             )
@@ -134,7 +90,7 @@ pub(crate) fn settings_certificate_tab(props: SettingsWindowProps) -> impl IntoE
                 "Web 操作台模式下，证书由运行 `zniff --web` 的服务器管理。客户端可访问代理端口的 /zniff 页面下载安装根证书。",
                 "In Web console mode, certificates are managed on the `zniff --web` host. Clients can install the root CA via /zniff on the proxy port.",
             ))
-            .text_size(px(12.0))
+            .text_size(px(TEXT_SM))
             .line_height(Points(18.0))
             .text_color(fg_secondary()),
         )
