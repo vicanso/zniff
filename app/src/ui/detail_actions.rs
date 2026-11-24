@@ -642,7 +642,16 @@ pub(crate) fn marked_action(
     label: impl IntoReactive<SharedString>,
     on_select: impl Fn() + 'static,
 ) -> impl IntoElement {
-    marked_action_inner(marked, label, true, on_select)
+    marked_action_inner_opts(marked, || true, label, true, on_select)
+}
+
+pub(crate) fn marked_action_enabled(
+    marked: impl Fn() -> bool + 'static + Clone,
+    enabled: impl Fn() -> bool + 'static + Clone,
+    label: impl IntoReactive<SharedString>,
+    on_select: impl Fn() + 'static,
+) -> impl IntoElement {
+    marked_action_inner_opts(marked, enabled, label, true, on_select)
 }
 
 pub(crate) fn marked_radio_stay(
@@ -650,11 +659,12 @@ pub(crate) fn marked_radio_stay(
     label: impl IntoReactive<SharedString>,
     on_select: impl Fn() + 'static,
 ) -> impl IntoElement {
-    marked_action_inner(marked, label, false, on_select)
+    marked_action_inner_opts(marked, || true, label, false, on_select)
 }
 
-pub(crate) fn marked_action_inner(
+pub(crate) fn marked_action_inner_opts(
     marked: impl Fn() -> bool + 'static + Clone,
+    enabled: impl Fn() -> bool + 'static + Clone,
     label: impl IntoReactive<SharedString>,
     close_on_select: bool,
     on_select: impl Fn() + 'static,
@@ -662,7 +672,13 @@ pub(crate) fn marked_action_inner(
     let dot = marked.clone();
     let dot_fill = marked.clone();
     let label_on = marked;
+    let dis = enabled.clone();
+    let hov = enabled.clone();
+    let act = enabled.clone();
+    let lbl_en = enabled;
     menu_item()
+        .disabled(move || !dis())
+        .disabled_style(|style| style.opacity(0.45))
         .close_on_select(close_on_select)
         .on_select(on_select)
         .h(px(30.0))
@@ -671,8 +687,26 @@ pub(crate) fn marked_action_inner(
         .rounded(px(RADIUS_MD))
         .flex_row()
         .items_center()
-        .hover(|style| style.bg(bg_control_hover()))
-        .active(|style| style.bg(bg_control_active()))
+        .hover(move |style| {
+            let hov = hov.clone();
+            style.bg(move || {
+                if hov() {
+                    bg_control_hover()
+                } else {
+                    AdaptiveColor::TRANSPARENT
+                }
+            })
+        })
+        .active(move |style| {
+            let act = act.clone();
+            style.bg(move || {
+                if act() {
+                    bg_control_active()
+                } else {
+                    AdaptiveColor::TRANSPARENT
+                }
+            })
+        })
         .transition_colors()
         .duration(MOTION_INSTANT_MS)
         .ease_out()
@@ -686,13 +720,21 @@ pub(crate) fn marked_action_inner(
                 .border_color(move || if dot() { accent_blue() } else { fg_muted() })
                 .bg(move || if dot_fill() { accent_blue() } else { bg_card() }),
         )
-        .child(control_text(label).text_color(move || {
-            if label_on() {
-                accent_blue_text()
-            } else {
-                fg_secondary()
-            }
-        }))
+        .child(
+            control_text(label)
+                .flex_1()
+                .min_w(px(0.0))
+                .text_overflow(EllipsizeMode::Tail)
+                .text_color(move || {
+                    if !lbl_en() {
+                        fg_muted()
+                    } else if label_on() {
+                        accent_blue_text()
+                    } else {
+                        fg_secondary()
+                    }
+                }),
+        )
 }
 
 pub(crate) fn detail_button(

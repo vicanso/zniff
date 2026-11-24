@@ -324,6 +324,10 @@ pub(crate) fn active_tab_id(controls: &Controls) -> u64 {
     lock_tabs(controls).active_tab_id()
 }
 
+pub(crate) fn switch_tab(controls: &Controls, tab_id: u64) -> bool {
+    lock_tabs(controls).switch_to(tab_id)
+}
+
 pub(crate) fn is_active_tab_read_only(controls: &Controls) -> bool {
     lock_tabs(controls).is_active_read_only()
 }
@@ -517,28 +521,48 @@ fn session_tab_chip(props: SessionTabBarProps, item: ReadSignal<TabSummary>) -> 
             },
         ))
         .child(
-            text(move || -> SharedString {
-                item.with(|tab| {
-                    let label = if tab.read_only {
-                        tab.name.as_str()
-                    } else {
-                        t(ui_lang(langs), "实时会话", "Live")
-                    };
-                    format!("{label} ({})", tab.count).into()
-                })
-            })
-            .max_w(px(172.0))
-            .number_of_lines(1)
-            .text_overflow(EllipsizeMode::Middle)
-            .text_size(px(TEXT_SM))
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(move || {
-                if active_tab.get() == tab_id {
-                    fg_primary()
-                } else {
-                    fg_secondary()
-                }
-            }),
+            view()
+                .flex_shrink_0()
+                .tooltip(
+                    tooltip().child(ui_tooltip_surface(
+                        text(move || -> SharedString {
+                            item.with(|tab| {
+                                if tab.read_only {
+                                    tab.name.clone()
+                                } else {
+                                    t(ui_lang(langs), "实时会话", "Live").to_string()
+                                }
+                            })
+                            .into()
+                        })
+                        .text_size(px(TEXT_SM))
+                        .text_color(fg_primary()),
+                    )),
+                )
+                .child(
+                    text(move || -> SharedString {
+                        item.with(|tab| {
+                            let label = if tab.read_only {
+                                tab.name.as_str()
+                            } else {
+                                t(ui_lang(langs), "实时会话", "Live")
+                            };
+                            format!("{label} ({})", tab.count).into()
+                        })
+                    })
+                    .max_w(px(172.0))
+                    .number_of_lines(1)
+                    .text_overflow(EllipsizeMode::Middle)
+                    .text_size(px(TEXT_SM))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(move || {
+                        if active_tab.get() == tab_id {
+                            fg_primary()
+                        } else {
+                            fg_secondary()
+                        }
+                    }),
+                ),
         )
         .child(when(
             move || is_ro,
@@ -562,8 +586,8 @@ fn session_tab_chip(props: SessionTabBarProps, item: ReadSignal<TabSummary>) -> 
                 let close_props = close_props.clone();
                 view()
                     .role(AccessibilityRole::Button)
-                    .w(px(16.0))
-                    .h(px(16.0))
+                    .w(px(ControlSize::Xs.height()))
+                    .h(px(ControlSize::Xs.height()))
                     .rounded(px(RADIUS_SM))
                     .items_center()
                     .justify_center()
@@ -574,6 +598,7 @@ fn session_tab_chip(props: SessionTabBarProps, item: ReadSignal<TabSummary>) -> 
                     .ease_out()
                     .focus_visible(apply_focus_ring)
                     .label(tr("关闭标签", "Close tab"))
+                    .tooltip(label_tip("关闭导入标签", "Close imported tab"))
                     .on_press(move || close_imported_tab(&close_props, tab_id))
                     .child(glyph_px(10.0, || Glyph::Close, || color(fg_muted())))
             },

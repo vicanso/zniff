@@ -190,6 +190,7 @@ pub(crate) fn facet_sidebar(
                                                     .duration(MOTION_INSTANT_MS)
                                                     .ease_out()
                                                     .focus_visible(apply_focus_ring)
+                                                    .label(tr("清空筛选", "Clear filter"))
                                                     .on_press(move || side_query.set(String::new()))
                                                     .child(
                                                         text("×")
@@ -253,41 +254,83 @@ pub(crate) fn facet_sidebar(
                                 .child(sidebar_section_header(
                                     "应用 / 来源",
                                     "Apps",
-                                    move || facets.with(|f| f.apps.len()),
+                                    move || filtered_apps().len(),
                                     apps_open,
                                 ))
                                 .child(when(
                                     move || apps_open.get(),
                                     move || {
-                                        view().w_full().gap_0p5().child(each(
-                                            filtered_apps,
-                                            |entry| entry.token.clone(),
-                                            move |entry, _| sidebar_app_row(entry, filter),
-                                        ))
+                                        when(
+                                            move || filtered_apps().is_empty(),
+                                            move || {
+                                                let has_query = !side_query.get().trim().is_empty();
+                                                let any_total = facets.with(|f| !f.apps.is_empty());
+                                                text(if has_query && any_total {
+                                                    tr("无匹配应用", "No matching apps")()
+                                                } else {
+                                                    tr("暂无应用", "No apps yet")()
+                                                })
+                                                .px_2p5()
+                                                .py_1()
+                                                .text_size(px(TEXT_XS))
+                                                .text_color(fg_muted())
+                                            },
+                                        )
+                                        .otherwise(move || {
+                                            view().w_full().gap_0p5().child(each(
+                                                filtered_apps,
+                                                |entry| entry.token.clone(),
+                                                move |entry, _| sidebar_app_row(entry, filter),
+                                            ))
+                                        })
                                     },
                                 ))
                                 .child(view().h(px(4.0)))
                                 .child(sidebar_section_header(
                                     "域名",
                                     "Domains",
-                                    move || facets.with(|f| f.domains.len()),
+                                    move || {
+                                        grouped_domains()
+                                            .iter()
+                                            .map(|g| g.entries.len())
+                                            .sum::<usize>()
+                                    },
                                     domains_open,
                                 ))
                                 .child(when(
                                     move || domains_open.get(),
                                     move || {
-                                        view().w_full().gap_0p5().child(each(
-                                            grouped_domains,
-                                            |group| group.root.clone(),
-                                            move |group, _| {
-                                                sidebar_domain_group_view(
-                                                    group,
-                                                    filter,
-                                                    side_query,
-                                                    collapsed_roots,
-                                                )
+                                        when(
+                                            move || grouped_domains().is_empty(),
+                                            move || {
+                                                let has_query = !side_query.get().trim().is_empty();
+                                                let any_total =
+                                                    facets.with(|f| !f.domains.is_empty());
+                                                text(if has_query && any_total {
+                                                    tr("无匹配域名", "No matching domains")()
+                                                } else {
+                                                    tr("暂无域名", "No domains yet")()
+                                                })
+                                                .px_2p5()
+                                                .py_1()
+                                                .text_size(px(TEXT_XS))
+                                                .text_color(fg_muted())
                                             },
-                                        ))
+                                        )
+                                        .otherwise(move || {
+                                            view().w_full().gap_0p5().child(each(
+                                                grouped_domains,
+                                                |group| group.root.clone(),
+                                                move |group, _| {
+                                                    sidebar_domain_group_view(
+                                                        group,
+                                                        filter,
+                                                        side_query,
+                                                        collapsed_roots,
+                                                    )
+                                                },
+                                            ))
+                                        })
                                     },
                                 )),
                         ),
@@ -316,6 +359,8 @@ pub(crate) fn facet_sidebar(
                     })
                     .on_responder_release(move |_event: &ResponderEvent| {
                         resizing.set(false);
+                        let width_u32 = clamp_sidebar_px(sidebar_width.get_untracked()).round() as u32;
+                        let _ = save_config(|cfg| cfg.sidebar_width = width_u32);
                     })
                     .on_responder_terminate(move |_event: &ResponderEvent| {
                         resizing.set(false);
@@ -565,47 +610,53 @@ pub(crate) fn sidebar_domain_group_view(
                         s.bg(move || {
                             if root_active() {
                                 accent_blue_soft_hover()
+                            } else if root_muted() {
+                                status_err_bg_hover()
                             } else {
                                 bg_control_hover()
                             }
                         })
                     })
-                    .child(
-                        view()
-                            .role(AccessibilityRole::Button)
-                            .w(px(18.0))
-                            .h(px(ControlSize::Xs.height()))
-                            .flex_shrink_0()
-                            .rounded(px(RADIUS_SM))
-                            .flex_row()
-                            .items_center()
-                            .justify_center()
-                            .hover(|s| s.bg(bg_control_hover()))
-                            .active(|s| s.bg(bg_control_active()))
-                            .transition_colors()
-                            .duration(MOTION_INSTANT_MS)
-                            .ease_out()
-                            .focus_visible(apply_focus_ring)
-                            .on_press(move || {
-                                let root = group.with(|g| g.root.clone());
-                                collapsed_roots.update(|set| {
-                                    if !set.remove(&root) {
-                                        set.insert(root);
-                                    }
-                                });
-                            })
-                            .child(glyph_px(
-                                10.0,
-                                move || {
-                                    if is_expanded() {
-                                        Glyph::Chevron
-                                    } else {
-                                        Glyph::ChevronRight
-                                    }
-                                },
-                                || color(fg_muted()),
-                            )),
-                    )
+                    .child(when(
+                        move || side_query.get().trim().is_empty(),
+                        move || {
+                            view()
+                                .role(AccessibilityRole::Button)
+                                .w(px(18.0))
+                                .h(px(ControlSize::Xs.height()))
+                                .flex_shrink_0()
+                                .rounded(px(RADIUS_SM))
+                                .flex_row()
+                                .items_center()
+                                .justify_center()
+                                .hover(|s| s.bg(bg_control_hover()))
+                                .active(|s| s.bg(bg_control_active()))
+                                .transition_colors()
+                                .duration(MOTION_INSTANT_MS)
+                                .ease_out()
+                                .focus_visible(apply_focus_ring)
+                                .label(tr("展开或收起子域", "Toggle subdomains"))
+                                .on_press(move || {
+                                    let root = group.with(|g| g.root.clone());
+                                    collapsed_roots.update(|set| {
+                                        if !set.remove(&root) {
+                                            set.insert(root);
+                                        }
+                                    });
+                                })
+                                .child(glyph_px(
+                                    10.0,
+                                    move || {
+                                        if is_expanded() {
+                                            Glyph::Chevron
+                                        } else {
+                                            Glyph::ChevronRight
+                                        }
+                                    },
+                                    || color(fg_muted()),
+                                ))
+                        },
+                    ))
                     .child(
                         view()
                             .role(AccessibilityRole::Button)
@@ -661,11 +712,12 @@ pub(crate) fn sidebar_domain_group_view(
                                 .text_color(fg_muted()),
                             ),
                     )
-                    .child(
+                    .child({
+                        let langs = ui_langs();
                         view()
                             .role(AccessibilityRole::Button)
-                            .w(px(16.0))
-                            .h(px(16.0))
+                            .w(px(ControlSize::Xs.height()))
+                            .h(px(ControlSize::Xs.height()))
                             .flex_shrink_0()
                             .rounded(px(RADIUS_SM))
                             .flex_row()
@@ -677,7 +729,22 @@ pub(crate) fn sidebar_domain_group_view(
                             .duration(MOTION_INSTANT_MS)
                             .ease_out()
                             .focus_visible(apply_focus_ring)
-                            .tooltip(label_tip("屏蔽整组域名", "Mute root domain group"))
+                            .label(tr("屏蔽或取消屏蔽整组域名", "Toggle mute root domain"))
+                            .tooltip(
+                                tooltip().child(ui_tooltip_surface(
+                                    text(move || -> SharedString {
+                                        let lang = ui_lang(langs);
+                                        if root_muted() {
+                                            t(lang, "取消屏蔽整组域名", "Unmute root domain group")
+                                        } else {
+                                            t(lang, "屏蔽整组域名", "Mute root domain group")
+                                        }
+                                        .into()
+                                    })
+                                    .text_size(px(TEXT_SM))
+                                    .text_color(fg_primary()),
+                                )),
+                            )
                             .on_press(move || {
                                 let root = group.with(|g| g.root.clone());
                                 filter.set(toggle_mute_facet(&filter.get(), &root));
@@ -688,8 +755,8 @@ pub(crate) fn sidebar_domain_group_view(
                                 } else {
                                     fg_muted()
                                 }
-                            })),
-                    ),
+                            }))
+                    }),
             )
             .child(when(is_expanded, move || {
                 view().w_full().gap_0p5().child(each(
@@ -814,11 +881,12 @@ fn sidebar_domain_leaf_row(
                     .text_color(fg_muted()),
                 ),
         )
-        .child(
+        .child({
+            let langs = ui_langs();
             view()
                 .role(AccessibilityRole::Button)
-                .w(px(16.0))
-                .h(px(16.0))
+                .w(px(ControlSize::Xs.height()))
+                .h(px(ControlSize::Xs.height()))
                 .flex_shrink_0()
                 .rounded(px(RADIUS_SM))
                 .flex_row()
@@ -830,7 +898,22 @@ fn sidebar_domain_leaf_row(
                 .duration(MOTION_INSTANT_MS)
                 .ease_out()
                 .focus_visible(apply_focus_ring)
-                .tooltip(label_tip("屏蔽此域名", "Mute this domain"))
+                .label(tr("屏蔽或取消屏蔽此域名", "Toggle mute domain"))
+                .tooltip(
+                    tooltip().child(ui_tooltip_surface(
+                        text(move || -> SharedString {
+                            let lang = ui_lang(langs);
+                            if is_muted() {
+                                t(lang, "取消屏蔽此域名", "Unmute this domain")
+                            } else {
+                                t(lang, "屏蔽此域名", "Mute this domain")
+                            }
+                            .into()
+                        })
+                        .text_size(px(TEXT_SM))
+                        .text_color(fg_primary()),
+                    )),
+                )
                 .on_press(move || {
                     let tok = entry.with(|e| e.token.clone());
                     filter.set(toggle_mute_facet(&filter.get(), &tok));
@@ -841,6 +924,6 @@ fn sidebar_domain_leaf_row(
                     } else {
                         fg_muted()
                     }
-                })),
-        )
+                }))
+        })
 }

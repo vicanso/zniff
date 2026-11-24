@@ -209,6 +209,8 @@ pub enum StatusMsg {
     ProfileSaved(String),
     ProfileRestored(String),
     MappedLocal(String),
+    BreakRuleAdded(String),
+    PrimaryFilterPausedForWatch,
     SequenceGenerated {
         count: usize,
     },
@@ -736,6 +738,16 @@ impl StatusMsg {
                 Lang::Zh => format!("已添加本地映射规则 · {target}"),
                 Lang::En => format!("Added map-local rule · {target}"),
             },
+            Self::BreakRuleAdded(target) => match lang {
+                Lang::Zh => format!("已添加断点规则: {target}"),
+                Lang::En => format!("Added break rule: {target}"),
+            },
+            Self::PrimaryFilterPausedForWatch => t(
+                lang,
+                "主过滤与提醒规则冲突，已自动暂停主过滤",
+                "Paused primary filter so Watch hits are visible",
+            )
+            .into(),
             Self::SequenceGenerated { count } => match lang {
                 Lang::Zh => format!("已生成 {count} 条流量的时序图并复制 Mermaid"),
                 Lang::En => {
@@ -993,6 +1005,8 @@ impl StatusMsg {
             | Self::ShareStopped
             | Self::RelayConnected(_)
             | Self::MappedLocal(_)
+            | Self::BreakRuleAdded(_)
+            | Self::PrimaryFilterPausedForWatch
             | Self::BaselineSet
             | Self::BaselineCleared
             | Self::Replayed(_)
@@ -1073,9 +1087,11 @@ impl StatusMsg {
             Self::ProfilesImported { .. } | Self::Imported { .. } | Self::RulesMigrated { .. } => {
                 t(lang, "导入成功", "Import Succeeded")
             }
-            Self::ProfileSaved(_) | Self::Saved(_) | Self::MappedLocal(_) => {
-                t(lang, "保存成功", "Saved Successfully")
-            }
+            Self::ProfileSaved(_)
+            | Self::Saved(_)
+            | Self::MappedLocal(_)
+            | Self::BreakRuleAdded(_) => t(lang, "保存成功", "Saved Successfully"),
+            Self::PrimaryFilterPausedForWatch => t(lang, "已暂停主过滤", "Primary Filter Paused"),
             Self::ProfileRestored(_) => t(lang, "已恢复历史版本", "History Restored"),
             Self::CopiedUrl
             | Self::CopiedHeaderValue(_)

@@ -89,6 +89,14 @@ pub(crate) fn column_picker_panel(
         .child(column_picker_content(columns, controls))
 }
 
+fn column_picker_section_header(title: impl IntoReactive<SharedString>) -> impl IntoElement {
+    view()
+        .px_2p5()
+        .pt_1p5()
+        .pb_0p5()
+        .child(ui_section_header(title))
+}
+
 fn column_picker_content(
     columns: Signal<ListColumns>,
     controls: Arc<Controls>,
@@ -97,7 +105,7 @@ fn column_picker_content(
     let scroll_controls = controls.clone();
     let reset_controls = controls.clone();
     view()
-        .w(px(204.0))
+        .w(px(268.0))
         .max_w(move || px((window().width.0 - 16.0).max(160.0)))
         .max_h(move || px((window().height.0 - 24.0).max(180.0)))
         .overflow_hidden()
@@ -110,10 +118,15 @@ fn column_picker_content(
                         .w_full()
                         .p_1()
                         .gap_0p5()
+                        .child(column_picker_section_header(tr("固定列", "Fixed columns")))
                         .children((0..3).map(move |slot| {
                             column_slot_row(columns, fixed_controls.clone(), slot)
                         }))
                         .child(menu_rule())
+                        .child(column_picker_section_header(tr(
+                            "可滚动列",
+                            "Scrollable columns",
+                        )))
                         .children((3..ListColumn::ORDERED.len()).map(move |slot| {
                             column_slot_row(columns, scroll_controls.clone(), slot)
                         }))
@@ -122,6 +135,7 @@ fn column_picker_content(
                             move || column_reset_order(columns, reset_controls.clone()),
                         ))
                         .child(menu_rule())
+                        .child(column_picker_section_header(tr("路径展示", "Path display")))
                         .child(column_path_display_choice(
                             columns,
                             controls.clone(),
@@ -151,6 +165,7 @@ fn column_picker_content(
                             "Full URL",
                         ))
                         .child(menu_rule())
+                        .child(column_picker_section_header(tr("文本省略", "Truncation")))
                         .child(column_ellipsize_choice(
                             columns,
                             controls.clone(),
@@ -189,6 +204,33 @@ pub(crate) fn column_slot_row(
         cols.on(cols.order[slot])
     };
     let locked = move || is_on() && columns.get().visible_count() <= 1;
+    let a11y_langs = ui_langs();
+    let row_label = move || -> SharedString {
+        let cols = columns.get();
+        let (zh, en) = cols.order[slot].labels();
+        match ui_lang(a11y_langs) {
+            Lang::Zh => {
+                let state = if !cols.on(cols.order[slot]) {
+                    "隐藏"
+                } else if cols.visible_count() <= 1 {
+                    "锁定"
+                } else {
+                    "显示"
+                };
+                format!("{zh} ({state})").into()
+            }
+            Lang::En => {
+                let state = if !cols.on(cols.order[slot]) {
+                    "hidden"
+                } else if cols.visible_count() <= 1 {
+                    "locked"
+                } else {
+                    "visible"
+                };
+                format!("{en} ({state})").into()
+            }
+        }
+    };
     view()
         .h(px(30.0))
         .pr_0p5()
@@ -197,6 +239,8 @@ pub(crate) fn column_slot_row(
         .items_center()
         .child(
             view()
+                .role(AccessibilityRole::Button)
+                .label(row_label)
                 .flex_1()
                 .min_w(px(0.0))
                 .h_full()
@@ -501,7 +545,12 @@ pub(crate) fn row_context_menu(
     };
     let marker_filter_controls = controls.clone();
     let marker_copy_controls = controls.clone();
+    let marker_copy_status = controls.clone();
+    let marker_del_check = controls.clone();
     let marker_del_controls = controls.clone();
+    let star_check = controls.clone();
+    let note_check = controls.clone();
+    let live_check = controls.clone();
     let can_local = move || {
         let controls = &local_check;
         picked.get().is_some_and(|id| {
@@ -512,12 +561,18 @@ pub(crate) fn row_context_menu(
             })
         })
     };
-    let can_replay = can_local.clone();
-    let can_repeat = can_local.clone();
-    let can_edit = can_local.clone();
-    let can_break = can_local.clone();
-    let can_map = can_local.clone();
-    let can_quick_rule = can_local;
+    let can_mutate = move || !is_active_tab_read_only(&star_check);
+    let can_note = move || !is_active_tab_read_only(&note_check);
+    let can_del_marker = move || !is_active_tab_read_only(&marker_del_check);
+    let can_local_break = can_local.clone();
+    let can_local_map = can_local.clone();
+    let can_quick_rule = can_local.clone();
+    let can_live = move || !is_active_tab_read_only(&live_check) && can_local();
+    let can_replay = can_live.clone();
+    let can_repeat = can_live.clone();
+    let can_edit = can_live;
+    let can_break = can_local_break;
+    let can_map = can_local_map;
     view()
         .w(px(196.0))
         .max_w(move || px((window().width.0 - 16.0).max(160.0)))
@@ -536,6 +591,8 @@ pub(crate) fn row_context_menu(
                     when(is_marker, move || {
                         let marker_filter_controls = marker_filter_controls.clone();
                         let marker_copy_controls = marker_copy_controls.clone();
+                        let marker_copy_status = marker_copy_status.clone();
+                        let can_del_marker = can_del_marker.clone();
                         let marker_del_controls = marker_del_controls.clone();
                         view()
                             .w_full()
@@ -564,12 +621,14 @@ pub(crate) fn row_context_menu(
                                             })
                                     {
                                         set_clipboard(label);
+                                        set_status(&marker_copy_status, StatusMsg::CopiedMarker);
                                     }
                                 }),
                             ))
                             .child(menu_rule())
-                            .child(action_item(
+                            .child(action_item_enabled(
                                 tr("删除标记", "Delete marker"),
+                                can_del_marker,
                                 closing(menu_open, move || {
                                     if guard_read_only_tab(&marker_del_controls) {
                                         return;
@@ -600,6 +659,8 @@ pub(crate) fn row_context_menu(
                         let repeat_controls = repeat_controls.clone();
                         let edit_controls = edit_controls.clone();
                         let replay_controls = replay_controls.clone();
+                        let can_mutate = can_mutate.clone();
+                        let can_note = can_note.clone();
                         let can_replay = can_replay.clone();
                         let can_repeat = can_repeat.clone();
                         let can_edit = can_edit.clone();
@@ -617,7 +678,7 @@ pub(crate) fn row_context_menu(
                                 }),
                             ))
                             .child(action_item(
-                                "cURL",
+                                tr("复制 cURL", "Copy cURL"),
                                 closing(menu_open, move || {
                                     copy_part(&copy_curl, picked.get(), CopyPart::Curl);
                                 }),
@@ -642,8 +703,9 @@ pub(crate) fn row_context_menu(
                                 }),
                             ))
                             .child(menu_rule())
-                            .child(marked_action(
+                            .child(marked_action_enabled(
                                 move || flow_pinned(&pin_mark, picked.get()),
+                                can_mutate,
                                 {
                                     let langs = ui_langs();
                                     move || -> SharedString {
@@ -686,8 +748,9 @@ pub(crate) fn row_context_menu(
                                     })
                                 },
                             ))
-                            .child(action_item(
+                            .child(action_item_enabled(
                                 tr("备注…", "Note…"),
+                                can_note,
                                 closing(menu_open, move || {
                                     shown.repeating.set(false);
                                     shown.editing_comment.set(true);
@@ -831,6 +894,7 @@ pub(crate) fn fill_break_rule(controls: &Controls, id: Option<u64>, rules_text: 
     else {
         return;
     };
+    let target = format!("{}{}", flow.host, flow.path);
     rules_text.set(next.clone());
     controls.hub.set_rules(&next);
     if let Err(err) = save_config(|config| config.rules = next) {
@@ -841,7 +905,9 @@ pub(crate) fn fill_break_rule(controls: &Controls, id: Option<u64>, rules_text: 
                 err: err.to_string(),
             },
         );
+        return;
     }
+    set_status(controls, StatusMsg::BreakRuleAdded(target));
 }
 
 pub(crate) fn map_local_from_flow(

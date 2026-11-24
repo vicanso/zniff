@@ -269,7 +269,7 @@ pub fn App() -> impl IntoElement {
         relay_accept: relay_accept_sig,
         list_width,
         list_height: signal(saved.list_height as f32),
-        sidebar_width: signal(SIDEBAR_WIDTH_DEFAULT),
+        sidebar_width: signal(config::clamp_sidebar_width(saved.sidebar_width) as f32),
         sidebar_collapsed: signal(saved.sidebar_collapsed),
         layout_mode: signal(saved.layout_mode),
         panel_open: signal(false),
@@ -954,10 +954,11 @@ pub fn App() -> impl IntoElement {
         let active_tab_now = active_tab_id(&controls_tick);
         let tab_switched = active_tab_now != seen_active_tab.get();
         if tab_switched {
+            let was_synced = active_tab_tick.get_untracked() == active_tab_now;
             seen_active_tab.replace(active_tab_now);
             active_tab_tick.set(active_tab_now);
             row_cache_tick.borrow_mut().rows.clear();
-            if selected_tick.get_untracked().is_some() {
+            if !was_synced && selected_tick.get_untracked().is_some() {
                 selected_tick.set(None);
             }
             baseline_tick.set(baseline_id_for_active_tab(&controls_tick));
@@ -1053,15 +1054,20 @@ pub fn App() -> impl IntoElement {
             seen_sort.replace(sort_now);
             seen_path_display.replace(path_display_now);
             let matched = active_matching_ids(&controls_tick, &effective_filter_now);
+            let filter_enabled_now = profile_tick.filter_enabled.get();
+            let active_primary = if filter_enabled_now {
+                filter_now.as_str()
+            } else {
+                ""
+            };
             let facet_ids = if run_secondary
                 && (facets_open_now || layout_mode_now == config::LayoutMode::Split)
-                && filter_now != effective_filter_now
+                && active_primary != effective_filter_now
             {
-                Some(active_matching_ids(&controls_tick, &filter_now))
+                Some(active_matching_ids(&controls_tick, active_primary))
             } else {
                 None
             };
-            let filter_enabled_now = profile_tick.filter_enabled.get();
             let list_filter_now = list_filter_tick.get();
             let (
                 lines,
@@ -1487,6 +1493,8 @@ pub fn App() -> impl IntoElement {
             profile_signals.about_open.set(false);
         } else if profile_signals.machine_settings_open.get() {
             profile_signals.machine_settings_open.set(false);
+        } else if facets_open.get() {
+            facets_open.set(false);
         } else if compose_esc.composing.get() || compose_esc.inline_mock.open.get() {
             reset_compose(compose_esc);
         } else if seq_esc.open.get() {
@@ -1776,6 +1784,10 @@ pub fn App() -> impl IntoElement {
                 effective_filter,
                 list_filter,
                 selected,
+                active_tab: active_tab_sig,
+                baseline,
+                primary_filter: filter,
+                filter_enabled: profile_signals.filter_enabled,
                 controls: controls.clone(),
             },
             controls.clone(),

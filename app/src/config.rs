@@ -152,6 +152,9 @@ pub const LIST_WIDTH_MIN: u32 = 280;
 pub const LIST_WIDTH_MAX: u32 = 1100;
 pub const LIST_HEIGHT_MIN: u32 = 160;
 pub const LIST_HEIGHT_MAX: u32 = 720;
+pub const SIDEBAR_WIDTH_DEFAULT: u32 = 230;
+pub const SIDEBAR_WIDTH_MIN: u32 = 176;
+pub const SIDEBAR_WIDTH_MAX: u32 = 340;
 
 /// Window size when `config.toml` has no `window_width` / `window_height`.
 pub const WINDOW_WIDTH_DEFAULT: u32 = 1200;
@@ -163,6 +166,10 @@ pub const WINDOW_HEIGHT_MAX: u32 = 4320;
 
 pub fn clamp_list_width(width: u32) -> u32 {
     width.clamp(LIST_WIDTH_MIN, LIST_WIDTH_MAX)
+}
+
+pub fn clamp_sidebar_width(width: u32) -> u32 {
+    width.clamp(SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX)
 }
 
 pub fn clamp_window_width(width: u32) -> u32 {
@@ -710,6 +717,7 @@ pub struct Config {
     pub ui_zoom: u16,
     pub layout_mode: LayoutMode,
     pub sidebar_collapsed: bool,
+    pub sidebar_width: u32,
     pub list_width: u32,
     pub list_height: u32,
     pub window_width: u32,
@@ -861,6 +869,11 @@ struct RawConfig {
     layout_mode: LayoutMode,
     #[serde(default, skip_serializing_if = "is_false")]
     sidebar_collapsed: bool,
+    #[serde(
+        default = "default_sidebar_width",
+        skip_serializing_if = "is_default_sidebar_width"
+    )]
+    sidebar_width: u32,
     #[serde(
         default = "default_list_width",
         skip_serializing_if = "is_default_list_width"
@@ -1094,6 +1107,7 @@ impl From<RawConfig> for Config {
             ui_zoom: clamp_ui_zoom(raw.ui_zoom),
             layout_mode: raw.layout_mode,
             sidebar_collapsed: raw.sidebar_collapsed,
+            sidebar_width: raw.sidebar_width,
             list_width: raw.list_width,
             list_height: raw.list_height,
             window_width: raw.window_width,
@@ -1216,6 +1230,7 @@ impl From<Config> for RawConfig {
             ui_zoom: clamp_ui_zoom(config.ui_zoom),
             layout_mode: config.layout_mode,
             sidebar_collapsed: config.sidebar_collapsed,
+            sidebar_width: clamp_sidebar_width(config.sidebar_width),
             list_width: config.list_width,
             list_height: config.list_height,
             window_width: config.window_width,
@@ -1294,6 +1309,7 @@ impl Default for Config {
             ui_zoom: UI_ZOOM_DEFAULT,
             layout_mode: LayoutMode::Split,
             sidebar_collapsed: false,
+            sidebar_width: default_sidebar_width(),
             list_width: default_list_width(),
             list_height: default_list_height(),
             window_width: default_window_width(),
@@ -1520,6 +1536,10 @@ fn default_list_width() -> u32 {
     LIST_WIDTH_DEFAULT
 }
 
+fn default_sidebar_width() -> u32 {
+    SIDEBAR_WIDTH_DEFAULT
+}
+
 fn default_list_height() -> u32 {
     320
 }
@@ -1542,6 +1562,10 @@ fn is_false(value: &bool) -> bool {
 
 fn is_default_list_width(value: &u32) -> bool {
     *value == LIST_WIDTH_DEFAULT
+}
+
+fn is_default_sidebar_width(value: &u32) -> bool {
+    *value == SIDEBAR_WIDTH_DEFAULT
 }
 
 fn is_default_list_height(value: &u32) -> bool {
@@ -1781,6 +1805,7 @@ fn normalize_for(mut config: Config, dev: bool) -> Config {
     }
     config.language = language_name(config.language.as_deref().and_then(parse_pref));
     config.ui_zoom = clamp_ui_zoom(config.ui_zoom);
+    config.sidebar_width = clamp_sidebar_width(config.sidebar_width);
     config.list_width = clamp_list_width(config.list_width);
     config.window_width = clamp_window_width(config.window_width);
     config.window_height = clamp_window_height(config.window_height);

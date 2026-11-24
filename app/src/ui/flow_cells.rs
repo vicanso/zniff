@@ -754,7 +754,10 @@ pub(crate) fn path_cell(
             }),
         )
         .on_mouse_move(move |event: &MouseEvent| {
-            let tip_display = effective_path_hover_display(columns.get(), &effective_filter.get());
+            let cols = columns.get();
+            let eff_filter = effective_filter.get();
+            let shown_display = effective_path_display(cols, &eff_filter);
+            let tip_display = effective_path_hover_display(cols, &eff_filter);
             let path = tip_rows.with(|rows| {
                 rows.get(index)
                     .map(|row| {
@@ -764,6 +767,7 @@ pub(crate) fn path_cell(
                             } else {
                                 tip_display
                             };
+                        let shown = row_target_display(row, shown_display);
                         let target = row_target_display(row, effective);
                         let with_relay = if row.relay_short.is_empty() {
                             target
@@ -774,10 +778,20 @@ pub(crate) fn path_cell(
                                 row.relay_short
                             )
                         };
-                        if row.rule_summary.is_empty() {
+                        let full = if row.rule_summary.is_empty() {
                             with_relay
                         } else {
                             format!("[{}] {with_relay}", row.rule_summary)
+                        };
+                        if !row.is_marker
+                            && row.relay_short.is_empty()
+                            && row.rule_summary.is_empty()
+                            && full == shown
+                            && shown.chars().count() <= 18
+                        {
+                            String::new()
+                        } else {
+                            full
                         }
                     })
                     .unwrap_or_default()

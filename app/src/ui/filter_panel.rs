@@ -191,34 +191,135 @@ pub(crate) fn saved_filter_panel(
                                             .text_color(fg_muted()),
                                         ),
                                 )
-                                .child(view().flex_row().items_center().gap_1p5().child(when(
-                                    move || !reset_filter.get().trim().is_empty(),
-                                    move || {
-                                        view()
-                                            .role(AccessibilityRole::Button)
-                                            .h(px(ControlSize::Xs.height()))
-                                            .px_2()
-                                            .rounded(px(RADIUS_SM))
-                                            .border_1()
-                                            .border_color(border_control())
-                                            .bg(bg_control())
-                                            .hover(|style| style.bg(bg_control_hover()))
-                                            .active(|style| style.bg(bg_control_active()))
-                                            .transition_colors()
-                                            .duration(MOTION_INSTANT_MS)
-                                            .ease_out()
-                                            .focus_visible(apply_focus_ring)
-                                            .flex_row()
-                                            .items_center()
-                                            .on_press(move || reset_filter.set(String::new()))
-                                            .child(
-                                                text(tr("清空条件", "Reset"))
-                                                    .text_size(px(TEXT_XS))
-                                                    .text_color(fg_secondary()),
-                                            )
-                                    },
-                                ))),
+                                .child(
+                                    view()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap_1p5()
+                                        .child(when(
+                                            move || !reset_filter.get().trim().is_empty(),
+                                            move || {
+                                                let langs = ui_langs();
+                                                let enabled = profiles.filter_enabled;
+                                                view()
+                                                    .role(AccessibilityRole::Button)
+                                                    .h(px(ControlSize::Xs.height()))
+                                                    .px_2()
+                                                    .rounded(px(RADIUS_SM))
+                                                    .border_1()
+                                                    .border_color(move || {
+                                                        if enabled.get() {
+                                                            border_control()
+                                                        } else {
+                                                            status_warn_fg()
+                                                        }
+                                                    })
+                                                    .bg(move || {
+                                                        if enabled.get() {
+                                                            bg_control()
+                                                        } else {
+                                                            status_warn_bg()
+                                                        }
+                                                    })
+                                                    .hover(|style| style.bg(bg_control_hover()))
+                                                    .active(|style| style.bg(bg_control_active()))
+                                                    .transition_colors()
+                                                    .duration(MOTION_INSTANT_MS)
+                                                    .ease_out()
+                                                    .focus_visible(apply_focus_ring)
+                                                    .flex_row()
+                                                    .items_center()
+                                                    .on_press(move || enabled.set(!enabled.get()))
+                                                    .child(
+                                                        text(move || -> SharedString {
+                                                            let lang = ui_lang(langs);
+                                                            if enabled.get() {
+                                                                t(lang, "暂停过滤", "Pause")
+                                                            } else {
+                                                                t(lang, "恢复过滤", "Resume")
+                                                            }
+                                                            .into()
+                                                        })
+                                                        .text_size(px(TEXT_XS))
+                                                        .text_color(move || {
+                                                            if enabled.get() {
+                                                                fg_secondary()
+                                                            } else {
+                                                                status_warn_fg()
+                                                            }
+                                                        }),
+                                                    )
+                                            },
+                                        ))
+                                        .child(when(
+                                            move || !reset_filter.get().trim().is_empty(),
+                                            move || {
+                                                view()
+                                                    .role(AccessibilityRole::Button)
+                                                    .h(px(ControlSize::Xs.height()))
+                                                    .px_2()
+                                                    .rounded(px(RADIUS_SM))
+                                                    .border_1()
+                                                    .border_color(border_control())
+                                                    .bg(bg_control())
+                                                    .hover(|style| style.bg(bg_control_hover()))
+                                                    .active(|style| style.bg(bg_control_active()))
+                                                    .transition_colors()
+                                                    .duration(MOTION_INSTANT_MS)
+                                                    .ease_out()
+                                                    .focus_visible(apply_focus_ring)
+                                                    .flex_row()
+                                                    .items_center()
+                                                    .on_press(move || {
+                                                        profiles.filter_enabled.set(true);
+                                                        reset_filter.set(String::new());
+                                                    })
+                                                    .child(
+                                                        text(tr("清空条件", "Reset"))
+                                                            .text_size(px(TEXT_XS))
+                                                            .text_color(fg_secondary()),
+                                                    )
+                                            },
+                                        )),
+                                ),
                         )
+                        .child(when(
+                            move || {
+                                !profiles.filter_enabled.get()
+                                    && !reset_filter.get().trim().is_empty()
+                            },
+                            move || {
+                                view()
+                                    .w_full()
+                                    .px_2p5()
+                                    .py_1p5()
+                                    .rounded(px(RADIUS_MD))
+                                    .border_1()
+                                    .border_color(status_warn_fg())
+                                    .bg(status_warn_bg())
+                                    .flex_row()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_2()
+                                    .child(
+                                        text(tr(
+                                            "主过滤当前已暂停，以下条件暂不生效",
+                                            "Primary filter is paused — conditions below are inactive",
+                                        ))
+                                        .flex_1()
+                                        .text_size(px(TEXT_XS))
+                                        .text_color(status_warn_fg()),
+                                    )
+                                    .child(
+                                        ui_button(ButtonVariant::Outline, ControlSize::Xs)
+                                            .on_press(move || profiles.filter_enabled.set(true))
+                                            .child(
+                                                control_text(tr("恢复", "Resume"))
+                                                    .text_color(fg_primary()),
+                                            ),
+                                    )
+                            },
+                        ))
                         .child(config_field(
                             "包含域名",
                             "Include Domains",

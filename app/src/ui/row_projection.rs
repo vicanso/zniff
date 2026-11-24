@@ -225,6 +225,9 @@ pub(crate) fn project_rows(
         cache.rows.retain(|_, row| row.stamp == stamp);
     }
     if let Some(sort) = sort {
+        if sort.column != ListColumn::Id {
+            lines.retain(|row| !row.is_marker);
+        }
         sort_row_lines(&mut lines, sort, path_display);
     }
     lines

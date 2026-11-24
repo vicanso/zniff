@@ -467,7 +467,6 @@ pub(crate) fn suggest_filter_completions(
         return PREFIX_SPECS
             .iter()
             .filter(|spec| spec.canonical)
-            .take(SUGGESTION_CAP)
             .map(|spec| prefix_suggestion("", spec, lang))
             .collect();
     }
@@ -521,7 +520,9 @@ fn suggest_prefixes(neg: &str, partial: &str, lang: Lang) -> Vec<FilterSuggestio
         }
     }
     starts.extend(contains);
-    starts.truncate(SUGGESTION_CAP);
+    if !query.is_empty() {
+        starts.truncate(SUGGESTION_CAP);
+    }
     starts
 }
 
@@ -587,10 +588,25 @@ fn suggest_values(
         if !query.is_empty() && lower == query {
             continue;
         }
+        let (value_tok, item_hint) = if prefix == "mark" {
+            let marker_tok = marker_filter_token(&cand);
+            let stripped = marker_tok.strip_prefix("mark:").unwrap_or(&marker_tok);
+            let full_hint = if stripped == cand {
+                hint.to_string()
+            } else {
+                format!("{hint}: {cand}")
+            };
+            (stripped.to_string(), full_hint)
+        } else {
+            (cand.clone(), hint.to_string())
+        };
+        if existing.contains(&value_tok.to_ascii_lowercase()) {
+            continue;
+        }
         let item = FilterSuggestion {
-            insert_token: format!("{neg}{prefix}:{or_head}{cand}"),
+            insert_token: format!("{neg}{prefix}:{or_head}{value_tok}"),
             label: cand,
-            hint: hint.to_string(),
+            hint: item_hint,
             append_space: true,
         };
         if query.is_empty() || lower.starts_with(&query) {
@@ -717,6 +733,7 @@ pub(crate) fn filter_assist_input(
     let catalog = filter_catalog_context();
     let anchor = element_ref();
     let open = signal(false);
+    let selected_idx = signal(None::<usize>);
     let has_error = computed(move || !validate_filter_syntax(&value.get()).is_empty());
     let suggestions = computed(move || {
         let text = value.get();
@@ -724,11 +741,12 @@ pub(crate) fn filter_assist_input(
         catalog.with(|cat| suggest_filter_completions(&text, cat, lang))
     });
 
-    let accept_first = move || {
-        let first = suggestions.with_untracked(|list| list.first().cloned());
-        if let Some(item) = first {
+    let accept_index = move |idx: usize| {
+        let picked = suggestions.with_untracked(|list| list.get(idx).cloned());
+        if let Some(item) = picked {
             let next = apply_filter_suggestion(&value.get_untracked(), &item);
             value.set(next);
+            selected_idx.set(None);
             open.set(!item.append_space);
             focus_ref.focus();
         }
@@ -777,20 +795,53 @@ pub(crate) fn filter_assist_input(
                 })
                 .text_size(px(TEXT_SM))
                 .text_color(fg_primary())
+                .on_focus(move || {
+                    selected_idx.set(None);
+                    open.set(true);
+                })
                 .on_change(move |text: &str| {
                     value.set(text.to_string());
+                    selected_idx.set(None);
                     open.set(true);
                 })
                 .on_key_press(move |key: &str| {
                     if key == "Escape" {
                         open.set(false);
+                        selected_idx.set(None);
+                    } else if key == "ArrowDown" {
+                        open.set(true);
+                        let count = suggestions.with_untracked(Vec::len);
+                        if count > 0 {
+                            selected_idx.update(|s| {
+                                *s = Some(match *s {
+                                    Some(i) => (i + 1) % count,
+                                    None => 0,
+                                });
+                            });
+                        }
+                    } else if key == "ArrowUp" {
+                        open.set(true);
+                        let count = suggestions.with_untracked(Vec::len);
+                        if count > 0 {
+                            selected_idx.update(|s| {
+                                *s = Some(match *s {
+                                    Some(0) | None => count - 1,
+                                    Some(i) => i - 1,
+                                });
+                            });
+                        }
                     } else if key == "Tab" && open.get_untracked() {
-                        accept_first();
+                        accept_index(selected_idx.get_untracked().unwrap_or(0));
                     }
                 })
                 .on_submit(move |_: &str| {
-                    if open.get_untracked() {
-                        accept_first();
+                    if open.get_untracked()
+                        && let Some(idx) = selected_idx.get_untracked()
+                    {
+                        accept_index(idx);
+                    } else {
+                        open.set(false);
+                        selected_idx.set(None);
                     }
                 }),
         )
@@ -803,10 +854,17 @@ pub(crate) fn filter_assist_input(
                     .align(Align::Start)
                     .offset(px(4.0))
                     .margin(px(8.0))
-                    .on_press_outside(move |_: &Point<Points>| open.set(false))
-                    .on_cancel(move || open.set(false))
+                    .on_press_outside(move |_: &Point<Points>| {
+                        open.set(false);
+                        selected_idx.set(None);
+                    })
+                    .on_cancel(move || {
+                        open.set(false);
+                        selected_idx.set(None);
+                    })
                     .child(filter_autocomplete_popup(
                         suggestions,
+                        selected_idx,
                         value,
                         open,
                         focus_ref,
@@ -817,6 +875,7 @@ pub(crate) fn filter_assist_input(
 
 fn filter_autocomplete_popup(
     suggestions: Memo<Vec<FilterSuggestion>>,
+    selected_idx: Signal<Option<usize>>,
     value: Signal<String>,
     open: Signal<bool>,
     focus_ref: ElementRef,
@@ -831,12 +890,12 @@ fn filter_autocomplete_popup(
         .border_color(border_strong())
         .shadow_lg()
         .flex_col()
-        .gap_0p5()
-        .child(dynamic(move || {
+        .child(scroll().w_full().max_h(px(260.0)).child(dynamic(move || {
             let items = suggestions.get();
             let mut col = view().w_full().flex_col().gap_0p5();
-            for item in items {
+            for (idx, item) in items.into_iter().enumerate() {
                 let pick = item.clone();
+                let is_selected = move || selected_idx.get() == Some(idx);
                 col = col.child(
                     view()
                         .role(AccessibilityRole::Button)
@@ -848,7 +907,22 @@ fn filter_autocomplete_popup(
                         .items_center()
                         .justify_between()
                         .gap_2()
-                        .hover(|style| style.bg(bg_control_hover()))
+                        .bg(move || {
+                            if is_selected() {
+                                accent_blue_soft()
+                            } else {
+                                AdaptiveColor::TRANSPARENT
+                            }
+                        })
+                        .hover(|style| {
+                            style.bg(move || {
+                                if is_selected() {
+                                    accent_blue_soft_hover()
+                                } else {
+                                    bg_control_hover()
+                                }
+                            })
+                        })
                         .active(|style| style.bg(bg_control_active()))
                         .transition_colors()
                         .duration(MOTION_INSTANT_MS)
@@ -858,17 +932,28 @@ fn filter_autocomplete_popup(
                         .on_press(move || {
                             let next = apply_filter_suggestion(&value.get_untracked(), &pick);
                             value.set(next);
+                            selected_idx.set(None);
                             open.set(!pick.append_space);
                             focus_ref.focus();
                         })
                         .child(
                             mono(item.label)
+                                .flex_1()
+                                .min_w(px(0.0))
                                 .number_of_lines(1)
+                                .text_overflow(EllipsizeMode::Tail)
                                 .text_size(px(TEXT_SM))
-                                .text_color(fg_primary()),
+                                .text_color(move || {
+                                    if is_selected() {
+                                        accent_blue_text()
+                                    } else {
+                                        fg_primary()
+                                    }
+                                }),
                         )
                         .child(
                             text(item.hint)
+                                .flex_shrink_0()
                                 .number_of_lines(1)
                                 .text_size(px(TEXT_XS))
                                 .text_color(fg_muted()),
@@ -876,5 +961,5 @@ fn filter_autocomplete_popup(
                 );
             }
             Some(col)
-        }))
+        })))
 }

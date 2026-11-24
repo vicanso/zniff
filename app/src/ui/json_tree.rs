@@ -769,7 +769,7 @@ pub(crate) fn json_tree_panel(
     let (tree_view, is_empty, effective_expanded) =
         build_tree_memos(json, search, user_expanded, search_expanded, selected_node);
 
-    guard_culled_pointer_events(view())
+    view()
         .w_full()
         .h(move || tree_container_height(is_empty, tree_view, effective_expanded))
         .bg(bg_code())
@@ -841,55 +841,63 @@ pub(crate) fn json_tree_panel(
                         ),
                 )
                 .child(
-                    tree()
+                    guard_culled_pointer_events(view())
                         .flex_1()
                         .min_h(px(0.0))
                         .w_full()
-                        .accessibility_label("JSON Tree")
-                        .items(move || tree_view.with(|v| v.0.items.clone()))
-                        .expanded(move || Some(effective_expanded.get()))
-                        .selected(move || selected_node.get())
-                        .on_expanded_change(move |ids: &Vec<SharedString>| {
-                            let q = search.get_untracked();
-                            let trimmed = q.trim();
-                            if trimmed.is_empty() {
-                                user_expanded.set(ids.clone());
-                            } else {
-                                search_expanded.set(Some((trimmed.to_string(), ids.clone())));
-                            }
-                        })
-                        .on_selected_change(move |id: &SharedString| {
-                            selected_node.set(Some(id.clone()));
-                        })
-                        .on_action(move |id: &SharedString| {
-                            let copied = json.with_untracked(|jb| {
-                                jb.as_ref()
-                                    .and_then(|body| copy_json_node_value(&body.value, id.as_ref()))
-                            });
-                            if let Some(payload) = copied {
-                                on_copy(payload);
-                            }
-                        })
-                        .list_style(|s| s.py_1p5())
-                        .item_class("group")
-                        .item_style(|s| s.w_full().h(px(TREE_ROW_H)).flex_row().items_center())
-                        .render_item(move |entry: &TreeEntry| {
-                            let node_id = entry.id.clone();
-                            let sel_id = entry.id.clone();
-                            let depth = entry.depth;
-                            let folder = entry.folder;
-                            let is_selected = computed(move || {
-                                selected_node.with(|s| s.as_ref() == Some(&sel_id))
-                            });
-                            let node_meta = computed(move || {
-                                tree_view.with(|v| v.0.meta.get(&node_id).cloned())
-                            });
-                            dynamic(move || {
-                                node_meta.get().map(|meta| {
-                                    render_node_row(depth, folder, meta, langs, is_selected)
+                        .child(
+                            tree()
+                                .size_full()
+                                .accessibility_label("JSON Tree")
+                                .items(move || tree_view.with(|v| v.0.items.clone()))
+                                .expanded(move || Some(effective_expanded.get()))
+                                .selected(move || selected_node.get())
+                                .on_expanded_change(move |ids: &Vec<SharedString>| {
+                                    let q = search.get_untracked();
+                                    let trimmed = q.trim();
+                                    if trimmed.is_empty() {
+                                        user_expanded.set(ids.clone());
+                                    } else {
+                                        search_expanded
+                                            .set(Some((trimmed.to_string(), ids.clone())));
+                                    }
                                 })
-                            })
-                        }),
+                                .on_selected_change(move |id: &SharedString| {
+                                    selected_node.set(Some(id.clone()));
+                                })
+                                .on_action(move |id: &SharedString| {
+                                    let copied = json.with_untracked(|jb| {
+                                        jb.as_ref().and_then(|body| {
+                                            copy_json_node_value(&body.value, id.as_ref())
+                                        })
+                                    });
+                                    if let Some(payload) = copied {
+                                        on_copy(payload);
+                                    }
+                                })
+                                .list_style(|s| s.py_1p5())
+                                .item_class("group")
+                                .item_style(|s| {
+                                    s.w_full().h(px(TREE_ROW_H)).flex_row().items_center()
+                                })
+                                .render_item(move |entry: &TreeEntry| {
+                                    let node_id = entry.id.clone();
+                                    let sel_id = entry.id.clone();
+                                    let depth = entry.depth;
+                                    let folder = entry.folder;
+                                    let is_selected = computed(move || {
+                                        selected_node.with(|s| s.as_ref() == Some(&sel_id))
+                                    });
+                                    let node_meta = computed(move || {
+                                        tree_view.with(|v| v.0.meta.get(&node_id).cloned())
+                                    });
+                                    dynamic(move || {
+                                        node_meta.get().map(|meta| {
+                                            render_node_row(depth, folder, meta, langs, is_selected)
+                                        })
+                                    })
+                                }),
+                        ),
                 )
                 .into_element()
         }))

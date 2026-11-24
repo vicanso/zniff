@@ -323,15 +323,28 @@ pub(crate) fn host_facet_active(filter: &str, host: &str) -> bool {
 
 pub(crate) fn toggle_host_facet(filter: &str, host: &str) -> String {
     let mut items = split_ui_or_items(&extract_host_or(filter));
-    if let Some(pos) = items
+    let added = if let Some(pos) = items
         .iter()
         .position(|item| item.eq_ignore_ascii_case(host))
     {
         items.remove(pos);
+        false
     } else {
         items.push(host.to_string());
+        true
+    };
+    let next = set_host_or(filter, &items.join(" | "));
+    if !added {
+        return next;
     }
-    set_host_or(filter, &items.join(" | "))
+    let mut muted = split_ui_or_items(&extract_exclude_or(&next));
+    let before = muted.len();
+    muted.retain(|item| !item.eq_ignore_ascii_case(host));
+    if muted.len() == before {
+        next
+    } else {
+        set_exclude_or(&next, &muted.join(" | "))
+    }
 }
 
 pub(crate) fn root_domain_facet_active(filter: &str, root: &str) -> bool {
@@ -348,11 +361,20 @@ pub(crate) fn toggle_root_domain_facet(filter: &str, root: &str) -> String {
     let had_bare = items.iter().any(|item| item.eq_ignore_ascii_case(root));
     if had_wild || had_bare {
         items.retain(|item| !item.eq_ignore_ascii_case(&wild) && !item.eq_ignore_ascii_case(root));
+        set_host_or(filter, &items.join(" | "))
     } else {
-        items.push(wild);
+        items.push(wild.clone());
         items.push(root.to_string());
+        let next = set_host_or(filter, &items.join(" | "));
+        let mut muted = split_ui_or_items(&extract_exclude_or(&next));
+        let before = muted.len();
+        muted.retain(|item| !item.eq_ignore_ascii_case(root) && !item.eq_ignore_ascii_case(&wild));
+        if muted.len() == before {
+            next
+        } else {
+            set_exclude_or(&next, &muted.join(" | "))
+        }
     }
-    set_host_or(filter, &items.join(" | "))
 }
 
 pub(crate) fn app_facet_active(filter: &str, app_token: &str) -> bool {
@@ -382,15 +404,29 @@ pub(crate) fn mute_facet_active(filter: &str, token: &str) -> bool {
 
 pub(crate) fn toggle_mute_facet(filter: &str, token: &str) -> String {
     let mut items = split_ui_or_items(&extract_exclude_or(filter));
-    if let Some(pos) = items
+    let added = if let Some(pos) = items
         .iter()
         .position(|item| item.eq_ignore_ascii_case(token))
     {
         items.remove(pos);
+        false
     } else {
         items.push(token.to_string());
+        true
+    };
+    let next = set_exclude_or(filter, &items.join(" | "));
+    if !added {
+        return next;
     }
-    set_exclude_or(filter, &items.join(" | "))
+    let wild = format!("*.{token}");
+    let mut hosts = split_ui_or_items(&extract_host_or(&next));
+    let before = hosts.len();
+    hosts.retain(|item| !item.eq_ignore_ascii_case(token) && !item.eq_ignore_ascii_case(&wild));
+    if hosts.len() == before {
+        next
+    } else {
+        set_host_or(&next, &hosts.join(" | "))
+    }
 }
 
 pub(crate) fn side_input(

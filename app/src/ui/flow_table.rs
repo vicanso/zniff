@@ -499,18 +499,28 @@ pub(crate) fn flow_table(
                     .on_visible_rows_change(move |range: &DataTableRange| {
                         hover.text.set(None);
                         let count = rows.with(Vec::len) as u32;
+                        let auto_follow = matches!(
+                            sort.get_untracked(),
+                            None | Some(ListSort {
+                                column: ListColumn::Id,
+                                desc: false
+                            })
+                        );
                         if count == 0 {
-                            follow.replace(true);
+                            follow.replace(auto_follow);
                             followed_count.replace(0);
                             return;
                         }
-                        let near = range.end.saturating_add(1) >= count;
-                        if follow.get() && count > followed_count.get() {
+                        let near = auto_follow && range.end.saturating_add(1) >= count;
+                        if auto_follow && follow.get() && count > followed_count.get() {
                             followed_count.replace(count);
                             if !near && let Some(api) = table.api::<DataTableApi>() {
                                 api.scroll_to_row(count - 1, Some(false));
                             }
                             return;
+                        }
+                        if !auto_follow {
+                            followed_count.replace(count);
                         }
                         follow.replace(near);
                     })

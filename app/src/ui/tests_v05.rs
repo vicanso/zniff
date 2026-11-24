@@ -1264,6 +1264,10 @@ async fn e1_e3_e4_e5_e6_v05_interactive_components_zh_en() {
                 effective_filter: profiles.filter,
                 list_filter: signal(String::new()),
                 selected,
+                active_tab: signal(LIVE_TAB_ID),
+                baseline: signal(None),
+                primary_filter: profiles.filter,
+                filter_enabled: profiles.filter_enabled,
                 controls: count_controls.clone(),
             }))
             .child(marker_modal(

@@ -198,7 +198,11 @@ pub(crate) fn merge_secondary_filter(main: &str, secondary: &str) -> String {
     out.join(" ")
 }
 
-fn list_clear_button(on_clear: Rc<dyn Fn()>) -> impl IntoElement {
+fn list_clear_button(controls: Arc<Controls>, on_clear: Rc<dyn Fn()>) -> impl IntoElement {
+    let langs = ui_langs();
+    let guard_controls = controls.clone();
+    let disabled_controls = controls.clone();
+    let is_ro = move || is_active_tab_read_only(&guard_controls);
     view()
         .role(AccessibilityRole::Button)
         .w(px(CONTROL_H))
@@ -209,17 +213,43 @@ fn list_clear_button(on_clear: Rc<dyn Fn()>) -> impl IntoElement {
         .justify_center()
         .rounded(px(RADIUS_MD))
         .bg(AdaptiveColor::TRANSPARENT)
-        .hover(|style| style.bg(bg_control_hover()))
+        .hover(move |style| {
+            let guard = controls.clone();
+            style.bg(move || {
+                if is_active_tab_read_only(&guard) {
+                    AdaptiveColor::TRANSPARENT
+                } else {
+                    bg_control_hover()
+                }
+            })
+        })
         .active(|style| style.bg(bg_control_active()))
+        .disabled(move || is_active_tab_read_only(&disabled_controls))
+        .disabled_style(|s| s.opacity(0.4))
         .transition_colors()
         .duration(MOTION_INSTANT_MS)
         .ease_out()
         .focus_visible(apply_focus_ring)
         .label(tr("清空会话", "Clear session"))
-        .tooltip(label_tip(
-            "清空会话 (Cmd/Ctrl+K)",
-            "Clear session (Cmd/Ctrl+K)",
-        ))
+        .tooltip(
+            tooltip().child(ui_tooltip_surface(
+                text(move || -> SharedString {
+                    let lang = ui_lang(langs);
+                    if is_ro() {
+                        t(
+                            lang,
+                            "当前为只读导入标签，无法清空（请切回实时会话）",
+                            "Read-only imported tab cannot be cleared (switch to Live)",
+                        )
+                    } else {
+                        t(lang, "清空会话 (Cmd/Ctrl+K)", "Clear session (Cmd/Ctrl+K)")
+                    }
+                    .into()
+                })
+                .text_size(px(TEXT_SM))
+                .text_color(fg_primary()),
+            )),
+        )
         .on_press(move || on_clear())
         .child(glyph_px(
             ControlSize::Sm.icon_size(),
@@ -255,7 +285,9 @@ pub(crate) fn flow_list(
     let list_filter = empty_state.list_filter;
     let row_controls = controls.clone();
     let merge_controls = controls.clone();
+    let clear_controls = controls.clone();
     let column_controls = controls;
+    let filter_enabled = profiles.filter_enabled;
     let picked = signal(None::<u64>);
     let menu_open = signal(false);
     let menu_at = signal(Point::<Points>::default());
@@ -379,6 +411,7 @@ pub(crate) fn flow_list(
                                 let merged =
                                     merge_secondary_filter(&main_filter.get(), &list_filter.get());
                                 main_filter.set(merged.clone());
+                                filter_enabled.set(true);
                                 list_filter.set(String::new());
                                 save_config_or_notify(&merge_controls, PrefName::Filter, |cfg| {
                                     cfg.filter = merged
@@ -393,7 +426,7 @@ pub(crate) fn flow_list(
                     },
                 ))
                 .child(column_menu(columns, column_controls))
-                .child(list_clear_button(on_clear)),
+                .child(list_clear_button(clear_controls, on_clear)),
         )
         .child(filter_syntax_error_strip(list_filter))
         .child(when(
@@ -578,42 +611,52 @@ pub(crate) fn facet_quick_bar(
         .child(tab_btn(0, "域名", "Domains", |f| f.domains.len()))
         .child(tab_btn(1, "应用", "Apps", |f| f.apps.len()))
         .child(view().w(px(1.0)).h(px(14.0)).mx_0p5().bg(border_subtle()))
-        .child(drawer_quick_chip(
-            filter,
-            "慢请求",
-            "Slow",
-            "slow:",
-            SLOW_ALIASES,
-            "筛选耗时 ≥ 1s 或进行中的慢请求 (slow:)",
-            "Filter slow requests >= 1s (slow:)",
-        ))
-        .child(drawer_quick_chip(
-            filter,
-            "出错",
-            "Error",
-            "status:4xx|5xx|err",
-            ERR_ALIASES,
-            "筛选 4xx / 5xx / 连接失败请求 (status:4xx|5xx|err)",
-            "Filter 4xx / 5xx / failed requests (status:4xx|5xx|err)",
-        ))
-        .child(drawer_quick_chip(
-            filter,
-            "JSON",
-            "JSON",
-            "type:json",
-            JSON_ALIASES,
-            "筛选 JSON 请求/响应 (type:json)",
-            "Filter JSON traffic (type:json)",
-        ))
-        .child(drawer_quick_chip(
-            filter,
-            "星标",
-            "Star",
-            "pin:",
-            PIN_ALIASES,
-            "只看已星标请求 (pin:)",
-            "Show starred requests only (pin:)",
-        ))
+        .child(
+            view().flex_1().min_w(px(0.0)).overflow_hidden().child(
+                scroll().horizontal().w_full().child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_1()
+                        .child(drawer_quick_chip(
+                            filter,
+                            "慢请求",
+                            "Slow",
+                            "slow:",
+                            SLOW_ALIASES,
+                            "筛选耗时 ≥ 1s 或进行中的慢请求 (slow:)",
+                            "Filter slow requests >= 1s (slow:)",
+                        ))
+                        .child(drawer_quick_chip(
+                            filter,
+                            "出错",
+                            "Error",
+                            "status:4xx|5xx|err",
+                            ERR_ALIASES,
+                            "筛选 4xx / 5xx / 连接失败请求 (status:4xx|5xx|err)",
+                            "Filter 4xx / 5xx / failed requests (status:4xx|5xx|err)",
+                        ))
+                        .child(drawer_quick_chip(
+                            filter,
+                            "JSON",
+                            "JSON",
+                            "type:json",
+                            JSON_ALIASES,
+                            "筛选 JSON 请求/响应 (type:json)",
+                            "Filter JSON traffic (type:json)",
+                        ))
+                        .child(drawer_quick_chip(
+                            filter,
+                            "星标",
+                            "Star",
+                            "pin:",
+                            PIN_ALIASES,
+                            "只看已星标请求 (pin:)",
+                            "Show starred requests only (pin:)",
+                        )),
+                ),
+            ),
+        )
 }
 
 pub(crate) fn facet_drawer(
@@ -717,6 +760,7 @@ pub(crate) fn facet_drawer(
                                     .duration(MOTION_INSTANT_MS)
                                     .ease_out()
                                     .focus_visible(apply_focus_ring)
+                                    .label(tr("清空搜索", "Clear search"))
                                     .on_press(move || drawer_query.set(String::new()))
                                     .child(text("×").text_size(px(TEXT_SM)).text_color(fg_muted()))
                             },
@@ -750,6 +794,7 @@ pub(crate) fn facet_drawer(
                         .duration(MOTION_INSTANT_MS)
                         .ease_out()
                         .focus_visible(apply_focus_ring)
+                        .label(tr("关闭", "Close"))
                         .on_press(move || facets_open.set(false))
                         .child(glyph_px(10.0, || Glyph::Close, || color(fg_muted()))),
                 ),
@@ -758,11 +803,18 @@ pub(crate) fn facet_drawer(
             when(
                 move || items_list().is_empty(),
                 move || {
+                    let has_query = !drawer_query.get().trim().is_empty();
+                    let any_total = if facet_tab.get() == 0 {
+                        facets.with(|f| !f.domains.is_empty())
+                    } else {
+                        facets.with(|f| !f.apps.is_empty())
+                    };
                     view().pr(px(LIST_PAD_END)).py_2().child(
-                        text(tr(
-                            "暂无捕获到的域名或应用",
-                            "No captured domains or apps yet",
-                        ))
+                        text(if has_query && any_total {
+                            tr("无匹配的域名或应用", "No matching domains or apps")()
+                        } else {
+                            tr("暂无捕获到的域名或应用", "No captured domains or apps yet")()
+                        })
                         .text_size(px(TEXT_SM))
                         .text_color(fg_muted()),
                     )

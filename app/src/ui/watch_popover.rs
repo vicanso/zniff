@@ -11,6 +11,10 @@ pub(crate) struct WatchPopoverProps {
     pub(crate) effective_filter: Signal<String>,
     pub(crate) list_filter: Signal<String>,
     pub(crate) selected: Signal<Option<u64>>,
+    pub(crate) active_tab: Signal<u64>,
+    pub(crate) baseline: Signal<Option<u64>>,
+    pub(crate) primary_filter: Signal<String>,
+    pub(crate) filter_enabled: Signal<bool>,
     pub(crate) controls: Arc<Controls>,
 }
 
@@ -196,6 +200,10 @@ fn watch_panel(props: WatchPopoverProps) -> impl IntoElement {
     let effective_filter = props.effective_filter;
     let list_filter = props.list_filter;
     let selected = props.selected;
+    let active_tab = props.active_tab;
+    let baseline = props.baseline;
+    let primary_filter = props.primary_filter;
+    let filter_enabled = props.filter_enabled;
     let open = props.open;
     let controls_add = props.controls.clone();
     let controls_enter = props.controls.clone();
@@ -223,6 +231,10 @@ fn watch_panel(props: WatchPopoverProps) -> impl IntoElement {
             eval,
             list_filter,
             selected,
+            active_tab,
+            baseline,
+            primary_filter,
+            filter_enabled,
             open,
             controls_list,
         )))
@@ -238,7 +250,7 @@ fn watch_panel_header(
         .items_center()
         .justify_between()
         .gap_2()
-        .child(ui_section_header(tr("匹配提醒 (Watch)", "Watch Alerts")))
+        .child(ui_section_header(tr("匹配提醒", "Watch Alerts")))
         .child(when(
             move || !effective_filter.get().trim().is_empty(),
             move || {
@@ -269,6 +281,21 @@ fn watch_add_form(
     controls_add: Arc<Controls>,
     controls_enter: Arc<Controls>,
 ) -> impl IntoElement {
+    let filter_focus = element_ref();
+    let invalid_draft = computed(move || {
+        let f = draft_filter.get();
+        f.trim().is_empty() || !validate_filter_syntax(&f).is_empty()
+    });
+    let submit = move |controls: &Controls| {
+        let expr = draft_filter.get_untracked();
+        if expr.trim().is_empty() || !validate_filter_syntax(&expr).is_empty() {
+            return;
+        }
+        if add_watch_rule(controls, rules, &draft_name.get_untracked(), &expr) {
+            draft_name.set(String::new());
+            draft_filter.set(String::new());
+        }
+    };
     view()
         .gap_1p5()
         .child(
@@ -276,48 +303,21 @@ fn watch_add_form(
                 .flex_row()
                 .items_center()
                 .gap_1p5()
-                .child(
-                    input()
-                        .flex_1()
-                        .h(px(ControlSize::Sm.height()))
-                        .px_2()
-                        .rounded(px(RADIUS_MD))
-                        .border_1()
-                        .border_color(border_control())
-                        .bg(bg_canvas())
-                        .text_size(px(TEXT_SM))
-                        .text_color(fg_primary())
-                        .placeholder(tr(
-                            "过滤表达式（如 status:5xx host:api.x.com）",
-                            "Filter expr (e.g. status:5xx host:api.x.com)",
-                        ))
-                        .value(move || draft_filter.get())
-                        .on_change(move |v: &str| draft_filter.set(v.to_string()))
-                        .on_submit(move |_: &str| {
-                            if add_watch_rule(
-                                &controls_enter,
-                                rules,
-                                &draft_name.get_untracked(),
-                                &draft_filter.get_untracked(),
-                            ) {
-                                draft_name.set(String::new());
-                                draft_filter.set(String::new());
-                            }
-                        }),
-                )
+                .child(view().flex_1().min_w(px(0.0)).child(filter_assist_input(
+                    draft_filter,
+                    tr(
+                        "过滤表达式（如 status:5xx host:api.x.com）",
+                        "Filter expr (e.g. status:5xx host:api.x.com)",
+                    ),
+                    ControlSize::Sm.height(),
+                    10.0,
+                    filter_focus,
+                )))
                 .child(
                     ui_button(ButtonVariant::Primary, ControlSize::Sm)
-                        .on_press(move || {
-                            if add_watch_rule(
-                                &controls_add,
-                                rules,
-                                &draft_name.get_untracked(),
-                                &draft_filter.get_untracked(),
-                            ) {
-                                draft_name.set(String::new());
-                                draft_filter.set(String::new());
-                            }
-                        })
+                        .disabled(move || invalid_draft.get())
+                        .accessibility_label(tr("添加提醒规则", "Add watch rule")())
+                        .on_press(move || submit(&controls_add))
                         .child(
                             control_text(tr("添加", "Add"))
                                 .text_size(px(TEXT_SM))
@@ -326,6 +326,7 @@ fn watch_add_form(
                         ),
                 ),
         )
+        .child(filter_syntax_error_inline(draft_filter))
         .child(
             input()
                 .w_full()
@@ -334,6 +335,7 @@ fn watch_add_form(
                 .rounded(px(RADIUS_MD))
                 .border_1()
                 .border_color(border_control())
+                .focus(|s| s.border_color(accent_blue()))
                 .bg(bg_canvas())
                 .text_size(px(TEXT_SM))
                 .text_color(fg_secondary())
@@ -341,16 +343,23 @@ fn watch_add_form(
                     "可选备注名（如：支付接口 5xx）",
                     "Optional label (e.g. Checkout 5xx)",
                 ))
+                .placeholder_color(move || color(fg_muted()))
                 .value(move || draft_name.get())
-                .on_change(move |v: &str| draft_name.set(v.to_string())),
+                .on_change(move |v: &str| draft_name.set(v.to_string()))
+                .on_submit(move |_: &str| submit(&controls_enter)),
         )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn watch_rules_list(
     rules: Signal<Vec<config::WatchRule>>,
     eval: Signal<crate::watch::WatchEvaluation>,
     list_filter: Signal<String>,
     selected: Signal<Option<u64>>,
+    active_tab: Signal<u64>,
+    baseline: Signal<Option<u64>>,
+    primary_filter: Signal<String>,
+    filter_enabled: Signal<bool>,
     open: Signal<bool>,
     controls: Arc<Controls>,
 ) -> impl IntoElement {
@@ -385,22 +394,40 @@ fn watch_rules_list(
             },
             |(idx, rule)| format!("{idx}:{}", rule.filter),
             move |item, _| {
-                watch_rule_row(item, rules, eval, list_filter, selected, open, controls.clone())
+                watch_rule_row(
+                    item,
+                    rules,
+                    eval,
+                    list_filter,
+                    selected,
+                    active_tab,
+                    baseline,
+                    primary_filter,
+                    filter_enabled,
+                    open,
+                    controls.clone(),
+                )
             },
         ))
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn watch_rule_row(
     item: ReadSignal<(usize, config::WatchRule)>,
     rules: Signal<Vec<config::WatchRule>>,
     eval: Signal<crate::watch::WatchEvaluation>,
     list_filter: Signal<String>,
     selected: Signal<Option<u64>>,
+    active_tab: Signal<u64>,
+    baseline: Signal<Option<u64>>,
+    primary_filter: Signal<String>,
+    filter_enabled: Signal<bool>,
     open: Signal<bool>,
     controls: Arc<Controls>,
 ) -> impl IntoElement {
     let controls_toggle = controls.clone();
+    let controls_jump = controls.clone();
     let controls_delete = controls;
     let enabled = move || item.with(|(_, r)| r.enabled);
     let filter_str = move || item.with(|(_, r)| r.filter.clone());
@@ -454,6 +481,7 @@ fn watch_rule_row(
                 .duration(MOTION_INSTANT_MS)
                 .ease_out()
                 .focus_visible(apply_focus_ring)
+                .label(tr("启用或停用此提醒", "Toggle watch rule"))
                 .on_press(move || {
                     let target_filter = item.with_untracked(|(_, r)| r.filter.clone());
                     let mut next = rules.get_untracked();
@@ -471,15 +499,50 @@ fn watch_rule_row(
         )
         .child(
             view()
+                .role(AccessibilityRole::Button)
                 .flex_1()
                 .min_w(px(0.0))
+                .px_1()
+                .py_0p5()
+                .rounded(px(RADIUS_SM))
+                .hover(|s| s.bg(bg_control_hover()))
+                .active(|s| s.bg(bg_control_active()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .focus_visible(apply_focus_ring)
+                .label(move || -> SharedString { filter_str().into() })
+                .tooltip(label_tip(
+                    "点击切到实时会话并筛选此提醒",
+                    "Filter live flows by this watch rule",
+                ))
                 .gap(px(1.0))
                 .on_press(move || {
                     let f = item.with_untracked(|(_, r)| r.filter.clone());
                     let (_, latest_id) = hit_info();
+                    let switched_live = active_tab.get_untracked() != LIVE_TAB_ID;
+                    if switched_live {
+                        switch_tab(&controls_jump, LIVE_TAB_ID);
+                        active_tab.set(LIVE_TAB_ID);
+                        baseline.set(baseline_id_for_active_tab(&controls_jump));
+                    }
+                    let primary = primary_filter.get_untracked();
+                    if filter_enabled.get_untracked() && !primary.trim().is_empty() {
+                        let combined = merge_secondary_filter(&primary, &f);
+                        let blocked = controls_jump.hub.with_session(|s| {
+                            let watch_hits = s.matching_with_previous_start(&f).len();
+                            watch_hits > 0 && s.matching_with_previous_start(&combined).is_empty()
+                        });
+                        if blocked {
+                            filter_enabled.set(false);
+                            set_status(&controls_jump, StatusMsg::PrimaryFilterPausedForWatch);
+                        }
+                    }
                     list_filter.set(f);
                     if let Some(id) = latest_id {
                         selected.set(Some(id));
+                    } else if switched_live {
+                        selected.set(None);
                     }
                     open.set(false);
                 })
