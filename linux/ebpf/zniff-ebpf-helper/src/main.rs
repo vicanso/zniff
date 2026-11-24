@@ -147,7 +147,6 @@ async fn main() {
     if let Ok(mut guard) = ctrl.lock() {
         guard.disable();
     }
-    let _ = (&emit_event, io::BufRead::lines);
 }
 
 #[cfg(not(target_os = "linux"))]
