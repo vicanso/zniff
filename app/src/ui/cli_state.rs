@@ -425,7 +425,6 @@ pub(crate) const FOLD_REQ_HEADERS: u8 = 1 << 5;
 pub(crate) const FOLD_REQ_BODY: u8 = 1 << 6;
 /// Toolbar controls share one compact desktop size tier (`ControlSize::Sm`).
 pub(crate) const CONTROL_H: f32 = ControlSize::Sm.height();
-pub(crate) const CONTROL_RADIUS: f32 = RADIUS_MD;
 pub(crate) const CONTROL_TEXT: f32 = TEXT_SM;
 
 pub(crate) fn ui_langs() -> Signal<Option<Lang>> {

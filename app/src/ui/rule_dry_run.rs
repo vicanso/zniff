@@ -82,7 +82,7 @@ pub(crate) fn rule_dry_run_strip(
                 .w_full()
                 .px_2()
                 .py_1()
-                .rounded(px(6.0))
+                .rounded(px(RADIUS_MD))
                 .border_1()
                 .border_color(move || {
                     if is_warn() {
@@ -116,7 +116,7 @@ pub(crate) fn rule_dry_run_strip(
                     })
                     .number_of_lines(1)
                     .text_overflow(EllipsizeMode::Tail)
-                    .text_size(px(11.0))
+                    .text_size(px(TEXT_XS))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(move || {
                         if is_warn() {
@@ -141,7 +141,7 @@ pub(crate) fn rule_dry_run_strip(
                         .min_w(px(0.0))
                         .number_of_lines(1)
                         .text_overflow(EllipsizeMode::Tail)
-                        .text_size(px(10.5))
+                        .text_size(px(TEXT_XS))
                         .text_color(fg_muted())
                     },
                 ))

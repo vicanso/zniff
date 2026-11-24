@@ -144,20 +144,24 @@ pub(crate) fn detail_rule_badges(shown: Shown, profiles: ProfileSignals) -> impl
                         let label = hit.format_badge();
                         let click_hit = hit.clone();
                         view()
+                            .role(AccessibilityRole::Button)
                             .max_w(px(220.0))
                             .overflow_hidden()
                             .px_2()
                             .py_0p5()
-                            .rounded(px(5.0))
+                            .rounded(px(RADIUS_SM))
                             .border_1()
                             .border_color(border_col)
                             .bg(bg_col)
                             .flex_row()
                             .items_center()
                             .gap_1()
-                            .hover(|style| style.opacity(0.85))
-                            .active(|style| style.opacity(0.7))
-                            .cursor(Cursor::Pointer)
+                            .hover(|style| style.bg(bg_control_hover()))
+                            .active(|style| style.bg(bg_control_active()))
+                            .transition_colors()
+                            .duration(MOTION_INSTANT_MS)
+                            .ease_out()
+                            .focus_visible(apply_focus_ring)
                             .tooltip(label_tip(
                                 "点击在规则编辑器中定位此规则",
                                 "Click to jump to this rule in editor",
@@ -170,7 +174,7 @@ pub(crate) fn detail_rule_badges(shown: Shown, profiles: ProfileSignals) -> impl
                                     .flex_shrink(1.0)
                                     .number_of_lines(1)
                                     .text_overflow(EllipsizeMode::Tail)
-                                    .text_size(px(11.0))
+                                    .text_size(px(TEXT_XS))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(fg_col),
                             )
@@ -190,7 +194,7 @@ pub(crate) fn detail_rule_badges(shown: Shown, profiles: ProfileSignals) -> impl
                     .overflow_hidden()
                     .px_2()
                     .py_0p5()
-                    .rounded(px(5.0))
+                    .rounded(px(RADIUS_SM))
                     .bg(accent_blue_soft())
                     .child(
                         mono(move || {
@@ -207,7 +211,7 @@ pub(crate) fn detail_rule_badges(shown: Shown, profiles: ProfileSignals) -> impl
                         })
                         .number_of_lines(1)
                         .text_overflow(EllipsizeMode::Tail)
-                        .text_size(px(11.5))
+                        .text_size(px(TEXT_XS))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(accent_blue_text()),
                     )
@@ -221,13 +225,13 @@ pub(crate) fn detail_rule_badges(shown: Shown, profiles: ProfileSignals) -> impl
                     .overflow_hidden()
                     .px_2()
                     .py_0p5()
-                    .rounded(px(5.0))
+                    .rounded(px(RADIUS_SM))
                     .bg(accent_blue_soft())
                     .child(
                         mono(move || shown.gql_badge.get())
                             .number_of_lines(1)
                             .text_overflow(EllipsizeMode::Tail)
-                            .text_size(px(11.5))
+                            .text_size(px(TEXT_XS))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(accent_blue_text()),
                     )

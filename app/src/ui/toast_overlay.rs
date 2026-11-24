@@ -78,15 +78,23 @@ fn toast_card(
     toast()
         .transition_status(move || item.with(|(_, _, s)| *s))
         .on_dismiss_request(dismiss_one)
-        .rounded(px(10.0))
+        .rounded(px(RADIUS_LG))
         .border_1()
         .border_color(border_strong())
         .bg(bg_card())
         .shadow_lg()
         .transition_all()
-        .duration(180.0)
-        .starting_class("opacity-0 -translate-y-2")
-        .ending_class("opacity-0 scale-95")
+        .duration(if reduce_motion() { 0.0 } else { MOTION_FAST_MS })
+        .starting_class(if reduce_motion() {
+            ""
+        } else {
+            "opacity-0 -translate-y-2"
+        })
+        .ending_class(if reduce_motion() {
+            ""
+        } else {
+            "opacity-0 scale-95"
+        })
         .child(row)
 }
 
@@ -100,13 +108,12 @@ fn toast_content(
         .flex_row()
         .items_center()
         .gap_3()
-        .cursor(Cursor::Pointer)
         .on_press(on_dismiss)
         .child(
             view()
-                .w(px(32.0))
-                .h(px(32.0))
-                .rounded(px(8.0))
+                .w(px(ControlSize::Md.height()))
+                .h(px(ControlSize::Md.height()))
+                .rounded(px(RADIUS_MD))
                 .flex_shrink_0()
                 .flex_row()
                 .items_center()
@@ -147,7 +154,7 @@ fn toast_content(
                         let lang = ui_lang(ui_langs());
                         item.with(|(_, msg, _)| msg.toast_title(lang).to_string())
                     })
-                    .text_size(px(13.0))
+                    .text_size(px(TEXT_MD))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(fg_primary()),
                 )
@@ -158,7 +165,7 @@ fn toast_content(
                     })
                     .number_of_lines(3)
                     .text_overflow(EllipsizeMode::Middle)
-                    .text_size(px(12.0))
+                    .text_size(px(TEXT_SM))
                     .text_color(fg_secondary()),
                 ),
         )
@@ -169,9 +176,10 @@ fn undo_clear_button(
     on_dismiss: impl Fn() + Copy + 'static,
 ) -> impl IntoElement {
     view()
+        .role(AccessibilityRole::Button)
         .px_2p5()
         .py_1()
-        .rounded(px(6.0))
+        .rounded(px(RADIUS_MD))
         .border_1()
         .border_color(accent_blue_border())
         .bg(accent_blue_soft())
@@ -179,16 +187,19 @@ fn undo_clear_button(
         .flex_row()
         .items_center()
         .justify_center()
-        .cursor(Cursor::Pointer)
         .hover(|s| s.bg(accent_blue_soft_hover()))
-        .active(|s| s.opacity(0.75))
+        .active(|s| s.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .on_press(move || {
             undo_clear_captured(&controls);
             on_dismiss();
         })
         .child(
             text(tr("撤销", "Undo"))
-                .text_size(px(12.0))
+                .text_size(px(TEXT_SM))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(accent_blue_text()),
         )
@@ -196,17 +207,21 @@ fn undo_clear_button(
 
 fn toast_close_button(on_dismiss: impl Fn() + Copy + 'static) -> impl IntoElement {
     view()
+        .role(AccessibilityRole::Button)
         .w(px(20.0))
         .h(px(20.0))
-        .rounded(px(5.0))
+        .rounded(px(RADIUS_SM))
         .flex_shrink_0()
         .flex_row()
         .items_center()
         .justify_center()
-        .cursor(Cursor::Pointer)
         .hover(|s| s.bg(bg_control_hover()))
-        .active(|s| s.opacity(0.75))
+        .active(|s| s.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .label(tr("关闭", "Dismiss"))
         .on_press(on_dismiss)
-        .child(glyph_px(10.5, || Glyph::Close, || color(fg_muted())))
+        .child(glyph_px(11.0, || Glyph::Close, || color(fg_muted())))
 }

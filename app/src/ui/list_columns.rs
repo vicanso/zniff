@@ -575,8 +575,7 @@ pub(crate) fn flow_table_classes() -> DataTableClasses {
     classes.header_cell_dragging = Some("opacity-60 bg-[#e2e8f0] dark:bg-[#222938]".into());
     classes.move_indicator = Some("bg-[#2563eb] dark:bg-[#3b82f6]".into());
     classes.row = Some(
-        "bg-white dark:bg-[#10141d] border-b border-b-[#f1f5f9] dark:border-b-[#19202e] cursor-pointer"
-            .into(),
+        "bg-white dark:bg-[#10141d] border-b border-b-[#f1f5f9] dark:border-b-[#19202e]".into(),
     );
     classes.row_odd = Some("bg-[#fafbfd] dark:bg-[#121722]".into());
     classes.row_hover = Some("bg-[#f1f5f9] dark:bg-[#1a2232]".into());

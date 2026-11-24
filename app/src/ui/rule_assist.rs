@@ -459,7 +459,7 @@ fn rule_line_summary_bar(
             .number_of_lines(1)
             .text_overflow(EllipsizeMode::Tail)
             .tabular_nums()
-            .text_size(px(11.0))
+            .text_size(px(TEXT_XS))
             .text_color(move || {
                 let has_err = collect_rule_lines(&target.current_text())
                     .iter()
@@ -473,17 +473,21 @@ fn rule_line_summary_bar(
         )
         .child(
             view()
-                .h(px(22.0))
+                .role(AccessibilityRole::Button)
+                .h(px(ControlSize::Xs.height()))
                 .px_1p5()
                 .flex_shrink_0()
                 .flex_row()
                 .items_center()
                 .gap_1()
-                .rounded(px(5.0))
+                .rounded(px(RADIUS_SM))
                 .bg(AdaptiveColor::TRANSPARENT)
                 .hover(|s| s.bg(bg_control_hover()))
-                .active(|s| s.opacity(0.8))
-                .cursor(Cursor::Pointer)
+                .active(|s| s.bg(bg_control_active()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .focus_visible(apply_focus_ring)
                 .on_press(move || {
                     if show_chips() {
                         manual_open.set(false);
@@ -501,7 +505,7 @@ fn rule_line_summary_bar(
                         }
                     })
                     .number_of_lines(1)
-                    .text_size(px(11.0))
+                    .text_size(px(TEXT_XS))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(fg_secondary()),
                 )
@@ -526,14 +530,19 @@ fn rule_chip_toggle_btn(
     is_zero_hit: impl Fn() -> bool + Copy + 'static,
 ) -> impl IntoElement {
     view()
+        .role(AccessibilityRole::Button)
         .w(px(14.0))
         .h(px(14.0))
         .flex_shrink_0()
-        .rounded(px(3.0))
+        .rounded(px(RADIUS_SM))
         .items_center()
         .justify_center()
-        .cursor(Cursor::Pointer)
         .hover(|s| s.bg(bg_control_hover()))
+        .active(|s| s.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .tooltip(label_tip(
             "启用 / 注释此规则 (#)",
             "Enable / comment this rule (#)",
@@ -551,7 +560,7 @@ fn rule_chip_toggle_btn(
                     "✓".into()
                 }
             })
-            .text_size(px(10.0))
+            .text_size(px(TEXT_XS))
             .font_weight(FontWeight::BOLD)
             .text_color(move || {
                 if item.with(|it| it.commented) || is_zero_hit() {
@@ -571,9 +580,16 @@ fn rule_chip_label(
     is_zero_hit: impl Fn() -> bool + Copy + 'static,
 ) -> impl IntoElement {
     view()
+        .role(AccessibilityRole::Button)
         .flex_1()
         .min_w(px(0.0))
-        .cursor(Cursor::Pointer)
+        .rounded(px(RADIUS_SM))
+        .hover(|s| s.bg(bg_control_hover()))
+        .active(|s| s.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .tooltip(label_tip(
             "点击回填到下方表单",
             "Fill rule into quick editor below",
@@ -601,7 +617,7 @@ fn rule_chip_label(
             })
             .number_of_lines(1)
             .text_overflow(EllipsizeMode::Tail)
-            .text_size(px(10.5))
+            .text_size(px(TEXT_XS))
             .text_color(move || {
                 if item.with(|it| it.commented) || is_zero_hit() {
                     fg_muted()
@@ -623,14 +639,19 @@ fn rule_chip_hit_badge(
         move || item.with(|it| !it.commented && it.valid),
         move || {
             view()
+                .role(AccessibilityRole::Button)
                 .px_1()
                 .h(px(15.0))
                 .flex_shrink_0()
-                .rounded(px(3.0))
+                .rounded(px(RADIUS_SM))
                 .items_center()
                 .justify_center()
-                .cursor(Cursor::Pointer)
                 .hover(|s| s.bg(bg_control_hover()))
+                .active(|s| s.bg(bg_control_active()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .focus_visible(apply_focus_ring)
                 .tooltip(label_tip(
                     "本会话命中次数（点击按此规则行过滤）",
                     "Session hit count (click to filter by this rule line)",
@@ -652,7 +673,7 @@ fn rule_chip_hit_badge(
                         }
                     })
                     .tabular_nums()
-                    .text_size(px(9.5))
+                    .text_size(px(TEXT_XS))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(move || {
                         if hit_count() > 0 {
@@ -672,21 +693,26 @@ fn rule_chip_remove_btn(
     controls: Arc<Controls>,
 ) -> impl IntoElement {
     view()
+        .role(AccessibilityRole::Button)
         .w(px(14.0))
         .h(px(14.0))
         .flex_shrink_0()
-        .rounded(px(3.0))
+        .rounded(px(RADIUS_SM))
         .items_center()
         .justify_center()
-        .cursor(Cursor::Pointer)
         .hover(|s| s.bg(bg_control_hover()))
+        .active(|s| s.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .tooltip(label_tip("删除此规则行", "Remove rule line"))
         .on_press(move || {
             let idx = item.with(|it| it.line_idx);
             let next = remove_rule_line(&target.current_text_untracked(), idx);
             target.commit(&controls, next);
         })
-        .child(text("×").text_size(px(10.5)).text_color(fg_muted()))
+        .child(text("×").text_size(px(TEXT_XS)).text_color(fg_muted()))
 }
 
 fn rule_line_chip(
@@ -706,11 +732,11 @@ fn rule_line_chip(
     };
     let is_zero_hit = move || item.with(|it| !it.commented && it.valid) && hit_count() == 0;
     view()
-        .h(px(22.0))
+        .h(px(ControlSize::Xs.height()))
         .max_w(px(300.0))
         .pl_1p5()
         .pr_1()
-        .rounded(px(5.0))
+        .rounded(px(RADIUS_SM))
         .border_1()
         .border_color(move || {
             let line_no = item.with(|it| it.line_idx + 1);

@@ -10,7 +10,8 @@ pub(crate) fn filter_chip(
 ) -> impl IntoElement {
     let is_active = computed(move || filter_has_token(&filter.get(), aliases));
     view()
-        .h(px(28.0))
+        .role(AccessibilityRole::Button)
+        .h(px(ControlSize::Sm.height()))
         .px_2p5()
         .flex_1()
         .min_w(px(0.0))
@@ -18,7 +19,7 @@ pub(crate) fn filter_chip(
         .items_center()
         .justify_center()
         .gap_1p5()
-        .rounded(px(6.0))
+        .rounded(px(RADIUS_MD))
         .border_1()
         .border_color(move || {
             if is_active.get() {
@@ -43,8 +44,11 @@ pub(crate) fn filter_chip(
                 }
             })
         })
-        .active(|style| style.opacity(0.8))
-        .cursor(Cursor::Pointer)
+        .active(|style| style.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .on_press(move || filter.set(toggle_filter_chip(&filter.get(), token, aliases)))
         .child(view().w(px(5.0)).h(px(5.0)).rounded_full().bg(move || {
             if is_active.get() {
@@ -56,7 +60,7 @@ pub(crate) fn filter_chip(
         .child(
             text(tr(zh, en))
                 .number_of_lines(1)
-                .text_size(px(11.5))
+                .text_size(px(TEXT_SM))
                 .text_color(move || {
                     if is_active.get() {
                         accent_blue_text()
@@ -414,12 +418,12 @@ pub(crate) fn focused_input(
         .w_full()
         .h(px(height))
         .px_2p5()
-        .rounded(px(7.0))
+        .rounded(px(RADIUS_MD))
         .bg(bg_code())
         .border_1()
         .border_color(border_control())
         .focus(|style| style.border_color(accent_blue()))
-        .text_size(px(12.5))
+        .text_size(px(TEXT_SM))
         .text_color(fg_primary())
         .multiline(multiline)
         .on_change(on_change);

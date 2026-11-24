@@ -404,7 +404,7 @@ pub(crate) fn error_summary_banner(
             .px_3()
             .py_2()
             .gap_2()
-            .rounded(px(7.0))
+            .rounded(px(RADIUS_MD))
             .bg(status_err_bg())
             .border_1()
             .border_color(status_err_fg())
@@ -425,7 +425,7 @@ pub(crate) fn error_summary_banner(
                 })
                 .selectable(true)
                 .on_press_up(dismiss_keyboard)
-                .text_size(px(12.0))
+                .text_size(px(TEXT_SM))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(status_err_fg()),
             )
@@ -466,13 +466,14 @@ fn error_action_chip(
         }
     };
     view()
+        .role(AccessibilityRole::Button)
         .h(px(24.0))
         .px_2()
         .flex_shrink_0()
         .flex_row()
         .items_center()
         .gap_1()
-        .rounded(px(5.0))
+        .rounded(px(RADIUS_MD))
         .border_1()
         .border_color(move || {
             if is_bypassed() {
@@ -497,17 +498,20 @@ fn error_action_chip(
                 }
             })
         })
-        .active(|style| style.opacity(0.8))
-        .cursor(Cursor::Pointer)
+        .active(|style| style.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .disabled(is_bypassed)
-        .disabled_style(|style| style.cursor(Cursor::Default))
+        .disabled_style(|style| style.opacity(0.6))
         .on_press(move || {
             let url = shown.url.get_untracked();
             let host = extract_host_from_url(&url);
             execute_error_action(action, &controls, profiles, &url, &host);
         })
         .child(glyph_px(
-            11.5,
+            12.0,
             move || action.glyph(is_bypassed()),
             move || {
                 color(if is_bypassed() {
@@ -520,7 +524,7 @@ fn error_action_chip(
         .child(
             text(move || -> SharedString { action.label(ui_lang(langs), is_bypassed()).into() })
                 .number_of_lines(1)
-                .text_size(px(11.5))
+                .text_size(px(TEXT_XS))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(move || {
                     if is_bypassed() {

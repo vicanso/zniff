@@ -21,66 +21,14 @@ pub(crate) fn enable_switch(
     en: &'static str,
     apply: impl Fn(bool) + 'static,
 ) -> impl IntoElement {
-    view()
-        .h(px(28.0))
-        .px_2()
-        .flex_1()
-        .min_w(px(0.0))
-        .flex_row()
-        .items_center()
-        .justify_center()
-        .gap_1p5()
-        .rounded(px(CONTROL_RADIUS))
-        .border_1()
-        .border_color(move || {
-            if on.get() {
-                accent_blue_border()
-            } else {
-                border_control()
-            }
-        })
-        .bg(move || {
-            if on.get() {
-                accent_blue_soft()
-            } else {
-                bg_control()
-            }
-        })
-        .hover(|style| {
-            style.bg(move || {
-                if on.get() {
-                    accent_blue_soft_hover()
-                } else {
-                    bg_control_hover()
-                }
-            })
-        })
-        .active(|style| style.opacity(0.8))
-        .cursor(Cursor::Pointer)
-        .on_press(move || {
-            let next = !on.get();
+    ui_switch_row(
+        tr(zh, en),
+        move || on.get(),
+        move |next| {
             on.set(next);
             apply(next);
-        })
-        .child(
-            view()
-                .w(px(6.0))
-                .h(px(6.0))
-                .rounded_full()
-                .bg(move || if on.get() { accent_blue() } else { fg_muted() }),
-        )
-        .child(
-            text(tr(zh, en))
-                .number_of_lines(1)
-                .text_size(px(12.0))
-                .text_color(move || {
-                    if on.get() {
-                        accent_blue_text()
-                    } else {
-                        fg_secondary()
-                    }
-                }),
-        )
+        },
+    )
 }
 
 /// Compact pill-track toggle switch for rules panel headers and inline toggles.
@@ -97,10 +45,13 @@ pub(crate) fn mini_toggle_switch(
         .flex_row()
         .items_center()
         .gap_1p5()
-        .rounded(px(5.0))
+        .rounded(px(RADIUS_MD))
         .hover(|style| style.bg(bg_control_hover()))
-        .active(|style| style.opacity(0.85))
-        .cursor(Cursor::Pointer)
+        .active(|style| style.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .checked(move || on.get())
         .on_change(move |next: &bool| {
             on.set(*next);
@@ -112,9 +63,12 @@ pub(crate) fn mini_toggle_switch(
                 .p(px(2.0))
                 .flex_row()
                 .items_center()
-                .rounded(px(99.0))
+                .rounded_full()
                 .bg(switch_track_off())
                 .checked(|c| c.bg(accent_blue()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
         })
         .thumb_style(|s| {
             s.w(px(10.0))
@@ -122,11 +76,14 @@ pub(crate) fn mini_toggle_switch(
                 .rounded_full()
                 .bg(switch_thumb())
                 .checked(|c| c.translate_x(px(12.0)))
+                .transition_transform()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
         })
         .child(
             text(tr(zh, en))
                 .number_of_lines(1)
-                .text_size(px(11.5))
+                .text_size(px(TEXT_XS))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(move || if on.get() { fg_primary() } else { fg_muted() }),
         )
@@ -157,7 +114,7 @@ pub(crate) fn rules_editor(
                 quick_add_open.get(),
             ))
         })
-        .rounded(px(7.0))
+        .rounded(px(RADIUS_MD))
         .border_1()
         .border_color(border_control())
         .bg(bg_code())
@@ -192,6 +149,7 @@ pub(crate) fn quick_side_chip(
     en: &'static str,
 ) -> impl IntoElement {
     view()
+        .role(AccessibilityRole::Button)
         .h(px(26.0))
         .px_2()
         .flex_row()
@@ -215,13 +173,16 @@ pub(crate) fn quick_side_chip(
                 }
             })
         })
-        .active(|style| style.opacity(0.8))
-        .cursor(Cursor::Pointer)
+        .active(|style| style.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .on_press(move || response.set(target_res))
         .child(
             text(tr(zh, en))
                 .number_of_lines(1)
-                .text_size(px(11.0))
+                .text_size(px(TEXT_XS))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(move || {
                     if response.get() == target_res {
@@ -256,20 +217,26 @@ pub(crate) fn quick_add_section(
                 .w_full()
                 .p_2()
                 .gap_1p5()
-                .rounded(px(8.0))
+                .rounded(px(RADIUS_LG))
                 .border_1()
                 .border_color(border_subtle())
                 .bg(bg_canvas())
                 .flex_col()
                 .child(
                     view()
+                        .role(AccessibilityRole::Button)
                         .h(px(20.0))
                         .px_0p5()
+                        .rounded(px(RADIUS_SM))
                         .flex_row()
                         .items_center()
                         .justify_between()
-                        .cursor(Cursor::Pointer)
-                        .hover(|style| style.opacity(0.85))
+                        .hover(|style| style.bg(bg_control_hover()))
+                        .active(|style| style.bg(bg_control_active()))
+                        .transition_colors()
+                        .duration(MOTION_INSTANT_MS)
+                        .ease_out()
+                        .focus_visible(apply_focus_ring)
                         .on_press(move || {
                             clear_quick_draft(draft);
                             open.set(false);
@@ -282,14 +249,14 @@ pub(crate) fn quick_add_section(
                                 .child(glyph_px(9.5, || Glyph::Chevron, || color(fg_muted())))
                                 .child(
                                     text(tr("按类型配置规则", "Configure Rule"))
-                                        .text_size(px(11.0))
+                                        .text_size(px(TEXT_XS))
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(fg_muted()),
                                 ),
                         )
                         .child(
                             text(tr("关闭", "Close"))
-                                .text_size(px(10.5))
+                                .text_size(px(TEXT_XS))
                                 .text_color(fg_muted()),
                         ),
                 )
@@ -304,7 +271,7 @@ fn quick_add_example_row(draft: QuickRuleDraftSignals) -> impl IntoElement {
     let kind = draft.kind;
     view()
         .w_full()
-        .h(px(22.0))
+        .h(px(ControlSize::Xs.height()))
         .px_0p5()
         .flex_row()
         .items_center()
@@ -320,7 +287,7 @@ fn quick_add_example_row(draft: QuickRuleDraftSignals) -> impl IntoElement {
                 .child(
                     text(tr("示例", "Example"))
                         .flex_shrink_0()
-                        .text_size(px(10.5))
+                        .text_size(px(TEXT_XS))
                         .text_color(fg_muted()),
                 )
                 .child(
@@ -329,22 +296,26 @@ fn quick_add_example_row(draft: QuickRuleDraftSignals) -> impl IntoElement {
                         .min_w(px(0.0))
                         .number_of_lines(1)
                         .text_overflow(EllipsizeMode::Tail)
-                        .text_size(px(10.5))
+                        .text_size(px(TEXT_XS))
                         .text_color(fg_secondary()),
                 ),
         )
         .child(
             view()
+                .role(AccessibilityRole::Button)
                 .h(px(20.0))
                 .px_1p5()
                 .flex_shrink_0()
-                .rounded(px(4.0))
+                .rounded(px(RADIUS_SM))
                 .flex_row()
                 .items_center()
                 .bg(AdaptiveColor::TRANSPARENT)
                 .hover(|s| s.bg(bg_control_hover()))
-                .active(|s| s.opacity(0.8))
-                .cursor(Cursor::Pointer)
+                .active(|s| s.bg(bg_control_active()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .focus_visible(apply_focus_ring)
                 .tooltip(label_tip(
                     "将当前类型的常用示例填入上方输入框",
                     "Fill fields above with this rule example",
@@ -364,7 +335,7 @@ fn quick_add_example_row(draft: QuickRuleDraftSignals) -> impl IntoElement {
                 .child(
                     text(tr("填入示例", "Use example"))
                         .number_of_lines(1)
-                        .text_size(px(10.5))
+                        .text_size(px(TEXT_XS))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(accent_blue_text()),
                 ),
@@ -419,16 +390,20 @@ fn quick_add_row_one(draft: QuickRuleDraftSignals) -> impl IntoElement {
             move || quick_kind(kind.get()).supports_graphql_op() && !show_op_input(),
             move || {
                 view()
+                    .role(AccessibilityRole::Button)
                     .h(px(26.0))
                     .px_1p5()
                     .flex_shrink_0()
-                    .rounded(px(5.0))
+                    .rounded(px(RADIUS_SM))
                     .items_center()
                     .justify_center()
                     .bg(AdaptiveColor::TRANSPARENT)
                     .hover(|s| s.bg(bg_control_hover()))
-                    .active(|s| s.opacity(0.8))
-                    .cursor(Cursor::Pointer)
+                    .active(|s| s.bg(bg_control_active()))
+                    .transition_colors()
+                    .duration(MOTION_INSTANT_MS)
+                    .ease_out()
+                    .focus_visible(apply_focus_ring)
                     .tooltip(label_tip(
                         "附加 GraphQL 操作名条件 (op=...)",
                         "Filter by GraphQL operation name (op=...)",
@@ -436,7 +411,7 @@ fn quick_add_row_one(draft: QuickRuleDraftSignals) -> impl IntoElement {
                     .on_press(move || op_open.set(true))
                     .child(
                         mono("GQL")
-                            .text_size(px(10.5))
+                            .text_size(px(TEXT_XS))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(fg_muted()),
                     )
@@ -616,19 +591,23 @@ fn quick_file_picker_button(
     label: impl Fn() -> String + 'static,
 ) -> impl IntoElement {
     view()
-        .h(px(28.0))
+        .role(AccessibilityRole::Button)
+        .h(px(ControlSize::Sm.height()))
         .px_2p5()
         .flex_shrink_0()
         .flex_row()
         .items_center()
         .justify_center()
-        .rounded(px(6.0))
+        .rounded(px(RADIUS_MD))
         .border_1()
         .border_color(border_control())
         .bg(bg_control())
         .hover(|style| style.bg(bg_control_hover()))
-        .active(|style| style.opacity(0.8))
-        .cursor(Cursor::Pointer)
+        .active(|style| style.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .on_press(move || {
             spawn(async move {
                 if let DialogOutcome::Picked(paths) =
@@ -641,7 +620,7 @@ fn quick_file_picker_button(
         })
         .child(
             text(label)
-                .text_size(px(11.0))
+                .text_size(px(TEXT_XS))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(fg_secondary()),
         )
@@ -744,7 +723,8 @@ fn quick_add_submit_button(
     let kind = draft.kind;
     let modes = draft.modes;
     view()
-        .h(px(28.0))
+        .role(AccessibilityRole::Button)
+        .h(px(ControlSize::Sm.height()))
         .px_3()
         .flex_grow(move || {
             if matches!(kind.get(), 8 | 12) || (kind.get() == 13 && modes.status_drop.get()) {
@@ -756,7 +736,7 @@ fn quick_add_submit_button(
         .flex_shrink_0()
         .items_center()
         .justify_center()
-        .rounded(px(6.0))
+        .rounded(px(RADIUS_MD))
         .border_1()
         .border_color(move || {
             if quick_add_ready(draft) {
@@ -782,17 +762,20 @@ fn quick_add_submit_button(
             })
         })
         .active(|style| {
-            style.opacity(move || {
+            style.bg(move || {
                 if quick_add_ready(draft) {
-                    0.8_f32
+                    bg_control_active()
                 } else {
-                    1.0_f32
+                    bg_control()
                 }
             })
         })
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .disabled(move || !quick_add_ready(draft))
-        .disabled_style(|style| style.cursor(Cursor::Default))
-        .cursor(Cursor::Pointer)
+        .disabled_style(|style| style.opacity(0.55))
         .on_press(move || {
             let kind_now = kind.get();
             let mode_now = modes.mode_for(kind_now);
@@ -821,7 +804,7 @@ fn quick_add_submit_button(
         })
         .child(
             text(tr("确认添加", "Add"))
-                .text_size(px(11.5))
+                .text_size(px(TEXT_SM))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(move || {
                     if quick_add_ready(draft) {
@@ -843,7 +826,7 @@ pub(crate) fn config_field(
         .w_full()
         .child(
             text(tr(zh, en))
-                .text_size(px(11.5))
+                .text_size(px(TEXT_XS))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(fg_muted()),
         )

@@ -22,7 +22,7 @@ pub(crate) fn allow_denied_summary_section(
                 .w_full()
                 .p_2()
                 .gap_1p5()
-                .rounded(px(6.0))
+                .rounded(px(RADIUS_MD))
                 .border_1()
                 .border_color(status_warn_fg())
                 .bg(status_warn_bg())
@@ -64,22 +64,26 @@ fn denied_summary_header(
                         }
                     })
                     .tabular_nums()
-                    .text_size(px(11.5))
+                    .text_size(px(TEXT_XS))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(status_warn_fg()),
                 ),
         )
         .child(
             view()
+                .role(AccessibilityRole::Button)
                 .h(px(20.0))
                 .px_1p5()
-                .rounded(px(4.0))
+                .rounded(px(RADIUS_SM))
                 .border_1()
                 .border_color(border_control())
                 .bg(bg_card())
                 .hover(|s| s.bg(bg_control_hover()))
-                .active(|s| s.opacity(0.8))
-                .cursor(Cursor::Pointer)
+                .active(|s| s.bg(bg_control_active()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .focus_visible(apply_focus_ring)
                 .items_center()
                 .justify_center()
                 .on_press(move || {
@@ -88,7 +92,7 @@ fn denied_summary_header(
                 })
                 .child(
                     text(tr("清零", "Reset"))
-                        .text_size(px(10.5))
+                        .text_size(px(TEXT_XS))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(fg_secondary()),
                 ),
@@ -125,10 +129,10 @@ fn denied_host_row(
 ) -> impl IntoElement {
     view()
         .w_full()
-        .min_h(px(22.0))
+        .min_h(px(ControlSize::Xs.height()))
         .px_1p5()
         .py_0p5()
-        .rounded(px(4.0))
+        .rounded(px(RADIUS_SM))
         .bg(bg_card())
         .flex_row()
         .items_center()
@@ -139,7 +143,7 @@ fn denied_host_row(
                 .min_w(px(0.0))
                 .number_of_lines(1)
                 .text_overflow(EllipsizeMode::Middle)
-                .text_size(px(11.0))
+                .text_size(px(TEXT_XS))
                 .text_color(fg_primary()),
         )
         .child(
@@ -148,7 +152,7 @@ fn denied_host_row(
             })
             .flex_shrink_0()
             .tabular_nums()
-            .text_size(px(10.5))
+            .text_size(px(TEXT_XS))
             .text_color(fg_muted()),
         )
         .child(when(
@@ -156,16 +160,20 @@ fn denied_host_row(
             move || {
                 let row_controls = controls.clone();
                 view()
+                    .role(AccessibilityRole::Button)
                     .h(px(18.0))
                     .px_1p5()
                     .flex_shrink_0()
-                    .rounded(px(4.0))
+                    .rounded(px(RADIUS_SM))
                     .border_1()
                     .border_color(accent_blue_border())
                     .bg(accent_blue_soft())
                     .hover(|s| s.bg(accent_blue_soft_hover()))
-                    .active(|s| s.opacity(0.8))
-                    .cursor(Cursor::Pointer)
+                    .active(|s| s.bg(bg_control_active()))
+                    .transition_colors()
+                    .duration(MOTION_INSTANT_MS)
+                    .ease_out()
+                    .focus_visible(apply_focus_ring)
                     .items_center()
                     .justify_center()
                     .on_press(move || {
@@ -177,7 +185,7 @@ fn denied_host_row(
                     .child(
                         text(tr("+ 允许", "+ Allow"))
                             .number_of_lines(1)
-                            .text_size(px(10.0))
+                            .text_size(px(TEXT_XS))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(accent_blue_text()),
                     )
@@ -199,7 +207,7 @@ fn denied_overflow_note(denied: Signal<allow_hosts::AllowDeniedSummary>) -> impl
                     Lang::En => format!("+{extra} more denied hosts").into(),
                 }
             })
-            .text_size(px(10.5))
+            .text_size(px(TEXT_XS))
             .text_color(fg_muted())
         },
     )

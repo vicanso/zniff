@@ -676,7 +676,7 @@ pub(crate) fn filter_syntax_error_strip(value: Signal<String>) -> impl IntoEleme
                             .into()
                     })
                     .number_of_lines(1)
-                    .text_size(px(11.0))
+                    .text_size(px(TEXT_XS))
                     .text_color(status_err_fg()),
                 )
         },
@@ -699,7 +699,7 @@ pub(crate) fn filter_syntax_error_inline(value: Signal<String>) -> impl IntoElem
                     .into()
             })
             .number_of_lines(1)
-            .text_size(px(11.0))
+            .text_size(px(TEXT_XS))
             .text_color(status_err_fg())
         },
     )
@@ -756,7 +756,7 @@ pub(crate) fn filter_assist_input(
                         px(pad_right_when_non_empty)
                     }
                 })
-                .rounded(px(7.0))
+                .rounded(px(RADIUS_MD))
                 .bg(bg_code())
                 .border_1()
                 .border_color(move || {
@@ -775,7 +775,7 @@ pub(crate) fn filter_assist_input(
                         }
                     })
                 })
-                .text_size(px(12.5))
+                .text_size(px(TEXT_SM))
                 .text_color(fg_primary())
                 .on_change(move |text: &str| {
                     value.set(text.to_string());
@@ -825,11 +825,11 @@ fn filter_autocomplete_popup(
         .w(px(300.0))
         .max_w(move || px((window().width.0 - 24.0).max(200.0)))
         .p_1()
-        .rounded(px(8.0))
+        .rounded(px(RADIUS_LG))
         .bg(bg_card())
         .border_1()
         .border_color(border_strong())
-        .shadow_md()
+        .shadow_lg()
         .flex_col()
         .gap_0p5()
         .child(dynamic(move || {
@@ -839,17 +839,21 @@ fn filter_autocomplete_popup(
                 let pick = item.clone();
                 col = col.child(
                     view()
+                        .role(AccessibilityRole::Button)
                         .w_full()
                         .h(px(26.0))
                         .px_2()
-                        .rounded(px(5.0))
+                        .rounded(px(RADIUS_MD))
                         .flex_row()
                         .items_center()
                         .justify_between()
                         .gap_2()
                         .hover(|style| style.bg(bg_control_hover()))
-                        .active(|style| style.opacity(0.8))
-                        .cursor(Cursor::Pointer)
+                        .active(|style| style.bg(bg_control_active()))
+                        .transition_colors()
+                        .duration(MOTION_INSTANT_MS)
+                        .ease_out()
+                        .focus_visible(apply_focus_ring)
                         .label(item.insert_token.clone())
                         .on_press(move || {
                             let next = apply_filter_suggestion(&value.get_untracked(), &pick);
@@ -860,13 +864,13 @@ fn filter_autocomplete_popup(
                         .child(
                             mono(item.label)
                                 .number_of_lines(1)
-                                .text_size(px(12.0))
+                                .text_size(px(TEXT_SM))
                                 .text_color(fg_primary()),
                         )
                         .child(
                             text(item.hint)
                                 .number_of_lines(1)
-                                .text_size(px(11.0))
+                                .text_size(px(TEXT_XS))
                                 .text_color(fg_muted()),
                         ),
                 );

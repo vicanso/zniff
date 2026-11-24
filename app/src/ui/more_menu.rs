@@ -352,14 +352,14 @@ fn update_hover_card(
                 .px_3()
                 .py_2p5()
                 .gap_2()
-                .rounded(px(8.0))
+                .rounded(px(RADIUS_LG))
                 .bg(bg_card())
                 .border_1()
                 .border_color(border_strong())
                 .shadow_lg()
                 .child(
                     text(move || format_update_header(&update_state.get(), ui_lang(langs)))
-                        .text_size(px(12.0))
+                        .text_size(px(TEXT_SM))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(fg_primary()),
                 )
@@ -392,7 +392,9 @@ fn update_hover_card(
                                             } else {
                                                 format!("[img: {}]", img.alt)
                                             };
-                                            mono(label).text_size(px(11.0)).text_color(fg_muted())
+                                            mono(label)
+                                                .text_size(px(TEXT_XS))
+                                                .text_color(fg_muted())
                                         }),
                                 ),
                             )

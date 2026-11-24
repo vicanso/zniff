@@ -208,17 +208,21 @@ pub(crate) fn rule_groups_bar(target: RuleEditTarget, controls: Arc<Controls>) -
             )
             .otherwise(move || {
                 view()
-                    .h(px(22.0))
+                    .role(AccessibilityRole::Button)
+                    .h(px(ControlSize::Xs.height()))
                     .px_1p5()
                     .flex_shrink_0()
                     .flex_row()
                     .items_center()
                     .gap_1()
-                    .rounded(px(5.0))
+                    .rounded(px(RADIUS_SM))
                     .bg(AdaptiveColor::TRANSPARENT)
                     .hover(|s| s.bg(bg_control_hover()))
-                    .active(|s| s.opacity(0.8))
-                    .cursor(Cursor::Pointer)
+                    .active(|s| s.bg(bg_control_active()))
+                    .transition_colors()
+                    .duration(MOTION_INSTANT_MS)
+                    .ease_out()
+                    .focus_visible(apply_focus_ring)
                     .tooltip(label_tip(
                         "新建可独立开关的规则分组",
                         "Create a toggleable rule group",
@@ -230,7 +234,7 @@ pub(crate) fn rule_groups_bar(target: RuleEditTarget, controls: Arc<Controls>) -
                     .child(
                         text(tr("+ 分组", "+ Group"))
                             .number_of_lines(1)
-                            .text_size(px(11.0))
+                            .text_size(px(TEXT_XS))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(fg_muted()),
                     )
@@ -242,13 +246,14 @@ fn workspace_pill(target: RuleEditTarget) -> impl IntoElement {
     let is_selected = move || target.editing.get().is_none();
     let has_groups = move || !target.groups.with(Vec::is_empty);
     view()
-        .h(px(22.0))
+        .role(AccessibilityRole::Button)
+        .h(px(ControlSize::Xs.height()))
         .px_2()
         .flex_shrink_0()
         .flex_row()
         .items_center()
         .gap_1()
-        .rounded(px(5.0))
+        .rounded(px(RADIUS_SM))
         .border_1()
         .border_color(move || {
             if is_selected() && has_groups() {
@@ -273,8 +278,11 @@ fn workspace_pill(target: RuleEditTarget) -> impl IntoElement {
                 }
             })
         })
-        .active(|s| s.opacity(0.8))
-        .cursor(Cursor::Pointer)
+        .active(|s| s.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .on_press(move || target.editing.set(None))
         .child(
             text(move || -> SharedString {
@@ -289,7 +297,7 @@ fn workspace_pill(target: RuleEditTarget) -> impl IntoElement {
                 }
             })
             .number_of_lines(1)
-            .text_size(px(11.0))
+            .text_size(px(TEXT_XS))
             .font_weight(FontWeight::MEDIUM)
             .text_color(move || {
                 if is_selected() && has_groups() {
@@ -319,7 +327,7 @@ fn group_pill(
     };
     let is_enabled = move || group.with(|g| g.enabled);
     view()
-        .h(px(22.0))
+        .h(px(ControlSize::Xs.height()))
         .pl_1p5()
         .pr_1()
         .max_w(px(220.0))
@@ -327,7 +335,7 @@ fn group_pill(
         .flex_row()
         .items_center()
         .gap_1()
-        .rounded(px(5.0))
+        .rounded(px(RADIUS_SM))
         .border_1()
         .border_color(move || {
             if is_selected() {
@@ -345,10 +353,11 @@ fn group_pill(
         })
         .child(
             view()
+                .role(AccessibilityRole::Checkbox)
                 .w(px(14.0))
                 .h(px(14.0))
                 .flex_shrink_0()
-                .rounded(px(3.0))
+                .rounded(px(RADIUS_SM))
                 .border_1()
                 .border_color(move || {
                     if is_enabled() {
@@ -364,9 +373,14 @@ fn group_pill(
                         bg_code()
                     }
                 })
+                .hover(|s| s.bg(bg_control_hover()))
+                .active(|s| s.bg(bg_control_active()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .focus_visible(apply_focus_ring)
                 .items_center()
                 .justify_center()
-                .cursor(Cursor::Pointer)
                 .tooltip(label_tip("启用 / 停用此分组", "Enable / disable group"))
                 .on_press(move || {
                     let name = group.with_untracked(|g| g.name.clone());
@@ -381,15 +395,22 @@ fn group_pill(
                             "".into()
                         }
                     })
-                    .text_size(px(10.0))
+                    .text_size(px(TEXT_XS))
                     .font_weight(FontWeight::BOLD)
                     .text_color(accent_blue_text()),
                 ),
         )
         .child(
             view()
+                .role(AccessibilityRole::Button)
                 .min_w(px(0.0))
-                .cursor(Cursor::Pointer)
+                .rounded(px(RADIUS_SM))
+                .hover(|s| s.bg(bg_control_hover()))
+                .active(|s| s.bg(bg_control_active()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .focus_visible(apply_focus_ring)
                 .on_press(move || {
                     let name = group.with_untracked(|g| g.name.clone());
                     target.editing.set(Some(name));
@@ -414,7 +435,7 @@ fn group_pill(
                     .max_w(px(150.0))
                     .number_of_lines(1)
                     .text_overflow(EllipsizeMode::Tail)
-                    .text_size(px(11.0))
+                    .text_size(px(TEXT_XS))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(move || {
                         if is_selected() {
@@ -429,14 +450,19 @@ fn group_pill(
         )
         .child(
             view()
+                .role(AccessibilityRole::Button)
                 .w(px(14.0))
                 .h(px(14.0))
                 .flex_shrink_0()
-                .rounded(px(3.0))
+                .rounded(px(RADIUS_SM))
                 .items_center()
                 .justify_center()
-                .cursor(Cursor::Pointer)
                 .hover(|s| s.bg(bg_control_hover()))
+                .active(|s| s.bg(bg_control_active()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .focus_visible(apply_focus_ring)
                 .tooltip(label_tip("删除此规则分组", "Delete rule group"))
                 .on_press(move || {
                     let name = group.with_untracked(|g| g.name.clone());
@@ -449,7 +475,7 @@ fn group_pill(
                     let next = remove_rule_group(&target.groups.get_untracked(), &name);
                     commit_groups(target, &remove_controls, next);
                 })
-                .child(text("×").text_size(px(10.5)).text_color(fg_muted())),
+                .child(text("×").text_size(px(TEXT_XS)).text_color(fg_muted())),
         )
 }
 
@@ -461,7 +487,7 @@ fn new_group_inline(
 ) -> impl IntoElement {
     let submit_controls = controls.clone();
     view()
-        .h(px(22.0))
+        .h(px(ControlSize::Xs.height()))
         .flex_row()
         .items_center()
         .gap_1()
@@ -471,13 +497,13 @@ fn new_group_inline(
                 .placeholder(tr("分组名…", "Group…"))
                 .placeholder_color(move || color(fg_muted()))
                 .w(px(108.0))
-                .h(px(22.0))
+                .h(px(ControlSize::Xs.height()))
                 .px_1p5()
-                .rounded(px(5.0))
+                .rounded(px(RADIUS_SM))
                 .bg(bg_code())
                 .border_1()
                 .border_color(accent_blue_border())
-                .text_size(px(11.0))
+                .text_size(px(TEXT_XS))
                 .text_color(fg_primary())
                 .multiline(false)
                 .on_change(move |text: &str| draft_name.set(text.to_string()))
@@ -487,40 +513,50 @@ fn new_group_inline(
         )
         .child(
             view()
-                .h(px(22.0))
+                .role(AccessibilityRole::Button)
+                .h(px(ControlSize::Xs.height()))
                 .px_1p5()
-                .rounded(px(5.0))
+                .rounded(px(RADIUS_SM))
                 .border_1()
                 .border_color(accent_blue_border())
                 .bg(accent_blue_soft())
                 .hover(|s| s.bg(accent_blue_soft_hover()))
-                .cursor(Cursor::Pointer)
+                .active(|s| s.bg(bg_control_active()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .focus_visible(apply_focus_ring)
                 .items_center()
                 .justify_center()
                 .on_press(move || confirm_new_group(target, &controls, draft_name, creating))
                 .child(
                     text(tr("创建", "Add"))
-                        .text_size(px(10.5))
+                        .text_size(px(TEXT_XS))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(accent_blue_text()),
                 ),
         )
         .child(
             view()
+                .role(AccessibilityRole::Button)
                 .w(px(20.0))
-                .h(px(22.0))
-                .rounded(px(5.0))
+                .h(px(ControlSize::Xs.height()))
+                .rounded(px(RADIUS_SM))
                 .border_1()
                 .border_color(border_control())
                 .bg(bg_control())
                 .hover(|s| s.bg(bg_control_hover()))
-                .cursor(Cursor::Pointer)
+                .active(|s| s.bg(bg_control_active()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .focus_visible(apply_focus_ring)
                 .items_center()
                 .justify_center()
                 .on_press(move || {
                     draft_name.set(String::new());
                     creating.set(false);
                 })
-                .child(text("×").text_size(px(11.0)).text_color(fg_muted())),
+                .child(text("×").text_size(px(TEXT_XS)).text_color(fg_muted())),
         )
 }

@@ -176,7 +176,7 @@ pub(crate) fn flow_quick_rule_section(
             view().px_2p5().py_0p5().child(
                 text(tr("快速规则", "Quick rule"))
                     .number_of_lines(1)
-                    .text_size(px(10.5))
+                    .text_size(px(TEXT_XS))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(fg_muted()),
             ),

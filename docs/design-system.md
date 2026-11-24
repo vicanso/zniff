@@ -66,6 +66,13 @@ Normative UI standards for `zniff`, following the [NSH Design Guides](https://ns
 | State Change | Tool & Tokens | Reduced Motion (`reduce_motion()`) |
 | --- | --- | --- |
 | Button / toggle hover & press | `transition_colors()`, `MOTION_INSTANT_MS`, ease-out | Instant color switch |
+| Semantic toggle switch (`nsh_base::switch()`) | `transition_colors()` (track) + `transition_transform()` (thumb), `MOTION_INSTANT_MS`, ease-out | Instant state change |
 | Popover / Menu open & close | `popup_style(ui_popup_style)` + `popup_starting_style(ui_popup_starting_style)` (`MOTION_FAST_MS`) | Appears/disappears immediately without fade |
 | Toast arrive & dismiss | `ToastMotion::sonner()`, `transition_all()`, `MOTION_FAST_MS` | Instant show/hide |
 | Virtualized table rows & counters | No motion (high-frequency updates stay calm) | None |
+
+## Reusable Kit Primitives (`app/src/ui/kit/`)
+
+- **Tokens (`tokens.rs`)**: `TEXT_{XS,SM,MD,LG}`, `RADIUS_{SM,MD,LG}`, `MOTION_{INSTANT,FAST,BASE}_MS`, `ControlSize::{Xs,Sm,Md}`, `ButtonVariant`, `BadgeTone`.
+- **Buttons (`button.rs`)**: `ui_button`, `ui_icon_button`, `ui_toggle_button`, `no_drag` — automatically apply accessibility roles, `bg_control_active()`/`accent_blue_active()` press states, `transition_colors()`, and `.focus_visible(apply_focus_ring)`.
+- **Surfaces, Overlays & Switches (`surface.rs`)**: `ui_popup_style`, `ui_popup_starting_style`, `ui_tooltip_surface`, `ui_section_header`, `ui_divider`, `ui_badge`, `ui_modal_backdrop`, `ui_modal_card`, `ui_modal_close_button`, `ui_switch_row`.

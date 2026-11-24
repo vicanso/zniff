@@ -5,7 +5,7 @@ pub(crate) fn menu_group_label(zh: &'static str, en: &'static str) -> impl IntoE
     view().px_2p5().pt_1().pb_0p5().child(
         text(tr(zh, en))
             .number_of_lines(1)
-            .text_size(px(10.5))
+            .text_size(px(TEXT_XS))
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(fg_muted()),
     )
@@ -63,15 +63,18 @@ pub(crate) fn menu_action(
 ) -> impl IntoElement {
     menu_item()
         .on_select(on_select)
-        .h(px(32.0))
+        .h(px(ControlSize::Md.height()))
         .px_2p5()
         .gap_2()
-        .rounded(px(6.0))
+        .rounded(px(RADIUS_MD))
         .flex_row()
         .items_center()
         .hover(|style| style.bg(bg_control_hover()))
-        .active(|style| style.opacity(0.75))
-        .cursor(Cursor::Pointer)
+        .active(|style| style.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .child(glyph(move || icon, || color(fg_secondary())))
         .child(control_text(label).text_color(fg_secondary()))
 }
@@ -84,15 +87,18 @@ pub(crate) fn menu_action_meta(
 ) -> impl IntoElement {
     menu_item()
         .on_select(on_select)
-        .h(px(32.0))
+        .h(px(ControlSize::Md.height()))
         .px_2p5()
         .gap_2()
-        .rounded(px(6.0))
+        .rounded(px(RADIUS_MD))
         .flex_row()
         .items_center()
         .hover(|style| style.bg(bg_control_hover()))
-        .active(|style| style.opacity(0.75))
-        .cursor(Cursor::Pointer)
+        .active(|style| style.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .child(glyph(move || icon, || color(fg_secondary())))
         .child(control_text(label).flex_1().text_color(fg_secondary()))
         .child(
@@ -100,7 +106,7 @@ pub(crate) fn menu_action_meta(
                 .tabular_nums()
                 .flex_shrink_0()
                 .number_of_lines(1)
-                .text_size(px(11.0))
+                .text_size(px(TEXT_XS))
                 .text_color(fg_muted()),
         )
 }
@@ -120,16 +126,16 @@ pub(crate) fn menu_action_enabled(
     let enabled_text = enabled;
     menu_item()
         .disabled(move || !enabled_off())
-        .disabled_style(|style| style.opacity(0.45).cursor(Cursor::Default))
+        .disabled_style(|style| style.opacity(0.45))
         .on_select(move || {
             if enabled_run() {
                 on_select();
             }
         })
-        .h(px(32.0))
+        .h(px(ControlSize::Md.height()))
         .px_2p5()
         .gap_2()
-        .rounded(px(6.0))
+        .rounded(px(RADIUS_MD))
         .flex_row()
         .items_center()
         .hover(|style| {
@@ -141,8 +147,19 @@ pub(crate) fn menu_action_enabled(
                 }
             })
         })
-        .active(|style| style.opacity(move || if enabled_active() { 0.75_f32 } else { 0.45_f32 }))
-        .cursor(Cursor::Pointer)
+        .active(|style| {
+            style.bg(move || {
+                if enabled_active() {
+                    bg_control_active()
+                } else {
+                    AdaptiveColor::TRANSPARENT
+                }
+            })
+        })
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .child(glyph(
             move || icon,
             move || {
@@ -165,7 +182,7 @@ pub(crate) fn menu_action_enabled(
                 .tabular_nums()
                 .flex_shrink_0()
                 .number_of_lines(1)
-                .text_size(px(11.0))
+                .text_size(px(TEXT_XS))
                 .text_color(fg_muted()),
         )
 }
@@ -176,9 +193,10 @@ pub(crate) fn menu_inline_pill(
     on_press: impl Fn() + 'static,
 ) -> impl IntoElement {
     view()
-        .h(px(22.0))
+        .role(AccessibilityRole::Button)
+        .h(px(ControlSize::Xs.height()))
         .px_2()
-        .rounded(px(5.0))
+        .rounded(px(RADIUS_SM))
         .flex_shrink_0()
         .flex_row()
         .items_center()
@@ -207,11 +225,13 @@ pub(crate) fn menu_inline_pill(
                 }
             })
         })
-        .active(|style| style.opacity(0.75))
+        .active(|style| style.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
         .focus_visible(apply_focus_ring)
-        .cursor(Cursor::Pointer)
         .on_press(on_press)
-        .child(compact_control_text(label, 11.0).text_color(move || {
+        .child(compact_control_text(label, TEXT_XS).text_color(move || {
             if active() {
                 accent_blue_text()
             } else {
@@ -416,15 +436,19 @@ pub(crate) fn menu_redact_row(
         .items_center()
         .child(
             view()
+                .role(AccessibilityRole::Checkbox)
                 .flex_1()
                 .h_full()
                 .flex_row()
                 .items_center()
                 .gap_2()
-                .rounded(px(5.0))
+                .rounded(px(RADIUS_SM))
                 .hover(|style| style.bg(bg_control_hover()))
-                .active(|style| style.opacity(0.75))
-                .cursor(Cursor::Pointer)
+                .active(|style| style.bg(bg_control_active()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .focus_visible(apply_focus_ring)
                 .on_press(move || {
                     let next = !seq_builder.redact_export.get();
                     seq_builder.redact_export.set(next);
@@ -448,7 +472,7 @@ pub(crate) fn menu_redact_row(
                             view()
                                 .w(px(10.0))
                                 .h(px(10.0))
-                                .rounded(px(2.5))
+                                .rounded(px(RADIUS_SM))
                                 .border_1()
                                 .border_color(
                                     move || {
@@ -535,9 +559,10 @@ pub(crate) fn menu_share_row(
                     move || {
                         let controls = controls.clone();
                         view()
-                            .h(px(22.0))
+                            .role(AccessibilityRole::Button)
+                            .h(px(ControlSize::Xs.height()))
                             .px_2()
-                            .rounded(px(5.0))
+                            .rounded(px(RADIUS_SM))
                             .flex_shrink_0()
                             .flex_row()
                             .items_center()
@@ -546,23 +571,27 @@ pub(crate) fn menu_share_row(
                             .border_color(status_err_fg())
                             .bg(status_err_bg())
                             .hover(|style| style.bg(status_err_bg_hover()))
-                            .active(|style| style.opacity(0.75))
-                            .cursor(Cursor::Pointer)
+                            .active(|style| style.bg(bg_control_active()))
+                            .transition_colors()
+                            .duration(MOTION_INSTANT_MS)
+                            .ease_out()
+                            .focus_visible(apply_focus_ring)
                             .on_press(move || {
                                 open.set(false);
                                 end_share(&controls, share_id);
                             })
                             .child(
-                                compact_control_text(tr("停止", "Stop"), 11.0)
+                                compact_control_text(tr("停止", "Stop"), TEXT_XS)
                                     .text_color(status_err_fg()),
                             )
                     },
                 ))
                 .child(
                     view()
-                        .w(px(22.0))
-                        .h(px(22.0))
-                        .rounded(px(5.0))
+                        .role(AccessibilityRole::Button)
+                        .w(px(ControlSize::Xs.height()))
+                        .h(px(ControlSize::Xs.height()))
+                        .rounded(px(RADIUS_SM))
                         .flex_shrink_0()
                         .flex_row()
                         .items_center()
@@ -591,15 +620,18 @@ pub(crate) fn menu_share_row(
                                 }
                             })
                         })
-                        .active(|style| style.opacity(0.75))
-                        .cursor(Cursor::Pointer)
+                        .active(|style| style.bg(bg_control_active()))
+                        .transition_colors()
+                        .duration(MOTION_INSTANT_MS)
+                        .ease_out()
+                        .focus_visible(apply_focus_ring)
                         .tooltip(label_tip("配置中转服务器", "Configure relay server"))
                         .on_press(move || {
                             open.set(false);
                             open_settings_tab(profiles, SettingsTab::Relay);
                         })
                         .child(glyph_px(
-                            11.5,
+                            12.0,
                             || Glyph::Sliders,
                             move || {
                                 if !profiles.relay_url.get().trim().is_empty() {
