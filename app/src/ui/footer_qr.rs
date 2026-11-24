@@ -63,7 +63,7 @@ pub(crate) fn footer(
                             text(tr("监听尚未开始", "Not listening"))
                                 .number_of_lines(1)
                                 .text_overflow(EllipsizeMode::Tail)
-                                .text_size(px(11.5))
+                                .text_size(px(TEXT_XS))
                                 .text_color(fg_muted())
                         },
                     )
@@ -78,7 +78,7 @@ pub(crate) fn footer(
                                 text(tr("监听", "Listening"))
                                     .flex_shrink_0()
                                     .number_of_lines(1)
-                                    .text_size(px(11.5))
+                                    .text_size(px(TEXT_XS))
                                     .text_color(fg_muted()),
                             )
                             .child(
@@ -87,7 +87,7 @@ pub(crate) fn footer(
                                     .tabular_nums()
                                     .number_of_lines(1)
                                     .text_overflow(EllipsizeMode::Tail)
-                                    .text_size(px(11.5))
+                                    .text_size(px(TEXT_XS))
                                     .text_color(fg_muted()),
                             )
                     }),
@@ -96,42 +96,40 @@ pub(crate) fn footer(
                     move || config_broken.get().is_some(),
                     move || {
                         view()
-                            .h(px(20.0))
-                            .px_1p5()
+                            .role(AccessibilityRole::Button)
+                            .h(px(ControlSize::Xs.height()))
+                            .px(px(ControlSize::Xs.padding_x()))
                             .flex_shrink_0()
                             .flex_row()
                             .items_center()
-                            .gap_1()
-                            .rounded(px(5.0))
+                            .gap(px(ControlSize::Xs.gap()))
+                            .rounded(px(RADIUS_SM))
                             .border_1()
                             .border_color(status_warn_fg())
                             .bg(status_warn_bg())
-                            .hover(|style| style.opacity(0.85))
-                            .active(|style| style.opacity(0.75))
-                            .cursor(Cursor::Pointer)
+                            .hover(|style| style.bg(bg_control_hover()))
+                            .active(|style| style.bg(bg_control_active()))
+                            .transition_colors()
+                            .duration(MOTION_INSTANT_MS)
+                            .ease_out()
+                            .focus_visible(apply_focus_ring)
                             .tooltip(
-                                tooltip().child(
-                                    view()
-                                        .max_w(px(420.0))
-                                        .px_2()
-                                        .py_1()
-                                        .rounded(px(6.0))
-                                        .bg(bg_card())
-                                        .border_1()
-                                        .border_color(border_strong())
-                                        .child(
-                                            text(move || config_broken.get().unwrap_or_default())
-                                                .text_size(px(11.5))
-                                                .text_color(fg_primary()),
-                                        ),
-                                ),
+                                tooltip().child(ui_tooltip_surface(
+                                    text(move || config_broken.get().unwrap_or_default())
+                                        .text_size(px(TEXT_SM))
+                                        .text_color(fg_primary()),
+                                )),
                             )
                             .on_press(move || config_broken_dismissed.set(false))
-                            .child(glyph_px(12.0, || Glyph::Alert, || color(status_warn_fg())))
+                            .child(glyph_px(
+                                ControlSize::Xs.icon_size(),
+                                || Glyph::Alert,
+                                || color(status_warn_fg()),
+                            ))
                             .child(
                                 text(tr("配置错误", "Config error"))
                                     .number_of_lines(1)
-                                    .text_size(px(11.0))
+                                    .text_size(px(TEXT_XS))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(status_warn_fg()),
                             )
@@ -173,18 +171,18 @@ pub(crate) fn footer(
                 .child(
                     mono(move || memory.get())
                         .tabular_nums()
-                        .text_size(px(11.5))
+                        .text_size(px(TEXT_XS))
                         .text_color(fg_muted()),
                 )
                 .child(
                     text(tr("· 已丢弃", "· dropped"))
-                        .text_size(px(11.5))
+                        .text_size(px(TEXT_XS))
                         .text_color(fg_muted()),
                 )
                 .child(
                     mono(move || present::format_thousands(dropped.get()))
                         .tabular_nums()
-                        .text_size(px(11.5))
+                        .text_size(px(TEXT_XS))
                         .text_color(fg_muted()),
                 ),
         )
@@ -202,6 +200,8 @@ pub(crate) fn cert_qr(
 ) -> impl IntoElement {
     popover()
         .open(move || Some(open.get()))
+        .popup_style(ui_popup_style)
+        .popup_starting_style(ui_popup_starting_style)
         .placement(Placement::Top)
         .align(Align::End)
         .offset(px(6.0))
@@ -224,40 +224,45 @@ pub(crate) fn qr_trigger(
     open: Signal<bool>,
 ) -> impl IntoElement {
     let has_lan = move || is_listening_lan(&listen.get()) && !lan_url.get().is_empty();
+    let is_tinted = move || open.get() || has_lan();
     view()
-        .h(px(22.0))
-        .px_2()
+        .role(AccessibilityRole::Button)
+        .h(px(ControlSize::Xs.height()))
+        .px(px(ControlSize::Xs.padding_x()))
         .flex_shrink_0()
         .flex_row()
         .items_center()
-        .gap_1()
-        .rounded(px(6.0))
+        .gap(px(ControlSize::Xs.gap()))
+        .rounded(px(RADIUS_SM))
         .border_1()
         .border_color(move || {
-            if open.get() || has_lan() {
+            if is_tinted() {
                 accent_blue_border()
             } else {
-                border_control()
+                AdaptiveColor::TRANSPARENT
             }
         })
         .bg(move || {
-            if open.get() {
+            if is_tinted() {
                 accent_blue_soft()
             } else {
-                bg_control()
+                AdaptiveColor::TRANSPARENT
             }
         })
         .hover(|style| {
             style.bg(move || {
-                if open.get() {
+                if is_tinted() {
                     accent_blue_soft_hover()
                 } else {
                     bg_control_hover()
                 }
             })
         })
-        .cursor(Cursor::Pointer)
-        .active(|style| style.opacity(0.75))
+        .active(|style| style.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .child(
             view()
                 .w(px(6.0))
@@ -279,9 +284,9 @@ pub(crate) fn qr_trigger(
             })
             .tabular_nums()
             .number_of_lines(1)
-            .text_size(px(11.5))
+            .text_size(px(TEXT_XS))
             .text_color(move || {
-                if open.get() {
+                if is_tinted() {
                     accent_blue_text()
                 } else {
                     fg_secondary()
@@ -309,11 +314,6 @@ pub(crate) fn qr_panel(
             px((window().width.0 - 20.0).clamp(280.0, max_w))
         })
         .max_h(move || px((window().height.0 - 50.0).max(200.0)))
-        .rounded(px(10.0))
-        .border_1()
-        .border_color(border_strong())
-        .bg(bg_card())
-        .shadow_md()
         .overflow_hidden()
         .child(
             scroll()
@@ -327,7 +327,7 @@ pub(crate) fn qr_panel(
                         .items_center()
                         .child(
                             text(tr("手机安装页", "Phone install page"))
-                                .text_size(px(12.0))
+                                .text_size(px(TEXT_SM))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(fg_secondary()),
                         )
@@ -345,7 +345,7 @@ pub(crate) fn qr_panel(
                                         view()
                                             .w_full()
                                             .p_2()
-                                            .rounded(px(6.0))
+                                            .rounded(px(RADIUS_MD))
                                             .bg(bg_code())
                                             .border_1()
                                             .border_color(border_strong())
@@ -354,7 +354,7 @@ pub(crate) fn qr_panel(
                                                     .selectable(true)
                                                     .number_of_lines(1)
                                                     .text_overflow(EllipsizeMode::Middle)
-                                                    .text_size(px(12.0))
+                                                    .text_size(px(TEXT_SM))
                                                     .text_color(fg_primary()),
                                             ),
                                     )
@@ -388,7 +388,7 @@ pub(crate) fn qr_local_only_notice(
             view()
                 .w_full()
                 .p_3()
-                .rounded(px(8.0))
+                .rounded(px(RADIUS_MD))
                 .bg(status_warn_bg())
                 .border_1()
                 .border_color(status_warn_fg())
@@ -398,10 +398,14 @@ pub(crate) fn qr_local_only_notice(
                         .flex_row()
                         .items_center()
                         .gap_1p5()
-                        .child(glyph_px(14.0, || Glyph::Alert, || color(status_warn_fg())))
+                        .child(glyph_px(
+                            ControlSize::Sm.icon_size(),
+                            || Glyph::Alert,
+                            || color(status_warn_fg()),
+                        ))
                         .child(
                             text(tr("当前仅监听本机", "Listening on localhost only"))
-                                .text_size(px(12.5))
+                                .text_size(px(TEXT_SM))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(fg_primary()),
                         ),
@@ -423,32 +427,25 @@ pub(crate) fn qr_local_only_notice(
                             }
                         }
                     })
-                    .text_size(px(12.0))
+                    .text_size(px(TEXT_SM))
                     .line_height(Points(18.0))
                     .text_color(fg_secondary()),
                 ),
         )
         .child(
-            view()
+            ui_button(ButtonVariant::Outline, ControlSize::Sm)
                 .w_full()
-                .h(px(30.0))
-                .px_3()
-                .rounded(px(6.0))
-                .border_1()
                 .border_color(accent_blue_border())
                 .bg(accent_blue_soft())
                 .hover(|style| style.bg(accent_blue_soft_hover()))
-                .active(|style| style.opacity(0.8))
-                .cursor(Cursor::Pointer)
-                .items_center()
-                .justify_center()
+                .active(|style| style.bg(bg_control_active()))
                 .on_press(move || {
                     listen_all.set(true);
                     switch_to_lan(controls.clone());
                 })
                 .child(
                     text(tr("切换为局域网监听", "Switch to LAN listening"))
-                        .text_size(px(12.0))
+                        .text_size(px(TEXT_SM))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(accent_blue_text()),
                 ),
@@ -532,7 +529,7 @@ pub(crate) fn qr_code_side(
                     move || {
                         view()
                             .p_2()
-                            .rounded(px(8.0))
+                            .rounded(px(RADIUS_MD))
                             .bg(qr_surface())
                             .child(image(move || qr_path.get()).w(px(168.0)).h(px(168.0)))
                     },
@@ -671,13 +668,14 @@ pub(crate) fn lan_choice_row(
     let picked_bg = picked;
     let picked_dot = picked;
     view()
-        .h(px(28.0))
+        .role(AccessibilityRole::Button)
+        .h(px(ControlSize::Sm.height()))
         .px_2()
         .w_full()
         .flex_row()
         .items_center()
         .gap_2()
-        .rounded(px(6.0))
+        .rounded(px(RADIUS_MD))
         .border_1()
         .border_color(move || {
             if picked() {
@@ -702,8 +700,11 @@ pub(crate) fn lan_choice_row(
                 }
             })
         })
-        .active(|style| style.opacity(0.8))
-        .cursor(Cursor::Pointer)
+        .active(|style| style.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .on_press(move || {
             let ip = addr.with(|item| item.ip.to_string());
             publish_lan(&listen.get(), &ip, lan_addrs, lan_choice, lan_url, qr_path);
@@ -748,7 +749,7 @@ pub(crate) fn port_field(port_text: Signal<String>, controls: Arc<Controls>) -> 
         .flex_shrink_0()
         .child(
             text(tr("端口", "Port"))
-                .text_size(px(11.5))
+                .text_size(px(TEXT_XS))
                 .text_color(fg_muted()),
         )
         .child(
@@ -757,14 +758,14 @@ pub(crate) fn port_field(port_text: Signal<String>, controls: Arc<Controls>) -> 
                 .placeholder(config::default_listen_port(config::is_dev_mode()).to_string())
                 .placeholder_color(move || color(fg_muted()))
                 .w(px(72.0))
-                .h(px(22.0))
+                .h(px(ControlSize::Xs.height()))
                 .px_2()
-                .rounded(px(6.0))
+                .rounded(px(RADIUS_SM))
                 .bg(bg_code())
                 .border_1()
                 .border_color(border_control())
                 .focus(|style| style.border_color(accent_blue()))
-                .text_size(px(12.0))
+                .text_size(px(TEXT_XS))
                 .text_color(fg_primary())
                 .on_change(move |text: &str| {
                     port_text.set(text.to_string());

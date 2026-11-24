@@ -58,6 +58,8 @@ pub(crate) fn connect_hub_popover(props: ConnectHubProps) -> impl IntoElement {
     let running = props.running;
     popover()
         .open(move || Some(open.get()))
+        .popup_style(ui_popup_style)
+        .popup_starting_style(ui_popup_starting_style)
         .placement(Placement::Top)
         .align(Align::End)
         .offset(px(6.0))
@@ -83,26 +85,27 @@ fn connect_hub_trigger(
 ) -> impl IntoElement {
     let active = move || open.get() || adb_count.get() > 0 || tp_active.get();
     view()
-        .h(px(22.0))
-        .px_2()
+        .role(AccessibilityRole::Button)
+        .h(px(ControlSize::Xs.height()))
+        .px(px(ControlSize::Xs.padding_x()))
         .flex_shrink_0()
         .flex_row()
         .items_center()
-        .gap_1()
-        .rounded(px(6.0))
+        .gap(px(ControlSize::Xs.gap()))
+        .rounded(px(RADIUS_SM))
         .border_1()
         .border_color(move || {
             if active() {
                 accent_blue_border()
             } else {
-                border_control()
+                AdaptiveColor::TRANSPARENT
             }
         })
         .bg(move || {
             if active() {
                 accent_blue_soft()
             } else {
-                bg_control()
+                AdaptiveColor::TRANSPARENT
             }
         })
         .hover(|style| {
@@ -114,15 +117,17 @@ fn connect_hub_trigger(
                 }
             })
         })
-        .cursor(Cursor::Pointer)
-        .active(|style| style.opacity(0.75))
+        .active(|style| style.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
         .focus_visible(apply_focus_ring)
         .tooltip(label_tip(
             "接入中心：免配浏览器 / 终端 / ADB / 手机扫码",
             "Connect Hub: Browser / Terminal / ADB / Mobile QR",
         ))
         .child(glyph_px(
-            11.5,
+            ControlSize::Xs.icon_size(),
             || Glyph::Globe,
             move || {
                 color(if active() {
@@ -147,7 +152,7 @@ fn connect_hub_trigger(
             })
             .tabular_nums()
             .number_of_lines(1)
-            .text_size(px(11.5))
+            .text_size(px(TEXT_XS))
             .text_color(move || {
                 if active() {
                     accent_blue_text()
@@ -162,11 +167,6 @@ fn connect_hub_panel(props: ConnectHubProps, open: Signal<bool>) -> impl IntoEle
     view()
         .w(move || px((window().width.0 - 20.0).clamp(280.0, 344.0)))
         .max_h(move || px((window().height.0 - 72.0).max(200.0)))
-        .rounded(px(10.0))
-        .border_1()
-        .border_color(border_strong())
-        .bg(bg_card())
-        .shadow_md()
         .overflow_hidden()
         .child(
             scroll()
@@ -193,6 +193,7 @@ fn connect_hub_body(props: ConnectHubProps, open: Signal<bool>) -> impl IntoElem
     #[cfg(not(target_arch = "wasm32"))]
     let body = body
         .child(hub_desktop_section(&props, open))
+        .child(ui_divider())
         .child(hub_mobile_section(&props, open));
     #[cfg(target_arch = "wasm32")]
     let body = body.child(hub_web_section(&props, open));
@@ -206,15 +207,10 @@ fn hub_header() -> impl IntoElement {
         .items_center()
         .justify_between()
         .gap_2()
-        .child(
-            text(tr("接入中心", "Connect Hub"))
-                .text_size(px(13.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(fg_primary()),
-        )
+        .child(ui_section_header(tr("接入中心", "Connect Hub")))
         .child(
             text(tr("免配一键抓包", "Zero-config capture"))
-                .text_size(px(11.0))
+                .text_size(px(TEXT_XS))
                 .text_color(fg_muted()),
         )
 }
@@ -231,9 +227,7 @@ fn hub_status_strip(
         .p_2()
         .gap_1p5()
         .flex_col()
-        .rounded(px(8.0))
-        .border_1()
-        .border_color(border_subtle())
+        .rounded(px(RADIUS_MD))
         .bg(bg_code())
         .child(hub_listen_row(controls.clone(), running, listen));
     #[cfg(not(target_arch = "wasm32"))]
@@ -280,7 +274,7 @@ fn hub_listen_row(
                     })
                     .number_of_lines(1)
                     .text_overflow(EllipsizeMode::Tail)
-                    .text_size(px(11.5))
+                    .text_size(px(TEXT_SM))
                     .text_color(fg_primary()),
                 ),
         )
@@ -351,7 +345,7 @@ fn hub_ca_row(
                     })
                     .number_of_lines(1)
                     .text_overflow(EllipsizeMode::Tail)
-                    .text_size(px(11.5))
+                    .text_size(px(TEXT_SM))
                     .text_color(move || {
                         if ca_ui.active_external.get().is_none()
                             && ca_ui.status.get() == ca::CaStatus::InstalledUntrusted
@@ -578,7 +572,7 @@ fn hub_android_cert_guide(controls: Arc<Controls>) -> impl IntoElement {
     view()
         .w_full()
         .flex_col()
-        .rounded(px(7.0))
+        .rounded(px(RADIUS_MD))
         .border_1()
         .border_color(border_subtle())
         .bg(bg_code())
@@ -593,6 +587,7 @@ fn hub_android_cert_guide(controls: Arc<Controls>) -> impl IntoElement {
 #[cfg(not(target_arch = "wasm32"))]
 fn hub_android_cert_guide_header(expanded: Signal<bool>) -> impl IntoElement {
     view()
+        .role(AccessibilityRole::Button)
         .w_full()
         .px_2p5()
         .py_1p5()
@@ -600,8 +595,12 @@ fn hub_android_cert_guide_header(expanded: Signal<bool>) -> impl IntoElement {
         .items_center()
         .justify_between()
         .gap_2()
-        .cursor(Cursor::Pointer)
         .hover(|style| style.bg(bg_control_hover()))
+        .active(|style| style.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .on_press(move || expanded.set(!expanded.get_untracked()))
         .child(
             view()
@@ -610,7 +609,11 @@ fn hub_android_cert_guide_header(expanded: Signal<bool>) -> impl IntoElement {
                 .flex_row()
                 .items_center()
                 .gap_1p5()
-                .child(glyph_px(11.5, || Glyph::Shield, || color(fg_secondary())))
+                .child(glyph_px(
+                    ControlSize::Xs.icon_size(),
+                    || Glyph::Shield,
+                    || color(fg_secondary()),
+                ))
                 .child(
                     text(tr(
                         "Android 7+ 证书配置 (network_security_config)",
@@ -618,13 +621,13 @@ fn hub_android_cert_guide_header(expanded: Signal<bool>) -> impl IntoElement {
                     ))
                     .number_of_lines(1)
                     .text_overflow(EllipsizeMode::Tail)
-                    .text_size(px(11.0))
+                    .text_size(px(TEXT_XS))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(fg_secondary()),
                 ),
         )
         .child(glyph_px(
-            11.0,
+            ControlSize::Xs.icon_size(),
             move || {
                 if expanded.get() {
                     Glyph::ChevronUp
@@ -655,26 +658,26 @@ fn hub_android_cert_guide_body(controls: Arc<Controls>) -> impl IntoElement {
                 "Android 7+ 应用默认忽略用户 CA。在 Debug 构建添加 res/xml/network_security_config.xml 并在 AndroidManifest.xml 引用：",
                 "Android 7+ apps ignore user CAs by default. Add res/xml/network_security_config.xml for debug builds and reference it in AndroidManifest.xml:",
             ))
-            .text_size(px(10.5))
+            .text_size(px(TEXT_XS))
             .text_color(fg_muted()),
         )
         .child(
             view()
                 .w_full()
                 .p_2()
-                .rounded(px(6.0))
+                .rounded(px(RADIUS_MD))
                 .border_1()
                 .border_color(border_subtle())
                 .bg(bg_card())
                 .child(
                     mono(crate::android_guide::connect_hub_preview())
-                        .text_size(px(10.0))
+                        .text_size(px(TEXT_XS))
                         .text_color(fg_primary()),
                 ),
         )
         .child(
             mono(crate::android_guide::MANIFEST_APPLICATION_ATTR)
-                .text_size(px(10.0))
+                .text_size(px(TEXT_XS))
                 .text_color(fg_secondary()),
         )
         .child(
@@ -765,7 +768,7 @@ fn hub_pac_row(controls: Arc<Controls>, open: Signal<bool>) -> impl IntoElement 
 
 fn hub_section_label(label: impl IntoReactive<SharedString>) -> Text {
     text(label)
-        .text_size(px(11.0))
+        .text_size(px(TEXT_XS))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(fg_muted())
 }
@@ -793,26 +796,27 @@ fn hub_action_row_reactive(
     let active_icon = active.clone();
     let active_text = active;
     view()
+        .role(AccessibilityRole::Button)
         .w_full()
         .px_2p5()
         .py_1p5()
         .gap_2()
         .flex_row()
         .items_center()
-        .rounded(px(7.0))
+        .rounded(px(RADIUS_MD))
         .border_1()
         .border_color(move || {
             if active_border() {
                 accent_blue_border()
             } else {
-                border_control()
+                AdaptiveColor::TRANSPARENT
             }
         })
         .bg(move || {
             if active_bg() {
                 accent_blue_soft()
             } else {
-                bg_control()
+                AdaptiveColor::TRANSPARENT
             }
         })
         .hover(|style| {
@@ -824,11 +828,14 @@ fn hub_action_row_reactive(
                 }
             })
         })
-        .active(|style| style.opacity(0.8))
+        .active(|style| style.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
         .focus_visible(apply_focus_ring)
-        .cursor(Cursor::Pointer)
         .on_press(on_press)
-        .child(glyph(
+        .child(glyph_px(
+            ControlSize::Sm.icon_size(),
             move || icon,
             move || {
                 color(if active_icon() {
@@ -848,7 +855,7 @@ fn hub_action_row_reactive(
                     text(title)
                         .number_of_lines(1)
                         .text_overflow(EllipsizeMode::Tail)
-                        .text_size(px(12.0))
+                        .text_size(px(TEXT_SM))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(move || {
                             if active_text() {
@@ -862,7 +869,7 @@ fn hub_action_row_reactive(
                     text(subtitle)
                         .number_of_lines(1)
                         .text_overflow(EllipsizeMode::Tail)
-                        .text_size(px(10.5))
+                        .text_size(px(TEXT_XS))
                         .text_color(fg_muted()),
                 ),
         )

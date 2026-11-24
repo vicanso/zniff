@@ -35,6 +35,8 @@ pub(crate) fn access_control_popover(props: AccessControlProps) -> impl IntoElem
     let proxy_auth = props.proxy_auth;
     popover()
         .open(move || Some(open.get()))
+        .popup_style(ui_popup_style)
+        .popup_starting_style(ui_popup_starting_style)
         .placement(Placement::Top)
         .align(Align::End)
         .offset(px(6.0))
@@ -50,13 +52,8 @@ pub(crate) fn access_control_popover(props: AccessControlProps) -> impl IntoElem
                 .w(px(340.0))
                 .p_3()
                 .gap_2p5()
-                .rounded(px(10.0))
-                .border_1()
-                .border_color(border_strong())
-                .bg(bg_card())
-                .shadow_md()
                 .child(proxy_auth_section(proxy_auth, controls.clone()))
-                .child(view().w_full().h(px(1.0)).bg(border_subtle()))
+                .child(ui_divider())
                 .child(allow_hosts_section(
                     allow_hosts,
                     allow_hosts_strict,
@@ -93,13 +90,14 @@ pub(crate) fn access_trigger_pill(
     };
     let denied_total = move || allow_denied.with(|summary| summary.total);
     view()
-        .h(px(22.0))
-        .px_2()
+        .role(AccessibilityRole::Button)
+        .h(px(ControlSize::Xs.height()))
+        .px(px(ControlSize::Xs.padding_x()))
         .flex_shrink_0()
         .flex_row()
         .items_center()
-        .gap_1()
-        .rounded(px(6.0))
+        .gap(px(ControlSize::Xs.gap()))
+        .rounded(px(RADIUS_SM))
         .border_1()
         .border_color(move || {
             let (auth_on, denies_all, restricted) = state();
@@ -108,33 +106,36 @@ pub(crate) fn access_trigger_pill(
             } else if open.get() || auth_on || restricted {
                 accent_blue_border()
             } else {
-                border_control()
+                AdaptiveColor::TRANSPARENT
             }
         })
         .bg(move || {
-            let (_, denies_all, _) = state();
+            let (auth_on, denies_all, restricted) = state();
             if denies_all || denied_total() > 0 {
                 status_warn_bg()
-            } else if open.get() {
+            } else if open.get() || auth_on || restricted {
                 accent_blue_soft()
             } else {
-                bg_control()
+                AdaptiveColor::TRANSPARENT
             }
         })
         .hover(|style| {
             style.bg(move || {
-                let (_, denies_all, _) = state();
+                let (auth_on, denies_all, restricted) = state();
                 if denies_all || denied_total() > 0 {
                     status_warn_bg()
-                } else if open.get() {
+                } else if open.get() || auth_on || restricted {
                     accent_blue_soft_hover()
                 } else {
                     bg_control_hover()
                 }
             })
         })
-        .active(|style| style.opacity(0.8))
-        .cursor(Cursor::Pointer)
+        .active(|style| style.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .child(view().w(px(6.0)).h(px(6.0)).rounded_full().bg(move || {
             let (auth_on, denies_all, restricted) = state();
             if denies_all || denied_total() > 0 {
@@ -164,12 +165,12 @@ pub(crate) fn access_trigger_pill(
             })
             .tabular_nums()
             .number_of_lines(1)
-            .text_size(px(11.5))
+            .text_size(px(TEXT_XS))
             .text_color(move || {
-                let (_, denies_all, _) = state();
+                let (auth_on, denies_all, restricted) = state();
                 if denies_all || denied_total() > 0 {
                     status_warn_fg()
-                } else if open.get() {
+                } else if open.get() || auth_on || restricted {
                     accent_blue_text()
                 } else {
                     fg_secondary()
@@ -219,7 +220,7 @@ pub(crate) fn proxy_auth_section(
                 "格式为 user:pass，留空表示不校验（/zniff 安装页豁免）。",
                 "Format: user:pass. Empty disables auth (/zniff is exempt).",
             ))
-            .text_size(px(11.5))
+            .text_size(px(TEXT_XS))
             .line_height(Points(17.0))
             .text_color(fg_muted()),
         )
@@ -239,14 +240,14 @@ pub(crate) fn proxy_auth_section(
                         .placeholder_color(move || color(fg_muted()))
                         .flex_1()
                         .min_w(px(0.0))
-                        .h(px(28.0))
+                        .h(px(ControlSize::Sm.height()))
                         .px_2()
-                        .rounded(px(6.0))
+                        .rounded(px(RADIUS_MD))
                         .bg(bg_code())
                         .border_1()
                         .border_color(border_control())
                         .focus(|style| style.border_color(accent_blue()))
-                        .text_size(px(12.0))
+                        .text_size(px(TEXT_SM))
                         .text_color(fg_primary())
                         .on_change(move |text: &str| {
                             apply_proxy_auth_change(&change_controls, proxy_auth, text);
@@ -306,7 +307,7 @@ pub(crate) fn allow_hosts_section(
                 "每行或逗号分隔：精确域名、*.子域、* 放行全部、-域名 排除，支持 # 注释。",
                 "Line/comma separated: exact host, *.sub, * for all, -host to exclude, # comments.",
             ))
-            .text_size(px(11.5))
+            .text_size(px(TEXT_XS))
             .line_height(Points(17.0))
             .text_color(fg_muted()),
         )
@@ -317,7 +318,7 @@ pub(crate) fn allow_hosts_section(
                     view()
                         .w_full()
                         .p_2()
-                        .rounded(px(6.0))
+                        .rounded(px(RADIUS_MD))
                         .border_1()
                         .border_color(border_control())
                         .bg(bg_code())
@@ -331,7 +332,7 @@ pub(crate) fn allow_hosts_section(
                                     raw.into()
                                 }
                             })
-                            .text_size(px(11.5))
+                            .text_size(px(TEXT_XS))
                             .text_color(fg_secondary()),
                         )
                 },
@@ -409,13 +410,13 @@ fn allow_hosts_header_row(
                         view()
                             .px_1p5()
                             .py_0p5()
-                            .rounded(px(4.0))
+                            .rounded(px(RADIUS_SM))
                             .border_1()
                             .border_color(border_control())
                             .bg(bg_control())
                             .child(
                                 text(tr("环境变量锁定", "Locked by env/CLI"))
-                                    .text_size(px(10.0))
+                                    .text_size(px(TEXT_XS))
                                     .text_color(fg_muted()),
                             )
                     },
@@ -432,7 +433,7 @@ fn allow_hosts_header_row(
                             t(lang, "不限制", "Unrestricted").into()
                         }
                     })
-                    .text_size(px(11.0))
+                    .text_size(px(TEXT_XS))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(move || {
                         let parsed = rules();
@@ -449,22 +450,11 @@ fn allow_hosts_header_row(
 }
 
 fn clear_pill_button(on_press: impl Fn() + 'static) -> impl IntoElement {
-    view()
-        .h(px(28.0))
-        .px_2()
-        .rounded(px(6.0))
-        .border_1()
-        .border_color(border_control())
-        .bg(bg_control())
-        .hover(|s| s.bg(bg_control_hover()))
-        .active(|s| s.opacity(0.8))
-        .cursor(Cursor::Pointer)
-        .items_center()
-        .justify_center()
+    ui_button(ButtonVariant::Outline, ControlSize::Sm)
         .on_press(on_press)
         .child(
             text(tr("清空", "Clear"))
-                .text_size(px(11.5))
+                .text_size(px(TEXT_SM))
                 .text_color(fg_secondary()),
         )
 }

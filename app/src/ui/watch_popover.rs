@@ -70,6 +70,8 @@ pub(crate) fn watch_popover(props: WatchPopoverProps) -> impl IntoElement {
     let eval = props.eval;
     popover()
         .open(move || Some(open.get()))
+        .popup_style(ui_popup_style)
+        .popup_starting_style(ui_popup_starting_style)
         .placement(Placement::Top)
         .align(Align::End)
         .offset(px(6.0))
@@ -91,13 +93,14 @@ fn watch_trigger(
     let has_hits = move || eval.with(|e| e.total_hits > 0);
     let has_active = move || eval.with(|e| e.active_rules > 0);
     view()
-        .h(px(22.0))
-        .px_2()
+        .role(AccessibilityRole::Button)
+        .h(px(ControlSize::Xs.height()))
+        .px(px(ControlSize::Xs.padding_x()))
         .flex_shrink_0()
         .flex_row()
         .items_center()
-        .gap_1()
-        .rounded(px(6.0))
+        .gap(px(ControlSize::Xs.gap()))
+        .rounded(px(RADIUS_SM))
         .border_1()
         .border_color(move || {
             if has_hits() {
@@ -105,39 +108,42 @@ fn watch_trigger(
             } else if open.get() || has_active() {
                 accent_blue_border()
             } else {
-                border_control()
+                AdaptiveColor::TRANSPARENT
             }
         })
         .bg(move || {
             if has_hits() {
                 status_warn_bg()
-            } else if open.get() {
+            } else if open.get() || has_active() {
                 accent_blue_soft()
             } else {
-                bg_control()
+                AdaptiveColor::TRANSPARENT
             }
         })
         .hover(|style| {
             style.bg(move || {
                 if has_hits() {
                     status_warn_bg()
-                } else if open.get() {
+                } else if open.get() || has_active() {
                     accent_blue_soft_hover()
                 } else {
                     bg_control_hover()
                 }
             })
         })
-        .cursor(Cursor::Pointer)
-        .active(|style| style.opacity(0.75))
+        .active(|style| style.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .label(tr("匹配提醒", "Watch Alerts"))
         .child(glyph_px(
-            11.0,
+            ControlSize::Xs.icon_size(),
             || Glyph::Alert,
             move || {
                 if has_hits() {
                     color(status_warn_fg())
-                } else if has_active() {
+                } else if open.get() || has_active() {
                     color(accent_blue_text())
                 } else {
                     color(fg_muted())
@@ -166,12 +172,13 @@ fn watch_trigger(
                     t(lang, "提醒", "Watch").into()
                 }
             })
-            .text_size(px(11.0))
+            .tabular_nums()
+            .text_size(px(TEXT_XS))
             .font_weight(FontWeight::MEDIUM)
             .text_color(move || {
                 if has_hits() {
                     status_warn_fg()
-                } else if has_active() {
+                } else if open.get() || has_active() {
                     accent_blue_text()
                 } else {
                     fg_secondary()
@@ -198,11 +205,6 @@ fn watch_panel(props: WatchPopoverProps) -> impl IntoElement {
         .w(move || px((window().width.0 - 24.0).clamp(280.0, 380.0)))
         .p_3()
         .gap_2p5()
-        .rounded(px(10.0))
-        .border_1()
-        .border_color(border_strong())
-        .bg(bg_card())
-        .shadow_md()
         .child(watch_panel_header(
             effective_filter,
             rules,
@@ -235,34 +237,23 @@ fn watch_panel_header(
         .items_center()
         .justify_between()
         .gap_2()
-        .child(
-            text(tr("匹配提醒 (Watch)", "Watch Alerts"))
-                .text_size(px(13.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(fg_primary()),
-        )
+        .child(ui_section_header(tr("匹配提醒 (Watch)", "Watch Alerts")))
         .child(when(
             move || !effective_filter.get().trim().is_empty(),
             move || {
                 let controls = controls.clone();
-                view()
-                    .h(px(22.0))
-                    .px_2()
-                    .rounded(px(5.0))
-                    .border_1()
+                ui_button(ButtonVariant::Outline, ControlSize::Xs)
                     .border_color(accent_blue_border())
                     .bg(accent_blue_soft())
                     .hover(|s| s.bg(accent_blue_soft_hover()))
-                    .items_center()
-                    .justify_center()
-                    .cursor(Cursor::Pointer)
+                    .active(|s| s.bg(bg_control_active()))
                     .on_press(move || {
                         let cur = effective_filter.get_untracked();
                         add_watch_rule(&controls, rules, "", &cur);
                     })
                     .child(
                         control_text(tr("监听当前过滤", "Watch current filter"))
-                            .text_size(px(11.0))
+                            .text_size(px(TEXT_XS))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(accent_blue_text()),
                     )
@@ -287,13 +278,13 @@ fn watch_add_form(
                 .child(
                     input()
                         .flex_1()
-                        .h(px(28.0))
+                        .h(px(ControlSize::Sm.height()))
                         .px_2()
-                        .rounded(px(CONTROL_RADIUS))
+                        .rounded(px(RADIUS_MD))
                         .border_1()
                         .border_color(border_control())
                         .bg(bg_canvas())
-                        .text_size(px(12.0))
+                        .text_size(px(TEXT_SM))
                         .text_color(fg_primary())
                         .placeholder(tr(
                             "过滤表达式（如 status:5xx host:api.x.com）",
@@ -314,17 +305,7 @@ fn watch_add_form(
                         }),
                 )
                 .child(
-                    view()
-                        .h(px(28.0))
-                        .px_2p5()
-                        .rounded(px(CONTROL_RADIUS))
-                        .border_1()
-                        .border_color(accent_blue_border())
-                        .bg(accent_blue())
-                        .hover(|s| s.bg(accent_blue_hover()))
-                        .items_center()
-                        .justify_center()
-                        .cursor(Cursor::Pointer)
+                    ui_button(ButtonVariant::Primary, ControlSize::Sm)
                         .on_press(move || {
                             if add_watch_rule(
                                 &controls_add,
@@ -338,7 +319,7 @@ fn watch_add_form(
                         })
                         .child(
                             control_text(tr("添加", "Add"))
-                                .text_size(px(11.5))
+                                .text_size(px(TEXT_SM))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(fg_on_accent()),
                         ),
@@ -347,13 +328,13 @@ fn watch_add_form(
         .child(
             input()
                 .w_full()
-                .h(px(26.0))
+                .h(px(ControlSize::Sm.height()))
                 .px_2()
-                .rounded(px(CONTROL_RADIUS))
+                .rounded(px(RADIUS_MD))
                 .border_1()
                 .border_color(border_control())
                 .bg(bg_canvas())
-                .text_size(px(11.5))
+                .text_size(px(TEXT_SM))
                 .text_color(fg_secondary())
                 .placeholder(tr(
                     "可选备注名（如：支付接口 5xx）",
@@ -386,7 +367,7 @@ fn watch_rules_list(
                         "Save a filter expression to count hits and alert when new matching flows arrive",
                     ))
                     .text_center()
-                    .text_size(px(11.5))
+                    .text_size(px(TEXT_SM))
                     .text_color(fg_muted()),
                 )
         },
@@ -437,7 +418,7 @@ fn watch_rule_row(
         .w_full()
         .px_2()
         .py_1p5()
-        .rounded(px(7.0))
+        .rounded(px(RADIUS_MD))
         .border_1()
         .border_color(border_control())
         .bg(bg_canvas())
@@ -446,9 +427,10 @@ fn watch_rule_row(
         .gap_2()
         .child(
             view()
+                .role(AccessibilityRole::Checkbox)
                 .w(px(16.0))
                 .h(px(16.0))
-                .rounded(px(4.0))
+                .rounded(px(RADIUS_SM))
                 .border_1()
                 .border_color(move || {
                     if enabled() {
@@ -467,7 +449,10 @@ fn watch_rule_row(
                 .items_center()
                 .justify_center()
                 .flex_shrink_0()
-                .cursor(Cursor::Pointer)
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .focus_visible(apply_focus_ring)
                 .on_press(move || {
                     let target_filter = item.with_untracked(|(_, r)| r.filter.clone());
                     let mut next = rules.get_untracked();
@@ -479,14 +464,15 @@ fn watch_rule_row(
                     }
                     persist_watch_rules(&controls_toggle, rules, next);
                 })
-                .child(when(enabled, || glyph_px(10.0, || Glyph::Check, white))),
+                .child(when(enabled, || {
+                    glyph_px(10.0, || Glyph::Check, || color(fg_on_accent()))
+                })),
         )
         .child(
             view()
                 .flex_1()
                 .min_w(px(0.0))
                 .gap(px(1.0))
-                .cursor(Cursor::Pointer)
                 .on_press(move || {
                     let f = item.with_untracked(|(_, r)| r.filter.clone());
                     let (_, latest_id) = hit_info();
@@ -509,7 +495,7 @@ fn watch_rule_row(
                     })
                     .number_of_lines(1)
                     .text_overflow(EllipsizeMode::Tail)
-                    .text_size(px(12.0))
+                    .text_size(px(TEXT_SM))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(move || if enabled() { fg_primary() } else { fg_muted() }),
                 )
@@ -519,7 +505,7 @@ fn watch_rule_row(
                         mono(move || -> SharedString { filter_str().into() })
                             .number_of_lines(1)
                             .text_overflow(EllipsizeMode::Tail)
-                            .text_size(px(10.5))
+                            .text_size(px(TEXT_XS))
                             .text_color(fg_muted())
                     },
                 )),
@@ -528,7 +514,7 @@ fn watch_rule_row(
             view()
                 .px_1p5()
                 .py_0p5()
-                .rounded(px(10.0))
+                .rounded(px(RADIUS_SM))
                 .flex_shrink_0()
                 .bg(move || {
                     if hit_info().0 > 0 {
@@ -542,7 +528,7 @@ fn watch_rule_row(
                         present::format_thousands(hit_info().0 as u64).into()
                     })
                     .tabular_nums()
-                    .text_size(px(11.0))
+                    .text_size(px(TEXT_XS))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(move || {
                         if hit_info().0 > 0 {
@@ -554,22 +540,20 @@ fn watch_rule_row(
                 ),
         )
         .child(
-            view()
-                .w(px(20.0))
-                .h(px(20.0))
-                .rounded(px(4.0))
-                .flex_shrink_0()
-                .items_center()
-                .justify_center()
-                .hover(|s| s.bg(bg_control_hover()))
-                .cursor(Cursor::Pointer)
-                .label(tr("删除提醒", "Delete watch"))
+            ui_icon_button(ButtonVariant::Ghost, ControlSize::Xs)
+                .accessibility_label(move || {
+                    Some(SharedString::from(tr("删除提醒", "Delete watch")()))
+                })
                 .on_press(move || {
                     let target_filter = item.with_untracked(|(_, r)| r.filter.clone());
                     let mut next = rules.get_untracked();
                     next.retain(|r| !r.filter.eq_ignore_ascii_case(&target_filter));
                     persist_watch_rules(&controls_delete, rules, next);
                 })
-                .child(glyph_px(10.0, || Glyph::Close, || color(fg_muted()))),
+                .child(glyph_px(
+                    ControlSize::Xs.icon_size(),
+                    || Glyph::Close,
+                    || color(fg_muted()),
+                )),
         )
 }
