@@ -42,6 +42,7 @@ pub(crate) struct QuickRuleDraftSignals {
     pub(crate) from: Signal<String>,
     pub(crate) to: Signal<String>,
     pub(crate) modes: QuickRuleModeSignals,
+    pub(crate) editing_line: Signal<Option<usize>>,
 }
 
 /// Contextual one-click quick-rule templates offered in the flow row and detail menus.
@@ -131,6 +132,7 @@ pub(crate) fn prefill_for_flow_action(
 
 /// Applies a `QuickRulePrefill` into the Quick Add Rule form signals.
 pub(crate) fn apply_quick_rule_prefill(prefill: QuickRulePrefill, draft: QuickRuleDraftSignals) {
+    draft.editing_line.set(None);
     draft.kind.set(prefill.kind);
     draft.host.set(prefill.host);
     draft.path.set(prefill.path);
@@ -393,6 +395,7 @@ mod tests {
                 from: signal("old_from".to_string()),
                 to: signal("old_to".to_string()),
                 modes: QuickRuleModeSignals::new(),
+                editing_line: signal(None),
             };
             assert!(draft.modes.req_res.get_untracked());
 

@@ -978,7 +978,7 @@ pub(crate) fn summary(
                                 .text_color(fg_muted()),
                         ),
                 )
-                .child(detail_rule_badges(shown, profiles))
+                .child(detail_rule_badges(shown, profiles, controls.clone()))
                 .child(when(
                     move || !shown.comment.get().is_empty() && !shown.editing_comment.get(),
                     move || {

@@ -83,7 +83,7 @@ pub(crate) fn split_filter_tokens(filter: &str) -> Vec<String> {
 fn join_comma_or_tokens(normalized: &str) -> Vec<String> {
     let mut tokens: Vec<String> = Vec::new();
     let mut join_next = false;
-    for raw in normalized.split_whitespace() {
+    for raw in session::split_filter_words(normalized) {
         if raw == "," {
             join_next = true;
             continue;
@@ -103,15 +103,15 @@ fn join_comma_or_tokens(normalized: &str) -> Vec<String> {
                 if !last.ends_with(',') {
                     last.push(',');
                 }
-                last.push_str(raw);
+                last.push_str(&raw);
             } else {
-                tokens.push(raw.to_string());
+                tokens.push(raw);
             }
-            join_next = raw.ends_with(',');
+            join_next = tokens.last().is_some_and(|t| t.ends_with(','));
             continue;
         }
         join_next = raw.ends_with(',');
-        tokens.push(raw.to_string());
+        tokens.push(raw);
     }
     tokens
 }

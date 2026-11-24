@@ -155,6 +155,7 @@ pub fn App() -> impl IntoElement {
     let compose = Compose {
         composing: signal(false),
         response: signal(false),
+        paused_id: signal(None),
         method: signal(String::new()),
         url: signal(String::new()),
         headers: signal(String::new()),

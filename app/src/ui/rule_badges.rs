@@ -89,7 +89,21 @@ pub(crate) fn rule_hover_summary(hits: &[session::RuleHit], fallback_summary: &s
 }
 
 /// Opens the rules panel switched to `hit`'s source group (or workspace) and highlights its line.
-pub(crate) fn focus_rule_hit(profiles: ProfileSignals, hit: &session::RuleHit) {
+pub(crate) fn focus_rule_hit(
+    profiles: ProfileSignals,
+    controls: &Controls,
+    hit: &session::RuleHit,
+) {
+    if let Some(group) = hit.group_name.as_deref()
+        && !profiles
+            .rule_groups
+            .with_untracked(|groups| rule_group_exists(groups, Some(group)))
+    {
+        set_status(controls, StatusMsg::RuleGroupMissing(group.to_string()));
+        return;
+    }
+    profiles.filter_panel_open.set(false);
+    profiles.preset_panel_open.set(false);
     profiles.editing_group.set(hit.group_name.clone());
     profiles.focused_rule_line.set(if hit.line_no > 0 {
         Some((hit.group_name.clone(), hit.line_no))
@@ -111,7 +125,11 @@ fn rule_badge_colors(verb: &str) -> (AdaptiveColor, AdaptiveColor, AdaptiveColor
 }
 
 /// Renders clickable per-rule hit badges (plus optional GraphQL op badge) in the detail summary.
-pub(crate) fn detail_rule_badges(shown: Shown, profiles: ProfileSignals) -> impl IntoElement {
+pub(crate) fn detail_rule_badges(
+    shown: Shown,
+    profiles: ProfileSignals,
+    controls: Arc<Controls>,
+) -> impl IntoElement {
     view()
         .flex_row()
         .flex_wrap()
@@ -120,6 +138,7 @@ pub(crate) fn detail_rule_badges(shown: Shown, profiles: ProfileSignals) -> impl
         .child(when(
             move || shown.rule_hits.with(|hits| !hits.is_empty()),
             move || {
+                let badge_controls = controls.clone();
                 each(
                     move || {
                         shown
@@ -143,6 +162,7 @@ pub(crate) fn detail_rule_badges(shown: Shown, profiles: ProfileSignals) -> impl
                         let glyph = rule_glyph_for_verb(&hit.verb);
                         let label = hit.format_badge();
                         let click_hit = hit.clone();
+                        let click_controls = badge_controls.clone();
                         view()
                             .role(AccessibilityRole::Button)
                             .max_w(px(220.0))
@@ -166,7 +186,7 @@ pub(crate) fn detail_rule_badges(shown: Shown, profiles: ProfileSignals) -> impl
                                 "点击在规则编辑器中定位此规则",
                                 "Click to jump to this rule in editor",
                             ))
-                            .on_press(move || focus_rule_hit(profiles, &click_hit))
+                            .on_press(move || focus_rule_hit(profiles, &click_controls, &click_hit))
                             .child(glyph_px(11.0, move || glyph, move || color(fg_col)))
                             .child(
                                 mono(label)

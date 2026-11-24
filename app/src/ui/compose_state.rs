@@ -55,6 +55,7 @@ fn restore_or_reset_new_draft(compose: Compose) {
         compose.body.set(String::new());
     }
     compose.response.set(false);
+    compose.paused_id.set(None);
     compose.status.set(String::new());
     compose.composing.set(true);
 }
@@ -82,7 +83,14 @@ pub(crate) fn begin_compose(controls: &Controls, id: Option<u64>, compose: Compo
         .hub
         .paused()
         .is_some_and(|(paused_id, side)| id == Some(paused_id) && side == BreakSide::Response);
+    let is_paused_flow = controls
+        .hub
+        .paused()
+        .is_some_and(|(paused_id, _)| id == Some(paused_id));
     compose.response.set(response);
+    compose
+        .paused_id
+        .set(if is_paused_flow { id } else { None });
     compose.method.set(flow.method);
     compose.url.set(flow.url);
     if response {
@@ -114,6 +122,7 @@ pub(crate) fn header_text(headers: &[(String, String)]) -> String {
 pub(crate) fn reset_compose(compose: Compose) {
     compose.composing.set(false);
     compose.response.set(false);
+    compose.paused_id.set(None);
     compose.method.set(String::new());
     compose.url.set(String::new());
     compose.headers.set(String::new());

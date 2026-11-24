@@ -312,6 +312,7 @@ fn make_compose() -> Compose {
     Compose {
         composing: signal(false),
         response: signal(false),
+        paused_id: signal(None),
         method: signal(String::new()),
         url: signal(String::new()),
         headers: signal(String::new()),
@@ -369,6 +370,7 @@ fn make_rule_draft() -> QuickRuleDraftSignals {
         from: signal(String::new()),
         to: signal(String::new()),
         modes: QuickRuleModeSignals::new(),
+        editing_line: signal(None),
     }
 }
 
@@ -796,7 +798,7 @@ fn b1_b2_b3_rule_badges_line_hits_and_dry_run_zh_en() {
             .h(px(480.0))
             .flex_col()
             .gap_2()
-            .child(detail_rule_badges(shown, profiles))
+            .child(detail_rule_badges(shown, profiles, controls.clone()))
             .child(rule_line_strip(
                 target,
                 controls.clone(),
@@ -2328,7 +2330,7 @@ fn bug3_external_jumps_switch_rules_panel_active_tab() {
             .h(px(860.0))
             .flex_col()
             .gap_2()
-            .child(detail_rule_badges(shown, profiles))
+            .child(detail_rule_badges(shown, profiles, controls.clone()))
             .child(error_summary_banner(shown, controls.clone(), profiles))
             .child(rules_panel(profiles, controls, draft))
     }

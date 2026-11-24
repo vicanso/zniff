@@ -143,6 +143,19 @@ pub(crate) fn append_template_rule(current: &str, rule_line: &str) -> String {
     }
 }
 
+/// Appends `rule_line` only when the exact trimmed line is not already present.
+/// Returns `(next_text, added)`.
+pub(crate) fn append_template_rule_checked(current: &str, rule_line: &str) -> (String, bool) {
+    let trimmed_line = rule_line.trim();
+    if trimmed_line.is_empty() {
+        return (current.to_string(), false);
+    }
+    if current.lines().any(|line| line.trim() == trimmed_line) {
+        return (current.to_string(), false);
+    }
+    (append_template_rule(current, trimmed_line), true)
+}
+
 fn rule_templates_menu_trigger(open: Signal<bool>) -> impl IntoElement {
     view()
         .role(AccessibilityRole::Button)
@@ -301,6 +314,7 @@ fn rule_preset_menu_item(
         .focus_visible(apply_focus_ring)
         .on_select(move || {
             if tpl.open_in_form {
+                draft.editing_line.set(None);
                 fill_draft_from_rule_line(
                     tpl.rule_line,
                     draft.kind,
@@ -313,8 +327,20 @@ fn rule_preset_menu_item(
                 );
                 quick_add_open.set(true);
             } else {
-                let next = append_template_rule(&target.current_text_untracked(), tpl.rule_line);
-                target.commit(&controls, next);
+                let (next, added) =
+                    append_template_rule_checked(&target.current_text_untracked(), tpl.rule_line);
+                if added {
+                    target.commit(&controls, next);
+                    set_status(
+                        &controls,
+                        StatusMsg::TemplateRuleAdded(tpl.rule_line.to_string()),
+                    );
+                } else {
+                    set_status(
+                        &controls,
+                        StatusMsg::TemplateRuleAlreadyPresent(tpl.rule_line.to_string()),
+                    );
+                }
             }
             open.set(false);
         })
@@ -326,12 +352,47 @@ fn rule_preset_menu_item(
                 .justify_between()
                 .gap_2()
                 .child(
-                    text(move || SharedString::from(tpl.label(ui_lang(langs))))
+                    view()
                         .flex_shrink_0()
-                        .number_of_lines(1)
-                        .text_size(px(TEXT_SM))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(fg_primary()),
+                        .flex_row()
+                        .items_center()
+                        .gap_1p5()
+                        .child(
+                            text(move || SharedString::from(tpl.label(ui_lang(langs))))
+                                .number_of_lines(1)
+                                .text_size(px(TEXT_SM))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(fg_primary()),
+                        )
+                        .child(
+                            view()
+                                .px_1()
+                                .h(px(16.0))
+                                .rounded(px(RADIUS_SM))
+                                .items_center()
+                                .justify_center()
+                                .bg(if tpl.open_in_form {
+                                    bg_control()
+                                } else {
+                                    accent_blue_soft()
+                                })
+                                .child(
+                                    text(if tpl.open_in_form {
+                                        tr("填表", "Form")
+                                    } else {
+                                        tr("一键", "Instant")
+                                    })
+                                    .text_size(px(TEXT_XS))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(
+                                        if tpl.open_in_form {
+                                            fg_muted()
+                                        } else {
+                                            accent_blue_text()
+                                        },
+                                    ),
+                                ),
+                        ),
                 )
                 .child(
                     mono(tpl.rule_line)
@@ -423,11 +484,24 @@ fn rule_kind_form_group_section(
                 .ease_out()
                 .focus_visible(apply_focus_ring)
                 .on_select(move || {
-                    let next = append_template_rule(
+                    let (next, added) = append_template_rule_checked(
                         &target.current_text_untracked(),
                         PROTO_RULE_TEMPLATE.rule_line,
                     );
-                    target.commit(&controls, next);
+                    if added {
+                        target.commit(&controls, next);
+                        set_status(
+                            &controls,
+                            StatusMsg::TemplateRuleAdded(PROTO_RULE_TEMPLATE.rule_line.to_string()),
+                        );
+                    } else {
+                        set_status(
+                            &controls,
+                            StatusMsg::TemplateRuleAlreadyPresent(
+                                PROTO_RULE_TEMPLATE.rule_line.to_string(),
+                            ),
+                        );
+                    }
                     open.set(false);
                 })
                 .child(
@@ -436,7 +510,18 @@ fn rule_kind_form_group_section(
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(fg_primary()),
                 )
-                .child(mono("proto").text_size(px(TEXT_XS)).text_color(fg_muted()))
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            text(tr("插入模板", "Insert template"))
+                                .text_size(px(TEXT_XS))
+                                .text_color(fg_muted()),
+                        )
+                        .child(mono("proto").text_size(px(TEXT_XS)).text_color(fg_muted())),
+                )
         }))
 }
 

@@ -149,6 +149,26 @@ fn profile_saved_trigger(ctx: ProfileDockMenuCtx) -> impl IntoElement {
         .items_center()
         .gap_1p5()
         .disabled(move || saved.with(Vec::is_empty))
+        .disabled_style(|style| style.opacity(0.6))
+        .tooltip(
+            tooltip().child(ui_tooltip_surface(
+                text(move || -> SharedString {
+                    let lang = ui_lang(langs);
+                    if saved.with(Vec::is_empty) {
+                        t(
+                            lang,
+                            "暂无已保存预设，可在下方填写名称后点保存",
+                            "No saved presets yet — enter a name below and click Save",
+                        )
+                    } else {
+                        t(lang, "选择或切换已保存预设", "Switch or clear saved preset")
+                    }
+                    .into()
+                })
+                .text_size(px(TEXT_SM))
+                .text_color(fg_primary()),
+            )),
+        )
         .child(
             view()
                 .w(px(6.0))
@@ -169,9 +189,9 @@ fn profile_saved_trigger(ctx: ProfileDockMenuCtx) -> impl IntoElement {
                 if let Some(name) = shown_profile_name(profiles) {
                     name.into()
                 } else if saved.with(Vec::is_empty) {
-                    t(lang, "暂无已保存配置", "No saved setups").into()
+                    t(lang, "暂无已保存预设", "No saved presets").into()
                 } else {
-                    t(lang, "选择已保存配置", "Saved setups").into()
+                    t(lang, "选择已保存预设", "Saved presets").into()
                 }
             })
             .flex_auto()
@@ -194,7 +214,10 @@ fn profile_saved_trigger(ctx: ProfileDockMenuCtx) -> impl IntoElement {
             move || !saved.with(Vec::is_empty),
             move || menu_count_badge(move || saved.with(Vec::len)),
         ))
-        .child(glyph_px(12.0, || Glyph::Chevron, || color(fg_muted())))
+        .child(when(
+            move || !saved.with(Vec::is_empty),
+            move || glyph_px(12.0, || Glyph::Chevron, || color(fg_muted())),
+        ))
 }
 
 fn profile_saved_popup(ctx: ProfileDockMenuCtx) -> impl IntoElement {
@@ -456,15 +479,7 @@ fn select_saved_profile_row(
         profiles.history,
     );
     profiles.name.set(preset.name.clone());
-    clear_rule_draft(
-        draft.host,
-        draft.path,
-        draft.op,
-        draft.from,
-        draft.to,
-        draft.modes,
-        draft.kind,
-    );
+    clear_quick_draft(draft);
     apply_saved_profile(
         &preset,
         profiles.filter,
@@ -487,6 +502,8 @@ fn select_saved_profile_row(
         preset.show_tunnel_failures,
         profiles.history,
     );
+    dropdown_open.set(false);
+    set_status(controls, StatusMsg::PresetSwitched(preset.name));
 }
 
 fn profile_name_chip(name: impl Fn() -> String + 'static, max_w: f32) -> impl IntoElement {
@@ -539,6 +556,7 @@ pub(crate) fn profile_history_menu(ctx: ProfileDockMenuCtx) -> impl IntoElement 
 }
 
 fn profile_history_trigger(ctx: ProfileDockMenuCtx) -> impl IntoElement {
+    let langs = ui_langs();
     let history = ctx.profiles.history;
     let history_open = ctx.history_open;
     view()
@@ -590,10 +608,26 @@ fn profile_history_trigger(ctx: ProfileDockMenuCtx) -> impl IntoElement {
         .items_center()
         .gap_1()
         .disabled(move || history.with(Vec::is_empty))
-        .tooltip(label_tip(
-            "最近 10 个配置历史版本，点击可恢复",
-            "Last 10 setup versions, click to restore",
-        ))
+        .disabled_style(|style| style.opacity(0.6))
+        .tooltip(
+            tooltip().child(ui_tooltip_surface(
+                text(move || -> SharedString {
+                    let lang = ui_lang(langs);
+                    if history.with(Vec::is_empty) {
+                        t(lang, "暂无历史版本", "No version history yet")
+                    } else {
+                        t(
+                            lang,
+                            "最近 10 个预设历史版本，点击可恢复",
+                            "Last 10 preset versions, click to restore",
+                        )
+                    }
+                    .into()
+                })
+                .text_size(px(TEXT_SM))
+                .text_color(fg_primary()),
+            )),
+        )
         .child(glyph_px(
             12.0,
             || Glyph::History,
@@ -717,15 +751,7 @@ fn history_profile_menu_row(
                 profiles.history,
             );
             profiles.name.set(preset.name.clone());
-            clear_rule_draft(
-                draft.host,
-                draft.path,
-                draft.op,
-                draft.from,
-                draft.to,
-                draft.modes,
-                draft.kind,
-            );
+            clear_quick_draft(draft);
             apply_saved_profile(
                 &preset,
                 profiles.filter,

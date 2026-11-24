@@ -62,7 +62,11 @@ pub(crate) fn effective_quick_inputs<'a>(
 }
 
 pub(crate) fn effective_quick_path(kind: u8, path: &str) -> &str {
-    if kind % 16 == 14 { "" } else { path }
+    if matches!(kind % 16, 10 | 14) {
+        ""
+    } else {
+        path
+    }
 }
 
 pub(crate) fn effective_quick_op(kind: u8, op: &str) -> &str {
@@ -71,24 +75,6 @@ pub(crate) fn effective_quick_op(kind: u8, op: &str) -> &str {
     } else {
         ""
     }
-}
-
-pub(crate) fn clear_rule_draft(
-    host: Signal<String>,
-    path: Signal<String>,
-    op: Signal<String>,
-    from: Signal<String>,
-    to: Signal<String>,
-    modes: QuickRuleModeSignals,
-    kind: Signal<u8>,
-) {
-    host.set(String::new());
-    path.set(String::new());
-    op.set(String::new());
-    from.set(String::new());
-    to.set(String::new());
-    modes.reset();
-    kind.set(0);
 }
 
 pub(crate) fn clear_working_setup_config(config: &mut config::Config) {
@@ -135,42 +121,23 @@ pub(crate) fn deselect_active_profile(profiles: ProfileSignals, controls: &Contr
     save_config_or_notify(controls, PrefName::Profiles, clear_working_setup_config);
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn blank_working_setup(
-    name: Signal<String>,
-    filter: Signal<String>,
-    bypass: Signal<String>,
-    rules: Signal<String>,
-    upstream: Signal<String>,
-    rules_on: Signal<bool>,
-    breaks_on: Signal<bool>,
-    tunnels: Signal<bool>,
-    draft_host: Signal<String>,
-    draft_path: Signal<String>,
-    draft_op: Signal<String>,
-    draft_from: Signal<String>,
-    draft_to: Signal<String>,
-    draft_modes: QuickRuleModeSignals,
-    draft_kind: Signal<u8>,
+    profiles: ProfileSignals,
+    draft: QuickRuleDraftSignals,
     controls: &Controls,
 ) {
-    name.set(String::new());
-    filter.set(String::new());
-    bypass.set(String::new());
-    rules.set(String::new());
-    upstream.set(String::new());
-    clear_rule_draft(
-        draft_host,
-        draft_path,
-        draft_op,
-        draft_from,
-        draft_to,
-        draft_modes,
-        draft_kind,
-    );
-    rules_on.set(true);
-    breaks_on.set(true);
-    tunnels.set(false);
+    profiles.name.set(String::new());
+    profiles.filter.set(String::new());
+    profiles.filter_enabled.set(true);
+    profiles.bypass.set(String::new());
+    profiles.rules.set(String::new());
+    profiles.upstream.set(String::new());
+    profiles.editing_group.set(None);
+    profiles.focused_rule_line.set(None);
+    clear_quick_draft(draft);
+    profiles.rules_on.set(true);
+    profiles.breaks_on.set(true);
+    profiles.show_tunnels.set(false);
     controls.hub.set_bypass("");
     controls.hub.set_rules("");
     controls.hub.set_upstream("");

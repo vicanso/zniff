@@ -32,6 +32,7 @@ pub(crate) fn format_rules_pill_tooltip(
     rule_count: usize,
     enabled_groups: usize,
     rules_on: bool,
+    breaks_on: bool,
     lang: Lang,
 ) -> String {
     let hint = t(
@@ -39,12 +40,12 @@ pub(crate) fn format_rules_pill_tooltip(
         "规则、分组、直通与上游代理",
         "Rules, groups, TLS bypass & upstream",
     );
-    if rule_count == 0 && enabled_groups == 0 {
+    if rule_count == 0 && enabled_groups == 0 && breaks_on {
         return hint.to_string();
     }
     let rules_str = present::format_thousands(rule_count as u64);
     let groups_str = present::format_thousands(enabled_groups as u64);
-    let summary = match (rules_on, enabled_groups > 0, lang) {
+    let mut summary = match (rules_on, enabled_groups > 0, lang) {
         (true, true, Lang::Zh) => {
             format!("已启用 {rules_str} 条规则 · {groups_str} 个分组")
         }
@@ -62,6 +63,9 @@ pub(crate) fn format_rules_pill_tooltip(
         }
         (false, false, Lang::En) => format!("Rules paused ({rules_str} rules)"),
     };
+    if !breaks_on {
+        summary.push_str(t(lang, " · 断点已暂停", " · Breaks paused"));
+    }
     format!("{summary}\n{hint}")
 }
 
@@ -186,6 +190,7 @@ pub(crate) fn rules_menu_popover(
                                 active_rules_count.get(),
                                 enabled_groups_count.get(),
                                 rules_on.get(),
+                                breaks_on.get(),
                                 ui_lang(langs),
                             )
                             .into()
@@ -239,7 +244,7 @@ pub(crate) fn rules_menu_popover(
                             .items_center()
                             .justify_center()
                             .bg(move || {
-                                if rules_on.get() {
+                                if !capture_muted(rules_on, breaks_on) {
                                     accent_blue_soft()
                                 } else {
                                     status_warn_bg()
@@ -261,7 +266,7 @@ pub(crate) fn rules_menu_popover(
                                 .text_size(px(TEXT_XS))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(move || {
-                                    if rules_on.get() {
+                                    if !capture_muted(rules_on, breaks_on) {
                                         accent_blue_text()
                                     } else {
                                         status_warn_fg()
@@ -352,6 +357,7 @@ pub(crate) fn rules_panel(
                                 rules_tab_body(
                                     rule_target,
                                     invalid_lines,
+                                    profiles.rules_on,
                                     tab0_controls.clone(),
                                     draft,
                                     quick_add_open,
@@ -436,6 +442,9 @@ fn rules_panel_top_bar(
                     "Enabled",
                     move |enabled| {
                         rules_controls.hub.set_rules_enabled(enabled);
+                        save_config_or_notify(&rules_controls, PrefName::Rules, |cfg| {
+                            cfg.rules_enabled = enabled;
+                        });
                     },
                 ))
                 .child(mini_toggle_switch(
@@ -444,6 +453,9 @@ fn rules_panel_top_bar(
                     "Breaks",
                     move |enabled| {
                         breaks_controls.hub.set_breaks_enabled(enabled);
+                        save_config_or_notify(&breaks_controls, PrefName::Rules, |cfg| {
+                            cfg.breaks_enabled = enabled;
+                        });
                     },
                 )),
         )
@@ -509,6 +521,7 @@ fn rules_panel_tab_button(
 fn rules_tab_body(
     rule_target: RuleEditTarget,
     invalid_lines: Memo<Vec<usize>>,
+    rules_on: Signal<bool>,
     controls: Arc<Controls>,
     draft: QuickRuleDraftSignals,
     quick_add_open: Signal<bool>,
@@ -553,12 +566,13 @@ fn rules_tab_body(
             draft,
             quick_add_open,
         ))
-        .child(rule_dry_run_strip(
+        .child(rule_dry_run_strip_live(
             rule_target,
+            Some(rules_on),
             dry_run_controls,
             move || {
                 if !quick_add_open.get() {
-                    return None;
+                    return DryRunInput::Existing;
                 }
                 let kind = draft.kind.get();
                 let response = draft.modes.mode_for(kind);
@@ -572,10 +586,12 @@ fn rules_tab_body(
                     response,
                     kind,
                 );
-                if line.trim().is_empty() {
-                    None
+                if !line.trim().is_empty() {
+                    DryRunInput::Draft(line)
+                } else if quick_draft_has_input(draft) {
+                    DryRunInput::IncompleteDraft
                 } else {
-                    Some(line)
+                    DryRunInput::Existing
                 }
             },
         ))
@@ -607,24 +623,34 @@ fn rules_editor_toolbar(
             move || {
                 view()
                     .h(px(20.0))
+                    .max_w(px(190.0))
                     .px_1p5()
                     .rounded(px(RADIUS_SM))
+                    .overflow_hidden()
                     .flex_row()
                     .items_center()
                     .bg(status_warn_bg())
                     .child(
                         text(move || {
-                            let lines = invalid_lines.with(|bad| {
-                                bad.iter()
+                            invalid_lines.with(|bad| {
+                                let preview = bad
+                                    .iter()
+                                    .take(2)
                                     .map(usize::to_string)
                                     .collect::<Vec<_>>()
-                                    .join(", ")
-                            });
-                            match ui_lang(langs) {
-                                Lang::Zh => format!("第 {lines} 行语法有误"),
-                                Lang::En => format!("Syntax error on line {lines}"),
-                            }
+                                    .join(", ");
+                                match (ui_lang(langs), bad.len()) {
+                                    (Lang::Zh, 0..=2) => format!("第 {preview} 行语法有误"),
+                                    (Lang::Zh, n) => format!("第 {preview} 等 {n} 行语法有误"),
+                                    (Lang::En, 0..=2) => format!("Syntax error on line {preview}"),
+                                    (Lang::En, n) => {
+                                        format!("Syntax errors on {preview} (+{})", n - 2)
+                                    }
+                                }
+                            })
                         })
+                        .number_of_lines(1)
+                        .text_overflow(EllipsizeMode::Tail)
                         .text_size(px(TEXT_XS))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(status_warn_fg()),
@@ -939,26 +965,15 @@ pub(crate) fn preset_pill_popover(
                         .justify_between()
                         .child(
                             text(tr(
-                                "配置预设（同时保存过滤、规则、直通与上游）",
-                                "Presets (saves filter, rules, bypass & upstream)",
+                                "预设（保存过滤、当前规则、直通与上游；规则分组全局共享）",
+                                "Presets (saves filter, workspace rules, bypass & upstream; groups stay global)",
                             ))
                             .text_size(px(TEXT_SM))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(fg_secondary()),
                         ),
                 )
-                .child(profile_dock(
-                    profiles,
-                    draft.host,
-                    draft.path,
-                    draft.op,
-                    draft.from,
-                    draft.to,
-                    draft.modes,
-                    draft.kind,
-                    import_open,
-                    controls,
-                )),
+                .child(profile_dock(profiles, draft, import_open, controls)),
         )
 }
 
@@ -977,13 +992,14 @@ mod tests {
         assert_eq!(format_rules_indicator(0, 1, Lang::Zh), "0 条 · 1 组");
         assert_eq!(format_rules_indicator(0, 1, Lang::En), "0 · 1g");
         assert!(
-            format_rules_pill_tooltip(1234, 12, true, Lang::En)
+            format_rules_pill_tooltip(1234, 12, true, true, Lang::En)
                 .starts_with("1,234 active rules · 12 groups\n")
         );
         assert!(
-            format_rules_pill_tooltip(1234, 0, false, Lang::Zh)
+            format_rules_pill_tooltip(1234, 0, false, true, Lang::Zh)
                 .starts_with("规则已暂停（1,234 条规则）\n")
         );
+        assert!(format_rules_pill_tooltip(3, 0, true, false, Lang::Zh).contains("断点已暂停"));
     }
 
     #[test]

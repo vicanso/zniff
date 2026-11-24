@@ -256,6 +256,35 @@ pub(crate) fn reset_broken_config_action(
     });
 }
 
+const BREAK_QUEUE_LIMIT: usize = 8;
+
+fn paused_flow_summary(controls: &Controls, id: u64) -> String {
+    controls.hub.with_session(|s| {
+        let Some(flow) = s.get(id) else {
+            return String::new();
+        };
+        let target = format!("{}{}", flow.host, flow.path);
+        let short_target = truncate_tail(&target, 34);
+        if flow.method.is_empty() {
+            short_target
+        } else if short_target.is_empty() {
+            flow.method.clone()
+        } else {
+            format!("{} {short_target}", flow.method)
+        }
+    })
+}
+
+fn truncate_tail(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars();
+    let head: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
+    }
+}
+
 pub(crate) fn break_bar(
     paused: Signal<Option<(u64, BreakSide)>>,
     paused_count: Signal<usize>,
@@ -264,6 +293,7 @@ pub(crate) fn break_bar(
     selected: Signal<Option<u64>>,
     controls: Arc<Controls>,
 ) -> impl IntoElement {
+    let banner_controls = controls.clone();
     let release = controls.clone();
     let release_all = controls.clone();
     let chip_controls = controls.clone();
@@ -284,39 +314,102 @@ pub(crate) fn break_bar(
                 .items_center()
                 .gap_2()
                 .child(
-                    text({
-                        let langs = ui_langs();
-                        move || -> SharedString {
-                            let count = paused_count.get();
-                            let queue_suffix = if count > 1 {
-                                format!(" (1 / {count})")
-                            } else {
-                                String::new()
-                            };
-                            match paused.get() {
-                                Some((id, BreakSide::Response)) => format!(
-                                    "{} #{id} {}{queue_suffix}",
-                                    t(ui_lang(langs), "流量", "Flow"),
-                                    t(ui_lang(langs), "停在响应断点", "is paused on the response")
-                                )
-                                .into(),
-                                Some((id, BreakSide::Request)) => format!(
-                                    "{} #{id} {}{queue_suffix}",
-                                    t(ui_lang(langs), "流量", "Flow"),
-                                    t(ui_lang(langs), "停在请求断点", "is paused on the request")
-                                )
-                                .into(),
-                                None => "".into(),
-                            }
-                        }
-                    })
-                    .flex_1()
-                    .min_w(px(160.0))
-                    .number_of_lines(1)
-                    .text_overflow(EllipsizeMode::Tail)
-                    .text_size(px(TEXT_SM))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(status_warn_fg()),
+                    view()
+                        .flex_1()
+                        .min_w(px(180.0))
+                        .flex_row()
+                        .items_center()
+                        .gap_1p5()
+                        .child(
+                            text({
+                                let langs = ui_langs();
+                                move || -> SharedString {
+                                    let lang = ui_lang(langs);
+                                    let count = paused_count.get();
+                                    let queue_suffix = if count > 1 {
+                                        match lang {
+                                            Lang::Zh => format!(" (1 / {count}, 上限 {BREAK_QUEUE_LIMIT})"),
+                                            Lang::En => format!(" (1 / {count}, max {BREAK_QUEUE_LIMIT})"),
+                                        }
+                                    } else {
+                                        String::new()
+                                    };
+                                    let ttl_suffix = match banner_controls.hub.paused_remaining_secs() {
+                                        Some(secs) if secs <= 15 => match lang {
+                                            Lang::Zh => format!(" · 剩 {secs}s"),
+                                            Lang::En => format!(" · {secs}s left"),
+                                        },
+                                        _ => String::new(),
+                                    };
+                                    match paused.get() {
+                                        Some((id, side)) => {
+                                            let which = match side {
+                                                BreakSide::Request => {
+                                                    t(lang, "停在请求断点", "paused on request")
+                                                }
+                                                BreakSide::Response => {
+                                                    t(lang, "停在响应断点", "paused on response")
+                                                }
+                                            };
+                                            let ctx = paused_flow_summary(&banner_controls, id);
+                                            if ctx.is_empty() {
+                                                format!(
+                                                    "{} #{id} {which}{queue_suffix}{ttl_suffix}",
+                                                    t(lang, "流量", "Flow")
+                                                )
+                                            } else {
+                                                format!(
+                                                    "#{id} {ctx} · {which}{queue_suffix}{ttl_suffix}"
+                                                )
+                                            }
+                                            .into()
+                                        }
+                                        None => "".into(),
+                                    }
+                                }
+                            })
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .number_of_lines(1)
+                            .text_overflow(EllipsizeMode::Tail)
+                            .text_size(px(TEXT_SM))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(status_warn_fg()),
+                        )
+                        .child(when(
+                            move || paused.get().is_some_and(|(id, _)| selected.get() != Some(id)),
+                            move || {
+                                view()
+                                    .role(AccessibilityRole::Button)
+                                    .h(px(ControlSize::Xs.height()))
+                                    .px_2()
+                                    .flex_shrink_0()
+                                    .rounded(px(RADIUS_SM))
+                                    .border_1()
+                                    .border_color(status_warn_fg())
+                                    .bg(bg_card())
+                                    .hover(|s| s.bg(status_warn_bg_hover()))
+                                    .active(|s| s.bg(bg_control_active()))
+                                    .transition_colors()
+                                    .duration(MOTION_INSTANT_MS)
+                                    .ease_out()
+                                    .focus_visible(apply_focus_ring)
+                                    .items_center()
+                                    .justify_center()
+                                    .tooltip(label_tip("在列表中选中并查看此暂停流量", "Select and inspect paused flow"))
+                                    .on_press(move || {
+                                        if let Some((id, _)) = paused.get() {
+                                            selected.set(Some(id));
+                                        }
+                                    })
+                                    .child(
+                                        text(tr("查看", "View"))
+                                            .text_size(px(TEXT_XS))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(status_warn_fg()),
+                                    )
+                            },
+                        )),
                 )
                 .child(
                     view()
@@ -338,6 +431,10 @@ pub(crate) fn break_bar(
                                 .focus_visible(apply_focus_ring)
                                 .flex_row()
                                 .items_center()
+                                .tooltip(label_tip(
+                                    "放行当前断点流量（若已编辑则会应用修改；60 秒未操作将自动放行）",
+                                    "Continue paused flow with current edits (auto-continues after 60s)",
+                                ))
                                 .on_press(move || {
                                     continue_break(&release, compose, selected, paused);
                                 })
@@ -353,15 +450,22 @@ pub(crate) fn break_bar(
                             move || paused_count.get() > 1,
                             move || {
                                 let controls = release_all.clone();
-                                detail_button(tr("全部放行", "Continue all"), move || {
-                                    if !break_all_allowed() {
-                                        return;
-                                    }
-                                    if compose.composing.get() {
-                                        reset_compose(compose);
-                                    }
-                                    controls.hub.resolve_all_breaks();
-                                })
+                                view()
+                                    .tooltip(label_tip(
+                                        "一次放行全部排队中的断点流量",
+                                        "Continue all queued paused flows",
+                                    ))
+                                    .child(detail_button(tr("全部放行", "Continue all"), move || {
+                                        if !break_all_allowed() {
+                                            return;
+                                        }
+                                        if compose.composing.get()
+                                            && compose.paused_id.get().is_some()
+                                        {
+                                            reset_compose(compose);
+                                        }
+                                        controls.hub.resolve_all_breaks();
+                                    }))
                             },
                         ))
                         .child(
@@ -370,24 +474,31 @@ pub(crate) fn break_bar(
                                 .h(px(CONTROL_H))
                                 .px_2p5()
                                 .rounded(px(RADIUS_MD))
-                                .border_1()
-                                .border_color(status_err_fg())
-                                .bg(status_err_bg())
-                                .hover(|style| style.bg(status_err_bg_hover()))
-                                .active(|style| style.bg(status_err_bg_hover()))
+                                .bg(danger_button_bg())
+                                .hover(|style| style.bg(danger_button_hover()))
+                                .active(|style| style.bg(danger_button_active()))
                                 .transition_colors()
                                 .duration(MOTION_INSTANT_MS)
                                 .ease_out()
                                 .focus_visible(apply_focus_ring)
                                 .flex_row()
                                 .items_center()
+                                .tooltip(label_tip(
+                                    "中断并丢弃当前断点连接",
+                                    "Drop and abort the paused connection",
+                                ))
                                 .on_press(move || {
                                     let paused_now =
                                         drop_controls.hub.paused().or_else(|| paused.get());
                                     if !break_action_allowed(paused_now.map(|(id, _)| id)) {
                                         return;
                                     }
-                                    if compose.composing.get() {
+                                    if compose.composing.get()
+                                        && compose
+                                            .paused_id
+                                            .get()
+                                            .is_some_and(|pid| paused_now.is_some_and(|(id, _)| id == pid))
+                                    {
                                         reset_compose(compose);
                                     }
                                     let _ = drop_controls.hub.resolve_break(BreakDecision {
@@ -402,7 +513,7 @@ pub(crate) fn break_bar(
                                         .number_of_lines(1)
                                         .text_size(px(TEXT_SM))
                                         .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(status_err_fg()),
+                                        .text_color(fg_on_accent()),
                                 ),
                         ),
                 ),
@@ -416,10 +527,13 @@ pub(crate) fn break_bar(
                     |item| (item.0, matches!(item.1, BreakSide::Response)),
                     move |item, index| {
                         let controls = controls.clone();
+                        let label_controls = controls.clone();
                         let is_head = move || index.get() == 0;
                         view()
                             .role(AccessibilityRole::Button)
                             .h(px(ControlSize::Xs.height()))
+                            .max_w(px(260.0))
+                            .overflow_hidden()
                             .px_2()
                             .rounded(px(RADIUS_SM))
                             .border_1()
@@ -453,6 +567,10 @@ pub(crate) fn break_bar(
                             .focus_visible(apply_focus_ring)
                             .flex_row()
                             .items_center()
+                            .tooltip(label_tip(
+                                "点击切换处理此排队断点（最多排队 8 条）",
+                                "Focus queued breakpoint (up to 8 queued)",
+                            ))
                             .on_press(move || {
                                 let id = item.with(|pair| pair.0);
                                 focus_queued_break(&controls, id, selected, compose);
@@ -464,17 +582,25 @@ pub(crate) fn break_bar(
                                         let (id, side) = item.with(|pair| *pair);
                                         let which = match side {
                                             BreakSide::Request => {
-                                                t(ui_lang(langs), "请求", "Request")
+                                                t(ui_lang(langs), "请求", "Req")
                                             }
                                             BreakSide::Response => {
-                                                t(ui_lang(langs), "响应", "Response")
+                                                t(ui_lang(langs), "响应", "Res")
                                             }
                                         };
-                                        format!("#{id} {which}").into()
+                                        let ctx = paused_flow_summary(&label_controls, id);
+                                        if ctx.is_empty() {
+                                            format!("#{id} {which}").into()
+                                        } else {
+                                            format!("#{id} {ctx} · {which}").into()
+                                        }
                                     }
                                 })
+                                .min_w(px(0.0))
+                                .flex_shrink(1.0)
                                 .tabular_nums()
                                 .number_of_lines(1)
+                                .text_overflow(EllipsizeMode::Tail)
                                 .text_size(px(TEXT_XS))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(move || {
@@ -502,7 +628,7 @@ pub(crate) fn focus_queued_break(
     if !controls.hub.promote_break(id) {
         return;
     }
-    if !already && compose.composing.get() {
+    if !already && compose.composing.get() && compose.paused_id.get().is_some() {
         reset_compose(compose);
     }
     selected.set(Some(id));
@@ -573,7 +699,7 @@ pub(crate) fn continue_break(
     }
     let edited = compose.composing.get()
         && current_paused.is_some_and(|(id, side)| {
-            (selected.get() == Some(id) || selected.get().is_none())
+            (compose.paused_id.get() == Some(id) || selected.get() == Some(id))
                 && compose.response.get() == matches!(side, BreakSide::Response)
         });
     let decision = if edited {
@@ -591,7 +717,12 @@ pub(crate) fn continue_break(
             status: None,
         }
     };
-    if compose.composing.get() {
+    if compose.composing.get()
+        && compose
+            .paused_id
+            .get()
+            .is_some_and(|pid| current_paused.is_some_and(|(id, _)| id == pid))
+    {
         reset_compose(compose);
     }
     if !controls.hub.resolve_break(decision) {

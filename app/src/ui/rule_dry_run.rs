@@ -49,35 +49,93 @@ pub(crate) fn format_dry_run_samples(summary: &crate::rules::DryRunSummary, lang
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DryRunInput {
+    Existing,
+    Draft(String),
+    IncompleteDraft,
+}
+
+fn target_rules_paused(target: RuleEditTarget, rules_on: Option<Signal<bool>>) -> bool {
+    if rules_on.is_some_and(|on| !on.get()) {
+        return true;
+    }
+    let Some(editing_name) = target.editing.get() else {
+        return false;
+    };
+    target.groups.with(|groups| {
+        groups
+            .iter()
+            .find(|g| g.name.eq_ignore_ascii_case(&editing_name))
+            .is_some_and(|g| !g.enabled)
+    })
+}
+
 /// Compact pre-save dry-run preview bar shown below the rules editor/strip.
 pub(crate) fn rule_dry_run_strip(
     target: RuleEditTarget,
     controls: Arc<Controls>,
     draft_line: impl Fn() -> Option<String> + 'static,
 ) -> impl IntoElement {
+    rule_dry_run_strip_live(target, None, controls, move || match draft_line() {
+        Some(line) if !line.trim().is_empty() => DryRunInput::Draft(line),
+        _ => DryRunInput::Existing,
+    })
+}
+
+pub(crate) fn rule_dry_run_strip_live(
+    target: RuleEditTarget,
+    rules_on: Option<Signal<bool>>,
+    controls: Arc<Controls>,
+    draft_state: impl Fn() -> DryRunInput + 'static,
+) -> impl IntoElement {
     let langs = ui_langs();
     let catalog = filter_catalog_context();
     let preview = computed(move || {
         // Subscribe to session changes via the live filter catalog.
         let _ = catalog.get();
-        let draft = draft_line();
-        let (eval_text, is_draft) = match draft {
-            Some(line) if !line.trim().is_empty() => (line, true),
-            _ => (target.current_text(), false),
-        };
-        let summary = controls
-            .hub
-            .with_session(|session| crate::rules::dry_run_rules(&eval_text, session.iter()));
-        (summary, is_draft)
+        let state = draft_state();
+        match state {
+            DryRunInput::IncompleteDraft => (None, false, true),
+            DryRunInput::Draft(line) => {
+                let summary = controls
+                    .hub
+                    .with_session(|session| crate::rules::dry_run_rules(&line, session.iter()));
+                (Some(summary), true, false)
+            }
+            DryRunInput::Existing => {
+                let current = target.current_text();
+                let summary = controls
+                    .hub
+                    .with_session(|session| crate::rules::dry_run_rules(&current, session.iter()));
+                (Some(summary), false, false)
+            }
+        }
     });
 
     when(
-        move || preview.with(|(summary, _)| summary.rule_count > 0),
         move || {
+            preview.with(|(summary, _, incomplete)| {
+                *incomplete || summary.as_ref().is_some_and(|s| s.rule_count > 0)
+            })
+        },
+        move || {
+            let is_incomplete = move || preview.with(|(_, _, inc)| *inc);
+            let is_paused = move || !is_incomplete() && target_rules_paused(target, rules_on);
             let is_warn = move || {
-                preview.with(|(summary, _)| summary.total_flows > 0 && summary.matched_flows == 0)
+                !is_incomplete()
+                    && preview.with(|(summary, _, _)| {
+                        summary
+                            .as_ref()
+                            .is_some_and(|s| s.total_flows > 0 && s.matched_flows == 0)
+                    })
             };
-            let is_matched = move || preview.with(|(summary, _)| summary.matched_flows > 0);
+            let is_matched = move || {
+                !is_incomplete()
+                    && preview.with(|(summary, _, _)| {
+                        summary.as_ref().is_some_and(|s| s.matched_flows > 0)
+                    })
+            };
             view()
                 .w_full()
                 .px_2()
@@ -85,7 +143,7 @@ pub(crate) fn rule_dry_run_strip(
                 .rounded(px(RADIUS_MD))
                 .border_1()
                 .border_color(move || {
-                    if is_warn() {
+                    if is_warn() || is_paused() {
                         status_warn_fg()
                     } else if is_matched() {
                         accent_blue_border()
@@ -94,7 +152,7 @@ pub(crate) fn rule_dry_run_strip(
                     }
                 })
                 .bg(move || {
-                    if is_warn() {
+                    if is_warn() || is_paused() {
                         status_warn_bg()
                     } else if is_matched() {
                         accent_blue_soft()
@@ -109,8 +167,27 @@ pub(crate) fn rule_dry_run_strip(
                     text(move || -> SharedString {
                         let lang = ui_lang(langs);
                         preview
-                            .with(|(summary, is_draft)| {
-                                format_dry_run_message(summary, *is_draft, lang).0
+                            .with(|(summary, is_draft, incomplete)| {
+                                if *incomplete {
+                                    t(
+                                        lang,
+                                        "草稿未填写完整，完成后将实时试跑",
+                                        "Draft incomplete — finish required fields to preview",
+                                    )
+                                    .to_string()
+                                } else if let Some(s) = summary {
+                                    let mut msg = format_dry_run_message(s, *is_draft, lang).0;
+                                    if target_rules_paused(target, rules_on) {
+                                        msg.push_str(t(
+                                            lang,
+                                            "（当前未启用）",
+                                            " (currently paused)",
+                                        ));
+                                    }
+                                    msg
+                                } else {
+                                    String::new()
+                                }
                             })
                             .into()
                     })
@@ -119,7 +196,7 @@ pub(crate) fn rule_dry_run_strip(
                     .text_size(px(TEXT_XS))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(move || {
-                        if is_warn() {
+                        if is_warn() || is_paused() {
                             status_warn_fg()
                         } else if is_matched() {
                             accent_blue_text()
@@ -129,12 +206,24 @@ pub(crate) fn rule_dry_run_strip(
                     }),
                 )
                 .child(when(
-                    move || preview.with(|(summary, _)| !summary.sample_targets.is_empty()),
+                    move || {
+                        !is_incomplete()
+                            && preview.with(|(summary, _, _)| {
+                                summary
+                                    .as_ref()
+                                    .is_some_and(|s| !s.sample_targets.is_empty())
+                            })
+                    },
                     move || {
                         mono(move || -> SharedString {
                             let lang = ui_lang(langs);
                             preview
-                                .with(|(summary, _)| format_dry_run_samples(summary, lang))
+                                .with(|(summary, _, _)| {
+                                    summary
+                                        .as_ref()
+                                        .map(|s| format_dry_run_samples(s, lang))
+                                        .unwrap_or_default()
+                                })
                                 .into()
                         })
                         .flex_1()

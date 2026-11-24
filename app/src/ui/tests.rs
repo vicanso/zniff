@@ -2978,6 +2978,7 @@ fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
         let compose = Compose {
             composing: signal(false),
             response: signal(false),
+            paused_id: signal(None),
             method: signal(String::new()),
             url: signal(String::new()),
             headers: signal(String::new()),
@@ -4587,6 +4588,7 @@ fn keyboard_step_selected_auto_scrolls_row_into_viewport() {
         let compose = super::Compose {
             composing: signal(false),
             response: signal(false),
+            paused_id: signal(None),
             method: signal(String::new()),
             url: signal(String::new()),
             status: signal(String::new()),
@@ -5488,11 +5490,11 @@ fn toolbar_pill_tooltips_show_full_untruncated_content() {
 
     // Rules pill: full rules & groups summary preserved on hover
     assert!(
-        super::format_rules_pill_tooltip(12, 3, true, Lang::Zh)
+        super::format_rules_pill_tooltip(12, 3, true, true, Lang::Zh)
             .starts_with("已启用 12 条规则 · 3 个分组\n")
     );
     assert!(
-        super::format_rules_pill_tooltip(12, 3, false, Lang::En)
+        super::format_rules_pill_tooltip(12, 3, false, true, Lang::En)
             .starts_with("Rules paused (12 rules · 3 groups)\n")
     );
 }

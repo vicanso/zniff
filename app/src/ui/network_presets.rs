@@ -89,26 +89,45 @@ impl NetworkPreset {
     }
 }
 
-/// Detects which built-in [`NetworkPreset`] is currently active in `groups`.
-pub(crate) fn detect_active_network_preset(groups: &[config::RuleGroup]) -> NetworkPreset {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NetworkGroupState {
+    None,
+    Preset(NetworkPreset),
+    Custom,
+}
+
+/// Inspects the `Network` group state (`None`, matching built-in `Preset`, or `Custom` tweaked rules).
+pub(crate) fn detect_network_group_state(groups: &[config::RuleGroup]) -> NetworkGroupState {
     let Some(group) = groups
         .iter()
         .find(|g| g.name.eq_ignore_ascii_case(NETWORK_PRESET_GROUP_NAME))
     else {
-        return NetworkPreset::None;
+        return NetworkGroupState::None;
     };
     if !group.enabled {
-        return NetworkPreset::None;
+        return NetworkGroupState::None;
     }
     let normalized = normalize_preset_rules(&group.rules);
     for &preset in NetworkPreset::ALL {
         if preset != NetworkPreset::None
             && normalize_preset_rules(preset.rules_text()) == normalized
         {
-            return preset;
+            return NetworkGroupState::Preset(preset);
         }
     }
-    NetworkPreset::None
+    if normalized.is_empty() {
+        NetworkGroupState::None
+    } else {
+        NetworkGroupState::Custom
+    }
+}
+
+/// Detects which built-in [`NetworkPreset`] is currently active in `groups`.
+pub(crate) fn detect_active_network_preset(groups: &[config::RuleGroup]) -> NetworkPreset {
+    match detect_network_group_state(groups) {
+        NetworkGroupState::Preset(preset) => preset,
+        NetworkGroupState::None | NetworkGroupState::Custom => NetworkPreset::None,
+    }
 }
 
 fn normalize_preset_rules(text: &str) -> String {
@@ -125,11 +144,28 @@ pub(crate) fn apply_network_preset_to_groups(
     preset: NetworkPreset,
 ) -> Vec<config::RuleGroup> {
     if preset == NetworkPreset::None {
-        let kept: Vec<config::RuleGroup> = groups
-            .iter()
-            .filter(|g| !g.name.eq_ignore_ascii_case(NETWORK_PRESET_GROUP_NAME))
-            .cloned()
-            .collect();
+        let is_custom = matches!(
+            detect_network_group_state(groups),
+            NetworkGroupState::Custom
+        );
+        let kept: Vec<config::RuleGroup> = if is_custom {
+            groups
+                .iter()
+                .cloned()
+                .map(|mut g| {
+                    if g.name.eq_ignore_ascii_case(NETWORK_PRESET_GROUP_NAME) {
+                        g.enabled = false;
+                    }
+                    g
+                })
+                .collect()
+        } else {
+            groups
+                .iter()
+                .filter(|g| !g.name.eq_ignore_ascii_case(NETWORK_PRESET_GROUP_NAME))
+                .cloned()
+                .collect()
+        };
         config::sanitize_rule_groups(kept)
     } else {
         config::upsert_rule_group(groups, NETWORK_PRESET_GROUP_NAME, preset.rules_text(), true)
@@ -142,8 +178,28 @@ pub(crate) fn apply_network_preset(
     controls: &Controls,
     preset: NetworkPreset,
 ) {
-    let next = apply_network_preset_to_groups(&profiles.rule_groups.get_untracked(), preset);
+    let existing = profiles.rule_groups.get_untracked();
+    let has_network_group = existing
+        .iter()
+        .any(|g| g.name.eq_ignore_ascii_case(NETWORK_PRESET_GROUP_NAME));
+    if preset != NetworkPreset::None
+        && !has_network_group
+        && existing.len() >= config::RULE_GROUP_CAP
+    {
+        set_status(
+            controls,
+            StatusMsg::RuleGroupLimitReached(config::RULE_GROUP_CAP),
+        );
+        return;
+    }
+    let was_custom = preset == NetworkPreset::None
+        && matches!(
+            detect_network_group_state(&existing),
+            NetworkGroupState::Custom
+        );
+    let next = apply_network_preset_to_groups(&existing, preset);
     if preset == NetworkPreset::None
+        && !was_custom
         && profiles.editing_group.with_untracked(|g| {
             g.as_deref()
                 .is_some_and(|n| n.eq_ignore_ascii_case(NETWORK_PRESET_GROUP_NAME))
@@ -153,13 +209,36 @@ pub(crate) fn apply_network_preset(
     }
     profiles.rule_groups.set(next.clone());
     controls.hub.set_rule_groups(&next);
-    if preset != NetworkPreset::None && !profiles.rules_on.get_untracked() {
+    let re_enabled = preset != NetworkPreset::None && !profiles.rules_on.get_untracked();
+    if re_enabled {
         profiles.rules_on.set(true);
         controls.hub.set_rules_enabled(true);
     }
     save_config_or_notify(controls, PrefName::Rules, |cfg| {
         cfg.rule_groups = next;
+        if re_enabled {
+            cfg.rules_enabled = true;
+        }
     });
+    let lang = use_context::<Signal<Option<Lang>>>()
+        .map(ui_lang)
+        .unwrap_or_else(|| load_lang_pref().unwrap_or(Lang::En));
+    if preset == NetworkPreset::None {
+        set_status(
+            controls,
+            StatusMsg::NetworkPresetCleared {
+                kept_custom: was_custom,
+            },
+        );
+    } else {
+        set_status(
+            controls,
+            StatusMsg::NetworkPresetApplied {
+                name: preset.label(lang).to_string(),
+                re_enabled,
+            },
+        );
+    }
 }
 
 /// Toolbar network condition preset switcher popover (`3G` / `Slow 3G` / `High latency` / `Offline`).
@@ -169,21 +248,30 @@ pub(crate) fn toolbar_network_preset_popover(
 ) -> impl IntoElement {
     let open = signal(false);
     let langs = ui_langs();
-    let active_preset = computed(move || {
+    let group_state = computed(move || {
         if !profiles.rules_on.get() {
-            return NetworkPreset::None;
+            return NetworkGroupState::None;
         }
         profiles
             .rule_groups
-            .with(|groups| detect_active_network_preset(groups))
+            .with(|groups| detect_network_group_state(groups))
     });
-    let is_throttled = move || active_preset.get() != NetworkPreset::None;
+    let active_preset = computed(move || match group_state.get() {
+        NetworkGroupState::Preset(p) => p,
+        NetworkGroupState::None | NetworkGroupState::Custom => NetworkPreset::None,
+    });
+    let is_throttled = move || !matches!(group_state.get(), NetworkGroupState::None);
     bind_popover_dismiss(open);
 
     popover()
         .open(move || Some(open.get()))
         .on_open_change(move |event: &nsh_base::PopoverEvent| {
             if let nsh_base::PopoverEvent::OpenChange(next, _) = event {
+                if *next {
+                    profiles.filter_panel_open.set(false);
+                    profiles.panel_open.set(false);
+                    profiles.preset_panel_open.set(false);
+                }
                 open.set(*next);
             }
         })
@@ -227,7 +315,7 @@ pub(crate) fn toolbar_network_preset_popover(
                 .hover(|style| {
                     style.bg(move || {
                         if is_throttled() {
-                            status_warn_bg()
+                            status_warn_bg_hover()
                         } else if open.get() {
                             accent_blue_soft_hover()
                         } else {
@@ -259,8 +347,13 @@ pub(crate) fn toolbar_network_preset_popover(
                     },
                 ))
                 .child(when(is_throttled, move || {
-                    text(move || {
-                        SharedString::from(active_preset.get().badge_label(ui_lang(langs)))
+                    text(move || -> SharedString {
+                        let lang = ui_lang(langs);
+                        match group_state.get() {
+                            NetworkGroupState::Preset(p) => p.badge_label(lang).into(),
+                            NetworkGroupState::Custom => t(lang, "自定义", "Custom").into(),
+                            NetworkGroupState::None => SharedString::default(),
+                        }
                     })
                     .number_of_lines(1)
                     .text_size(px(TEXT_SM))
@@ -297,7 +390,7 @@ fn network_preset_menu(
         let item_controls = controls.clone();
         let is_selected = move || active_preset.get() == preset;
         menu = menu.child(
-            view()
+            menu_item()
                 .w_full()
                 .px_2()
                 .py_1p5()
@@ -309,7 +402,7 @@ fn network_preset_menu(
                     if is_selected() {
                         accent_blue_soft()
                     } else {
-                        bg_card()
+                        AdaptiveColor::TRANSPARENT
                     }
                 })
                 .hover(|style| {
@@ -325,7 +418,8 @@ fn network_preset_menu(
                 .transition_colors()
                 .duration(MOTION_INSTANT_MS)
                 .ease_out()
-                .on_press(move || {
+                .focus_visible(apply_focus_ring)
+                .on_select(move || {
                     apply_network_preset(profiles, &item_controls, preset);
                     open.set(false);
                 })

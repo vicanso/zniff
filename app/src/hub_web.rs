@@ -328,6 +328,10 @@ impl Hub {
             .clone()
     }
 
+    pub fn paused_remaining_secs(&self) -> Option<u64> {
+        None
+    }
+
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::Relaxed)
     }

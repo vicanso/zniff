@@ -195,6 +195,7 @@ pub(crate) fn quick_side_chip(
 }
 
 pub(crate) fn clear_quick_draft(draft: QuickRuleDraftSignals) {
+    draft.editing_line.set(None);
     draft.host.set(String::new());
     draft.path.set(String::new());
     draft.op.set(String::new());
@@ -203,16 +204,27 @@ pub(crate) fn clear_quick_draft(draft: QuickRuleDraftSignals) {
     draft.modes.reset();
 }
 
+pub(crate) fn quick_draft_has_input(draft: QuickRuleDraftSignals) -> bool {
+    draft.editing_line.get().is_some()
+        || !draft.host.get().trim().is_empty()
+        || !draft.path.get().trim().is_empty()
+        || !draft.op.get().trim().is_empty()
+        || !draft.from.get().trim().is_empty()
+        || !draft.to.get().trim().is_empty()
+}
+
 pub(crate) fn quick_add_section(
     target: RuleEditTarget,
     controls: Arc<Controls>,
     draft: QuickRuleDraftSignals,
     open: Signal<bool>,
 ) -> impl IntoElement {
+    let langs = ui_langs();
     when(
         move || open.get(),
         move || {
             let row2_controls = controls.clone();
+            let editing_line = draft.editing_line;
             view()
                 .w_full()
                 .p_2()
@@ -224,44 +236,125 @@ pub(crate) fn quick_add_section(
                 .flex_col()
                 .child(
                     view()
-                        .role(AccessibilityRole::Button)
-                        .h(px(20.0))
-                        .px_0p5()
-                        .rounded(px(RADIUS_SM))
+                        .w_full()
+                        .h(px(22.0))
                         .flex_row()
                         .items_center()
                         .justify_between()
-                        .hover(|style| style.bg(bg_control_hover()))
-                        .active(|style| style.bg(bg_control_active()))
-                        .transition_colors()
-                        .duration(MOTION_INSTANT_MS)
-                        .ease_out()
-                        .focus_visible(apply_focus_ring)
-                        .on_press(move || {
-                            clear_quick_draft(draft);
-                            open.set(false);
-                        })
+                        .gap_1p5()
                         .child(
                             view()
+                                .role(AccessibilityRole::Button)
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .h_full()
+                                .px_1()
+                                .rounded(px(RADIUS_SM))
                                 .flex_row()
                                 .items_center()
                                 .gap_1()
+                                .hover(|style| style.bg(bg_control_hover()))
+                                .active(|style| style.bg(bg_control_active()))
+                                .transition_colors()
+                                .duration(MOTION_INSTANT_MS)
+                                .ease_out()
+                                .focus_visible(apply_focus_ring)
+                                .tooltip(label_tip(
+                                    "折叠表单并保留当前草稿",
+                                    "Collapse form while keeping current draft",
+                                ))
+                                .on_press(move || open.set(false))
                                 .child(glyph_px(9.5, || Glyph::Chevron, || color(fg_muted())))
                                 .child(
                                     text(tr("按类型配置规则", "Configure Rule"))
                                         .text_size(px(TEXT_XS))
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(fg_muted()),
-                                ),
+                                )
+                                .child(when(
+                                    move || editing_line.get().is_some(),
+                                    move || {
+                                        view()
+                                            .px_1p5()
+                                            .py_0p5()
+                                            .rounded(px(RADIUS_SM))
+                                            .bg(status_warn_bg())
+                                            .child(
+                                                text(move || -> SharedString {
+                                                    let n = editing_line
+                                                        .get()
+                                                        .map(|i| i + 1)
+                                                        .unwrap_or(0);
+                                                    match ui_lang(langs) {
+                                                        Lang::Zh => format!("编辑第 {n} 行"),
+                                                        Lang::En => format!("Editing line {n}"),
+                                                    }
+                                                    .into()
+                                                })
+                                                .text_size(px(TEXT_XS))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(status_warn_fg()),
+                                            )
+                                    },
+                                )),
                         )
                         .child(
-                            text(tr("关闭", "Close"))
-                                .text_size(px(TEXT_XS))
-                                .text_color(fg_muted()),
+                            view()
+                                .flex_shrink_0()
+                                .flex_row()
+                                .items_center()
+                                .gap_1()
+                                .child(when(
+                                    move || quick_draft_has_input(draft),
+                                    move || {
+                                        view()
+                                            .role(AccessibilityRole::Button)
+                                            .h(px(22.0))
+                                            .px_1p5()
+                                            .rounded(px(RADIUS_SM))
+                                            .hover(|style| style.bg(bg_control_hover()))
+                                            .active(|style| style.bg(bg_control_active()))
+                                            .focus_visible(apply_focus_ring)
+                                            .items_center()
+                                            .justify_center()
+                                            .on_press(move || clear_quick_draft(draft))
+                                            .child(
+                                                text(tr("清空", "Clear"))
+                                                    .text_size(px(TEXT_XS))
+                                                    .text_color(fg_muted()),
+                                            )
+                                    },
+                                ))
+                                .child(
+                                    view()
+                                        .role(AccessibilityRole::Button)
+                                        .h(px(22.0))
+                                        .px_1p5()
+                                        .rounded(px(RADIUS_SM))
+                                        .hover(|style| style.bg(bg_control_hover()))
+                                        .active(|style| style.bg(bg_control_active()))
+                                        .focus_visible(apply_focus_ring)
+                                        .items_center()
+                                        .justify_center()
+                                        .tooltip(label_tip(
+                                            "关闭并清空当前草稿",
+                                            "Close form and discard draft",
+                                        ))
+                                        .on_press(move || {
+                                            clear_quick_draft(draft);
+                                            open.set(false);
+                                        })
+                                        .child(
+                                            text(tr("关闭", "Close"))
+                                                .text_size(px(TEXT_XS))
+                                                .text_color(fg_muted()),
+                                        ),
+                                ),
                         ),
                 )
-                .child(quick_add_row_one(draft))
+                .child(quick_add_row_one(target, controls.clone(), draft, open))
                 .child(quick_add_row_two(target, row2_controls, draft, open))
+                .child(quick_add_validation_hint(draft))
                 .child(quick_add_example_row(draft))
         },
     )
@@ -342,9 +435,17 @@ fn quick_add_example_row(draft: QuickRuleDraftSignals) -> impl IntoElement {
         )
 }
 
-fn quick_add_row_one(draft: QuickRuleDraftSignals) -> impl IntoElement {
+fn quick_add_row_one(
+    target: RuleEditTarget,
+    controls: Arc<Controls>,
+    draft: QuickRuleDraftSignals,
+    open: Signal<bool>,
+) -> impl IntoElement {
     let kind = draft.kind;
     let op_open = signal(false);
+    let submit_host = controls.clone();
+    let submit_path = controls.clone();
+    let submit_op = controls;
     let show_op_input = move || {
         quick_kind(kind.get()).supports_graphql_op()
             && (op_open.get() || !draft.op.get().trim().is_empty())
@@ -354,36 +455,38 @@ fn quick_add_row_one(draft: QuickRuleDraftSignals) -> impl IntoElement {
         .items_center()
         .gap_1()
         .child(quick_kind_dropdown(kind))
-        .child(view().flex_1().min_w(px(0.0)).child(side_input(
+        .child(view().flex_1().min_w(px(0.0)).child(submit_input(
             draft.host,
             tr("域名 (*)", "Host (*)"),
             28.0,
-            false,
             move |text| draft.host.set(text.to_string()),
+            move |_| submit_quick_add(target, &submit_host, draft, open),
         )))
         .child(when(
-            move || kind.get() != 14,
+            move || !matches!(kind.get(), 10 | 14),
             move || {
-                view().flex_1().min_w(px(0.0)).child(side_input(
+                let sc = submit_path.clone();
+                view().flex_1().min_w(px(0.0)).child(submit_input(
                     draft.path,
-                    tr("Path (*)", "Path (*)"),
+                    tr("路径 (*)", "Path (*)"),
                     28.0,
-                    false,
                     move |text| draft.path.set(text.to_string()),
+                    move |_| submit_quick_add(target, &sc, draft, open),
                 ))
             },
         ))
         .child(when(show_op_input, move || {
+            let sc = submit_op.clone();
             view()
                 .w(px(96.0))
                 .flex_shrink(1.0)
                 .min_w(px(0.0))
-                .child(side_input(
+                .child(submit_input(
                     draft.op,
-                    tr("GraphQL op", "GraphQL op"),
+                    tr("GraphQL 操作名", "GraphQL op"),
                     28.0,
-                    false,
                     move |text| draft.op.set(text.to_string()),
+                    move |_| submit_quick_add(target, &sc, draft, open),
                 ))
         }))
         .child(when(
@@ -637,15 +740,18 @@ fn quick_add_row_two(
     let modes = draft.modes;
     let from = draft.from;
     let to = draft.to;
+    let submit_from = controls.clone();
+    let submit_to = controls.clone();
     let row = view().flex_row().items_center().gap_1().child(when(
         move || !matches!(kind.get(), 8 | 12) && !(kind.get() == 13 && modes.status_drop.get()),
         move || {
-            view().flex_1().min_w(px(0.0)).child(side_input(
+            let sc = submit_from.clone();
+            view().flex_1().min_w(px(0.0)).child(submit_input(
                 from,
                 move || quick_from_placeholder(kind.get(), ui_lang(langs)).to_string(),
                 28.0,
-                false,
                 move |text| from.set(text.to_string()),
+                move |_| submit_quick_add(target, &sc, draft, open),
             ))
         },
     ));
@@ -668,12 +774,13 @@ fn quick_add_row_two(
         .child(when(
             move || matches!(kind.get(), 0 | 2 | 4 | 5 | 6 | 7 | 9 | 10 | 11 | 14 | 15),
             move || {
-                view().flex_1().min_w(px(0.0)).child(side_input(
+                let sc = submit_to.clone();
+                view().flex_1().min_w(px(0.0)).child(submit_input(
                     to,
                     move || quick_to_placeholder(kind.get(), ui_lang(langs)).to_string(),
                     28.0,
-                    false,
                     move |text| to.set(text.to_string()),
+                    move |_| submit_quick_add(target, &sc, draft, open),
                 ))
             },
         ))
@@ -691,18 +798,44 @@ fn quick_add_row_two(
     row.child(quick_add_submit_button(target, controls, draft, open))
 }
 
-fn quick_add_ready(draft: QuickRuleDraftSignals) -> bool {
+pub(crate) fn quick_add_validation_error(
+    draft: QuickRuleDraftSignals,
+    lang: Lang,
+) -> Option<&'static str> {
+    let host_raw = draft.host.get();
+    let host = host_raw.trim();
+    if host.is_empty() {
+        return Some(t(
+            lang,
+            "请输入域名模式，如 * 或 api.example.com",
+            "Enter a host pattern (e.g. * or api.example.com)",
+        ));
+    }
+    if host.contains(char::is_whitespace) {
+        return Some(t(
+            lang,
+            "域名模式不能包含空格",
+            "Host pattern cannot contain spaces",
+        ));
+    }
     let kind_now = draft.kind.get();
+    let path_raw = draft.path.get();
+    let eff_path = effective_quick_path(kind_now, &path_raw);
+    if eff_path.trim().contains(char::is_whitespace) {
+        return Some(t(
+            lang,
+            "路径前缀不能包含空格",
+            "Path prefix cannot contain spaces",
+        ));
+    }
     let mode_now = draft.modes.mode_for(kind_now);
     let from_raw = draft.from.get();
     let to_raw = draft.to.get();
     let op_raw = draft.op.get();
     let (eff_from, eff_to) = effective_quick_inputs(kind_now, mode_now, &from_raw, &to_raw);
-    let path_raw = draft.path.get();
-    let eff_path = effective_quick_path(kind_now, &path_raw);
     let eff_op = effective_quick_op(kind_now, &op_raw);
-    let combined = crate::rules::combine_rule_pattern(&draft.host.get(), eff_path);
-    crate::rules::append_quick_rule_with_op(
+    let combined = crate::rules::combine_rule_pattern(host, eff_path);
+    if crate::rules::append_quick_rule_with_op(
         "",
         quick_kind(kind_now),
         &combined,
@@ -712,6 +845,124 @@ fn quick_add_ready(draft: QuickRuleDraftSignals) -> bool {
         eff_op,
     )
     .is_some()
+    {
+        return None;
+    }
+    Some(match kind_now % 16 {
+        1 => t(
+            lang,
+            "请输入以 http:// 或 https:// 开头的目标 URL",
+            "Enter a target URL starting with http:// or https://",
+        ),
+        2 => t(
+            lang,
+            "请填写本地文件路径，或填写有效状态码 (100-599)",
+            "Provide a local file path or valid status code (100-599)",
+        ),
+        3 => t(
+            lang,
+            "请输入合法延迟时长（如 500ms 或 2s）",
+            "Enter a valid delay duration (e.g. 500ms or 2s)",
+        ),
+        9 => t(
+            lang,
+            "请输入速率或预设（如 3g、slow-3g、256kbps）",
+            "Enter a bandwidth rate or preset (e.g. 3g or 256kbps)",
+        ),
+        10 => t(
+            lang,
+            "请填写或选择证书文件 (.crt / .pem)",
+            "Select or enter a certificate file (.crt / .pem)",
+        ),
+        14 => t(
+            lang,
+            "请输入合法目标 IP/主机名，且域名不能含路径或端口",
+            "Enter a valid target IP/host (source host without path/port)",
+        ),
+        15 => t(
+            lang,
+            "Hook 仅支持本机回环 URL（http://127.0.0.1 或 ::1）",
+            "Hook requires a local loopback URL (127.0.0.1 or ::1)",
+        ),
+        _ => t(
+            lang,
+            "请补全必填字段或检查输入格式",
+            "Complete required fields or check syntax",
+        ),
+    })
+}
+
+fn quick_add_ready(draft: QuickRuleDraftSignals) -> bool {
+    quick_add_validation_error(draft, Lang::En).is_none()
+}
+
+fn quick_add_validation_hint(draft: QuickRuleDraftSignals) -> impl IntoElement {
+    let langs = ui_langs();
+    let show = move || {
+        quick_draft_has_input(draft) && quick_add_validation_error(draft, Lang::En).is_some()
+    };
+    when(show, move || {
+        text(move || -> SharedString {
+            quick_add_validation_error(draft, ui_lang(langs))
+                .unwrap_or("")
+                .into()
+        })
+        .px_0p5()
+        .number_of_lines(1)
+        .text_overflow(EllipsizeMode::Tail)
+        .text_size(px(TEXT_XS))
+        .text_color(status_warn_fg())
+    })
+}
+
+fn submit_quick_add(
+    target: RuleEditTarget,
+    controls: &Controls,
+    draft: QuickRuleDraftSignals,
+    open: Signal<bool>,
+) {
+    let kind_now = draft.kind.get_untracked();
+    let mode_now = draft.modes.mode_for(kind_now);
+    let from_raw = draft.from.get_untracked();
+    let to_raw = draft.to.get_untracked();
+    let op_raw = draft.op.get_untracked();
+    let host_raw = draft.host.get_untracked();
+    let path_raw = draft.path.get_untracked();
+    let (eff_from, eff_to) = effective_quick_inputs(kind_now, mode_now, &from_raw, &to_raw);
+    let eff_path = effective_quick_path(kind_now, &path_raw);
+    let eff_op = effective_quick_op(kind_now, &op_raw);
+    let combined_pattern = crate::rules::combine_rule_pattern(&host_raw, eff_path);
+    let current = target.current_text_untracked();
+    let next = if let Some(line_idx) = draft.editing_line.get_untracked() {
+        let Some(single_line) = crate::rules::append_quick_rule_with_op(
+            "",
+            quick_kind(kind_now),
+            &combined_pattern,
+            mode_now,
+            eff_from,
+            eff_to,
+            eff_op,
+        ) else {
+            return;
+        };
+        replace_rule_line(&current, line_idx, &single_line)
+    } else {
+        let Some(appended) = crate::rules::append_quick_rule_with_op(
+            &current,
+            quick_kind(kind_now),
+            &combined_pattern,
+            mode_now,
+            eff_from,
+            eff_to,
+            eff_op,
+        ) else {
+            return;
+        };
+        appended
+    };
+    target.commit(controls, next);
+    clear_quick_draft(draft);
+    open.set(false);
 }
 
 fn quick_add_submit_button(
@@ -720,8 +971,10 @@ fn quick_add_submit_button(
     draft: QuickRuleDraftSignals,
     open: Signal<bool>,
 ) -> impl IntoElement {
+    let langs = ui_langs();
     let kind = draft.kind;
     let modes = draft.modes;
+    let editing_line = draft.editing_line;
     view()
         .role(AccessibilityRole::Button)
         .h(px(ControlSize::Sm.height()))
@@ -776,43 +1029,54 @@ fn quick_add_submit_button(
         .focus_visible(apply_focus_ring)
         .disabled(move || !quick_add_ready(draft))
         .disabled_style(|style| style.opacity(0.55))
-        .on_press(move || {
-            let kind_now = kind.get();
-            let mode_now = modes.mode_for(kind_now);
-            let from_raw = draft.from.get();
-            let to_raw = draft.to.get();
-            let op_raw = draft.op.get();
-            let (eff_from, eff_to) = effective_quick_inputs(kind_now, mode_now, &from_raw, &to_raw);
-            let path_raw = draft.path.get();
-            let eff_path = effective_quick_path(kind_now, &path_raw);
-            let eff_op = effective_quick_op(kind_now, &op_raw);
-            let combined_pattern = crate::rules::combine_rule_pattern(&draft.host.get(), eff_path);
-            let Some(next) = crate::rules::append_quick_rule_with_op(
-                &target.current_text_untracked(),
-                quick_kind(kind_now),
-                &combined_pattern,
-                mode_now,
-                eff_from,
-                eff_to,
-                eff_op,
-            ) else {
-                return;
-            };
-            target.commit(&controls, next);
-            clear_quick_draft(draft);
-            open.set(false);
-        })
-        .child(
-            text(tr("确认添加", "Add"))
-                .text_size(px(TEXT_SM))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(move || {
-                    if quick_add_ready(draft) {
-                        accent_blue_text()
+        .tooltip(
+            tooltip().child(ui_tooltip_surface(
+                text(move || -> SharedString {
+                    let lang = ui_lang(langs);
+                    if let Some(reason) = quick_add_validation_error(draft, lang) {
+                        reason.into()
+                    } else if let Some(idx) = editing_line.get() {
+                        let n = idx + 1;
+                        match lang {
+                            Lang::Zh => format!("原地替换第 {n} 行规则 (Enter)").into(),
+                            Lang::En => format!("Replace rule line {n} in place (Enter)").into(),
+                        }
                     } else {
-                        fg_muted()
+                        t(
+                            lang,
+                            "添加规则到当前编辑器 (Enter)",
+                            "Add rule to editor (Enter)",
+                        )
+                        .into()
                     }
-                }),
+                })
+                .text_size(px(TEXT_SM))
+                .text_color(fg_primary()),
+            )),
+        )
+        .on_press(move || submit_quick_add(target, &controls, draft, open))
+        .child(
+            text(move || -> SharedString {
+                let lang = ui_lang(langs);
+                if let Some(idx) = editing_line.get() {
+                    let n = idx + 1;
+                    match lang {
+                        Lang::Zh => format!("更新第 {n} 行").into(),
+                        Lang::En => format!("Update line {n}").into(),
+                    }
+                } else {
+                    t(lang, "确认添加", "Add").into()
+                }
+            })
+            .text_size(px(TEXT_SM))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(move || {
+                if quick_add_ready(draft) {
+                    accent_blue_text()
+                } else {
+                    fg_muted()
+                }
+            }),
         )
 }
 

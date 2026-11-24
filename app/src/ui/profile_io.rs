@@ -184,6 +184,9 @@ pub(crate) fn apply_rule_import_report(
             .unwrap_or(group_name);
         profiles.rule_groups.set(next_groups.clone());
         profiles.editing_group.set(Some(selected_name));
+        profiles.preset_panel_open.set(false);
+        profiles.rules_panel_tab.set(0);
+        profiles.panel_open.set(true);
         controls.hub.set_rule_groups(&next_groups);
         saved_ok &= save_config_or_notify(controls, PrefName::Rules, |config| {
             config.rule_groups = next_groups;
@@ -477,8 +480,8 @@ pub(crate) fn import_dropped(
         StatusMsg::ImportFailed(
             t(
                 lang,
-                "Web 模式请打开「过滤 → 导入」粘贴 TOML 配置",
-                "In Web mode, open Filter → Import to paste TOML setup",
+                "Web 模式请打开「预设 → 导入」粘贴 TOML / Whistle / Charles XML",
+                "In Web mode, open Presets → Import to paste TOML, Whistle, or Charles XML",
             )
             .to_string(),
         ),

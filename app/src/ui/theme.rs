@@ -128,6 +128,10 @@ pub(crate) fn status_warn_bg() -> AdaptiveColor {
     AdaptiveColor::rgb(0xfef3c7, 0x33240b)
 }
 
+pub(crate) fn status_warn_bg_hover() -> AdaptiveColor {
+    AdaptiveColor::rgb(0xfde68a, 0x45300f)
+}
+
 pub(crate) fn status_err_fg() -> AdaptiveColor {
     AdaptiveColor::rgb(0x9f1239, 0xfb7185)
 }

@@ -363,6 +363,8 @@ pub(crate) struct Compose {
     pub(crate) composing: Signal<bool>,
     /// True when the open editor is the paused response, not the request.
     pub(crate) response: Signal<bool>,
+    /// Flow id when Compose is actively editing a paused breakpoint flow.
+    pub(crate) paused_id: Signal<Option<u64>>,
     pub(crate) method: Signal<String>,
     pub(crate) url: Signal<String>,
     pub(crate) headers: Signal<String>,

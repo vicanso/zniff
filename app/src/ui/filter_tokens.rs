@@ -439,6 +439,16 @@ pub(crate) fn side_input(
     focused_input(value, placeholder, height, multiline, on_change, None)
 }
 
+pub(crate) fn submit_input(
+    value: Signal<String>,
+    placeholder: impl IntoReactive<String> + 'static,
+    height: f32,
+    on_change: impl Fn(&str) + 'static,
+    on_submit: impl Fn(&str) + 'static,
+) -> impl IntoElement {
+    styled_input_box(value, placeholder, height, false, on_change).on_submit(on_submit)
+}
+
 pub(crate) fn focused_input(
     value: Signal<String>,
     placeholder: impl IntoReactive<String> + 'static,
@@ -447,6 +457,20 @@ pub(crate) fn focused_input(
     on_change: impl Fn(&str) + 'static,
     focus: Option<ElementRef>,
 ) -> impl IntoElement {
+    let field = styled_input_box(value, placeholder, height, multiline, on_change);
+    match focus {
+        Some(focus) => field.element_ref(&focus),
+        None => field,
+    }
+}
+
+fn styled_input_box(
+    value: Signal<String>,
+    placeholder: impl IntoReactive<String> + 'static,
+    height: f32,
+    multiline: bool,
+    on_change: impl Fn(&str) + 'static,
+) -> nsh_base::Input {
     let field = input()
         .value(value)
         .placeholder(placeholder)
@@ -463,9 +487,5 @@ pub(crate) fn focused_input(
         .text_color(fg_primary())
         .multiline(multiline)
         .on_change(on_change);
-    let field = if multiline { field.py_2() } else { field };
-    match focus {
-        Some(focus) => field.element_ref(&focus),
-        None => field,
-    }
+    if multiline { field.py_2() } else { field }
 }

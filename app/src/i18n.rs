@@ -211,6 +211,20 @@ pub enum StatusMsg {
     MappedLocal(String),
     BreakRuleAdded(String),
     PrimaryFilterPausedForWatch,
+    ProtoEditInEditor,
+    NetworkPresetApplied {
+        name: String,
+        re_enabled: bool,
+    },
+    NetworkPresetCleared {
+        kept_custom: bool,
+    },
+    RuleGroupLimitReached(usize),
+    RuleGroupExists(String),
+    RuleGroupMissing(String),
+    PresetSwitched(String),
+    TemplateRuleAdded(String),
+    TemplateRuleAlreadyPresent(String),
     SequenceGenerated {
         count: usize,
     },
@@ -748,6 +762,50 @@ impl StatusMsg {
                 "Paused primary filter so Watch hits are visible",
             )
             .into(),
+            Self::ProtoEditInEditor => t(
+                lang,
+                "请在上方纯文本编辑器中修改 proto 规则",
+                "Edit proto rules in the text editor above",
+            )
+            .into(),
+            Self::NetworkPresetApplied { name, re_enabled } => match (lang, re_enabled) {
+                (Lang::Zh, true) => format!("已开启规则引擎并应用网络预设 · {name}"),
+                (Lang::Zh, false) => format!("已应用网络预设 · {name}"),
+                (Lang::En, true) => format!("Enabled rules engine and applied preset · {name}"),
+                (Lang::En, false) => format!("Applied network preset · {name}"),
+            },
+            Self::NetworkPresetCleared { kept_custom } => match (lang, kept_custom) {
+                (Lang::Zh, true) => {
+                    "已停用自定义 Network 规则分组（保留原规则）".to_string()
+                }
+                (Lang::Zh, false) => "已恢复正常网络（无限制）".to_string(),
+                (Lang::En, true) => "Paused custom Network rule group (rules kept)".to_string(),
+                (Lang::En, false) => "Network throttling cleared".to_string(),
+            },
+            Self::RuleGroupLimitReached(limit) => match lang {
+                Lang::Zh => format!("最多支持 {limit} 个规则分组"),
+                Lang::En => format!("Maximum {limit} rule groups reached"),
+            },
+            Self::RuleGroupExists(name) => match lang {
+                Lang::Zh => format!("规则分组「{name}」已存在，已切换"),
+                Lang::En => format!("Switched to existing rule group \"{name}\""),
+            },
+            Self::RuleGroupMissing(name) => match lang {
+                Lang::Zh => format!("规则分组「{name}」已被删除"),
+                Lang::En => format!("Rule group \"{name}\" was deleted"),
+            },
+            Self::PresetSwitched(name) => match lang {
+                Lang::Zh => format!("已切换预设「{name}」"),
+                Lang::En => format!("Switched to preset \"{name}\""),
+            },
+            Self::TemplateRuleAdded(line) => match lang {
+                Lang::Zh => format!("已添加规则 · {line}"),
+                Lang::En => format!("Added rule · {line}"),
+            },
+            Self::TemplateRuleAlreadyPresent(line) => match lang {
+                Lang::Zh => format!("规则已存在 · {line}"),
+                Lang::En => format!("Rule already present · {line}"),
+            },
             Self::SequenceGenerated { count } => match lang {
                 Lang::Zh => format!("已生成 {count} 条流量的时序图并复制 Mermaid"),
                 Lang::En => {
@@ -1007,6 +1065,11 @@ impl StatusMsg {
             | Self::MappedLocal(_)
             | Self::BreakRuleAdded(_)
             | Self::PrimaryFilterPausedForWatch
+            | Self::NetworkPresetApplied { .. }
+            | Self::NetworkPresetCleared { .. }
+            | Self::RuleGroupExists(_)
+            | Self::PresetSwitched(_)
+            | Self::TemplateRuleAdded(_)
             | Self::BaselineSet
             | Self::BaselineCleared
             | Self::Replayed(_)
@@ -1074,7 +1137,11 @@ impl StatusMsg {
             | Self::TabLimitReached(_)
             | Self::TransparentProxyNeedsApproval
             | Self::TransparentProxyFailed(_)
-            | Self::TransparentProxyNeedsApplications => Some(true),
+            | Self::TransparentProxyNeedsApplications
+            | Self::ProtoEditInEditor
+            | Self::RuleGroupLimitReached(_)
+            | Self::RuleGroupMissing(_)
+            | Self::TemplateRuleAlreadyPresent(_) => Some(true),
             _ => None,
         }
     }
@@ -1092,6 +1159,7 @@ impl StatusMsg {
             | Self::MappedLocal(_)
             | Self::BreakRuleAdded(_) => t(lang, "保存成功", "Saved Successfully"),
             Self::PrimaryFilterPausedForWatch => t(lang, "已暂停主过滤", "Primary Filter Paused"),
+            Self::PresetSwitched(_) => t(lang, "已切换预设", "Preset Switched"),
             Self::ProfileRestored(_) => t(lang, "已恢复历史版本", "History Restored"),
             Self::CopiedUrl
             | Self::CopiedHeaderValue(_)

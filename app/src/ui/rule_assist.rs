@@ -61,6 +61,20 @@ pub(crate) fn toggle_rule_line_comment(rules: &str, target_idx: usize) -> String
     lines.join("\n")
 }
 
+/// Replaces the specified 0-based line index with `replacement`.
+pub(crate) fn replace_rule_line(rules: &str, target_idx: usize, replacement: &str) -> String {
+    let clean = replacement.trim();
+    let mut lines: Vec<String> = rules.lines().map(str::to_string).collect();
+    if let Some(slot) = lines.get_mut(target_idx) {
+        *slot = clean.to_string();
+        lines.join("\n")
+    } else if rules.trim().is_empty() {
+        clean.to_string()
+    } else {
+        format!("{rules}\n{clean}")
+    }
+}
+
 /// Removes the specified 0-based line index from the rules text.
 pub(crate) fn remove_rule_line(rules: &str, target_idx: usize) -> String {
     rules
@@ -379,9 +393,13 @@ pub(crate) fn fill_draft_from_rule_line(
 }
 
 pub(crate) fn rule_filter_token_for_line(group_name: Option<&str>, line_no: usize) -> String {
-    match group_name {
-        Some(group) if !group.trim().is_empty() => format!("rule:{group}:{line_no}"),
-        _ => format!("rule:{line_no}"),
+    match group_name.map(str::trim).filter(|g| !g.is_empty()) {
+        Some(group) if group.chars().any(char::is_whitespace) || group.contains('"') => {
+            let escaped = group.replace('"', "\\\"");
+            format!("rule:\"{escaped}\":{line_no}")
+        }
+        Some(group) => format!("rule:{group}:{line_no}"),
+        None => format!("rule:{line_no}"),
     }
 }
 
@@ -572,13 +590,56 @@ fn rule_chip_toggle_btn(
         )
 }
 
+fn fill_line_into_quick_editor(
+    raw: &str,
+    line_idx: usize,
+    target: RuleEditTarget,
+    draft: QuickRuleDraftSignals,
+    quick_add_open: Signal<bool>,
+    controls: &Controls,
+) {
+    target.focused_line.set(None);
+    let uncommented = raw.trim().trim_start_matches('#').trim_start();
+    if matches!(
+        crate::rules::parse_single_rule(uncommented),
+        Some(crate::rules::Rule::Proto { .. })
+    ) {
+        set_status(controls, StatusMsg::ProtoEditInEditor);
+        return;
+    }
+    if fill_draft_from_rule_line(
+        raw,
+        draft.kind,
+        draft.host,
+        draft.path,
+        draft.op,
+        draft.from,
+        draft.to,
+        draft.modes,
+    ) {
+        draft.editing_line.set(Some(line_idx));
+        quick_add_open.set(true);
+    }
+}
+
 fn rule_chip_label(
     item: ReadSignal<RuleLineItem>,
     target: RuleEditTarget,
+    controls: Arc<Controls>,
     draft: QuickRuleDraftSignals,
     quick_add_open: Signal<bool>,
     is_zero_hit: impl Fn() -> bool + Copy + 'static,
 ) -> impl IntoElement {
+    let langs = ui_langs();
+    let is_proto = move || {
+        item.with(|it| {
+            let uncommented = it.raw.trim().trim_start_matches('#').trim_start();
+            matches!(
+                crate::rules::parse_single_rule(uncommented),
+                Some(crate::rules::Rule::Proto { .. })
+            )
+        })
+    };
     view()
         .role(AccessibilityRole::Button)
         .flex_1()
@@ -590,25 +651,38 @@ fn rule_chip_label(
         .duration(MOTION_INSTANT_MS)
         .ease_out()
         .focus_visible(apply_focus_ring)
-        .tooltip(label_tip(
-            "点击回填到下方表单",
-            "Fill rule into quick editor below",
-        ))
+        .tooltip(
+            tooltip().child(ui_tooltip_surface(
+                text(move || -> SharedString {
+                    let lang = ui_lang(langs);
+                    if item.with(|it| !it.commented && !it.valid) {
+                        t(
+                            lang,
+                            "语法有误，请在上方文本编辑器中修改",
+                            "Invalid syntax — edit in text editor above",
+                        )
+                    } else if is_proto() {
+                        t(
+                            lang,
+                            "请在上方纯文本编辑器中修改 proto 规则",
+                            "Edit proto rules in text editor above",
+                        )
+                    } else {
+                        t(
+                            lang,
+                            "点击回填到下方表单原地编辑此行",
+                            "Fill rule into quick editor to update this line",
+                        )
+                    }
+                    .into()
+                })
+                .text_size(px(TEXT_SM))
+                .text_color(fg_primary()),
+            )),
+        )
         .on_press(move || {
-            target.focused_line.set(None);
-            let raw = item.with(|it| it.raw.clone());
-            if fill_draft_from_rule_line(
-                &raw,
-                draft.kind,
-                draft.host,
-                draft.path,
-                draft.op,
-                draft.from,
-                draft.to,
-                draft.modes,
-            ) {
-                quick_add_open.set(true);
-            }
+            let (raw, line_idx) = item.with(|it| (it.raw.clone(), it.line_idx));
+            fill_line_into_quick_editor(&raw, line_idx, target, draft, quick_add_open, &controls);
         })
         .child(
             mono(move || -> SharedString {
@@ -635,6 +709,7 @@ fn rule_chip_hit_badge(
     target: RuleEditTarget,
     hit_count: impl Fn() -> usize + Copy + 'static,
 ) -> impl IntoElement {
+    let langs = ui_langs();
     when(
         move || item.with(|it| !it.commented && it.valid),
         move || {
@@ -646,22 +721,51 @@ fn rule_chip_hit_badge(
                 .rounded(px(RADIUS_SM))
                 .items_center()
                 .justify_center()
-                .hover(|s| s.bg(bg_control_hover()))
+                .hover(|s| {
+                    s.bg(move || {
+                        if hit_count() > 0 {
+                            bg_control_hover()
+                        } else {
+                            AdaptiveColor::TRANSPARENT
+                        }
+                    })
+                })
                 .active(|s| s.bg(bg_control_active()))
                 .transition_colors()
                 .duration(MOTION_INSTANT_MS)
                 .ease_out()
                 .focus_visible(apply_focus_ring)
-                .tooltip(label_tip(
-                    "本会话命中次数（点击按此规则行过滤）",
-                    "Session hit count (click to filter by this rule line)",
-                ))
+                .disabled(move || hit_count() == 0)
+                .disabled_style(|s| s.opacity(0.45))
+                .tooltip(
+                    tooltip().child(ui_tooltip_surface(
+                        text(move || -> SharedString {
+                            let lang = ui_lang(langs);
+                            if hit_count() > 0 {
+                                t(
+                                    lang,
+                                    "本会话命中次数（点击关闭面板并按此规则行过滤）",
+                                    "Session hits (click to filter by this rule line)",
+                                )
+                            } else {
+                                t(lang, "本会话暂无命中", "0 hits in current session")
+                            }
+                            .into()
+                        })
+                        .text_size(px(TEXT_SM))
+                        .text_color(fg_primary()),
+                    )),
+                )
                 .on_press(move || {
+                    if hit_count() == 0 {
+                        return;
+                    }
                     let line_no = item.with(|it| it.line_idx + 1);
                     let group = target.editing.get_untracked();
                     let token = rule_filter_token_for_line(group.as_deref(), line_no);
                     target.filter.set(token);
                     target.filter_enabled.set(true);
+                    target.panel_open.set(false);
                 })
                 .child(
                     mono(move || -> SharedString {
@@ -724,6 +828,7 @@ fn rule_line_chip(
     catalog: Signal<FilterSuggestionsCatalog>,
 ) -> impl IntoElement {
     let tc = controls.clone();
+    let lc = controls.clone();
     let rc = controls;
     let hit_count = move || {
         let line_no = item.with(|it| it.line_idx + 1);
@@ -770,12 +875,119 @@ fn rule_line_chip(
         .child(rule_chip_label(
             item,
             target,
+            lc,
             draft,
             quick_add_open,
             is_zero_hit,
         ))
         .child(rule_chip_hit_badge(item, target, hit_count))
         .child(rule_chip_remove_btn(item, target, rc))
+}
+
+fn rule_focused_banner(
+    target: RuleEditTarget,
+    controls: Arc<Controls>,
+    draft: QuickRuleDraftSignals,
+    quick_add_open: Signal<bool>,
+) -> impl IntoElement {
+    let langs = ui_langs();
+    let focused_entry = move || {
+        collect_rule_lines(&target.current_text())
+            .into_iter()
+            .find(|it| target.is_line_focused(it.line_idx + 1))
+            .map(|it| (it.line_idx, it.raw))
+    };
+    when(
+        move || focused_entry().is_some(),
+        move || {
+            let edit_controls = controls.clone();
+            view()
+                .w_full()
+                .px_2()
+                .py_1()
+                .rounded(px(RADIUS_SM))
+                .border_1()
+                .border_color(status_warn_fg())
+                .bg(status_warn_bg())
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(
+                    text(move || -> SharedString {
+                        let n = focused_entry().map(|(i, _)| i + 1).unwrap_or(0);
+                        match ui_lang(langs) {
+                            Lang::Zh => format!("已定位到第 {n} 行（已在下方置顶高亮）"),
+                            Lang::En => format!("Focused rule line #{n} (pinned below)"),
+                        }
+                        .into()
+                    })
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .number_of_lines(1)
+                    .text_overflow(EllipsizeMode::Tail)
+                    .text_size(px(TEXT_XS))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(status_warn_fg()),
+                )
+                .child(
+                    view()
+                        .flex_shrink_0()
+                        .flex_row()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            view()
+                                .role(AccessibilityRole::Button)
+                                .h(px(ControlSize::Xs.height()))
+                                .px_1p5()
+                                .rounded(px(RADIUS_SM))
+                                .hover(|s| s.bg(status_warn_bg_hover()))
+                                .active(|s| s.bg(bg_control_active()))
+                                .focus_visible(apply_focus_ring)
+                                .items_center()
+                                .justify_center()
+                                .on_press(move || {
+                                    if let Some((idx, raw)) = focused_entry() {
+                                        fill_line_into_quick_editor(
+                                            &raw,
+                                            idx,
+                                            target,
+                                            draft,
+                                            quick_add_open,
+                                            &edit_controls,
+                                        );
+                                    }
+                                })
+                                .child(
+                                    text(tr("编辑此行", "Edit line"))
+                                        .text_size(px(TEXT_XS))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(status_warn_fg()),
+                                ),
+                        )
+                        .child(
+                            view()
+                                .role(AccessibilityRole::Button)
+                                .w(px(ControlSize::Xs.height()))
+                                .h(px(ControlSize::Xs.height()))
+                                .rounded(px(RADIUS_SM))
+                                .hover(|s| s.bg(status_warn_bg_hover()))
+                                .active(|s| s.bg(bg_control_active()))
+                                .focus_visible(apply_focus_ring)
+                                .items_center()
+                                .justify_center()
+                                .label(tr("清除定位高亮", "Clear focus highlight"))
+                                .on_press(move || target.focused_line.set(None))
+                                .child(
+                                    text("×")
+                                        .text_size(px(TEXT_XS))
+                                        .text_color(status_warn_fg()),
+                                ),
+                        ),
+                )
+        },
+    )
 }
 
 pub(crate) fn rule_line_strip(
@@ -787,10 +999,15 @@ pub(crate) fn rule_line_strip(
     let catalog = filter_catalog_context();
     let manual_open = signal(false);
     let show_chips = move || manual_open.get() || target.focused_line.with(Option::is_some);
-    let items = move || collect_rule_lines(&target.current_text());
+    let items = move || {
+        let mut all = collect_rule_lines(&target.current_text());
+        all.sort_by_key(|it| !target.is_line_focused(it.line_idx + 1));
+        all
+    };
     when(
         move || !items().is_empty(),
         move || {
+            let banner_controls = controls.clone();
             let strip_controls = controls.clone();
             view()
                 .w_full()
@@ -801,6 +1018,12 @@ pub(crate) fn rule_line_strip(
                     catalog,
                     manual_open,
                     show_chips,
+                ))
+                .child(rule_focused_banner(
+                    target,
+                    banner_controls,
+                    draft,
+                    quick_add_open,
                 ))
                 .child(when(show_chips, move || {
                     let item_controls = strip_controls.clone();

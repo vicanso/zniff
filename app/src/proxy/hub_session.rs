@@ -27,6 +27,18 @@ impl Hub {
             .collect()
     }
 
+    pub fn paused_remaining_secs(&self) -> Option<u64> {
+        self.break_queue
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .front()
+            .map(|slot| {
+                Duration::from_secs(60)
+                    .saturating_sub(slot.touched.elapsed())
+                    .as_secs()
+            })
+    }
+
     /// Moves `id` to the front and restarts its 60s timer. Other slots stay paused.
     pub fn promote_break(&self, id: u64) -> bool {
         let mut queue = self

@@ -191,6 +191,7 @@ pub(crate) fn toolbar(
         from: signal(String::new()),
         to: signal(String::new()),
         modes: QuickRuleModeSignals::new(),
+        editing_line: signal(None),
     };
     #[cfg(not(target_arch = "wasm32"))]
     let update_controls = import_controls.clone();

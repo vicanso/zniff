@@ -90,17 +90,21 @@ pub(crate) fn live_preset_save_state(
     profiles: ProfileSignals,
     draft: QuickRuleDraftSignals,
 ) -> PresetSaveState {
-    let kind = draft.kind.get();
-    let effective_rules = draft_rules_with_op(
-        &profiles.rules.get(),
-        &draft.host.get(),
-        &draft.path.get(),
-        &draft.op.get(),
-        &draft.from.get(),
-        &draft.to.get(),
-        draft.modes.mode_for(kind),
-        kind,
-    );
+    let effective_rules = if profiles.editing_group.with(|g| g.is_some()) {
+        profiles.rules.get()
+    } else {
+        let kind = draft.kind.get();
+        draft_rules_with_op(
+            &profiles.rules.get(),
+            &draft.host.get(),
+            &draft.path.get(),
+            &draft.op.get(),
+            &draft.from.get(),
+            &draft.to.get(),
+            draft.modes.mode_for(kind),
+            kind,
+        )
+    };
     let typed_name = profiles.name.get();
     let filter = profiles.filter.get();
     let bypass = profiles.bypass.get();
@@ -164,26 +168,31 @@ pub(crate) fn commit_and_save_profile(
     target_name: Option<&str>,
     controls: &Controls,
 ) {
-    let host = draft.host.get();
-    let path = draft.path.get();
-    let op = draft.op.get();
-    let from = draft.from.get();
-    let to = draft.to.get();
-    let kind_now = draft.kind.get();
     let current = profiles.rules.get();
-    let rules_now = draft_rules_with_op(
-        &current,
-        &host,
-        &path,
-        &op,
-        &from,
-        &to,
-        draft.modes.mode_for(kind_now),
-        kind_now,
-    );
+    let rules_now = if profiles.editing_group.with_untracked(|g| g.is_some()) {
+        current.clone()
+    } else {
+        let host = draft.host.get();
+        let path = draft.path.get();
+        let op = draft.op.get();
+        let from = draft.from.get();
+        let to = draft.to.get();
+        let kind_now = draft.kind.get();
+        draft_rules_with_op(
+            &current,
+            &host,
+            &path,
+            &op,
+            &from,
+            &to,
+            draft.modes.mode_for(kind_now),
+            kind_now,
+        )
+    };
     if rules_now != current {
         profiles.rules.set(rules_now.clone());
         controls.hub.set_rules(&rules_now);
+        draft.editing_line.set(None);
         draft.host.set(String::new());
         draft.path.set(String::new());
         draft.op.set(String::new());

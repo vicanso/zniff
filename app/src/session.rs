@@ -2998,12 +2998,52 @@ impl StatusMatch {
     }
 }
 
+/// Splits filter text on whitespace while preserving quoted segments (`"..."`).
+pub(crate) fn split_filter_words(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    for ch in text.chars() {
+        if ch == '"' {
+            in_quotes = !in_quotes;
+            current.push(ch);
+        } else if !in_quotes && ch.is_whitespace() {
+            if !current.is_empty() {
+                out.push(std::mem::take(&mut current));
+            }
+        } else {
+            current.push(ch);
+        }
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    out
+}
+
 fn split_or_terms(text: &str) -> Vec<String> {
-    text.split(['|', ','])
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .map(|part| part.to_ascii_lowercase())
-        .collect()
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    for ch in text.chars() {
+        if ch == '"' {
+            in_quotes = !in_quotes;
+            current.push(ch);
+        } else if !in_quotes && (ch == '|' || ch == ',') {
+            let trimmed = current.trim();
+            if !trimmed.is_empty() {
+                parts.push(trimmed.to_ascii_lowercase());
+            }
+            current.clear();
+        } else {
+            current.push(ch);
+        }
+    }
+    let trimmed = current.trim();
+    if !trimmed.is_empty() {
+        parts.push(trimmed.to_ascii_lowercase());
+    }
+    parts
 }
 
 /// Combines a base setup filter and a secondary list filter into a two-stage
@@ -3025,7 +3065,7 @@ pub fn combine_filters(base: &str, secondary: &str) -> String {
 pub fn normalize_filter_pipes(filter: &str) -> String {
     let mut tokens: Vec<String> = Vec::new();
     let mut join_next = false;
-    for raw in filter.split_whitespace() {
+    for raw in split_filter_words(filter) {
         if raw == "|" {
             join_next = true;
             continue;
@@ -3045,15 +3085,15 @@ pub fn normalize_filter_pipes(filter: &str) -> String {
                 if !last.ends_with('|') {
                     last.push('|');
                 }
-                last.push_str(raw);
+                last.push_str(&raw);
             } else {
-                tokens.push(raw.to_string());
+                tokens.push(raw);
             }
-            join_next = raw.ends_with('|');
+            join_next = tokens.last().is_some_and(|t| t.ends_with('|'));
             continue;
         }
         join_next = raw.ends_with('|');
-        tokens.push(raw.to_string());
+        tokens.push(raw);
     }
     tokens.join(" ")
 }
@@ -3114,6 +3154,15 @@ fn path_prefix_matches(path: &str, prefix: &str) -> bool {
         .is_some_and(|rest| starts_with_ignore_ascii(rest, prefix))
 }
 
+fn unquote_rule_segment(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let inner = trimmed
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .unwrap_or(trimmed);
+    inner.replace("\\\"", "\"")
+}
+
 fn flow_matches_rule_term(flow: &Flow, term: &str) -> bool {
     let clean = term.trim().trim_start_matches('#');
     if clean.is_empty() {
@@ -3127,22 +3176,24 @@ fn flow_matches_rule_term(flow: &Flow, term: &str) -> bool {
         && let Ok(line_no) = line_part.trim_start_matches('#').parse::<usize>()
         && line_no > 0
     {
+        let group_name = unquote_rule_segment(group);
         return flow.rule_hits.iter().any(|h| {
             h.line_no == line_no
                 && h.group_name
                     .as_deref()
-                    .is_some_and(|g| g.eq_ignore_ascii_case(group))
+                    .is_some_and(|g| g.eq_ignore_ascii_case(&group_name))
         });
     }
+    let clean_unquoted = unquote_rule_segment(clean);
     flow.rule_hits.iter().any(|h| {
-        h.verb.eq_ignore_ascii_case(clean)
+        h.verb.eq_ignore_ascii_case(&clean_unquoted)
             || h.group_name
                 .as_deref()
-                .is_some_and(|g| g.eq_ignore_ascii_case(clean))
+                .is_some_and(|g| g.eq_ignore_ascii_case(&clean_unquoted))
     }) || flow
         .rule_hit
         .split_whitespace()
-        .any(|w| w.eq_ignore_ascii_case(clean))
+        .any(|w| w.eq_ignore_ascii_case(&clean_unquoted))
 }
 
 fn comment_has_repeat_id(comment: &str, id_str: &str) -> bool {
@@ -3342,7 +3393,7 @@ impl FilterPlan {
 fn join_comma_or_tokens(normalized: &str) -> Vec<String> {
     let mut tokens: Vec<String> = Vec::new();
     let mut join_next = false;
-    for raw in normalized.split_whitespace() {
+    for raw in split_filter_words(normalized) {
         if raw == "," {
             join_next = true;
             continue;
@@ -3362,15 +3413,15 @@ fn join_comma_or_tokens(normalized: &str) -> Vec<String> {
                 if !last.ends_with(',') {
                     last.push(',');
                 }
-                last.push_str(raw);
+                last.push_str(&raw);
             } else {
-                tokens.push(raw.to_string());
+                tokens.push(raw);
             }
-            join_next = raw.ends_with(',');
+            join_next = tokens.last().is_some_and(|t| t.ends_with(','));
             continue;
         }
         join_next = raw.ends_with(',');
-        tokens.push(raw.to_string());
+        tokens.push(raw);
     }
     tokens
 }
@@ -5508,6 +5559,19 @@ mod tests {
         assert_eq!(s.ids_matching("rule:mock"), vec![f2]);
         assert_eq!(s.ids_matching("-rule:replace"), vec![f2, f3, f4]);
         assert_eq!(s.ids_matching("-rule:mock:2"), vec![f1, f3, f4]);
+
+        s.set_rule_hit_details(
+            f3,
+            "cors",
+            vec![RuleHit {
+                group_name: Some("Charles XML".into()),
+                line_no: 4,
+                verb: "cors".into(),
+            }],
+        );
+        assert_eq!(s.ids_matching(r#"rule:"Charles XML":4"#), vec![f3]);
+        assert_eq!(s.ids_matching(r#"rule:"Charles XML""#), vec![f3]);
+        assert_eq!(s.ids_matching(r#"-rule:"Charles XML":4"#), vec![f1, f2, f4]);
     }
 
     #[test]
