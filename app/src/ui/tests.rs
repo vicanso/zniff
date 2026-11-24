@@ -4268,36 +4268,34 @@ async fn sidebar_quick_filter_chips_fit_on_single_row_zh_en() {
         (crate::i18n::Lang::Zh, ["慢请求", "出错", "JSON", "星标"]),
         (crate::i18n::Lang::En, ["Slow", "Error", "JSON", "Star"]),
     ] {
-        for sidebar_w in [super::SIDEBAR_WIDTH_DEFAULT, 220.0] {
-            CHIP_SIDEBAR_LANG.with(|c| c.set(lang));
-            CHIP_SIDEBAR_W.with(|c| c.set(sidebar_w));
-            let (_core, tree) = mount_headless_component::<QuickChipSidebarHarness>(Size::new(
-                px(300.0),
-                px(400.0),
-            ));
-            let chip_frames: Vec<_> = labels
-                .iter()
-                .map(|label| {
-                    let text_id = tree
-                        .texts
-                        .iter()
-                        .find_map(|(id, t)| (t == label).then_some(*id))
-                        .unwrap_or_else(|| panic!("missing chip {label:?} at width={sidebar_w}"));
-                    let chip_id = tree.parent[&text_id];
-                    (*label, tree.abs_frame(chip_id))
-                })
-                .collect();
-            let y0 = chip_frames[0].1.origin.y.0;
-            for (label, frame) in &chip_frames {
-                assert!(
-                    (frame.origin.y.0 - y0).abs() < 4.0,
-                    "{lang:?} width={sidebar_w}: chip {label:?} wrapped to second row: {chip_frames:?}"
-                );
-                assert!(
-                    frame.origin.x.0 + frame.size.width.0 <= sidebar_w,
-                    "{lang:?} width={sidebar_w}: chip {label:?} overflowed sidebar: {frame:?}"
-                );
-            }
+        let sidebar_w = super::SIDEBAR_WIDTH_DEFAULT;
+        CHIP_SIDEBAR_LANG.with(|c| c.set(lang));
+        CHIP_SIDEBAR_W.with(|c| c.set(sidebar_w));
+        let (_core, tree) =
+            mount_headless_component::<QuickChipSidebarHarness>(Size::new(px(300.0), px(400.0)));
+        let chip_frames: Vec<_> = labels
+            .iter()
+            .map(|label| {
+                let text_id = tree
+                    .texts
+                    .iter()
+                    .find_map(|(id, t)| (t == label).then_some(*id))
+                    .unwrap_or_else(|| panic!("missing chip {label:?} at width={sidebar_w}"));
+                let chip_id = tree.parent[&text_id];
+                (*label, tree.abs_frame(chip_id))
+            })
+            .collect();
+        let y0 = chip_frames[0].1.origin.y.0;
+        let content_right = sidebar_w - 5.0 - 8.0;
+        for (label, frame) in &chip_frames {
+            assert!(
+                (frame.origin.y.0 - y0).abs() < 4.0,
+                "{lang:?} width={sidebar_w}: chip {label:?} wrapped to second row: {chip_frames:?}"
+            );
+            assert!(
+                frame.origin.x.0 + frame.size.width.0 <= content_right,
+                "{lang:?} width={sidebar_w}: chip {label:?} overflowed sidebar: {frame:?}"
+            );
         }
     }
 }

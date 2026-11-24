@@ -152,7 +152,7 @@ pub const LIST_WIDTH_MIN: u32 = 280;
 pub const LIST_WIDTH_MAX: u32 = 1100;
 pub const LIST_HEIGHT_MIN: u32 = 160;
 pub const LIST_HEIGHT_MAX: u32 = 720;
-pub const SIDEBAR_WIDTH_DEFAULT: u32 = 240;
+pub const SIDEBAR_WIDTH_DEFAULT: u32 = 218;
 pub const SIDEBAR_WIDTH_MIN: u32 = 176;
 pub const SIDEBAR_WIDTH_MAX: u32 = 340;
 
