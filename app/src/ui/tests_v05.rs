@@ -2386,3 +2386,83 @@ fn bug4_proto_and_invalid_chips_do_not_open_stale_form() {
         );
     }
 }
+
+#[test]
+fn popover_closes_when_focus_moves_into_outside_workspace_input() {
+    #[component]
+    fn OutsideInputDismissHarness() -> impl IntoElement {
+        let lang = TEST_LANG.with(Cell::get);
+        provide_base_contexts(lang);
+        let dismiss = provide_popover_dismiss();
+        let workspace_ref = element_ref();
+        workspace_ref.on_focus_in(move || dismiss.dismiss());
+        let open = signal(true);
+        bind_popover_dismiss(open);
+        let inside_text = signal(String::new());
+        let outside_text = signal(String::new());
+
+        view()
+            .w(px(640.0))
+            .h(px(480.0))
+            .flex_col()
+            .child(
+                popover()
+                    .open(move || Some(open.get()))
+                    .on_open_change(move |event: &nsh_base::PopoverEvent| {
+                        if let nsh_base::PopoverEvent::OpenChange(next, _) = event {
+                            open.set(*next);
+                        }
+                    })
+                    .trigger(view().child(text("PRESET_TRIGGER")))
+                    .child(
+                        view().p_2().child(text("INSIDE_HOST")).child(
+                            input()
+                                .value(inside_text)
+                                .on_change(move |s: &str| inside_text.set(s.to_string())),
+                        ),
+                    ),
+            )
+            .child(
+                view()
+                    .element_ref(&workspace_ref)
+                    .flex_1()
+                    .child(text("OUTSIDE_HOST"))
+                    .child(
+                        input()
+                            .value(outside_text)
+                            .on_change(move |s: &str| outside_text.set(s.to_string())),
+                    ),
+            )
+            .child(text(move || format!("POPOVER_OPEN:{}", open.get())))
+    }
+
+    TEST_LANG.set(Lang::En);
+    let (mut core, mut tree) = mount::<OutsideInputDismissHarness>(Size::new(px(640.0), px(480.0)));
+    assert!(tree.has_text("POPOVER_OPEN:true"));
+
+    let find_sibling_input = |marker: &str| -> NodeId {
+        let marker_id = tree
+            .live_node_ids()
+            .into_iter()
+            .find(|id| tree.texts.get(id).is_some_and(|s| s == marker))
+            .unwrap_or_else(|| panic!("missing marker {marker}"));
+        let parent_id = tree.parent[&marker_id];
+        tree.children[&parent_id]
+            .iter()
+            .copied()
+            .find(|id| tree.kinds.get(id) == Some(&ViewKind::Input))
+            .unwrap_or_else(|| panic!("missing Input under {marker}"))
+    };
+    let inside_input = find_sibling_input("INSIDE_HOST");
+    let outside_input = find_sibling_input("OUTSIDE_HOST");
+
+    // Focusing an input inside the popover keeps the popover open.
+    core.set_states(inside_input, nsh_core::tailwind::state::FOCUSED);
+    tree.pump(&mut core);
+    assert!(tree.has_text("POPOVER_OPEN:true"));
+
+    // Moving focus into the outside workspace input closes the popover.
+    core.set_states(outside_input, nsh_core::tailwind::state::FOCUSED);
+    tree.pump(&mut core);
+    assert!(tree.has_text("POPOVER_OPEN:false"));
+}

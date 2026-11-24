@@ -11,6 +11,7 @@ pub(crate) fn saved_filter_menu(
     let filter = profiles.filter;
     let filter_enabled = profiles.filter_enabled;
     let open = profiles.filter_panel_open;
+    bind_popover_dismiss(open);
     let has_filter = move || !filter.get().trim().is_empty();
     let is_paused = move || has_filter() && !filter_enabled.get();
     let is_tinted = move || open.get() || (has_filter() && filter_enabled.get());

@@ -56,6 +56,7 @@ pub fn App() -> impl IntoElement {
     let facets = signal(session::SessionFacets::default());
     let filter_catalog = signal(FilterSuggestionsCatalog::default());
     provide_context(filter_catalog);
+    let popover_dismiss = provide_popover_dismiss();
     let facets_open = signal(false);
     let flow_total = signal(0_usize);
     let session_tabs_sig = signal(vec![TabSummary {
@@ -1598,15 +1599,25 @@ pub fn App() -> impl IntoElement {
                 qr_open,
                 pending_qr,
             };
+            let workspace_ref = element_ref();
+            workspace_ref.on_focus_in(move || popover_dismiss.dismiss());
             let build_split: Rc<dyn Fn(bool) -> View> = Rc::new(move |vertical: bool| {
                 let controls_list = controls_list.clone();
                 let controls_split = controls_split.clone();
                 let controls_detail = controls_detail.clone();
                 let onboarding_now = onboarding_base.clone();
                 let container = if vertical {
-                    view().flex_1().min_h(px(0.0)).flex_col()
+                    view()
+                        .element_ref(&workspace_ref)
+                        .flex_1()
+                        .min_h(px(0.0))
+                        .flex_col()
                 } else {
-                    view().flex_1().min_h(px(0.0)).flex_row()
+                    view()
+                        .element_ref(&workspace_ref)
+                        .flex_1()
+                        .min_h(px(0.0))
+                        .flex_row()
                 };
                 container
                     .child(when(

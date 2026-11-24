@@ -198,6 +198,7 @@ pub(crate) fn cert_qr(
     open: Signal<bool>,
     controls: Arc<Controls>,
 ) -> impl IntoElement {
+    bind_popover_dismiss(open);
     popover()
         .open(move || Some(open.get()))
         .popup_style(ui_popup_style)
@@ -742,6 +743,7 @@ pub(crate) fn lan_choice_row(
 }
 
 pub(crate) fn port_field(port_text: Signal<String>, controls: Arc<Controls>) -> impl IntoElement {
+    let dismiss = popover_dismiss_context();
     view()
         .flex_row()
         .items_center()
@@ -767,6 +769,11 @@ pub(crate) fn port_field(port_text: Signal<String>, controls: Arc<Controls>) -> 
                 .focus(|style| style.border_color(accent_blue()))
                 .text_size(px(TEXT_XS))
                 .text_color(fg_primary())
+                .on_focus(move || {
+                    if let Some(d) = dismiss {
+                        d.dismiss();
+                    }
+                })
                 .on_change(move |text: &str| {
                     port_text.set(text.to_string());
                     if let Some(port) = present::parse_port(text) {

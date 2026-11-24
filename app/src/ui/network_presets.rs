@@ -178,6 +178,7 @@ pub(crate) fn toolbar_network_preset_popover(
             .with(|groups| detect_active_network_preset(groups))
     });
     let is_throttled = move || active_preset.get() != NetworkPreset::None;
+    bind_popover_dismiss(open);
 
     popover()
         .open(move || Some(open.get()))

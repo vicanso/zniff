@@ -53,6 +53,7 @@ pub(crate) fn trigger_mobile_qr(
 /// Android ADB, iOS Simulator, system proxy, and mobile QR setup.
 pub(crate) fn connect_hub_popover(props: ConnectHubProps) -> impl IntoElement {
     let open = signal(false);
+    bind_popover_dismiss(open);
     let adb_count = props.adb_count;
     let tp_active = props.tp_active;
     let running = props.running;

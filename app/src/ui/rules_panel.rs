@@ -107,6 +107,7 @@ pub(crate) fn rules_menu_popover(
     let rules_on = profiles.rules_on;
     let breaks_on = profiles.breaks_on;
     let open = profiles.panel_open;
+    bind_popover_dismiss(open);
     let active_rules_count = computed(move || {
         let effective = effective_rules_text(&rules_text.get(), &rule_groups.get());
         crate::rules::parse_rules(&effective).len()
@@ -769,6 +770,7 @@ pub(crate) fn preset_pill_popover(
 ) -> impl IntoElement {
     let langs = ui_langs();
     let open = profiles.preset_panel_open;
+    bind_popover_dismiss(open);
     let import_open = signal(false);
     let active_name = move || {
         toolbar_active_profile_name(

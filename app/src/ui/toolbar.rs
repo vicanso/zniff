@@ -642,6 +642,7 @@ pub(crate) fn toolbar_menu(
 ) -> impl IntoElement {
     let _ = (install, remove, toggle_proxy, pretty);
     let open = signal(false);
+    bind_popover_dismiss(open);
     popover()
         .open(move || Some(open.get()))
         .popup_style(ui_popup_style)
@@ -797,6 +798,7 @@ pub(crate) fn toolbar_layout_switcher(
                 ),
         );
     }
+    bind_popover_dismiss(open);
     popover()
         .open(move || Some(open.get()))
         .popup_style(ui_popup_style)

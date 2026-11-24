@@ -194,3 +194,51 @@ pub(crate) fn ui_badge(label: impl IntoReactive<SharedString>, tone: BadgeTone) 
                 .text_color(fg),
         )
 }
+
+/// Broadcast handle that asks all mounted toolbar/footer popovers to close when focus enters an
+/// outside native input/editor (whose mouse-down events AppKit consumes before `on_press_outside`).
+#[derive(Clone, Copy)]
+pub(crate) struct PopoverDismiss(Signal<u64>);
+
+impl PopoverDismiss {
+    /// Dismisses any currently open popover listening on this bus.
+    pub(crate) fn dismiss(self) {
+        self.0.update(|n| *n = n.wrapping_add(1));
+    }
+}
+
+/// Provides the root-level [`PopoverDismiss`] bus to descendant UI components.
+#[allow(dead_code)]
+pub(crate) fn provide_popover_dismiss() -> PopoverDismiss {
+    let handle = PopoverDismiss(signal(0));
+    provide_context(handle);
+    handle
+}
+
+/// Returns the root [`PopoverDismiss`] bus when mounted under [`App`], or `None` in isolated tests.
+pub(crate) fn popover_dismiss_context() -> Option<PopoverDismiss> {
+    use_context::<PopoverDismiss>()
+}
+
+/// Connects a popover's `open` signal to the outside-input dismiss bus and clears any previously
+/// focused workspace input when opening so clicking back into that input triggers `on_focus_in`.
+pub(crate) fn bind_popover_dismiss(open: Signal<bool>) {
+    let was_open = Cell::new(open.get_untracked());
+    effect(move || {
+        let now = open.get();
+        if now && !was_open.replace(true) {
+            dismiss_keyboard();
+        } else if !now {
+            was_open.set(false);
+        }
+    });
+    if let Some(PopoverDismiss(rev)) = popover_dismiss_context() {
+        let seen = Cell::new(rev.get_untracked());
+        effect(move || {
+            let cur = rev.get();
+            if cur != seen.replace(cur) && open.get_untracked() {
+                open.set(false);
+            }
+        });
+    }
+}

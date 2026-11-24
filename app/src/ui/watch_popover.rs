@@ -67,6 +67,7 @@ fn add_watch_rule(
 
 pub(crate) fn watch_popover(props: WatchPopoverProps) -> impl IntoElement {
     let open = props.open;
+    bind_popover_dismiss(open);
     let eval = props.eval;
     popover()
         .open(move || Some(open.get()))

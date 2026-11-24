@@ -26,6 +26,7 @@ pub(crate) fn access_summary_state(
 /// Combined footer popover for machine-level proxy authentication and allowed host rules.
 pub(crate) fn access_control_popover(props: AccessControlProps) -> impl IntoElement {
     let open = props.open;
+    bind_popover_dismiss(open);
     let controls = props.controls.clone();
     let denied_controls = props.controls.clone();
     let allow_hosts = props.allow_hosts;
