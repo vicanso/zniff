@@ -1566,7 +1566,7 @@ pub fn flow_snapshot_scoped(flow: &Flow, lang: Lang, scope: u8) -> String {
     if include_bodies {
         push_section(
             &mut out,
-            t(lang, "请求 body", "Request body"),
+            t(lang, "请求正文", "Request body"),
             &body_text(&flow.request_body),
         );
     }
@@ -1580,7 +1580,7 @@ pub fn flow_snapshot_scoped(flow: &Flow, lang: Lang, scope: u8) -> String {
     if include_bodies {
         push_section(
             &mut out,
-            t(lang, "响应 body", "Response body"),
+            t(lang, "响应正文", "Response body"),
             &body_text(&flow.response_body),
         );
     }

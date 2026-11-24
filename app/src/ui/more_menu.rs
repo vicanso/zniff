@@ -220,14 +220,15 @@ pub(crate) fn more_menu(
         )
     );
     let diag_controls = import_controls.clone();
-    let items = items.child(menu_action(
-        Glyph::Download,
-        tr("导出诊断包…", "Export Diagnostics…"),
-        move || {
-            open.set(false);
-            export_diagnostics_file(diag_controls.clone());
-        },
-    ));
+    let diag_label = if cfg!(target_arch = "wasm32") {
+        tr("复制诊断包", "Copy Diagnostics")
+    } else {
+        tr("导出诊断包…", "Export Diagnostics…")
+    };
+    let items = items.child(menu_action(Glyph::Download, diag_label, move || {
+        open.set(false);
+        export_diagnostics_file(diag_controls.clone());
+    }));
     let items = items.child(menu_action_meta(
         Glyph::Badge,
         tr("关于 zniff", "About zniff"),

@@ -474,7 +474,7 @@ pub(crate) fn toolbar(
                                             .min_w(px(0.0))
                                             .number_of_lines(1)
                                             .text_overflow(EllipsizeMode::Tail)
-                                            .text_size(px(12.0))
+                                            .text_size(px(TEXT_SM))
                                             .font_weight(FontWeight::MEDIUM)
                                             .text_color(move || {
                                                 if condition_info().2 {
@@ -496,7 +496,7 @@ pub(crate) fn toolbar(
                                     .min_w(px(0.0))
                                     .number_of_lines(1)
                                     .text_overflow(EllipsizeMode::Tail)
-                                    .text_size(px(12.0))
+                                    .text_size(px(TEXT_SM))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(move || {
                                         if startup_error().is_some() {

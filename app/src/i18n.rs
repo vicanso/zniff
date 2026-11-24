@@ -284,6 +284,8 @@ pub enum StatusMsg {
     CopiedLinuxCaCmd(String),
     CopiedAndroidCertGuide,
     CopiedSystemInfo,
+    #[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+    CopiedDiagnostics,
     ClearedFlows {
         count: usize,
     },
@@ -423,7 +425,7 @@ impl StatusMsg {
                         t(lang, "允许域名没有记住:", "Allowed hosts were not saved:")
                     }
                     PrefName::Profiles => {
-                        t(lang, "预设配置没有记住:", "Saved setups were not saved:")
+                        t(lang, "预设没有记住:", "Presets were not saved:")
                     }
                     PrefName::Port => t(lang, "端口没有记住:", "Port was not saved:"),
                     PrefName::Lan => t(lang, "局域网开关没有记住:", "LAN switch was not saved:"),
@@ -438,7 +440,7 @@ impl StatusMsg {
                         t(lang, "抓包开关没有记住:", "Capture switch was not saved:")
                     }
                     PrefName::Relay => {
-                        t(lang, "中转设置没有记住:", "Relay settings were not saved:")
+                        t(lang, "中继设置没有记住:", "Relay settings were not saved:")
                     }
                     PrefName::Redact => t(
                         lang,
@@ -515,7 +517,7 @@ impl StatusMsg {
                 if *binary {
                     t(
                         lang,
-                        "已复制 cURL，二进制 body 未写入命令",
+                        "已复制 cURL，二进制正文未写入命令",
                         "Copied cURL; the binary body was left out",
                     )
                     .into()
@@ -523,24 +525,19 @@ impl StatusMsg {
                     t(lang, "已复制 cURL", "Copied cURL").into()
                 }
             }
-            Self::EmptyCopy(side) => format!(
-                "{} {}",
-                side_name(lang, *side),
-                t(
-                    lang,
-                    "body 是空的，已复制空文本",
-                    "body is empty; copied an empty string"
-                )
-            ),
+            Self::EmptyCopy(side) => match lang {
+                Lang::Zh => format!("{}正文为空，已复制空文本", side_name(lang, *side)),
+                Lang::En => {
+                    format!("{} body is empty; copied an empty string", side_name(lang, *side))
+                }
+            },
             Self::CopiedBody { side, hex } => {
                 let side = side_name(lang, *side);
-                if *hex {
-                    format!(
-                        "{side} {}",
-                        t(lang, "body 已按十六进制复制", "body copied as hex")
-                    )
-                } else {
-                    format!("{} {side} body", t(lang, "已复制", "Copied"))
+                match (lang, *hex) {
+                    (Lang::Zh, true) => format!("{side}正文已按十六进制复制"),
+                    (Lang::Zh, false) => format!("已复制{side}正文"),
+                    (Lang::En, true) => format!("{side} body copied as hex"),
+                    (Lang::En, false) => format!("Copied {} body", side.to_ascii_lowercase()),
                 }
             }
             Self::CopiedJsonValue => t(lang, "已复制 JSON 值", "Copied JSON value").into(),
@@ -548,7 +545,7 @@ impl StatusMsg {
             Self::CopiedThinking => t(lang, "已复制思考过程", "Copied thinking").into(),
             Self::CopiedToolArgs => t(lang, "已复制工具参数", "Copied tool arguments").into(),
             Self::CopiedMarker => t(lang, "已复制标记名称", "Copied marker label").into(),
-            Self::EmptyResponse => t(lang, "响应 body 是空的", "Response body is empty").into(),
+            Self::EmptyResponse => t(lang, "响应正文为空", "Response body is empty").into(),
             Self::SaveCancelled => t(lang, "已取消保存", "Save cancelled").into(),
             Self::SaveFailed(err) => format!(
                 "{} {}",
@@ -608,7 +605,7 @@ impl StatusMsg {
                         "{base} · {}",
                         t(
                             lang,
-                            "对方打开这个中转地址即可。",
+                            "对方打开这个中继地址即可。",
                             "The other person opens this relay address."
                         )
                     )
@@ -627,19 +624,19 @@ impl StatusMsg {
             }
             Self::RelayBadUrl => t(
                 lang,
-                "中转地址要写成 http(s)://主机:端口[/前缀]",
+                "中继地址要写成 http(s)://主机:端口[/前缀]",
                 "Relay address must look like http(s)://host:port[/prefix]",
             )
             .into(),
             Self::RelayNeedToken => t(
                 lang,
-                "先填写中转密钥，再分享",
+                "先填写中继密钥，再分享",
                 "Fill in the relay token before sharing",
             )
             .into(),
             Self::RelayAcceptNeedToken => t(
                 lang,
-                "先填写中转密钥，再接收上传",
+                "先填写中继密钥，再接收上传",
                 "Fill in the relay token before accepting uploads",
             )
             .into(),
@@ -652,14 +649,14 @@ impl StatusMsg {
             Self::RelayPushFailed(err) => {
                 format!(
                     "{} {}",
-                    t(lang, "中转推送失败:", "Relay push failed:"),
+                    t(lang, "中继推送失败:", "Relay push failed:"),
                     localize_error(lang, err)
                 )
             }
             Self::RelayConnected(url) => {
                 format!(
                     "{} · {url}",
-                    t(lang, "中转已恢复", "Relay is receiving again")
+                    t(lang, "中继已恢复", "Relay is receiving again")
                 )
             }
             Self::ShareNeedsCapture => t(
@@ -724,22 +721,22 @@ impl StatusMsg {
             Self::ProfilesExported { count } => match lang {
                 Lang::Zh => {
                     if *count == 1 {
-                        "已导出当前配置到剪贴板".into()
+                        "已导出当前预设到剪贴板".into()
                     } else {
-                        format!("已导出 {count} 套配置到剪贴板")
+                        format!("已导出 {count} 个预设到剪贴板")
                     }
                 }
                 Lang::En => {
                     if *count == 1 {
-                        "Exported current setup to clipboard".into()
+                        "Exported current preset to clipboard".into()
                     } else {
-                        format!("Exported {count} setups to clipboard")
+                        format!("Exported {count} presets to clipboard")
                     }
                 }
             },
             Self::ProfilesImported { count } => match lang {
-                Lang::Zh => format!("已导入 {count} 套配置"),
-                Lang::En => format!("Imported {count} setups"),
+                Lang::Zh => format!("已导入 {count} 个预设"),
+                Lang::En => format!("Imported {count} presets"),
             },
             Self::RulesMigrated {
                 source,
@@ -758,12 +755,12 @@ impl StatusMsg {
                 }
             },
             Self::ProfileSaved(name) => match lang {
-                Lang::Zh => format!("已保存配置「{name}」"),
-                Lang::En => format!("Saved setup \"{name}\""),
+                Lang::Zh => format!("已保存预设「{name}」"),
+                Lang::En => format!("Saved preset \"{name}\""),
             },
             Self::ProfileRestored(name) => match lang {
-                Lang::Zh => format!("已恢复历史配置「{name}」"),
-                Lang::En => format!("Restored setup \"{name}\" from history"),
+                Lang::Zh => format!("已恢复历史预设「{name}」"),
+                Lang::En => format!("Restored preset \"{name}\" from history"),
             },
             Self::MappedLocal(target) => match lang {
                 Lang::Zh => format!("已添加本地映射规则 · {target}"),
@@ -1000,6 +997,12 @@ impl StatusMsg {
             )
             .into(),
             Self::CopiedSystemInfo => t(lang, "已复制系统与环境信息", "Copied system info").into(),
+            Self::CopiedDiagnostics => t(
+                lang,
+                "已复制诊断包 (JSON)",
+                "Copied diagnostics bundle (JSON)",
+            )
+            .into(),
             Self::ClearedFlows { count } => match lang {
                 Lang::Zh => format!("已清空 {count} 条流量"),
                 Lang::En if *count == 1 => "Cleared 1 flow".to_string(),
@@ -1148,6 +1151,7 @@ impl StatusMsg {
             | Self::CopiedConfigPath(_)
             | Self::CopiedOpenApi { .. }
             | Self::CopiedSystemInfo
+            | Self::CopiedDiagnostics
             | Self::UpdateUpToDate(_)
             | Self::UpdateAvailable(_)
             | Self::ClearedFlows { .. }
@@ -1262,6 +1266,7 @@ impl StatusMsg {
             | Self::CopiedConfigPath(_)
             | Self::CopiedOpenApi { .. }
             | Self::CopiedSystemInfo
+            | Self::CopiedDiagnostics
             | Self::Shared { .. } => t(lang, "已复制到剪贴板", "Copied to Clipboard"),
             Self::RelayConnected(_) => t(lang, "中继已恢复", "Relay Reconnected"),
             Self::ConfigReset { .. } => t(lang, "配置已重置", "Config Reset"),
@@ -1735,11 +1740,11 @@ mod tests {
         assert!(
             StatusMsg::ProfilesExported { count: 2 }
                 .text(Lang::Zh)
-                .contains("已导出 2 套配置到剪贴板")
+                .contains("已导出 2 个预设到剪贴板")
         );
         assert_eq!(
             StatusMsg::ProfilesImported { count: 3 }.text(Lang::En),
-            "Imported 3 setups"
+            "Imported 3 presets"
         );
         assert_eq!(StatusMsg::ExportCancelled.text(Lang::Zh), "已取消导出");
         assert_eq!(
@@ -1808,7 +1813,7 @@ mod tests {
                 relay: true,
             }
             .text(Lang::Zh),
-            "已复制分享地址，15 分钟内有效 · http://10.0.0.1:9/s/abc · 对方打开这个中转地址即可。"
+            "已复制分享地址，15 分钟内有效 · http://10.0.0.1:9/s/abc · 对方打开这个中继地址即可。"
         );
         assert_eq!(
             StatusMsg::RelayPushFailed("HTTP 401".into()).text(Lang::En),
@@ -1816,7 +1821,7 @@ mod tests {
         );
         assert_eq!(
             StatusMsg::RelayConnected("http://10.0.0.1:9/s/abc".into()).text(Lang::Zh),
-            "中转已恢复 · http://10.0.0.1:9/s/abc"
+            "中继已恢复 · http://10.0.0.1:9/s/abc"
         );
         assert_eq!(
             StatusMsg::RelayNeedToken.text(Lang::En),
@@ -1961,5 +1966,20 @@ mod tests {
             localize_error(Lang::En, "禁止访问 (403)"),
             "Forbidden (403)"
         );
+
+        let copied_diag = StatusMsg::CopiedDiagnostics;
+        assert_eq!(copied_diag.toast_kind(), Some(false));
+        assert_eq!(copied_diag.text(Lang::Zh), "已复制诊断包 (JSON)");
+        assert_eq!(
+            copied_diag.text(Lang::En),
+            "Copied diagnostics bundle (JSON)"
+        );
+
+        let body_ok = StatusMsg::CopiedBody {
+            side: Side::Response,
+            hex: false,
+        };
+        assert_eq!(body_ok.text(Lang::Zh), "已复制响应正文");
+        assert_eq!(body_ok.text(Lang::En), "Copied response body");
     }
 }

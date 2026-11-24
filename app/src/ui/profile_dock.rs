@@ -295,8 +295,6 @@ pub(crate) fn profile_dock(
                     .p_2p5()
                     .gap_2()
                     .rounded(px(RADIUS_MD))
-                    .border_1()
-                    .border_color(border_subtle())
                     .bg(bg_canvas())
                     .child(
                         view()

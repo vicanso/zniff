@@ -510,7 +510,7 @@ pub(crate) fn qr_code_side(
                         }
                     }
                 })
-                .text_size(px(12.0))
+                .text_size(px(TEXT_SM))
                 .text_color(fg_muted()),
             ),
         )
@@ -643,7 +643,7 @@ pub(crate) fn qr_step(
         .child(
             view().w(px(18.0)).flex_shrink_0().child(
                 text(index)
-                    .text_size(px(12.0))
+                    .text_size(px(TEXT_SM))
                     .line_height(Points(18.0))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(fg_secondary()),
@@ -652,7 +652,7 @@ pub(crate) fn qr_step(
         .child(
             view().flex_1().min_w(px(0.0)).child(
                 text(body)
-                    .text_size(px(12.0))
+                    .text_size(px(TEXT_SM))
                     .line_height(Points(18.0))
                     .text_color(fg_muted()),
             ),
@@ -661,7 +661,7 @@ pub(crate) fn qr_step(
 
 pub(crate) fn qr_os_heading(title: &'static str) -> Text {
     text(title)
-        .text_size(px(12.0))
+        .text_size(px(TEXT_SM))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(fg_primary())
 }
@@ -746,7 +746,7 @@ pub(crate) fn lan_choice_row(
             .min_w(px(0.0))
             .number_of_lines(1)
             .text_overflow(EllipsizeMode::Tail)
-            .text_size(px(12.0))
+            .text_size(px(TEXT_SM))
             .text_color(fg_primary()),
         )
 }

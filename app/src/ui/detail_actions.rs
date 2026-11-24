@@ -127,7 +127,8 @@ fn code_snippets_section(
     code_open: Signal<bool>,
 ) -> impl IntoElement {
     let langs = ui_langs();
-    let entries: [(Option<(&'static str, &'static str)>, &'static str, Snippet); 11] = [
+    type SnippetEntry = (Option<(&'static str, &'static str)>, &'static str, Snippet);
+    let entries: [SnippetEntry; 11] = [
         (None, "fetch", Snippet::Fetch),
         (None, "Python", Snippet::Python),
         (None, "Rust (reqwest)", Snippet::RustReqwest),
@@ -276,33 +277,32 @@ pub(crate) fn detail_actions(
                 copy_part(&copy_response, selected.get(), CopyPart::Response);
             },
         ));
+    let save_check = save.clone();
+    let has_res_body = move || {
+        !shown.response_body.get().is_empty()
+            || !shown.response_hex.with(Vec::is_empty)
+            || !shown.preview.get().is_empty()
+            || selected
+                .get()
+                .and_then(|id| selected_flow(&save_check, Some(id)))
+                .is_some_and(|flow| !flow.response_body.is_empty())
+    };
     #[cfg(not(target_arch = "wasm32"))]
-    let items = items.child(action_item(
+    let items = items.child(action_item_enabled(
         tr("另存响应…", "Save response…"),
+        has_res_body,
         move || {
             export_response(save.clone(), selected.get());
         },
     ));
     #[cfg(target_arch = "wasm32")]
-    let items = {
-        let save_web = save.clone();
-        let has_res_body = move || {
-            !shown.response_body.get().is_empty()
-                || !shown.response_hex.with(Vec::is_empty)
-                || !shown.preview.get().is_empty()
-                || selected
-                    .get()
-                    .and_then(|id| selected_flow(&save, Some(id)))
-                    .is_some_and(|flow| !flow.response_body.is_empty())
-        };
-        items.child(action_item_enabled(
-            tr("另存响应…", "Save response…"),
-            has_res_body,
-            move || {
-                export_response_web(save_web.clone(), selected.get());
-            },
-        ))
-    };
+    let items = items.child(action_item_enabled(
+        tr("另存响应…", "Save response…"),
+        has_res_body,
+        move || {
+            export_response_web(save.clone(), selected.get());
+        },
+    ));
     let items = items
         .child(menu_rule())
         .child(action_item(tr("只看", "Focus"), move || {

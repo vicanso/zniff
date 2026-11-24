@@ -100,7 +100,7 @@ pub(crate) fn kv_value_cell(line: ReadSignal<HeaderLine>) -> impl IntoElement {
         .child(
             mono(move || line.with(|line| line.value.clone()))
                 .selectable(true)
-                .text_size(px(TEXT_SM))
+                .text_size(move || scaled_px(TEXT_SM))
                 .text_color(fg_primary()),
         )
         .child(when(
@@ -116,7 +116,7 @@ pub(crate) fn kv_value_cell(line: ReadSignal<HeaderLine>) -> impl IntoElement {
                     .child(
                         mono(move || line.with(|line| line.hint.clone().unwrap_or_default()))
                             .selectable(true)
-                            .text_size(px(TEXT_XS))
+                            .text_size(move || scaled_px(TEXT_XS))
                             .text_color(fg_secondary()),
                     )
             },
@@ -241,7 +241,7 @@ fn format_header_lines_for_copy(lines: &[HeaderLine], is_query: bool) -> String 
         .join("\n")
 }
 
-fn row_copy_button(
+pub(crate) fn row_copy_button(
     zh_label: &'static str,
     en_label: &'static str,
     zh_tip: &'static str,
@@ -459,7 +459,7 @@ pub(crate) fn header_section(props: HeaderSectionProps) -> impl IntoElement {
                                             .selectable(true)
                                             .number_of_lines(1)
                                             .text_overflow(EllipsizeMode::Tail)
-                                            .text_size(px(TEXT_SM))
+                                            .text_size(move || scaled_px(TEXT_SM))
                                             .font_weight(FontWeight::MEDIUM)
                                             .text_color(fg_muted()),
                                     )
@@ -919,7 +919,7 @@ pub(crate) fn messages_section(
                                                     .selectable(true)
                                                     .number_of_lines(1)
                                                     .text_overflow(EllipsizeMode::Tail)
-                                                    .text_size(px(TEXT_SM))
+                                                    .text_size(move || scaled_px(TEXT_SM))
                                                     .font_weight(FontWeight::MEDIUM)
                                                     .text_color(fg_muted()),
                                             )
@@ -928,7 +928,7 @@ pub(crate) fn messages_section(
                                                     .flex_1()
                                                     .min_w(px(0.0))
                                                     .selectable(true)
-                                                    .text_size(px(TEXT_SM))
+                                                    .text_size(move || scaled_px(TEXT_SM))
                                                     .text_color(fg_primary()),
                                             )
                                             .child(row_copy_slot(

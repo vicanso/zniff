@@ -549,8 +549,8 @@ fn rule_chip_toggle_btn(
 ) -> impl IntoElement {
     view()
         .role(AccessibilityRole::Button)
-        .w(px(14.0))
-        .h(px(14.0))
+        .w(px(18.0))
+        .h(px(18.0))
         .flex_shrink_0()
         .rounded(px(RADIUS_SM))
         .items_center()
@@ -561,6 +561,7 @@ fn rule_chip_toggle_btn(
         .duration(MOTION_INSTANT_MS)
         .ease_out()
         .focus_visible(apply_focus_ring)
+        .label(tr("启用或注释规则", "Toggle rule comment"))
         .tooltip(label_tip(
             "启用 / 注释此规则 (#)",
             "Enable / comment this rule (#)",
@@ -798,8 +799,8 @@ fn rule_chip_remove_btn(
 ) -> impl IntoElement {
     view()
         .role(AccessibilityRole::Button)
-        .w(px(14.0))
-        .h(px(14.0))
+        .w(px(18.0))
+        .h(px(18.0))
         .flex_shrink_0()
         .rounded(px(RADIUS_SM))
         .items_center()
@@ -810,6 +811,7 @@ fn rule_chip_remove_btn(
         .duration(MOTION_INSTANT_MS)
         .ease_out()
         .focus_visible(apply_focus_ring)
+        .label(tr("删除规则行", "Remove rule line"))
         .tooltip(label_tip("删除此规则行", "Remove rule line"))
         .on_press(move || {
             let idx = item.with(|it| it.line_idx);

@@ -69,21 +69,14 @@ pub(crate) fn marker_modal(open: Signal<bool>, controls: Arc<Controls>) -> impl 
                     view()
                         .w_full()
                         .h_full()
-                        .bg(backdrop_scrim())
                         .items_center()
                         .justify_center()
-                        .on_press(move || open.set(false))
+                        .child(ui_modal_backdrop(move || open.set(false)))
                         .child(
-                            view()
+                            ui_modal_card()
                                 .w(move || px((window().width.0 - 32.0).clamp(280.0, 420.0)))
                                 .p_4()
                                 .gap_3()
-                                .rounded(px(RADIUS_LG))
-                                .border_1()
-                                .border_color(border_strong())
-                                .bg(bg_card())
-                                .shadow_lg()
-                                .on_press(|| {})
                                 .child(marker_modal_header(open, badge))
                                 .child(
                                     view().gap_1p5().child(

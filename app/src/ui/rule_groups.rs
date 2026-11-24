@@ -599,8 +599,8 @@ fn group_pill(
             .child(
                 view()
                     .role(AccessibilityRole::Checkbox)
-                    .w(px(14.0))
-                    .h(px(14.0))
+                    .w(px(18.0))
+                    .h(px(18.0))
                     .flex_shrink_0()
                     .rounded(px(RADIUS_SM))
                     .border_1()

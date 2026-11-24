@@ -58,7 +58,7 @@ pub(crate) fn fg_secondary() -> AdaptiveColor {
 }
 
 pub(crate) fn fg_muted() -> AdaptiveColor {
-    AdaptiveColor::rgb(0x526075, 0x8e9bb3)
+    AdaptiveColor::rgb(0x475569, 0x9aa6bd)
 }
 
 pub(crate) fn fg_on_accent() -> AdaptiveColor {
@@ -187,8 +187,8 @@ pub(crate) fn timing_transfer() -> AdaptiveColor {
 pub(crate) fn method_fg(method: &str) -> AdaptiveColor {
     match method {
         "GET" => AdaptiveColor::rgb(0x0369a1, 0x38bdf8),
-        "POST" => AdaptiveColor::rgb(0x047857, 0x34d399),
-        "PUT" | "PATCH" => AdaptiveColor::rgb(0xb45309, 0xfbbf24),
+        "POST" => AdaptiveColor::rgb(0x046c4e, 0x34d399),
+        "PUT" | "PATCH" => AdaptiveColor::rgb(0x92400e, 0xfbbf24),
         "DELETE" => AdaptiveColor::rgb(0x9f1239, 0xfb7185),
         "CONNECT" => AdaptiveColor::rgb(0x6d28d9, 0xa78bfa),
         _ => fg_secondary(),
@@ -284,4 +284,31 @@ pub(crate) fn build_nsh_theme(mono_family: Option<&str>) -> nsh_base::Theme {
         theme.set_font(nsh_core::element::FONT_MONO, family);
     }
     theme
+}
+
+/// Flow DataTable Tailwind utility classes aligned with the semantic surface/border/accent tokens.
+pub(crate) fn flow_table_theme_classes() -> DataTableClasses {
+    let mut classes = DataTableClasses::default();
+    classes.root = Some("bg-white dark:bg-[#10141d]".into());
+    classes.header = Some(
+        "bg-[#f1f5f9] dark:bg-[#151b26] border-b border-b-[#e2e8f0] dark:border-b-[#222938]".into(),
+    );
+    classes.header_cell =
+        Some("bg-[#f1f5f9] dark:bg-[#151b26] cursor-grab active:cursor-grabbing".into());
+    classes.header_cell_dragging = Some("opacity-60 bg-[#e2e8f0] dark:bg-[#222938]".into());
+    classes.move_indicator = Some("bg-[#2563eb] dark:bg-[#3b82f6]".into());
+    classes.row = Some(
+        "bg-white dark:bg-[#10141d] border-b border-b-[#f1f5f9] dark:border-b-[#19202e]".into(),
+    );
+    classes.row_odd = Some("bg-[#fafbfd] dark:bg-[#121722]".into());
+    classes.row_hover = Some("bg-[#f1f5f9] dark:bg-[#1a2232]".into());
+    classes.row_selected = Some("bg-[#eff6ff] dark:bg-[#172542]".into());
+    // The table draws a 1px rule after the pinned columns. Painting it made
+    // a line only beside the first scrolling column. The drag target stays
+    // and shows a thicker 3px bar across the full 5px hit band on hover/drag.
+    classes.resize_handle = Some(
+        "w-[3px] bg-transparent hover:bg-[#2563eb] group-hover:bg-[#2563eb] group-active:bg-[#2563eb] dark:hover:bg-[#3b82f6] dark:group-hover:bg-[#3b82f6] dark:group-active:bg-[#3b82f6]"
+            .into(),
+    );
+    classes
 }

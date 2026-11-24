@@ -565,27 +565,5 @@ pub(crate) fn flow_column_title(key: &str, display: EffectivePathDisplay) -> Str
 }
 
 pub(crate) fn flow_table_classes() -> DataTableClasses {
-    let mut classes = DataTableClasses::default();
-    classes.root = Some("bg-white dark:bg-[#10141d]".into());
-    classes.header = Some(
-        "bg-[#f1f5f9] dark:bg-[#151b26] border-b border-b-[#e2e8f0] dark:border-b-[#222938]".into(),
-    );
-    classes.header_cell =
-        Some("bg-[#f1f5f9] dark:bg-[#151b26] cursor-grab active:cursor-grabbing".into());
-    classes.header_cell_dragging = Some("opacity-60 bg-[#e2e8f0] dark:bg-[#222938]".into());
-    classes.move_indicator = Some("bg-[#2563eb] dark:bg-[#3b82f6]".into());
-    classes.row = Some(
-        "bg-white dark:bg-[#10141d] border-b border-b-[#f1f5f9] dark:border-b-[#19202e]".into(),
-    );
-    classes.row_odd = Some("bg-[#fafbfd] dark:bg-[#121722]".into());
-    classes.row_hover = Some("bg-[#f1f5f9] dark:bg-[#1a2232]".into());
-    classes.row_selected = Some("bg-[#eff6ff] dark:bg-[#172542]".into());
-    // The table draws a 1px rule after the pinned columns. Painting it made
-    // a line only beside the first scrolling column. The drag target stays
-    // and shows a thicker 3px bar across the full 5px hit band on hover/drag.
-    classes.resize_handle = Some(
-        "w-[3px] bg-transparent hover:bg-[#2563eb] group-hover:bg-[#2563eb] group-active:bg-[#2563eb] dark:hover:bg-[#3b82f6] dark:group-hover:bg-[#3b82f6] dark:group-active:bg-[#3b82f6]"
-            .into(),
-    );
-    classes
+    flow_table_theme_classes()
 }

@@ -322,7 +322,7 @@ pub(crate) fn compose_box(
                                     .child(
                                         text(tr("状态码", "Status code"))
                                             .number_of_lines(1)
-                                            .text_size(px(12.0))
+                                            .text_size(px(TEXT_SM))
                                             .text_color(fg_secondary()),
                                     )
                                     .child(

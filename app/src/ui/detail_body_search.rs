@@ -145,7 +145,9 @@ fn jump_next_body_match(
 }
 
 pub(crate) fn body_search_width(pane_width: f32) -> f32 {
-    if pane_width > 0.0 && pane_width < 520.0 {
+    if pane_width > 0.0 && pane_width <= 460.0 {
+        76.0
+    } else if pane_width > 0.0 && pane_width < 520.0 {
         104.0
     } else {
         120.0

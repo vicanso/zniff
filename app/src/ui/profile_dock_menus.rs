@@ -289,7 +289,7 @@ fn deselect_profile_section(
                 })
                 .child(glyph_px(12.0, || Glyph::Close, || color(fg_muted())))
                 .child(
-                    text(tr("取消选择当前配置", "Deselect current setup"))
+                    text(tr("取消选择当前预设", "Deselect current preset"))
                         .flex_1()
                         .min_w(px(0.0))
                         .number_of_lines(1)

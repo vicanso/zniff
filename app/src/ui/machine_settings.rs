@@ -27,14 +27,14 @@ pub(crate) fn relay_settings_card(
                 .bg(bg_chrome())
                 .child(
                     text(tr(
-                        "以下为本机全局设置，修改后立即生效并自动保存，不随配置方案（Profile）切换或导出。",
-                        "Machine-wide settings. Applied and saved immediately, independent of profiles.",
+                        "以下为本机全局设置，修改后立即生效并自动保存，不随预设（Preset）切换或导出。",
+                        "Machine-wide settings. Applied and saved immediately, independent of presets.",
                     ))
                     .text_size(px(TEXT_SM))
                     .text_color(fg_secondary()),
                 ),
         )
-        .child(section_heading(tr("中转分享", "Live-share Relay")))
+        .child(section_heading(tr("中继分享", "Live-share Relay")))
         .child(
             view()
                 .w_full()
@@ -46,7 +46,7 @@ pub(crate) fn relay_settings_card(
                 .border_color(border_subtle())
                 .bg(bg_canvas())
                 .child(config_field(
-                    "中转地址",
+                    "中继地址",
                     "Relay address",
                     side_input(
                         relay_url_text,
@@ -76,7 +76,7 @@ pub(crate) fn relay_settings_card(
                     ),
                 ))
                 .child(config_field(
-                    "中转密钥",
+                    "中继密钥",
                     "Relay token",
                     side_input(
                         relay_token_text,

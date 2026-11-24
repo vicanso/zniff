@@ -476,10 +476,7 @@ pub(crate) fn export_diagnostics_file(controls: Arc<Controls>) {
     match bundle.to_pretty_json() {
         Ok(json) => {
             set_clipboard(json);
-            set_status(
-                &controls,
-                StatusMsg::Exported("zniff-diagnostics.json (clipboard)".into()),
-            );
+            set_status(&controls, StatusMsg::CopiedDiagnostics);
         }
         Err(err) => set_status(&controls, StatusMsg::ExportFailed(err.to_string())),
     }

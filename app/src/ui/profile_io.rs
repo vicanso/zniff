@@ -1,6 +1,7 @@
 #[allow(unused_imports)]
 use super::*;
 
+#[cfg(test)]
 pub(crate) fn profiles_for_export(
     saved: &[config::SavedProfile],
     name: &str,

@@ -19,7 +19,7 @@ pub(crate) fn transparent_proxy_card(
     view()
         .w_full()
         .flex_col()
-        .rounded(px(7.0))
+        .rounded(px(RADIUS_MD))
         .border_1()
         .border_color(move || {
             if tp_status.with(|st| st.is_on_or_starting()) {
@@ -61,6 +61,7 @@ fn tp_header_row(
     let langs = ui_langs();
     let toggle_controls = controls;
     view()
+        .role(AccessibilityRole::Button)
         .w_full()
         .px_2p5()
         .py_1p5()
@@ -68,8 +69,12 @@ fn tp_header_row(
         .items_center()
         .justify_between()
         .gap_1p5()
-        .cursor(Cursor::Pointer)
         .hover(|style| style.bg(bg_control_hover()))
+        .active(|style| style.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .on_press(move || {
             let next = !expanded.get_untracked();
             expanded.set(next);
@@ -105,7 +110,7 @@ fn tp_header_row(
                             text(tr("透明按进程抓包", "Transparent Proxy"))
                                 .number_of_lines(1)
                                 .text_overflow(EllipsizeMode::Tail)
-                                .text_size(px(12.0))
+                                .text_size(px(TEXT_SM))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(fg_primary()),
                         )
@@ -115,7 +120,7 @@ fn tp_header_row(
                             })
                             .number_of_lines(1)
                             .text_overflow(EllipsizeMode::Tail)
-                            .text_size(px(10.5))
+                            .text_size(px(TEXT_XS))
                             .text_color(move || {
                                 tp_status.with(|st| {
                                     if !st.in_applications
@@ -282,7 +287,7 @@ fn tp_inline_notice(tp_status: Signal<TransparentProxyStatus>) -> impl IntoEleme
                             }
                         })
                     })
-                    .text_size(px(10.5))
+                    .text_size(px(TEXT_XS))
                     .line_height(Points(15.0))
                     .text_color(status_warn_fg()),
                 )
@@ -449,7 +454,7 @@ fn tp_expanded_body(
                 "Automatically excludes zniff and core macOS daemons; attaches source app names.",
             );
             text(note)
-                .text_size(px(10.0))
+                .text_size(px(TEXT_XS))
                 .line_height(Points(14.0))
                 .text_color(fg_muted())
         })
@@ -477,7 +482,7 @@ fn tp_linux_auth_section(tp_status: Signal<TransparentProxyStatus>) -> impl Into
                     "免密授权已就绪（已授予 eBPF capability，无需每次输入密码）",
                     "Passwordless ready (eBPF capabilities granted)",
                 ))
-                .text_size(px(10.0))
+                .text_size(px(TEXT_XS))
                 .line_height(Points(14.0))
                 .text_color(status_ok_fg())
             },
@@ -490,7 +495,7 @@ fn tp_linux_auth_section(tp_status: Signal<TransparentProxyStatus>) -> impl Into
                     .flex_col()
                     .gap_1()
                     .p_1p5()
-                    .rounded(px(6.0))
+                    .rounded(px(RADIUS_MD))
                     .bg(bg_card())
                     .border_1()
                     .border_color(border_subtle())
@@ -508,7 +513,7 @@ fn tp_linux_auth_section(tp_status: Signal<TransparentProxyStatus>) -> impl Into
                                 ))
                                 .number_of_lines(1)
                                 .text_overflow(EllipsizeMode::Tail)
-                                .text_size(px(10.0))
+                                .text_size(px(TEXT_XS))
                                 .text_color(fg_secondary()),
                             )
                             .child(menu_inline_pill(
@@ -535,7 +540,7 @@ fn tp_linux_auth_section(tp_status: Signal<TransparentProxyStatus>) -> impl Into
                         mono(move || -> SharedString {
                             tp_status.with(|st| st.setcap_command.clone()).into()
                         })
-                        .text_size(px(10.0))
+                        .text_size(px(TEXT_XS))
                         .text_color(fg_primary()),
                     )
             },
@@ -563,7 +568,7 @@ fn tp_targets_section(
                         "运行中应用（点击快速加入）",
                         "Running Apps (click to toggle)",
                     ))
-                    .text_size(px(10.5))
+                    .text_size(px(TEXT_XS))
                     .text_color(fg_muted()),
                 )
                 .child(menu_inline_pill(

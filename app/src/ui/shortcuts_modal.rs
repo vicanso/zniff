@@ -113,14 +113,13 @@ pub(crate) fn format_shortcut_badge(spec: &str, apple: bool) -> String {
 }
 
 pub(crate) fn is_apple_platform() -> bool {
-    nsh_core::prelude::try_apple_keys().unwrap_or_else(|| cfg!(target_os = "macos"))
+    nsh_core::prelude::try_apple_keys().unwrap_or(cfg!(target_os = "macos"))
 }
 
 pub(crate) fn shortcuts_modal(open: Signal<bool>) -> impl IntoElement {
     when(
         move || open.get(),
         move || {
-            let langs = ui_langs();
             let apple = is_apple_platform();
             let backdrop = ui_modal_backdrop(move || open.set(false));
 
@@ -148,11 +147,10 @@ pub(crate) fn shortcuts_modal(open: Signal<bool>) -> impl IntoElement {
                 )
                 .child(ui_modal_close_button(move || open.set(false)));
 
-            let lang = ui_lang(langs);
             let body = SHORTCUT_SECTIONS
                 .iter()
                 .fold(view().w_full().p_4().gap_4().flex_col(), |col, section| {
-                    col.child(shortcut_section_view(section, lang, apple))
+                    col.child(shortcut_section_view(section, apple))
                 });
 
             let footer = view()
@@ -222,8 +220,8 @@ pub(crate) fn shortcuts_modal(open: Signal<bool>) -> impl IntoElement {
     )
 }
 
-fn shortcut_section_view(section: &ShortcutSection, lang: Lang, apple: bool) -> impl IntoElement {
-    let title = text(t(lang, section.title_zh, section.title_en))
+fn shortcut_section_view(section: &ShortcutSection, apple: bool) -> impl IntoElement {
+    let title = text(tr(section.title_zh, section.title_en))
         .text_size(px(TEXT_XS))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(fg_muted());
@@ -256,7 +254,7 @@ fn shortcut_section_view(section: &ShortcutSection, lang: Lang, apple: bool) -> 
                     .justify_between()
                     .gap_3()
                     .child(
-                        text(t(lang, item.zh, item.en))
+                        text(tr(item.zh, item.en))
                             .flex_1()
                             .min_w(px(0.0))
                             .text_size(px(TEXT_SM))

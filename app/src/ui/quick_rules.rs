@@ -229,9 +229,7 @@ pub(crate) fn quick_add_section(
                 .w_full()
                 .p_2()
                 .gap_1p5()
-                .rounded(px(RADIUS_LG))
-                .border_1()
-                .border_color(border_subtle())
+                .rounded(px(RADIUS_MD))
                 .bg(bg_canvas())
                 .flex_col()
                 .child(
@@ -534,7 +532,7 @@ fn quick_add_mode_chip(draft: QuickRuleDraftSignals) -> impl IntoElement {
         .flex_shrink_0()
         .flex_row()
         .items_center()
-        .rounded(px(6.0))
+        .rounded(px(RADIUS_MD))
         .border_1()
         .border_color(border_control())
         .overflow_hidden()
@@ -614,10 +612,10 @@ fn quick_from_placeholder(kind: u8, lang: Lang) -> &'static str {
         ),
         4 | 5 => t(
             lang,
-            "Header 条件 (可选): X-Debug:1",
+            "请求头条件 (可选): X-Debug:1",
             "Header cond (optional): X-Debug:1",
         ),
-        6 => t(lang, "Header 名称: X-Debug", "Header name: X-Debug"),
+        6 => t(lang, "请求头名: X-Debug", "Header name: X-Debug"),
         7 => t(lang, "参数名: env", "Query param: env"),
         9 => t(
             lang,
@@ -658,10 +656,10 @@ fn quick_to_placeholder(kind: u8, lang: Lang) -> &'static str {
         2 => t(lang, "状态码: 200 (可选)", "Status: 200 (optional)"),
         4 | 5 => t(
             lang,
-            "Body 子串 (可选): error",
+            "正文子串 (可选): error",
             "Body substr (optional): error",
         ),
-        6 => t(lang, "Header 值 (留空删除)", "Value (empty to delete)"),
+        6 => t(lang, "请求头值 (留空删除)", "Value (empty to delete)"),
         7 => t(lang, "参数值 (留空删除)", "Value (empty to delete)"),
         9 => t(
             lang,

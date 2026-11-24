@@ -199,7 +199,7 @@ pub(crate) fn proxy_auth_section(
                 .justify_between()
                 .child(
                     text(tr("代理认证", "Proxy auth"))
-                        .text_size(px(12.0))
+                        .text_size(px(TEXT_SM))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(fg_primary()),
                 )
@@ -362,7 +362,7 @@ pub(crate) fn allow_hosts_section(
                             .border_1()
                             .border_color(border_control())
                             .focus(|style| style.border_color(accent_blue()))
-                            .text_size(px(12.0))
+                            .text_size(px(TEXT_SM))
                             .text_color(fg_primary())
                             .on_change(move |text: &str| edit_cb(text)),
                     )
@@ -396,7 +396,7 @@ fn allow_hosts_header_row(
         .gap_1p5()
         .child(
             text(tr("允许代理的域名", "Allowed hosts"))
-                .text_size(px(12.0))
+                .text_size(px(TEXT_SM))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(fg_primary()),
         )

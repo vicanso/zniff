@@ -72,6 +72,7 @@ fn target_rules_paused(target: RuleEditTarget, rules_on: Option<Signal<bool>>) -
 }
 
 /// Compact pre-save dry-run preview bar shown below the rules editor/strip.
+#[cfg(test)]
 pub(crate) fn rule_dry_run_strip(
     target: RuleEditTarget,
     controls: Arc<Controls>,

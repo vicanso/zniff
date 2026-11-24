@@ -5043,7 +5043,7 @@ async fn body_section_header_keeps_gap_between_title_and_search_at_narrow_split(
             .pr_5()
             .py_3p5()
             .child(super::body_section(
-                "响应 body",
+                "响应正文",
                 "Response body",
                 shown.response_body,
                 shown.response_hex,

@@ -71,6 +71,7 @@ pub(crate) fn flow_header(
     let is_sorted =
         move || column.is_some_and(|col| sort.get().is_some_and(|current| current.column == col));
     let row = view()
+        .role(AccessibilityRole::Button)
         .w_full()
         .h_full()
         .min_w(px(0.0))
@@ -79,7 +80,12 @@ pub(crate) fn flow_header(
         .gap_0p5()
         .flex_row()
         .items_center()
-        .overflow_hidden();
+        .overflow_hidden()
+        .hover(|s| s.bg(bg_control_hover()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring);
     let row = if align_right { row.justify_end() } else { row };
     row.child(
         text(move || -> SharedString {

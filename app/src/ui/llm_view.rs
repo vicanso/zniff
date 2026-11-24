@@ -83,11 +83,13 @@ fn llm_meta_strip(summary: Signal<Option<llm_stream::LlmStreamSummary>>) -> impl
                 })
             },
             move || {
+                let langs = ui_langs();
                 llm_badge(move || {
+                    let stop_lbl = t(ui_lang(langs), "结束原因", "stop");
                     summary.with(|opt| {
                         opt.as_ref()
                             .and_then(|s| s.finish_reason.as_ref())
-                            .map(|r| format!("stop: {r}"))
+                            .map(|r| format!("{stop_lbl}: {r}"))
                             .unwrap_or_default()
                     })
                 })
@@ -125,15 +127,19 @@ fn format_metrics_summary(s: &llm_stream::LlmStreamSummary, lang: Lang) -> Strin
         parts.push(format!("{lbl} {total}ms"));
     }
     let u = &s.usage;
+    let (in_lbl, out_lbl, reason_lbl) = match lang {
+        Lang::Zh => ("输入", "输出", "思考"),
+        Lang::En => ("in", "out", "reason"),
+    };
     let mut tok_parts = Vec::new();
     if let Some(v) = u.input_tokens {
-        tok_parts.push(format!("in:{v}"));
+        tok_parts.push(format!("{in_lbl}:{v}"));
     }
     if let Some(v) = u.output_tokens {
-        tok_parts.push(format!("out:{v}"));
+        tok_parts.push(format!("{out_lbl}:{v}"));
     }
     if let Some(v) = u.reasoning_tokens {
-        tok_parts.push(format!("reason:{v}"));
+        tok_parts.push(format!("{reason_lbl}:{v}"));
     }
     if !tok_parts.is_empty() {
         parts.push(format!(
@@ -157,11 +163,10 @@ fn llm_thinking_card(
     open: Signal<bool>,
     controls: Arc<Controls>,
 ) -> impl IntoElement {
+    let langs = ui_langs();
     view()
         .w_full()
         .rounded(px(RADIUS_MD))
-        .border_1()
-        .border_color(border_control())
         .bg(bg_code())
         .overflow_hidden()
         .child(
@@ -172,8 +177,6 @@ fn llm_thinking_card(
                 .flex_row()
                 .items_center()
                 .justify_between()
-                .border_b(move || if open.get() { px(1.0) } else { px(0.0) })
-                .border_b_color(border_subtle())
                 .child(
                     view()
                         .role(AccessibilityRole::Button)
@@ -189,14 +192,28 @@ fn llm_thinking_card(
                         .duration(MOTION_INSTANT_MS)
                         .ease_out()
                         .focus_visible(apply_focus_ring)
+                        .label(tr("展开或收起思考过程", "Toggle thinking"))
                         .on_press(move || open.update(|v| *v = !*v))
+                        .child(glyph_px(
+                            10.0,
+                            move || {
+                                if open.get() {
+                                    Glyph::Chevron
+                                } else {
+                                    Glyph::ChevronRight
+                                }
+                            },
+                            || color(fg_secondary()),
+                        ))
                         .child(
                             text(move || -> SharedString {
-                                let marker = if open.get() { "▾" } else { "▸" };
                                 let count = summary.with(|opt| {
                                     opt.as_ref().map_or(0, |s| s.thinking.chars().count())
                                 });
-                                format!("{marker} Thinking ({count} chars)").into()
+                                match ui_lang(langs) {
+                                    Lang::Zh => format!("思考过程 ({count} 字)").into(),
+                                    Lang::En => format!("Thinking ({count} chars)").into(),
+                                }
                             })
                             .text_size(px(TEXT_XS))
                             .font_weight(FontWeight::SEMIBOLD)
@@ -216,18 +233,26 @@ fn llm_thinking_card(
         .child(when(
             move || open.get(),
             move || {
-                view().w_full().p_2p5().child(
-                    mono(move || -> SharedString {
-                        summary
-                            .with(|opt| {
-                                opt.as_ref().map(|s| s.thinking.clone()).unwrap_or_default()
-                            })
-                            .into()
-                    })
-                    .selectable(true)
-                    .text_size(px(TEXT_SM))
-                    .line_height(px(18.0))
-                    .text_color(fg_muted()),
+                view().w_full().child(ui_divider()).child(
+                    guard_culled_pointer_events(view()).w_full().child(
+                        scroll().w_full().max_h(px(260.0)).child(
+                            view().w_full().p_2p5().child(
+                                mono(move || -> SharedString {
+                                    summary
+                                        .with(|opt| {
+                                            opt.as_ref()
+                                                .map(|s| s.thinking.clone())
+                                                .unwrap_or_default()
+                                        })
+                                        .into()
+                                })
+                                .selectable(true)
+                                .text_size(move || scaled_px(12.0))
+                                .line_height(move || scaled_px(18.0))
+                                .text_color(fg_muted()),
+                            ),
+                        ),
+                    ),
                 )
             },
         ))
@@ -237,11 +262,10 @@ fn llm_output_card(
     summary: Signal<Option<llm_stream::LlmStreamSummary>>,
     controls: Arc<Controls>,
 ) -> impl IntoElement {
+    let langs = ui_langs();
     view()
         .w_full()
         .rounded(px(RADIUS_MD))
-        .border_1()
-        .border_color(border_control())
         .bg(bg_code())
         .overflow_hidden()
         .child(
@@ -252,8 +276,6 @@ fn llm_output_card(
                 .flex_row()
                 .items_center()
                 .justify_between()
-                .border_b_1()
-                .border_b_color(border_subtle())
                 .child(
                     text(tr("模型输出", "Assistant Output"))
                         .text_size(px(TEXT_XS))
@@ -276,27 +298,35 @@ fn llm_output_card(
                     },
                 )),
         )
+        .child(ui_divider())
         .child(
-            view().w_full().p_2p5().child(
-                mono(move || -> SharedString {
-                    let body = summary
-                        .with(|opt| opt.as_ref().map(|s| s.content.clone()).unwrap_or_default());
-                    if body.is_empty() {
-                        "(empty text output)".into()
-                    } else {
-                        body.into()
-                    }
-                })
-                .selectable(true)
-                .text_size(px(TEXT_SM))
-                .line_height(px(18.0))
-                .text_color(move || {
-                    if summary.with(|opt| opt.as_ref().is_some_and(|s| s.content.is_empty())) {
-                        fg_muted()
-                    } else {
-                        fg_primary()
-                    }
-                }),
+            guard_culled_pointer_events(view()).w_full().child(
+                scroll().w_full().max_h(px(260.0)).child(
+                    view().w_full().p_2p5().child(
+                        mono(move || -> SharedString {
+                            let body = summary.with(|opt| {
+                                opt.as_ref().map(|s| s.content.clone()).unwrap_or_default()
+                            });
+                            if body.is_empty() {
+                                t(ui_lang(langs), "（无文本输出）", "(empty text output)").into()
+                            } else {
+                                body.into()
+                            }
+                        })
+                        .selectable(true)
+                        .text_size(move || scaled_px(12.0))
+                        .line_height(move || scaled_px(18.0))
+                        .text_color(move || {
+                            if summary
+                                .with(|opt| opt.as_ref().is_some_and(|s| s.content.is_empty()))
+                            {
+                                fg_muted()
+                            } else {
+                                fg_primary()
+                            }
+                        }),
+                    ),
+                ),
             ),
         )
 }
@@ -339,8 +369,6 @@ fn llm_tool_calls_card(
                 view()
                     .w_full()
                     .rounded(px(RADIUS_MD))
-                    .border_1()
-                    .border_color(border_control())
                     .bg(bg_code())
                     .overflow_hidden()
                     .child(
@@ -351,8 +379,6 @@ fn llm_tool_calls_card(
                             .flex_row()
                             .items_center()
                             .justify_between()
-                            .border_b_1()
-                            .border_b_color(border_subtle())
                             .child(
                                 mono(move || -> SharedString {
                                     tc.with(|item| {
@@ -375,13 +401,18 @@ fn llm_tool_calls_card(
                                 set_status(&copy_controls, StatusMsg::CopiedToolArgs);
                             })),
                     )
+                    .child(ui_divider())
                     .child(
-                        view().w_full().p_2p5().child(
-                            mono(move || -> SharedString { formatted().into() })
-                                .selectable(true)
-                                .text_size(px(TEXT_SM))
-                                .line_height(px(18.0))
-                                .text_color(fg_primary()),
+                        guard_culled_pointer_events(view()).w_full().child(
+                            scroll().w_full().max_h(px(260.0)).child(
+                                view().w_full().p_2p5().child(
+                                    mono(move || -> SharedString { formatted().into() })
+                                        .selectable(true)
+                                        .text_size(move || scaled_px(12.0))
+                                        .line_height(move || scaled_px(18.0))
+                                        .text_color(fg_primary()),
+                                ),
+                            ),
                         ),
                     )
             },

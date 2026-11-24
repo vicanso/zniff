@@ -174,7 +174,7 @@ pub(crate) fn body_section(
                                 .flex_row()
                                 .flex_wrap()
                                 .items_center()
-                                .gap_1p5()
+                                .gap_1()
                                 .child(when(
                                     move || {
                                         if tree_on() {
@@ -224,25 +224,31 @@ pub(crate) fn body_section(
                                         is_paged,
                                     )
                                 }))
-                                .child(detail_button(tr("复制", "Copy"), move || {
-                                    let part = if embed_image {
-                                        CopyPart::Response
-                                    } else {
-                                        CopyPart::Request
-                                    };
-                                    if shown.pretty.get_untracked() && !doc_on() {
-                                        let visible = body.get_untracked();
-                                        if !visible.is_empty() {
-                                            set_clipboard(visible);
-                                            set_status(
-                                                &copy_controls,
-                                                StatusMsg::CopiedBody { side, hex: false },
-                                            );
-                                            return;
+                                .child(row_copy_button(
+                                    "复制正文",
+                                    "Copy body",
+                                    "复制当前正文",
+                                    "Copy body",
+                                    move || {
+                                        let part = if embed_image {
+                                            CopyPart::Response
+                                        } else {
+                                            CopyPart::Request
+                                        };
+                                        if shown.pretty.get_untracked() && !doc_on() {
+                                            let visible = body.get_untracked();
+                                            if !visible.is_empty() {
+                                                set_clipboard(visible);
+                                                set_status(
+                                                    &copy_controls,
+                                                    StatusMsg::CopiedBody { side, hex: false },
+                                                );
+                                                return;
+                                            }
                                         }
-                                    }
-                                    copy_part(&copy_controls, selected.get_untracked(), part);
-                                }))
+                                        copy_part(&copy_controls, selected.get_untracked(), part);
+                                    },
+                                ))
                                 .child(when(
                                     move || doc.with(Option::is_some),
                                     move || doc_preview_chip(preview_flag),
@@ -425,7 +431,7 @@ pub(crate) fn body_section(
                                 .py_2()
                                 .selectable(true)
                                 .on_press_up(dismiss_keyboard)
-                                .text_size(px(12.0))
+                                .text_size(move || scaled_px(TEXT_SM))
                                 .text_color(fg_primary()),
                             ),
                         )
@@ -496,7 +502,7 @@ pub(crate) fn body_section(
                                         .selectable(true)
                                         .number_of_lines(1)
                                         .text_overflow(EllipsizeMode::Tail)
-                                        .text_size(px(12.0))
+                                        .text_size(move || scaled_px(TEXT_SM))
                                         .font_weight(FontWeight::MEDIUM)
                                         .text_color(fg_muted()),
                                 )

@@ -2365,7 +2365,7 @@ fn save_inline_mock_op(
     slot: &mut Slot,
     value: &Value,
     save_error: &mut Option<String>,
-) -> std::result::Result<(String, String), Reply> {
+) -> std::result::Result<(String, String), Box<Reply>> {
     let host = value
         .get("host")
         .and_then(Value::as_str)
@@ -2378,7 +2378,13 @@ fn save_inline_mock_op(
         .and_then(Value::as_u64)
         .and_then(|c| u16::try_from(c).ok())
         .filter(|c| (100..600).contains(c))
-        .ok_or_else(|| json_reply(400, "Bad Request", &json!({"error": "invalid status"})))?;
+        .ok_or_else(|| {
+            Box::new(json_reply(
+                400,
+                "Bad Request",
+                &json!({"error": "invalid status"}),
+            ))
+        })?;
     let edited_headers = json_headers(value.get("headers")).unwrap_or_default();
     let original_headers = json_headers(value.get("original_headers")).unwrap_or_default();
     let body_bytes = json_body(value).unwrap_or_default();
@@ -2399,11 +2405,11 @@ fn save_inline_mock_op(
     let (target, next_rules) =
         crate::ui::persist_inline_mock_files(&base_dir, &slot.hub.rules_text(), &input).map_err(
             |err| {
-                json_reply(
+                Box::new(json_reply(
                     500,
                     "Internal Server Error",
                     &json!({"error": err.to_string()}),
-                )
+                ))
             },
         )?;
     slot.hub.set_rules(&next_rules);
@@ -2739,7 +2745,7 @@ fn sync_hub_op(slot: &mut Slot, op: &str, value: &Value) -> Reply {
         }
         "save_inline_mock" => match save_inline_mock_op(slot, value, &mut save_error) {
             Ok(meta) => mock_meta = Some(meta),
-            Err(reply) => return reply,
+            Err(reply) => return *reply,
         },
         _ => return json_reply(400, "Bad Request", &json!({"error": "unknown op"})),
     }

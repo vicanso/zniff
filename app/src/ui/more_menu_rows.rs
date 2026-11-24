@@ -654,7 +654,7 @@ pub(crate) fn menu_share_row(
                         .duration(MOTION_INSTANT_MS)
                         .ease_out()
                         .focus_visible(apply_focus_ring)
-                        .tooltip(label_tip("配置中转服务器", "Configure relay server"))
+                        .tooltip(label_tip("配置中继服务器", "Configure relay server"))
                         .on_press(move || {
                             open.set(false);
                             open_settings_tab(profiles, SettingsTab::Relay);
