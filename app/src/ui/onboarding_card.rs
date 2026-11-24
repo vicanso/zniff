@@ -87,7 +87,14 @@ fn onboarding_header(props: &OnboardingProps) -> impl IntoElement {
                                     .w(px(6.0))
                                     .h(px(6.0))
                                     .rounded_full()
-                                    .bg(status_ok_fg()),
+                                    .bg(status_ok_fg())
+                                    .style_with(|s| {
+                                        if reduce_motion() {
+                                            s
+                                        } else {
+                                            s.animation(ui_pulse_animation(MOTION_PULSE_MS))
+                                        }
+                                    }),
                             )
                             .child(
                                 mono(move || SharedString::from(listen.get()))
@@ -308,13 +315,57 @@ fn onboarding_secondary_section(
     );
 
     #[cfg(not(target_arch = "wasm32"))]
-    let section = section.child(onboarding_utility_strip(props));
+    let section = section.child(onboarding_more_connection_disclosure(props));
 
     section
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn onboarding_utility_strip(props: &OnboardingProps) -> impl IntoElement {
+fn onboarding_more_connection_disclosure(props: &OnboardingProps) -> impl IntoElement {
+    let more_open = signal(props.use_system_proxy.get_untracked());
+    let strip_props = props.clone();
+    view()
+        .w_full()
+        .flex_col()
+        .gap_2()
+        .child(
+            view()
+                .role(AccessibilityRole::Button)
+                .self_start()
+                .h(px(ControlSize::Xs.height()))
+                .px_1p5()
+                .rounded(px(RADIUS_SM))
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .hover(|s| s.bg(bg_control_hover()))
+                .active(|s| s.bg(bg_control_active()))
+                .transition_colors()
+                .duration(move || motion_ms(MOTION_INSTANT_MS))
+                .ease_out()
+                .focus_visible(apply_focus_ring)
+                .label(tr("更多连接方式", "More connection options"))
+                .on_press(move || more_open.update(|v| *v = !*v))
+                .child(ui_rotating_chevron(
+                    10.0,
+                    move || more_open.get(),
+                    || color(fg_muted()),
+                ))
+                .child(
+                    text(tr("更多连接方式", "More connection options"))
+                        .text_size(px(TEXT_XS))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(fg_muted()),
+                ),
+        )
+        .child(when(
+            move || more_open.get(),
+            move || onboarding_utility_strip(strip_props.clone()),
+        ))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn onboarding_utility_strip(props: OnboardingProps) -> impl IntoElement {
     let sys_proxy_on = props.use_system_proxy;
     let toggle_sys = Rc::clone(&props.toggle_system_proxy);
     let env_controls = props.controls.clone();
@@ -378,9 +429,9 @@ fn interactive_surface_button(
         .flex_row()
         .items_center()
         .border_1()
-        .transition_colors()
-        .duration(MOTION_INSTANT_MS)
-        .ease_out()
+        .transition()
+        .duration(move || motion_ms(MOTION_INSTANT_MS))
+        .ease_bezier(0.22, 1.0, 0.36, 1.0)
         .border_color(move || {
             if active_border() {
                 accent_blue_border()
@@ -414,13 +465,14 @@ fn interactive_surface_button(
             })
         })
         .active(move |s| {
-            s.bg(move || {
-                if active_press() {
-                    accent_blue_soft_hover()
-                } else {
-                    bg_control_active()
-                }
-            })
+            s.scale(move || if reduce_motion() { 1.0_f32 } else { 0.985_f32 })
+                .bg(move || {
+                    if active_press() {
+                        accent_blue_soft_hover()
+                    } else {
+                        bg_control_active()
+                    }
+                })
         })
         .focus_visible(apply_focus_ring)
 }

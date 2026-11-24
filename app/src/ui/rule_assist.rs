@@ -457,6 +457,7 @@ fn rule_line_summary_bar(
     show_chips: impl Fn() -> bool + Copy + 'static,
 ) -> impl IntoElement {
     let langs = ui_langs();
+    let parsed_lines = computed(move || collect_rule_lines(&target.current_text()));
     view()
         .w_full()
         .h(px(22.0))
@@ -467,10 +468,11 @@ fn rule_line_summary_bar(
         .gap_2()
         .child(
             text(move || {
-                let items = collect_rule_lines(&target.current_text());
                 let group = target.editing.get();
-                let (summary, _) = catalog.with(|cat| {
-                    format_rule_line_summary(&items, group.as_deref(), cat, ui_lang(langs))
+                let (summary, _) = parsed_lines.with(|items| {
+                    catalog.with(|cat| {
+                        format_rule_line_summary(items, group.as_deref(), cat, ui_lang(langs))
+                    })
                 });
                 SharedString::from(summary)
             })
@@ -479,9 +481,8 @@ fn rule_line_summary_bar(
             .tabular_nums()
             .text_size(px(TEXT_XS))
             .text_color(move || {
-                let has_err = collect_rule_lines(&target.current_text())
-                    .iter()
-                    .any(|it| !it.commented && !it.valid);
+                let has_err =
+                    parsed_lines.with(|items| items.iter().any(|it| !it.commented && !it.valid));
                 if has_err {
                     status_warn_fg()
                 } else {
@@ -503,7 +504,7 @@ fn rule_line_summary_bar(
                 .hover(|s| s.bg(bg_control_hover()))
                 .active(|s| s.bg(bg_control_active()))
                 .transition_colors()
-                .duration(MOTION_INSTANT_MS)
+                .duration(move || motion_ms(MOTION_INSTANT_MS))
                 .ease_out()
                 .focus_visible(apply_focus_ring)
                 .on_press(move || {
@@ -527,17 +528,17 @@ fn rule_line_summary_bar(
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(fg_secondary()),
                 )
-                .child(glyph_px(
-                    9.0,
-                    move || {
-                        if show_chips() {
-                            Glyph::ChevronUp
-                        } else {
-                            Glyph::Chevron
-                        }
-                    },
-                    || color(fg_muted()),
-                )),
+                .child(
+                    view()
+                        .flex_shrink_0()
+                        .items_center()
+                        .justify_center()
+                        .rotate(move || if show_chips() { deg(180.0) } else { deg(0.0) })
+                        .transition_transform()
+                        .duration(move || motion_ms(MOTION_INSTANT_MS))
+                        .ease_bezier(0.22, 1.0, 0.36, 1.0)
+                        .child(glyph_px(9.0, || Glyph::Chevron, || color(fg_muted()))),
+                ),
         )
 }
 
@@ -797,28 +798,88 @@ fn rule_chip_remove_btn(
     target: RuleEditTarget,
     controls: Arc<Controls>,
 ) -> impl IntoElement {
+    let confirm = signal(false);
+    let reset_job = stored(None::<Spawned<()>>);
     view()
         .role(AccessibilityRole::Button)
-        .w(px(18.0))
         .h(px(18.0))
+        .min_w(px(18.0))
+        .px(move || if confirm.get() { px(4.0) } else { px(0.0) })
         .flex_shrink_0()
         .rounded(px(RADIUS_SM))
         .items_center()
         .justify_center()
-        .hover(|s| s.bg(bg_control_hover()))
+        .bg(move || {
+            if confirm.get() {
+                status_err_bg()
+            } else {
+                AdaptiveColor::TRANSPARENT
+            }
+        })
+        .hover(|s| {
+            s.bg(move || {
+                if confirm.get() {
+                    status_err_bg_hover()
+                } else {
+                    bg_control_hover()
+                }
+            })
+        })
         .active(|s| s.bg(bg_control_active()))
         .transition_colors()
         .duration(MOTION_INSTANT_MS)
         .ease_out()
         .focus_visible(apply_focus_ring)
-        .label(tr("删除规则行", "Remove rule line"))
-        .tooltip(label_tip("删除此规则行", "Remove rule line"))
-        .on_press(move || {
-            let idx = item.with(|it| it.line_idx);
-            let next = remove_rule_line(&target.current_text_untracked(), idx);
-            target.commit(&controls, next);
+        .label(move || -> SharedString {
+            let langs = ui_langs();
+            if confirm.get() {
+                t(
+                    ui_lang(langs),
+                    "再次点击确认删除规则行",
+                    "Click again to confirm rule removal",
+                )
+            } else {
+                t(ui_lang(langs), "删除规则行", "Remove rule line")
+            }
+            .into()
         })
-        .child(text("×").text_size(px(TEXT_XS)).text_color(fg_muted()))
+        .tooltip(label_tip(
+            "删除此规则行（需二次确认）",
+            "Remove rule line (click twice)",
+        ))
+        .on_press(move || {
+            if confirm.get_untracked() {
+                reset_job.replace(None);
+                confirm.set(false);
+                let idx = item.with(|it| it.line_idx);
+                let next = remove_rule_line(&target.current_text_untracked(), idx);
+                target.commit(&controls, next);
+            } else {
+                confirm.set(true);
+                reset_job.replace(Some(set_timeout(Duration::from_millis(3500), move || {
+                    confirm.set(false);
+                })));
+            }
+        })
+        .child(
+            text(move || -> SharedString {
+                let langs = ui_langs();
+                if confirm.get() {
+                    t(ui_lang(langs), "删?", "Del?").into()
+                } else {
+                    "×".into()
+                }
+            })
+            .text_size(px(TEXT_XS))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(move || {
+                if confirm.get() {
+                    status_err_fg()
+                } else {
+                    fg_muted()
+                }
+            }),
+        )
 }
 
 fn rule_line_chip(
@@ -893,14 +954,14 @@ fn rule_focused_banner(
     quick_add_open: Signal<bool>,
 ) -> impl IntoElement {
     let langs = ui_langs();
-    let focused_entry = move || {
+    let focused_entry = computed(move || {
         collect_rule_lines(&target.current_text())
             .into_iter()
             .find(|it| target.is_line_focused(it.line_idx + 1))
             .map(|it| (it.line_idx, it.raw))
-    };
+    });
     when(
-        move || focused_entry().is_some(),
+        move || focused_entry.with(Option::is_some),
         move || {
             let edit_controls = controls.clone();
             view()
@@ -917,7 +978,8 @@ fn rule_focused_banner(
                 .gap_2()
                 .child(
                     text(move || -> SharedString {
-                        let n = focused_entry().map(|(i, _)| i + 1).unwrap_or(0);
+                        let n =
+                            focused_entry.with(|opt| opt.as_ref().map(|(i, _)| i + 1).unwrap_or(0));
                         match ui_lang(langs) {
                             Lang::Zh => format!("已定位到第 {n} 行（已在下方置顶高亮）"),
                             Lang::En => format!("Focused rule line #{n} (pinned below)"),
@@ -950,7 +1012,7 @@ fn rule_focused_banner(
                                 .items_center()
                                 .justify_center()
                                 .on_press(move || {
-                                    if let Some((idx, raw)) = focused_entry() {
+                                    if let Some((idx, raw)) = focused_entry.get() {
                                         fill_line_into_quick_editor(
                                             &raw,
                                             idx,

@@ -68,6 +68,9 @@ pub(crate) fn toolbar_sidebar_toggle(
                             }))
                         })
                         .on_press(move || {
+                            if let Some(layout_ref) = use_context::<SidebarLayoutRef>() {
+                                layout_ref.animate();
+                            }
                             let next = !sidebar_collapsed.get();
                             sidebar_collapsed.set(next);
                             if let Err(err) = save_config(|config| config.sidebar_collapsed = next)
@@ -277,20 +280,39 @@ pub(crate) fn toolbar(
                         .rounded_full()
                         .flex_shrink_0()
                         .bg(move || {
-                            let has_err = matches!(
-                                status.get(),
-                                StatusMsg::BindFailed { .. }
-                                    | StatusMsg::CaUnavailable(_)
-                                    | StatusMsg::StopRestoreFailed(_)
-                                    | StatusMsg::ProxyApplyFailed { .. }
-                                    | StatusMsg::ProxyRestoreFailed(_)
-                            );
+                            let has_err = status.with(|s| {
+                                matches!(
+                                    s,
+                                    StatusMsg::BindFailed { .. }
+                                        | StatusMsg::CaUnavailable(_)
+                                        | StatusMsg::StopRestoreFailed(_)
+                                        | StatusMsg::ProxyApplyFailed { .. }
+                                        | StatusMsg::ProxyRestoreFailed(_)
+                                )
+                            });
                             if has_err {
                                 status_warn_fg()
                             } else if running.get() {
                                 status_ok_fg()
                             } else {
                                 fg_muted()
+                            }
+                        })
+                        .style_with(move |s| {
+                            let has_err = status.with(|msg| {
+                                matches!(
+                                    msg,
+                                    StatusMsg::BindFailed { .. }
+                                        | StatusMsg::CaUnavailable(_)
+                                        | StatusMsg::StopRestoreFailed(_)
+                                        | StatusMsg::ProxyApplyFailed { .. }
+                                        | StatusMsg::ProxyRestoreFailed(_)
+                                )
+                            });
+                            if running.get() && !has_err && !reduce_motion() {
+                                s.animation(ui_pulse_animation(MOTION_PULSE_MS))
+                            } else {
+                                s
                             }
                         }),
                 ),
@@ -620,6 +642,7 @@ pub(crate) fn toolbar_menu(
         .open(move || Some(open.get()))
         .popup_style(ui_popup_style)
         .popup_starting_style(ui_popup_starting_style)
+        .popup_ending_style(ui_popup_ending_style)
         .on_open_change(move |event: &nsh_base::PopoverEvent| {
             if let nsh_base::PopoverEvent::OpenChange(next, _) = event {
                 open.set(*next);
@@ -776,6 +799,7 @@ pub(crate) fn toolbar_layout_switcher(
         .open(move || Some(open.get()))
         .popup_style(ui_popup_style)
         .popup_starting_style(ui_popup_starting_style)
+        .popup_ending_style(ui_popup_ending_style)
         .placement(Placement::Bottom)
         .align(Align::End)
         .offset(px(6.0))

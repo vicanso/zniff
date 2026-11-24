@@ -93,7 +93,7 @@ pub(crate) fn facet_sidebar(
     let resize_hot = signal(false);
     let resizing = signal(false);
 
-    let filtered_apps = move || -> Vec<session::FacetEntry> {
+    let filtered_apps = computed(move || -> Vec<session::FacetEntry> {
         let q = side_query.get().trim().to_ascii_lowercase();
         facets.with(|f| {
             f.apps
@@ -106,12 +106,12 @@ pub(crate) fn facet_sidebar(
                 .cloned()
                 .collect()
         })
-    };
+    });
 
-    let grouped_domains = move || -> Vec<DomainGroup> {
+    let grouped_domains = computed(move || -> Vec<DomainGroup> {
         let q = side_query.get();
         facets.with(|f| group_domains_by_root(&f.domains, &q))
-    };
+    });
 
     when(
         move || !sidebar_collapsed.get(),
@@ -187,10 +187,10 @@ pub(crate) fn facet_sidebar(
                                                     .hover(|s| s.bg(bg_control_hover()))
                                                     .active(|s| s.bg(bg_control_active()))
                                                     .transition_colors()
-                                                    .duration(MOTION_INSTANT_MS)
+                                                    .duration(move || motion_ms(MOTION_INSTANT_MS))
                                                     .ease_out()
                                                     .focus_visible(apply_focus_ring)
-                                                    .label(tr("清空筛选", "Clear filter"))
+                                                    .label(tr("清空过滤", "Clear filter"))
                                                     .on_press(move || side_query.set(String::new()))
                                                     .child(
                                                         text("×")
@@ -213,7 +213,7 @@ pub(crate) fn facet_sidebar(
                                         "Slow",
                                         "slow:",
                                         SLOW_ALIASES,
-                                        "筛选耗时 ≥ 1s 或进行中的慢请求 (slow:)",
+                                        "过滤耗时 ≥ 1s 或进行中的慢请求 (slow:)",
                                         "Filter slow requests >= 1s (slow:)",
                                     ))
                                     .child(drawer_quick_chip(
@@ -222,7 +222,7 @@ pub(crate) fn facet_sidebar(
                                         "Error",
                                         "status:4xx|5xx|err",
                                         ERR_ALIASES,
-                                        "筛选 4xx / 5xx / 连接失败请求 (status:4xx|5xx|err)",
+                                        "过滤 4xx / 5xx / 连接失败请求 (status:4xx|5xx|err)",
                                         "Filter 4xx / 5xx / failed requests (status:4xx|5xx|err)",
                                     ))
                                     .child(drawer_quick_chip(
@@ -231,7 +231,7 @@ pub(crate) fn facet_sidebar(
                                         "JSON",
                                         "type:json",
                                         JSON_ALIASES,
-                                        "筛选 JSON 请求/响应 (type:json)",
+                                        "过滤 JSON 请求/响应 (type:json)",
                                         "Filter JSON traffic (type:json)",
                                     ))
                                     .child(drawer_quick_chip(
@@ -254,14 +254,14 @@ pub(crate) fn facet_sidebar(
                                 .child(sidebar_section_header(
                                     "应用 / 来源",
                                     "Apps",
-                                    move || filtered_apps().len(),
+                                    move || filtered_apps.with(Vec::len),
                                     apps_open,
                                 ))
                                 .child(when(
                                     move || apps_open.get(),
                                     move || {
                                         when(
-                                            move || filtered_apps().is_empty(),
+                                            move || filtered_apps.with(Vec::is_empty),
                                             move || {
                                                 let has_query = !side_query.get().trim().is_empty();
                                                 let any_total = facets.with(|f| !f.apps.is_empty());
@@ -278,7 +278,7 @@ pub(crate) fn facet_sidebar(
                                         )
                                         .otherwise(move || {
                                             view().w_full().gap_0p5().child(each(
-                                                filtered_apps,
+                                                move || filtered_apps.get(),
                                                 |entry| entry.token.clone(),
                                                 move |entry, _| sidebar_app_row(entry, filter),
                                             ))
@@ -290,10 +290,9 @@ pub(crate) fn facet_sidebar(
                                     "域名",
                                     "Domains",
                                     move || {
-                                        grouped_domains()
-                                            .iter()
-                                            .map(|g| g.entries.len())
-                                            .sum::<usize>()
+                                        grouped_domains.with(|groups| {
+                                            groups.iter().map(|g| g.entries.len()).sum::<usize>()
+                                        })
                                     },
                                     domains_open,
                                 ))
@@ -301,7 +300,7 @@ pub(crate) fn facet_sidebar(
                                     move || domains_open.get(),
                                     move || {
                                         when(
-                                            move || grouped_domains().is_empty(),
+                                            move || grouped_domains.with(Vec::is_empty),
                                             move || {
                                                 let has_query = !side_query.get().trim().is_empty();
                                                 let any_total =
@@ -319,7 +318,7 @@ pub(crate) fn facet_sidebar(
                                         )
                                         .otherwise(move || {
                                             view().w_full().gap_0p5().child(each(
-                                                grouped_domains,
+                                                move || grouped_domains.get(),
                                                 |group| group.root.clone(),
                                                 move |group, _| {
                                                     sidebar_domain_group_view(
@@ -407,19 +406,13 @@ fn sidebar_section_header(
         .hover(|s| s.bg(bg_control_hover()))
         .active(|s| s.bg(bg_control_active()))
         .transition_colors()
-        .duration(MOTION_INSTANT_MS)
+        .duration(move || motion_ms(MOTION_INSTANT_MS))
         .ease_out()
         .focus_visible(apply_focus_ring)
         .on_press(move || open.update(|v| *v = !*v))
-        .child(glyph_px(
+        .child(ui_rotating_chevron(
             10.0,
-            move || {
-                if open.get() {
-                    Glyph::Chevron
-                } else {
-                    Glyph::ChevronRight
-                }
-            },
+            move || open.get(),
             || color(fg_muted()),
         ))
         .child(
@@ -644,17 +637,7 @@ pub(crate) fn sidebar_domain_group_view(
                                         }
                                     });
                                 })
-                                .child(glyph_px(
-                                    10.0,
-                                    move || {
-                                        if is_expanded() {
-                                            Glyph::Chevron
-                                        } else {
-                                            Glyph::ChevronRight
-                                        }
-                                    },
-                                    || color(fg_muted()),
-                                ))
+                                .child(ui_rotating_chevron(10.0, is_expanded, || color(fg_muted())))
                         },
                     ))
                     .child(

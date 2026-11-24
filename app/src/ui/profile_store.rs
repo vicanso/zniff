@@ -693,6 +693,12 @@ pub(crate) fn clamp_sidebar_px(width: f32) -> f32 {
     }
 }
 
+pub(crate) const SIDEBAR_AUTO_COLLAPSE_PX: f32 = 880.0;
+
+pub(crate) fn sidebar_effectively_collapsed(collapsed: bool, window_w: f32) -> bool {
+    collapsed || (window_w.is_finite() && window_w > 0.0 && window_w < SIDEBAR_AUTO_COLLAPSE_PX)
+}
+
 pub(crate) fn effective_sidebar_px(
     layout_mode: config::LayoutMode,
     sidebar_w: f32,

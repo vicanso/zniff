@@ -25,7 +25,7 @@ pub(crate) const SHORTCUT_SECTIONS: &[ShortcutSection] = &[
         items: &[
             ShortcutEntry {
                 keys: &["up", "down"],
-                zh: "在筛选列表中切换选中流量",
+                zh: "在过滤列表中切换选中流量",
                 en: "Select previous / next flow",
             },
             ShortcutEntry {

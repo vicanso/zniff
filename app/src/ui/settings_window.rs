@@ -179,6 +179,11 @@ fn settings_modal_header(open: Signal<bool>) -> impl IntoElement {
 
 pub(crate) fn settings_shell(props: SettingsWindowProps, is_modal: bool) -> impl IntoElement {
     let tab = props.profiles.settings_tab;
+    let content_scroll = element_ref();
+    effect(move || {
+        let _ = tab.get();
+        content_scroll.scroll_to_offset(px(0.0), false);
+    });
     let content_props = props.clone();
     view()
         .w_full()
@@ -196,13 +201,12 @@ pub(crate) fn settings_shell(props: SettingsWindowProps, is_modal: bool) -> impl
                 .child(settings_tab_header(tab))
                 .child(
                     view().flex_1().min_h(px(0.0)).w_full().child(
-                        scroll().w_full().h_full().child(
-                            view()
-                                .w_full()
-                                .p_4()
-                                .gap_3()
-                                .flex_col()
-                                .child(dynamic(move || {
+                        scroll()
+                            .element_ref(&content_scroll)
+                            .w_full()
+                            .h_full()
+                            .child(view().w_full().p_4().gap_3().flex_col().child(dynamic(
+                                move || {
                                     let p = content_props.clone();
                                     match tab.get() {
                                         SettingsTab::General => {
@@ -224,8 +228,8 @@ pub(crate) fn settings_shell(props: SettingsWindowProps, is_modal: bool) -> impl
                                             Some(settings_updates_tab(p).into_element())
                                         }
                                     }
-                                })),
-                        ),
+                                },
+                            ))),
                     ),
                 ),
         )

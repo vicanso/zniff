@@ -1141,12 +1141,14 @@ const PAGE_TEMPLATE: &str = r##"<!DOCTYPE html>
   html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg-canvas); color: var(--fg-primary); font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; -webkit-font-smoothing: antialiased; }
   button, input { font-family: inherit; }
   .mono { font-family: "JetBrains Mono", "JetBrains Mono NL", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
-  .shell { display: flex; flex-direction: column; height: 100vh; width: 100vw; overflow: hidden; }
+  .shell { display: flex; flex-direction: column; height: 100vh; height: 100dvh; width: 100vw; overflow: hidden; }
   .topbar { height: 44px; flex-shrink: 0; background: var(--bg-chrome); border-bottom: 1px solid var(--border-strong); padding: 0 12px; display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 0; }
   .brand { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; overflow: hidden; }
   .logo { width: 22px; height: 22px; border-radius: 6px; background: var(--accent); color: #fff; font-weight: 800; font-size: 12px; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
   .brand-name { font-weight: 700; font-size: 14px; letter-spacing: -0.01em; flex-shrink: 0; }
   .status-dot { width: 7px; height: 7px; border-radius: 99px; background: var(--ok-fg); flex-shrink: 0; }
+  .status-dot:not(.ended):not(.snapshot) { animation: livePulse 1.6s ease-in-out infinite; }
+  @keyframes livePulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.42; } }
   .status-dot.ended { background: var(--err-fg); }
   .status-dot.snapshot { background: var(--accent); }
   .meta-text { color: var(--fg-muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
@@ -1346,16 +1348,29 @@ const PAGE_TEMPLATE: &str = r##"<!DOCTYPE html>
   .wf-row:hover, .seq-step-row:hover, .dep-card:hover { border-color: var(--accent); background: var(--bg-row-hover); }
   .wf-track { flex: 1; min-width: 140px; height: 10px; border-radius: 99px; background: var(--bg-code); position: relative; overflow: hidden; }
   .wf-bar { position: absolute; top: 0; bottom: 0; min-width: 3px; border-radius: 99px; display: flex; overflow: hidden; }
-  .toast { position: fixed; bottom: 36px; right: 16px; z-index: 100; padding: 6px 12px; border-radius: 6px; background: var(--accent); color: #fff; font-size: 12px; font-weight: 600; box-shadow: var(--shadow-pop); opacity: 0; pointer-events: none; transition: opacity 0.16s; }
-  .toast.show { opacity: 1; }
+  .toast { position: fixed; bottom: 36px; right: 16px; z-index: 100; padding: 6px 12px; border-radius: 6px; background: var(--accent); color: #fff; font-size: 12px; font-weight: 600; box-shadow: var(--shadow-pop); opacity: 0; transform: translateY(6px); pointer-events: none; transition: opacity 150ms cubic-bezier(0.22, 1, 0.36, 1), transform 150ms cubic-bezier(0.22, 1, 0.36, 1); }
+  .toast.show { opacity: 1; transform: translateY(0); }
   .bottombar { height: 26px; flex-shrink: 0; background: var(--bg-chrome); border-top: 1px solid var(--border-strong); padding: 0 12px; display: flex; align-items: center; justify-content: space-between; font-size: 11.5px; color: var(--fg-muted); }
   @media (max-width: 860px) {
+    .shell { height: 100dvh; }
+    .topbar { height: auto; min-height: 44px; padding: 6px 10px; flex-wrap: wrap; row-gap: 6px; }
+    .toolbar-right { max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
     .workspace { flex-direction: column; }
     .left-pane { width: 100% !important; max-width: none; height: 46%; border-bottom: 1px solid var(--border-strong); }
     .splitter { display: none; }
     .right-pane { height: 54%; min-width: 0; }
     .kv-row { grid-template-columns: 120px minmax(0, 1fr); }
-    .seq-pick-list { width: 180px; }
+    .modal-backdrop { padding: 10px; }
+    .modal-box { width: calc(100vw - 20px); max-height: calc(100dvh - 20px); }
+    .modal-body { flex-direction: column; }
+    .seq-pick-list { width: 100%; max-height: 34%; border-right: none; border-bottom: 1px solid var(--border-strong); }
+    .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+  @media (pointer: coarse) {
+    .pill, .chip, .mini-btn, .icon-btn, .menu-item { min-height: 34px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { transition: none !important; animation: none !important; }
   }
 </style>
 </head>
@@ -1565,9 +1580,32 @@ function showToast(msg) {
   showToast._t = setTimeout(() => el.classList.remove("show"), 1400);
 }
 
+function copyFallback(str) {
+  const ta = document.createElement("textarea");
+  ta.value = str;
+  ta.setAttribute("readonly", "");
+  ta.style.position = "fixed";
+  ta.style.left = "-9999px";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch (_) {}
+  document.body.removeChild(ta);
+  return ok;
+}
+
 async function copyRawText(text, btn) {
-  try {
-    await navigator.clipboard.writeText(String(text ?? ""));
+  const str = String(text ?? "");
+  let copied = false;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    try {
+      await navigator.clipboard.writeText(str);
+      copied = true;
+    } catch (_) {}
+  }
+  if (!copied) copied = copyFallback(str);
+  if (copied) {
     if (btn) {
       const prev = btn.textContent;
       btn.textContent = tr("已复制", "Copied");
@@ -1575,7 +1613,7 @@ async function copyRawText(text, btn) {
     } else {
       showToast(tr("已复制到剪贴板", "Copied to clipboard"));
     }
-  } catch (_) {
+  } else {
     showToast(tr("复制失败", "Copy failed"));
   }
 }
@@ -4876,6 +4914,9 @@ mod tests {
         assert!(html.contains("onlyHostFilter(flow.host)"));
         assert!(html.contains(".code-viewer.hex-dump"));
         assert!(html.contains("w >= 980 ? 32 : 16"));
+        assert!(html.contains("prefers-reduced-motion: reduce"));
+        assert!(html.contains("execCommand"));
+        assert!(html.contains("100dvh"));
     }
 
     #[test]

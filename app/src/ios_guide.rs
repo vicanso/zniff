@@ -9,17 +9,17 @@ pub const IOS_TLS_PROBE_URL: &str = "https://zniff.local/probe";
 
 /// Extra CSS rules for the iOS verification checklist on `/zniff`.
 pub const IOS_CHECKLIST_STYLE: &str = r#"  .checklist { list-style: none; margin: 0.6rem 0; padding: 0; }
-  .checklist li { display: flex; align-items: flex-start; gap: 0.55rem; padding: 0.45rem 0; border-bottom: 1px solid #1e293b; font-size: 0.92rem; }
+  .checklist li { display: flex; align-items: flex-start; gap: 0.55rem; padding: 0.5rem 0; border-bottom: 1px solid var(--card-border); font-size: 0.92rem; }
   .checklist li:last-child { border-bottom: none; }
-  .step-icon { width: 1.25rem; height: 1.25rem; border-radius: 999px; border: 1.5px solid #475569; color: #94a3b8; display: inline-flex; align-items: center; justify-content: center; font-size: 0.78rem; font-weight: 700; flex-shrink: 0; margin-top: 0.1rem; }
+  .step-icon { width: 1.25rem; height: 1.25rem; border-radius: 999px; border: 1.5px solid var(--copy-border); color: var(--muted); display: inline-flex; align-items: center; justify-content: center; font-size: 0.78rem; font-weight: 700; flex-shrink: 0; margin-top: 0.1rem; transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease; }
   .checklist li.done .step-icon { background: #16a34a; border-color: #16a34a; color: #fff; }
-  .checklist li.done .step-title { color: #86efac; }
+  .checklist li.done .step-title { color: var(--ok-fg); }
   .probe-bar { display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; margin-top: 0.65rem; flex-wrap: wrap; }
-  .probe-status { font-size: 0.85rem; color: #94a3b8; flex: 1; min-width: 12rem; }
-  .probe-status.ok { color: #86efac; }
-  .probe-status.fail { color: #fca5a5; }
-  .probe-btn { border: 1px solid #2563eb; background: #1d4ed8; color: #fff; border-radius: 8px; padding: 0.45rem 0.85rem; font-size: 0.85rem; font-weight: 600; cursor: pointer; }
-  .probe-btn:active { opacity: 0.8; }"#;
+  .probe-status { font-size: 0.85rem; color: var(--muted); flex: 1; min-width: 12rem; }
+  .probe-status.ok { color: var(--ok-fg); }
+  .probe-status.fail { color: var(--err-fg); }
+  .probe-btn { min-height: 40px; border: 1px solid var(--btn-bg); background: var(--btn-bg); color: #fff; border-radius: 8px; padding: 0.5rem 0.95rem; font-size: 0.85rem; font-weight: 600; cursor: pointer; touch-action: manipulation; transition: transform 100ms cubic-bezier(0.22, 1, 0.36, 1), opacity 100ms ease; }
+  .probe-btn:active { transform: scale(0.97); opacity: 0.88; }"#;
 
 /// Renders the bilingual iOS verification checklist card embedded into `/zniff`.
 pub fn install_page_ios_checklist(zh: bool) -> String {

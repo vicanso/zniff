@@ -133,7 +133,7 @@ fn empty_clear_filter_button(
         .hover(|style| style.bg(accent_blue_soft_hover()))
         .active(|style| style.bg(bg_control_active()))
         .transition_colors()
-        .duration(MOTION_INSTANT_MS)
+        .duration(move || motion_ms(MOTION_INSTANT_MS))
         .ease_out()
         .focus_visible(apply_focus_ring)
         .label(tr("清空过滤", "Clear filter"))
@@ -171,7 +171,7 @@ fn empty_pause_primary_button(filter_enabled: Signal<bool>) -> impl IntoElement 
         .hover(|style| style.bg(bg_control_hover()))
         .active(|style| style.bg(bg_control_active()))
         .transition_colors()
-        .duration(MOTION_INSTANT_MS)
+        .duration(move || motion_ms(MOTION_INSTANT_MS))
         .ease_out()
         .focus_visible(apply_focus_ring)
         .label(tr("暂停主过滤", "Pause primary filter"))
@@ -309,6 +309,7 @@ pub(crate) fn flow_table(
     let hover = CellHover {
         text: signal(None::<String>),
         at: signal(Point::<Points>::default()),
+        intent: stored(None::<Spawned<()>>),
     };
     let save_job = stored(None::<Spawned<()>>);
     let widths_for_cols = widths;
@@ -424,7 +425,7 @@ pub(crate) fn flow_table(
                     .row_count(move || Some(rows.with(Vec::len) as u32))
                     .row_height(move || scaled_px(34.0))
                     .header_height(px(28.0))
-                    .font_size(px(12.0))
+                    .font_size(move || scaled_px(12.0))
                     .row_header(false)
                     .column_selectable(false)
                     .cell_selectable(false)
@@ -486,10 +487,6 @@ pub(crate) fn flow_table(
                             header_menu.set(false);
                             let next = rows.with(|rows| rows.get(row as usize).map(|row| row.id));
                             picked.set(next);
-                            if selected.get() != next {
-                                reset_compose(compose);
-                            }
-                            selected.set(next);
                             menu_open.set(true);
                         } else {
                             menu_open.set(false);
@@ -602,20 +599,37 @@ pub(crate) fn flow_table(
 pub(crate) struct CellHover {
     pub(crate) text: Signal<Option<String>>,
     pub(crate) at: Signal<Point<Points>>,
+    pub(crate) intent: Stored<Option<Spawned<()>>>,
+}
+
+pub(crate) fn hide_cell_hover(hover: CellHover) {
+    hover.intent.replace(None);
+    if hover.text.with_untracked(Option::is_some) {
+        hover.text.set(None);
+    }
 }
 
 pub(crate) fn show_cell_hover(hover: CellHover, event: &MouseEvent, text: String) {
     if text.is_empty() {
-        if hover.text.with_untracked(Option::is_some) {
-            hover.text.set(None);
-        }
+        hide_cell_hover(hover);
         return;
     }
     hover.at.set(event.page_position);
     if hover
         .text
-        .with_untracked(|cur| cur.as_deref() != Some(text.as_str()))
+        .with_untracked(|cur| cur.as_deref() == Some(text.as_str()))
     {
+        hover.intent.replace(None);
+        return;
+    }
+    if hover.text.with_untracked(Option::is_some) {
+        hover.intent.replace(None);
         hover.text.set(Some(text));
+    } else {
+        hover
+            .intent
+            .replace(Some(set_timeout(Duration::from_millis(280), move || {
+                hover.text.set(Some(text));
+            })));
     }
 }

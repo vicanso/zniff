@@ -99,7 +99,7 @@ pub(crate) fn summary_primary_actions(
         .child(
             view()
                 .tooltip(label_tip(
-                    "重放请求 (Cmd/Ctrl+R)",
+                    "重放请求（Cmd/Ctrl+R）",
                     "Replay request (Cmd/Ctrl+R)",
                 ))
                 .child(
@@ -162,7 +162,7 @@ fn code_snippets_section(
                 .hover(|style| style.bg(bg_control_hover()))
                 .active(|style| style.bg(bg_control_active()))
                 .transition_colors()
-                .duration(MOTION_INSTANT_MS)
+                .duration(move || motion_ms(MOTION_INSTANT_MS))
                 .ease_out()
                 .focus_visible(apply_focus_ring)
                 .child(
@@ -171,15 +171,9 @@ fn code_snippets_section(
                     })
                     .text_color(fg_secondary()),
                 )
-                .child(glyph_px(
+                .child(ui_rotating_chevron(
                     11.0,
-                    move || {
-                        if code_open.get() {
-                            Glyph::Chevron
-                        } else {
-                            Glyph::ChevronRight
-                        }
-                    },
+                    move || code_open.get(),
                     || color(fg_muted()),
                 )),
         )
@@ -501,6 +495,7 @@ pub(crate) fn detail_actions(
         .margin(px(8.0))
         .popup_style(ui_popup_style)
         .popup_starting_style(ui_popup_starting_style)
+        .popup_ending_style(ui_popup_ending_style)
         .trigger(detail_more_trigger(open))
         .child(
             view()

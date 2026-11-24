@@ -38,6 +38,7 @@ pub(crate) fn access_control_popover(props: AccessControlProps) -> impl IntoElem
         .open(move || Some(open.get()))
         .popup_style(ui_popup_style)
         .popup_starting_style(ui_popup_starting_style)
+        .popup_ending_style(ui_popup_ending_style)
         .placement(Placement::Top)
         .align(Align::End)
         .offset(px(6.0))
@@ -124,7 +125,7 @@ pub(crate) fn access_trigger_pill(
             style.bg(move || {
                 let (auth_on, denies_all, restricted) = state();
                 if denies_all || denied_total() > 0 {
-                    status_warn_bg()
+                    status_warn_bg_hover()
                 } else if open.get() || auth_on || restricted {
                     accent_blue_soft_hover()
                 } else {
@@ -180,13 +181,90 @@ pub(crate) fn access_trigger_pill(
         )
 }
 
+/// Validates `user:pass` format (`empty` disables auth; non-empty requires `:` with non-empty parts or user).
+pub(crate) fn is_valid_proxy_auth_draft(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    trimmed.is_empty()
+        || trimmed
+            .split_once(':')
+            .is_some_and(|(user, pass)| !user.is_empty() && !pass.is_empty())
+}
+
+fn sync_draft_from_source(source: Signal<String>, draft: Signal<String>) {
+    let last_synced = RefCell::new(source.get_untracked());
+    effect(move || {
+        let cur = source.get();
+        let mut prev = last_synced.borrow_mut();
+        if *prev != cur {
+            *prev = cur.clone();
+            draft.set(cur);
+        }
+    });
+}
+
+fn confirm_clear_button(on_clear: impl Fn() + Clone + 'static) -> impl IntoElement {
+    let confirm = signal(false);
+    let reset_job = stored(None::<Spawned<()>>);
+    ui_button(ButtonVariant::Outline, ControlSize::Sm)
+        .border_color(move || {
+            if confirm.get() {
+                status_err_fg()
+            } else {
+                border_control()
+            }
+        })
+        .bg(move || {
+            if confirm.get() {
+                status_err_bg()
+            } else {
+                bg_card()
+            }
+        })
+        .on_press(move || {
+            if confirm.get_untracked() {
+                reset_job.replace(None);
+                confirm.set(false);
+                on_clear();
+            } else {
+                confirm.set(true);
+                reset_job.replace(Some(set_timeout(Duration::from_millis(3500), move || {
+                    confirm.set(false);
+                })));
+            }
+        })
+        .child(
+            text(move || -> SharedString {
+                let langs = ui_langs();
+                if confirm.get() {
+                    t(ui_lang(langs), "确认清空？", "Confirm?").into()
+                } else {
+                    t(ui_lang(langs), "清空", "Clear").into()
+                }
+            })
+            .text_size(px(TEXT_SM))
+            .text_color(move || {
+                if confirm.get() {
+                    status_err_fg()
+                } else {
+                    fg_secondary()
+                }
+            }),
+        )
+}
+
 pub(crate) fn proxy_auth_section(
     proxy_auth: Signal<String>,
     controls: Arc<Controls>,
 ) -> impl IntoElement {
     let langs = ui_langs();
     let active = move || !proxy_auth.get().trim().is_empty();
-    let change_controls = controls.clone();
+    let draft = signal(proxy_auth.get_untracked());
+    sync_draft_from_source(proxy_auth, draft);
+    let show_secret = signal(false);
+    let is_dirty = move || draft.get().trim() != proxy_auth.get().trim();
+    let is_valid = move || is_valid_proxy_auth_draft(&draft.get());
+    let apply_controls = controls.clone();
+    let submit_controls = controls.clone();
     let clear_controls = controls;
     view()
         .w_full()
@@ -233,7 +311,8 @@ pub(crate) fn proxy_auth_section(
                 .gap_1p5()
                 .child(
                     input()
-                        .value(proxy_auth)
+                        .value(move || draft.get())
+                        .masked(move || !show_secret.get())
                         .placeholder(tr(
                             "user:pass，空着不校验",
                             "user:pass, empty disables auth",
@@ -246,24 +325,122 @@ pub(crate) fn proxy_auth_section(
                         .rounded(px(RADIUS_MD))
                         .bg(bg_code())
                         .border_1()
-                        .border_color(border_control())
+                        .border_color(move || {
+                            if !is_valid() {
+                                status_err_fg()
+                            } else {
+                                border_control()
+                            }
+                        })
                         .focus(|style| style.border_color(accent_blue()))
                         .text_size(px(TEXT_SM))
                         .text_color(fg_primary())
-                        .on_change(move |text: &str| {
-                            apply_proxy_auth_change(&change_controls, proxy_auth, text);
+                        .on_change(move |text: &str| draft.set(text.to_string()))
+                        .on_submit(move |text: &str| {
+                            draft.set(text.to_string());
+                            if is_valid_proxy_auth_draft(text) {
+                                apply_proxy_auth_change(&submit_controls, proxy_auth, text);
+                            }
                         }),
                 )
-                .child(when(
-                    move || !proxy_auth.get().is_empty(),
-                    move || {
-                        let controls = clear_controls.clone();
-                        clear_pill_button(move || {
-                            apply_proxy_auth_change(&controls, proxy_auth, "");
-                        })
-                    },
-                )),
+                .child(
+                    ui_button(ButtonVariant::Outline, ControlSize::Sm)
+                        .on_press(move || show_secret.update(|v| *v = !*v))
+                        .child(
+                            text(move || -> SharedString {
+                                let lang = ui_lang(langs);
+                                if show_secret.get() {
+                                    t(lang, "隐藏", "Hide").into()
+                                } else {
+                                    t(lang, "显示", "Show").into()
+                                }
+                            })
+                            .text_size(px(TEXT_XS))
+                            .text_color(fg_secondary()),
+                        ),
+                ),
         )
+        .child(when(
+            move || !is_valid(),
+            move || {
+                text(tr("格式应为 user:pass", "Use user:pass format"))
+                    .text_size(px(TEXT_XS))
+                    .text_color(status_err_fg())
+            },
+        ))
+        .child(draft_action_bar(
+            is_dirty,
+            is_valid,
+            move || !proxy_auth.get().is_empty(),
+            ("取消", "Reset"),
+            move || draft.set(proxy_auth.get_untracked()),
+            move || {
+                let next = draft.get_untracked();
+                if is_valid_proxy_auth_draft(&next) {
+                    apply_proxy_auth_change(&apply_controls, proxy_auth, &next);
+                }
+            },
+            move || {
+                draft.set(String::new());
+                apply_proxy_auth_change(&clear_controls, proxy_auth, "");
+            },
+        ))
+}
+
+fn draft_action_bar(
+    is_dirty: impl Fn() -> bool + Copy + 'static,
+    can_apply: impl Fn() -> bool + Copy + 'static,
+    has_saved: impl Fn() -> bool + Copy + 'static,
+    reset_label: (&'static str, &'static str),
+    on_reset: impl Fn() + Clone + 'static,
+    on_apply: impl Fn() + Clone + 'static,
+    on_clear: impl Fn() + Clone + 'static,
+) -> impl IntoElement {
+    when(
+        move || is_dirty() || has_saved(),
+        move || {
+            let on_clear = on_clear.clone();
+            let on_reset = on_reset.clone();
+            let on_apply = on_apply.clone();
+            view()
+                .w_full()
+                .flex_row()
+                .items_center()
+                .justify_end()
+                .gap_1p5()
+                .child(when(is_dirty, move || {
+                    let on_reset = on_reset.clone();
+                    let on_apply = on_apply.clone();
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_1p5()
+                        .child(
+                            ui_button(ButtonVariant::Outline, ControlSize::Sm)
+                                .on_press(on_reset)
+                                .child(
+                                    text(tr(reset_label.0, reset_label.1))
+                                        .text_size(px(TEXT_XS))
+                                        .text_color(fg_secondary()),
+                                ),
+                        )
+                        .child(
+                            ui_button(ButtonVariant::Primary, ControlSize::Sm)
+                                .disabled(move || !can_apply())
+                                .on_press(on_apply)
+                                .child(
+                                    text(tr("应用", "Apply"))
+                                        .text_size(px(TEXT_XS))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(fg_on_accent()),
+                                ),
+                        )
+                }))
+                .child(when(has_saved, move || {
+                    confirm_clear_button(on_clear.clone())
+                }))
+        },
+    )
 }
 
 /// Renders the host allow-list editor or read-only locked view inside the Access popover.
@@ -275,6 +452,9 @@ pub(crate) fn allow_hosts_section(
 ) -> impl IntoElement {
     let langs = ui_langs();
     let rules = move || crate::allow_hosts::AllowHostRules::parse(&allow_hosts.get(), strict.get());
+    let draft = signal(allow_hosts.get_untracked());
+    sync_draft_from_source(allow_hosts, draft);
+    let is_dirty = move || draft.get().trim() != allow_hosts.get().trim();
     let edit_cb = on_change_hosts.clone();
     let clear_cb = on_change_hosts;
     view()
@@ -346,11 +526,11 @@ pub(crate) fn allow_hosts_section(
                     .gap_1p5()
                     .child(
                         input()
-                            .value(allow_hosts)
+                            .value(move || draft.get())
                             .multiline(true)
                             .placeholder(tr(
-                                "api.vicanso.dev\n*.staging.vicanso.dev",
-                                "api.vicanso.dev\n*.staging.vicanso.dev",
+                                "api.example.com\n*.staging.example.com",
+                                "api.example.com\n*.staging.example.com",
                             ))
                             .placeholder_color(move || color(fg_muted()))
                             .w_full()
@@ -364,17 +544,21 @@ pub(crate) fn allow_hosts_section(
                             .focus(|style| style.border_color(accent_blue()))
                             .text_size(px(TEXT_SM))
                             .text_color(fg_primary())
-                            .on_change(move |text: &str| edit_cb(text)),
+                            .on_change(move |text: &str| draft.set(text.to_string())),
                     )
-                    .child(when(
+                    .child(draft_action_bar(
+                        is_dirty,
+                        || true,
                         move || !allow_hosts.get().is_empty(),
+                        ("还原", "Reset"),
+                        move || draft.set(allow_hosts.get_untracked()),
                         move || {
-                            let clear_cb = clear_cb.clone();
-                            view()
-                                .w_full()
-                                .flex_row()
-                                .justify_end()
-                                .child(clear_pill_button(move || clear_cb("")))
+                            let next = draft.get_untracked();
+                            edit_cb(&next);
+                        },
+                        move || {
+                            draft.set(String::new());
+                            clear_cb("");
                         },
                     ))
             }),
@@ -450,16 +634,6 @@ fn allow_hosts_header_row(
         )
 }
 
-fn clear_pill_button(on_press: impl Fn() + 'static) -> impl IntoElement {
-    ui_button(ButtonVariant::Outline, ControlSize::Sm)
-        .on_press(on_press)
-        .child(
-            text(tr("清空", "Clear"))
-                .text_size(px(TEXT_SM))
-                .text_color(fg_secondary()),
-        )
-}
-
 fn apply_proxy_auth_change(controls: &Controls, proxy_auth: Signal<String>, raw: &str) {
     proxy_auth.set(raw.to_string());
     let stored = raw.trim().to_string();
@@ -502,5 +676,20 @@ pub(crate) fn apply_allow_hosts_change(
                 err: err.to_string(),
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validates_proxy_auth_user_pass_drafts() {
+        assert!(is_valid_proxy_auth_draft(""));
+        assert!(is_valid_proxy_auth_draft("   "));
+        assert!(is_valid_proxy_auth_draft("alice:secret"));
+        assert!(!is_valid_proxy_auth_draft("alice"));
+        assert!(!is_valid_proxy_auth_draft("alice:"));
+        assert!(!is_valid_proxy_auth_draft(":secret"));
     }
 }

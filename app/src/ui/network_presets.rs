@@ -123,6 +123,7 @@ pub(crate) fn detect_network_group_state(groups: &[config::RuleGroup]) -> Networ
 }
 
 /// Detects which built-in [`NetworkPreset`] is currently active in `groups`.
+#[cfg(test)]
 pub(crate) fn detect_active_network_preset(groups: &[config::RuleGroup]) -> NetworkPreset {
     match detect_network_group_state(groups) {
         NetworkGroupState::Preset(preset) => preset,
@@ -242,6 +243,14 @@ pub(crate) fn apply_network_preset(
 }
 
 /// Toolbar network condition preset switcher popover (`3G` / `Slow 3G` / `High latency` / `Offline`).
+pub(crate) fn active_preset_from_state(state: NetworkGroupState) -> Option<NetworkPreset> {
+    match state {
+        NetworkGroupState::Preset(p) => Some(p),
+        NetworkGroupState::None => Some(NetworkPreset::None),
+        NetworkGroupState::Custom => None,
+    }
+}
+
 pub(crate) fn toolbar_network_preset_popover(
     profiles: ProfileSignals,
     controls: Arc<Controls>,
@@ -256,10 +265,7 @@ pub(crate) fn toolbar_network_preset_popover(
             .rule_groups
             .with(|groups| detect_network_group_state(groups))
     });
-    let active_preset = computed(move || match group_state.get() {
-        NetworkGroupState::Preset(p) => p,
-        NetworkGroupState::None | NetworkGroupState::Custom => NetworkPreset::None,
-    });
+    let active_preset = computed(move || active_preset_from_state(group_state.get()));
     let is_throttled = move || !matches!(group_state.get(), NetworkGroupState::None);
     bind_popover_dismiss(open);
 
@@ -277,6 +283,7 @@ pub(crate) fn toolbar_network_preset_popover(
         })
         .popup_style(ui_popup_style)
         .popup_starting_style(ui_popup_starting_style)
+        .popup_ending_style(ui_popup_ending_style)
         .placement(Placement::Bottom)
         .align(Align::End)
         .offset(px(6.0))
@@ -365,6 +372,7 @@ pub(crate) fn toolbar_network_preset_popover(
             profiles,
             controls,
             active_preset,
+            group_state,
             open,
             langs,
         ))
@@ -373,22 +381,45 @@ pub(crate) fn toolbar_network_preset_popover(
 fn network_preset_menu(
     profiles: ProfileSignals,
     controls: Arc<Controls>,
-    active_preset: Memo<NetworkPreset>,
+    active_preset: Memo<Option<NetworkPreset>>,
+    group_state: Memo<NetworkGroupState>,
     open: Signal<bool>,
     langs: Signal<Option<Lang>>,
 ) -> impl IntoElement {
-    let mut menu = view().w(px(236.0)).p_1p5().gap_0p5().flex_col().child(
-        view().px_2().py_1().child(
-            text(tr("网络条件预设", "Network Conditions"))
-                .text_size(px(TEXT_XS))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(fg_muted()),
-        ),
-    );
+    let mut menu = view()
+        .w(px(236.0))
+        .p_1p5()
+        .gap_0p5()
+        .flex_col()
+        .child(
+            view().px_2().py_1().child(
+                text(tr("网络条件预设", "Network Conditions"))
+                    .text_size(px(TEXT_XS))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(fg_muted()),
+            ),
+        )
+        .child(when(
+            move || group_state.get() == NetworkGroupState::Custom,
+            move || {
+                view()
+                    .mx_1()
+                    .mb_1()
+                    .px_2()
+                    .py_1()
+                    .rounded(px(RADIUS_SM))
+                    .bg(status_warn_bg())
+                    .child(
+                        text(tr("当前使用自定义网络规则", "Custom network rules active"))
+                            .text_size(px(TEXT_XS))
+                            .text_color(status_warn_fg()),
+                    )
+            },
+        ));
 
     for &preset in NetworkPreset::ALL {
         let item_controls = controls.clone();
-        let is_selected = move || active_preset.get() == preset;
+        let is_selected = move || active_preset.get() == Some(preset);
         menu = menu.child(
             menu_item()
                 .w_full()
@@ -552,5 +583,18 @@ mod tests {
             );
         }
         assert_eq!(NetworkPreset::from_command_id("unknown"), None);
+    }
+
+    #[test]
+    fn custom_network_group_never_selects_no_throttling() {
+        assert_eq!(
+            active_preset_from_state(NetworkGroupState::None),
+            Some(NetworkPreset::None)
+        );
+        assert_eq!(
+            active_preset_from_state(NetworkGroupState::Preset(NetworkPreset::Slow3g)),
+            Some(NetworkPreset::Slow3g)
+        );
+        assert_eq!(active_preset_from_state(NetworkGroupState::Custom), None);
     }
 }

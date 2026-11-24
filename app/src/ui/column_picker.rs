@@ -13,6 +13,7 @@ pub(crate) fn column_menu(
         .margin(px(8.0))
         .popup_style(ui_popup_style)
         .popup_starting_style(ui_popup_starting_style)
+        .popup_ending_style(ui_popup_ending_style)
         .on_open_change(move |event: &nsh_base::MenuEvent| {
             if let nsh_base::MenuEvent::OpenChange(next, _) = event {
                 open.set(*next);
@@ -140,7 +141,7 @@ fn column_picker_content(
                             columns,
                             controls.clone(),
                             config::PathDisplay::Auto,
-                            "自动 (无域名过滤时含域名)",
+                            "自动（无域名过滤时含域名）",
                             "Auto (Host + Path when unfiltered)",
                         ))
                         .child(column_path_display_choice(
@@ -531,8 +532,10 @@ pub(crate) fn row_context_menu(
     let local_check = controls.clone();
     let map_label_check = controls.clone();
     let map_local_controls = controls.clone();
+    let mock_controls = controls.clone();
     let quick_rule_controls = controls.clone();
     let repeat_controls = controls.clone();
+    let note_select_controls = controls.clone();
     let edit_controls = controls.clone();
     let replay_controls = controls.clone();
     let is_marker_check = controls.clone();
@@ -657,6 +660,7 @@ pub(crate) fn row_context_menu(
                         let map_local_controls = map_local_controls.clone();
                         let quick_rule_controls = quick_rule_controls.clone();
                         let repeat_controls = repeat_controls.clone();
+                        let note_select_controls = note_select_controls.clone();
                         let edit_controls = edit_controls.clone();
                         let replay_controls = replay_controls.clone();
                         let can_mutate = can_mutate.clone();
@@ -751,9 +755,26 @@ pub(crate) fn row_context_menu(
                             .child(action_item_enabled(
                                 tr("备注…", "Note…"),
                                 can_note,
-                                closing(menu_open, move || {
-                                    shown.repeating.set(false);
-                                    shown.editing_comment.set(true);
+                                closing(menu_open, {
+                                    let note_select_controls = note_select_controls.clone();
+                                    move || {
+                                        if let Some(target) = picked.get()
+                                            && selected.get_untracked() != Some(target)
+                                        {
+                                            reset_compose(compose);
+                                            selected.set(Some(target));
+                                            let lang = ui_lang(ui_langs());
+                                            publish_detail_for_controls(
+                                                &shown,
+                                                &note_select_controls,
+                                                Some(target),
+                                                lang,
+                                                baseline.get_untracked(),
+                                            );
+                                        }
+                                        shown.repeating.set(false);
+                                        shown.editing_comment.set(true);
+                                    }
                                 }),
                             ))
                             .child(menu_rule())
@@ -774,6 +795,12 @@ pub(crate) fn row_context_menu(
                                 closing(menu_open, move || {
                                     if refuse_relay(&repeat_controls, picked.get()) {
                                         return;
+                                    }
+                                    if let Some(target) = picked.get()
+                                        && selected.get_untracked() != Some(target)
+                                    {
+                                        reset_compose(compose);
+                                        selected.set(Some(target));
                                     }
                                     shown.editing_comment.set(false);
                                     shown.repeating.set(true);
@@ -840,14 +867,35 @@ pub(crate) fn row_context_menu(
                                     );
                                 }),
                             ))
-                            .child(flow_quick_rule_section(can_quick_rule, move |action| {
-                                menu_open.set(false);
-                                open_quick_rule_for_flow(
-                                    &quick_rule_controls,
-                                    profiles,
-                                    picked.get(),
-                                    action,
-                                );
+                            .child(flow_quick_rule_section(can_quick_rule, {
+                                let mock_controls = mock_controls.clone();
+                                move |action| {
+                                    menu_open.set(false);
+                                    let target = picked.get();
+                                    if action == FlowQuickRuleAction::MockResponse {
+                                        if let Some(flow_id) = target
+                                            && selected.get_untracked() != Some(flow_id)
+                                        {
+                                            reset_compose(compose);
+                                            selected.set(Some(flow_id));
+                                            publish_detail_for_controls(
+                                                &shown,
+                                                &mock_controls,
+                                                Some(flow_id),
+                                                ui_lang(ui_langs()),
+                                                baseline.get_untracked(),
+                                            );
+                                        }
+                                        begin_inline_mock(&mock_controls, target, compose);
+                                    } else {
+                                        open_quick_rule_for_flow(
+                                            &quick_rule_controls,
+                                            profiles,
+                                            target,
+                                            action,
+                                        );
+                                    }
+                                }
                             }))
                     }),
                 ),
@@ -924,37 +972,8 @@ pub(crate) fn map_local_from_flow(
     let host = flow.host.clone();
     let path = flow.path.clone();
     let status = flow.status;
-    #[cfg(target_arch = "wasm32")]
-    let status_only = true;
     #[cfg(not(target_arch = "wasm32"))]
-    let status_only = flow.response_body.is_empty();
-    if status_only {
-        let Some(next) = crate::rules::append_map_local_line(
-            &rules_text.get(),
-            &host,
-            &path,
-            None,
-            Some(status.unwrap_or(200)),
-        ) else {
-            return;
-        };
-        rules_text.set(next.clone());
-        controls.hub.set_rules(&next);
-        if let Err(err) = save_config(|config| config.rules = next) {
-            set_status(
-                &controls,
-                StatusMsg::PrefUnsaved {
-                    name: PrefName::Rules,
-                    err: err.to_string(),
-                },
-            );
-            return;
-        }
-        set_status(&controls, StatusMsg::MappedLocal(format!("{host}{path}")));
-        return;
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
+    if !flow.response_body.is_empty() {
         let ext = present::content_type(&flow.response_headers)
             .and_then(present::image_extension)
             .unwrap_or_else(|| body_extension(&flow.response_headers, &flow.response_body));
@@ -1002,7 +1021,30 @@ pub(crate) fn map_local_from_flow(
                 DialogOutcome::Failed(err) => set_status(&controls, StatusMsg::SaveFailed(err)),
             }
         });
+        return;
     }
+    let Some(next) = crate::rules::append_map_local_line(
+        &rules_text.get(),
+        &host,
+        &path,
+        None,
+        Some(status.unwrap_or(200)),
+    ) else {
+        return;
+    };
+    rules_text.set(next.clone());
+    controls.hub.set_rules(&next);
+    if let Err(err) = save_config(|config| config.rules = next) {
+        set_status(
+            &controls,
+            StatusMsg::PrefUnsaved {
+                name: PrefName::Rules,
+                err: err.to_string(),
+            },
+        );
+        return;
+    }
+    set_status(&controls, StatusMsg::MappedLocal(format!("{host}{path}")));
 }
 
 pub(crate) fn flow_pinned(controls: &Controls, id: Option<u64>) -> bool {

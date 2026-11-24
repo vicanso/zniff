@@ -32,6 +32,7 @@ pub(crate) fn saved_filter_menu(
         .margin(px(10.0))
         .popup_style(ui_popup_style)
         .popup_starting_style(ui_popup_starting_style)
+        .popup_ending_style(ui_popup_ending_style)
         .trigger(
             view()
                 .window_drag(false)
@@ -71,7 +72,7 @@ pub(crate) fn saved_filter_menu(
                 })
                 .active(|style| style.bg(bg_control_active()))
                 .transition_colors()
-                .duration(MOTION_INSTANT_MS)
+                .duration(move || motion_ms(MOTION_INSTANT_MS))
                 .ease_out()
                 .focus_visible(apply_focus_ring)
                 .tooltip(label_tip("视图流量过滤", "Traffic view filter"))
@@ -224,7 +225,7 @@ pub(crate) fn saved_filter_panel(
                                                     .hover(|style| style.bg(bg_control_hover()))
                                                     .active(|style| style.bg(bg_control_active()))
                                                     .transition_colors()
-                                                    .duration(MOTION_INSTANT_MS)
+                                                    .duration(move || motion_ms(MOTION_INSTANT_MS))
                                                     .ease_out()
                                                     .focus_visible(apply_focus_ring)
                                                     .flex_row()
@@ -265,7 +266,7 @@ pub(crate) fn saved_filter_panel(
                                                     .hover(|style| style.bg(bg_control_hover()))
                                                     .active(|style| style.bg(bg_control_active()))
                                                     .transition_colors()
-                                                    .duration(MOTION_INSTANT_MS)
+                                                    .duration(move || motion_ms(MOTION_INSTANT_MS))
                                                     .ease_out()
                                                     .focus_visible(apply_focus_ring)
                                                     .flex_row()
@@ -367,7 +368,7 @@ pub(crate) fn saved_filter_panel(
                                 .gap_1()
                                 .w_full()
                                 .child(
-                                    text(tr("快捷筛选", "Quick Filters"))
+                                    text(tr("快捷过滤", "Quick Filters"))
                                         .text_size(px(TEXT_XS))
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(fg_muted()),

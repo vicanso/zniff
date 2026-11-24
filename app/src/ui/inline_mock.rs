@@ -437,7 +437,7 @@ pub(crate) fn inline_mock_trigger_button(
                 })
                 .active(|style| style.bg(bg_control_active()))
                 .transition_colors()
-                .duration(MOTION_INSTANT_MS)
+                .duration(move || motion_ms(MOTION_INSTANT_MS))
                 .ease_out()
                 .focus_visible(apply_focus_ring)
                 .flex_row()
@@ -697,10 +697,13 @@ fn inline_mock_headers_editor(mock: InlineMockSignals) -> impl IntoElement {
         .gap_1()
         .flex_col()
         .child(
-            text(tr("响应头 (Name: Value)", "Response headers (Name: Value)"))
-                .text_size(px(TEXT_SM))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(fg_secondary()),
+            text(tr(
+                "响应头（Name: Value）",
+                "Response headers (Name: Value)",
+            ))
+            .text_size(px(TEXT_SM))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(fg_secondary()),
         )
         .child(
             guard_culled_pointer_events(view())

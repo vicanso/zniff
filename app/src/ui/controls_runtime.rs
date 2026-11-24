@@ -425,6 +425,8 @@ pub(crate) fn install_ca(controls: Arc<Controls>) {
                 set_ca_status(&controls, status);
                 if status == ca::CaStatus::Trusted {
                     set_status(&controls, StatusMsg::CaInstalled);
+                } else {
+                    set_status(&controls, StatusMsg::CaInstalledNeedsTrust);
                 }
             }
             Err(err) => {
@@ -547,8 +549,10 @@ pub(crate) fn platform_ca_extra_menu_item(_controls: &Arc<Controls>) -> impl Int
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn install_ca_ios_sim(controls: Arc<Controls>) {
     std::thread::spawn(move || {
+        let Some(port) = ensure_capture_port_for_launcher(&controls) else {
+            return;
+        };
         let ca = controls.hub.ca.clone();
-        let port = current_listen_port(&controls);
         match ca::install_ios_simulators(&ca, port) {
             Ok(ca::IosSimOutcome::Installed { count, port }) => {
                 set_status(&controls, StatusMsg::IosSimInstalled { count, port });
@@ -918,6 +922,11 @@ pub(crate) fn apply_capture_state(controls: &Controls, value: &serde_json::Value
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn start_capture(controls: &Controls) {
     let _ops = lock_ops(controls);
+    start_capture_locked(controls);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn start_capture_locked(controls: &Controls) {
     if lock_bool(&controls.running) {
         return;
     }
@@ -1057,6 +1066,29 @@ pub(crate) fn switch_to_lan(controls: Arc<Controls>) {
                     .unwrap_or_else(|err| err.into_inner()) = Some(capture);
             }
             Err(err) => {
+                set_bool(&controls.listen_all, false);
+                let _ = store_listen_all(false);
+                let local_addr = SocketAddr::from(([127, 0, 0, 1], port));
+                if let Ok(rollback) = Capture::spawn(controls.hub.clone(), local_addr) {
+                    let local_port = rollback.addr.port();
+                    set_port(&controls.listen_port, local_port);
+                    *controls
+                        .listen
+                        .lock()
+                        .unwrap_or_else(|err| err.into_inner()) = rollback.addr.to_string();
+                    *controls
+                        .capture
+                        .lock()
+                        .unwrap_or_else(|err| err.into_inner()) = Some(rollback);
+                    set_status(
+                        &controls,
+                        StatusMsg::BindFailed {
+                            port,
+                            err: format!("{err:#}"),
+                        },
+                    );
+                    return;
+                }
                 ca::clear_ios_simulator_proxies();
                 launcher::clear_android_adb_proxies();
                 transparent_proxy::cleanup_on_exit();
@@ -1110,6 +1142,9 @@ pub(crate) fn toggle_system_proxy(controls: Arc<Controls>) {
             return;
         }
         if !running {
+            if on {
+                start_capture_locked(&controls);
+            }
             return;
         }
         if on {

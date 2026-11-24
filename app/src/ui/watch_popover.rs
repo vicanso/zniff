@@ -77,6 +77,7 @@ pub(crate) fn watch_popover(props: WatchPopoverProps) -> impl IntoElement {
         .open(move || Some(open.get()))
         .popup_style(ui_popup_style)
         .popup_starting_style(ui_popup_starting_style)
+        .popup_ending_style(ui_popup_ending_style)
         .placement(Placement::Top)
         .align(Align::End)
         .offset(px(6.0))
@@ -128,7 +129,7 @@ fn watch_trigger(
         .hover(|style| {
             style.bg(move || {
                 if has_hits() {
-                    status_warn_bg()
+                    status_warn_bg_hover()
                 } else if open.get() || has_active() {
                     accent_blue_soft_hover()
                 } else {
@@ -316,7 +317,9 @@ fn watch_add_form(
                 .child(
                     ui_button(ButtonVariant::Primary, ControlSize::Sm)
                         .disabled(move || invalid_draft.get())
-                        .accessibility_label(tr("添加提醒规则", "Add watch rule")())
+                        .accessibility_label(move || {
+                            Some(SharedString::from(tr("添加提醒规则", "Add watch rule")()))
+                        })
                         .on_press(move || submit(&controls_add))
                         .child(
                             control_text(tr("添加", "Add"))
@@ -513,7 +516,7 @@ fn watch_rule_row(
                 .focus_visible(apply_focus_ring)
                 .label(move || -> SharedString { filter_str().into() })
                 .tooltip(label_tip(
-                    "点击切到实时会话并筛选此提醒",
+                    "点击切到实时会话并过滤此提醒",
                     "Filter live flows by this watch rule",
                 ))
                 .gap(px(1.0))
@@ -603,21 +606,83 @@ fn watch_rule_row(
                     }),
                 ),
         )
-        .child(
-            ui_icon_button(ButtonVariant::Ghost, ControlSize::Xs)
-                .accessibility_label(move || {
-                    Some(SharedString::from(tr("删除提醒", "Delete watch")()))
+        .child({
+            let confirm = signal(false);
+            let reset_job = stored(None::<Spawned<()>>);
+            let langs = ui_langs();
+            view()
+                .role(AccessibilityRole::Button)
+                .h(px(ControlSize::Xs.height()))
+                .min_w(px(ControlSize::Xs.height()))
+                .px(move || if confirm.get() { px(6.0) } else { px(0.0) })
+                .rounded(px(ControlSize::Xs.radius()))
+                .flex_row()
+                .items_center()
+                .justify_center()
+                .flex_shrink_0()
+                .bg(move || {
+                    if confirm.get() {
+                        status_err_bg()
+                    } else {
+                        AdaptiveColor::TRANSPARENT
+                    }
+                })
+                .hover(|s| {
+                    s.bg(move || {
+                        if confirm.get() {
+                            status_err_bg_hover()
+                        } else {
+                            bg_control_hover()
+                        }
+                    })
+                })
+                .active(|s| s.bg(bg_control_active()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .focus_visible(apply_focus_ring)
+                .label(move || -> SharedString {
+                    if confirm.get() {
+                        tr("确认删除提醒", "Confirm delete watch")().into()
+                    } else {
+                        tr("删除提醒", "Delete watch")().into()
+                    }
                 })
                 .on_press(move || {
-                    let target_filter = item.with_untracked(|(_, r)| r.filter.clone());
-                    let mut next = rules.get_untracked();
-                    next.retain(|r| !r.filter.eq_ignore_ascii_case(&target_filter));
-                    persist_watch_rules(&controls_delete, rules, next);
+                    if confirm.get_untracked() {
+                        reset_job.replace(None);
+                        confirm.set(false);
+                        let target_filter = item.with_untracked(|(_, r)| r.filter.clone());
+                        let mut next = rules.get_untracked();
+                        next.retain(|r| !r.filter.eq_ignore_ascii_case(&target_filter));
+                        persist_watch_rules(&controls_delete, rules, next);
+                    } else {
+                        confirm.set(true);
+                        reset_job
+                            .replace(Some(set_timeout(Duration::from_millis(3500), move || {
+                                confirm.set(false)
+                            })));
+                    }
                 })
-                .child(glyph_px(
-                    ControlSize::Xs.icon_size(),
-                    || Glyph::Close,
-                    || color(fg_muted()),
-                )),
-        )
+                .child(
+                    when(
+                        move || confirm.get(),
+                        move || {
+                            text(move || -> SharedString {
+                                t(ui_lang(langs), "删?", "Del?").into()
+                            })
+                            .text_size(px(TEXT_XS))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(status_err_fg())
+                        },
+                    )
+                    .otherwise(move || {
+                        glyph_px(
+                            ControlSize::Xs.icon_size(),
+                            || Glyph::Close,
+                            || color(fg_muted()),
+                        )
+                    }),
+                )
+        })
 }

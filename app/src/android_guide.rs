@@ -180,7 +180,11 @@ document.addEventListener('click', function (e) {
   var ok = btn.getAttribute('data-ok') || 'Copied';
   function done() {
     btn.textContent = ok;
-    setTimeout(function () { btn.textContent = prev; }, 1600);
+    btn.classList.add('copied');
+    setTimeout(function () {
+      btn.classList.remove('copied');
+      btn.textContent = prev;
+    }, 1600);
   }
   if (navigator.clipboard && navigator.clipboard.writeText) {
     navigator.clipboard.writeText(text).then(done).catch(fallback);

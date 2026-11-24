@@ -92,6 +92,7 @@ pub(crate) fn profile_saved_menu(ctx: ProfileDockMenuCtx) -> impl IntoElement {
         .margin(px(8.0))
         .popup_style(ui_popup_style)
         .popup_starting_style(ui_popup_starting_style)
+        .popup_ending_style(ui_popup_ending_style)
         .trigger(profile_saved_trigger(trigger_ctx))
         .child(profile_saved_popup(ctx, confirm_delete))
 }
@@ -613,6 +614,7 @@ pub(crate) fn profile_history_menu(ctx: ProfileDockMenuCtx) -> impl IntoElement 
         .margin(px(8.0))
         .popup_style(ui_popup_style)
         .popup_starting_style(ui_popup_starting_style)
+        .popup_ending_style(ui_popup_ending_style)
         .trigger(profile_history_trigger(trigger_ctx))
         .child(profile_history_popup(ctx))
 }

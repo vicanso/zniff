@@ -104,7 +104,8 @@ pub(crate) fn column_splitter(
     let dragging = signal(false);
     let clamped_width = move |target: f32| {
         let mode = layout_mode.get();
-        let side = effective_sidebar_px(mode, sidebar_width.get(), sidebar_collapsed.get());
+        let collapsed = sidebar_effectively_collapsed(sidebar_collapsed.get(), window().width.0);
+        let side = effective_sidebar_px(mode, sidebar_width.get(), collapsed);
         clamp_list_px_for_layout(target, window().width.0, mode, side)
     };
     view()
@@ -288,13 +289,16 @@ pub(crate) fn flow_list(
     let clear_controls = controls.clone();
     let column_controls = controls;
     let filter_enabled = profiles.filter_enabled;
+    let langs = ui_langs();
+    let has_active_main = move || filter_enabled.get() && !main_filter.get().trim().is_empty();
     let picked = signal(None::<u64>);
     let menu_open = signal(false);
     let menu_at = signal(Point::<Points>::default());
     let facet_tab = signal(0_u8);
     let effective_width = move || {
         let mode = layout_mode.get();
-        let side = effective_sidebar_px(mode, sidebar_width.get(), sidebar_collapsed.get());
+        let collapsed = sidebar_effectively_collapsed(sidebar_collapsed.get(), window().width.0);
+        let side = effective_sidebar_px(mode, sidebar_width.get(), collapsed);
         clamp_list_px_for_layout(width.get(), window().width.0, mode, side)
     };
     let effective_height = move || clamp_list_height_for_window(height.get(), window().height.0);
@@ -340,10 +344,23 @@ pub(crate) fn flow_list(
                         .items_center()
                         .child(filter_assist_input(
                             list_filter,
-                            tr(
-                                "在当前结果中再次过滤 (主机、路径、状态、body:…)",
-                                "Filter current results (host, path, status, body:…)",
-                            ),
+                            move || -> String {
+                                let lang = ui_lang(langs);
+                                if has_active_main() {
+                                    t(
+                                        lang,
+                                        "在主过滤结果中二次过滤（主机、路径、状态、body:…）",
+                                        "Filter within primary results (host, path, status, body:…)",
+                                    )
+                                } else {
+                                    t(
+                                        lang,
+                                        "过滤请求（主机、路径、状态、body:…）",
+                                        "Filter requests (host, path, status, body:…)",
+                                    )
+                                }
+                                .to_string()
+                            },
                             30.0,
                             28.0,
                             filter_focus,
@@ -366,11 +383,31 @@ pub(crate) fn flow_list(
                                     .hover(|style| style.bg(bg_control_hover()))
                                     .active(|style| style.bg(bg_control_active()))
                                     .transition_colors()
-                                    .duration(MOTION_INSTANT_MS)
+                                    .duration(move || motion_ms(MOTION_INSTANT_MS))
                                     .ease_out()
                                     .focus_visible(apply_focus_ring)
-                                    .label(tr("清空二次过滤", "Clear secondary filter"))
-                                    .tooltip(label_tip("清空二次过滤", "Clear secondary filter"))
+                                    .label(move || -> SharedString {
+                                        let lang = ui_lang(langs);
+                                        if has_active_main() {
+                                            t(lang, "清空二次过滤", "Clear secondary filter")
+                                        } else {
+                                            t(lang, "清空过滤", "Clear filter")
+                                        }
+                                        .into()
+                                    })
+                                    .tooltip(tooltip().child(ui_tooltip_surface(
+                                        text(move || -> SharedString {
+                                            let lang = ui_lang(langs);
+                                            if has_active_main() {
+                                                t(lang, "清空二次过滤", "Clear secondary filter")
+                                            } else {
+                                                t(lang, "清空过滤", "Clear filter")
+                                            }
+                                            .into()
+                                        })
+                                        .text_size(move || scaled_px(TEXT_SM))
+                                        .text_color(fg_primary()),
+                                    )))
                                     .on_press(move || list_filter.set(String::new()))
                                     .child(
                                         control_text("×")
@@ -399,14 +436,39 @@ pub(crate) fn flow_list(
                             .hover(|style| style.bg(accent_blue_soft_hover()))
                             .active(|style| style.bg(bg_control_active()))
                             .transition_colors()
-                            .duration(MOTION_INSTANT_MS)
+                            .duration(move || motion_ms(MOTION_INSTANT_MS))
                             .ease_out()
                             .focus_visible(apply_focus_ring)
-                            .label(tr("并入主过滤", "Merge"))
-                            .tooltip(label_tip(
-                                "将当前二次筛选并入顶栏主过滤条件并可保存进预设",
-                                "Merge secondary filter into main filter",
-                            ))
+                            .label(move || -> SharedString {
+                                let lang = ui_lang(langs);
+                                if has_active_main() {
+                                    t(lang, "并入主过滤", "Merge")
+                                } else {
+                                    t(lang, "设为主过滤", "Pin filter")
+                                }
+                                .into()
+                            })
+                            .tooltip(tooltip().child(ui_tooltip_surface(
+                                text(move || -> SharedString {
+                                    let lang = ui_lang(langs);
+                                    if has_active_main() {
+                                        t(
+                                            lang,
+                                            "将当前二次过滤并入顶栏主过滤（可保存进预设）",
+                                            "Merge secondary filter into primary filter",
+                                        )
+                                    } else {
+                                        t(
+                                            lang,
+                                            "将当前过滤条件固定到顶栏主过滤（可保存进预设）",
+                                            "Pin current filter to toolbar primary filter",
+                                        )
+                                    }
+                                    .into()
+                                })
+                                .text_size(move || scaled_px(TEXT_SM))
+                                .text_color(fg_primary()),
+                            )))
                             .on_press(move || {
                                 let merged =
                                     merge_secondary_filter(&main_filter.get(), &list_filter.get());
@@ -418,10 +480,18 @@ pub(crate) fn flow_list(
                                 });
                             })
                             .child(
-                                control_text(tr("并入主过滤", "Merge"))
-                                    .text_size(px(TEXT_SM))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(accent_blue_text()),
+                                control_text(move || -> SharedString {
+                                    let lang = ui_lang(langs);
+                                    if has_active_main() {
+                                        t(lang, "并入主过滤", "Merge")
+                                    } else {
+                                        t(lang, "设为主过滤", "Pin filter")
+                                    }
+                                    .into()
+                                })
+                                .text_size(px(TEXT_SM))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(accent_blue_text()),
                             )
                     },
                 ))
@@ -430,7 +500,10 @@ pub(crate) fn flow_list(
         )
         .child(filter_syntax_error_strip(list_filter))
         .child(when(
-            move || layout_mode.get() == config::LayoutMode::TopBottom || sidebar_collapsed.get(),
+            move || {
+                layout_mode.get() == config::LayoutMode::TopBottom
+                    || sidebar_effectively_collapsed(sidebar_collapsed.get(), window().width.0)
+            },
             move || facet_quick_bar(facets, facets_open, facet_tab, list_filter),
         ))
         .child(tls_failure_banner_from_context())
@@ -458,7 +531,10 @@ pub(crate) fn flow_list(
                 .child(when(
                     move || {
                         (layout_mode.get() == config::LayoutMode::TopBottom
-                            || sidebar_collapsed.get())
+                            || sidebar_effectively_collapsed(
+                                sidebar_collapsed.get(),
+                                window().width.0,
+                            ))
                             && facets_open.get()
                     },
                     move || {
@@ -624,7 +700,7 @@ pub(crate) fn facet_quick_bar(
                             "Slow",
                             "slow:",
                             SLOW_ALIASES,
-                            "筛选耗时 ≥ 1s 或进行中的慢请求 (slow:)",
+                            "过滤耗时 ≥ 1s 或进行中的慢请求 (slow:)",
                             "Filter slow requests >= 1s (slow:)",
                         ))
                         .child(drawer_quick_chip(
@@ -633,7 +709,7 @@ pub(crate) fn facet_quick_bar(
                             "Error",
                             "status:4xx|5xx|err",
                             ERR_ALIASES,
-                            "筛选 4xx / 5xx / 连接失败请求 (status:4xx|5xx|err)",
+                            "过滤 4xx / 5xx / 连接失败请求 (status:4xx|5xx|err)",
                             "Filter 4xx / 5xx / failed requests (status:4xx|5xx|err)",
                         ))
                         .child(drawer_quick_chip(
@@ -642,7 +718,7 @@ pub(crate) fn facet_quick_bar(
                             "JSON",
                             "type:json",
                             JSON_ALIASES,
-                            "筛选 JSON 请求/响应 (type:json)",
+                            "过滤 JSON 请求/响应 (type:json)",
                             "Filter JSON traffic (type:json)",
                         ))
                         .child(drawer_quick_chip(
@@ -719,7 +795,7 @@ pub(crate) fn facet_drawer(
                         .child(
                             input()
                                 .value(drawer_query)
-                                .placeholder(tr("筛选域名或应用…", "Filter domains / apps…"))
+                                .placeholder(tr("过滤域名或应用…", "Filter domains / apps…"))
                                 .placeholder_color(move || color(fg_muted()))
                                 .w_full()
                                 .h(px(24.0))
@@ -757,7 +833,7 @@ pub(crate) fn facet_drawer(
                                     .hover(|s| s.bg(bg_control_hover()))
                                     .active(|s| s.bg(bg_control_active()))
                                     .transition_colors()
-                                    .duration(MOTION_INSTANT_MS)
+                                    .duration(move || motion_ms(MOTION_INSTANT_MS))
                                     .ease_out()
                                     .focus_visible(apply_focus_ring)
                                     .label(tr("清空搜索", "Clear search"))
@@ -771,7 +847,7 @@ pub(crate) fn facet_drawer(
                         if facet_tab.get() == 0 {
                             tr("点击只看 · × 屏蔽", "Click to filter · × to mute")().into()
                         } else {
-                            tr("点击按进程/来源筛选", "Click to filter by app/client")().into()
+                            tr("点击按进程/来源过滤", "Click to filter by app/client")().into()
                         }
                     })
                     .flex_shrink_0()

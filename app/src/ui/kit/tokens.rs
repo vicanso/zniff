@@ -16,11 +16,31 @@ pub(crate) const RADIUS_MD: f32 = 6.0;
 pub(crate) const RADIUS_LG: f32 = 10.0;
 
 #[allow(dead_code)]
+pub(crate) const MOTION_PRESS_MS: f32 = 90.0;
+#[allow(dead_code)]
+pub(crate) const MOTION_EXIT_MS: f32 = 110.0;
+#[allow(dead_code)]
 pub(crate) const MOTION_INSTANT_MS: f32 = 120.0;
 #[allow(dead_code)]
 pub(crate) const MOTION_FAST_MS: f32 = 160.0;
 #[allow(dead_code)]
 pub(crate) const MOTION_BASE_MS: f32 = 220.0;
+#[allow(dead_code)]
+pub(crate) const MOTION_PULSE_MS: f32 = 1400.0;
+#[allow(dead_code)]
+pub(crate) const PRESS_SCALE: f32 = 0.97;
+#[allow(dead_code)]
+pub(crate) const PRESS_SCALE_ICON: f32 = 0.94;
+
+/// Returns `0.0` when the system "Reduce motion" accessibility setting is enabled.
+#[allow(dead_code)]
+pub(crate) fn motion_ms(ms: f32) -> f32 {
+    if nsh_core::prelude::reduce_motion() {
+        0.0
+    } else {
+        ms
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]

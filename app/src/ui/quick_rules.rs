@@ -49,8 +49,8 @@ pub(crate) fn mini_toggle_switch(
         .hover(|style| style.bg(bg_control_hover()))
         .active(|style| style.bg(bg_control_active()))
         .transition_colors()
-        .duration(MOTION_INSTANT_MS)
-        .ease_out()
+        .duration(move || motion_ms(MOTION_INSTANT_MS))
+        .ease_bezier(0.22, 1.0, 0.36, 1.0)
         .focus_visible(apply_focus_ring)
         .checked(move || on.get())
         .on_change(move |next: &bool| {
@@ -67,8 +67,8 @@ pub(crate) fn mini_toggle_switch(
                 .bg(switch_track_off())
                 .checked(|c| c.bg(accent_blue()))
                 .transition_colors()
-                .duration(MOTION_INSTANT_MS)
-                .ease_out()
+                .duration(move || motion_ms(MOTION_INSTANT_MS))
+                .ease_bezier(0.22, 1.0, 0.36, 1.0)
         })
         .thumb_style(|s| {
             s.w(px(10.0))
@@ -77,8 +77,8 @@ pub(crate) fn mini_toggle_switch(
                 .bg(switch_thumb())
                 .checked(|c| c.translate_x(px(12.0)))
                 .transition_transform()
-                .duration(MOTION_INSTANT_MS)
-                .ease_out()
+                .duration(move || motion_ms(MOTION_INSTANT_MS))
+                .ease_bezier(0.22, 1.0, 0.36, 1.0)
         })
         .child(
             text(tr(zh, en))
@@ -126,8 +126,8 @@ pub(crate) fn rules_editor(
                 .line_numbers(true)
                 .folding(false)
                 .soft_wrap(true)
-                .font_size(Points(12.0))
-                .line_height(Points(18.0))
+                .font_size(move || scaled_px(12.0))
+                .line_height(move || scaled_px(18.0))
                 .scroll_beyond_last_line(false)
                 .placeholder(move || {
                     SharedString::from(tr(

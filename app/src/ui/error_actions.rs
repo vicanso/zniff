@@ -169,11 +169,23 @@ fn is_network_upstream_error(lower: &str) -> bool {
 }
 
 /// Returns ordered recovery actions for a flow on desktop (`is_desktop = true`) or web (`false`).
+#[cfg(test)]
 pub(crate) fn actions_for_error(
     status: Option<u16>,
     error: &str,
     host: &str,
     is_desktop: bool,
+) -> Vec<ErrorAction> {
+    actions_for_error_with_ca(status, error, host, is_desktop, false)
+}
+
+/// Returns ordered recovery actions, omitting `InstallCa` when the host root CA is already trusted.
+pub(crate) fn actions_for_error_with_ca(
+    status: Option<u16>,
+    error: &str,
+    host: &str,
+    is_desktop: bool,
+    ca_trusted: bool,
 ) -> Vec<ErrorAction> {
     let Some(category) = classify_error(status, error) else {
         return Vec::new();
@@ -186,7 +198,9 @@ pub(crate) fn actions_for_error(
                 actions.push(ErrorAction::BypassTls);
             }
             if is_desktop {
-                actions.push(ErrorAction::InstallCa);
+                if !ca_trusted {
+                    actions.push(ErrorAction::InstallCa);
+                }
                 actions.push(ErrorAction::OpenInBrowser);
             }
             actions
@@ -352,7 +366,7 @@ fn add_host_to_bypass(controls: &Controls, profiles: ProfileSignals, host: &str)
     }
 }
 
-fn execute_error_action(
+pub(crate) fn execute_error_action(
     action: ErrorAction,
     controls: &Arc<Controls>,
     profiles: ProfileSignals,
@@ -399,12 +413,24 @@ pub(crate) fn error_summary_banner(
 ) -> impl IntoElement {
     let is_desktop = cfg!(not(target_arch = "wasm32"));
     let langs = ui_langs();
+    let ca_ctx = use_context::<TlsFailureBannerSignals>();
+    let ca_controls = controls.clone();
     let visible = move || !shown.error.get().is_empty() || shown.status.get() == Some(407);
-    let actions = move || {
+    let actions = computed(move || {
         let url = shown.url.get();
         let host = extract_host_from_url(&url);
-        actions_for_error(shown.status.get(), &shown.error.get(), &host, is_desktop)
-    };
+        let ca_trusted = ca_ctx
+            .as_ref()
+            .map(|s| s.ca_status.get() == ca::CaStatus::Trusted)
+            .unwrap_or_else(|| lock_ca_status(&ca_controls) == ca::CaStatus::Trusted);
+        actions_for_error_with_ca(
+            shown.status.get(),
+            &shown.error.get(),
+            &host,
+            is_desktop,
+            ca_trusted,
+        )
+    });
     let is_neutral = move || {
         let err = shown.error.get();
         shown.status.get() != Some(407) && is_non_actionable_notice(&err.to_ascii_lowercase())
@@ -461,7 +487,7 @@ pub(crate) fn error_summary_banner(
                 }),
             )
             .child(when(
-                move || !actions().is_empty(),
+                move || !actions.with(Vec::is_empty),
                 move || {
                     let controls = controls.clone();
                     view()
@@ -471,7 +497,7 @@ pub(crate) fn error_summary_banner(
                         .items_center()
                         .gap_1p5()
                         .child(each(
-                            actions,
+                            move || actions.get(),
                             |act| *act as u8,
                             move |item, _| {
                                 let action = item.get_untracked();
@@ -646,6 +672,10 @@ mod tests {
                 ErrorAction::InstallCa,
                 ErrorAction::OpenInBrowser,
             ]
+        );
+        assert_eq!(
+            actions_for_error_with_ca(None, "证书被拒绝", "api.example.com", true, true),
+            vec![ErrorAction::BypassTls, ErrorAction::OpenInBrowser]
         );
         // On wasm32, desktop-only InstallCa and OpenInBrowser are hidden.
         assert_eq!(

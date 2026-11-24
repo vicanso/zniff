@@ -54,6 +54,13 @@ pub(crate) fn footer(
                             } else {
                                 fg_muted()
                             }
+                        })
+                        .style_with(move |s| {
+                            if running.get() && !reduce_motion() {
+                                s.animation(ui_pulse_animation(MOTION_PULSE_MS))
+                            } else {
+                                s
+                            }
                         }),
                 )
                 .child(
@@ -212,6 +219,7 @@ pub(crate) fn cert_qr(
         .open(move || Some(open.get()))
         .popup_style(ui_popup_style)
         .popup_starting_style(ui_popup_starting_style)
+        .popup_ending_style(ui_popup_ending_style)
         .placement(Placement::Top)
         .align(Align::End)
         .offset(px(6.0))

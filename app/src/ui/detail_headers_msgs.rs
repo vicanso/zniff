@@ -72,14 +72,9 @@ pub(crate) fn toggle_card_and_persist(folded: Signal<u8>, bit: u8, controls: &Co
 }
 
 pub(crate) fn fold_mark(folded: Signal<u8>, bit: u8) -> impl IntoElement {
-    glyph(
-        move || {
-            if card_folded(folded, bit) {
-                Glyph::ChevronRight
-            } else {
-                Glyph::Chevron
-            }
-        },
+    ui_rotating_chevron(
+        13.0,
+        move || !card_folded(folded, bit),
         || color(fg_muted()),
     )
 }
@@ -123,13 +118,6 @@ pub(crate) fn kv_value_cell(line: ReadSignal<HeaderLine>) -> impl IntoElement {
         ))
 }
 
-fn pulse_animation(duration_ms: f32) -> KeyframeAnimation {
-    KeyframeAnimation::new(Keyframes::Pulse)
-        .duration(duration_ms)
-        .easing([0.4, 0.0, 0.6, 1.0])
-        .frame_rate(30.0)
-}
-
 pub(crate) fn detail_loading_row() -> impl IntoElement {
     view()
         .px_3p5()
@@ -148,7 +136,7 @@ pub(crate) fn detail_loading_row() -> impl IntoElement {
                     if reduce_motion() {
                         s
                     } else {
-                        s.animation(pulse_animation(1200.0))
+                        s.animation(ui_pulse_animation(1200.0))
                     }
                 }),
         )
@@ -166,7 +154,7 @@ pub(crate) fn detail_loading_box() -> impl IntoElement {
                 if reduce_motion() {
                     s
                 } else {
-                    s.animation(pulse_animation(1500.0))
+                    s.animation(ui_pulse_animation(1500.0))
                 }
             })
     };
@@ -202,7 +190,7 @@ pub(crate) fn detail_loading_box() -> impl IntoElement {
                             if reduce_motion() {
                                 s
                             } else {
-                                s.animation(pulse_animation(1100.0))
+                                s.animation(ui_pulse_animation(1100.0))
                             }
                         }),
                 )
@@ -248,6 +236,8 @@ pub(crate) fn row_copy_button(
     en_tip: &'static str,
     on_copy: impl Fn() + 'static,
 ) -> impl IntoElement {
+    let copied = signal(false);
+    let reset_job = stored(None::<Spawned<()>>);
     view()
         .role(AccessibilityRole::Button)
         .w(px(ControlSize::Xs.height()))
@@ -257,22 +247,49 @@ pub(crate) fn row_copy_button(
         .items_center()
         .justify_center()
         .rounded(px(RADIUS_SM))
-        .bg(AdaptiveColor::TRANSPARENT)
-        .hover(|style| style.bg(bg_control_hover()))
+        .bg(move || {
+            if copied.get() {
+                status_ok_bg()
+            } else {
+                AdaptiveColor::TRANSPARENT
+            }
+        })
+        .hover(move |style| {
+            style.bg(move || {
+                if copied.get() {
+                    status_ok_bg()
+                } else {
+                    bg_control_hover()
+                }
+            })
+        })
         .active(|style| style.bg(bg_control_active()))
         .transition_colors()
-        .duration(MOTION_INSTANT_MS)
+        .duration(move || motion_ms(MOTION_INSTANT_MS))
         .ease_out()
         .focus_visible(apply_focus_ring)
         .label(tr(zh_label, en_label))
         .tooltip(label_tip(zh_tip, en_tip))
-        .on_press(on_copy)
+        .on_press(move || {
+            on_copy();
+            copied.set(true);
+            reset_job.replace(Some(set_timeout(Duration::from_millis(1400), move || {
+                copied.set(false)
+            })));
+        })
         .child(
             canvas(move || {
-                Painter::new()
-                    .line_width(1.3)
-                    .stroke_color(color(fg_secondary()))
-                    .stroke_svg("M4.5 4.5 H10.5 V11.0 H4.5 Z M2.5 8.5 H2.0 V2.0 H8.0 V3.0")
+                if copied.get() {
+                    Painter::new()
+                        .line_width(1.5)
+                        .stroke_color(color(status_ok_fg()))
+                        .stroke_svg("M2.5 6.8 L5.2 9.4 L10.2 3.8")
+                } else {
+                    Painter::new()
+                        .line_width(1.3)
+                        .stroke_color(color(fg_secondary()))
+                        .stroke_svg("M4.5 4.5 H10.5 V11.0 H4.5 Z M2.5 8.5 H2.0 V2.0 H8.0 V3.0")
+                }
             })
             .w(px(12.5))
             .h(px(12.5)),

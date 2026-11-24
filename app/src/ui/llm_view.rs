@@ -5,7 +5,7 @@ pub(crate) fn llm_stream_panel(
     summary: Signal<Option<llm_stream::LlmStreamSummary>>,
     controls: Arc<Controls>,
 ) -> impl IntoElement {
-    let thinking_open = signal(true);
+    let thinking_open = signal(false);
     let content_controls = controls.clone();
     let tools_controls = controls.clone();
     view()
@@ -85,7 +85,7 @@ fn llm_meta_strip(summary: Signal<Option<llm_stream::LlmStreamSummary>>) -> impl
             move || {
                 let langs = ui_langs();
                 llm_badge(move || {
-                    let stop_lbl = t(ui_lang(langs), "结束原因", "stop");
+                    let stop_lbl = t(ui_lang(langs), "结束原因", "finish");
                     summary.with(|opt| {
                         opt.as_ref()
                             .and_then(|s| s.finish_reason.as_ref())
@@ -142,11 +142,17 @@ fn format_metrics_summary(s: &llm_stream::LlmStreamSummary, lang: Lang) -> Strin
         tok_parts.push(format!("{reason_lbl}:{v}"));
     }
     if !tok_parts.is_empty() {
-        parts.push(format!(
-            "{} ({})",
-            tok_parts.join(" "),
-            u.total_tokens.unwrap_or(0)
-        ));
+        let total = u
+            .total_tokens
+            .or_else(|| match (u.input_tokens, u.output_tokens) {
+                (Some(i), Some(o)) => Some(i.saturating_add(o)),
+                _ => None,
+            });
+        if let Some(total) = total {
+            parts.push(format!("{} ({total})", tok_parts.join(" ")));
+        } else {
+            parts.push(tok_parts.join(" "));
+        }
     }
     if let Some(tps) = s.tokens_per_sec() {
         parts.push(format!("{tps:.1} tok/s"));
@@ -189,20 +195,14 @@ fn llm_thinking_card(
                         .hover(|s| s.bg(bg_control_hover()))
                         .active(|s| s.bg(bg_control_active()))
                         .transition_colors()
-                        .duration(MOTION_INSTANT_MS)
+                        .duration(move || motion_ms(MOTION_INSTANT_MS))
                         .ease_out()
                         .focus_visible(apply_focus_ring)
                         .label(tr("展开或收起思考过程", "Toggle thinking"))
                         .on_press(move || open.update(|v| *v = !*v))
-                        .child(glyph_px(
+                        .child(ui_rotating_chevron(
                             10.0,
-                            move || {
-                                if open.get() {
-                                    Glyph::Chevron
-                                } else {
-                                    Glyph::ChevronRight
-                                }
-                            },
+                            move || open.get(),
                             || color(fg_secondary()),
                         ))
                         .child(
@@ -331,6 +331,14 @@ fn llm_output_card(
         )
 }
 
+fn tool_call_item_key((idx, tc): &(usize, llm_stream::LlmToolCall)) -> String {
+    if tc.id.is_empty() {
+        format!("idx:{idx}")
+    } else {
+        format!("{idx}:{}", tc.id)
+    }
+}
+
 fn llm_tool_calls_card(
     summary: Signal<Option<llm_stream::LlmStreamSummary>>,
     controls: Arc<Controls>,
@@ -338,7 +346,7 @@ fn llm_tool_calls_card(
     let items = move || {
         summary.with(|opt| {
             opt.as_ref()
-                .map(|s| s.tool_calls.clone())
+                .map(|s| s.tool_calls.iter().cloned().enumerate().collect::<Vec<_>>())
                 .unwrap_or_default()
         })
     };
@@ -360,63 +368,59 @@ fn llm_tool_calls_card(
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(fg_secondary()),
         )
-        .child(each(
-            items,
-            |tc| format!("{}:{}:{}", tc.id, tc.name, tc.arguments.len()),
-            move |tc, _| {
-                let copy_controls = controls.clone();
-                let formatted = move || format_tool_args(&tc.with(|item| item.arguments.clone()));
-                view()
-                    .w_full()
-                    .rounded(px(RADIUS_MD))
-                    .bg(bg_code())
-                    .overflow_hidden()
-                    .child(
-                        view()
-                            .w_full()
-                            .px_2p5()
-                            .py_1p5()
-                            .flex_row()
-                            .items_center()
-                            .justify_between()
-                            .child(
-                                mono(move || -> SharedString {
-                                    tc.with(|item| {
-                                        if item.id.is_empty() {
-                                            item.name.clone()
-                                        } else {
-                                            format!("{} ({})", item.name, item.id)
-                                        }
-                                    })
-                                    .into()
+        .child(each(items, tool_call_item_key, move |tc, _| {
+            let copy_controls = controls.clone();
+            let formatted = move || format_tool_args(&tc.with(|(_, item)| item.arguments.clone()));
+            view()
+                .w_full()
+                .rounded(px(RADIUS_MD))
+                .bg(bg_code())
+                .overflow_hidden()
+                .child(
+                    view()
+                        .w_full()
+                        .px_2p5()
+                        .py_1p5()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            mono(move || -> SharedString {
+                                tc.with(|(_, item)| {
+                                    if item.id.is_empty() {
+                                        item.name.clone()
+                                    } else {
+                                        format!("{} ({})", item.name, item.id)
+                                    }
                                 })
-                                .text_size(px(TEXT_SM))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(accent_blue_text()),
-                            )
-                            .child(detail_button(tr("复制参数", "Copy args"), move || {
-                                let raw = tc.with_untracked(|item| item.arguments.clone());
-                                let pretty = format_tool_args(&raw);
-                                set_clipboard(pretty);
-                                set_status(&copy_controls, StatusMsg::CopiedToolArgs);
-                            })),
-                    )
-                    .child(ui_divider())
-                    .child(
-                        guard_culled_pointer_events(view()).w_full().child(
-                            scroll().w_full().max_h(px(260.0)).child(
-                                view().w_full().p_2p5().child(
-                                    mono(move || -> SharedString { formatted().into() })
-                                        .selectable(true)
-                                        .text_size(move || scaled_px(12.0))
-                                        .line_height(move || scaled_px(18.0))
-                                        .text_color(fg_primary()),
-                                ),
+                                .into()
+                            })
+                            .text_size(px(TEXT_SM))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(accent_blue_text()),
+                        )
+                        .child(detail_button(tr("复制参数", "Copy args"), move || {
+                            let raw = tc.with_untracked(|(_, item)| item.arguments.clone());
+                            let pretty = format_tool_args(&raw);
+                            set_clipboard(pretty);
+                            set_status(&copy_controls, StatusMsg::CopiedToolArgs);
+                        })),
+                )
+                .child(ui_divider())
+                .child(
+                    guard_culled_pointer_events(view()).w_full().child(
+                        scroll().w_full().max_h(px(260.0)).child(
+                            view().w_full().p_2p5().child(
+                                mono(move || -> SharedString { formatted().into() })
+                                    .selectable(true)
+                                    .text_size(move || scaled_px(12.0))
+                                    .line_height(move || scaled_px(18.0))
+                                    .text_color(fg_primary()),
                             ),
                         ),
-                    )
-            },
-        ))
+                    ),
+                )
+        }))
 }
 
 fn format_tool_args(raw: &str) -> String {
@@ -427,4 +431,67 @@ fn format_tool_args(raw: &str) -> String {
     serde_json::from_str::<serde_json::Value>(trimmed)
         .and_then(|v| serde_json::to_string_pretty(&v))
         .unwrap_or_else(|_| raw.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_call_key_stays_stable_while_arguments_stream() {
+        let a = (
+            0,
+            llm_stream::LlmToolCall {
+                id: "call_1".into(),
+                name: "get_weather".into(),
+                arguments: "{\"city\":\"Sh".into(),
+            },
+        );
+        let b = (
+            0,
+            llm_stream::LlmToolCall {
+                id: "call_1".into(),
+                name: "get_weather".into(),
+                arguments: "{\"city\":\"Shanghai\"}".into(),
+            },
+        );
+        assert_eq!(tool_call_item_key(&a), tool_call_item_key(&b));
+        let empty = (
+            1,
+            llm_stream::LlmToolCall {
+                id: String::new(),
+                name: "fn".into(),
+                arguments: String::new(),
+            },
+        );
+        assert_eq!(tool_call_item_key(&empty), "idx:1");
+    }
+
+    #[test]
+    fn metrics_summary_falls_back_or_omits_missing_total_tokens() {
+        let mut s = llm_stream::LlmStreamSummary {
+            provider: llm_stream::LlmProvider::Anthropic,
+            model: Some("claude".into()),
+            finish_reason: Some("stop".into()),
+            thinking: String::new(),
+            content: "hi".into(),
+            tool_calls: Vec::new(),
+            usage: llm_stream::LlmUsage {
+                input_tokens: Some(12),
+                output_tokens: Some(8),
+                reasoning_tokens: None,
+                total_tokens: None,
+            },
+            chunk_count: 3,
+            ttft_ms: Some(100),
+            total_ms: Some(500),
+        };
+        let sum = format_metrics_summary(&s, Lang::En);
+        assert!(sum.contains("in:12 out:8 (20)"), "{sum}");
+
+        s.usage.input_tokens = None;
+        let partial = format_metrics_summary(&s, Lang::En);
+        assert!(partial.contains("out:8"), "{partial}");
+        assert!(!partial.contains("(0)"), "{partial}");
+    }
 }

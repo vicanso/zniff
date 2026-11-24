@@ -70,7 +70,7 @@ pub(crate) fn flow_header(
     };
     let is_sorted =
         move || column.is_some_and(|col| sort.get().is_some_and(|current| current.column == col));
-    let row = view()
+    let mut row = view()
         .role(AccessibilityRole::Button)
         .w_full()
         .h(px(28.0))
@@ -82,9 +82,14 @@ pub(crate) fn flow_header(
         .items_center()
         .overflow_hidden()
         .transition_colors()
-        .duration(MOTION_INSTANT_MS)
+        .duration(move || motion_ms(MOTION_INSTANT_MS))
         .ease_out()
         .focus_visible(apply_focus_ring);
+    if column.is_some() {
+        row = row
+            .hover(|s| s.bg(bg_control_hover()))
+            .active(|s| s.bg(bg_control_active()));
+    }
     let row = if align_right { row.justify_end() } else { row };
     row.child(
         text(move || -> SharedString {
@@ -384,7 +389,7 @@ pub(crate) fn time_cell(
             });
             show_cell_hover(hover, event, clock);
         })
-        .on_mouse_leave(move |_: &MouseEvent| hover.text.set(None))
+        .on_mouse_leave(move |_: &MouseEvent| hide_cell_hover(hover))
         .child(
             mono(move || {
                 rows.with(|rows| {
@@ -484,7 +489,7 @@ pub(crate) fn host_cell(
             });
             show_cell_hover(hover, event, host);
         })
-        .on_mouse_leave(move |_: &MouseEvent| hover.text.set(None))
+        .on_mouse_leave(move |_: &MouseEvent| hide_cell_hover(hover))
         .child(
             mono(move || {
                 rows.with(|rows| {
@@ -542,7 +547,7 @@ pub(crate) fn client_ip_cell(
             });
             show_cell_hover(hover, event, ip);
         })
-        .on_mouse_leave(move |_: &MouseEvent| hover.text.set(None))
+        .on_mouse_leave(move |_: &MouseEvent| hide_cell_hover(hover))
         .child(
             mono(move || {
                 rows.with(|rows| {
@@ -803,7 +808,7 @@ pub(crate) fn path_cell(
             });
             show_cell_hover(hover, event, path);
         })
-        .on_mouse_leave(move |_: &MouseEvent| hover.text.set(None))
+        .on_mouse_leave(move |_: &MouseEvent| hide_cell_hover(hover))
 }
 
 pub(crate) fn row_target_text(row: &RowLine, display: EffectivePathDisplay) -> &str {

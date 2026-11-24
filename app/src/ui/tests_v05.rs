@@ -757,6 +757,102 @@ fn a3_more_menu_has_three_groups_each_at_most_six_items_zh_en() {
     }
 }
 
+#[test]
+fn more_menu_clear_unstarred_requires_two_step_confirm_and_disables_when_empty_zh_en() {
+    fn sample_unpinned_row(id: u64) -> Arc<RowLine> {
+        Arc::new(RowLine {
+            id,
+            method: "GET".into(),
+            status: Some(200),
+            time: "00:00:00".into(),
+            gap_nanos: 0,
+            clock: String::new(),
+            elapsed: "1ms".into(),
+            elapsed_nanos: Some(1_000_000),
+            elapsed_slow: false,
+            host: "api.example.com".into(),
+            client_ip: "127.0.0.1".into(),
+            path: "/v1/ping".into(),
+            host_path: "api.example.com/v1/ping".into(),
+            url: "https://api.example.com/v1/ping".into(),
+            comment: String::new(),
+            protocol: "HTTP/1.1".into(),
+            size: "12B".into(),
+            size_bytes: 12,
+            failed: false,
+            pinned: false,
+            is_marker: false,
+            rule_marker: String::new(),
+            rule_summary: String::new(),
+            relay_short: String::new(),
+        })
+    }
+
+    #[component]
+    fn ClearGuardHarness() -> impl IntoElement {
+        let lang = TEST_LANG.with(Cell::get);
+        provide_base_contexts(lang);
+        let controls = make_controls("more-clear-guard");
+        let profiles = make_profiles();
+        let open = signal(true);
+        let rows = signal(Vec::<Arc<RowLine>>::new());
+        let cleared = signal(0_usize);
+        let add_row = rows;
+        let check_cleared = cleared;
+
+        view()
+            .w(px(360.0))
+            .h(px(760.0))
+            .flex_col()
+            .child(
+                view()
+                    .on_press(move || add_row.set(vec![sample_unpinned_row(1)]))
+                    .child(text("SEED_UNPINNED")),
+            )
+            .child(text(move || {
+                format!("CLEARED:{}:OPEN:{}", check_cleared.get(), open.get())
+            }))
+            .child(more_menu(
+                open,
+                || {},
+                || {},
+                move || cleared.update(|n| *n += 1),
+                controls,
+                rows,
+                profiles.filter,
+                signal(Phase::Empty),
+                signal(String::new()),
+                profiles,
+                make_compose(),
+                make_seq_builder(),
+                signal(None),
+                signal(UpdateState::default()),
+            ))
+    }
+
+    for lang in [Lang::Zh, Lang::En] {
+        TEST_LANG.set(lang);
+        let (mut core, mut tree) = mount::<ClearGuardHarness>(Size::new(px(360.0), px(760.0)));
+        let clear_label = t(lang, "清空未星标", "Clear unstarred");
+        let confirm_label = t(lang, "再次点击确认清空", "Click again to clear");
+
+        // Disabled when no unpinned flows exist: pressing does not arm confirm or clear.
+        assert!(tree.press_text(&mut core, clear_label));
+        assert!(!tree.has_text(confirm_label));
+        assert!(tree.has_text("CLEARED:0:OPEN:true"));
+
+        // Seed 1 unpinned row -> first click arms 2-step confirmation and keeps menu open.
+        assert!(tree.press_text(&mut core, "SEED_UNPINNED"));
+        assert!(tree.press_text(&mut core, clear_label));
+        assert!(tree.has_text(confirm_label));
+        assert!(tree.has_text("CLEARED:0:OPEN:true"));
+
+        // Second click executes clear and dismisses menu.
+        assert!(tree.press_text(&mut core, confirm_label));
+        assert!(tree.has_text("CLEARED:1:OPEN:false"));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 3. B1 + B2 + B3: Detail rule hit badges, rule line hit counts, and dry-run preview
 // ---------------------------------------------------------------------------

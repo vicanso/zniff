@@ -491,6 +491,8 @@ pub fn App() -> impl IntoElement {
     // offset back once; the same flow updating does not scroll.
     let detail_scroll = element_ref();
     let detail_scroll_tick = detail_scroll;
+    let workspace_ref = element_ref();
+    provide_context(SidebarLayoutRef(workspace_ref));
     let detail_top_left = stored(false);
     let seen_detail_stamp = stored((
         true,
@@ -1614,6 +1616,7 @@ pub fn App() -> impl IntoElement {
                 selected,
                 install_ca: Rc::clone(&install_ca_cb),
             });
+            provide_context(profile_signals);
             provide_context(SessionTabBarProps {
                 tabs: session_tabs_sig,
                 active_tab: active_tab_sig,
@@ -1647,7 +1650,6 @@ pub fn App() -> impl IntoElement {
                 pending_qr,
             };
             let onboarding_strip_props = onboarding_base.clone();
-            let workspace_ref = element_ref();
             workspace_ref.on_focus_in(move || popover_dismiss.dismiss());
             let on_clear: Rc<dyn Fn()> = Rc::new(move || {
                 clear_captured(
@@ -1680,7 +1682,13 @@ pub fn App() -> impl IntoElement {
                 };
                 container
                     .child(when(
-                        move || profile_signals.layout_mode.get() == config::LayoutMode::Split,
+                        move || {
+                            profile_signals.layout_mode.get() == config::LayoutMode::Split
+                                && !sidebar_effectively_collapsed(
+                                    profile_signals.sidebar_collapsed.get(),
+                                    window().width.0,
+                                )
+                        },
                         move || {
                             facet_sidebar(
                                 facets,

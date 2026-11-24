@@ -526,15 +526,30 @@ pub(crate) fn marker_detail_card(
                             move || !is_active_tab_read_only(&controls_ro_del),
                             move || {
                                 let controls_del = controls_del.clone();
+                                let confirm = signal(false);
+                                let reset_job = stored(None::<Spawned<()>>);
+                                let langs = ui_langs();
                                 view()
                                     .role(AccessibilityRole::Button)
                                     .h(px(ControlSize::Sm.height()))
                                     .px_3()
                                     .rounded(px(RADIUS_MD))
                                     .border_1()
-                                    .border_color(status_err_bg())
-                                    .bg(bg_control())
-                                    .hover(|s| s.bg(status_err_bg()))
+                                    .border_color(move || {
+                                        if confirm.get() {
+                                            status_err_fg()
+                                        } else {
+                                            status_err_bg()
+                                        }
+                                    })
+                                    .bg(move || {
+                                        if confirm.get() {
+                                            status_err_bg()
+                                        } else {
+                                            bg_control()
+                                        }
+                                    })
+                                    .hover(|s| s.bg(status_err_bg_hover()))
                                     .active(|s| s.bg(bg_control_active()))
                                     .transition_colors()
                                     .duration(MOTION_INSTANT_MS)
@@ -546,15 +561,33 @@ pub(crate) fn marker_detail_card(
                                         if guard_read_only_tab(&controls_del) {
                                             return;
                                         }
-                                        if let Some(id) = selected.get_untracked() {
-                                            controls_del.hub.remove_marker(id);
-                                            selected.set(None);
+                                        if confirm.get_untracked() {
+                                            reset_job.replace(None);
+                                            confirm.set(false);
+                                            if let Some(id) = selected.get_untracked() {
+                                                controls_del.hub.remove_marker(id);
+                                                selected.set(None);
+                                            }
+                                        } else {
+                                            confirm.set(true);
+                                            reset_job.replace(Some(set_timeout(
+                                                Duration::from_millis(3500),
+                                                move || confirm.set(false),
+                                            )));
                                         }
                                     })
                                     .child(
-                                        control_text(tr("删除标记", "Delete marker"))
-                                            .text_size(px(TEXT_SM))
-                                            .text_color(status_err_fg()),
+                                        control_text(move || -> SharedString {
+                                            if confirm.get() {
+                                                t(ui_lang(langs), "确认删除？", "Confirm delete?")
+                                                    .into()
+                                            } else {
+                                                t(ui_lang(langs), "删除标记", "Delete marker")
+                                                    .into()
+                                            }
+                                        })
+                                        .text_size(px(TEXT_SM))
+                                        .text_color(status_err_fg()),
                                     )
                             },
                         )),

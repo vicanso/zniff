@@ -63,6 +63,7 @@ pub(crate) fn connect_hub_popover(props: ConnectHubProps) -> impl IntoElement {
         .open(move || Some(open.get()))
         .popup_style(ui_popup_style)
         .popup_starting_style(ui_popup_starting_style)
+        .popup_ending_style(ui_popup_ending_style)
         .placement(Placement::Top)
         .align(Align::End)
         .offset(px(6.0))
@@ -98,9 +99,12 @@ fn connect_hub_trigger(
     let langs = ui_langs();
     let active =
         move || open.get() || adb_count.get() > 0 || tp_active.get() || use_system_proxy.get();
-    let ca_untrusted =
-        move || !cfg!(target_arch = "wasm32") && ca_status.get() != ca::CaStatus::Trusted;
-    let show_dot = move || ca_untrusted() || use_system_proxy.get();
+    let ca_needs_attention = move || {
+        !cfg!(target_arch = "wasm32")
+            && (ca_status.get() == ca::CaStatus::InstalledUntrusted
+                || (use_system_proxy.get() && ca_status.get() != ca::CaStatus::Trusted))
+    };
+    let show_dot = move || ca_needs_attention() || use_system_proxy.get();
     view()
         .role(AccessibilityRole::Button)
         .h(px(ControlSize::Xs.height()))
@@ -152,9 +156,21 @@ fn connect_hub_trigger(
                         .to_string(),
                     ];
                     if use_system_proxy.get() {
-                        parts.push(t(lang, "系统代理已接管", "System proxy active").to_string());
+                        if running.get() {
+                            parts
+                                .push(t(lang, "系统代理已接管", "System proxy active").to_string());
+                        } else {
+                            parts.push(
+                                t(
+                                    lang,
+                                    "系统代理已开启（启动抓包后生效）",
+                                    "System proxy armed (applies when started)",
+                                )
+                                .to_string(),
+                            );
+                        }
                     }
-                    if ca_untrusted() {
+                    if ca_needs_attention() {
                         parts.push(
                             t(
                                 lang,
@@ -172,7 +188,7 @@ fn connect_hub_trigger(
         )
         .child(when(show_dot, move || {
             view().w(px(6.0)).h(px(6.0)).rounded_full().bg(move || {
-                if ca_untrusted() {
+                if ca_needs_attention() {
                     status_warn_fg()
                 } else {
                     accent_blue()
@@ -475,7 +491,7 @@ fn hub_ca_row(
                                         },
                                     )
                                 },
-                                || true,
+                                move || ca_ui.detected_external.with(Vec::is_empty),
                                 move || install.as_ref()(),
                             ))
                     },
@@ -504,7 +520,7 @@ fn hub_desktop_section(props: &ConnectHubProps, open: Signal<bool>) -> impl Into
         ))
         .child(hub_action_row(
             Glyph::Globe,
-            tr("隔离浏览器 (Chromium)", "Isolated Browser (Chromium)"),
+            tr("隔离浏览器（Chromium）", "Isolated Browser (Chromium)"),
             tr("免装系统证书，独立沙箱", "SPKI trust, isolated profile"),
             || false,
             move || {

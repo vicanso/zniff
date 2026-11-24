@@ -1784,7 +1784,7 @@ function paint(flows) {
     rowsEl.appendChild(tr);
   }
 }
-async fn load(id) {
+async function load(id) {
   const res = await fetch("api/flows/" + id);
   if (!res.ok) { detailEl.textContent = I.detail; return; }
   const flow = await res.json();
@@ -4747,5 +4747,15 @@ mod tests {
 
         drop(server);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn emergency_web_console_script_uses_valid_javascript_function_syntax() {
+        let html_zh = page(true);
+        let html_en = page(false);
+        assert!(html_zh.contains("async function load(id)"));
+        assert!(html_en.contains("async function load(id)"));
+        assert!(!html_zh.contains("async fn "));
+        assert!(!html_en.contains("async fn "));
     }
 }

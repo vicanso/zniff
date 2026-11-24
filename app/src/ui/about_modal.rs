@@ -54,7 +54,7 @@ pub(crate) fn parse_linux_gpu_info(info: &str) -> Option<String> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn get_basic_gpu_info() -> &'static str {
+fn probe_basic_gpu_info() -> &'static str {
     GPU_INFO
         .get_or_init(|| {
             #[cfg(target_os = "macos")]
@@ -96,6 +96,16 @@ fn get_basic_gpu_info() -> &'static str {
             "Unknown GPU".to_string()
         })
         .as_str()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn cached_gpu_info() -> Option<&'static str> {
+    GPU_INFO.get().map(String::as_str)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn get_basic_gpu_info() -> &'static str {
+    cached_gpu_info().unwrap_or("—")
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -315,6 +325,32 @@ pub(crate) fn install_macos_application_menu(
     });
 }
 
+pub(crate) fn update_banner_visuals(
+    st: &UpdateState,
+) -> (AdaptiveColor, AdaptiveColor, AdaptiveColor, Glyph) {
+    if matches!(st.phase, UpdatePhase::Checking) {
+        return (bg_code(), border_subtle(), fg_secondary(), Glyph::Download);
+    }
+    match &st.last_check {
+        Some(UpdateCheckNotice::UpToDate(_)) => {
+            (status_ok_bg(), status_ok_fg(), status_ok_fg(), Glyph::Check)
+        }
+        Some(UpdateCheckNotice::Available(_)) => (
+            accent_blue_soft(),
+            accent_blue_border(),
+            accent_blue_text(),
+            Glyph::Download,
+        ),
+        Some(UpdateCheckNotice::Failed(_)) => (
+            status_warn_bg(),
+            status_warn_fg(),
+            status_warn_fg(),
+            Glyph::Alert,
+        ),
+        None => (bg_code(), border_subtle(), fg_secondary(), Glyph::Download),
+    }
+}
+
 /// Modal dialog displaying zniff branding, build metadata, project links, and runtime environment info.
 pub(crate) fn about_modal(
     profiles: ProfileSignals,
@@ -323,6 +359,31 @@ pub(crate) fn about_modal(
 ) -> impl IntoElement {
     #[cfg(target_arch = "wasm32")]
     let _ = update_state;
+    let gpu_label = signal(get_basic_gpu_info().to_string());
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let gpu_poll = stored(None::<Spawned<()>>);
+        effect(move || {
+            if profiles.about_open.get() {
+                if let Some(ready) = cached_gpu_info() {
+                    gpu_label.set(ready.to_string());
+                    gpu_poll.replace(None);
+                } else {
+                    std::thread::spawn(|| {
+                        let _ = probe_basic_gpu_info();
+                    });
+                    gpu_poll.replace(Some(set_interval(Duration::from_millis(40), move || {
+                        if let Some(ready) = cached_gpu_info() {
+                            gpu_label.set(ready.to_string());
+                            gpu_poll.replace(None);
+                        }
+                    })));
+                }
+            } else {
+                gpu_poll.replace(None);
+            }
+        });
+    }
     when(
         move || profiles.about_open.get(),
         move || {
@@ -501,6 +562,7 @@ pub(crate) fn about_modal(
             let rows_list = system_info_rows(ui_lang(langs)).into_iter().fold(
                 view().w_full().gap_1(),
                 |col, (key, val)| {
+                    let is_gpu = key == "GPU";
                     col.child(
                         view()
                             .w_full()
@@ -515,11 +577,17 @@ pub(crate) fn about_modal(
                                     .text_color(fg_muted()),
                             )
                             .child(
-                                mono(val)
-                                    .flex_1()
-                                    .selectable(true)
-                                    .text_size(px(TEXT_XS))
-                                    .text_color(fg_primary()),
+                                mono(move || -> SharedString {
+                                    if is_gpu {
+                                        gpu_label.get().into()
+                                    } else {
+                                        val.clone().into()
+                                    }
+                                })
+                                .flex_1()
+                                .selectable(true)
+                                .text_size(px(TEXT_XS))
+                                .text_color(fg_primary()),
                             ),
                     )
                 },
@@ -560,41 +628,26 @@ pub(crate) fn about_modal(
                     },
                     move || {
                         let controls_up = controls_upgrade.clone();
-                        let st = update_state.get();
-                        let is_checking = matches!(st.phase, UpdatePhase::Checking);
-                        let (bg_col, border_col, fg_col, glyph_kind) = match &st.last_check {
-                            _ if is_checking => {
-                                (bg_code(), border_subtle(), fg_secondary(), Glyph::Download)
-                            }
-                            Some(UpdateCheckNotice::UpToDate(_)) => {
-                                (status_ok_bg(), status_ok_fg(), status_ok_fg(), Glyph::Check)
-                            }
-                            Some(UpdateCheckNotice::Available(_)) => (
-                                accent_blue_soft(),
-                                accent_blue_border(),
-                                accent_blue_text(),
-                                Glyph::Download,
-                            ),
-                            Some(UpdateCheckNotice::Failed(_)) => (
-                                status_warn_bg(),
-                                status_warn_fg(),
-                                status_warn_fg(),
-                                Glyph::Alert,
-                            ),
-                            None => (bg_code(), border_subtle(), fg_secondary(), Glyph::Download),
-                        };
+                        let banner_visuals = move || update_banner_visuals(&update_state.get());
                         view()
                             .w_full()
                             .px_3()
                             .py_2()
                             .rounded(px(RADIUS_MD))
                             .border_1()
-                            .border_color(border_col)
-                            .bg(bg_col)
+                            .border_color(move || banner_visuals().1)
+                            .bg(move || banner_visuals().0)
+                            .transition_colors()
+                            .duration(MOTION_INSTANT_MS)
+                            .ease_out()
                             .flex_row()
                             .items_center()
                             .gap_2()
-                            .child(glyph_px(14.0, move || glyph_kind, move || color(fg_col)))
+                            .child(glyph_px(
+                                14.0,
+                                move || banner_visuals().3,
+                                move || color(banner_visuals().2),
+                            ))
                             .child(
                                 text(move || {
                                     let lang = ui_lang(langs);
@@ -620,7 +673,7 @@ pub(crate) fn about_modal(
                                 .min_w(px(0.0))
                                 .number_of_lines(2)
                                 .text_size(px(TEXT_SM))
-                                .text_color(fg_col),
+                                .text_color(move || banner_visuals().2),
                             )
                             .child(when(
                                 move || {
@@ -779,4 +832,62 @@ pub(crate) fn about_modal(
                 )
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn update_banner_visuals_reflect_all_phases() {
+        let checking = UpdateState {
+            phase: UpdatePhase::Checking,
+            last_check: Some(UpdateCheckNotice::Failed("stale".into())),
+            ..UpdateState::default()
+        };
+        assert_eq!(
+            update_banner_visuals(&checking),
+            (bg_code(), border_subtle(), fg_secondary(), Glyph::Download)
+        );
+
+        let up_to_date = UpdateState {
+            phase: UpdatePhase::Idle,
+            last_check: Some(UpdateCheckNotice::UpToDate("0.4.0".into())),
+            ..UpdateState::default()
+        };
+        assert_eq!(
+            update_banner_visuals(&up_to_date),
+            (status_ok_bg(), status_ok_fg(), status_ok_fg(), Glyph::Check)
+        );
+
+        let available = UpdateState {
+            phase: UpdatePhase::Idle,
+            last_check: Some(UpdateCheckNotice::Available("0.5.0".into())),
+            ..UpdateState::default()
+        };
+        assert_eq!(
+            update_banner_visuals(&available),
+            (
+                accent_blue_soft(),
+                accent_blue_border(),
+                accent_blue_text(),
+                Glyph::Download
+            )
+        );
+
+        let failed = UpdateState {
+            phase: UpdatePhase::Idle,
+            last_check: Some(UpdateCheckNotice::Failed("timeout".into())),
+            ..UpdateState::default()
+        };
+        assert_eq!(
+            update_banner_visuals(&failed),
+            (
+                status_warn_bg(),
+                status_warn_fg(),
+                status_warn_fg(),
+                Glyph::Alert
+            )
+        );
+    }
 }

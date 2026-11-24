@@ -87,6 +87,7 @@ fn profile_export_menu(
         .margin(px(8.0))
         .popup_style(ui_popup_style)
         .popup_starting_style(ui_popup_starting_style)
+        .popup_ending_style(ui_popup_ending_style)
         .trigger(
             view()
                 .role(AccessibilityRole::Button)
@@ -469,13 +470,13 @@ pub(crate) fn profile_dock(
                                     .line_numbers(true)
                                     .folding(false)
                                     .soft_wrap(true)
-                                    .font_size(Points(12.0))
-                                    .line_height(Points(18.0))
+                                    .font_size(move || scaled_px(12.0))
+                                    .line_height(move || scaled_px(18.0))
                                     .scroll_beyond_last_line(false)
                                     .placeholder(move || {
                                         SharedString::from(tr(
-                                            "粘贴 TOML 预设、Whistle 规则或 Charles XML...",
-                                            "Paste TOML preset, Whistle rules, or Charles XML...",
+                                            "粘贴 TOML 预设、Whistle 规则或 Charles XML…",
+                                            "Paste TOML preset, Whistle rules, or Charles XML…",
                                         )(
                                         ))
                                     })
@@ -485,34 +486,37 @@ pub(crate) fn profile_dock(
                                     .size_full(),
                             ),
                     )
-                    .child(when(
-                        move || {
-                            preview_import_status(&import_text.get(), ui_lang(langs)).is_some()
-                        },
-                        move || {
-                            let is_err = move || {
-                                preview_import_status(&import_text.get(), ui_lang(langs))
-                                    .is_some_and(|(_, err)| err)
-                            };
-                            text(move || {
-                                SharedString::from(
-                                    preview_import_status(&import_text.get(), ui_lang(langs))
-                                        .map(|(msg, _)| msg)
-                                        .unwrap_or_default(),
-                                )
-                            })
-                            .number_of_lines(2)
-                            .text_overflow(EllipsizeMode::Tail)
-                            .text_size(px(TEXT_XS))
-                            .text_color(move || {
-                                if is_err() {
-                                    status_warn_fg()
-                                } else {
-                                    accent_blue_text()
-                                }
-                            })
-                        },
-                    ))
+                    .child({
+                        let import_preview = computed(move || {
+                            import_text.with(|txt| preview_import_status(txt, ui_lang(langs)))
+                        });
+                        when(
+                            move || import_preview.with(Option::is_some),
+                            move || {
+                                let is_err = move || {
+                                    import_preview
+                                        .with(|p| p.as_ref().is_some_and(|(_, err)| *err))
+                                };
+                                text(move || {
+                                    SharedString::from(import_preview.with(|p| {
+                                        p.as_ref()
+                                            .map(|(msg, _)| msg.clone())
+                                            .unwrap_or_default()
+                                    }))
+                                })
+                                .number_of_lines(2)
+                                .text_overflow(EllipsizeMode::Tail)
+                                .text_size(px(TEXT_XS))
+                                .text_color(move || {
+                                    if is_err() {
+                                        status_warn_fg()
+                                    } else {
+                                        accent_blue_text()
+                                    }
+                                })
+                            },
+                        )
+                    })
             },
         ))
         .child(

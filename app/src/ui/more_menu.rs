@@ -155,14 +155,7 @@ pub(crate) fn more_menu(
         items,
         menu_copy_config_row(open, copy_env, import_controls.clone())
     );
-    let items = items.child(menu_action(
-        Glyph::Trash,
-        tr("清空未星标", "Clear unstarred"),
-        move || {
-            open.set(false);
-            clear_unpinned();
-        },
-    ));
+    let items = items.child(menu_clear_unstarred_row(open, rows, clear_unpinned));
 
     // Group 3: Help & Settings (<= 6 items)
     let items = items
@@ -248,6 +241,106 @@ pub(crate) fn more_menu(
                 .w_full()
                 .max_h(move || px((window().height.0 - 70.0).max(178.0)))
                 .child(items),
+        )
+}
+
+fn menu_clear_unstarred_row(
+    open: Signal<bool>,
+    rows: Signal<Vec<Arc<RowLine>>>,
+    clear_unpinned: impl Fn() + 'static,
+) -> impl IntoElement {
+    let langs = ui_langs();
+    let has_unpinned = move || rows.with(|list| list.iter().any(|r| !r.pinned));
+    let confirm_clear = signal(false);
+    let clear_job = stored(None::<Spawned<()>>);
+    effect(move || {
+        if !open.get() {
+            clear_job.replace(None);
+            confirm_clear.set(false);
+        }
+    });
+    menu_item()
+        .disabled(move || !has_unpinned())
+        .disabled_style(|s| s.opacity(0.45))
+        .close_on_select(false)
+        .on_select(move || {
+            if !has_unpinned() {
+                return;
+            }
+            if confirm_clear.get_untracked() {
+                clear_job.replace(None);
+                confirm_clear.set(false);
+                open.set(false);
+                clear_unpinned();
+            } else {
+                confirm_clear.set(true);
+                clear_job.replace(Some(set_timeout(Duration::from_millis(3500), move || {
+                    confirm_clear.set(false);
+                })));
+            }
+        })
+        .h(px(ControlSize::Md.height()))
+        .px_2p5()
+        .gap_2()
+        .rounded(px(RADIUS_MD))
+        .flex_row()
+        .items_center()
+        .hover(move |style| {
+            style.bg(move || {
+                if !has_unpinned() {
+                    AdaptiveColor::TRANSPARENT
+                } else if confirm_clear.get() {
+                    status_warn_bg_hover()
+                } else {
+                    bg_control_hover()
+                }
+            })
+        })
+        .active(move |style| {
+            style.bg(move || {
+                if has_unpinned() {
+                    bg_control_active()
+                } else {
+                    AdaptiveColor::TRANSPARENT
+                }
+            })
+        })
+        .transition_colors()
+        .duration(move || motion_ms(MOTION_INSTANT_MS))
+        .ease_out()
+        .focus_visible(apply_focus_ring)
+        .child(glyph(
+            || Glyph::Trash,
+            move || {
+                color(if confirm_clear.get() {
+                    status_warn_fg()
+                } else if has_unpinned() {
+                    fg_secondary()
+                } else {
+                    fg_muted()
+                })
+            },
+        ))
+        .child(
+            control_text(move || -> SharedString {
+                let lang = ui_lang(langs);
+                if confirm_clear.get() {
+                    t(lang, "再次点击确认清空", "Click again to clear")
+                } else {
+                    t(lang, "清空未星标", "Clear unstarred")
+                }
+                .into()
+            })
+            .flex_1()
+            .text_color(move || {
+                if confirm_clear.get() {
+                    status_warn_fg()
+                } else if has_unpinned() {
+                    fg_secondary()
+                } else {
+                    fg_muted()
+                }
+            }),
         )
 }
 
@@ -346,6 +439,9 @@ fn update_hover_card(
         .align(align)
         .offset(px(6.0))
         .margin(px(10.0))
+        .popup_style(ui_popup_style)
+        .popup_starting_style(ui_popup_starting_style)
+        .popup_ending_style(ui_popup_ending_style)
         .trigger(trigger)
         .child(
             view()
@@ -353,11 +449,6 @@ fn update_hover_card(
                 .px_3()
                 .py_2p5()
                 .gap_2()
-                .rounded(px(RADIUS_LG))
-                .bg(bg_card())
-                .border_1()
-                .border_color(border_strong())
-                .shadow_lg()
                 .child(
                     text(move || format_update_header(&update_state.get(), ui_lang(langs)))
                         .text_size(px(TEXT_SM))

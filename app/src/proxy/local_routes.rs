@@ -728,24 +728,67 @@ pub(super) fn gzip_bytes(body: &[u8]) -> Option<Vec<u8>> {
     encoder.finish().ok()
 }
 
-const INSTALL_PAGE_STYLE: &str = r#"  body { margin: 0; background: #0d1017; color: #f1f5f9; font: 16px/1.55 -apple-system, BlinkMacSystemFont, sans-serif; }
-  main { max-width: 32rem; margin: 0 auto; padding: 1.5rem 1.25rem 2.5rem; }
+const INSTALL_PAGE_STYLE: &str = r#"  :root {
+    color-scheme: dark light;
+    --bg: #0d1017;
+    --fg: #f1f5f9;
+    --muted: #94a3b8;
+    --card-bg: #131926;
+    --card-border: #1e293b;
+    --code-bg: #0b0f19;
+    --sub-fg: #cbd5e1;
+    --btn-bg: #2563eb;
+    --copy-bg: #1e293b;
+    --copy-border: #334155;
+    --copy-fg: #f8fafc;
+    --ok-fg: #86efac;
+    --ok-bg: #052e16;
+    --ok-border: #16a34a;
+    --err-fg: #fca5a5;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f8fafc;
+      --fg: #0f172a;
+      --muted: #475569;
+      --card-bg: #ffffff;
+      --card-border: #cbd5e1;
+      --code-bg: #f1f5f9;
+      --sub-fg: #334155;
+      --btn-bg: #2563eb;
+      --copy-bg: #ffffff;
+      --copy-border: #cbd5e1;
+      --copy-fg: #0f172a;
+      --ok-fg: #15803d;
+      --ok-bg: #dcfce7;
+      --ok-border: #86efac;
+      --err-fg: #b91c1c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.55 -apple-system, BlinkMacSystemFont, sans-serif; -webkit-text-size-adjust: 100%; }
+  main { max-width: 34rem; margin: 0 auto; padding: max(1.25rem, env(safe-area-inset-top)) max(1.1rem, env(safe-area-inset-right)) max(2.5rem, env(safe-area-inset-bottom)) max(1.1rem, env(safe-area-inset-left)); }
   h1 { font-size: 1.35rem; margin: 0 0 0.6rem; }
   h2 { font-size: 1rem; margin: 1.4rem 0 0.4rem; }
   p { margin: 0.4rem 0; }
-  a.btn { display: block; margin: 1rem 0 0.4rem; padding: 0.85rem 1rem; border-radius: 10px; background: #2563eb; color: #fff; font-weight: 600; text-align: center; text-decoration: none; }
+  a.btn { display: flex; align-items: center; justify-content: center; min-height: 46px; margin: 1rem 0 0.4rem; padding: 0.75rem 1rem; border-radius: 10px; background: var(--btn-bg); color: #fff; font-weight: 600; text-align: center; text-decoration: none; touch-action: manipulation; transition: transform 110ms cubic-bezier(0.22, 1, 0.36, 1), opacity 110ms ease; }
+  a.btn:active { transform: scale(0.98); opacity: 0.9; }
   ol { margin: 0.3rem 0; padding-left: 1.2rem; }
   code { font-family: "JetBrains Mono", "JetBrains Mono NL", ui-monospace, Menlo, monospace; font-size: 0.88em; }
-  .note { color: #94a3b8; font-size: 0.9rem; }
-  details.card { margin: 0.9rem 0; padding: 0.75rem 0.9rem; border-radius: 10px; border: 1px solid #1e293b; background: #131926; }
-  details.card > summary { cursor: pointer; font-weight: 600; font-size: 0.95rem; }
-  details.sub-card { margin-top: 0.75rem; padding-top: 0.65rem; border-top: 1px solid #1e293b; }
-  details.sub-card > summary { cursor: pointer; font-size: 0.9rem; color: #cbd5e1; }
-  .snippet { margin: 0.65rem 0; border-radius: 8px; border: 1px solid #1e293b; background: #0b0f19; overflow: hidden; }
-  .snippet-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; padding: 0.4rem 0.65rem; border-bottom: 1px solid #1e293b; font-size: 0.82rem; color: #cbd5e1; }
-  .copy-btn { border: 1px solid #334155; background: #1e293b; color: #f8fafc; border-radius: 6px; padding: 0.25rem 0.6rem; font-size: 0.78rem; cursor: pointer; flex-shrink: 0; }
-  .copy-btn:active { opacity: 0.75; }
-  pre { margin: 0; padding: 0.65rem; overflow-x: auto; font-size: 0.8rem; line-height: 1.45; color: #e2e8f0; }"#;
+  .note { color: var(--muted); font-size: 0.9rem; }
+  details.card, section.card { margin: 0.9rem 0; padding: 0.8rem 0.95rem; border-radius: 10px; border: 1px solid var(--card-border); background: var(--card-bg); }
+  details.card > summary { cursor: pointer; font-weight: 600; font-size: 0.95rem; min-height: 28px; }
+  details.sub-card { margin-top: 0.75rem; padding-top: 0.65rem; border-top: 1px solid var(--card-border); }
+  details.sub-card > summary { cursor: pointer; font-size: 0.9rem; color: var(--sub-fg); }
+  .snippet { margin: 0.65rem 0; border-radius: 8px; border: 1px solid var(--card-border); background: var(--code-bg); overflow: hidden; }
+  .snippet-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; padding: 0.45rem 0.65rem; border-bottom: 1px solid var(--card-border); font-size: 0.82rem; color: var(--sub-fg); }
+  .copy-btn { min-height: 36px; border: 1px solid var(--copy-border); background: var(--copy-bg); color: var(--copy-fg); border-radius: 6px; padding: 0.4rem 0.85rem; font-size: 0.8rem; font-weight: 500; cursor: pointer; flex-shrink: 0; touch-action: manipulation; transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease, transform 90ms ease; }
+  .copy-btn:active { transform: scale(0.96); }
+  .copy-btn.copied { background: var(--ok-bg); border-color: var(--ok-border); color: var(--ok-fg); }
+  pre { margin: 0; padding: 0.7rem; overflow-x: auto; font-size: 0.8rem; line-height: 1.45; color: var(--fg); }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { transition: none !important; animation: none !important; }
+  }"#;
 
 pub(super) const TLS_PROBE_HOST: &str = "zniff.local";
 const TLS_PROBE_BODY: &[u8] = br#"{"ok":true,"host":"zniff.local","tls":"trusted"}"#;
@@ -830,7 +873,7 @@ fn build_install_page(zh: bool) -> String {
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <link rel="icon" href="data:,">
 <title>安装 zniff 根证书</title>
 <style>
@@ -870,7 +913,7 @@ fn build_install_page(zh: bool) -> String {
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <link rel="icon" href="data:,">
 <title>Install the zniff root certificate</title>
 <style>

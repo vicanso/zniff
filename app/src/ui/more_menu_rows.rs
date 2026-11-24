@@ -72,7 +72,7 @@ pub(crate) fn menu_action(
         .hover(|style| style.bg(bg_control_hover()))
         .active(|style| style.bg(bg_control_active()))
         .transition_colors()
-        .duration(MOTION_INSTANT_MS)
+        .duration(move || motion_ms(MOTION_INSTANT_MS))
         .ease_out()
         .focus_visible(apply_focus_ring)
         .child(glyph(move || icon, || color(fg_secondary())))
@@ -96,7 +96,7 @@ pub(crate) fn menu_action_meta(
         .hover(|style| style.bg(bg_control_hover()))
         .active(|style| style.bg(bg_control_active()))
         .transition_colors()
-        .duration(MOTION_INSTANT_MS)
+        .duration(move || motion_ms(MOTION_INSTANT_MS))
         .ease_out()
         .focus_visible(apply_focus_ring)
         .child(glyph(move || icon, || color(fg_secondary())))
@@ -157,7 +157,7 @@ pub(crate) fn menu_action_enabled(
             })
         })
         .transition_colors()
-        .duration(MOTION_INSTANT_MS)
+        .duration(move || motion_ms(MOTION_INSTANT_MS))
         .ease_out()
         .focus_visible(apply_focus_ring)
         .child(glyph(
@@ -227,7 +227,7 @@ pub(crate) fn menu_inline_pill(
         })
         .active(|style| style.bg(bg_control_active()))
         .transition_colors()
-        .duration(MOTION_INSTANT_MS)
+        .duration(move || motion_ms(MOTION_INSTANT_MS))
         .ease_out()
         .focus_visible(apply_focus_ring)
         .on_press(on_press)
@@ -258,7 +258,7 @@ fn menu_danger_inline_pill(
         .hover(|style| style.bg(danger_button_hover()))
         .active(|style| style.bg(danger_button_active()))
         .transition_colors()
-        .duration(MOTION_INSTANT_MS)
+        .duration(move || motion_ms(MOTION_INSTANT_MS))
         .ease_out()
         .focus_visible(apply_focus_ring)
         .on_press(on_press)
@@ -475,7 +475,7 @@ pub(crate) fn menu_redact_row(
                 .hover(|style| style.bg(bg_control_hover()))
                 .active(|style| style.bg(bg_control_active()))
                 .transition_colors()
-                .duration(MOTION_INSTANT_MS)
+                .duration(move || motion_ms(MOTION_INSTANT_MS))
                 .ease_out()
                 .focus_visible(apply_focus_ring)
                 .on_press(move || {
@@ -491,25 +491,25 @@ pub(crate) fn menu_redact_row(
                 })
                 .child(
                     view()
-                        .w(px(13.0))
-                        .h(px(13.0))
+                        .w(px(14.0))
+                        .h(px(14.0))
                         .flex_shrink_0()
                         .flex_row()
                         .items_center()
                         .justify_center()
-                        .child(
-                            view()
-                                .w(px(10.0))
-                                .h(px(10.0))
-                                .rounded(px(RADIUS_SM))
-                                .border_1()
-                                .border_color(
-                                    move || {
-                                        if marked() { accent_blue() } else { fg_muted() }
-                                    },
-                                )
-                                .bg(move || if marked() { accent_blue() } else { bg_card() }),
-                        ),
+                        .rounded(px(RADIUS_SM))
+                        .border_1()
+                        .border_color(move || {
+                            if marked() {
+                                accent_blue()
+                            } else {
+                                border_control()
+                            }
+                        })
+                        .bg(move || if marked() { accent_blue() } else { bg_card() })
+                        .child(when(marked, move || {
+                            glyph_px(9.0, || Glyph::Check, || color(fg_on_accent()))
+                        })),
                 )
                 .child(
                     control_text(tr("导出/分享脱敏", "Redact exports")).text_color(move || {
@@ -602,7 +602,7 @@ pub(crate) fn menu_share_row(
                             .hover(|style| style.bg(status_err_bg_hover()))
                             .active(|style| style.bg(bg_control_active()))
                             .transition_colors()
-                            .duration(MOTION_INSTANT_MS)
+                            .duration(move || motion_ms(MOTION_INSTANT_MS))
                             .ease_out()
                             .focus_visible(apply_focus_ring)
                             .on_press(move || {
@@ -651,7 +651,7 @@ pub(crate) fn menu_share_row(
                         })
                         .active(|style| style.bg(bg_control_active()))
                         .transition_colors()
-                        .duration(MOTION_INSTANT_MS)
+                        .duration(move || motion_ms(MOTION_INSTANT_MS))
                         .ease_out()
                         .focus_visible(apply_focus_ring)
                         .tooltip(label_tip("配置中继服务器", "Configure relay server"))
@@ -1141,7 +1141,7 @@ pub(crate) fn primary_button(
             })
         })
         .transition_colors()
-        .duration(MOTION_INSTANT_MS)
+        .duration(move || motion_ms(MOTION_INSTANT_MS))
         .ease_out()
         .focus_visible(apply_focus_ring)
         .on_press(on_press)

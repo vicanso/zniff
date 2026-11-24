@@ -14,7 +14,8 @@ pub(crate) struct CommandPaletteState {
     pub(crate) pretty: bool,
     pub(crate) default_json_tree: bool,
     pub(crate) adb_count: usize,
-    pub(crate) network_preset: NetworkPreset,
+    pub(crate) network_preset: Option<NetworkPreset>,
+    pub(crate) theme_mode: config::ThemeMode,
 }
 
 pub(crate) fn build_command_items(state: CommandPaletteState) -> Vec<CommandItem> {
@@ -30,6 +31,7 @@ pub(crate) fn build_command_items(state: CommandPaletteState) -> Vec<CommandItem
         default_json_tree,
         adb_count,
         network_preset,
+        theme_mode,
     } = state;
     let g_capture = t(lang, "抓包", "Capture");
     let g_network = t(lang, "网络条件", "Network");
@@ -170,7 +172,7 @@ pub(crate) fn build_command_items(state: CommandPaletteState) -> Vec<CommandItem
         items.push(
             CommandItem::new(preset.command_id(), label)
                 .group(g_network)
-                .checked(network_preset == preset)
+                .checked(network_preset == Some(preset))
                 .keywords([
                     "network", "throttle", "3g", "slow", "latency", "offline", "网络", "弱网",
                     "限速", "延迟", "离线",
@@ -475,16 +477,19 @@ pub(crate) fn build_command_items(state: CommandPaletteState) -> Vec<CommandItem
             t(lang, "主题：跟随系统", "Theme: Follow System"),
         )
         .group(g_view)
+        .checked(theme_mode == config::ThemeMode::System)
         .keywords(["theme", "system", "appearance", "主题", "系统"]),
     );
     items.push(
         CommandItem::new("theme_light", t(lang, "主题：浅色模式", "Theme: Light"))
             .group(g_view)
+            .checked(theme_mode == config::ThemeMode::Light)
             .keywords(["theme", "light", "appearance", "主题", "浅色"]),
     );
     items.push(
         CommandItem::new("theme_dark", t(lang, "主题：深色模式", "Theme: Dark"))
             .group(g_view)
+            .checked(theme_mode == config::ThemeMode::Dark)
             .keywords(["theme", "dark", "appearance", "主题", "深色"]),
     );
     items.push(
@@ -576,12 +581,15 @@ pub(crate) fn command_palette_modal(
                     #[cfg(target_arch = "wasm32")]
                     let adb_count = 0usize;
                     let network_preset = if profiles.rules_on.get() {
-                        profiles
-                            .rule_groups
-                            .with(|groups| detect_active_network_preset(groups))
+                        profiles.rule_groups.with(|groups| {
+                            active_preset_from_state(detect_network_group_state(groups))
+                        })
                     } else {
-                        NetworkPreset::None
+                        Some(NetworkPreset::None)
                     };
+                    let theme_mode = appearance_prefs()
+                        .map(|p| p.theme_mode.get())
+                        .unwrap_or(config::ThemeMode::System);
                     build_command_items(CommandPaletteState {
                         lang,
                         running: running.get(),
@@ -594,6 +602,7 @@ pub(crate) fn command_palette_modal(
                         default_json_tree: profiles.default_json_tree.get(),
                         adb_count,
                         network_preset,
+                        theme_mode,
                     })
                 })
                 .placeholder(move || {
@@ -623,12 +632,25 @@ pub(crate) fn command_palette_modal(
                     } else {
                         fg_primary()
                     };
+                    let check_slot = view()
+                        .w(px(14.0))
+                        .h(px(14.0))
+                        .flex_shrink_0()
+                        .items_center()
+                        .justify_center()
+                        .child(if entry.checked {
+                            glyph_px(12.0, || Glyph::Check, || color(accent_blue_text()))
+                                .into_element()
+                        } else {
+                            view().into_element()
+                        });
                     let row = view()
                         .w_full()
                         .flex_row()
                         .items_center()
                         .justify_between()
                         .gap_2()
+                        .child(check_slot)
                         .child(
                             text(entry.label.clone())
                                 .flex_1()
@@ -796,13 +818,34 @@ pub(crate) fn command_palette_modal(
                             save_config_or_notify(&controls, PrefName::Pretty, |cfg| {
                                 cfg.default_pretty = next;
                             });
+                            publish_detail_for_controls(
+                                &shown,
+                                &controls,
+                                selected.get(),
+                                ui_lang(langs),
+                                baseline.get(),
+                            );
                         }
                         "toggle_json_tree" => {
                             let next = !profiles.default_json_tree.get();
                             profiles.default_json_tree.set(next);
+                            if next {
+                                pretty.set(true);
+                                shown.pretty.set(true);
+                            }
                             save_config_or_notify(&controls, PrefName::Pretty, |cfg| {
                                 cfg.default_json_tree = next;
+                                if next {
+                                    cfg.default_pretty = true;
+                                }
                             });
+                            publish_detail_for_controls(
+                                &shown,
+                                &controls,
+                                selected.get(),
+                                ui_lang(langs),
+                                baseline.get(),
+                            );
                         }
                         "show_summary" => {
                             selected.set(None);
@@ -864,9 +907,24 @@ mod tests {
             pretty: true,
             default_json_tree: false,
             adb_count: 2,
-            network_preset: NetworkPreset::Slow3g,
+            network_preset: Some(NetworkPreset::Slow3g),
+            theme_mode: config::ThemeMode::Dark,
         });
         let ids: HashSet<&str> = items.iter().map(|it| it.id.as_str()).collect();
+        assert!(
+            items
+                .iter()
+                .find(|it| it.id == "theme_dark")
+                .unwrap()
+                .checked
+        );
+        assert!(
+            !items
+                .iter()
+                .find(|it| it.id == "theme_light")
+                .unwrap()
+                .checked
+        );
         assert_eq!(ids.len(), items.len(), "command ids must be unique");
         assert!(ids.contains("network_none"));
         assert!(ids.contains("network_3g"));

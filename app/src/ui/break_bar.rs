@@ -294,6 +294,19 @@ pub(crate) fn break_bar(
     controls: Arc<Controls>,
 ) -> impl IntoElement {
     let banner_controls = controls.clone();
+    let ttl_controls = controls.clone();
+    let ttl_secs = signal(banner_controls.hub.paused_remaining_secs());
+    let ttl_job = stored(None::<Spawned<()>>);
+    effect(move || {
+        let _ = paused.get();
+        ttl_secs.set(ttl_controls.hub.paused_remaining_secs());
+        if ttl_job.with(|j| j.is_none()) {
+            let tick_controls = ttl_controls.clone();
+            ttl_job.replace(Some(set_interval(Duration::from_secs(1), move || {
+                ttl_secs.set(tick_controls.hub.paused_remaining_secs());
+            })));
+        }
+    });
     let release = controls.clone();
     let release_all = controls.clone();
     let chip_controls = controls.clone();
@@ -334,7 +347,7 @@ pub(crate) fn break_bar(
                                     } else {
                                         String::new()
                                     };
-                                    let ttl_suffix = match banner_controls.hub.paused_remaining_secs() {
+                                    let ttl_suffix = match ttl_secs.get() {
                                         Some(secs) if secs <= 15 => match lang {
                                             Lang::Zh => format!(" · 剩 {secs}s"),
                                             Lang::En => format!(" · {secs}s left"),
@@ -471,6 +484,7 @@ pub(crate) fn break_bar(
                         .child(
                             view()
                                 .role(AccessibilityRole::Button)
+                                .ml_2()
                                 .h(px(CONTROL_H))
                                 .px_2p5()
                                 .rounded(px(RADIUS_MD))

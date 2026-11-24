@@ -29,6 +29,13 @@ mod tests {
             assert!(TEXT_MD < TEXT_LG);
             assert!(RADIUS_SM < RADIUS_MD);
             assert!(RADIUS_MD < RADIUS_LG);
+            assert!(MOTION_PRESS_MS < MOTION_EXIT_MS);
+            assert!(MOTION_EXIT_MS < MOTION_INSTANT_MS);
+            assert!(MOTION_INSTANT_MS < MOTION_FAST_MS);
+            assert!(MOTION_FAST_MS < MOTION_BASE_MS);
+            assert!(MOTION_BASE_MS < MOTION_PULSE_MS);
+            assert!(PRESS_SCALE_ICON > 0.85 && PRESS_SCALE_ICON < PRESS_SCALE);
+            assert!(PRESS_SCALE < 1.0);
         }
 
         let sizes = [ControlSize::Xs, ControlSize::Sm, ControlSize::Md];

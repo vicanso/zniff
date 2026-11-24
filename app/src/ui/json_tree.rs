@@ -567,6 +567,9 @@ fn render_node_row(
                 }
             })
         })
+        .transition_colors()
+        .duration(move || motion_ms(MOTION_INSTANT_MS))
+        .ease_out()
         .group_focus_visible(|fv| fv.border_l(px(2.0)).border_l_color(accent_blue()));
 
     if folder {
@@ -578,6 +581,8 @@ fn render_node_row(
                 .items_center()
                 .justify_center()
                 .app_class("transition-transform group-aria-expanded:rotate-90")
+                .duration(move || motion_ms(MOTION_INSTANT_MS))
+                .ease_bezier(0.22, 1.0, 0.36, 1.0)
                 .child(glyph_px(11.0, || Glyph::ChevronRight, || color(fg_muted()))),
         );
     } else {

@@ -379,6 +379,7 @@ pub(crate) fn onboarding_checklist(props: &OnboardingProps) -> impl IntoElement 
                 }
             })
             .text_size(px(TEXT_XS))
+            .tabular_nums()
             .font_weight(FontWeight::MEDIUM)
             .text_color(fg_muted()),
         );

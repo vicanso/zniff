@@ -892,6 +892,10 @@ fn install_page_includes_ios_verification_checklist_and_probe() {
         assert!(html.contains("id=\"step-profile\""));
         assert!(html.contains("id=\"step-trust\""));
         assert!(html.contains("id=\"ios-probe-btn\""));
+        assert!(html.contains("prefers-color-scheme: light"));
+        assert!(html.contains("prefers-reduced-motion: reduce"));
+        assert!(html.contains("viewport-fit=cover"));
+        assert!(html.contains("safe-area-inset"));
     }
 }
 

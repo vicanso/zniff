@@ -143,7 +143,7 @@ fn strip_bar(
     let dismissed = props.profiles.onboarding_strip_dismissed;
     let flow_total = props.flow_total;
 
-    let read_summary = move || {
+    let summary = computed(move || {
         let input = copyable_checklist_input(running, listen, ca_ui, traffic);
         onboarding_strip_state(
             &input,
@@ -152,7 +152,8 @@ fn strip_bar(
             phase.get(),
             ui_lang(langs),
         )
-    };
+    });
+    let next_id = move || summary.with(|s| s.as_ref().map(|v| v.step.id));
 
     view()
         .w_full()
@@ -176,16 +177,20 @@ fn strip_bar(
                 .items_center()
                 .gap_2()
                 .child(strip_progress_badge(move || {
-                    read_summary()
-                        .map(|s| format!("{}/{}", s.done, s.total))
-                        .unwrap_or_default()
+                    summary.with(|s| {
+                        s.as_ref()
+                            .map(|v| format!("{}/{}", v.done, v.total))
+                            .unwrap_or_default()
+                    })
                 }))
                 .child(
                     text(move || -> SharedString {
-                        read_summary()
-                            .map(|s| s.step.title)
-                            .unwrap_or_default()
-                            .into()
+                        summary.with(|s| {
+                            s.as_ref()
+                                .map(|v| v.step.title.clone())
+                                .unwrap_or_default()
+                                .into()
+                        })
                     })
                     .number_of_lines(1)
                     .text_size(px(TEXT_XS))
@@ -194,10 +199,12 @@ fn strip_bar(
                 )
                 .child(
                     text(move || -> SharedString {
-                        read_summary()
-                            .map(|s| s.step.hint)
-                            .unwrap_or_default()
-                            .into()
+                        summary.with(|s| {
+                            s.as_ref()
+                                .map(|v| v.step.hint.clone())
+                                .unwrap_or_default()
+                                .into()
+                        })
                     })
                     .flex_1()
                     .min_w(px(0.0))
@@ -213,7 +220,7 @@ fn strip_bar(
                 .flex_row()
                 .items_center()
                 .gap_1p5()
-                .child(strip_actions(&props, phase, langs))
+                .child(strip_actions(&props, next_id, langs))
                 .child(strip_dismiss_button(dismissed, props.controls.clone())),
         )
 }
@@ -248,7 +255,7 @@ fn strip_dismiss_button(dismissed: Signal<bool>, controls: Arc<Controls>) -> imp
         .hover(|s| s.bg(bg_control_hover()))
         .active(|s| s.bg(bg_control_active()))
         .transition_colors()
-        .duration(MOTION_INSTANT_MS)
+        .duration(move || motion_ms(MOTION_INSTANT_MS))
         .ease_out()
         .focus_visible(apply_focus_ring)
         .items_center()
@@ -267,26 +274,11 @@ fn strip_dismiss_button(dismissed: Signal<bool>, controls: Arc<Controls>) -> imp
 #[cfg(not(target_arch = "wasm32"))]
 fn strip_actions(
     props: &OnboardingProps,
-    phase: Signal<Phase>,
+    next_id: impl Fn() -> Option<ChecklistStepId> + Copy + 'static,
     langs: Signal<Option<Lang>>,
 ) -> impl IntoElement {
-    let running = props.running;
-    let listen = props.listen;
     let ca_ui = props.ca_ui;
-    let traffic = props.onboarding_traffic;
-    let dismissed = props.profiles.onboarding_strip_dismissed;
-    let flow_total = props.flow_total;
-    let next_id = move || {
-        let input = copyable_checklist_input(running, listen, ca_ui, traffic);
-        onboarding_strip_state(
-            &input,
-            dismissed.get(),
-            flow_total.get(),
-            phase.get(),
-            ui_lang(langs),
-        )
-        .map(|s| s.step.id)
-    };
+    let running = props.running;
     let start_controls = props.controls.clone();
     let ext_controls = props.controls.clone();
     let browser_controls = props.controls.clone();
@@ -356,7 +348,7 @@ fn strip_actions(
                             }
                         }
                     },
-                    true,
+                    ca_ui.detected_external.with(Vec::is_empty),
                     move || cb.as_ref()(),
                 )
             },
@@ -413,26 +405,10 @@ fn strip_actions(
 #[cfg(target_arch = "wasm32")]
 fn strip_actions(
     props: &OnboardingProps,
-    phase: Signal<Phase>,
-    langs: Signal<Option<Lang>>,
+    next_id: impl Fn() -> Option<ChecklistStepId> + Copy + 'static,
+    _langs: Signal<Option<Lang>>,
 ) -> impl IntoElement {
     let running = props.running;
-    let listen = props.listen;
-    let ca_ui = props.ca_ui;
-    let traffic = props.onboarding_traffic;
-    let dismissed = props.profiles.onboarding_strip_dismissed;
-    let flow_total = props.flow_total;
-    let next_id = move || {
-        let input = copyable_checklist_input(running, listen, ca_ui, traffic);
-        onboarding_strip_state(
-            &input,
-            dismissed.get(),
-            flow_total.get(),
-            phase.get(),
-            ui_lang(langs),
-        )
-        .map(|s| s.step.id)
-    };
     let start_controls = props.controls.clone();
     let copy_controls = props.controls.clone();
     let qr_controls = props.controls.clone();

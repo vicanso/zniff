@@ -227,6 +227,7 @@ pub enum StatusMsg {
     TemplateRuleAdded(String),
     TemplateRuleAlreadyPresent(String),
     CaInstalled,
+    CaInstalledNeedsTrust,
     CaRemoved,
     HostAddedToBypass(String),
     #[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
@@ -785,6 +786,12 @@ impl StatusMsg {
             Self::CaInstalled => {
                 t(lang, "已安装并信任 zniff 根证书", "Installed and trusted zniff root CA").into()
             }
+            Self::CaInstalledNeedsTrust => t(
+                lang,
+                "根证书已写入系统，但尚未被信任；请在钥匙串/证书库设为「始终信任」",
+                "Root CA installed, but not yet trusted; set it to Always Trust in Keychain/store",
+            )
+            .into(),
             Self::CaRemoved => t(
                 lang,
                 "已从系统移除 zniff 根证书",
@@ -1207,6 +1214,7 @@ impl StatusMsg {
             | Self::TransparentProxyNeedsApproval
             | Self::TransparentProxyFailed(_)
             | Self::TransparentProxyNeedsApplications
+            | Self::CaInstalledNeedsTrust
             | Self::ProtoEditInEditor
             | Self::RuleGroupLimitReached(_)
             | Self::RuleGroupMissing(_)
@@ -1230,6 +1238,7 @@ impl StatusMsg {
             Self::PrimaryFilterPausedForWatch => t(lang, "已暂停主过滤", "Primary Filter Paused"),
             Self::PresetSwitched(_) => t(lang, "已切换预设", "Preset Switched"),
             Self::CaInstalled => t(lang, "证书已安装", "CA Installed"),
+            Self::CaInstalledNeedsTrust => t(lang, "需要信任证书", "Trust Required"),
             Self::CaRemoved => t(lang, "证书已移除", "CA Removed"),
             Self::RulesCleared | Self::ComposeHistoryCleared => t(lang, "已清空", "Cleared"),
             Self::RuleGroupDeleted(_) | Self::PresetDeleted(_) => t(lang, "已删除", "Deleted"),

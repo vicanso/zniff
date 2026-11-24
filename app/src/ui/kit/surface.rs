@@ -6,23 +6,44 @@ use super::super::*;
 use nsh_core::element::StyleRefinement;
 
 use super::tokens::{
-    BadgeTone, ControlSize, MOTION_FAST_MS, MOTION_INSTANT_MS, RADIUS_LG, RADIUS_MD, RADIUS_SM,
-    TEXT_MD, TEXT_SM, TEXT_XS,
+    BadgeTone, ControlSize, MOTION_EXIT_MS, MOTION_FAST_MS, MOTION_INSTANT_MS, MOTION_PRESS_MS,
+    PRESS_SCALE_ICON, RADIUS_LG, RADIUS_MD, RADIUS_SM, TEXT_MD, TEXT_SM, TEXT_XS, motion_ms,
 };
+
+fn apple_ease_timing(duration_ms: f32) -> KeyframeTiming {
+    let mut timing = KeyframeTiming::default();
+    timing.duration_ms = duration_ms;
+    timing.easing = Easing::Bezier(0.22, 1.0, 0.36, 1.0);
+    timing
+}
 
 /// Full-viewport modal backdrop scrim that dismisses on press.
 #[allow(dead_code)]
 pub(crate) fn ui_modal_backdrop(on_close: impl Fn() + 'static) -> View {
+    let fade = motion().entering(
+        MotionSpec::new(apple_ease_timing(MOTION_FAST_MS))
+            .values(MotionChannel::Opacity, [0.0, 1.0]),
+    );
     view()
         .absolute()
         .inset_0()
         .bg(backdrop_scrim())
+        .bind_motion(&fade)
         .on_press(on_close)
 }
 
 /// Shared modal dialog card chrome.
 #[allow(dead_code)]
 pub(crate) fn ui_modal_card() -> View {
+    let spec = MotionSpec::new(apple_ease_timing(MOTION_FAST_MS))
+        .values(MotionChannel::Opacity, [0.0, 1.0]);
+    let spec = if reduce_motion() {
+        spec
+    } else {
+        spec.values(MotionChannel::Scale, [0.97, 1.0])
+            .values(MotionChannel::TranslateY, [4.0, 0.0])
+    };
+    let reveal = motion().entering(spec);
     view()
         .flex_col()
         .overflow_hidden()
@@ -31,6 +52,7 @@ pub(crate) fn ui_modal_card() -> View {
         .border_color(border_strong())
         .bg(bg_card())
         .shadow_lg()
+        .bind_motion(&reveal)
 }
 
 /// Shared accessible icon close button for modal dialog headers.
@@ -46,10 +68,20 @@ pub(crate) fn ui_modal_close_button(on_close: impl Fn() + 'static) -> impl IntoE
         .items_center()
         .justify_center()
         .hover(|s| s.bg(bg_control_hover()))
-        .active(|s| s.bg(bg_control_active()))
-        .transition_colors()
-        .duration(MOTION_INSTANT_MS)
-        .ease_out()
+        .active(|s| {
+            s.bg(bg_control_active())
+                .duration(move || motion_ms(MOTION_PRESS_MS))
+                .scale(move || {
+                    if reduce_motion() {
+                        1.0
+                    } else {
+                        PRESS_SCALE_ICON
+                    }
+                })
+        })
+        .transition()
+        .duration(move || motion_ms(MOTION_INSTANT_MS))
+        .ease_bezier(0.22, 1.0, 0.36, 1.0)
         .focus_visible(apply_focus_ring)
         .label(tr("关闭", "Close"))
         .on_press(on_close)
@@ -76,8 +108,8 @@ pub(crate) fn ui_switch_row(
         .hover(|s| s.bg(bg_control_hover()))
         .active(|s| s.bg(bg_control_active()))
         .transition_colors()
-        .duration(MOTION_INSTANT_MS)
-        .ease_out()
+        .duration(move || motion_ms(MOTION_INSTANT_MS))
+        .ease_bezier(0.22, 1.0, 0.36, 1.0)
         .focus_visible(apply_focus_ring)
         .checked(checked)
         .on_change(move |next: &bool| on_toggle(*next))
@@ -92,8 +124,8 @@ pub(crate) fn ui_switch_row(
                 .bg(switch_track_off())
                 .checked(|c| c.bg(accent_blue()))
                 .transition_colors()
-                .duration(MOTION_INSTANT_MS)
-                .ease_out()
+                .duration(move || motion_ms(MOTION_INSTANT_MS))
+                .ease_bezier(0.22, 1.0, 0.36, 1.0)
         })
         .thumb_style(|s| {
             s.w(px(12.0))
@@ -102,8 +134,8 @@ pub(crate) fn ui_switch_row(
                 .bg(switch_thumb())
                 .checked(|c| c.translate_x(px(12.0)))
                 .transition_transform()
-                .duration(MOTION_INSTANT_MS)
-                .ease_out()
+                .duration(move || motion_ms(MOTION_INSTANT_MS))
+                .ease_bezier(0.22, 1.0, 0.36, 1.0)
         })
         .child(
             text(label)
@@ -129,15 +161,76 @@ pub(crate) fn ui_popup_style(s: StyleRefinement) -> StyleRefinement {
         .bg(bg_card())
         .shadow_lg()
         .overflow_hidden()
-        .transition_opacity()
-        .duration(MOTION_FAST_MS)
-        .ease_out()
+        .transition()
+        .duration(move || motion_ms(MOTION_FAST_MS))
+        .ease_bezier(0.22, 1.0, 0.36, 1.0)
 }
 
 /// Shared popup reveal starting state honoring reduced-motion preferences.
 #[allow(dead_code)]
 pub(crate) fn ui_popup_starting_style(s: StyleRefinement) -> StyleRefinement {
-    if reduce_motion() { s } else { s.opacity(0.0) }
+    if reduce_motion() {
+        s
+    } else {
+        s.opacity(0.0).scale(0.97)
+    }
+}
+
+/// Shared popup dismissal ending state (faster than entrance, no-op under reduced motion).
+#[allow(dead_code)]
+pub(crate) fn ui_popup_ending_style(s: StyleRefinement) -> StyleRefinement {
+    if reduce_motion() {
+        s
+    } else {
+        s.opacity(0.0)
+            .scale(0.97)
+            .duration(MOTION_EXIT_MS)
+            .ease_bezier(0.32, 0.0, 0.67, 1.0)
+    }
+}
+
+/// Handle passed via context so toolbar/command actions can trigger scoped layout animation on the workspace container.
+#[derive(Clone, Copy)]
+#[allow(dead_code)]
+pub(crate) struct SidebarLayoutRef(pub(crate) ElementRef);
+
+impl SidebarLayoutRef {
+    #[allow(dead_code)]
+    pub(crate) fn animate(self) {
+        if !reduce_motion() {
+            self.0.animate_layout(nsh_core::LayoutTransition::new(
+                nsh_core::LayoutCurve::bezier(0.22, 1.0, 0.36, 1.0),
+                MOTION_FAST_MS,
+            ));
+        }
+    }
+}
+
+/// Smooth 60fps pulse keyframe animation shared by skeleton loaders and live status dots.
+#[allow(dead_code)]
+pub(crate) fn ui_pulse_animation(duration_ms: f32) -> KeyframeAnimation {
+    KeyframeAnimation::new(Keyframes::Pulse)
+        .duration(duration_ms)
+        .easing([0.4, 0.0, 0.6, 1.0])
+        .frame_rate(60.0)
+}
+
+/// Rotating disclosure chevron (`0°` collapsed → `90°` expanded) honoring reduced motion.
+#[allow(dead_code)]
+pub(crate) fn ui_rotating_chevron(
+    size: f32,
+    open: impl Fn() -> bool + Copy + 'static,
+    fill: impl Fn() -> Hsla + Copy + 'static,
+) -> View {
+    view()
+        .flex_shrink_0()
+        .items_center()
+        .justify_center()
+        .rotate(move || if open() { deg(90.0) } else { deg(0.0) })
+        .transition_transform()
+        .duration(move || motion_ms(MOTION_INSTANT_MS))
+        .ease_bezier(0.22, 1.0, 0.36, 1.0)
+        .child(glyph_px(size, || Glyph::ChevronRight, fill))
 }
 
 /// Shared surface for anchored tooltips.

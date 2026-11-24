@@ -227,10 +227,10 @@ fn apply_web_state_snapshot(
             seed_web_prefs(controls, prefs, ui.profiles, ui.seq_builder);
             state.server_sync = capture_server_sync(prefs, prefs_rev);
         }
-    } else if prefs_rev != state.server_sync.prefs_rev {
-        if let Some(prefs) = value.get("prefs").filter(|p| p.get("rules").is_some()) {
-            sync_changed_server_prefs(controls, prefs, prefs_rev, ui, &mut state.server_sync);
-        }
+    } else if prefs_rev != state.server_sync.prefs_rev
+        && let Some(prefs) = value.get("prefs").filter(|p| p.get("rules").is_some())
+    {
+        sync_changed_server_prefs(controls, prefs, prefs_rev, ui, &mut state.server_sync);
     }
     let capturing = value
         .get("capturing")
@@ -668,22 +668,16 @@ pub(crate) fn start_web_poll(
             let mut next_snap = None;
             let mut fetch_ok = false;
             let mut auth_denied = false;
-            match fetch(HttpRequest::get(url)).await {
-                Ok(response) => {
-                    proxy::note_web_state_url(&response.head.url);
-                    if response.ok() {
-                        if let Ok(value) =
-                            serde_json::from_str::<serde_json::Value>(&response.text())
-                        {
-                            fetch_ok = true;
-                            next_snap =
-                                apply_web_state_snapshot(&controls, &ui, &mut state, &value);
-                        }
-                    } else if matches!(response.head.status, 401 | 403) {
-                        auth_denied = true;
+            if let Ok(response) = fetch(HttpRequest::get(url)).await {
+                proxy::note_web_state_url(&response.head.url);
+                if response.ok() {
+                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&response.text()) {
+                        fetch_ok = true;
+                        next_snap = apply_web_state_snapshot(&controls, &ui, &mut state, &value);
                     }
+                } else if matches!(response.head.status, 401 | 403) {
+                    auth_denied = true;
                 }
-                Err(_) => {}
             }
             if fetch_ok {
                 state.consecutive_failures = 0;

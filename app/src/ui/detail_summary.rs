@@ -884,6 +884,11 @@ pub(crate) fn summary(
                 let save_controls = controls.clone();
                 let submit_controls = controls.clone();
                 let clear_controls = controls.clone();
+                let draft = signal(shown.comment.get_untracked());
+                let confirm_del = signal(false);
+                let del_job = stored(None::<Spawned<()>>);
+                let has_saved_comment = move || !shown.comment.with(|c| c.trim().is_empty());
+                let langs = ui_langs();
                 view()
                     .flex_row()
                     .items_center()
@@ -891,27 +896,55 @@ pub(crate) fn summary(
                     .child(
                         view().flex_1().min_w(px(0.0)).child(
                             compose_input_on(
-                                shown.comment,
-                                tr(
-                                    "添加流量备注（可用 note: 搜索）…",
-                                    "Add flow note (searchable via note:)…",
-                                ),
+                                draft,
+                                tr("添加备注…", "Add a note…"),
                                 26.0,
                                 false,
-                                move |text| shown.comment.set(text.to_string()),
+                                move |text| {
+                                    draft.set(text.to_string());
+                                    confirm_del.set(false);
+                                },
                             )
                             .on_submit(move |text: &str| {
+                                draft.set(text.to_string());
                                 shown.comment.set(text.to_string());
                                 save_flow_comment(&submit_controls, selected.get(), shown);
                             }),
                         ),
                     )
                     .child(detail_button(tr("保存", "Save"), move || {
+                        shown.comment.set(draft.get_untracked());
                         save_flow_comment(&save_controls, selected.get(), shown);
                     }))
-                    .child(detail_button(tr("清除", "Clear"), move || {
-                        shown.comment.set(String::new());
-                        save_flow_comment(&clear_controls, selected.get(), shown);
+                    .child(detail_button(tr("取消", "Cancel"), move || {
+                        del_job.replace(None);
+                        shown.editing_comment.set(false);
+                    }))
+                    .child(when(has_saved_comment, move || {
+                        let clear_controls = clear_controls.clone();
+                        detail_button(
+                            move || -> SharedString {
+                                if confirm_del.get() {
+                                    t(ui_lang(langs), "确认删除？", "Confirm?").into()
+                                } else {
+                                    t(ui_lang(langs), "删除", "Delete").into()
+                                }
+                            },
+                            move || {
+                                if confirm_del.get_untracked() {
+                                    del_job.replace(None);
+                                    confirm_del.set(false);
+                                    shown.comment.set(String::new());
+                                    save_flow_comment(&clear_controls, selected.get(), shown);
+                                } else {
+                                    confirm_del.set(true);
+                                    del_job.replace(Some(set_timeout(
+                                        Duration::from_millis(3500),
+                                        move || confirm_del.set(false),
+                                    )));
+                                }
+                            },
+                        )
                     }))
             }
         }))
@@ -971,21 +1004,36 @@ fn summary_url_box(
         .on_mouse_leave(move |_: &MouseEvent| hovered.set(false))
         .on_press_up(dismiss_keyboard)
         .child(url_slot)
-        .child(when(
-            move || compact || hovered.get(),
-            move || {
-                let copy_controls = controls.clone();
-                row_copy_button(
-                    "复制 URL",
-                    "Copy URL",
-                    "复制完整 URL",
-                    "Copy full URL",
-                    move || {
-                        copy_part(&copy_controls, selected.get(), CopyPart::Url);
-                    },
-                )
-            },
-        ))
+        .child(
+            view()
+                .w(px(ControlSize::Xs.height()))
+                .h(px(ControlSize::Xs.height()))
+                .flex_shrink_0()
+                .items_center()
+                .justify_center()
+                .opacity(move || {
+                    if compact || hovered.get() {
+                        1.0_f32
+                    } else {
+                        0.0_f32
+                    }
+                })
+                .transition_opacity()
+                .duration(move || motion_ms(MOTION_INSTANT_MS))
+                .ease_out()
+                .child({
+                    let copy_controls = controls.clone();
+                    row_copy_button(
+                        "复制 URL",
+                        "Copy URL",
+                        "复制完整 URL",
+                        "Copy full URL",
+                        move || {
+                            copy_part(&copy_controls, selected.get(), CopyPart::Url);
+                        },
+                    )
+                }),
+        )
 }
 
 fn summary_metrics_text(shown: Shown) -> impl IntoElement {

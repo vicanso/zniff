@@ -3621,6 +3621,12 @@ fn wide_three_layout_clamps_list_width_and_preserves_detail_space() {
     let split_clamped =
         super::clamp_list_px_for_layout(660.0, 1200.0, crate::config::LayoutMode::Split, 0.0);
     assert_eq!(split_clamped, 660.0);
+
+    assert!(!super::sidebar_effectively_collapsed(false, 0.0));
+    assert!(!super::sidebar_effectively_collapsed(false, 880.0));
+    assert!(super::sidebar_effectively_collapsed(false, 879.0));
+    assert!(super::sidebar_effectively_collapsed(false, 640.0));
+    assert!(super::sidebar_effectively_collapsed(true, 1200.0));
 }
 
 #[test]
@@ -5608,6 +5614,7 @@ fn path_cell_rule_badge_centers_icons_with_gap_and_clears_path() {
         let hover = super::CellHover {
             text: signal(None),
             at: signal(point(px(0.0), px(0.0))),
+            intent: stored(None::<Spawned<()>>),
         };
 
         view().w(px(320.0)).h(px(34.0)).child(super::path_cell(

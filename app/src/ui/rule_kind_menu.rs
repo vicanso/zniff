@@ -121,6 +121,7 @@ pub(crate) fn quick_kind_dropdown(kind: Signal<u8>) -> impl IntoElement {
         .margin(px(8.0))
         .popup_style(ui_popup_style)
         .popup_starting_style(ui_popup_starting_style)
+        .popup_ending_style(ui_popup_ending_style)
         .trigger(
             view()
                 .role(AccessibilityRole::Button)
@@ -273,6 +274,7 @@ pub(crate) fn quick_var_menu(target: Signal<String>) -> impl IntoElement {
         .margin(px(8.0))
         .popup_style(ui_popup_style)
         .popup_starting_style(ui_popup_starting_style)
+        .popup_ending_style(ui_popup_ending_style)
         .trigger(
             view()
                 .role(AccessibilityRole::Button)

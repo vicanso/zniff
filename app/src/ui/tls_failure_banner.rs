@@ -189,37 +189,94 @@ fn tls_failure_banner_view(signals: TlsFailureBannerSignals) -> View {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn single_burst_host(controls: &Controls, burst: TlsFailureBurst) -> Option<String> {
+    if burst.distinct_hosts != 1 || burst.latest_flow_id == 0 {
+        return None;
+    }
+    with_active_session(controls, |session| {
+        session
+            .get(burst.latest_flow_id)
+            .map(|f| normalize_flow_host(&f.host))
+            .filter(|h| !h.is_empty())
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn tls_banner_actions(
     signals: &TlsFailureBannerSignals,
     dismissed: Signal<bool>,
 ) -> impl IntoElement {
     let ca_status = signals.ca_status;
+    let burst = signals.burst;
     let install_cb = signals.install_ca.clone();
     let browser_controls = signals.controls.clone();
+    let host_controls = signals.controls.clone();
+    let bypass_controls = signals.controls.clone();
     let selected = signals.selected;
+    let profiles_ctx = use_context::<ProfileSignals>();
     let langs = ui_langs();
+    let ca_trusted = move || ca_status.get() == ca::CaStatus::Trusted;
+    let bypass_target = computed(move || {
+        let profiles = profiles_ctx?;
+        let host = single_burst_host(&host_controls, burst.get())?;
+        let already = bypass_contains_host(&profiles.bypass.get(), &host);
+        (!already).then_some(host)
+    });
 
     view()
         .flex_row()
         .flex_wrap()
         .items_center()
         .gap_1p5()
-        .child(tls_banner_button(
-            move || -> SharedString {
-                let lang = ui_lang(langs);
-                match ca_status.get() {
-                    ca::CaStatus::InstalledUntrusted => t(lang, "信任证书", "Trust CA").into(),
-                    ca::CaStatus::NotInstalled | ca::CaStatus::Trusted => {
-                        t(lang, "安装证书", "Install CA").into()
-                    }
-                }
+        .child(when(
+            move || !ca_trusted(),
+            move || {
+                let install_cb = install_cb.clone();
+                tls_banner_button(
+                    move || -> SharedString {
+                        let lang = ui_lang(langs);
+                        match ca_status.get() {
+                            ca::CaStatus::InstalledUntrusted => {
+                                t(lang, "信任证书", "Trust CA").into()
+                            }
+                            ca::CaStatus::NotInstalled | ca::CaStatus::Trusted => {
+                                t(lang, "安装证书", "Install CA").into()
+                            }
+                        }
+                    },
+                    || true,
+                    move || install_cb.as_ref()(),
+                )
             },
-            true,
-            move || install_cb.as_ref()(),
+        ))
+        .child(when(
+            move || ca_trusted() && bypass_target.with(Option::is_some),
+            move || {
+                let bypass_controls = bypass_controls.clone();
+                let host_lookup = bypass_controls.clone();
+                tls_banner_button(
+                    tr("加入直通", "Bypass TLS"),
+                    || true,
+                    move || {
+                        if let Some(profiles) = profiles_ctx
+                            && let Some(host) =
+                                single_burst_host(&host_lookup, burst.get_untracked())
+                        {
+                            execute_error_action(
+                                ErrorAction::BypassTls,
+                                &bypass_controls,
+                                profiles,
+                                "",
+                                &host,
+                            );
+                        }
+                    },
+                )
+            },
         ))
         .child(tls_banner_button(
             tr("隔离浏览器", "Isolated Browser"),
-            false,
+            move || ca_trusted() && bypass_target.with(Option::is_none),
             move || {
                 let url = selected_browser_start_url(&browser_controls, selected.get());
                 launch_browser_action(browser_controls.clone(), url);
@@ -227,7 +284,7 @@ fn tls_banner_actions(
         ))
         .child(tls_banner_button(
             tr("忽略", "Dismiss"),
-            false,
+            || false,
             move || {
                 dismissed.set(true);
             },
@@ -245,7 +302,7 @@ fn tls_banner_actions(
         .gap_1p5()
         .child(tls_banner_button(
             tr("忽略", "Dismiss"),
-            false,
+            || false,
             move || {
                 dismissed.set(true);
             },
@@ -254,7 +311,7 @@ fn tls_banner_actions(
 
 fn tls_banner_button(
     label: impl IntoReactive<SharedString>,
-    primary: bool,
+    primary: impl Fn() -> bool + Copy + 'static,
     on_press: impl Fn() + 'static,
 ) -> impl IntoElement {
     nsh_base::button()
@@ -268,24 +325,30 @@ fn tls_banner_button(
         .transition_colors()
         .duration(MOTION_INSTANT_MS)
         .ease_out()
-        .border_color(if primary {
-            accent_blue()
-        } else {
-            border_control()
-        })
-        .bg(if primary { accent_blue() } else { bg_card() })
-        .hover(move |s| {
-            s.bg(if primary {
-                accent_blue_hover()
+        .border_color(move || {
+            if primary() {
+                accent_blue()
             } else {
-                bg_control()
+                border_control()
+            }
+        })
+        .bg(move || if primary() { accent_blue() } else { bg_card() })
+        .hover(move |s| {
+            s.bg(move || {
+                if primary() {
+                    accent_blue_hover()
+                } else {
+                    bg_control()
+                }
             })
         })
         .active(move |s| {
-            s.bg(if primary {
-                accent_blue_active()
-            } else {
-                bg_control_active()
+            s.bg(move || {
+                if primary() {
+                    accent_blue_active()
+                } else {
+                    bg_control_active()
+                }
             })
         })
         .focus_visible(apply_focus_ring)
@@ -294,10 +357,12 @@ fn tls_banner_button(
                 .number_of_lines(1)
                 .text_size(px(TEXT_XS))
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(if primary {
-                    fg_on_accent()
-                } else {
-                    fg_secondary()
+                .text_color(move || {
+                    if primary() {
+                        fg_on_accent()
+                    } else {
+                        fg_secondary()
+                    }
                 }),
         )
 }

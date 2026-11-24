@@ -280,6 +280,7 @@ pub(crate) fn rule_templates_menu(
         .margin(px(8.0))
         .popup_style(ui_popup_style)
         .popup_starting_style(ui_popup_starting_style)
+        .popup_ending_style(ui_popup_ending_style)
         .trigger(rule_templates_menu_trigger(open))
         .child(rule_templates_menu_body(
             target,

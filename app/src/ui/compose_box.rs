@@ -466,6 +466,9 @@ pub(crate) fn compose_box(
                                                         .popup_starting_style(
                                                             ui_popup_starting_style,
                                                         )
+                                                        .popup_ending_style(
+                                                            ui_popup_ending_style,
+                                                        )
                                                         .trigger(
                                                             view()
                                                                 .role(AccessibilityRole::Button)
@@ -806,8 +809,8 @@ pub(crate) fn lan_toggle(on: Signal<bool>, controls: Arc<Controls>) -> impl Into
         .hover(|style| style.bg(bg_control_hover()))
         .active(|style| style.bg(bg_control_active()))
         .transition_colors()
-        .duration(MOTION_INSTANT_MS)
-        .ease_out()
+        .duration(move || motion_ms(MOTION_INSTANT_MS))
+        .ease_bezier(0.22, 1.0, 0.36, 1.0)
         .focus_visible(apply_focus_ring)
         .checked(move || on.get())
         .on_change(move |next: &bool| {
@@ -834,8 +837,8 @@ pub(crate) fn lan_toggle(on: Signal<bool>, controls: Arc<Controls>) -> impl Into
                 .bg(switch_track_off())
                 .checked(|c| c.bg(accent_blue()))
                 .transition_colors()
-                .duration(MOTION_INSTANT_MS)
-                .ease_out()
+                .duration(move || motion_ms(MOTION_INSTANT_MS))
+                .ease_bezier(0.22, 1.0, 0.36, 1.0)
         })
         .thumb_style(|s| {
             s.w(px(10.0))
@@ -844,8 +847,8 @@ pub(crate) fn lan_toggle(on: Signal<bool>, controls: Arc<Controls>) -> impl Into
                 .bg(switch_thumb())
                 .checked(|c| c.translate_x(px(12.0)))
                 .transition_transform()
-                .duration(MOTION_INSTANT_MS)
-                .ease_out()
+                .duration(move || motion_ms(MOTION_INSTANT_MS))
+                .ease_bezier(0.22, 1.0, 0.36, 1.0)
         })
         .child(
             text(move || -> SharedString {
@@ -893,15 +896,38 @@ pub(crate) fn prompt_import_har(controls: Arc<Controls>) {
 }
 
 fn compose_clear_button(compose: Compose) -> impl IntoElement {
+    let confirm = signal(false);
+    let reset_job = stored(None::<Spawned<()>>);
+    let langs = ui_langs();
     view()
         .role(AccessibilityRole::Button)
         .h(px(26.0))
         .px_2p5()
         .rounded(px(RADIUS_MD))
         .border_1()
-        .border_color(border_control())
-        .bg(bg_control())
-        .hover(|style| style.bg(bg_control_hover()))
+        .border_color(move || {
+            if confirm.get() {
+                status_err_fg()
+            } else {
+                border_control()
+            }
+        })
+        .bg(move || {
+            if confirm.get() {
+                status_err_bg()
+            } else {
+                bg_control()
+            }
+        })
+        .hover(|style| {
+            style.bg(move || {
+                if confirm.get() {
+                    status_err_bg_hover()
+                } else {
+                    bg_control_hover()
+                }
+            })
+        })
         .active(|style| style.bg(bg_control_active()))
         .transition_colors()
         .duration(MOTION_INSTANT_MS)
@@ -910,23 +936,44 @@ fn compose_clear_button(compose: Compose) -> impl IntoElement {
         .flex_row()
         .items_center()
         .on_press(move || {
-            compose.method.set("GET".to_string());
-            compose.url.set(String::new());
-            compose.headers.set(String::new());
-            compose.body.set(String::new());
-            compose.draft_saved.set((
-                "GET".to_string(),
-                String::new(),
-                String::new(),
-                String::new(),
-            ));
+            if confirm.get_untracked() {
+                reset_job.replace(None);
+                confirm.set(false);
+                compose.method.set("GET".to_string());
+                compose.url.set(String::new());
+                compose.headers.set(String::new());
+                compose.body.set(String::new());
+                compose.draft_saved.set((
+                    "GET".to_string(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                ));
+            } else {
+                confirm.set(true);
+                reset_job.replace(Some(set_timeout(Duration::from_millis(3500), move || {
+                    confirm.set(false);
+                })));
+            }
         })
         .child(
-            text(tr("清空", "Clear"))
-                .number_of_lines(1)
-                .text_size(px(TEXT_SM))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(fg_secondary()),
+            text(move || -> SharedString {
+                if confirm.get() {
+                    t(ui_lang(langs), "确认清空？", "Confirm clear?").into()
+                } else {
+                    t(ui_lang(langs), "清空", "Clear").into()
+                }
+            })
+            .number_of_lines(1)
+            .text_size(px(TEXT_SM))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(move || {
+                if confirm.get() {
+                    status_err_fg()
+                } else {
+                    fg_secondary()
+                }
+            }),
         )
 }
 
@@ -949,6 +996,7 @@ fn compose_recent_menu(compose: Compose, controls: Arc<Controls>) -> impl IntoEl
         .margin(px(8.0))
         .popup_style(ui_popup_style)
         .popup_starting_style(ui_popup_starting_style)
+        .popup_ending_style(ui_popup_ending_style)
         .trigger(
             view()
                 .role(AccessibilityRole::Button)

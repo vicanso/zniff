@@ -141,6 +141,7 @@ pub(crate) fn rules_menu_popover(
         .margin(px(10.0))
         .popup_style(ui_popup_style)
         .popup_starting_style(ui_popup_starting_style)
+        .popup_ending_style(ui_popup_ending_style)
         .trigger(
             view()
                 .window_drag(false)
@@ -892,6 +893,7 @@ pub(crate) fn preset_pill_popover(
         .margin(px(10.0))
         .popup_style(ui_popup_style)
         .popup_starting_style(ui_popup_starting_style)
+        .popup_ending_style(ui_popup_ending_style)
         .trigger(
             view()
                 .window_drag(false)
