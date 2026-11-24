@@ -1008,16 +1008,19 @@ pub(crate) fn primary_button(
 ) -> impl IntoElement {
     let danger_bg = danger.clone();
     let danger_hover = danger.clone();
+    let danger_active = danger.clone();
     let icon_state = danger;
     view()
         .window_drag(false)
-        .h(px(CONTROL_H))
-        .px_2p5()
-        .gap_1p5()
+        .role(AccessibilityRole::Button)
+        .h(px(ControlSize::Sm.height()))
+        .px(px(ControlSize::Sm.padding_x()))
+        .gap(px(ControlSize::Sm.gap()))
         .flex_shrink_0()
         .flex_row()
         .items_center()
-        .rounded(px(CONTROL_RADIUS))
+        .justify_center()
+        .rounded(px(RADIUS_MD))
         .bg(move || {
             if danger_bg() {
                 danger_button_bg()
@@ -1034,11 +1037,22 @@ pub(crate) fn primary_button(
                 }
             })
         })
-        .cursor(Cursor::Pointer)
-        .active(|style| style.opacity(0.8))
+        .active(|style| {
+            style.bg(move || {
+                if danger_active() {
+                    danger_button_active()
+                } else {
+                    accent_blue_active()
+                }
+            })
+        })
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
         .focus_visible(apply_focus_ring)
         .on_press(on_press)
-        .child(glyph(
+        .child(glyph_px(
+            ControlSize::Sm.icon_size(),
             move || {
                 if icon_state() {
                     Glyph::Stop

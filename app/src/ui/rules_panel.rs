@@ -137,13 +137,14 @@ pub(crate) fn rules_menu_popover(
         .trigger(
             view()
                 .window_drag(false)
+                .role(AccessibilityRole::Button)
                 .h(px(CONTROL_H))
                 .px_2()
                 .flex_shrink_0()
                 .flex_row()
                 .items_center()
                 .gap_1p5()
-                .rounded(px(CONTROL_RADIUS))
+                .rounded(px(RADIUS_MD))
                 .border_1()
                 .border_color(move || {
                     if capture_muted(rules_on, breaks_on) {
@@ -151,14 +152,14 @@ pub(crate) fn rules_menu_popover(
                     } else if open.get() || has_rules_config() {
                         accent_blue_border()
                     } else {
-                        border_control()
+                        AdaptiveColor::TRANSPARENT
                     }
                 })
                 .bg(move || {
                     if is_tinted() {
                         accent_blue_soft()
                     } else {
-                        bg_control()
+                        AdaptiveColor::TRANSPARENT
                     }
                 })
                 .hover(|style| {
@@ -170,32 +171,25 @@ pub(crate) fn rules_menu_popover(
                         }
                     })
                 })
-                .active(|style| style.opacity(0.8))
-                .cursor(Cursor::Pointer)
+                .active(|style| style.bg(bg_control_active()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .focus_visible(apply_focus_ring)
                 .tooltip(
-                    tooltip().child(
-                        view()
-                            .max_w(px(360.0))
-                            .px_2p5()
-                            .py_1p5()
-                            .rounded(px(6.0))
-                            .bg(bg_card())
-                            .border_1()
-                            .border_color(border_strong())
-                            .child(
-                                text(move || -> SharedString {
-                                    format_rules_pill_tooltip(
-                                        active_rules_count.get(),
-                                        enabled_groups_count.get(),
-                                        rules_on.get(),
-                                        ui_lang(langs),
-                                    )
-                                    .into()
-                                })
-                                .text_size(px(11.5))
-                                .text_color(fg_primary()),
-                            ),
-                    ),
+                    tooltip().child(ui_tooltip_surface(
+                        text(move || -> SharedString {
+                            format_rules_pill_tooltip(
+                                active_rules_count.get(),
+                                enabled_groups_count.get(),
+                                rules_on.get(),
+                                ui_lang(langs),
+                            )
+                            .into()
+                        })
+                        .text_size(px(TEXT_SM))
+                        .text_color(fg_primary()),
+                    )),
                 )
                 .child(when(
                     move || capture_muted(rules_on, breaks_on),
@@ -208,7 +202,7 @@ pub(crate) fn rules_menu_popover(
                     },
                 ))
                 .child(glyph_px(
-                    13.5,
+                    ControlSize::Sm.icon_size(),
                     || Glyph::Sliders,
                     move || {
                         color(if capture_muted(rules_on, breaks_on) {

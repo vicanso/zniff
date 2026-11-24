@@ -186,6 +186,8 @@ pub(crate) fn toolbar_network_preset_popover(
                 open.set(*next);
             }
         })
+        .popup_style(ui_popup_style)
+        .popup_starting_style(ui_popup_starting_style)
         .placement(Placement::Bottom)
         .align(Align::End)
         .offset(px(6.0))
@@ -193,14 +195,15 @@ pub(crate) fn toolbar_network_preset_popover(
         .trigger(
             view()
                 .window_drag(false)
-                .h(px(24.0))
-                .px_1p5()
+                .role(AccessibilityRole::Button)
+                .h(px(CONTROL_H))
+                .px_2()
                 .gap_1()
                 .flex_shrink_0()
                 .flex_row()
                 .items_center()
                 .justify_center()
-                .rounded(px(6.0))
+                .rounded(px(RADIUS_MD))
                 .border_1()
                 .border_color(move || {
                     if is_throttled() {
@@ -208,7 +211,7 @@ pub(crate) fn toolbar_network_preset_popover(
                     } else if open.get() {
                         accent_blue_border()
                     } else {
-                        border_control()
+                        AdaptiveColor::TRANSPARENT
                     }
                 })
                 .bg(move || {
@@ -217,7 +220,7 @@ pub(crate) fn toolbar_network_preset_popover(
                     } else if open.get() {
                         accent_blue_soft()
                     } else {
-                        bg_control()
+                        AdaptiveColor::TRANSPARENT
                     }
                 })
                 .hover(|style| {
@@ -231,14 +234,18 @@ pub(crate) fn toolbar_network_preset_popover(
                         }
                     })
                 })
-                .active(|style| style.opacity(0.8))
-                .cursor(Cursor::Pointer)
+                .active(|style| style.bg(bg_control_active()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .focus_visible(apply_focus_ring)
+                .label(tr("网络条件预设", "Network conditions"))
                 .tooltip(label_tip(
                     "网络条件预设（3G / 弱网 / 高延迟 / 离线）",
                     "Network conditions (3G / Slow 3G / High latency / Offline)",
                 ))
                 .child(glyph_px(
-                    11.5,
+                    ControlSize::Sm.icon_size(),
                     || Glyph::Globe,
                     move || {
                         color(if is_throttled() {
@@ -255,7 +262,7 @@ pub(crate) fn toolbar_network_preset_popover(
                         SharedString::from(active_preset.get().badge_label(ui_lang(langs)))
                     })
                     .number_of_lines(1)
-                    .text_size(px(11.5))
+                    .text_size(px(TEXT_SM))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(status_warn_fg())
                 })),
@@ -276,24 +283,14 @@ fn network_preset_menu(
     open: Signal<bool>,
     langs: Signal<Option<Lang>>,
 ) -> impl IntoElement {
-    let mut menu = view()
-        .w(px(236.0))
-        .p_1p5()
-        .gap_0p5()
-        .flex_col()
-        .rounded(px(8.0))
-        .border_1()
-        .border_color(border_strong())
-        .bg(bg_card())
-        .shadow_md()
-        .child(
-            view().px_2().py_1().child(
-                text(tr("网络条件预设", "Network Conditions"))
-                    .text_size(px(11.0))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(fg_muted()),
-            ),
-        );
+    let mut menu = view().w(px(236.0)).p_1p5().gap_0p5().flex_col().child(
+        view().px_2().py_1().child(
+            text(tr("网络条件预设", "Network Conditions"))
+                .text_size(px(TEXT_XS))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(fg_muted()),
+        ),
+    );
 
     for &preset in NetworkPreset::ALL {
         let item_controls = controls.clone();
@@ -303,11 +300,10 @@ fn network_preset_menu(
                 .w_full()
                 .px_2()
                 .py_1p5()
-                .rounded(px(5.0))
+                .rounded(px(RADIUS_MD))
                 .flex_row()
                 .items_center()
                 .gap_2()
-                .cursor(Cursor::Pointer)
                 .bg(move || {
                     if is_selected() {
                         accent_blue_soft()
@@ -324,6 +320,10 @@ fn network_preset_menu(
                         }
                     })
                 })
+                .active(|style| style.bg(bg_control_active()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
                 .on_press(move || {
                     apply_network_preset(profiles, &item_controls, preset);
                     open.set(false);
@@ -337,7 +337,7 @@ fn network_preset_menu(
                         .child(
                             text(move || SharedString::from(preset.label(ui_lang(langs))))
                                 .number_of_lines(1)
-                                .text_size(px(12.0))
+                                .text_size(px(TEXT_SM))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(move || {
                                     if is_selected() {
@@ -350,12 +350,16 @@ fn network_preset_menu(
                         .child(
                             text(move || SharedString::from(preset.description(ui_lang(langs))))
                                 .number_of_lines(1)
-                                .text_size(px(10.5))
+                                .text_size(px(TEXT_XS))
                                 .text_color(fg_muted()),
                         ),
                 )
                 .child(when(is_selected, move || {
-                    glyph_px(12.0, || Glyph::Check, || color(accent_blue_text()))
+                    glyph_px(
+                        ControlSize::Xs.icon_size(),
+                        || Glyph::Check,
+                        || color(accent_blue_text()),
+                    )
                 })),
         );
     }

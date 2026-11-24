@@ -32,13 +32,14 @@ pub(crate) fn saved_filter_menu(
         .trigger(
             view()
                 .window_drag(false)
+                .role(AccessibilityRole::Button)
                 .h(px(CONTROL_H))
                 .px_2()
                 .flex_shrink_0()
                 .flex_row()
                 .items_center()
                 .gap_1p5()
-                .rounded(px(CONTROL_RADIUS))
+                .rounded(px(RADIUS_MD))
                 .border_1()
                 .border_color(move || {
                     if is_paused() {
@@ -46,14 +47,14 @@ pub(crate) fn saved_filter_menu(
                     } else if is_tinted() {
                         accent_blue_border()
                     } else {
-                        border_control()
+                        AdaptiveColor::TRANSPARENT
                     }
                 })
                 .bg(move || {
                     if is_tinted() {
                         accent_blue_soft()
                     } else {
-                        bg_control()
+                        AdaptiveColor::TRANSPARENT
                     }
                 })
                 .hover(|style| {
@@ -65,8 +66,11 @@ pub(crate) fn saved_filter_menu(
                         }
                     })
                 })
-                .active(|style| style.opacity(0.8))
-                .cursor(Cursor::Pointer)
+                .active(|style| style.bg(bg_control_active()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .focus_visible(apply_focus_ring)
                 .tooltip(label_tip("视图流量过滤", "Traffic view filter"))
                 .child(when(is_paused, move || {
                     view()
@@ -76,7 +80,7 @@ pub(crate) fn saved_filter_menu(
                         .bg(status_warn_fg())
                 }))
                 .child(glyph_px(
-                    13.5,
+                    ControlSize::Sm.icon_size(),
                     || Glyph::List,
                     move || {
                         color(if is_paused() {

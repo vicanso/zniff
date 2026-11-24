@@ -242,11 +242,6 @@ pub(crate) fn more_menu(
         .max_w(move || px((window().width.0 - 16.0).max(180.0)))
         .max_h(move || px((window().height.0 - 68.0).max(180.0)))
         .overflow_hidden()
-        .rounded(px(10.0))
-        .border_1()
-        .border_color(border_strong())
-        .bg(bg_card())
-        .shadow_md()
         .child(
             scroll()
                 .w_full()
@@ -419,12 +414,12 @@ pub(crate) fn toolbar_update_pill(
             let pill = view()
                 .window_drag(false)
                 .h(px(CONTROL_H))
-                .px_2p5()
+                .px_2()
                 .gap_1p5()
                 .flex_shrink_0()
                 .flex_row()
                 .items_center()
-                .rounded(px(CONTROL_RADIUS))
+                .rounded(px(RADIUS_MD))
                 .border_1()
                 .border_color(accent_blue_border())
                 .bg(accent_blue_soft())
@@ -437,18 +432,20 @@ pub(crate) fn toolbar_update_pill(
                         }
                     })
                 })
-                .cursor(Cursor::Pointer)
                 .active(|style| {
-                    style.opacity(move || {
+                    style.bg(move || {
                         if update_state.get().is_busy() {
-                            1.0_f32
+                            accent_blue_soft()
                         } else {
-                            0.8_f32
+                            bg_control_active()
                         }
                     })
                 })
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .focus_visible(apply_focus_ring)
                 .disabled(move || update_state.get().is_busy())
-                .disabled_style(|style| style.cursor(Cursor::Default))
                 .on_press(move || {
                     let st = update_state.get();
                     match st.phase {
@@ -468,7 +465,11 @@ pub(crate) fn toolbar_update_pill(
                         | UpdatePhase::Installing { .. } => {}
                     }
                 })
-                .child(glyph(|| Glyph::Download, || color(accent_blue_text())))
+                .child(glyph_px(
+                    ControlSize::Sm.icon_size(),
+                    || Glyph::Download,
+                    || color(accent_blue_text()),
+                ))
                 .child(
                     control_text(move || {
                         let lang = ui_lang(langs);

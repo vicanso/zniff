@@ -5,6 +5,11 @@ use super::super::*;
 
 use super::tokens::{ButtonVariant, ControlSize, MOTION_INSTANT_MS};
 
+/// Wraps a title-bar interactive control so presses do not trigger window dragging.
+pub(crate) fn no_drag(child: impl IntoElement) -> View {
+    view().window_drag(false).flex_shrink_0().child(child)
+}
+
 /// Standard semantic button styled strictly from theme tokens and `ControlSize`.
 /// Uses the desktop default arrow cursor (non-link actions never set `Cursor::Pointer`).
 #[allow(dead_code)]

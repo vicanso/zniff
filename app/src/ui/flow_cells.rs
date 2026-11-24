@@ -815,20 +815,11 @@ pub(crate) fn row_target_display(row: &RowLine, display: EffectivePathDisplay) -
 }
 
 pub(crate) fn label_tip(zh: &'static str, en: &'static str) -> impl IntoTooltip {
-    tooltip().child(
-        view()
-            .px_2()
-            .py_1()
-            .rounded(px(6.0))
-            .bg(bg_card())
-            .border_1()
-            .border_color(border_strong())
-            .child(
-                text(tr(zh, en))
-                    .text_size(move || scaled_px(12.0))
-                    .text_color(fg_primary()),
-            ),
-    )
+    tooltip().child(ui_tooltip_surface(
+        text(tr(zh, en))
+            .text_size(move || scaled_px(TEXT_SM))
+            .text_color(fg_primary()),
+    ))
 }
 
 /// The list's one hover bubble. It lives beside the table, not inside a

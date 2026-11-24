@@ -41,84 +41,64 @@ pub(crate) fn toolbar_sidebar_toggle(
             let controls = controls.clone();
             view()
                 .window_drag(false)
-                .w(px(28.0))
-                .h(px(CONTROL_H))
                 .mr_1()
                 .flex_shrink_0()
-                .rounded(px(CONTROL_RADIUS))
-                .bg(move || {
-                    if sidebar_collapsed.get() {
-                        AdaptiveColor::TRANSPARENT
-                    } else {
-                        bg_control()
-                    }
-                })
-                .hover(|s| s.bg(bg_control_hover()))
-                .active(|s| s.opacity(0.8))
-                .cursor(Cursor::Pointer)
-                .focus_visible(apply_focus_ring)
-                .flex_row()
-                .items_center()
-                .justify_center()
-                .label(move || {
-                    if sidebar_collapsed.get() {
-                        tr("展开域名与应用栏", "Expand Domains & Apps sidebar")()
-                    } else {
-                        tr("收起域名与应用栏", "Collapse Domains & Apps sidebar")()
-                    }
-                })
                 .tooltip(
-                    tooltip().child(
-                        view()
-                            .px_2()
-                            .py_1()
-                            .rounded(px(6.0))
-                            .bg(bg_card())
-                            .border_1()
-                            .border_color(border_strong())
-                            .child(
-                                text(move || {
-                                    if sidebar_collapsed.get() {
-                                        tr("展开侧边栏", "Expand sidebar")()
-                                    } else {
-                                        tr("收起侧边栏", "Collapse sidebar")()
-                                    }
-                                })
-                                .text_size(px(12.0))
-                                .text_color(fg_primary()),
-                            ),
-                    ),
-                )
-                .on_press(move || {
-                    let next = !sidebar_collapsed.get();
-                    sidebar_collapsed.set(next);
-                    if let Err(err) = save_config(|config| config.sidebar_collapsed = next) {
-                        set_status(
-                            &controls,
-                            StatusMsg::PrefUnsaved {
-                                name: PrefName::List,
-                                err: err.to_string(),
-                            },
-                        );
-                    }
-                })
-                .child(glyph_px(
-                    15.0,
-                    move || {
-                        if sidebar_collapsed.get() {
-                            Glyph::Sidebar
-                        } else {
-                            Glyph::SidebarOpen
-                        }
-                    },
-                    move || {
-                        color(if sidebar_collapsed.get() {
-                            fg_secondary()
-                        } else {
-                            fg_primary()
+                    tooltip().child(ui_tooltip_surface(
+                        text(move || {
+                            if sidebar_collapsed.get() {
+                                tr("展开侧边栏", "Expand sidebar")()
+                            } else {
+                                tr("收起侧边栏", "Collapse sidebar")()
+                            }
                         })
-                    },
-                ))
+                        .text_size(px(TEXT_SM))
+                        .text_color(fg_primary()),
+                    )),
+                )
+                .child(
+                    ui_icon_button(ButtonVariant::Ghost, ControlSize::Sm)
+                        .selected(move || !sidebar_collapsed.get())
+                        .selected_style(|s| s.bg(bg_control()))
+                        .accessibility_label(move || {
+                            Some(SharedString::from(if sidebar_collapsed.get() {
+                                tr("展开域名与应用栏", "Expand Domains & Apps sidebar")()
+                            } else {
+                                tr("收起域名与应用栏", "Collapse Domains & Apps sidebar")()
+                            }))
+                        })
+                        .on_press(move || {
+                            let next = !sidebar_collapsed.get();
+                            sidebar_collapsed.set(next);
+                            if let Err(err) = save_config(|config| config.sidebar_collapsed = next)
+                            {
+                                set_status(
+                                    &controls,
+                                    StatusMsg::PrefUnsaved {
+                                        name: PrefName::List,
+                                        err: err.to_string(),
+                                    },
+                                );
+                            }
+                        })
+                        .child(glyph_px(
+                            ControlSize::Sm.icon_size(),
+                            move || {
+                                if sidebar_collapsed.get() {
+                                    Glyph::Sidebar
+                                } else {
+                                    Glyph::SidebarOpen
+                                }
+                            },
+                            move || {
+                                color(if sidebar_collapsed.get() {
+                                    fg_secondary()
+                                } else {
+                                    fg_primary()
+                                })
+                            },
+                        )),
+                )
         },
     )
 }
@@ -273,27 +253,27 @@ pub(crate) fn toolbar(
                     view()
                         .w(px(20.0))
                         .h(px(20.0))
-                        .rounded(px(5.5))
+                        .rounded(px(RADIUS_MD))
                         .bg(accent_blue())
                         .items_center()
                         .justify_center()
                         .child(
                             mono("Z")
-                                .text_size(px(12.0))
+                                .text_size(px(TEXT_SM))
                                 .font_weight(FontWeight::BOLD)
                                 .text_color(fg_on_accent()),
                         ),
                 )
                 .child(
                     text("zniff")
-                        .text_size(px(14.5))
-                        .font_weight(FontWeight::BOLD)
+                        .text_size(px(TEXT_MD))
+                        .font_weight(FontWeight::SEMIBOLD)
                         .text_color(fg_primary()),
                 )
                 .child(
                     view()
-                        .w(px(7.0))
-                        .h(px(7.0))
+                        .w(px(6.0))
+                        .h(px(6.0))
                         .ml_0p5()
                         .rounded_full()
                         .flex_shrink_0()
@@ -318,9 +298,9 @@ pub(crate) fn toolbar(
         )
         .child(
             view()
-                .w(px(1.5))
-                .h(px(18.0))
-                .rounded_full()
+                .w(px(1.0))
+                .h(px(16.0))
+                .mx_0p5()
                 .flex_shrink_0()
                 .bg(border_divider()),
         )
@@ -384,17 +364,17 @@ pub(crate) fn toolbar(
                                 let is_active_pill = move || profiles.filter_enabled.get();
                                 view()
                                     .window_drag(false)
-                                    .h(px(24.0))
+                                    .role(AccessibilityRole::Button)
+                                    .h(px(CONTROL_H))
                                     .max_w(px(240.0))
                                     .min_w(px(0.0))
                                     .px_2()
                                     .gap_1()
-                                    .rounded(px(6.0))
+                                    .rounded(px(RADIUS_MD))
                                     .overflow_hidden()
                                     .flex_shrink(1.0)
                                     .flex_row()
                                     .items_center()
-                                    .cursor(Cursor::Pointer)
                                     .border_1()
                                     .border_color(move || {
                                         if is_active_pill() {
@@ -419,38 +399,32 @@ pub(crate) fn toolbar(
                                             }
                                         })
                                     })
-                                    .active(|style| style.opacity(0.8))
+                                    .active(|style| style.bg(bg_control_active()))
+                                    .transition_colors()
+                                    .duration(MOTION_INSTANT_MS)
+                                    .ease_out()
+                                    .focus_visible(apply_focus_ring)
                                     .label(tr("切换过滤生效状态", "Toggle filter active state"))
                                     .tooltip(
-                                        tooltip().child(
-                                            view()
-                                                .max_w(px(420.0))
-                                                .px_2p5()
-                                                .py_1p5()
-                                                .rounded(px(6.0))
-                                                .bg(bg_card())
-                                                .border_1()
-                                                .border_color(border_strong())
-                                                .child(
-                                                    text(move || -> SharedString {
-                                                        format_filter_pill_tooltip(
-                                                            &profiles.filter.get(),
-                                                            &filter.get(),
-                                                            profiles.filter_enabled.get(),
-                                                            ui_lang(langs),
-                                                        )
-                                                        .into()
-                                                    })
-                                                    .text_size(px(11.5))
-                                                    .text_color(fg_primary()),
-                                                ),
-                                        ),
+                                        tooltip().child(ui_tooltip_surface(
+                                            text(move || -> SharedString {
+                                                format_filter_pill_tooltip(
+                                                    &profiles.filter.get(),
+                                                    &filter.get(),
+                                                    profiles.filter_enabled.get(),
+                                                    ui_lang(langs),
+                                                )
+                                                .into()
+                                            })
+                                            .text_size(px(TEXT_SM))
+                                            .text_color(fg_primary()),
+                                        )),
                                     )
                                     .on_press(move || {
                                         profiles.filter_enabled.update(|on| *on = !*on);
                                     })
                                     .child(glyph_px(
-                                        10.5,
+                                        ControlSize::Xs.icon_size(),
                                         move || {
                                             if profiles.filter_enabled.get() {
                                                 Glyph::Check
@@ -476,7 +450,7 @@ pub(crate) fn toolbar(
                                         .flex_shrink(1.0)
                                         .number_of_lines(1)
                                         .text_overflow(EllipsizeMode::Tail)
-                                        .text_size(px(11.5))
+                                        .text_size(px(TEXT_SM))
                                         .font_weight(FontWeight::MEDIUM)
                                         .text_color(
                                             move || {
@@ -597,6 +571,14 @@ pub(crate) fn toolbar(
         selected,
         update_state,
     ))
+    .child(
+        view()
+            .w(px(1.0))
+            .h(px(16.0))
+            .mx_0p5()
+            .flex_shrink_0()
+            .bg(border_divider()),
+    )
     .child(primary_button(
         {
             let langs = ui_langs();
@@ -614,33 +596,26 @@ pub(crate) fn toolbar(
 }
 
 pub(crate) fn toolbar_text_button(on_press: impl Fn() + 'static) -> impl IntoElement {
-    view()
-        .window_drag(false)
-        .h(px(CONTROL_H))
-        .px_2()
-        .gap_1()
-        .flex_shrink_0()
-        .flex_row()
-        .items_center()
-        .rounded(px(CONTROL_RADIUS))
-        .border_1()
-        .border_color(border_control())
-        .bg(bg_control())
-        .hover(|style| style.bg(bg_control_hover()))
-        .cursor(Cursor::Pointer)
-        .active(|style| style.opacity(0.8))
-        .focus_visible(apply_focus_ring)
-        .label(tr("清空会话", "Clear session"))
-        .tooltip(label_tip(
-            "清空会话 (Cmd/Ctrl+K)",
-            "Clear session (Cmd/Ctrl+K)",
-        ))
-        .on_press(on_press)
-        .child(glyph_px(13.5, || Glyph::Trash, || color(fg_secondary())))
-        .child(when(
-            move || window().width.0 >= 860.0,
-            move || control_text(tr("清空", "Clear")).text_color(fg_primary()),
-        ))
+    no_drag(
+        ui_button(ButtonVariant::Ghost, ControlSize::Sm)
+            .accessibility_label(move || {
+                Some(SharedString::from(tr("清空会话", "Clear session")()))
+            })
+            .on_press(on_press)
+            .child(glyph_px(
+                ControlSize::Sm.icon_size(),
+                || Glyph::Trash,
+                || color(fg_secondary()),
+            ))
+            .child(when(
+                move || window().width.0 >= 860.0,
+                move || control_text(tr("清空", "Clear")).text_color(fg_primary()),
+            )),
+    )
+    .tooltip(label_tip(
+        "清空会话 (Cmd/Ctrl+K)",
+        "Clear session (Cmd/Ctrl+K)",
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -669,6 +644,8 @@ pub(crate) fn toolbar_menu(
     let open = signal(false);
     popover()
         .open(move || Some(open.get()))
+        .popup_style(ui_popup_style)
+        .popup_starting_style(ui_popup_starting_style)
         .on_open_change(move |event: &nsh_base::PopoverEvent| {
             if let nsh_base::PopoverEvent::OpenChange(next, _) = event {
                 open.set(*next);
@@ -746,32 +723,23 @@ pub(crate) fn toolbar_layout_switcher(
         config::LayoutMode::Split => Glyph::LayoutSplit,
         config::LayoutMode::TopBottom => Glyph::LayoutTopBottom,
     };
-    let mut menu = view()
-        .w(px(164.0))
-        .p_1()
-        .gap_0p5()
-        .rounded(px(8.0))
-        .border_1()
-        .border_color(border_strong())
-        .bg(bg_card())
-        .shadow_md();
+    let mut menu = view().w(px(164.0)).p_1().gap_0p5().flex_col();
     for (mode, icon, zh, en) in modes {
         let mode_controls = controls.clone();
         menu = menu.child(
             view()
                 .w_full()
-                .h(px(28.0))
+                .h(px(ControlSize::Sm.height()))
                 .px_2()
-                .rounded(px(5.0))
+                .rounded(px(RADIUS_MD))
                 .flex_row()
                 .items_center()
                 .gap_2()
-                .cursor(Cursor::Pointer)
                 .bg(move || {
                     if layout_mode.get() == mode {
                         accent_blue_soft()
                     } else {
-                        bg_card()
+                        AdaptiveColor::TRANSPARENT
                     }
                 })
                 .hover(|style| {
@@ -783,7 +751,10 @@ pub(crate) fn toolbar_layout_switcher(
                         }
                     })
                 })
-                .active(|style| style.opacity(0.8))
+                .active(|style| style.bg(bg_control_active()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
                 .on_press(move || {
                     open.set(false);
                     if layout_mode.get() == mode {
@@ -801,7 +772,7 @@ pub(crate) fn toolbar_layout_switcher(
                     }
                 })
                 .child(glyph_px(
-                    13.0,
+                    ControlSize::Sm.icon_size(),
                     move || icon,
                     move || {
                         if layout_mode.get() == mode {
@@ -814,7 +785,7 @@ pub(crate) fn toolbar_layout_switcher(
                 .child(
                     text(tr(zh, en))
                         .flex_1()
-                        .text_size(px(12.0))
+                        .text_size(px(TEXT_SM))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(move || {
                             if layout_mode.get() == mode {
@@ -828,6 +799,8 @@ pub(crate) fn toolbar_layout_switcher(
     }
     popover()
         .open(move || Some(open.get()))
+        .popup_style(ui_popup_style)
+        .popup_starting_style(ui_popup_starting_style)
         .placement(Placement::Bottom)
         .align(Align::End)
         .offset(px(6.0))
@@ -840,27 +813,28 @@ pub(crate) fn toolbar_layout_switcher(
         .trigger(
             view()
                 .window_drag(false)
-                .h(px(28.0))
+                .role(AccessibilityRole::Button)
+                .h(px(CONTROL_H))
                 .px_2()
                 .gap_1p5()
                 .flex_shrink_0()
                 .flex_row()
                 .items_center()
                 .justify_center()
-                .rounded(px(6.0))
+                .rounded(px(RADIUS_MD))
                 .border_1()
                 .border_color(move || {
                     if open.get() {
                         accent_blue_border()
                     } else {
-                        border_control()
+                        AdaptiveColor::TRANSPARENT
                     }
                 })
                 .bg(move || {
                     if open.get() {
                         accent_blue_soft()
                     } else {
-                        bg_control()
+                        AdaptiveColor::TRANSPARENT
                     }
                 })
                 .hover(|style| {
@@ -872,17 +846,24 @@ pub(crate) fn toolbar_layout_switcher(
                         }
                     })
                 })
-                .active(|style| style.opacity(0.8))
-                .cursor(Cursor::Pointer)
+                .active(|style| style.bg(bg_control_active()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .focus_visible(apply_focus_ring)
                 .label(tr("分栏布局", "Split layout"))
                 .tooltip(label_tip("切换分栏布局", "Switch split layout"))
-                .child(glyph_px(13.0, current_icon, move || {
-                    if open.get() {
-                        color(accent_blue_text())
-                    } else {
-                        color(fg_secondary())
-                    }
-                }))
+                .child(glyph_px(
+                    ControlSize::Sm.icon_size(),
+                    current_icon,
+                    move || {
+                        if open.get() {
+                            color(accent_blue_text())
+                        } else {
+                            color(fg_secondary())
+                        }
+                    },
+                ))
                 .child(when(
                     move || window().width.0 >= 860.0,
                     move || {
@@ -914,86 +895,52 @@ pub(crate) fn toolbar_summary_button(
             && !seq_builder.redact_open.get()
             && !rows.with(Vec::is_empty)
     };
-    view()
-        .window_drag(false)
-        .h(px(CONTROL_H))
-        .px_2()
-        .gap_1()
-        .flex_shrink_0()
-        .flex_row()
-        .items_center()
-        .justify_center()
-        .rounded(px(CONTROL_RADIUS))
-        .border_1()
-        .border_color(move || {
-            if is_summary_active() {
-                accent_blue_border()
-            } else {
-                border_control()
-            }
-        })
-        .bg(move || {
-            if is_summary_active() {
-                accent_blue_soft()
-            } else {
-                bg_control()
-            }
-        })
-        .hover(|style| {
-            style.bg(move || {
-                if is_summary_active() {
-                    accent_blue_soft_hover()
-                } else {
-                    bg_control_hover()
-                }
+    no_drag(
+        ui_toggle_button(ControlSize::Sm, is_summary_active)
+            .on_press(move || {
+                reset_compose(compose);
+                close_sequence_diagram(seq_builder);
+                selected.set(None);
             })
-        })
-        .active(|style| style.opacity(0.8))
-        .focus_visible(apply_focus_ring)
-        .cursor(Cursor::Pointer)
-        .tooltip(label_tip("查看会话统计概览", "View session summary"))
-        .on_press(move || {
-            reset_compose(compose);
-            close_sequence_diagram(seq_builder);
-            selected.set(None);
-        })
-        .child(control_text(tr("统计", "Summary")).text_color(move || {
-            if is_summary_active() {
-                accent_blue_text()
-            } else {
-                fg_primary()
-            }
-        }))
-        .child(
-            view()
-                .h(px(16.0))
-                .px_1p5()
-                .rounded(px(4.0))
-                .flex_row()
-                .items_center()
-                .justify_center()
-                .bg(move || {
-                    if is_summary_active() {
-                        accent_blue_soft_hover()
-                    } else {
-                        bg_card()
-                    }
-                })
-                .child(
-                    mono(move || SharedString::from(flow_count_now(rows, flow_total, filter)))
-                        .tabular_nums()
-                        .number_of_lines(1)
-                        .text_size(px(10.5))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(move || {
-                            if is_summary_active() {
-                                accent_blue_text()
-                            } else {
-                                fg_secondary()
-                            }
-                        }),
-                ),
-        )
+            .child(control_text(tr("统计", "Summary")).text_color(move || {
+                if is_summary_active() {
+                    accent_blue_text()
+                } else {
+                    fg_primary()
+                }
+            }))
+            .child(
+                view()
+                    .h(px(16.0))
+                    .px_1p5()
+                    .rounded(px(RADIUS_SM))
+                    .flex_row()
+                    .items_center()
+                    .justify_center()
+                    .bg(move || {
+                        if is_summary_active() {
+                            accent_blue_soft_hover()
+                        } else {
+                            bg_control()
+                        }
+                    })
+                    .child(
+                        mono(move || SharedString::from(flow_count_now(rows, flow_total, filter)))
+                            .tabular_nums()
+                            .number_of_lines(1)
+                            .text_size(px(TEXT_XS))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(move || {
+                                if is_summary_active() {
+                                    accent_blue_text()
+                                } else {
+                                    fg_secondary()
+                                }
+                            }),
+                    ),
+            ),
+    )
+    .tooltip(label_tip("查看会话统计概览", "View session summary"))
 }
 
 pub(crate) fn more_trigger(
@@ -1008,26 +955,27 @@ pub(crate) fn more_trigger(
     let is_tinted = move || open.get() || proxy_on.get();
     view()
         .window_drag(false)
+        .role(AccessibilityRole::Button)
         .h(px(CONTROL_H))
         .px_2()
         .gap_1()
         .flex_shrink_0()
         .flex_row()
         .items_center()
-        .rounded(px(CONTROL_RADIUS))
+        .rounded(px(RADIUS_MD))
         .border_1()
         .border_color(move || {
             if is_tinted() {
                 accent_blue_border()
             } else {
-                border_control()
+                AdaptiveColor::TRANSPARENT
             }
         })
         .bg(move || {
             if is_tinted() {
                 accent_blue_soft()
             } else {
-                bg_control()
+                AdaptiveColor::TRANSPARENT
             }
         })
         .hover(|style| {
@@ -1039,8 +987,10 @@ pub(crate) fn more_trigger(
                 }
             })
         })
-        .cursor(Cursor::Pointer)
-        .active(|style| style.opacity(0.75))
+        .active(|style| style.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
         .focus_visible(apply_focus_ring)
         .child(when(
             move || {
@@ -1077,7 +1027,8 @@ pub(crate) fn more_trigger(
                 fg_primary()
             }
         }))
-        .child(glyph(
+        .child(glyph_px(
+            ControlSize::Xs.icon_size(),
             || Glyph::Chevron,
             move || {
                 color(if is_tinted() {
