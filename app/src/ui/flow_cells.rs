@@ -227,7 +227,7 @@ pub(crate) fn method_cell(
                             rows.get(index)
                                 .map(|row| {
                                     if row.is_marker {
-                                        AdaptiveColor::new(white(), white())
+                                        fg_on_accent()
                                     } else {
                                         method_fg(&row.method)
                                     }

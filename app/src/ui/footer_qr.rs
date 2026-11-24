@@ -533,7 +533,7 @@ pub(crate) fn qr_code_side(
                         view()
                             .p_2()
                             .rounded(px(8.0))
-                            .bg(AdaptiveColor::rgb(0xffffff, 0xffffff))
+                            .bg(qr_surface())
                             .child(image(move || qr_path.get()).w(px(168.0)).h(px(168.0)))
                     },
                 ))

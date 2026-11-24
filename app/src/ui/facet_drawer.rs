@@ -396,7 +396,7 @@ pub(crate) fn flow_list(
                                 view()
                                     .absolute()
                                     .inset_0()
-                                    .bg(AdaptiveColor::new(rgba(0x00000018), rgba(0x00000044)))
+                                    .bg(backdrop_scrim_soft())
                                     .on_press(move || facets_open.set(false)),
                             )
                             .child(

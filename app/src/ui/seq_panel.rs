@@ -294,7 +294,7 @@ pub(crate) fn seq_candidate_row(
                         canvas(|| {
                             Painter::new()
                                 .line_width(1.8)
-                                .stroke_color(white())
+                                .stroke_color(fg_on_accent().light)
                                 .stroke_svg("M2.2 5.2 L4.4 7.4 L8.0 3.0")
                         })
                         .w(px(10.0))
@@ -606,7 +606,7 @@ pub(crate) fn sequence_diagram_panel(
                                                 .font_weight(FontWeight::SEMIBOLD)
                                                 .text_color(move || {
                                                     if has_checked() {
-                                                        AdaptiveColor::rgb(0xffffff, 0xffffff)
+                                                        fg_on_accent()
                                                     } else {
                                                         fg_muted()
                                                     }

@@ -108,6 +108,7 @@ mod flow_table;
 mod footer_qr;
 mod inline_mock;
 mod json_tree;
+mod kit;
 mod lan_qr;
 mod list_columns;
 mod llm_view;
@@ -191,6 +192,8 @@ pub(crate) use self::flow_table::*;
 pub(crate) use self::footer_qr::*;
 pub(crate) use self::inline_mock::*;
 pub(crate) use self::json_tree::*;
+#[allow(unused_imports)]
+pub(crate) use self::kit::*;
 pub(crate) use self::lan_qr::*;
 pub(crate) use self::list_columns::*;
 pub(crate) use self::llm_view::*;

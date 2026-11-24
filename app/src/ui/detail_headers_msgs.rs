@@ -570,7 +570,7 @@ fn msg_filter_chip(
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(move || {
                     if active() {
-                        AdaptiveColor::rgb(0xffffff, 0xffffff)
+                        fg_on_accent()
                     } else {
                         fg_secondary()
                     }

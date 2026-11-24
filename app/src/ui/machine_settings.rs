@@ -145,7 +145,7 @@ pub(crate) fn machine_settings_modal(
             let backdrop = view()
                 .absolute()
                 .inset_0()
-                .bg(AdaptiveColor::new(rgba(0x0F172A5C), rgba(0x0000008F)))
+                .bg(backdrop_scrim())
                 .on_press(move || profiles.machine_settings_open.set(false));
 
             let header = view()

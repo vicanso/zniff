@@ -568,7 +568,7 @@ pub(crate) fn command_palette_modal(
             let backdrop = view()
                 .absolute()
                 .inset_0()
-                .bg(AdaptiveColor::new(rgba(0x0F172A5C), rgba(0x0000008F)))
+                .bg(backdrop_scrim())
                 .on_press(move || open.set(false));
 
             let palette = nsh_base::command()

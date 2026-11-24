@@ -281,7 +281,7 @@ pub(crate) fn toolbar(
                             mono("Z")
                                 .text_size(px(12.0))
                                 .font_weight(FontWeight::BOLD)
-                                .text_color(white()),
+                                .text_color(fg_on_accent()),
                         ),
                 )
                 .child(

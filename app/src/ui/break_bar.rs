@@ -109,7 +109,7 @@ pub(crate) fn config_broken_bar(
                                 .number_of_lines(1)
                                 .text_size(px(12.0))
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(white()),
+                                .text_color(fg_on_accent()),
                         ),
                 )
                 .child(
@@ -334,7 +334,7 @@ pub(crate) fn break_bar(
                                         .number_of_lines(1)
                                         .text_size(px(12.0))
                                         .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(white()),
+                                        .text_color(fg_on_accent()),
                                 ),
                         )
                         .child(when(

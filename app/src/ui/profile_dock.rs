@@ -253,7 +253,7 @@ pub(crate) fn profile_dock(
                                                     .font_weight(FontWeight::MEDIUM)
                                                     .text_color(move || {
                                                         if ready() {
-                                                            AdaptiveColor::rgb(0xffffff, 0xffffff)
+                                                            fg_on_accent()
                                                         } else {
                                                             fg_muted()
                                                         }
@@ -1417,7 +1417,7 @@ pub(crate) fn profile_dock(
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(move || {
                                     if ready_text() {
-                                        AdaptiveColor::rgb(0xffffff, 0xffffff)
+                                        fg_on_accent()
                                     } else {
                                         fg_muted()
                                     }

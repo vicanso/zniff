@@ -2,23 +2,23 @@
 use super::*;
 
 pub(crate) fn phase_color_dns() -> AdaptiveColor {
-    AdaptiveColor::rgb(0x0284c7, 0x38bdf8)
+    timing_dns()
 }
 
 pub(crate) fn phase_color_tcp() -> AdaptiveColor {
-    AdaptiveColor::rgb(0xd97706, 0xfbbf24)
+    timing_connect()
 }
 
 pub(crate) fn phase_color_tls() -> AdaptiveColor {
-    AdaptiveColor::rgb(0x7c3aed, 0xa78bfa)
+    timing_tls()
 }
 
 pub(crate) fn phase_color_wait() -> AdaptiveColor {
-    AdaptiveColor::rgb(0x059669, 0x34d399)
+    timing_ttfb()
 }
 
 pub(crate) fn phase_color_download() -> AdaptiveColor {
-    AdaptiveColor::rgb(0x2563eb, 0x60a5fa)
+    timing_transfer()
 }
 
 pub(crate) fn summary_timing_bar(timing: Signal<present::TimingBreakdown>) -> impl IntoElement {
@@ -371,7 +371,7 @@ pub(crate) fn repeat_inline_bar(
                         .number_of_lines(1)
                         .text_size(px(11.5))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(white()),
+                        .text_color(fg_on_accent()),
                 ),
         )
         .child(detail_button(tr("取消", "Cancel"), move || {

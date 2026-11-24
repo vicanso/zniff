@@ -293,7 +293,7 @@ fn tls_banner_button(
                 .text_size(px(11.5))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(if primary {
-                    AdaptiveColor::rgb(0xffffff, 0xffffff)
+                    fg_on_accent()
                 } else {
                     fg_secondary()
                 }),

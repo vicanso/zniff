@@ -1046,11 +1046,11 @@ pub(crate) fn primary_button(
                     Glyph::Play
                 }
             },
-            white,
+            || color(fg_on_accent()),
         ))
         .child(
             control_text(label)
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(white()),
+                .text_color(fg_on_accent()),
         )
 }

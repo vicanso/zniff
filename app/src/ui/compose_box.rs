@@ -228,7 +228,7 @@ pub(crate) fn compose_box(
                                                 if status_invalid() {
                                                     fg_muted()
                                                 } else {
-                                                    AdaptiveColor::rgb(0xffffff, 0xffffff)
+                                                    fg_on_accent()
                                                 }
                                             }),
                                     )
@@ -264,7 +264,7 @@ pub(crate) fn compose_box(
                                         .number_of_lines(1)
                                         .text_size(px(12.0))
                                         .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(white()),
+                                        .text_color(fg_on_accent()),
                                     )
                             },
                         )),

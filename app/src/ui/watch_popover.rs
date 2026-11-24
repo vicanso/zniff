@@ -340,7 +340,7 @@ fn watch_add_form(
                             control_text(tr("添加", "Add"))
                                 .text_size(px(11.5))
                                 .font_weight(FontWeight::MEDIUM)
-                                .text_color(white()),
+                                .text_color(fg_on_accent()),
                         ),
                 ),
         )

@@ -120,22 +120,11 @@ pub(crate) fn provide_mono_font(system: bool) -> MonoFont {
             });
         });
     }
-    // Skips the first run when nothing would change, so a system-font start
-    // does not replace the tokens it was given.
-    let applied = Rc::new(Cell::new(false));
     let langs = ui_langs();
     effect(move || {
         let lang = ui_lang(langs);
         let family = mono_family_for_lang(font.system.get(), font.bundled.get(), lang);
-        if family.is_none() && !applied.get() {
-            return;
-        }
-        applied.set(true);
-        let mut theme = nsh_base::Theme::default();
-        if let Some(family) = family {
-            theme.set_font(nsh_core::element::FONT_MONO, family.as_str());
-        }
-        set_tokens(theme.into_tokens());
+        set_tokens(build_nsh_theme(family.as_deref()).into_tokens());
     });
     font
 }

@@ -990,7 +990,7 @@ pub(crate) fn doc_preview_chip(preview: Signal<bool>) -> impl IntoElement {
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(move || {
                     if preview.get() {
-                        AdaptiveColor::rgb(0xffffff, 0xffffff)
+                        fg_on_accent()
                     } else {
                         fg_secondary()
                     }
@@ -1075,7 +1075,7 @@ fn body_mode_chip(
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(move || {
                     if is_active() {
-                        AdaptiveColor::rgb(0xffffff, 0xffffff)
+                        fg_on_accent()
                     } else {
                         fg_secondary()
                     }

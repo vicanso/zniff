@@ -526,7 +526,7 @@ fn inline_mock_header(
                                     if status_invalid() {
                                         fg_muted()
                                     } else {
-                                        AdaptiveColor::rgb(0xffffff, 0xffffff)
+                                        fg_on_accent()
                                     }
                                 }),
                         ),

@@ -324,7 +324,7 @@ pub(crate) fn about_modal(
             let backdrop = view()
                 .absolute()
                 .inset_0()
-                .bg(AdaptiveColor::new(rgba(0x0F172A5C), rgba(0x0000008F)))
+                .bg(backdrop_scrim())
                 .on_press(move || profiles.about_open.set(false));
 
             let header = view()
@@ -656,7 +656,7 @@ pub(crate) fn about_modal(
                                                 .number_of_lines(1)
                                                 .text_size(px(11.5))
                                                 .font_weight(FontWeight::SEMIBOLD)
-                                                .text_color(white()),
+                                                .text_color(fg_on_accent()),
                                         )
                                 },
                             ))

@@ -29,6 +29,10 @@ pub(crate) fn bg_control_hover() -> AdaptiveColor {
     AdaptiveColor::rgb(0xe2e8f0, 0x252e40)
 }
 
+pub(crate) fn bg_control_active() -> AdaptiveColor {
+    AdaptiveColor::rgb(0xcbd5e1, 0x2e3a4f)
+}
+
 pub(crate) fn border_strong() -> AdaptiveColor {
     AdaptiveColor::rgb(0xe2e8f0, 0x222938)
 }
@@ -57,12 +61,20 @@ pub(crate) fn fg_muted() -> AdaptiveColor {
     AdaptiveColor::rgb(0x526075, 0x8e9bb3)
 }
 
+pub(crate) fn fg_on_accent() -> AdaptiveColor {
+    AdaptiveColor::rgb(0xffffff, 0xffffff)
+}
+
 pub(crate) fn accent_blue() -> AdaptiveColor {
     AdaptiveColor::rgb(0x2563eb, 0x2563eb)
 }
 
 pub(crate) fn accent_blue_hover() -> AdaptiveColor {
     AdaptiveColor::rgb(0x1d4ed8, 0x1d4ed8)
+}
+
+pub(crate) fn accent_blue_active() -> AdaptiveColor {
+    AdaptiveColor::rgb(0x1e40af, 0x1e40af)
 }
 
 pub(crate) fn accent_blue_soft() -> AdaptiveColor {
@@ -136,6 +148,38 @@ pub(crate) fn danger_button_hover() -> AdaptiveColor {
     AdaptiveColor::rgb(0xb91c1c, 0xbe123c)
 }
 
+pub(crate) fn danger_button_active() -> AdaptiveColor {
+    AdaptiveColor::rgb(0x991b1b, 0x9f1239)
+}
+
+pub(crate) fn backdrop_scrim() -> AdaptiveColor {
+    AdaptiveColor::new(rgba(0x0F172A5C), rgba(0x0000008F))
+}
+
+pub(crate) fn backdrop_scrim_soft() -> AdaptiveColor {
+    AdaptiveColor::new(rgba(0x00000018), rgba(0x00000044))
+}
+
+pub(crate) fn timing_dns() -> AdaptiveColor {
+    AdaptiveColor::rgb(0x0284c7, 0x38bdf8)
+}
+
+pub(crate) fn timing_connect() -> AdaptiveColor {
+    AdaptiveColor::rgb(0xd97706, 0xfbbf24)
+}
+
+pub(crate) fn timing_tls() -> AdaptiveColor {
+    AdaptiveColor::rgb(0x7c3aed, 0xa78bfa)
+}
+
+pub(crate) fn timing_ttfb() -> AdaptiveColor {
+    AdaptiveColor::rgb(0x059669, 0x34d399)
+}
+
+pub(crate) fn timing_transfer() -> AdaptiveColor {
+    AdaptiveColor::rgb(0x2563eb, 0x60a5fa)
+}
+
 pub(crate) fn method_fg(method: &str) -> AdaptiveColor {
     match method {
         "GET" => AdaptiveColor::rgb(0x0369a1, 0x38bdf8),
@@ -196,4 +240,44 @@ pub(crate) fn switch_track_off() -> AdaptiveColor {
 
 pub(crate) fn switch_thumb() -> AdaptiveColor {
     AdaptiveColor::rgb(0xffffff, 0xf8fafc)
+}
+
+pub(crate) fn qr_surface() -> AdaptiveColor {
+    AdaptiveColor::rgb(0xffffff, 0xffffff)
+}
+
+/// Builds an `nsh_base::Theme` synchronized with zniff's semantic tokens and radius scale.
+pub(crate) fn build_nsh_theme(mono_family: Option<&str>) -> nsh_base::Theme {
+    let mut theme = nsh_base::Theme::default();
+    theme.set_color("background", bg_canvas());
+    theme.set_color("foreground", fg_primary());
+    theme.set_color("card", bg_card());
+    theme.set_color("card-foreground", fg_primary());
+    theme.set_color("popover", bg_card());
+    theme.set_color("popover-foreground", fg_primary());
+    theme.set_color("primary", accent_blue());
+    theme.set_color("primary-foreground", fg_on_accent());
+    theme.set_color("secondary", bg_control());
+    theme.set_color("secondary-foreground", fg_primary());
+    theme.set_color("muted", bg_control());
+    theme.set_color("muted-foreground", fg_muted());
+    theme.set_color("accent", bg_control_hover());
+    theme.set_color("accent-foreground", fg_primary());
+    theme.set_color("destructive", danger_button_bg());
+    theme.set_color("border", border_strong());
+    theme.set_color("input", border_control());
+    theme.set_color("ring", focus_ring());
+    theme.set_color("sidebar", bg_chrome());
+    theme.set_color("sidebar-foreground", fg_primary());
+    theme.set_color("sidebar-primary", accent_blue());
+    theme.set_color("sidebar-primary-foreground", fg_on_accent());
+    theme.set_color("sidebar-accent", bg_control_hover());
+    theme.set_color("sidebar-accent-foreground", fg_primary());
+    theme.set_color("sidebar-border", border_strong());
+    theme.set_color("sidebar-ring", focus_ring());
+    theme.set_number("radius", RADIUS_MD);
+    if let Some(family) = mono_family {
+        theme.set_font(nsh_core::element::FONT_MONO, family);
+    }
+    theme
 }

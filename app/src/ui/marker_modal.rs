@@ -69,7 +69,7 @@ pub(crate) fn marker_modal(open: Signal<bool>, controls: Arc<Controls>) -> impl 
                     view()
                         .w_full()
                         .h_full()
-                        .bg(AdaptiveColor::new(rgba(0x0000_0048), rgba(0x0000_0080)))
+                        .bg(backdrop_scrim())
                         .items_center()
                         .justify_center()
                         .on_press(move || open.set(false))
@@ -262,7 +262,7 @@ fn marker_modal_footer(
                     control_text(tr("插入标记", "Add marker"))
                         .text_size(px(12.0))
                         .font_weight(FontWeight::MEDIUM)
-                        .text_color(white()),
+                        .text_color(fg_on_accent()),
                 ),
         )
 }

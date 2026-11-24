@@ -380,7 +380,7 @@ fn preset_sync_action_button(
             .font_weight(FontWeight::MEDIUM)
             .text_color(move || {
                 if is_dirty() {
-                    AdaptiveColor::rgb(0xffffff, 0xffffff)
+                    fg_on_accent()
                 } else {
                     fg_primary()
                 }

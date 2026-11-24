@@ -125,7 +125,7 @@ pub(crate) fn shortcuts_modal(open: Signal<bool>) -> impl IntoElement {
             let backdrop = view()
                 .absolute()
                 .inset_0()
-                .bg(AdaptiveColor::new(rgba(0x0F172A5C), rgba(0x0000008F)))
+                .bg(backdrop_scrim())
                 .on_press(move || open.set(false));
 
             let header = view()
