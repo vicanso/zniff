@@ -3012,7 +3012,6 @@ fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
             || {},
             || {},
             || {},
-            || {},
             move || {
                 let next = !running.get();
                 running.set(next);

@@ -1495,16 +1495,6 @@ pub fn App() -> impl IntoElement {
             move || remove_ca(controls_remove.clone()),
             move || toggle_system_proxy(controls_proxy.clone()),
             move || {
-                clear_captured(
-                    &controls_clear,
-                    selected_clear,
-                    baseline_clear,
-                    compose_clear,
-                    seq_builder,
-                    shown,
-                );
-            },
-            move || {
                 clear_unpinned_captured(
                     &controls_clear_unpinned,
                     selected_clear_unpinned,
@@ -1601,11 +1591,22 @@ pub fn App() -> impl IntoElement {
             };
             let workspace_ref = element_ref();
             workspace_ref.on_focus_in(move || popover_dismiss.dismiss());
+            let on_clear: Rc<dyn Fn()> = Rc::new(move || {
+                clear_captured(
+                    &controls_clear,
+                    selected_clear,
+                    baseline_clear,
+                    compose_clear,
+                    seq_builder,
+                    shown,
+                );
+            });
             let build_split: Rc<dyn Fn(bool) -> View> = Rc::new(move |vertical: bool| {
                 let controls_list = controls_list.clone();
                 let controls_split = controls_split.clone();
                 let controls_detail = controls_detail.clone();
                 let onboarding_now = onboarding_base.clone();
+                let on_clear_list = Rc::clone(&on_clear);
                 let container = if vertical {
                     view()
                         .element_ref(&workspace_ref)
@@ -1661,6 +1662,7 @@ pub fn App() -> impl IntoElement {
                             shown,
                             baseline,
                             filter_focus,
+                            on_clear_list,
                         )
                     })
                     .child(pane_splitter(

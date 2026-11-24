@@ -198,6 +198,36 @@ pub(crate) fn merge_secondary_filter(main: &str, secondary: &str) -> String {
     out.join(" ")
 }
 
+fn list_clear_button(on_clear: Rc<dyn Fn()>) -> impl IntoElement {
+    view()
+        .role(AccessibilityRole::Button)
+        .w(px(CONTROL_H))
+        .h(px(CONTROL_H))
+        .flex_shrink_0()
+        .flex_row()
+        .items_center()
+        .justify_center()
+        .rounded(px(RADIUS_MD))
+        .bg(AdaptiveColor::TRANSPARENT)
+        .hover(|style| style.bg(bg_control_hover()))
+        .active(|style| style.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
+        .label(tr("清空会话", "Clear session"))
+        .tooltip(label_tip(
+            "清空会话 (Cmd/Ctrl+K)",
+            "Clear session (Cmd/Ctrl+K)",
+        ))
+        .on_press(move || on_clear())
+        .child(glyph_px(
+            ControlSize::Sm.icon_size(),
+            || Glyph::Trash,
+            || color(fg_secondary()),
+        ))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn flow_list(
     rows: Signal<Vec<Arc<RowLine>>>,
@@ -214,6 +244,7 @@ pub(crate) fn flow_list(
     shown: Shown,
     baseline: Signal<Option<u64>>,
     filter_focus: ElementRef,
+    on_clear: Rc<dyn Fn()>,
 ) -> impl IntoElement {
     let width = profiles.list_width;
     let height = profiles.list_height;
@@ -361,7 +392,8 @@ pub(crate) fn flow_list(
                             )
                     },
                 ))
-                .child(column_menu(columns, column_controls)),
+                .child(column_menu(columns, column_controls))
+                .child(list_clear_button(on_clear)),
         )
         .child(filter_syntax_error_strip(list_filter))
         .child(when(

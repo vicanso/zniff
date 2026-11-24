@@ -157,7 +157,6 @@ pub(crate) fn toolbar(
     install: impl Fn() + 'static,
     remove: impl Fn() + 'static,
     toggle_proxy: impl Fn() + 'static,
-    clear: impl Fn() + 'static,
     clear_unpinned: impl Fn() + 'static,
     export_har: impl Fn() + 'static,
     copy_env: impl Fn() + 'static,
@@ -176,7 +175,6 @@ pub(crate) fn toolbar(
     update_state: Signal<UpdateState>,
 ) -> impl IntoElement {
     let install = Rc::new(install);
-    let clear = Rc::new(clear);
     let clear_unpinned = Rc::new(clear_unpinned);
     let remove = Rc::new(remove);
     let preset_controls = import_controls.clone();
@@ -543,10 +541,6 @@ pub(crate) fn toolbar(
         rules_controls,
         shared_rule_draft,
     ))
-    .child(toolbar_text_button({
-        let clear = Rc::clone(&clear);
-        move || clear()
-    }))
     .child(toolbar_menu(
         ca_ui,
         use_system_proxy,
@@ -592,29 +586,6 @@ pub(crate) fn toolbar(
         },
         move || running.get(),
         toggle,
-    ))
-}
-
-pub(crate) fn toolbar_text_button(on_press: impl Fn() + 'static) -> impl IntoElement {
-    no_drag(
-        ui_button(ButtonVariant::Ghost, ControlSize::Sm)
-            .accessibility_label(move || {
-                Some(SharedString::from(tr("清空会话", "Clear session")()))
-            })
-            .on_press(on_press)
-            .child(glyph_px(
-                ControlSize::Sm.icon_size(),
-                || Glyph::Trash,
-                || color(fg_secondary()),
-            ))
-            .child(when(
-                move || window().width.0 >= 860.0,
-                move || control_text(tr("清空", "Clear")).text_color(fg_primary()),
-            )),
-    )
-    .tooltip(label_tip(
-        "清空会话 (Cmd/Ctrl+K)",
-        "Clear session (Cmd/Ctrl+K)",
     ))
 }
 
