@@ -62,7 +62,7 @@ pub(crate) fn config_broken_bar(
                     .selectable(true)
                     .number_of_lines(2)
                     .text_overflow(EllipsizeMode::Tail)
-                    .text_size(px(12.0))
+                    .text_size(px(TEXT_SM))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(status_warn_fg()),
                 ),
@@ -84,13 +84,17 @@ pub(crate) fn config_broken_bar(
                 }))
                 .child(
                     view()
-                        .h(px(26.0))
+                        .role(AccessibilityRole::Button)
+                        .h(px(CONTROL_H))
                         .px_2p5()
-                        .rounded(px(6.0))
+                        .rounded(px(RADIUS_MD))
                         .bg(accent_blue())
                         .hover(|style| style.bg(accent_blue_hover()))
-                        .active(|style| style.opacity(0.85))
-                        .cursor(Cursor::Pointer)
+                        .active(|style| style.bg(accent_blue_active()))
+                        .transition_colors()
+                        .duration(MOTION_INSTANT_MS)
+                        .ease_out()
+                        .focus_visible(apply_focus_ring)
                         .flex_row()
                         .items_center()
                         .on_press(move || {
@@ -107,19 +111,23 @@ pub(crate) fn config_broken_bar(
                         .child(
                             text(tr("备份并重置", "Backup & reset"))
                                 .number_of_lines(1)
-                                .text_size(px(12.0))
+                                .text_size(px(TEXT_SM))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(fg_on_accent()),
                         ),
                 )
                 .child(
                     view()
-                        .w(px(26.0))
-                        .h(px(26.0))
-                        .rounded(px(6.0))
+                        .role(AccessibilityRole::Button)
+                        .w(px(CONTROL_H))
+                        .h(px(CONTROL_H))
+                        .rounded(px(RADIUS_MD))
                         .hover(|style| style.bg(bg_control_hover()))
-                        .active(|style| style.opacity(0.75))
-                        .cursor(Cursor::Pointer)
+                        .active(|style| style.bg(bg_control_active()))
+                        .transition_colors()
+                        .duration(MOTION_INSTANT_MS)
+                        .ease_out()
+                        .focus_visible(apply_focus_ring)
                         .flex_row()
                         .items_center()
                         .justify_center()
@@ -306,7 +314,7 @@ pub(crate) fn break_bar(
                     .min_w(px(160.0))
                     .number_of_lines(1)
                     .text_overflow(EllipsizeMode::Tail)
-                    .text_size(px(12.5))
+                    .text_size(px(TEXT_SM))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(status_warn_fg()),
                 )
@@ -317,13 +325,17 @@ pub(crate) fn break_bar(
                         .gap_1p5()
                         .child(
                             view()
-                                .h(px(26.0))
+                                .role(AccessibilityRole::Button)
+                                .h(px(CONTROL_H))
                                 .px_2p5()
-                                .rounded(px(6.0))
+                                .rounded(px(RADIUS_MD))
                                 .bg(accent_blue())
                                 .hover(|style| style.bg(accent_blue_hover()))
-                                .active(|style| style.opacity(0.85))
-                                .cursor(Cursor::Pointer)
+                                .active(|style| style.bg(accent_blue_active()))
+                                .transition_colors()
+                                .duration(MOTION_INSTANT_MS)
+                                .ease_out()
+                                .focus_visible(apply_focus_ring)
                                 .flex_row()
                                 .items_center()
                                 .on_press(move || {
@@ -332,7 +344,7 @@ pub(crate) fn break_bar(
                                 .child(
                                     text(tr("放行", "Continue"))
                                         .number_of_lines(1)
-                                        .text_size(px(12.0))
+                                        .text_size(px(TEXT_SM))
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(fg_on_accent()),
                                 ),
@@ -354,15 +366,19 @@ pub(crate) fn break_bar(
                         ))
                         .child(
                             view()
-                                .h(px(26.0))
+                                .role(AccessibilityRole::Button)
+                                .h(px(CONTROL_H))
                                 .px_2p5()
-                                .rounded(px(6.0))
+                                .rounded(px(RADIUS_MD))
                                 .border_1()
                                 .border_color(status_err_fg())
                                 .bg(status_err_bg())
                                 .hover(|style| style.bg(status_err_bg_hover()))
-                                .active(|style| style.opacity(0.8))
-                                .cursor(Cursor::Pointer)
+                                .active(|style| style.bg(status_err_bg_hover()))
+                                .transition_colors()
+                                .duration(MOTION_INSTANT_MS)
+                                .ease_out()
+                                .focus_visible(apply_focus_ring)
                                 .flex_row()
                                 .items_center()
                                 .on_press(move || {
@@ -384,7 +400,7 @@ pub(crate) fn break_bar(
                                 .child(
                                     text(tr("丢弃", "Drop"))
                                         .number_of_lines(1)
-                                        .text_size(px(12.0))
+                                        .text_size(px(TEXT_SM))
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(status_err_fg()),
                                 ),
@@ -402,9 +418,10 @@ pub(crate) fn break_bar(
                         let controls = controls.clone();
                         let is_head = move || index.get() == 0;
                         view()
-                            .h(px(22.0))
+                            .role(AccessibilityRole::Button)
+                            .h(px(ControlSize::Xs.height()))
                             .px_2()
-                            .rounded(px(6.0))
+                            .rounded(px(RADIUS_SM))
                             .border_1()
                             .border_color(move || {
                                 if is_head() {
@@ -429,8 +446,11 @@ pub(crate) fn break_bar(
                                     }
                                 })
                             })
-                            .cursor(Cursor::Pointer)
-                            .active(|style| style.opacity(0.75))
+                            .active(|style| style.bg(bg_control_active()))
+                            .transition_colors()
+                            .duration(MOTION_INSTANT_MS)
+                            .ease_out()
+                            .focus_visible(apply_focus_ring)
                             .flex_row()
                             .items_center()
                             .on_press(move || {
@@ -455,7 +475,7 @@ pub(crate) fn break_bar(
                                 })
                                 .tabular_nums()
                                 .number_of_lines(1)
-                                .text_size(px(11.5))
+                                .text_size(px(TEXT_XS))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(move || {
                                     if is_head() {

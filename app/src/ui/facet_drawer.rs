@@ -289,25 +289,29 @@ pub(crate) fn flow_list(
                             move || !list_filter.get().is_empty(),
                             move || {
                                 view()
+                                    .role(AccessibilityRole::Button)
                                     .absolute()
                                     .right(px(4.0))
                                     .top(px(4.0))
-                                    .w(px(22.0))
-                                    .h(px(22.0))
+                                    .w(px(ControlSize::Xs.height()))
+                                    .h(px(ControlSize::Xs.height()))
                                     .flex_shrink_0()
                                     .flex_row()
                                     .items_center()
                                     .justify_center()
-                                    .rounded(px(5.0))
+                                    .rounded(px(RADIUS_SM))
                                     .hover(|style| style.bg(bg_control_hover()))
-                                    .active(|style| style.opacity(0.75))
-                                    .cursor(Cursor::Pointer)
+                                    .active(|style| style.bg(bg_control_active()))
+                                    .transition_colors()
+                                    .duration(MOTION_INSTANT_MS)
+                                    .ease_out()
+                                    .focus_visible(apply_focus_ring)
                                     .label(tr("清空二次过滤", "Clear secondary filter"))
                                     .tooltip(label_tip("清空二次过滤", "Clear secondary filter"))
                                     .on_press(move || list_filter.set(String::new()))
                                     .child(
                                         control_text("×")
-                                            .text_size(px(14.0))
+                                            .text_size(px(TEXT_MD))
                                             .text_color(fg_secondary()),
                                     )
                             },
@@ -318,19 +322,23 @@ pub(crate) fn flow_list(
                     move || {
                         let merge_controls = merge_controls.clone();
                         view()
-                            .h(px(30.0))
+                            .role(AccessibilityRole::Button)
+                            .h(px(CONTROL_H))
                             .px_2()
                             .flex_shrink_0()
                             .flex_row()
                             .items_center()
                             .justify_center()
-                            .rounded(px(CONTROL_RADIUS))
+                            .rounded(px(RADIUS_MD))
                             .border_1()
                             .border_color(accent_blue_border())
                             .bg(accent_blue_soft())
                             .hover(|style| style.bg(accent_blue_soft_hover()))
-                            .active(|style| style.opacity(0.8))
-                            .cursor(Cursor::Pointer)
+                            .active(|style| style.bg(bg_control_active()))
+                            .transition_colors()
+                            .duration(MOTION_INSTANT_MS)
+                            .ease_out()
+                            .focus_visible(apply_focus_ring)
                             .label(tr("并入主过滤", "Merge"))
                             .tooltip(label_tip(
                                 "将当前二次筛选并入顶栏主过滤条件并可保存进预设",
@@ -347,7 +355,7 @@ pub(crate) fn flow_list(
                             })
                             .child(
                                 control_text(tr("并入主过滤", "Merge"))
-                                    .text_size(px(11.5))
+                                    .text_size(px(TEXT_SM))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(accent_blue_text()),
                             )
@@ -443,10 +451,11 @@ pub(crate) fn facet_quick_bar(
         let open_tab = move || facets_open.get() && facet_tab.get() == idx;
         let highlighted = move || open_tab() || filter.with(|f| facet_tab_has_filter(f, idx));
         view()
-            .h(px(22.0))
+            .role(AccessibilityRole::Button)
+            .h(px(ControlSize::Xs.height()))
             .px_2()
             .flex_shrink_0()
-            .rounded(px(5.0))
+            .rounded(px(RADIUS_SM))
             .flex_row()
             .items_center()
             .gap_1()
@@ -474,8 +483,11 @@ pub(crate) fn facet_quick_bar(
                     }
                 })
             })
-            .active(|style| style.opacity(0.8))
-            .cursor(Cursor::Pointer)
+            .active(|style| style.bg(bg_control_active()))
+            .transition_colors()
+            .duration(MOTION_INSTANT_MS)
+            .ease_out()
+            .focus_visible(apply_focus_ring)
             .on_press(move || {
                 if facets_open.get() && facet_tab.get() == idx {
                     facets_open.set(false);
@@ -490,7 +502,7 @@ pub(crate) fn facet_quick_bar(
                     format!("{} ({count})", t(ui_lang(langs), zh, en)).into()
                 })
                 .tabular_nums()
-                .text_size(px(11.0))
+                .text_size(px(TEXT_XS))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(move || {
                     if highlighted() {
@@ -501,7 +513,7 @@ pub(crate) fn facet_quick_bar(
                 }),
             )
             .child(glyph_px(
-                9.0,
+                10.0,
                 move || {
                     if open_tab() {
                         Glyph::ChevronUp
@@ -644,12 +656,12 @@ pub(crate) fn facet_drawer(
                                         px(20.0)
                                     }
                                 })
-                                .rounded(px(5.0))
+                                .rounded(px(RADIUS_SM))
                                 .bg(bg_code())
                                 .border_1()
                                 .border_color(border_control())
                                 .focus(|style| style.border_color(accent_blue()))
-                                .text_size(px(11.5))
+                                .text_size(px(TEXT_SM))
                                 .text_color(fg_primary())
                                 .on_change(move |text: &str| drawer_query.set(text.to_string())),
                         )
@@ -657,19 +669,24 @@ pub(crate) fn facet_drawer(
                             move || !drawer_query.get().is_empty(),
                             move || {
                                 view()
+                                    .role(AccessibilityRole::Button)
                                     .absolute()
                                     .right(px(2.0))
                                     .top(px(3.0))
                                     .w(px(18.0))
                                     .h(px(18.0))
-                                    .rounded(px(4.0))
+                                    .rounded(px(RADIUS_SM))
                                     .flex_row()
                                     .items_center()
                                     .justify_center()
-                                    .cursor(Cursor::Pointer)
                                     .hover(|s| s.bg(bg_control_hover()))
+                                    .active(|s| s.bg(bg_control_active()))
+                                    .transition_colors()
+                                    .duration(MOTION_INSTANT_MS)
+                                    .ease_out()
+                                    .focus_visible(apply_focus_ring)
                                     .on_press(move || drawer_query.set(String::new()))
-                                    .child(text("×").text_size(px(12.0)).text_color(fg_muted()))
+                                    .child(text("×").text_size(px(TEXT_SM)).text_color(fg_muted()))
                             },
                         )),
                 )
@@ -682,20 +699,25 @@ pub(crate) fn facet_drawer(
                         }
                     })
                     .flex_shrink_0()
-                    .text_size(px(11.0))
+                    .text_size(px(TEXT_XS))
                     .text_color(fg_muted()),
                 )
                 .child(
                     view()
-                        .w(px(22.0))
-                        .h(px(22.0))
+                        .role(AccessibilityRole::Button)
+                        .w(px(ControlSize::Xs.height()))
+                        .h(px(ControlSize::Xs.height()))
                         .flex_shrink_0()
-                        .rounded(px(4.0))
+                        .rounded(px(RADIUS_SM))
                         .flex_row()
                         .items_center()
                         .justify_center()
-                        .cursor(Cursor::Pointer)
                         .hover(|s| s.bg(bg_control_hover()))
+                        .active(|s| s.bg(bg_control_active()))
+                        .transition_colors()
+                        .duration(MOTION_INSTANT_MS)
+                        .ease_out()
+                        .focus_visible(apply_focus_ring)
                         .on_press(move || facets_open.set(false))
                         .child(glyph_px(10.0, || Glyph::Close, || color(fg_muted()))),
                 ),
@@ -709,7 +731,7 @@ pub(crate) fn facet_drawer(
                             "暂无捕获到的域名或应用",
                             "No captured domains or apps yet",
                         ))
-                        .text_size(px(11.5))
+                        .text_size(px(TEXT_SM))
                         .text_color(fg_muted()),
                     )
                 },
@@ -767,9 +789,10 @@ pub(crate) fn drawer_quick_chip(
 ) -> impl IntoElement {
     let is_active = computed(move || filter_has_token(&filter.get(), aliases));
     view()
-        .h(px(22.0))
+        .role(AccessibilityRole::Button)
+        .h(px(ControlSize::Xs.height()))
         .px_1p5()
-        .rounded(px(5.0))
+        .rounded(px(RADIUS_SM))
         .border_1()
         .border_color(move || {
             if is_active.get() {
@@ -794,28 +817,33 @@ pub(crate) fn drawer_quick_chip(
                 }
             })
         })
-        .active(|style| style.opacity(0.8))
-        .cursor(Cursor::Pointer)
+        .active(|style| style.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .label(tr(zh, en))
         .tooltip(label_tip(tip_zh, tip_en))
         .flex_row()
         .items_center()
-        .gap(px(3.5))
+        .gap_1()
         .on_press(move || filter.set(toggle_filter_chip(&filter.get(), token, aliases)))
-        .child(view().w(px(4.5)).h(px(4.5)).rounded_full().bg(move || {
+        .child(view().w(px(5.0)).h(px(5.0)).rounded_full().bg(move || {
             if is_active.get() {
                 accent_blue()
             } else {
                 fg_muted()
             }
         }))
-        .child(compact_control_text(tr(zh, en), 11.0).text_color(move || {
-            if is_active.get() {
-                accent_blue_text()
-            } else {
-                fg_secondary()
-            }
-        }))
+        .child(
+            compact_control_text(tr(zh, en), TEXT_XS).text_color(move || {
+                if is_active.get() {
+                    accent_blue_text()
+                } else {
+                    fg_secondary()
+                }
+            }),
+        )
 }
 
 pub(crate) const JSON_ALIASES: &[&str] = &["type:json", "ct:json"];

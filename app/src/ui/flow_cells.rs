@@ -79,7 +79,6 @@ pub(crate) fn flow_header(
         .gap_0p5()
         .flex_row()
         .items_center()
-        .cursor(Cursor::Pointer)
         .overflow_hidden();
     let row = if align_right { row.justify_end() } else { row };
     row.child(
@@ -100,7 +99,7 @@ pub(crate) fn flow_header(
     )
     .child(when(is_sorted, move || {
         glyph_px(
-            10.5,
+            10.0,
             move || {
                 if sort.get().is_some_and(|current| current.desc) {
                     Glyph::Chevron
@@ -197,7 +196,7 @@ pub(crate) fn method_cell(
             view()
                 .px(px(5.0))
                 .py_0p5()
-                .rounded(px(4.0))
+                .rounded(px(RADIUS_SM))
                 .bg(move || {
                     rows.with(|rows| {
                         rows.get(index)
@@ -678,7 +677,7 @@ pub(crate) fn path_cell(
                     .h(move || scaled_px(18.0))
                     .mr(px(6.0))
                     .px(px(4.0))
-                    .rounded(px(4.0))
+                    .rounded(px(RADIUS_SM))
                     .flex_shrink_0()
                     .flex_row()
                     .items_center()
@@ -712,7 +711,7 @@ pub(crate) fn path_cell(
                     .h(move || scaled_px(18.0))
                     .mr(px(6.0))
                     .px(px(5.0))
-                    .rounded(px(4.0))
+                    .rounded(px(RADIUS_SM))
                     .flex_shrink_0()
                     .flex_row()
                     .items_center()
@@ -829,7 +828,7 @@ pub(crate) fn cell_tip(full: impl Fn() -> String + 'static) -> impl IntoElement 
         .max_w(move || px((window().width.0 - 16.0).clamp(180.0, 420.0)))
         .px_2p5()
         .py_1p5()
-        .rounded(px(6.0))
+        .rounded(px(RADIUS_MD))
         .border_1()
         .border_color(border_strong())
         .bg(bg_card())

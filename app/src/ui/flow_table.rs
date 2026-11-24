@@ -65,7 +65,7 @@ pub(crate) fn list_empty(state: EmptyFilterState) -> impl IntoElement {
                 }
             })
             .text_center()
-            .text_size(px(13.5))
+            .text_size(px(TEXT_MD))
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(fg_secondary()),
         )
@@ -85,7 +85,7 @@ pub(crate) fn list_empty(state: EmptyFilterState) -> impl IntoElement {
                 }
             })
             .text_center()
-            .text_size(px(12.0))
+            .text_size(px(TEXT_SM))
             .text_color(fg_muted()),
         )
         .child(when(
@@ -120,18 +120,22 @@ fn empty_clear_filter_button(
     on_clear_primary: Option<Rc<dyn Fn()>>,
 ) -> impl IntoElement {
     view()
-        .h(px(28.0))
+        .role(AccessibilityRole::Button)
+        .h(px(CONTROL_H))
         .px_3()
         .flex_row()
         .items_center()
         .justify_center()
-        .rounded(px(CONTROL_RADIUS))
+        .rounded(px(RADIUS_MD))
         .border_1()
         .border_color(accent_blue_border())
         .bg(accent_blue_soft())
         .hover(|style| style.bg(accent_blue_soft_hover()))
-        .active(|style| style.opacity(0.8))
-        .cursor(Cursor::Pointer)
+        .active(|style| style.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .label(tr("清空过滤", "Clear filter"))
         .on_press(move || {
             if !list_filter.get_untracked().is_empty() {
@@ -146,7 +150,7 @@ fn empty_clear_filter_button(
         })
         .child(
             control_text(tr("清空过滤", "Clear filter"))
-                .text_size(px(12.0))
+                .text_size(px(TEXT_SM))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(accent_blue_text()),
         )
@@ -154,23 +158,27 @@ fn empty_clear_filter_button(
 
 fn empty_pause_primary_button(filter_enabled: Signal<bool>) -> impl IntoElement {
     view()
-        .h(px(28.0))
+        .role(AccessibilityRole::Button)
+        .h(px(CONTROL_H))
         .px_3()
         .flex_row()
         .items_center()
         .justify_center()
-        .rounded(px(CONTROL_RADIUS))
+        .rounded(px(RADIUS_MD))
         .border_1()
         .border_color(border_control())
         .bg(bg_control())
         .hover(|style| style.bg(bg_control_hover()))
-        .active(|style| style.opacity(0.8))
-        .cursor(Cursor::Pointer)
+        .active(|style| style.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .label(tr("暂停主过滤", "Pause primary filter"))
         .on_press(move || filter_enabled.set(false))
         .child(
             control_text(tr("暂停主过滤", "Pause primary filter"))
-                .text_size(px(12.0))
+                .text_size(px(TEXT_SM))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(fg_secondary()),
         )

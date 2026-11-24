@@ -150,7 +150,7 @@ pub(crate) fn facet_sidebar(
                                                 ))
                                                 .placeholder_color(move || color(fg_muted()))
                                                 .w_full()
-                                                .h(px(28.0))
+                                                .h(px(CONTROL_H))
                                                 .pl_2()
                                                 .pr(move || {
                                                     if side_query.get().is_empty() {
@@ -159,12 +159,12 @@ pub(crate) fn facet_sidebar(
                                                         px(24.0)
                                                     }
                                                 })
-                                                .rounded(px(6.0))
+                                                .rounded(px(RADIUS_MD))
                                                 .bg(bg_code())
                                                 .border_1()
                                                 .border_color(border_control())
                                                 .focus(|style| style.border_color(accent_blue()))
-                                                .text_size(px(11.5))
+                                                .text_size(px(TEXT_SM))
                                                 .text_color(fg_primary())
                                                 .on_change(move |text: &str| {
                                                     side_query.set(text.to_string())
@@ -174,21 +174,26 @@ pub(crate) fn facet_sidebar(
                                             move || !side_query.get().is_empty(),
                                             move || {
                                                 view()
+                                                    .role(AccessibilityRole::Button)
                                                     .absolute()
                                                     .right(px(3.0))
                                                     .top(px(3.0))
-                                                    .w(px(22.0))
-                                                    .h(px(22.0))
-                                                    .rounded(px(4.0))
+                                                    .w(px(ControlSize::Xs.height()))
+                                                    .h(px(ControlSize::Xs.height()))
+                                                    .rounded(px(RADIUS_SM))
                                                     .flex_row()
                                                     .items_center()
                                                     .justify_center()
-                                                    .cursor(Cursor::Pointer)
                                                     .hover(|s| s.bg(bg_control_hover()))
+                                                    .active(|s| s.bg(bg_control_active()))
+                                                    .transition_colors()
+                                                    .duration(MOTION_INSTANT_MS)
+                                                    .ease_out()
+                                                    .focus_visible(apply_focus_ring)
                                                     .on_press(move || side_query.set(String::new()))
                                                     .child(
                                                         text("×")
-                                                            .text_size(px(13.0))
+                                                            .text_size(px(TEXT_MD))
                                                             .text_color(fg_muted()),
                                                     )
                                             },
@@ -346,15 +351,20 @@ fn sidebar_section_header(
 ) -> impl IntoElement {
     let langs = ui_langs();
     view()
+        .role(AccessibilityRole::Button)
         .w_full()
         .h(px(24.0))
         .px_1p5()
-        .rounded(px(5.0))
+        .rounded(px(RADIUS_SM))
         .flex_row()
         .items_center()
         .gap_1()
-        .cursor(Cursor::Pointer)
         .hover(|s| s.bg(bg_control_hover()))
+        .active(|s| s.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .on_press(move || open.update(|v| *v = !*v))
         .child(glyph_px(
             10.0,
@@ -372,7 +382,7 @@ fn sidebar_section_header(
                 .flex_1()
                 .min_w(px(0.0))
                 .number_of_lines(1)
-                .text_size(px(11.0))
+                .text_size(px(TEXT_XS))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(fg_muted()),
         )
@@ -382,7 +392,7 @@ fn sidebar_section_header(
                 present::format_thousands(count() as u64).into()
             })
             .tabular_nums()
-            .text_size(px(10.5))
+            .text_size(px(TEXT_XS))
             .text_color(fg_muted()),
         )
 }
@@ -395,7 +405,7 @@ fn sidebar_error_pill(errors: impl Fn() -> usize + Copy + 'static) -> impl IntoE
                 .h(px(15.0))
                 .px_1()
                 .flex_shrink_0()
-                .rounded(px(3.5))
+                .rounded(px(RADIUS_SM))
                 .bg(status_err_bg())
                 .flex_row()
                 .items_center()
@@ -405,7 +415,7 @@ fn sidebar_error_pill(errors: impl Fn() -> usize + Copy + 'static) -> impl IntoE
                         present::format_thousands(errors() as u64).into()
                     })
                     .tabular_nums()
-                    .text_size(px(9.5))
+                    .text_size(px(TEXT_XS))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(status_err_fg()),
                 )
@@ -430,15 +440,15 @@ pub(crate) fn sidebar_app_row(
             .into()
     };
     view()
+        .role(AccessibilityRole::Button)
         .w_full()
         .h(px(25.0))
         .pl_3()
         .pr_1p5()
-        .rounded(px(5.0))
+        .rounded(px(RADIUS_SM))
         .flex_row()
         .items_center()
         .gap_1p5()
-        .cursor(Cursor::Pointer)
         .bg(move || {
             if is_active() {
                 accent_blue_soft()
@@ -455,22 +465,17 @@ pub(crate) fn sidebar_app_row(
                 }
             })
         })
+        .active(|s| s.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .tooltip(
-            tooltip().child(
-                view()
-                    .max_w(px(360.0))
-                    .px_2()
-                    .py_1()
-                    .rounded(px(6.0))
-                    .bg(bg_card())
-                    .border_1()
-                    .border_color(border_strong())
-                    .child(
-                        text(display_label)
-                            .text_size(px(11.5))
-                            .text_color(fg_primary()),
-                    ),
-            ),
+            tooltip().child(ui_tooltip_surface(
+                text(display_label)
+                    .text_size(px(TEXT_SM))
+                    .text_color(fg_primary()),
+            )),
         )
         .on_press(move || {
             let tok = entry.with(|e| e.token.clone());
@@ -483,7 +488,7 @@ pub(crate) fn sidebar_app_row(
                 .min_w(px(0.0))
                 .number_of_lines(1)
                 .text_overflow(EllipsizeMode::Tail)
-                .text_size(px(11.5))
+                .text_size(px(TEXT_SM))
                 .text_color(move || {
                     if is_active() {
                         accent_blue_text()
@@ -500,7 +505,7 @@ pub(crate) fn sidebar_app_row(
                     .into()
             })
             .tabular_nums()
-            .text_size(px(10.5))
+            .text_size(px(TEXT_XS))
             .text_color(fg_muted()),
         )
 }
@@ -543,7 +548,7 @@ pub(crate) fn sidebar_domain_group_view(
                     .h(px(24.0))
                     .pl_1()
                     .pr_1()
-                    .rounded(px(5.0))
+                    .rounded(px(RADIUS_SM))
                     .flex_row()
                     .items_center()
                     .gap_0p5()
@@ -567,15 +572,20 @@ pub(crate) fn sidebar_domain_group_view(
                     })
                     .child(
                         view()
+                            .role(AccessibilityRole::Button)
                             .w(px(18.0))
-                            .h(px(22.0))
+                            .h(px(ControlSize::Xs.height()))
                             .flex_shrink_0()
-                            .rounded(px(4.0))
+                            .rounded(px(RADIUS_SM))
                             .flex_row()
                             .items_center()
                             .justify_center()
-                            .cursor(Cursor::Pointer)
                             .hover(|s| s.bg(bg_control_hover()))
+                            .active(|s| s.bg(bg_control_active()))
+                            .transition_colors()
+                            .duration(MOTION_INSTANT_MS)
+                            .ease_out()
+                            .focus_visible(apply_focus_ring)
                             .on_press(move || {
                                 let root = group.with(|g| g.root.clone());
                                 collapsed_roots.update(|set| {
@@ -585,7 +595,7 @@ pub(crate) fn sidebar_domain_group_view(
                                 });
                             })
                             .child(glyph_px(
-                                9.5,
+                                10.0,
                                 move || {
                                     if is_expanded() {
                                         Glyph::Chevron
@@ -598,13 +608,19 @@ pub(crate) fn sidebar_domain_group_view(
                     )
                     .child(
                         view()
+                            .role(AccessibilityRole::Button)
                             .flex_1()
                             .min_w(px(0.0))
                             .h_full()
                             .flex_row()
                             .items_center()
                             .gap_1()
-                            .cursor(Cursor::Pointer)
+                            .rounded(px(RADIUS_SM))
+                            .active(|s| s.bg(bg_control_active()))
+                            .transition_colors()
+                            .duration(MOTION_INSTANT_MS)
+                            .ease_out()
+                            .focus_visible(apply_focus_ring)
                             .tooltip(label_tip(
                                 "点击只看此根域及其子域",
                                 "Click to filter this root domain & subdomains",
@@ -621,7 +637,7 @@ pub(crate) fn sidebar_domain_group_view(
                                 .min_w(px(0.0))
                                 .number_of_lines(1)
                                 .text_overflow(EllipsizeMode::Middle)
-                                .text_size(px(11.5))
+                                .text_size(px(TEXT_SM))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(move || {
                                     if root_active() {
@@ -641,27 +657,32 @@ pub(crate) fn sidebar_domain_group_view(
                                         .into()
                                 })
                                 .tabular_nums()
-                                .text_size(px(10.5))
+                                .text_size(px(TEXT_XS))
                                 .text_color(fg_muted()),
                             ),
                     )
                     .child(
                         view()
+                            .role(AccessibilityRole::Button)
                             .w(px(16.0))
                             .h(px(16.0))
                             .flex_shrink_0()
-                            .rounded(px(3.0))
+                            .rounded(px(RADIUS_SM))
                             .flex_row()
                             .items_center()
                             .justify_center()
-                            .cursor(Cursor::Pointer)
                             .hover(|s| s.bg(bg_control_hover()))
+                            .active(|s| s.bg(bg_control_active()))
+                            .transition_colors()
+                            .duration(MOTION_INSTANT_MS)
+                            .ease_out()
+                            .focus_visible(apply_focus_ring)
                             .tooltip(label_tip("屏蔽整组域名", "Mute root domain group"))
                             .on_press(move || {
                                 let root = group.with(|g| g.root.clone());
                                 filter.set(toggle_mute_facet(&filter.get(), &root));
                             })
-                            .child(text("×").text_size(px(11.5)).text_color(move || {
+                            .child(text("×").text_size(px(TEXT_SM)).text_color(move || {
                                 if root_muted() {
                                     status_err_fg()
                                 } else {
@@ -700,7 +721,7 @@ fn sidebar_domain_leaf_row(
         .h(px(25.0))
         .pl(if indented { px(18.0) } else { px(10.0) })
         .pr_1()
-        .rounded(px(5.0))
+        .rounded(px(RADIUS_SM))
         .flex_row()
         .items_center()
         .gap_1()
@@ -724,31 +745,25 @@ fn sidebar_domain_leaf_row(
         })
         .child(
             view()
+                .role(AccessibilityRole::Button)
                 .flex_1()
                 .min_w(px(0.0))
                 .h_full()
                 .flex_row()
                 .items_center()
                 .gap_1p5()
-                .cursor(Cursor::Pointer)
+                .rounded(px(RADIUS_SM))
+                .active(|s| s.bg(bg_control_active()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .focus_visible(apply_focus_ring)
                 .tooltip(
-                    tooltip().child(
-                        view()
-                            .max_w(px(360.0))
-                            .px_2()
-                            .py_1()
-                            .rounded(px(6.0))
-                            .bg(bg_card())
-                            .border_1()
-                            .border_color(border_strong())
-                            .child(
-                                mono(move || -> SharedString {
-                                    entry.with(|e| e.label.clone()).into()
-                                })
-                                .text_size(px(11.5))
-                                .text_color(fg_primary()),
-                            ),
-                    ),
+                    tooltip().child(ui_tooltip_surface(
+                        mono(move || -> SharedString { entry.with(|e| e.label.clone()).into() })
+                            .text_size(px(TEXT_SM))
+                            .text_color(fg_primary()),
+                    )),
                 )
                 .on_press(move || {
                     let tok = entry.with(|e| e.token.clone());
@@ -756,8 +771,8 @@ fn sidebar_domain_leaf_row(
                 })
                 .child(
                     view()
-                        .w(px(5.0))
-                        .h(px(5.0))
+                        .w(px(6.0))
+                        .h(px(6.0))
                         .rounded_full()
                         .flex_shrink_0()
                         .bg(move || {
@@ -776,7 +791,7 @@ fn sidebar_domain_leaf_row(
                         .min_w(px(0.0))
                         .number_of_lines(1)
                         .text_overflow(EllipsizeMode::Middle)
-                        .text_size(px(11.5))
+                        .text_size(px(TEXT_SM))
                         .text_color(move || {
                             if is_active() {
                                 accent_blue_text()
@@ -795,27 +810,32 @@ fn sidebar_domain_leaf_row(
                             .into()
                     })
                     .tabular_nums()
-                    .text_size(px(10.5))
+                    .text_size(px(TEXT_XS))
                     .text_color(fg_muted()),
                 ),
         )
         .child(
             view()
+                .role(AccessibilityRole::Button)
                 .w(px(16.0))
                 .h(px(16.0))
                 .flex_shrink_0()
-                .rounded(px(3.0))
+                .rounded(px(RADIUS_SM))
                 .flex_row()
                 .items_center()
                 .justify_center()
-                .cursor(Cursor::Pointer)
                 .hover(|s| s.bg(bg_control_hover()))
+                .active(|s| s.bg(bg_control_active()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .focus_visible(apply_focus_ring)
                 .tooltip(label_tip("屏蔽此域名", "Mute this domain"))
                 .on_press(move || {
                     let tok = entry.with(|e| e.token.clone());
                     filter.set(toggle_mute_facet(&filter.get(), &tok));
                 })
-                .child(text("×").text_size(px(11.5)).text_color(move || {
+                .child(text("×").text_size(px(TEXT_SM)).text_color(move || {
                     if is_muted() {
                         status_err_fg()
                     } else {

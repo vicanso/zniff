@@ -351,7 +351,7 @@ pub(crate) fn onboarding_checklist(props: &OnboardingProps) -> impl IntoElement 
                     Lang::En => format!("{done}/4 ready").into(),
                 }
             })
-            .text_size(px(11.0))
+            .text_size(px(TEXT_XS))
             .font_weight(FontWeight::MEDIUM)
             .text_color(fg_muted()),
         );
@@ -362,7 +362,7 @@ pub(crate) fn onboarding_checklist(props: &OnboardingProps) -> impl IntoElement 
         .gap_2()
         .px_3p5()
         .py_3()
-        .rounded(px(8.0))
+        .rounded(px(RADIUS_LG))
         .border_1()
         .border_color(border_strong())
         .bg(bg_card())
@@ -417,7 +417,7 @@ fn checklist_step_row(
                         );
                         steps[index].title.clone().into()
                     })
-                    .text_size(px(12.5))
+                    .text_size(px(TEXT_MD))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(fg_primary()),
                 )
@@ -430,7 +430,7 @@ fn checklist_step_row(
                         );
                         steps[index].hint.clone().into()
                     })
-                    .text_size(px(11.5))
+                    .text_size(px(TEXT_XS))
                     .text_color(move || {
                         let lang = ui_lang(langs);
                         let steps = compute_onboarding_checklist(
@@ -526,7 +526,7 @@ fn checklist_step_badge(props: OnboardingProps, index: usize) -> impl IntoElemen
                 )
                 .otherwise(move || {
                     mono(num.clone())
-                        .text_size(px(10.5))
+                        .text_size(px(TEXT_XS))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(fg_muted())
                 })
@@ -635,14 +635,14 @@ fn checklist_action_chip(
 ) -> impl IntoElement {
     nsh_base::button()
         .on_press(on_press)
-        .h(px(24.0))
+        .h(px(ControlSize::Xs.height()))
         .px_2()
         .flex_row()
         .items_center()
-        .rounded(px(5.0))
+        .rounded(px(RADIUS_SM))
         .border_1()
         .transition_colors()
-        .duration(120.0)
+        .duration(MOTION_INSTANT_MS)
         .ease_out()
         .border_color(if accent {
             accent_blue_border()
@@ -661,16 +661,12 @@ fn checklist_action_chip(
                 bg_control_hover()
             })
         })
-        .active(|s| s.opacity(0.85))
-        .focus_visible(|s| {
-            s.outline(px(2.0))
-                .outline_color(accent_blue())
-                .outline_offset(px(2.0))
-        })
+        .active(|s| s.bg(bg_control_active()))
+        .focus_visible(apply_focus_ring)
         .child(
             text(label)
                 .number_of_lines(1)
-                .text_size(px(11.0))
+                .text_size(px(TEXT_XS))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(if accent {
                     accent_blue_text()

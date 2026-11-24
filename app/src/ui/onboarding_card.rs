@@ -71,7 +71,7 @@ fn onboarding_header(props: &OnboardingProps) -> impl IntoElement {
                 .gap_2()
                 .child(
                     text(tr("快速开始抓包", "Quick Start"))
-                        .text_size(px(16.0))
+                        .text_size(px(TEXT_LG))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(fg_primary()),
                 )
@@ -92,7 +92,7 @@ fn onboarding_header(props: &OnboardingProps) -> impl IntoElement {
                             .child(
                                 mono(move || SharedString::from(listen.get()))
                                     .number_of_lines(1)
-                                    .text_size(px(11.5))
+                                    .text_size(px(TEXT_XS))
                                     .text_color(fg_muted()),
                             )
                     },
@@ -103,7 +103,7 @@ fn onboarding_header(props: &OnboardingProps) -> impl IntoElement {
                 "选择免配入口即可捕获流量，无需修改全局代理设置。",
                 "Pick a zero-config entry to capture traffic without touching global proxy settings.",
             ))
-            .text_size(px(12.5))
+            .text_size(px(TEXT_SM))
             .text_color(fg_muted()),
         )
 }
@@ -370,7 +370,7 @@ fn interactive_surface_button(
         .items_center()
         .border_1()
         .transition_colors()
-        .duration(120.0)
+        .duration(MOTION_INSTANT_MS)
         .ease_out()
         .border_color(move || {
             if active_border() {
@@ -409,15 +409,11 @@ fn interactive_surface_button(
                 if active_press() {
                     accent_blue_soft_hover()
                 } else {
-                    bg_control_hover()
+                    bg_control_active()
                 }
             })
         })
-        .focus_visible(|s| {
-            s.outline(px(2.0))
-                .outline_color(accent_blue())
-                .outline_offset(px(2.0))
-        })
+        .focus_visible(apply_focus_ring)
 }
 
 fn onboarding_primary_card(
@@ -437,12 +433,12 @@ fn onboarding_primary_card(
         .px_3p5()
         .py_3()
         .gap_3()
-        .rounded(px(8.0))
+        .rounded(px(RADIUS_LG))
         .child(
             view()
                 .w(px(32.0))
                 .h(px(32.0))
-                .rounded(px(7.0))
+                .rounded(px(RADIUS_MD))
                 .flex_shrink_0()
                 .items_center()
                 .justify_center()
@@ -454,7 +450,7 @@ fn onboarding_primary_card(
                     }
                 })
                 .child(glyph_px(
-                    15.0,
+                    16.0,
                     move || icon,
                     move || {
                         color(if active_icon() {
@@ -482,7 +478,7 @@ fn onboarding_card_labels(
             text(title)
                 .number_of_lines(1)
                 .text_overflow(EllipsizeMode::Tail)
-                .text_size(px(13.0))
+                .text_size(px(TEXT_MD))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(move || {
                     if active() {
@@ -496,7 +492,7 @@ fn onboarding_card_labels(
             text(subtitle)
                 .number_of_lines(1)
                 .text_overflow(EllipsizeMode::Tail)
-                .text_size(px(11.5))
+                .text_size(px(TEXT_XS))
                 .text_color(fg_muted()),
         )
 }
@@ -513,7 +509,7 @@ fn onboarding_secondary_tile(
         .px_3()
         .py_2p5()
         .gap_2p5()
-        .rounded(px(8.0))
+        .rounded(px(RADIUS_MD))
         .child(
             view()
                 .w(px(18.0))
@@ -537,12 +533,12 @@ fn onboarding_utility_chip(
     let active_text = active.clone();
 
     interactive_surface_button(bg_card(), border_control(), active, on_press)
-        .h(px(28.0))
+        .h(px(CONTROL_H))
         .px_2p5()
         .gap_1p5()
-        .rounded(px(6.0))
+        .rounded(px(RADIUS_MD))
         .child(glyph_px(
-            12.5,
+            12.0,
             move || icon,
             move || {
                 color(if active_icon() {
@@ -555,7 +551,7 @@ fn onboarding_utility_chip(
         .child(
             text(label)
                 .number_of_lines(1)
-                .text_size(px(12.0))
+                .text_size(px(TEXT_SM))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(move || {
                     if active_text() {
@@ -584,5 +580,5 @@ fn onboarding_footer_hint() -> impl IntoElement {
         .pt_3()
         .border_t_1()
         .border_t_color(border_subtle())
-        .child(text(tip).text_size(px(11.5)).text_color(fg_muted()))
+        .child(text(tip).text_size(px(TEXT_XS)).text_color(fg_muted()))
 }

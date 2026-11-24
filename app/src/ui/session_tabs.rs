@@ -474,9 +474,10 @@ fn session_tab_chip(props: SessionTabBarProps, item: ReadSignal<TabSummary>) -> 
     let close_props = props;
 
     view()
-        .h(px(24.0))
+        .role(AccessibilityRole::Tab)
+        .h(px(ControlSize::Xs.height()))
         .px_2()
-        .rounded(px(6.0))
+        .rounded(px(RADIUS_MD))
         .border_1()
         .border_color(move || {
             if active_tab.get() == tab_id {
@@ -493,11 +494,15 @@ fn session_tab_chip(props: SessionTabBarProps, item: ReadSignal<TabSummary>) -> 
             }
         })
         .hover(|s| s.bg(bg_control_hover()))
+        .active(|s| s.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .flex_shrink_0()
         .flex_row()
         .items_center()
         .gap_1p5()
-        .cursor(Cursor::Pointer)
         .on_press(move || switch_active_tab(&switch_props, tab_id))
         .child(when(
             move || !is_ro,
@@ -525,7 +530,7 @@ fn session_tab_chip(props: SessionTabBarProps, item: ReadSignal<TabSummary>) -> 
             .max_w(px(172.0))
             .number_of_lines(1)
             .text_overflow(EllipsizeMode::Middle)
-            .text_size(px(11.5))
+            .text_size(px(TEXT_SM))
             .font_weight(FontWeight::MEDIUM)
             .text_color(move || {
                 if active_tab.get() == tab_id {
@@ -541,11 +546,11 @@ fn session_tab_chip(props: SessionTabBarProps, item: ReadSignal<TabSummary>) -> 
                 view()
                     .px_1()
                     .py_0p5()
-                    .rounded(px(4.0))
+                    .rounded(px(RADIUS_SM))
                     .bg(bg_control())
                     .child(
                         text(tr("只读", "RO"))
-                            .text_size(px(9.5))
+                            .text_size(px(TEXT_XS))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(fg_muted()),
                     )
@@ -556,16 +561,21 @@ fn session_tab_chip(props: SessionTabBarProps, item: ReadSignal<TabSummary>) -> 
             move || {
                 let close_props = close_props.clone();
                 view()
+                    .role(AccessibilityRole::Button)
                     .w(px(16.0))
                     .h(px(16.0))
-                    .rounded(px(4.0))
+                    .rounded(px(RADIUS_SM))
                     .items_center()
                     .justify_center()
                     .hover(|s| s.bg(bg_control_hover()))
-                    .cursor(Cursor::Pointer)
+                    .active(|s| s.bg(bg_control_active()))
+                    .transition_colors()
+                    .duration(MOTION_INSTANT_MS)
+                    .ease_out()
+                    .focus_visible(apply_focus_ring)
                     .label(tr("关闭标签", "Close tab"))
                     .on_press(move || close_imported_tab(&close_props, tab_id))
-                    .child(glyph_px(9.0, || Glyph::Close, || color(fg_muted())))
+                    .child(glyph_px(10.0, || Glyph::Close, || color(fg_muted())))
             },
         ))
 }

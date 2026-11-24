@@ -270,23 +270,13 @@ fn preset_sync_status(
         .gap_1p5()
         .overflow_hidden()
         .tooltip(
-            tooltip().child(
-                view()
-                    .max_w(px(360.0))
-                    .px_2p5()
-                    .py_1p5()
-                    .rounded(px(6.0))
-                    .bg(bg_card())
-                    .border_1()
-                    .border_color(border_strong())
-                    .child(
-                        text(move || -> SharedString {
-                            state.with(|s| sync_status_text(s, ui_lang(langs))).into()
-                        })
-                        .text_size(px(11.5))
-                        .text_color(fg_primary()),
-                    ),
-            ),
+            tooltip().child(ui_tooltip_surface(
+                text(move || -> SharedString {
+                    state.with(|s| sync_status_text(s, ui_lang(langs))).into()
+                })
+                .text_size(px(TEXT_SM))
+                .text_color(fg_primary()),
+            )),
         )
         .child(when(is_dirty, move || {
             view()
@@ -304,7 +294,7 @@ fn preset_sync_status(
             .min_w(px(0.0))
             .number_of_lines(1)
             .text_overflow(EllipsizeMode::Tail)
-            .text_size(px(11.5))
+            .text_size(px(TEXT_XS))
             .text_color(move || {
                 if is_dirty() {
                     fg_secondary()
@@ -324,10 +314,11 @@ fn preset_sync_action_button(
 ) -> impl IntoElement {
     let is_dirty = move || state.with(PresetSaveState::is_dirty);
     view()
-        .h(px(26.0))
+        .role(AccessibilityRole::Button)
+        .h(px(CONTROL_H))
         .px_2p5()
         .flex_shrink_0()
-        .rounded(px(6.0))
+        .rounded(px(RADIUS_MD))
         .border_1()
         .border_color(move || {
             if is_dirty() {
@@ -352,11 +343,21 @@ fn preset_sync_action_button(
                 }
             })
         })
-        .active(|style| style.opacity(move || if is_dirty() { 0.85_f32 } else { 0.8_f32 }))
+        .active(|style| {
+            style.bg(move || {
+                if is_dirty() {
+                    accent_blue_active()
+                } else {
+                    bg_control_active()
+                }
+            })
+        })
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
         .flex_row()
         .items_center()
         .justify_center()
-        .cursor(Cursor::Pointer)
         .focus_visible(apply_focus_ring)
         .label(move || -> SharedString {
             state.with(|s| sync_button_label(s, ui_lang(langs))).into()
@@ -376,7 +377,7 @@ fn preset_sync_action_button(
             text(move || -> SharedString {
                 state.with(|s| sync_button_label(s, ui_lang(langs))).into()
             })
-            .text_size(px(11.5))
+            .text_size(px(TEXT_SM))
             .font_weight(FontWeight::MEDIUM)
             .text_color(move || {
                 if is_dirty() {

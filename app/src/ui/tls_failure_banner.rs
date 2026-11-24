@@ -164,7 +164,7 @@ fn tls_failure_banner_view(signals: TlsFailureBannerSignals) -> View {
             .min_w(px(0.0))
             .number_of_lines(2)
             .text_overflow(EllipsizeMode::Tail)
-            .text_size(px(12.0))
+            .text_size(px(TEXT_SM))
             .font_weight(FontWeight::MEDIUM)
             .text_color(status_warn_fg()),
         );
@@ -259,14 +259,14 @@ fn tls_banner_button(
 ) -> impl IntoElement {
     nsh_base::button()
         .on_press(on_press)
-        .h(px(24.0))
+        .h(px(ControlSize::Xs.height()))
         .px_2()
         .flex_row()
         .items_center()
-        .rounded(px(5.0))
+        .rounded(px(RADIUS_SM))
         .border_1()
         .transition_colors()
-        .duration(120.0)
+        .duration(MOTION_INSTANT_MS)
         .ease_out()
         .border_color(if primary {
             accent_blue()
@@ -281,16 +281,18 @@ fn tls_banner_button(
                 bg_control()
             })
         })
-        .active(|s| s.opacity(0.85))
-        .focus_visible(|s| {
-            s.outline(px(2.0))
-                .outline_color(accent_blue())
-                .outline_offset(px(2.0))
+        .active(move |s| {
+            s.bg(if primary {
+                accent_blue_active()
+            } else {
+                bg_control_active()
+            })
         })
+        .focus_visible(apply_focus_ring)
         .child(
             text(label)
                 .number_of_lines(1)
-                .text_size(px(11.5))
+                .text_size(px(TEXT_XS))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(if primary {
                     fg_on_accent()
