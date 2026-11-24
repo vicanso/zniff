@@ -1255,6 +1255,158 @@ pub(crate) fn save_config(change: impl FnOnce(&mut config::Config)) -> std::io::
 }
 
 #[cfg(target_arch = "wasm32")]
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+#[serde(default)]
+struct WebLocalPrefs {
+    language: Option<String>,
+    theme_mode: Option<config::ThemeMode>,
+    ui_zoom: Option<u16>,
+    layout_mode: Option<config::LayoutMode>,
+    sidebar_collapsed: Option<bool>,
+    sidebar_width: Option<u32>,
+    list_width: Option<u32>,
+    list_height: Option<u32>,
+    default_pretty: Option<bool>,
+    default_json_tree: Option<bool>,
+    onboarding_strip_dismissed: Option<bool>,
+    show_gap: Option<bool>,
+    show_elapsed: Option<bool>,
+    show_host: Option<bool>,
+    show_client_ip: Option<bool>,
+    show_size: Option<bool>,
+    show_full_url: Option<bool>,
+    folded_cards: Option<Vec<String>>,
+    column_widths: Option<std::collections::HashMap<String, u32>>,
+    column_widths_top_bottom: Option<std::collections::HashMap<String, u32>>,
+    column_order: Option<Vec<String>>,
+    watch_rules: Option<Vec<config::WatchRule>>,
+    compose_history: Option<Vec<config::ComposeHistoryItem>>,
+}
+
+#[cfg(target_arch = "wasm32")]
+const WEB_LOCAL_PREFS_KEY: &str = "zniff.web.local_prefs.v1";
+
+#[cfg(target_arch = "wasm32")]
+impl WebLocalPrefs {
+    fn from_config(cfg: &config::Config) -> Self {
+        Self {
+            language: cfg.language.clone(),
+            theme_mode: Some(cfg.theme_mode),
+            ui_zoom: Some(cfg.ui_zoom),
+            layout_mode: Some(cfg.layout_mode),
+            sidebar_collapsed: Some(cfg.sidebar_collapsed),
+            sidebar_width: Some(cfg.sidebar_width),
+            list_width: Some(cfg.list_width),
+            list_height: Some(cfg.list_height),
+            default_pretty: Some(cfg.default_pretty),
+            default_json_tree: Some(cfg.default_json_tree),
+            onboarding_strip_dismissed: Some(cfg.onboarding_strip_dismissed),
+            show_gap: Some(cfg.show_gap),
+            show_elapsed: Some(cfg.show_elapsed),
+            show_host: Some(cfg.show_host),
+            show_client_ip: Some(cfg.show_client_ip),
+            show_size: Some(cfg.show_size),
+            show_full_url: Some(cfg.show_full_url),
+            folded_cards: Some(cfg.folded_cards.clone()),
+            column_widths: Some(cfg.column_widths.clone()),
+            column_widths_top_bottom: Some(cfg.column_widths_top_bottom.clone()),
+            column_order: Some(cfg.column_order.clone()),
+            watch_rules: Some(cfg.watch_rules.clone()),
+            compose_history: Some(cfg.compose_history.clone()),
+        }
+    }
+
+    fn apply_to(self, cfg: &mut config::Config) {
+        if let Some(v) = self.language {
+            cfg.language = Some(v);
+        }
+        if let Some(v) = self.theme_mode {
+            cfg.theme_mode = v;
+        }
+        if let Some(v) = self.ui_zoom {
+            cfg.ui_zoom = config::clamp_ui_zoom(v);
+        }
+        if let Some(v) = self.layout_mode {
+            cfg.layout_mode = v;
+        }
+        if let Some(v) = self.sidebar_collapsed {
+            cfg.sidebar_collapsed = v;
+        }
+        if let Some(v) = self.sidebar_width {
+            cfg.sidebar_width = config::clamp_sidebar_width(v);
+        }
+        if let Some(v) = self.list_width {
+            cfg.list_width = v;
+        }
+        if let Some(v) = self.list_height {
+            cfg.list_height = v;
+        }
+        if let Some(v) = self.default_pretty {
+            cfg.default_pretty = v;
+        }
+        if let Some(v) = self.default_json_tree {
+            cfg.default_json_tree = v;
+        }
+        if let Some(v) = self.onboarding_strip_dismissed {
+            cfg.onboarding_strip_dismissed = v;
+        }
+        if let Some(v) = self.show_gap {
+            cfg.show_gap = v;
+        }
+        if let Some(v) = self.show_elapsed {
+            cfg.show_elapsed = v;
+        }
+        if let Some(v) = self.show_host {
+            cfg.show_host = v;
+        }
+        if let Some(v) = self.show_client_ip {
+            cfg.show_client_ip = v;
+        }
+        if let Some(v) = self.show_size {
+            cfg.show_size = v;
+        }
+        if let Some(v) = self.show_full_url {
+            cfg.show_full_url = v;
+        }
+        if let Some(v) = self.folded_cards {
+            cfg.folded_cards = v;
+        }
+        if let Some(v) = self.column_widths {
+            cfg.column_widths = v;
+        }
+        if let Some(v) = self.column_widths_top_bottom {
+            cfg.column_widths_top_bottom = v;
+        }
+        if let Some(v) = self.column_order {
+            cfg.column_order = v;
+        }
+        if let Some(v) = self.watch_rules {
+            cfg.watch_rules = v;
+        }
+        if let Some(v) = self.compose_history {
+            cfg.compose_history = config::sanitize_compose_history(v);
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn hydrate_web_local_prefs() {
+    let Some(raw) = nsh_core::storage::Storage::get_item(WEB_LOCAL_PREFS_KEY) else {
+        return;
+    };
+    let Ok(parsed) = serde_json::from_str::<WebLocalPrefs>(&raw) else {
+        return;
+    };
+    let mut guard = web_config_slot()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    parsed.apply_to(&mut guard);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn hydrate_web_local_prefs() {}
+
+#[cfg(target_arch = "wasm32")]
 pub(crate) fn save_config(change: impl FnOnce(&mut config::Config)) -> std::io::Result<()> {
     let (before, after) = {
         let mut guard = web_config_slot()
@@ -1265,6 +1417,9 @@ pub(crate) fn save_config(change: impl FnOnce(&mut config::Config)) -> std::io::
         let after = guard.clone();
         (before, after)
     };
+    if let Ok(json) = serde_json::to_string(&WebLocalPrefs::from_config(&after)) {
+        let _ = nsh_core::storage::Storage::set_item(WEB_LOCAL_PREFS_KEY, json);
+    }
     proxy::sync_web_config_diff(&before, &after);
     Ok(())
 }

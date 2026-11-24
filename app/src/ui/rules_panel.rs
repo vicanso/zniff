@@ -862,7 +862,7 @@ pub(crate) fn preset_pill_popover(
     let langs = ui_langs();
     let open = profiles.preset_panel_open;
     bind_popover_dismiss(open);
-    let import_open = signal(false);
+    let import_open = profiles.import_open;
     let active_name = move || {
         toolbar_active_profile_name(
             &profiles.saved.get(),

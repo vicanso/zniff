@@ -542,6 +542,7 @@ impl WebServer {
                         relay_push: None,
                         web_root,
                         prefs,
+                        prefs_rev: 0,
                     }));
                     loop {
                         if flag.load(Ordering::Relaxed) {
@@ -646,6 +647,7 @@ struct Slot {
     /// Packaged nsh page. `None` keeps the small HTML console.
     web_root: Option<PathBuf>,
     prefs: WebPrefs,
+    prefs_rev: u64,
 }
 
 #[derive(Serialize)]
@@ -659,6 +661,7 @@ struct StateRuntime {
     share_id: String,
     generation: u64,
     session_rev: u64,
+    prefs_rev: u64,
     paused: Option<PausedBody>,
     paused_queue: Vec<PausedBody>,
     allow_denied_total: u64,
@@ -1206,6 +1209,7 @@ fn state_runtime(slot: &Slot) -> StateRuntime {
         share_id: slot.hub.share_id().unwrap_or_default(),
         generation: slot.hub.generation(),
         session_rev,
+        prefs_rev: slot.prefs_rev,
         paused: queue.first().map(|(id, side)| PausedBody {
             id: *id,
             side: break_side_name(*side),
@@ -2755,6 +2759,31 @@ fn sync_hub_op(slot: &mut Slot, op: &str, value: &Value) -> Reply {
     ) {
         slot.hub.touch();
     }
+    if matches!(
+        op,
+        "set_bypass"
+            | "set_rules"
+            | "set_rule_groups"
+            | "set_upstream"
+            | "set_proxy_auth"
+            | "set_allow_hosts"
+            | "set_relay_token"
+            | "set_relay_url"
+            | "set_filter"
+            | "set_active_profile"
+            | "select_profile"
+            | "delete_profile"
+            | "sync_profiles"
+            | "set_redact"
+            | "set_rules_enabled"
+            | "set_breaks_enabled"
+            | "set_show_tunnel_failures"
+            | "set_relay_accept"
+            | "reset_broken_config"
+            | "save_inline_mock"
+    ) {
+        slot.prefs_rev = slot.prefs_rev.wrapping_add(1);
+    }
     let mut body = serde_json::to_value(state_value(slot)).unwrap_or_else(|_| json!({}));
     if let Some((mock_path, rules)) = mock_meta
         && let Some(obj) = body.as_object_mut()
@@ -2829,6 +2858,7 @@ fn begin_share_op(slot: &mut Slot, head: &Head, value: &Value) -> Reply {
         filter,
         redact,
     );
+    let is_relay = matches!(&route, crate::relay::ShareRoute::Relay(_));
     let url = match route {
         crate::relay::ShareRoute::Local { base, .. } => format!("{base}/s/{id}"),
         crate::relay::ShareRoute::Relay(base) => {
@@ -2845,7 +2875,17 @@ fn begin_share_op(slot: &mut Slot, head: &Head, value: &Value) -> Reply {
             url
         }
     };
-    json_reply(200, "OK", &json!({"ok": true, "id": id, "url": url}))
+    json_reply(
+        200,
+        "OK",
+        &json!({
+            "ok": true,
+            "id": id,
+            "url": url,
+            "relay": is_relay,
+            "local_only": local_only && !is_relay,
+        }),
+    )
 }
 
 fn share_host(raw: &str) -> String {

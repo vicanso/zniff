@@ -59,7 +59,7 @@ pub(crate) fn marker_modal(open: Signal<bool>, controls: Arc<Controls>) -> impl 
             let controls_submit = controls.clone();
             let controls_enter = controls.clone();
             let controls_presets = controls.clone();
-            let apple = cfg!(target_os = "macos");
+            let apple = is_apple_platform();
             let badge = format_shortcut_badge("mod+shift+m", apple);
 
             overlay()

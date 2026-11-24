@@ -875,6 +875,7 @@ pub(crate) fn toolbar_summary_button(
         ui_toggle_button(ControlSize::Sm, is_summary_active)
             .on_press(move || {
                 reset_compose(compose);
+                seq_builder.resume_ids.set(Vec::new());
                 close_sequence_diagram(seq_builder);
                 selected.set(None);
                 shown_phase.set(Phase::Empty);

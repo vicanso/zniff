@@ -51,6 +51,7 @@ struct WebPollSnapshot {
     capturing: bool,
     gen_num: u64,
     rev_num: u64,
+    prefs_rev: u64,
     paused_len: usize,
     share_id: String,
     relay_accept: bool,
@@ -62,6 +63,19 @@ struct WebPollUi {
     listen_all: Signal<bool>,
     profiles: ProfileSignals,
     seq_builder: SeqBuilder,
+    web_disconnected: Signal<Option<String>>,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Default)]
+struct WebServerSyncState {
+    prefs_rev: u64,
+    bypass: String,
+    rules: String,
+    rule_groups: Vec<config::RuleGroup>,
+    upstream: String,
+    filter: String,
+    relay_url: String,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -71,6 +85,8 @@ struct WebPollState {
     seen_error: String,
     last_snap: Option<WebPollSnapshot>,
     idle_streak: u32,
+    consecutive_failures: u32,
+    server_sync: WebServerSyncState,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -103,7 +119,25 @@ fn apply_web_state_snapshot(
     let rev_num = value
         .get("session_rev")
         .and_then(serde_json::Value::as_u64)?;
+    let prefs_rev = value
+        .get("prefs_rev")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
     controls.hub.apply_state(value);
+    if state.seeded {
+        if let Some(port) = json_port(value)
+            && lock_port(&controls.listen_port) != port
+        {
+            set_port(&controls.listen_port, port);
+            ui.port_text.set(port.to_string());
+        }
+        if let Some(all) = value.get("listen_all").and_then(serde_json::Value::as_bool)
+            && lock_bool(&controls.listen_all) != all
+        {
+            set_bool(&controls.listen_all, all);
+            ui.listen_all.set(all);
+        }
+    }
     let mut relay_accept = ui.profiles.relay_accept.get_untracked();
     if let Some(prefs) = value.get("prefs") {
         if let Some(on) = prefs
@@ -113,6 +147,29 @@ fn apply_web_state_snapshot(
             relay_accept = on;
             if ui.profiles.relay_accept.get_untracked() != on {
                 ui.profiles.relay_accept.set(on);
+            }
+        }
+        if state.seeded {
+            if let Some(on) = prefs
+                .get("rules_enabled")
+                .and_then(serde_json::Value::as_bool)
+                && ui.profiles.rules_on.get_untracked() != on
+            {
+                ui.profiles.rules_on.set(on);
+            }
+            if let Some(on) = prefs
+                .get("breaks_enabled")
+                .and_then(serde_json::Value::as_bool)
+                && ui.profiles.breaks_on.get_untracked() != on
+            {
+                ui.profiles.breaks_on.set(on);
+            }
+            if let Some(on) = prefs
+                .get("show_tunnels")
+                .and_then(serde_json::Value::as_bool)
+                && ui.profiles.show_tunnels.get_untracked() != on
+            {
+                ui.profiles.show_tunnels.set(on);
             }
         }
         if let Some(auth) = prefs.get("proxy_auth").and_then(serde_json::Value::as_str)
@@ -168,6 +225,11 @@ fn apply_web_state_snapshot(
         }
         if let Some(prefs) = value.get("prefs") {
             seed_web_prefs(controls, prefs, ui.profiles, ui.seq_builder);
+            state.server_sync = capture_server_sync(prefs, prefs_rev);
+        }
+    } else if prefs_rev != state.server_sync.prefs_rev {
+        if let Some(prefs) = value.get("prefs").filter(|p| p.get("rules").is_some()) {
+            sync_changed_server_prefs(controls, prefs, prefs_rev, ui, &mut state.server_sync);
         }
     }
     let capturing = value
@@ -212,10 +274,142 @@ fn apply_web_state_snapshot(
         capturing,
         gen_num,
         rev_num,
+        prefs_rev,
         paused_len,
         share_id,
         relay_accept,
     })
+}
+
+#[cfg(target_arch = "wasm32")]
+fn capture_server_sync(prefs: &serde_json::Value, prefs_rev: u64) -> WebServerSyncState {
+    WebServerSyncState {
+        prefs_rev,
+        bypass: prefs
+            .get("bypass")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        rules: prefs
+            .get("rules")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        rule_groups: prefs
+            .get("rule_groups")
+            .and_then(|v| serde_json::from_value::<Vec<config::RuleGroup>>(v.clone()).ok())
+            .map(config::sanitize_rule_groups)
+            .unwrap_or_default(),
+        upstream: prefs
+            .get("upstream")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        filter: prefs
+            .get("filter")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        relay_url: prefs
+            .get("relay_url")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn sync_changed_server_prefs(
+    controls: &Controls,
+    prefs: &serde_json::Value,
+    prefs_rev: u64,
+    ui: &WebPollUi,
+    sync: &mut WebServerSyncState,
+) {
+    let mut cfg = web_config_slot()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .clone();
+    if let Some(text) = prefs.get("bypass").and_then(serde_json::Value::as_str)
+        && text != sync.bypass
+    {
+        if ui.profiles.bypass.get_untracked() == sync.bypass {
+            ui.profiles.bypass.set(text.to_string());
+        }
+        cfg.bypass_hosts = text.to_string();
+        sync.bypass = text.to_string();
+    }
+    if let Some(text) = prefs.get("rules").and_then(serde_json::Value::as_str)
+        && text != sync.rules
+    {
+        if ui.profiles.rules.get_untracked() == sync.rules {
+            ui.profiles.rules.set(text.to_string());
+        }
+        cfg.rules = text.to_string();
+        sync.rules = text.to_string();
+    }
+    if let Some(items) = prefs
+        .get("rule_groups")
+        .and_then(|v| serde_json::from_value::<Vec<config::RuleGroup>>(v.clone()).ok())
+    {
+        let clean = config::sanitize_rule_groups(items);
+        if clean != sync.rule_groups {
+            if ui.profiles.rule_groups.get_untracked() == sync.rule_groups {
+                ui.profiles.rule_groups.set(clean.clone());
+            }
+            cfg.rule_groups = clean.clone();
+            sync.rule_groups = clean;
+        }
+    }
+    if let Some(text) = prefs.get("upstream").and_then(serde_json::Value::as_str)
+        && text != sync.upstream
+    {
+        if ui.profiles.upstream.get_untracked() == sync.upstream {
+            ui.profiles.upstream.set(text.to_string());
+        }
+        cfg.upstream_proxy = text.to_string();
+        sync.upstream = text.to_string();
+    }
+    if let Some(text) = prefs.get("filter").and_then(serde_json::Value::as_str)
+        && text != sync.filter
+    {
+        if ui.profiles.filter.get_untracked() == sync.filter {
+            ui.profiles.filter.set(text.to_string());
+        }
+        cfg.filter = text.to_string();
+        sync.filter = text.to_string();
+    }
+    if let Some(url) = prefs.get("relay_url").and_then(serde_json::Value::as_str)
+        && url != sync.relay_url
+    {
+        if ui.profiles.relay_url.get_untracked() == sync.relay_url {
+            ui.profiles.relay_url.set(url.to_string());
+        }
+        *controls
+            .relay_url
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = url.to_string();
+        cfg.relay_url = url.to_string();
+        sync.relay_url = url.to_string();
+    }
+    if let Some(items) = prefs
+        .get("saved_profiles")
+        .and_then(|v| serde_json::from_value::<Vec<config::SavedProfile>>(v.clone()).ok())
+    {
+        cfg.saved_profiles = items.clone();
+        ui.profiles.saved.set(items);
+    }
+    if let Some(items) = prefs
+        .get("profile_history")
+        .and_then(|v| serde_json::from_value::<Vec<config::SavedProfile>>(v.clone()).ok())
+    {
+        cfg.profile_history = items.clone();
+        ui.profiles.history.set(items);
+    }
+    sync.prefs_rev = prefs_rev;
+    *web_config_slot()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner()) = cfg;
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -418,6 +612,7 @@ pub(crate) fn start_web_poll(
     selected: Signal<Option<u64>>,
     baseline: Signal<Option<u64>>,
     web_bg: Signal<bool>,
+    web_disconnected: Signal<Option<String>>,
 ) {
     let flows_sync = Rc::new(RefCell::new(WebFlowsSync::default()));
     let filter_controls = controls.clone();
@@ -444,6 +639,7 @@ pub(crate) fn start_web_poll(
             listen_all,
             profiles,
             seq_builder,
+            web_disconnected,
         };
         let mut state = WebPollState::default();
         let mut immediate = false;
@@ -459,17 +655,52 @@ pub(crate) fn start_web_poll(
                 immediate = true;
             }
             let last_stamp = state.last_snap.as_ref().map(|s| (s.gen_num, s.rev_num));
-            let url = build_web_state_url(state.seeded, last_stamp, immediate);
+            let need_full_prefs = state
+                .last_snap
+                .as_ref()
+                .is_some_and(|s| s.prefs_rev != state.server_sync.prefs_rev);
+            let url = if state.seeded && need_full_prefs {
+                "api/state".to_string()
+            } else {
+                build_web_state_url(state.seeded, last_stamp, immediate)
+            };
             immediate = false;
             let mut next_snap = None;
             let mut fetch_ok = false;
-            if let Ok(response) = fetch(HttpRequest::get(url)).await {
-                proxy::note_web_state_url(&response.head.url);
-                if response.ok()
-                    && let Ok(value) = serde_json::from_str::<serde_json::Value>(&response.text())
+            let mut auth_denied = false;
+            match fetch(HttpRequest::get(url)).await {
+                Ok(response) => {
+                    proxy::note_web_state_url(&response.head.url);
+                    if response.ok() {
+                        if let Ok(value) =
+                            serde_json::from_str::<serde_json::Value>(&response.text())
+                        {
+                            fetch_ok = true;
+                            next_snap =
+                                apply_web_state_snapshot(&controls, &ui, &mut state, &value);
+                        }
+                    } else if matches!(response.head.status, 401 | 403) {
+                        auth_denied = true;
+                    }
+                }
+                Err(_) => {}
+            }
+            if fetch_ok {
+                state.consecutive_failures = 0;
+                if ui.web_disconnected.get_untracked().is_some() {
+                    ui.web_disconnected.set(None);
+                }
+            } else if auth_denied {
+                state.consecutive_failures = state.consecutive_failures.saturating_add(1);
+                if ui.web_disconnected.get_untracked().as_deref() != Some("auth") {
+                    ui.web_disconnected.set(Some("auth".to_string()));
+                }
+            } else {
+                state.consecutive_failures = state.consecutive_failures.saturating_add(1);
+                if state.consecutive_failures >= 2
+                    && ui.web_disconnected.get_untracked().as_deref() != Some("offline")
                 {
-                    fetch_ok = true;
-                    next_snap = apply_web_state_snapshot(&controls, &ui, &mut state, &value);
+                    ui.web_disconnected.set(Some("offline".to_string()));
                 }
             }
             let state_changed = match (&state.last_snap, &next_snap) {

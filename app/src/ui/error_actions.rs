@@ -76,7 +76,7 @@ pub(crate) fn classify_error(status: Option<u16>, error: &str) -> Option<ErrorCa
     None
 }
 
-fn is_non_actionable_notice(lower: &str) -> bool {
+pub(crate) fn is_non_actionable_notice(lower: &str) -> bool {
     const IGNORED: &[&str] = &[
         "直通名单",
         "bypass list",
@@ -90,6 +90,12 @@ fn is_non_actionable_notice(lower: &str) -> bool {
         "response break skipped",
     ];
     IGNORED.iter().any(|needle| lower.contains(needle))
+}
+
+pub(crate) fn is_tunnel_notice(error: &str) -> bool {
+    let lower = error.trim().to_ascii_lowercase();
+    const TUNNEL_HINTS: &[&str] = &["直通名单", "bypass list", "不是 tls", "not tls"];
+    TUNNEL_HINTS.iter().any(|needle| lower.contains(needle))
 }
 
 fn is_proxy_auth_error(lower: &str) -> bool {
@@ -327,6 +333,7 @@ pub(crate) fn append_bypass_host(current: &str, host: &str) -> Option<String> {
 }
 
 fn add_host_to_bypass(controls: &Controls, profiles: ProfileSignals, host: &str) {
+    let clean_host = normalize_flow_host(host);
     let Some(next) = append_bypass_host(&profiles.bypass.get_untracked(), host) else {
         return;
     };
@@ -340,6 +347,8 @@ fn add_host_to_bypass(controls: &Controls, profiles: ProfileSignals, host: &str)
                 err: err.to_string(),
             },
         );
+    } else if !clean_host.is_empty() {
+        set_status(controls, StatusMsg::HostAddedToBypass(clean_host));
     }
 }
 
@@ -396,6 +405,10 @@ pub(crate) fn error_summary_banner(
         let host = extract_host_from_url(&url);
         actions_for_error(shown.status.get(), &shown.error.get(), &host, is_desktop)
     };
+    let is_neutral = move || {
+        let err = shown.error.get();
+        shown.status.get() != Some(407) && is_non_actionable_notice(&err.to_ascii_lowercase())
+    };
     when(visible, move || {
         let controls = controls.clone();
         view()
@@ -405,9 +418,21 @@ pub(crate) fn error_summary_banner(
             .py_2()
             .gap_2()
             .rounded(px(RADIUS_MD))
-            .bg(status_err_bg())
+            .bg(move || {
+                if is_neutral() {
+                    bg_control()
+                } else {
+                    status_err_bg()
+                }
+            })
             .border_1()
-            .border_color(status_err_fg())
+            .border_color(move || {
+                if is_neutral() {
+                    border_control()
+                } else {
+                    status_err_fg()
+                }
+            })
             .child(
                 text(move || -> SharedString {
                     let lang = ui_lang(langs);
@@ -427,7 +452,13 @@ pub(crate) fn error_summary_banner(
                 .on_press_up(dismiss_keyboard)
                 .text_size(px(TEXT_SM))
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(status_err_fg()),
+                .text_color(move || {
+                    if is_neutral() {
+                        fg_secondary()
+                    } else {
+                        status_err_fg()
+                    }
+                }),
             )
             .child(when(
                 move || !actions().is_empty(),

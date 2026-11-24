@@ -47,6 +47,7 @@ pub(crate) fn begin_sequence_diagram(
             .collect()
     });
     candidates.sort_by_key(|c| c.id);
+    seq_builder.resume_ids.set(Vec::new());
     reset_compose(compose);
     selected.set(None);
     shown_phase.set(Phase::Empty);
@@ -55,6 +56,33 @@ pub(crate) fn begin_sequence_diagram(
     seq_builder.hover_bar.set(None);
     refresh_seq_diagram(controls, seq_builder);
     seq_builder.open.set(true);
+}
+
+pub(crate) fn resume_sequence_diagram(
+    controls: &Controls,
+    rows: Signal<Vec<Arc<RowLine>>>,
+    seq_builder: SeqBuilder,
+    compose: Compose,
+    selected: Signal<Option<u64>>,
+    shown_phase: Signal<Phase>,
+) {
+    let saved_ids: std::collections::HashSet<u64> = seq_builder
+        .resume_ids
+        .with_untracked(|ids| ids.iter().copied().collect());
+    let saved_mode = seq_builder.resume_view_mode.get_untracked();
+    begin_sequence_diagram(controls, rows, seq_builder, compose, selected, shown_phase);
+    if !saved_ids.is_empty() {
+        seq_builder.items.update(|items| {
+            let any_match = items.iter().any(|item| saved_ids.contains(&item.id));
+            if any_match {
+                for item in items {
+                    item.checked = saved_ids.contains(&item.id);
+                }
+            }
+        });
+        seq_builder.view_mode.set(saved_mode);
+        refresh_seq_diagram(controls, seq_builder);
+    }
 }
 
 pub(crate) fn seq_source_kind_chip(
@@ -136,8 +164,8 @@ pub(crate) fn seq_mermaid_source_view(
                     .line_numbers(true)
                     .folding(false)
                     .soft_wrap(true)
-                    .font_size(Points(12.0))
-                    .line_height(Points(18.0))
+                    .font_size(move || scaled_px(12.0))
+                    .line_height(move || scaled_px(18.0))
                     .scroll_beyond_last_line(false)
                     .size_full(),
             ),
@@ -470,6 +498,7 @@ pub(crate) fn sequence_diagram_panel(
                         ),
                 )
                 .child(detail_button(tr("关闭", "Close"), move || {
+                    seq_builder.resume_ids.set(Vec::new());
                     close_sequence_diagram(seq_builder);
                 })),
         )

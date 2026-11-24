@@ -228,6 +228,11 @@ pub enum StatusMsg {
     TemplateRuleAlreadyPresent(String),
     CaInstalled,
     CaRemoved,
+    HostAddedToBypass(String),
+    #[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+    WebConfigUnsaved(String),
+    #[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+    WebOpFailed(String),
     RulesCleared,
     RuleGroupDeleted(String),
     PresetDeleted(String),
@@ -789,6 +794,22 @@ impl StatusMsg {
                 "Removed zniff root CA from system trust",
             )
             .into(),
+            Self::HostAddedToBypass(host) => match lang {
+                Lang::Zh => format!("已将 {host} 加入直通名单，新连接将直接隧道转发"),
+                Lang::En => {
+                    format!("Added {host} to bypass list; new connections will tunnel directly")
+                }
+            },
+            Self::WebConfigUnsaved(err) => format!(
+                "{} {}",
+                t(lang, "服务端配置没有保存:", "Server config was not saved:"),
+                localize_error(lang, err)
+            ),
+            Self::WebOpFailed(err) => format!(
+                "{} {}",
+                t(lang, "Web 操作失败:", "Web action failed:"),
+                localize_error(lang, err)
+            ),
             Self::RulesCleared => {
                 t(lang, "已清空当前规则内容", "Cleared rules editor").into()
             }
@@ -1107,6 +1128,7 @@ impl StatusMsg {
             | Self::TemplateRuleAdded(_)
             | Self::CaInstalled
             | Self::CaRemoved
+            | Self::HostAddedToBypass(_)
             | Self::RulesCleared
             | Self::RuleGroupDeleted(_)
             | Self::PresetDeleted(_)
@@ -1139,6 +1161,8 @@ impl StatusMsg {
             | Self::PrefUnsaved { .. }
             | Self::PortUnsaved { .. }
             | Self::ProxyOptionUnsaved(_)
+            | Self::WebConfigUnsaved(_)
+            | Self::WebOpFailed(_)
             | Self::ProxyManual(_)
             | Self::ReplayFailed(_)
             | Self::InstallFailed(_)
@@ -1241,9 +1265,10 @@ impl StatusMsg {
             | Self::Shared { .. } => t(lang, "已复制到剪贴板", "Copied to Clipboard"),
             Self::RelayConnected(_) => t(lang, "中继已恢复", "Relay Reconnected"),
             Self::ConfigReset { .. } => t(lang, "配置已重置", "Config Reset"),
-            Self::PrefUnsaved { .. } | Self::PortUnsaved { .. } | Self::ProxyOptionUnsaved(_) => {
-                t(lang, "保存失败", "Save Failed")
-            }
+            Self::PrefUnsaved { .. }
+            | Self::PortUnsaved { .. }
+            | Self::ProxyOptionUnsaved(_)
+            | Self::WebConfigUnsaved(_) => t(lang, "保存失败", "Save Failed"),
             Self::Replayed(_) | Self::Repeated { .. } => t(lang, "重放已发送", "Replay Sent"),
             Self::UpdateUpToDate(_) | Self::UpdateAvailable(_) => {
                 t(lang, "检查更新", "Update Check")
@@ -1265,7 +1290,8 @@ impl StatusMsg {
             | Self::AdbFailed(_)
             | Self::UpdateCheckFailed(_)
             | Self::UpdateFailed { .. }
-            | Self::TransparentProxyFailed(_) => t(lang, "操作失败", "Action Failed"),
+            | Self::TransparentProxyFailed(_)
+            | Self::WebOpFailed(_) => t(lang, "操作失败", "Action Failed"),
             Self::ConfigBroken { .. } => t(lang, "配置错误", "Configuration Error"),
             _ if self.toast_kind() == Some(true) => t(lang, "操作提示", "Notice"),
             _ => t(lang, "操作成功", "Action Completed"),
@@ -1355,6 +1381,14 @@ pub fn localize_error(lang: Lang, text: &str) -> String {
         ("中继流量只能查看", "Relay flows are read-only"),
         ("没有连上", "Could not connect to server"),
         ("没有分享地址", "No share URL returned"),
+        ("请求失败", "Request failed"),
+        ("重放失败", "Replay failed"),
+        ("请求没有编码", "Request could not be encoded"),
+        ("中继需要口令", "Relay requires a token"),
+        ("中继地址无效", "Invalid relay address"),
+        ("需要先开始抓包", "Start capturing first"),
+        ("未授权 (401)", "Unauthorized (401)"),
+        ("禁止访问 (403)", "Forbidden (403)"),
         (
             "允许域名已由启动参数或环境变量锁定",
             "Allowed hosts are locked by CLI flags or environment variables",
@@ -1904,5 +1938,28 @@ mod tests {
         assert_eq!(watch.toast_title(Lang::Zh), "匹配提醒命中");
         assert_eq!(watch.toast_title(Lang::En), "Watch Alert");
         assert!(watch.text(Lang::En).contains("(+2)"));
+
+        let bypass_added = StatusMsg::HostAddedToBypass("api.example.com".into());
+        assert_eq!(bypass_added.toast_kind(), Some(false));
+        assert!(bypass_added.text(Lang::Zh).contains("api.example.com"));
+        assert!(bypass_added.text(Lang::En).contains("api.example.com"));
+
+        let web_unsaved = StatusMsg::WebConfigUnsaved("请求失败".into());
+        assert_eq!(web_unsaved.toast_kind(), Some(true));
+        assert!(web_unsaved.text(Lang::En).contains("Request failed"));
+
+        let web_err = StatusMsg::WebOpFailed("未授权 (401)".into());
+        assert_eq!(web_err.toast_kind(), Some(true));
+        assert!(web_err.text(Lang::En).contains("Unauthorized (401)"));
+
+        assert_eq!(localize_error(Lang::En, "请求失败"), "Request failed");
+        assert_eq!(
+            localize_error(Lang::En, "未授权 (401)"),
+            "Unauthorized (401)"
+        );
+        assert_eq!(
+            localize_error(Lang::En, "禁止访问 (403)"),
+            "Forbidden (403)"
+        );
     }
 }

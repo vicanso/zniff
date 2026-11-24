@@ -858,16 +858,20 @@ pub(crate) fn begin_share(
             .to_string();
         share_id.set(id);
         set_clipboard(url.to_string());
+        let local_only = value
+            .get("local_only")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or_else(|| url.contains("127.0.0.1"));
         let relay = value
-            .get("url")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|url| !url.contains("127.0.0.1"));
+            .get("relay")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
         set_status(
             &controls,
             StatusMsg::Shared {
                 url: url.to_string(),
                 minutes,
-                local_only: url.contains("127.0.0.1"),
+                local_only,
                 relay,
             },
         );

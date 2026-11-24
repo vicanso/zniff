@@ -18,6 +18,11 @@ pub fn App() -> impl IntoElement {
     }
     let langs = signal(load_lang_pref());
     provide_context(langs);
+    hydrate_web_local_prefs();
+    let langs_after_hydrate = load_lang_pref();
+    if langs.get_untracked() != langs_after_hydrate {
+        langs.set(langs_after_hydrate);
+    }
     let initial_ui_cfg = saved_config();
     provide_appearance_prefs(initial_ui_cfg.theme_mode, initial_ui_cfg.ui_zoom);
     provide_mono_font(initial_ui_cfg.system_mono_font);
@@ -147,6 +152,7 @@ pub fn App() -> impl IntoElement {
     };
     let port_text = signal(String::new());
     let listen_all = signal(false);
+    let web_disconnected = signal(None::<String>);
     let paused = signal(None::<(u64, BreakSide)>);
     let paused_count = signal(0_usize);
     let paused_queue = signal(Vec::<(u64, BreakSide)>::new());
@@ -194,6 +200,8 @@ pub fn App() -> impl IntoElement {
     let seq_builder = SeqBuilder {
         open: signal(false),
         items: signal(Vec::new()),
+        resume_ids: signal(Vec::new()),
+        resume_view_mode: signal(0),
         include_response: signal(true),
         include_query: signal(false),
         output: signal(String::new()),
@@ -277,6 +285,7 @@ pub fn App() -> impl IntoElement {
         rules_panel_tab: signal(0),
         filter_panel_open: signal(false),
         preset_panel_open: signal(false),
+        import_open: signal(false),
         access_open: signal(false),
         quick_rule_prefill: signal(None),
         machine_settings_open: signal(false),
@@ -422,6 +431,7 @@ pub fn App() -> impl IntoElement {
             selected,
             baseline,
             web_bg,
+            web_disconnected,
         );
         start_web_detail_watch(controls.clone(), selected, baseline);
     }
@@ -651,7 +661,10 @@ pub fn App() -> impl IntoElement {
         {
             let _ = update_probe_at.get();
             if let Some(err) = proxy::take_save_error() {
-                set_status(&controls_tick, StatusMsg::ProxyOptionUnsaved(err));
+                set_status(&controls_tick, StatusMsg::WebConfigUnsaved(err));
+            }
+            for err in proxy::drain_web_op_errors() {
+                set_status(&controls_tick, StatusMsg::WebOpFailed(err));
             }
         }
         let cfg_err_now = current_config_error(&controls_tick);
@@ -1610,6 +1623,8 @@ pub fn App() -> impl IntoElement {
                 compose,
                 seq_builder,
             });
+            provide_context(seq_builder);
+            provide_context(DiagramResumeRows(rows));
             let toggle_sys_cb: Rc<dyn Fn()> = {
                 let c = controls.clone();
                 Rc::new(move || toggle_system_proxy(c.clone()))
@@ -1741,6 +1756,50 @@ pub fn App() -> impl IntoElement {
                 .flex_1()
                 .min_h(px(0.0))
                 .flex_col()
+                .child(when(
+                    move || web_disconnected.get().is_some(),
+                    move || {
+                        let langs = ui_langs();
+                        view()
+                            .w_full()
+                            .min_h(px(32.0))
+                            .px_3()
+                            .py_1()
+                            .flex_shrink_0()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .bg(status_err_bg())
+                            .border_b_1()
+                            .border_b_color(status_err_fg())
+                            .child(glyph_px(13.0, || Glyph::Alert, || color(status_err_fg())))
+                            .child(
+                                text(move || -> SharedString {
+                                    let lang = ui_lang(langs);
+                                    if web_disconnected.get().as_deref() == Some("auth") {
+                                        t(
+                                            lang,
+                                            "操作台认证已失效或权限受限（HTTP 401/403），请重新验证或刷新页面。",
+                                            "Web console authorization failed (HTTP 401/403); re-authenticate or reload.",
+                                        )
+                                        .into()
+                                    } else {
+                                        t(
+                                            lang,
+                                            "与 zniff Web 后端连接已断开，正在自动重连…（当前显示为上次同步的缓存数据）",
+                                            "Disconnected from zniff web backend, reconnecting… (showing last synced state)",
+                                        )
+                                        .into()
+                                    }
+                                })
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .text_size(px(TEXT_XS))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(status_err_fg()),
+                            )
+                    },
+                ))
                 .child(onboarding_progress_strip(
                     onboarding_strip_props,
                     shown.phase,

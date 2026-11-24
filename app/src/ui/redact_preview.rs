@@ -32,6 +32,7 @@ pub(crate) fn redact_preview_panel(
     let export_har_controls = controls.clone();
     let export_html_controls = controls.clone();
     let preview_controls = controls;
+    let fields_save_timer = Rc::new(RefCell::new(None));
     let langs = ui_langs();
 
     let preview_pair = computed(move || {
@@ -353,11 +354,17 @@ pub(crate) fn redact_preview_panel(
                                         .redact_fields
                                         .lock()
                                         .unwrap_or_else(|err| err.into_inner()) = text_val.clone();
-                                    save_config_or_notify(
-                                        &fields_controls,
-                                        PrefName::Redact,
-                                        |cfg| cfg.redact_fields = text_val,
-                                    );
+                                    let save_controls = fields_controls.clone();
+                                    fields_save_timer.replace(Some(set_timeout(
+                                        Duration::from_millis(500),
+                                        move || {
+                                            save_config_or_notify(
+                                                &save_controls,
+                                                PrefName::Redact,
+                                                |cfg| cfg.redact_fields = text_val,
+                                            );
+                                        },
+                                    )));
                                 }),
                         ),
                 )
@@ -472,30 +479,49 @@ pub(crate) fn redact_preview_panel(
                                     },
                                 )),
                         )
-                        .child(
-                            guard_culled_pointer_events(view())
-                                .h(move || px((window().height.0 - 300.0).clamp(180.0, 480.0)))
-                                .overflow_hidden()
-                                .child(
-                                    diff_view()
-                                        .old_value(move || {
-                                            preview_pair.with(|(_, before, _, _)| {
-                                                SharedString::from(before.clone())
+                        .child(when(
+                            move || preview_pair.with(|(meta, _, _, _)| meta.is_some()),
+                            move || {
+                                guard_culled_pointer_events(view())
+                                    .h(move || px((window().height.0 - 300.0).clamp(180.0, 480.0)))
+                                    .overflow_hidden()
+                                    .child(
+                                        diff_view()
+                                            .old_value(move || {
+                                                preview_pair.with(|(_, before, _, _)| {
+                                                    SharedString::from(before.clone())
+                                                })
                                             })
-                                        })
-                                        .new_value(move || {
-                                            preview_pair.with(|(_, _, after, _)| {
-                                                SharedString::from(after.clone())
+                                            .new_value(move || {
+                                                preview_pair.with(|(_, _, after, _)| {
+                                                    SharedString::from(after.clone())
+                                                })
                                             })
-                                        })
-                                        .layout(DiffLayout::Unified)
-                                        .language("plaintext")
-                                        .soft_wrap(true)
-                                        .font_size(Points(12.0))
-                                        .line_height(Points(18.0))
-                                        .size_full(),
-                                ),
+                                            .layout(DiffLayout::Unified)
+                                            .language("plaintext")
+                                            .soft_wrap(true)
+                                            .font_size(move || scaled_px(12.0))
+                                            .line_height(move || scaled_px(18.0))
+                                            .size_full(),
+                                    )
+                            },
                         )
+                        .otherwise(move || {
+                            view()
+                                .w_full()
+                                .px_4()
+                                .py_6()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    text(tr(
+                                        "当前列表中暂无可预览的流量，请先捕获或选择一条请求。",
+                                        "No flow available for redaction preview yet — capture or select a flow first.",
+                                    ))
+                                    .text_size(px(TEXT_SM))
+                                    .text_color(fg_muted()),
+                                )
+                        }))
                 }),
         )
 }

@@ -243,7 +243,7 @@ fn onboarding_secondary_section(
     #[cfg(not(target_arch = "wasm32"))]
     let import_profiles = props.profiles;
     #[cfg(target_arch = "wasm32")]
-    let panel_open = props.profiles.panel_open;
+    let web_profiles = props.profiles;
     let _ = props.profiles;
 
     let workflow_grid = view()
@@ -263,15 +263,25 @@ fn onboarding_secondary_section(
         .child(onboarding_secondary_tile(
             Glyph::Download,
             tr("导入规则 / 会话", "Import Rules / Sessions"),
-            tr(
-                "Whistle / Charles / HAR / TOML",
-                "Whistle / Charles / HAR / TOML",
-            ),
+            if cfg!(target_arch = "wasm32") {
+                tr(
+                    "Whistle / Charles XML / TOML",
+                    "Whistle / Charles XML / TOML",
+                )
+            } else {
+                tr(
+                    "Whistle / Charles / HAR / TOML",
+                    "Whistle / Charles / HAR / TOML",
+                )
+            },
             move || {
                 #[cfg(not(target_arch = "wasm32"))]
                 prompt_import_migration(import_controls.clone(), import_profiles);
                 #[cfg(target_arch = "wasm32")]
-                panel_open.set(true);
+                {
+                    web_profiles.import_open.set(true);
+                    web_profiles.preset_panel_open.set(true);
+                }
             },
         ));
 

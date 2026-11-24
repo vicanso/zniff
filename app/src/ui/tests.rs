@@ -2961,6 +2961,7 @@ fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
             rules_panel_tab: signal(0),
             filter_panel_open: signal(false),
             preset_panel_open: signal(false),
+            import_open: signal(false),
             access_open: signal(false),
             quick_rule_prefill: signal(None),
             machine_settings_open: signal(false),
@@ -2994,6 +2995,8 @@ fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
         let seq_builder = SeqBuilder {
             open: signal(false),
             items: signal(Vec::new()),
+            resume_ids: signal(Vec::new()),
+            resume_view_mode: signal(0),
             include_response: signal(true),
             include_query: signal(false),
             output: signal(String::new()),

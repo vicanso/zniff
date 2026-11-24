@@ -206,6 +206,19 @@ pub(crate) fn jump_to_seq_flow(
     if flow_id == 0 {
         return;
     }
+    let checked_ids: Vec<u64> = seq_builder.items.with_untracked(|items| {
+        items
+            .iter()
+            .filter(|item| item.checked)
+            .map(|item| item.id)
+            .collect()
+    });
+    if !checked_ids.is_empty() {
+        seq_builder.resume_ids.set(checked_ids);
+        seq_builder
+            .resume_view_mode
+            .set(seq_builder.view_mode.get_untracked());
+    }
     reset_compose(compose);
     close_sequence_diagram(seq_builder);
     selected.set(Some(flow_id));

@@ -19,7 +19,7 @@ pub(crate) fn more_menu(
     selected: Signal<Option<u64>>,
     update_state: Signal<UpdateState>,
 ) -> impl IntoElement {
-    let apple = cfg!(target_os = "macos");
+    let apple = is_apple_platform();
     let settings_shortcut = format_shortcut_badge("mod+,", apple);
     let shortcuts_key = format_shortcut_badge("mod+/", apple);
 

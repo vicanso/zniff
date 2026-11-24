@@ -341,6 +341,7 @@ pub(crate) struct ProfileSignals {
     pub(crate) rules_panel_tab: Signal<u8>,
     pub(crate) filter_panel_open: Signal<bool>,
     pub(crate) preset_panel_open: Signal<bool>,
+    pub(crate) import_open: Signal<bool>,
     pub(crate) access_open: Signal<bool>,
     pub(crate) quick_rule_prefill: Signal<Option<QuickRulePrefill>>,
     pub(crate) machine_settings_open: Signal<bool>,
@@ -356,6 +357,9 @@ pub(crate) struct ProfileSignals {
     pub(crate) onboarding_strip_dismissed: Signal<bool>,
     pub(crate) deselect_rev: Signal<u64>,
 }
+
+#[derive(Clone, Copy)]
+pub(crate) struct DiagramResumeRows(pub(crate) Signal<Vec<Arc<RowLine>>>);
 
 pub(crate) type ComposeDraft = (String, String, String, String);
 
@@ -393,6 +397,8 @@ pub(crate) struct SeqCandidate {
 pub(crate) struct SeqBuilder {
     pub(crate) open: Signal<bool>,
     pub(crate) items: Signal<Vec<SeqCandidate>>,
+    pub(crate) resume_ids: Signal<Vec<u64>>,
+    pub(crate) resume_view_mode: Signal<u8>,
     pub(crate) include_response: Signal<bool>,
     pub(crate) include_query: Signal<bool>,
     pub(crate) output: Signal<String>,

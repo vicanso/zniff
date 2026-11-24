@@ -234,6 +234,16 @@ fn step_first_http(input: &ChecklistInput, lang: Lang) -> ChecklistStep {
             )
             .to_string(),
         )
+    } else if input.ca_optional_web {
+        (
+            StepStatus::Waiting,
+            t(
+                lang,
+                "等待流量：复制下方代理地址或扫手机二维码，并将客户端 HTTP 代理指向它",
+                "Waiting for traffic: copy the proxy address below (or scan QR) and point a client HTTP proxy here",
+            )
+            .to_string(),
+        )
     } else {
         (
             StepStatus::Waiting,

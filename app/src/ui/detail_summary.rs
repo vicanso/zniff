@@ -941,28 +941,46 @@ pub(crate) fn summary(
                         .py_0p5()
                         .rounded(px(RADIUS_SM))
                         .bg(move || {
-                            http_status_bg(
-                                shown.status.get(),
-                                !shown.error.get().is_empty() && shown.status.get().is_none(),
-                            )
+                            if shown.status.get().is_none() && is_tunnel_notice(&shown.error.get())
+                            {
+                                bg_control()
+                            } else {
+                                http_status_bg(
+                                    shown.status.get(),
+                                    !shown.error.get().is_empty() && shown.status.get().is_none(),
+                                )
+                            }
                         })
                         .child(
                             mono({
                                 let langs = ui_langs();
-                                move || match shown.status.get() {
-                                    Some(code) => code.to_string(),
-                                    None if !shown.error.get().is_empty() => "ERR".to_string(),
-                                    None => t(ui_lang(langs), "等待响应", "Waiting").into(),
+                                move || {
+                                    let err = shown.error.get();
+                                    match shown.status.get() {
+                                        Some(code) => code.to_string(),
+                                        None if !err.is_empty() && is_tunnel_notice(&err) => {
+                                            t(ui_lang(langs), "隧道", "TUNNEL").into()
+                                        }
+                                        None if !err.is_empty() => "ERR".to_string(),
+                                        None => t(ui_lang(langs), "等待响应", "Waiting").into(),
+                                    }
                                 }
                             })
                             .tabular_nums()
                             .text_size(px(TEXT_XS))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(move || {
-                                http_status_fg(
-                                    shown.status.get(),
-                                    !shown.error.get().is_empty() && shown.status.get().is_none(),
-                                )
+                                if shown.status.get().is_none()
+                                    && is_tunnel_notice(&shown.error.get())
+                                {
+                                    fg_secondary()
+                                } else {
+                                    http_status_fg(
+                                        shown.status.get(),
+                                        !shown.error.get().is_empty()
+                                            && shown.status.get().is_none(),
+                                    )
+                                }
                             }),
                         ),
                 )
@@ -1013,6 +1031,43 @@ pub(crate) fn summary(
                     },
                 ))
                 .child(view().flex_1())
+                .child({
+                    let diagram_ctx = use_context::<SeqBuilder>();
+                    let diagram_rows = use_context::<DiagramResumeRows>();
+                    let resume_controls = controls.clone();
+                    when(
+                        move || {
+                            diagram_ctx.is_some_and(|sb| {
+                                !sb.open.get() && !sb.resume_ids.with(Vec::is_empty)
+                            }) && diagram_rows.is_some()
+                        },
+                        move || {
+                            let sb = diagram_ctx.expect("seq builder context");
+                            let rows_ctx = diagram_rows.expect("diagram rows context");
+                            let c = resume_controls.clone();
+                            let langs = ui_langs();
+                            detail_button(
+                                move || -> SharedString {
+                                    let count = sb.resume_ids.with(Vec::len);
+                                    match ui_lang(langs) {
+                                        Lang::Zh => format!("返回图表 ({count})").into(),
+                                        Lang::En => format!("Diagram ({count})").into(),
+                                    }
+                                },
+                                move || {
+                                    resume_sequence_diagram(
+                                        &c,
+                                        rows_ctx.0,
+                                        sb,
+                                        compose,
+                                        selected,
+                                        shown.phase,
+                                    );
+                                },
+                            )
+                        },
+                    )
+                })
                 .child(summary_primary_actions(shown, controls.clone(), selected))
                 .child(inline_mock_trigger_button(
                     shown,

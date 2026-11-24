@@ -131,7 +131,10 @@ pub(crate) fn seq_dependency_view(
                                     })
                                 })
                                 .tabular_nums()
+                                .flex_1()
+                                .min_w(px(0.0))
                                 .number_of_lines(1)
+                                .text_overflow(EllipsizeMode::Tail)
                                 .text_size(px(TEXT_XS))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(fg_secondary()),
@@ -589,6 +592,27 @@ pub(crate) fn seq_dependency_row(
                             .child(seq_dep_badge(row, langs, 2))
                             .child(seq_dep_badge(row, langs, 3))
                             .child(when(
+                                move || row.with(|r| r.bar.deps.len() > 4),
+                                move || {
+                                    view()
+                                        .px_1p5()
+                                        .py(px(1.5))
+                                        .rounded(px(RADIUS_SM))
+                                        .bg(bg_control())
+                                        .child(
+                                            mono(move || {
+                                                let extra = row
+                                                    .with(|r| r.bar.deps.len().saturating_sub(4));
+                                                format!("+{extra}")
+                                            })
+                                            .tabular_nums()
+                                            .text_size(px(TEXT_XS))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(fg_muted()),
+                                        )
+                                },
+                            ))
+                            .child(when(
                                 move || row.with(|r| !r.bar.comment.is_empty()),
                                 move || {
                                     view()
@@ -735,8 +759,11 @@ pub(crate) fn seq_waterfall_view(
                                     })
                                 })
                                 .tabular_nums()
-                                .flex_shrink_0()
+                                .max_w(relative(0.55))
+                                .min_w(px(0.0))
+                                .text_right()
                                 .number_of_lines(1)
+                                .text_overflow(EllipsizeMode::Middle)
                                 .text_size(px(TEXT_XS))
                                 .text_color(accent_blue_text()),
                             ),
@@ -841,6 +868,7 @@ pub(crate) fn seq_waterfall_row(
     at: Position,
 ) -> impl IntoElement {
     let viewport_w = seq_builder.viewport_w;
+    let langs = ui_langs();
     let bar_item = computed(move || {
         seq_builder
             .diagram
@@ -1098,14 +1126,22 @@ pub(crate) fn seq_waterfall_row(
                         .bg(bg_card())
                         .child(
                             mono(move || {
+                                let lang = ui_lang(langs);
                                 bar_item.with(|b| {
                                     if let Some(dep) = b.deps.first() {
                                         if dep.kind.is_hard() {
-                                            format!("{} · dep#{}", b.duration_label, dep.from_flow_id)
+                                            format!(
+                                                "{} · {}#{}",
+                                                b.duration_label,
+                                                t(lang, "依赖", "dep"),
+                                                dep.from_flow_id
+                                            )
                                         } else {
                                             format!(
-                                                "{} · after#{}",
-                                                b.duration_label, dep.from_flow_id
+                                                "{} · {}#{}",
+                                                b.duration_label,
+                                                t(lang, "后继", "after"),
+                                                dep.from_flow_id
                                             )
                                         }
                                     } else {

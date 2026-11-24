@@ -1015,6 +1015,24 @@ pub fn take_poll_wake() -> bool {
     POLL_WAKE.swap(false, std::sync::atomic::Ordering::AcqRel)
 }
 
+static WEB_OP_ERRORS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn push_web_op_error(msg: impl Into<String>) {
+    let text = msg.into();
+    if text.trim().is_empty() {
+        return;
+    }
+    let mut guard = WEB_OP_ERRORS.lock().unwrap_or_else(|err| err.into_inner());
+    if guard.len() >= 8 {
+        guard.remove(0);
+    }
+    guard.push(text);
+}
+
+pub fn drain_web_op_errors() -> Vec<String> {
+    std::mem::take(&mut *WEB_OP_ERRORS.lock().unwrap_or_else(|err| err.into_inner()))
+}
+
 pub fn take_save_error() -> Option<String> {
     LAST_SAVE_ERROR
         .lock()
@@ -1024,23 +1042,46 @@ pub fn take_save_error() -> Option<String> {
 
 fn post_op(value: Value) {
     let Ok(body) = serde_json::to_vec(&value) else {
+        push_web_op_error("请求没有编码");
         return;
     };
     nsh_core::prelude::spawn(async move {
         let request = nsh_core::prelude::HttpRequest::post("api/hub", body)
             .header("content-type", "application/json");
-        if let Ok(response) = nsh_core::prelude::fetch(request).await {
-            notify_poll_wake();
-            if let Ok(parsed) = serde_json::from_str::<Value>(&response.text())
-                && let Some(err) = parsed
-                    .get("save_error")
-                    .and_then(Value::as_str)
+        match nsh_core::prelude::fetch(request).await {
+            Ok(response) => {
+                notify_poll_wake();
+                let body_text = response.text();
+                let parsed = serde_json::from_str::<Value>(&body_text).ok();
+                if !response.ok() {
+                    let fallback = match response.head.status {
+                        401 => "未授权 (401)".to_string(),
+                        403 => "禁止访问 (403)".to_string(),
+                        code => format!("HTTP {code}"),
+                    };
+                    let err = parsed
+                        .as_ref()
+                        .and_then(|v| v.get("error").and_then(Value::as_str))
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .unwrap_or(fallback);
+                    push_web_op_error(err);
+                    return;
+                }
+                if let Some(err) = parsed
+                    .as_ref()
+                    .and_then(|v| v.get("save_error").and_then(Value::as_str))
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
-            {
-                *LAST_SAVE_ERROR
-                    .lock()
-                    .unwrap_or_else(|err| err.into_inner()) = Some(err.to_string());
+                {
+                    *LAST_SAVE_ERROR
+                        .lock()
+                        .unwrap_or_else(|err| err.into_inner()) = Some(err.to_string());
+                }
+            }
+            Err(_) => {
+                push_web_op_error("没有连上");
             }
         }
     });

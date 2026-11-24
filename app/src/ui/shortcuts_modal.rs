@@ -112,8 +112,8 @@ pub(crate) fn format_shortcut_badge(spec: &str, apple: bool) -> String {
     }
 }
 
-fn is_apple_platform() -> bool {
-    cfg!(target_os = "macos")
+pub(crate) fn is_apple_platform() -> bool {
+    nsh_core::prelude::try_apple_keys().unwrap_or_else(|| cfg!(target_os = "macos"))
 }
 
 pub(crate) fn shortcuts_modal(open: Signal<bool>) -> impl IntoElement {
