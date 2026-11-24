@@ -4733,8 +4733,16 @@ mod tests {
         assert_eq!(std::fs::read(mock_path).unwrap(), body_bytes);
         let rules = mock_resp["rules"].as_str().unwrap();
         assert!(rules.contains("map-local api.vicanso.dev/v1/hello"));
-        assert!(rules.contains(mock_path));
-        assert!(hub.rules_text().contains(mock_path));
+        let expected_token = crate::rules::quote_rule_token(mock_path);
+        assert!(
+            rules.contains(&expected_token),
+            "rules={rules:?} expected={expected_token:?}"
+        );
+        assert!(
+            hub.rules_text().contains(&expected_token),
+            "hub_rules={:?} expected={expected_token:?}",
+            hub.rules_text()
+        );
         assert!(hub.rules_enabled());
 
         drop(server);
