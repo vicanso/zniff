@@ -965,7 +965,18 @@ fn unpack_and_replace(tarball: &Path, unpack: &Path, target: &Path) -> Result<()
     let member = tarball_member_dir().ok_or("no release build for this architecture")?;
     let fresh = find_unpacked_binary(unpack, "zniff", Some(member))
         .ok_or_else(|| format!("the tarball has no zniff or {member}/zniff in it"))?;
-    replace_binary(target, &fresh)
+    replace_binary(target, &fresh)?;
+    if let Some(fresh_helper) = fresh
+        .parent()
+        .map(|dir| dir.join("zniff-ebpf-helper"))
+        .filter(|p| p.is_file())
+    {
+        let helper_target = target.with_file_name("zniff-ebpf-helper");
+        if let Err(err) = replace_binary(&helper_target, &fresh_helper) {
+            log::warn!("could not update zniff-ebpf-helper in place: {err}");
+        }
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]

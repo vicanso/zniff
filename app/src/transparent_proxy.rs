@@ -34,6 +34,10 @@ pub struct TransparentProxyStatus {
     pub state: TpState,
     pub active: bool,
     pub error: String,
+    #[serde(default)]
+    pub passwordless_ready: bool,
+    #[serde(default)]
+    pub setcap_command: String,
 }
 
 impl TransparentProxyStatus {
@@ -198,6 +202,8 @@ fn parse_bundle_and_manager_status(
         state: mgr.state,
         active: mgr.active,
         error: mgr.error,
+        passwordless_ready: false,
+        setcap_command: String::new(),
     }
 }
 
@@ -357,6 +363,8 @@ pub fn refresh_status() -> TransparentProxyStatus {
             state: TpState::Idle,
             active: false,
             error: String::new(),
+            passwordless_ready: false,
+            setcap_command: String::new(),
         };
         store_status(st.clone());
         return st;
@@ -367,7 +375,18 @@ pub fn refresh_status() -> TransparentProxyStatus {
     st
 }
 
-#[cfg(not(all(target_os = "macos", feature = "desktop", not(target_arch = "wasm32"))))]
+#[cfg(all(target_os = "linux", feature = "desktop", not(target_arch = "wasm32")))]
+pub fn refresh_status() -> TransparentProxyStatus {
+    let st = crate::transparent_proxy_linux::native::refresh_status();
+    store_status(st.clone());
+    st
+}
+
+#[cfg(not(all(
+    any(target_os = "macos", target_os = "linux"),
+    feature = "desktop",
+    not(target_arch = "wasm32")
+)))]
 pub fn refresh_status() -> TransparentProxyStatus {
     let st = TransparentProxyStatus::default();
     store_status(st.clone());
@@ -381,7 +400,18 @@ pub fn refresh_running_apps() -> Vec<RunningApp> {
     apps
 }
 
-#[cfg(not(all(target_os = "macos", feature = "desktop", not(target_arch = "wasm32"))))]
+#[cfg(all(target_os = "linux", feature = "desktop", not(target_arch = "wasm32")))]
+pub fn refresh_running_apps() -> Vec<RunningApp> {
+    let apps = crate::transparent_proxy_linux::native::list_running_apps();
+    store_running_apps(apps.clone());
+    apps
+}
+
+#[cfg(not(all(
+    any(target_os = "macos", target_os = "linux"),
+    feature = "desktop",
+    not(target_arch = "wasm32")
+)))]
 pub fn refresh_running_apps() -> Vec<RunningApp> {
     Vec::new()
 }
@@ -397,9 +427,24 @@ pub fn start(cfg: &TransparentProxyConfig) -> Result<StartOutcome, String> {
     res
 }
 
-#[cfg(not(all(target_os = "macos", feature = "desktop", not(target_arch = "wasm32"))))]
+#[cfg(all(target_os = "linux", feature = "desktop", not(target_arch = "wasm32")))]
+pub fn start(cfg: &TransparentProxyConfig) -> Result<StartOutcome, String> {
+    if OP_IN_FLIGHT.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return Err("透明代理正在切换中".to_string());
+    }
+    let res = crate::transparent_proxy_linux::native::start(cfg);
+    OP_IN_FLIGHT.store(false, std::sync::atomic::Ordering::Release);
+    refresh_status();
+    res
+}
+
+#[cfg(not(all(
+    any(target_os = "macos", target_os = "linux"),
+    feature = "desktop",
+    not(target_arch = "wasm32")
+)))]
 pub fn start(_cfg: &TransparentProxyConfig) -> Result<StartOutcome, String> {
-    Err("当前构建未内嵌 macOS 透明代理系统扩展".to_string())
+    Err("当前构建不支持透明代理".to_string())
 }
 
 #[cfg(all(target_os = "macos", feature = "desktop", not(target_arch = "wasm32")))]
@@ -409,7 +454,18 @@ pub fn update_config(cfg: &TransparentProxyConfig) -> Result<(), String> {
     res
 }
 
-#[cfg(not(all(target_os = "macos", feature = "desktop", not(target_arch = "wasm32"))))]
+#[cfg(all(target_os = "linux", feature = "desktop", not(target_arch = "wasm32")))]
+pub fn update_config(cfg: &TransparentProxyConfig) -> Result<(), String> {
+    let res = crate::transparent_proxy_linux::native::update_config(cfg);
+    refresh_status();
+    res
+}
+
+#[cfg(not(all(
+    any(target_os = "macos", target_os = "linux"),
+    feature = "desktop",
+    not(target_arch = "wasm32")
+)))]
 pub fn update_config(_cfg: &TransparentProxyConfig) -> Result<(), String> {
     Ok(())
 }
@@ -425,7 +481,22 @@ pub fn stop() -> Result<(), String> {
     res
 }
 
-#[cfg(not(all(target_os = "macos", feature = "desktop", not(target_arch = "wasm32"))))]
+#[cfg(all(target_os = "linux", feature = "desktop", not(target_arch = "wasm32")))]
+pub fn stop() -> Result<(), String> {
+    if OP_IN_FLIGHT.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return Err("透明代理正在切换中".to_string());
+    }
+    let res = crate::transparent_proxy_linux::native::stop();
+    OP_IN_FLIGHT.store(false, std::sync::atomic::Ordering::Release);
+    refresh_status();
+    res
+}
+
+#[cfg(not(all(
+    any(target_os = "macos", target_os = "linux"),
+    feature = "desktop",
+    not(target_arch = "wasm32")
+)))]
 pub fn stop() -> Result<(), String> {
     Ok(())
 }

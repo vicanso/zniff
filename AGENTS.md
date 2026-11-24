@@ -13,6 +13,7 @@
   - **函数复杂度**：单函数目标 `<= 80` 行，**硬性上限 `120` 行**；分支/循环嵌套深度尽量控制在 `<= 4` 层（优先使用 early return、`let-else`、`?` 与语义化小函数拉平）；单函数参数不超过 `7` 个（超出则聚合为结构体，禁止为新增函数继续添加 `#[allow(clippy::too_many_arguments)]`）。
   - **历史大文件治理**：触碰已超 `1200` 行的历史大文件（如 `present.rs`、`share.rs`、`session.rs`、`rules.rs`、`web.rs`）时，禁止继续向其追加成块的新组件或新子系统；每当修改其中某个独立区块，优先顺手将该内聚区块抽离为独立子模块。
 - `app/src/proxy/`、`app/src/local_proc.rs`：代理内核已拆分为 `mod.rs`（入口与 `Capture`）、`hub.rs` / `hub_session.rs`（`Hub` 状态、规则/断点/连接池/会话/分享）、`tls_mitm.rs`（CONNECT/MITM/H1/H2 握手）、`plain_http.rs`、`upstream_io.rs`、`local_routes.rs`（`/zniff`、`/mcp`、`/relay`、`/s/`）、`replay.rs`、`wire.rs`、`hyper_forward.rs`、`hyper_helpers.rs` 与 `tests.rs`，配合 `local_proc.rs` 完成本机回环源端口到进程名识别（macOS `lsof +c 0` / Linux `/proc` / Windows）。
+- `macos/transparent-proxy/` 与 `linux/ebpf/`、`app/src/transparent_proxy.rs`、`app/src/transparent_proxy_linux.rs`：桌面按进程透明抓包后端（不改系统代理，直接附带 `X-Zniff-Source-App` 并支持 UDP 443 拦截以回落 HTTPS TCP）——macOS 使用内置 `NETransparentProxyProvider` System Extension；Linux 使用独立工作区 `linux/ebpf/`（`aya` + `aya-ebpf` cgroup v2 `connect4/6`、`sendmsg4/6`、`sockops` 与 `sched` tracepoint）构建嵌入 eBPF 字节码的 `zniff-ebpf-helper`，桌面端按 `setcap` 免密或 `pkexec` 提权拉起（要求 Linux 5.12+ 与 cgroup v2）。
 - `app/src/session.rs`：内存会话。
 - `app/src/ca.rs`：根 CA 和叶子证书。
 - `app/src/sysproxy.rs`：系统代理的记住、改写和恢复。

@@ -1324,6 +1324,14 @@ pub(crate) fn toggle_transparent_proxy(controls: Arc<Controls>) {
             return;
         }
         if !st.in_applications {
+            #[cfg(target_os = "linux")]
+            set_status(
+                &controls,
+                StatusMsg::TransparentProxyFailed(
+                    "需要 Linux 5.12+ 且启用 cgroup v2 (/sys/fs/cgroup)".to_string(),
+                ),
+            );
+            #[cfg(not(target_os = "linux"))]
             set_status(&controls, StatusMsg::TransparentProxyNeedsApplications);
             return;
         }

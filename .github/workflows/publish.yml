@@ -194,7 +194,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install GTK 4 and GStreamer dependencies
+      - name: Install GTK 4, GStreamer, and LLVM dependencies
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -202,6 +202,8 @@ jobs:
             build-essential \
             clang \
             libclang-dev \
+            llvm-dev \
+            libzstd-dev \
             pkg-config \
             libfontconfig-dev \
             libfreetype-dev \
@@ -211,7 +213,17 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly
+          components: rust-src
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - uses: cargo-bins/cargo-binstall@main
+
+      - name: Install bpf-linker
+        run: cargo binstall --no-confirm bpf-linker || cargo install --locked bpf-linker
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -259,6 +271,14 @@ jobs:
           rustup_home="${RUSTUP_HOME:-${USERPROFILE:-$HOME}/.rustup}"
           export RUSTFLAGS="--remap-path-prefix=${GITHUB_WORKSPACE}=. --remap-path-prefix=${cargo_home}=/cargo --remap-path-prefix=${rustup_home}=/rustup ${RUSTFLAGS:-}"
 
+          helper_bin="${RUNNER_TEMP}/zniff-ebpf-helper"
+          (cd .. && ./scripts/build-linux-ebpf.sh "$helper_bin")
+          helper_glibc="$(objdump -T "$helper_bin" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sed 's/GLIBC_//' | sort -uV | tail -n1 || true)"
+          if [ -n "$helper_glibc" ] && [ "$(printf '%s\n%s\n' "2.39" "$helper_glibc" | sort -V | tail -n1)" != "2.39" ]; then
+            echo "Helper binary requires GLIBC_${helper_glibc}, which exceeds baseline GLIBC_2.39" >&2
+            exit 1
+          fi
+
           nsh package --target linux \
             --app-version "$app_version" \
             --build "$GITHUB_RUN_NUMBER" \
@@ -276,13 +296,11 @@ jobs:
             exit 1
           fi
 
-          archive="$(find "$out_dir" -maxdepth 1 -type f -name '*.tar.gz' | head -n 1)"
-          if [ -z "$archive" ]; then
-            echo "::error::Expected a .tar.gz package from nsh package --target linux"
-            ls -la "$out_dir"
-            exit 1
-          fi
-          cp "$archive" "${stage_dir}/${APP_NAME}-linux-${TARGET_ARCH}.tar.gz"
+          bundle_dir="$(dirname "$bin")"
+          cp "$helper_bin" "${bundle_dir}/zniff-ebpf-helper"
+          chmod 755 "${bundle_dir}/zniff-ebpf-helper"
+          tar -czf "${stage_dir}/${APP_NAME}-linux-${TARGET_ARCH}.tar.gz" \
+            -C "$(dirname "$bundle_dir")" "$(basename "$bundle_dir")"
 
       - name: Upload zniff Desktop asset (tag)
         if: startsWith(github.ref, 'refs/tags/')

@@ -1,0 +1,19 @@
+[package]
+name = "zniff-ebpf-prog"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+aya-ebpf = "0.3.0"
+zniff-ebpf-common = { path = "../zniff-ebpf-common" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+opt-level = 3
+lto = true
+panic = "abort"

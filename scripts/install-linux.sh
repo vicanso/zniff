@@ -18,7 +18,9 @@
 # The tarball member is `zniff-linux-$arch/zniff`, the same path
 # `updater.rs` replaces in place. `--uninstall` removes exactly what this
 # put down. `--no-autostart` installs everything else. `--tag vX.Y.Z`
-# pins the download.
+# pins the download. `--ebpf-caps` grants `zniff-ebpf-helper` minimal eBPF
+# capabilities via `sudo setcap` without prompting; `--no-ebpf-caps` skips
+# prompting and keeps the install strictly rootless.
 #
 # Not meant to be piped into a shell. It stops a running process and
 # writes under ~/.local and ~/.config; that is not something to run
@@ -53,7 +55,7 @@ die() { printf 'install-linux.sh: %s\n' "$*" >&2; exit 1; }
 here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 
 uninstall() {
-    for f in "$BIN_DIR/$APP" "$DESKTOP_DIR/$DESKTOP_ID.desktop" \
+    for f in "$BIN_DIR/$APP" "$BIN_DIR/$APP-ebpf-helper" "$DESKTOP_DIR/$DESKTOP_ID.desktop" \
              "$ICON_DIR/$APP.png" "$AUTOSTART_DIR/$DESKTOP_ID.desktop"; do
         if [ -e "$f" ]; then
             rm -f "$f"
@@ -80,11 +82,14 @@ fi
 
 want_autostart=1
 pin_tag=""
+want_ebpf_caps="prompt"
 while [ $# -gt 0 ]; do
     case "$1" in
         --no-autostart) want_autostart=0 ;;
+        --ebpf-caps) want_ebpf_caps="yes" ;;
+        --no-ebpf-caps) want_ebpf_caps="no" ;;
         --tag) shift; pin_tag="${1:-}"; [ -n "$pin_tag" ] || die "--tag needs a version" ;;
-        *) die "unknown argument $1 (--uninstall, --no-autostart, --tag vX.Y.Z)" ;;
+        *) die "unknown argument $1 (--uninstall, --no-autostart, --ebpf-caps, --no-ebpf-caps, --tag vX.Y.Z)" ;;
     esac
     shift
 done
@@ -172,16 +177,20 @@ fetch_release() {
 if [ -x "$here/$APP" ]; then
     binary="$here/$APP"
     icon="$here/$APP.png"
+    helper="$here/$APP-ebpf-helper"
 elif [ -x "$here/../app/target/release/$APP" ]; then
     binary="$here/../app/target/release/$APP"
     icon="$here/../icons/$APP.png"
+    helper="$here/../linux/ebpf/target/release/$APP-ebpf-helper"
 elif [ -x "$here/../target/release/$APP" ]; then
     binary="$here/../target/release/$APP"
     icon="$here/../icons/$APP.png"
+    helper="$here/../linux/ebpf/target/release/$APP-ebpf-helper"
 else
     say "no local binary — fetching the latest release for $arch"
     fetch_release
     binary="$unpacked/$APP"
+    helper="$unpacked/$APP-ebpf-helper"
     if [ -f "$unpacked/$APP.png" ]; then
         icon="$unpacked/$APP.png"
     elif [ -f "$unpacked/icon.png" ]; then
@@ -191,6 +200,7 @@ else
     fi
 fi
 [ -f "$icon" ] || icon=""
+[ -x "$helper" ] || helper=""
 
 # --- a running instance would keep serving the old binary -----------------
 #
@@ -210,6 +220,63 @@ fi
 mkdir -p "$BIN_DIR"
 install -m755 "$binary" "$BIN_DIR/$APP"
 say "installed $BIN_DIR/$APP"
+
+find_setcap() {
+    for c in setcap /usr/sbin/setcap /sbin/setcap; do
+        if command -v "$c" >/dev/null 2>&1; then
+            command -v "$c"
+            return 0
+        fi
+    done
+    return 1
+}
+
+configure_ebpf_caps() {
+    helper_path="$1"
+    setcap_bin=$(find_setcap) || setcap_bin=""
+    [ -n "$setcap_bin" ] || return 1
+
+    do_apply=0
+    if [ "$want_ebpf_caps" = yes ]; then
+        do_apply=1
+    elif [ "$want_ebpf_caps" = prompt ] && [ -t 0 ] && [ -t 1 ]; then
+        if [ "$(id -u)" = 0 ] || command -v sudo >/dev/null 2>&1; then
+            printf 'Configure passwordless eBPF transparent proxy via sudo setcap? [y/N] '
+            IFS= read -r ans || ans=""
+            case "$ans" in
+                y|Y|yes|YES) do_apply=1 ;;
+            esac
+        fi
+    fi
+
+    [ "$do_apply" = 1 ] || return 1
+
+    caps="cap_bpf,cap_net_admin,cap_sys_resource+ep"
+    if [ "$(id -u)" = 0 ]; then
+        if "$setcap_bin" "$caps" "$helper_path"; then
+            say "granted eBPF capabilities ($caps) to $helper_path"
+            return 0
+        fi
+    elif command -v sudo >/dev/null 2>&1; then
+        if sudo "$setcap_bin" "$caps" "$helper_path"; then
+            say "granted eBPF capabilities ($caps) to $helper_path"
+            return 0
+        fi
+    fi
+    say "warning: failed to set eBPF capabilities; zniff will prompt via pkexec when starting transparent proxy."
+    return 1
+}
+
+helper_installed=""
+ebpf_caps_granted=""
+if [ -n "$helper" ]; then
+    install -m755 "$helper" "$BIN_DIR/$APP-ebpf-helper"
+    helper_installed=1
+    say "installed $BIN_DIR/$APP-ebpf-helper"
+    if configure_ebpf_caps "$BIN_DIR/$APP-ebpf-helper"; then
+        ebpf_caps_granted=1
+    fi
+fi
 
 icon_installed=""
 if [ -n "$icon" ]; then
@@ -378,3 +445,12 @@ say ""
 say "Start it now:  $BIN_DIR/$APP"
 say "The system proxy stays off until you turn it on inside $APP."
 say "Data directory: $DATA_DIR"
+if [ -n "$helper_installed" ]; then
+    say ""
+    if [ -n "$ebpf_caps_granted" ]; then
+        say "Passwordless eBPF transparent proxy is ready (rerun setcap after upgrading $APP-ebpf-helper)."
+    else
+        say "Optional passwordless eBPF transparent proxy (otherwise pkexec prompts on start):"
+        say "  sudo setcap cap_bpf,cap_net_admin,cap_sys_resource+ep \"$BIN_DIR/$APP-ebpf-helper\""
+    fi
+fi

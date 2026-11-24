@@ -42,14 +42,16 @@ jobs:
             os: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - name: GTK 4 & GStreamer
-        # nsh 0.6's Linux backend links GTK 4, GStreamer, and fontconfig/freetype (plus clang for bindgen/skia).
+      - name: GTK 4, GStreamer, and LLVM dependencies
+        # nsh 0.6's Linux backend links GTK 4, GStreamer, and fontconfig/freetype (plus clang/llvm for eBPF).
         if: matrix.name == 'linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             clang \
             libclang-dev \
+            llvm-dev \
+            libzstd-dev \
             pkg-config \
             libfontconfig-dev \
             libfreetype-dev \
@@ -86,6 +88,11 @@ jobs:
           }
           clang --version
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: dtolnay/rust-toolchain@master
+        if: matrix.name == 'linux'
+        with:
+          toolchain: nightly
+          components: rust-src
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
@@ -115,6 +122,18 @@ jobs:
           cargo clippy --manifest-path app/Cargo.toml --lib --no-default-features --target wasm32-unknown-unknown -- --deny=warnings
       - name: test
         run: cargo test --manifest-path app/Cargo.toml --workspace
+      - uses: cargo-bins/cargo-binstall@main
+        if: matrix.name == 'linux'
+      - name: test linux eBPF workspace & build helper
+        if: matrix.name == 'linux'
+        run: |
+          set -euo pipefail
+          cargo fmt --manifest-path linux/ebpf/Cargo.toml --all -- --check
+          cargo fmt --manifest-path linux/ebpf/zniff-ebpf-prog/Cargo.toml -- --check
+          cargo clippy --manifest-path linux/ebpf/Cargo.toml --workspace --all-targets -- -D warnings
+          cargo test --manifest-path linux/ebpf/Cargo.toml --workspace
+          cargo binstall --no-confirm bpf-linker || cargo install --locked bpf-linker
+          ./scripts/build-linux-ebpf.sh
       - name: nsh check (macOS & Linux)
         if: matrix.name == 'macos' || matrix.name == 'linux'
         shell: bash

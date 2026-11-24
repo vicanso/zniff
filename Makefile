@@ -9,7 +9,7 @@ CARGO_FLAGS := --manifest-path $(MANIFEST)
 VERSION := $(shell sed -n 's/^version = "\([^"]*\)"/\1/p' $(MANIFEST) | head -1)
 
 .PHONY: all help build dev dev-app dev-cargo debug run web web-ui fmt lint test test-app bench check check-wasm \
-	build-app package-macos package-macos-universal package-macos-signed release release-cli bundle bundle-signed \
+	build-app build-linux-ebpf package-macos package-macos-universal package-macos-signed release release-cli bundle bundle-signed \
 	clean bloat udeps version sync-version version-patch version-minor version-major tag nightly changelog
 
 # --- develop ---------------------------------------------------------------
@@ -32,6 +32,7 @@ help:
 		'test-app               run fmt/lint/test + nsh check && nsh test in app/' \
 		'bench                  run large-session performance benchmarks (10k / 100k flows)' \
 		'build-app              build desktop nsh runtime artifacts' \
+		'build-linux-ebpf       build Linux aya eBPF helper binary (Linux + nightly + bpf-linker)' \
 		'package-macos          package zniff.app via nsh package --target macos' \
 		'package-macos-universal  package universal arm64+x86_64 zniff.app via nsh' \
 		'package-macos-signed   package zniff.app via nsh and embed/sign system extension' \
@@ -145,6 +146,9 @@ build-app:
 		*) echo "nsh 必须是 $(NSH_VERSION)，当前是 $$($(NSH_BIN) --version 2>/dev/null || printf '<none>')"; exit 1 ;; \
 	esac
 	cd app && $(NSH_BIN) build $(ARGS)
+
+build-linux-ebpf:
+	scripts/build-linux-ebpf.sh
 
 release:
 	@cargo_home="$${CARGO_HOME:-$$HOME/.cargo}"; \

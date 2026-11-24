@@ -76,6 +76,9 @@ mod sysproxy;
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
 mod transparent_proxy;
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(all(target_os = "linux", feature = "desktop")), allow(dead_code))]
+mod transparent_proxy_linux;
 mod ui;
 #[cfg(not(target_arch = "wasm32"))]
 mod updater;

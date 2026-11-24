@@ -24,7 +24,7 @@ https://github.com/user-attachments/assets/19339425-f1df-47fe-ab8a-88bb586fd4a1
 
 ## 核心亮点
 
-- **免配抓包** — 底栏一个 **「接入」** 按钮即可拉起隔离 Chromium、代理终端、Android `adb`、iOS 模拟器或手机扫码。
+- **免配抓包** — 底栏一个 **「接入」** 按钮即可拉起隔离 Chromium、代理终端、Android `adb`、iOS 模拟器、手机扫码，或开启按应用透明抓包（macOS 系统扩展 / Linux `aya` eBPF）。
 - **真实协议** — 按 ALPN 跟随 HTTP/2、WebSocket 与 SSE，不降级 HTTP/1.1；支持 HTTP 与 SOCKS5 上游。
 - **深度检视** — JSON 树、GraphQL、LLM / AI SSE 流、Protobuf、MessagePack、JWT 与基准对比。
 - **纯文本规则** — 17 类规则（Mock、映射、改写、延迟、断点、Webhook…），支持多组叠加。
@@ -51,7 +51,8 @@ https://github.com/user-attachments/assets/19339425-f1df-47fe-ab8a-88bb586fd4a1
   curl -fsSLO https://raw.githubusercontent.com/vicanso/zniff/main/scripts/install-linux.sh
   sh install-linux.sh
   ```
-  无需 `root`，自动下载对应 `x86_64` / `aarch64` 发行包并通过 `SHA256SUMS` 校验（GitHub 不可达时自动回落 Gitee 镜像），检查 GTK 4.14+ / `glibc 2.39` 运行依赖，并将二进制、图标、启动器项与开机自启安装到 `~/.local` 和 `~/.config`（也可解压 Linux `.tar.gz` 后直接运行包内 `./install-linux.sh`）。支持 `--no-autostart`、`--tag vX.Y.Z` 与 `--uninstall`。
+  无需 `root`，自动下载对应 `x86_64` / `aarch64` 发行包并通过 `SHA256SUMS` 校验（GitHub 不可达时自动回落 Gitee 镜像），检查 GTK 4.14+ / `glibc 2.39` 运行依赖，并将主程序、`zniff-ebpf-helper`、图标、启动器项与开机自启安装到 `~/.local` 和 `~/.config`（也可解压 Linux `.tar.gz` 后直接运行包内 `./install-linux.sh`）。支持 `--no-autostart`、`--ebpf-caps`、`--no-ebpf-caps`、`--tag vX.Y.Z` 与 `--uninstall`。
+  - **Linux eBPF 透明代理**：需要 Linux 5.12+ 与 cgroup v2。默认在 **「接入」** 面板点击开启时通过 `pkexec` 弹窗授权；安装时加 `--ebpf-caps`（或在交互式安装确认提示中输入 `y`，或手动执行 `sudo setcap cap_bpf,cap_net_admin,cap_sys_resource+ep ~/.local/bin/zniff-ebpf-helper`）即可免密开启，原地更新替换 `zniff-ebpf-helper` 后需重新执行一次 `setcap`。
 - **源码安装**：
   ```bash
   cargo install --git https://github.com/vicanso/zniff

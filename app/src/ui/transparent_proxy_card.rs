@@ -39,7 +39,16 @@ pub(crate) fn transparent_proxy_card(
         .child(tp_inline_notice(tp_status))
         .child(when(
             move || expanded.get(),
-            move || tp_expanded_body(controls.clone(), tp_apps, capture_all, targets, block_quic),
+            move || {
+                tp_expanded_body(
+                    controls.clone(),
+                    tp_status,
+                    tp_apps,
+                    capture_all,
+                    targets,
+                    block_quic,
+                )
+            },
         ))
 }
 
@@ -167,6 +176,14 @@ fn tp_header_row(
 
 fn tp_status_subtitle(lang: Lang, st: &TransparentProxyStatus) -> String {
     if !st.in_applications {
+        #[cfg(target_os = "linux")]
+        return t(
+            lang,
+            "需要 Linux 5.12+ 与 cgroup v2",
+            "Requires Linux 5.12+ and cgroup v2",
+        )
+        .to_string();
+        #[cfg(not(target_os = "linux"))]
         return t(
             lang,
             "需移至 /Applications 才能激活",
@@ -181,7 +198,21 @@ fn tp_status_subtitle(lang: Lang, st: &TransparentProxyStatus) -> String {
             "Running · No OS proxy change",
         )
         .into(),
-        TpState::Starting => t(lang, "正在启动系统扩展…", "Starting extension…").into(),
+        TpState::Starting => {
+            #[cfg(target_os = "linux")]
+            {
+                t(
+                    lang,
+                    "正在启动 eBPF 助手（可能弹出授权）…",
+                    "Starting eBPF helper (auth prompt)…",
+                )
+                .into()
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                t(lang, "正在启动系统扩展…", "Starting extension…").into()
+            }
+        }
         TpState::Stopping => t(lang, "正在停止…", "Stopping…").into(),
         TpState::NeedsApproval => {
             t(lang, "等待系统设置授权", "Needs System Settings approval").into()
@@ -225,12 +256,20 @@ fn tp_inline_notice(tp_status: Signal<TransparentProxyStatus>) -> impl IntoEleme
                         let lang = ui_lang(langs);
                         tp_status.with(|st| {
                             if !st.in_applications {
-                                t(
+                                #[cfg(target_os = "linux")]
+                                return t(
+                                    lang,
+                                    "需要 Linux 5.12+ 内核并挂载 cgroup v2 (/sys/fs/cgroup/cgroup.controllers) 才能启用 eBPF 透明代理。",
+                                    "Requires Linux 5.12+ kernel and cgroup v2 (/sys/fs/cgroup/cgroup.controllers) for eBPF transparent proxy.",
+                                )
+                                .into();
+                                #[cfg(not(target_os = "linux"))]
+                                return t(
                                     lang,
                                     "请先将 zniff.app 移至 /Applications 目录再激活系统扩展。",
                                     "Move zniff.app into /Applications first to activate the system extension.",
                                 )
-                                .into()
+                                .into();
                             } else if st.state == TpState::NeedsApproval {
                                 t(
                                     lang,
@@ -248,12 +287,43 @@ fn tp_inline_notice(tp_status: Signal<TransparentProxyStatus>) -> impl IntoEleme
                     .text_color(status_warn_fg()),
                 )
                 .child(when(
-                    move || tp_status.with(|st| st.state == TpState::NeedsApproval),
+                    move || {
+                        cfg!(target_os = "macos")
+                            && tp_status.with(|st| st.state == TpState::NeedsApproval)
+                    },
                     move || {
                         view().w_full().flex_row().justify_end().child(menu_inline_pill(
                             tr("打开系统设置", "Open System Settings"),
                             || true,
                             transparent_proxy::open_system_settings,
+                        ))
+                    },
+                ))
+                .child(when(
+                    move || {
+                        tp_status.with(|st| {
+                            st.state == TpState::Error && !st.setcap_command.is_empty()
+                        })
+                    },
+                    move || {
+                        let copied = signal(false);
+                        view().w_full().flex_row().justify_end().child(menu_inline_pill(
+                            move || {
+                                let lang = ui_lang(langs);
+                                SharedString::from(if copied.get() {
+                                    t(lang, "已复制", "Copied")
+                                } else {
+                                    t(lang, "复制免密命令", "Copy setcap cmd")
+                                })
+                            },
+                            || true,
+                            move || {
+                                let cmd = tp_status.with_untracked(|st| st.setcap_command.clone());
+                                if !cmd.is_empty() {
+                                    set_clipboard(cmd);
+                                    copied.set(true);
+                                }
+                            },
                         ))
                     },
                 ))
@@ -263,6 +333,7 @@ fn tp_inline_notice(tp_status: Signal<TransparentProxyStatus>) -> impl IntoEleme
 
 fn tp_expanded_body(
     controls: Arc<Controls>,
+    tp_status: Signal<TransparentProxyStatus>,
     tp_apps: Signal<Vec<RunningApp>>,
     capture_all: Signal<bool>,
     targets: Signal<String>,
@@ -366,15 +437,109 @@ fn tp_expanded_body(
                     },
                 )),
         )
-        .child(
-            text(tr(
+        .child({
+            #[cfg(target_os = "linux")]
+            let note = tr(
+                "基于 eBPF (cgroup v2) 按进程拦截，自动排除 zniff 与系统 DNS 服务；请求流直接附带来源进程名。",
+                "Per-process eBPF (cgroup v2) capture, excludes zniff and DNS services; attaches source app names.",
+            );
+            #[cfg(not(target_os = "linux"))]
+            let note = tr(
                 "自动排除 zniff 自身与系统核心守护进程；请求流会直接附带来源应用名。",
                 "Automatically excludes zniff and core macOS daemons; attaches source app names.",
-            ))
-            .text_size(px(10.0))
-            .line_height(Points(14.0))
-            .text_color(fg_muted()),
-        )
+            );
+            text(note)
+                .text_size(px(10.0))
+                .line_height(Points(14.0))
+                .text_color(fg_muted())
+        })
+        .child(when(
+            move || {
+                tp_status.with(|st| {
+                    st.in_applications && (st.passwordless_ready || !st.setcap_command.is_empty())
+                })
+            },
+            move || tp_linux_auth_section(tp_status),
+        ))
+}
+
+fn tp_linux_auth_section(tp_status: Signal<TransparentProxyStatus>) -> impl IntoElement {
+    let langs = ui_langs();
+    let copied = signal(false);
+    view()
+        .w_full()
+        .flex_col()
+        .gap_1()
+        .child(when(
+            move || tp_status.with(|st| st.passwordless_ready),
+            move || {
+                text(tr(
+                    "免密授权已就绪（已授予 eBPF capability，无需每次输入密码）",
+                    "Passwordless ready (eBPF capabilities granted)",
+                ))
+                .text_size(px(10.0))
+                .line_height(Points(14.0))
+                .text_color(status_ok_fg())
+            },
+        ))
+        .child(when(
+            move || tp_status.with(|st| !st.passwordless_ready && !st.setcap_command.is_empty()),
+            move || {
+                view()
+                    .w_full()
+                    .flex_col()
+                    .gap_1()
+                    .p_1p5()
+                    .rounded(px(6.0))
+                    .bg(bg_card())
+                    .border_1()
+                    .border_color(border_subtle())
+                    .child(
+                        view()
+                            .w_full()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .gap_1()
+                            .child(
+                                text(tr(
+                                    "免密启动（可选，避免每次 pkexec 弹窗）",
+                                    "Passwordless start (optional, skips pkexec prompt)",
+                                ))
+                                .number_of_lines(1)
+                                .text_overflow(EllipsizeMode::Tail)
+                                .text_size(px(10.0))
+                                .text_color(fg_secondary()),
+                            )
+                            .child(menu_inline_pill(
+                                move || {
+                                    let lang = ui_lang(langs);
+                                    SharedString::from(if copied.get() {
+                                        t(lang, "已复制", "Copied")
+                                    } else {
+                                        t(lang, "复制命令", "Copy")
+                                    })
+                                },
+                                || false,
+                                move || {
+                                    let cmd =
+                                        tp_status.with_untracked(|st| st.setcap_command.clone());
+                                    if !cmd.is_empty() {
+                                        set_clipboard(cmd);
+                                        copied.set(true);
+                                    }
+                                },
+                            )),
+                    )
+                    .child(
+                        mono(move || -> SharedString {
+                            tp_status.with(|st| st.setcap_command.clone()).into()
+                        })
+                        .text_size(px(10.0))
+                        .text_color(fg_primary()),
+                    )
+            },
+        ))
 }
 
 fn tp_targets_section(
@@ -445,10 +610,19 @@ fn tp_targets_section(
         .child(
             input()
                 .value(targets)
-                .placeholder(tr(
-                    "进程名或 Bundle ID，逗号分隔（如 Safari, curl, node）",
-                    "Process names or bundle IDs, comma-separated (e.g. Safari, curl)",
-                ))
+                .placeholder({
+                    #[cfg(target_os = "linux")]
+                    let ph = tr(
+                        "进程名、可执行名或 PID，逗号分隔（如 firefox, curl, node）",
+                        "Process names or PIDs, comma-separated (e.g. firefox, curl, node)",
+                    );
+                    #[cfg(not(target_os = "linux"))]
+                    let ph = tr(
+                        "进程名或 Bundle ID，逗号分隔（如 Safari, curl, node）",
+                        "Process names or bundle IDs, comma-separated (e.g. Safari, curl)",
+                    );
+                    ph
+                })
                 .placeholder_color(move || color(fg_muted()))
                 .w_full()
                 .h(px(28.0))
