@@ -134,6 +134,8 @@ pub(crate) fn rules_menu_popover(
         .align(Align::End)
         .offset(px(6.0))
         .margin(px(10.0))
+        .popup_style(ui_popup_style)
+        .popup_starting_style(ui_popup_starting_style)
         .trigger(
             view()
                 .window_drag(false)
@@ -230,7 +232,7 @@ pub(crate) fn rules_menu_popover(
                             .h(px(16.0))
                             .max_w(px(120.0))
                             .px_1p5()
-                            .rounded(px(4.0))
+                            .rounded(px(RADIUS_SM))
                             .overflow_hidden()
                             .flex_row()
                             .items_center()
@@ -255,7 +257,7 @@ pub(crate) fn rules_menu_popover(
                                 .number_of_lines(1)
                                 .text_overflow(EllipsizeMode::Tail)
                                 .tabular_nums()
-                                .text_size(px(10.5))
+                                .text_size(px(TEXT_XS))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(move || {
                                     if rules_on.get() {
@@ -317,11 +319,6 @@ pub(crate) fn rules_panel(
         .max_h(move || px(adaptive_filter_panel_max_height(window().height.0)))
         .flex_col()
         .overflow_hidden()
-        .rounded(px(10.0))
-        .border_1()
-        .border_color(border_strong())
-        .bg(bg_card())
-        .shadow_md()
         .child(
             scroll()
                 .w_full()
@@ -469,12 +466,14 @@ fn rules_panel_tab_button(
         .flex_row()
         .items_center()
         .gap_1p5()
-        .cursor(Cursor::Pointer)
-        .active(|style| style.opacity(0.85))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .child(
             text(tr(zh, en))
                 .number_of_lines(1)
-                .text_size(px(12.5))
+                .text_size(px(TEXT_SM))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(move || if selected() { fg_primary() } else { fg_muted() }),
         )
@@ -491,7 +490,7 @@ fn rules_panel_tab_button(
                     .child(
                         mono(move || present::format_thousands(badge_count() as u64))
                             .tabular_nums()
-                            .text_size(px(10.0))
+                            .text_size(px(TEXT_XS))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(fg_secondary()),
                     )
@@ -499,8 +498,8 @@ fn rules_panel_tab_button(
         ))
         .child(when(show_dot, move || {
             view()
-                .w(px(5.5))
-                .h(px(5.5))
+                .w(px(6.0))
+                .h(px(6.0))
                 .rounded_full()
                 .bg(accent_blue())
         }))
@@ -608,7 +607,7 @@ fn rules_editor_toolbar(
                 view()
                     .h(px(20.0))
                     .px_1p5()
-                    .rounded(px(4.0))
+                    .rounded(px(RADIUS_SM))
                     .flex_row()
                     .items_center()
                     .bg(status_warn_bg())
@@ -625,7 +624,7 @@ fn rules_editor_toolbar(
                                 Lang::En => format!("Syntax error on line {lines}"),
                             }
                         })
-                        .text_size(px(10.5))
+                        .text_size(px(TEXT_XS))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(status_warn_fg()),
                     )
@@ -642,22 +641,26 @@ fn rules_editor_toolbar(
             move || {
                 let clear_controls = clear_controls.clone();
                 view()
-                    .h(px(24.0))
+                    .role(AccessibilityRole::Button)
+                    .h(px(ControlSize::Xs.height()))
                     .px_1p5()
                     .flex_shrink_0()
-                    .rounded(px(5.0))
+                    .rounded(px(RADIUS_SM))
                     .bg(AdaptiveColor::TRANSPARENT)
                     .hover(|style| style.bg(bg_control_hover()))
-                    .active(|style| style.opacity(0.8))
+                    .active(|style| style.bg(bg_control_active()))
+                    .transition_colors()
+                    .duration(MOTION_INSTANT_MS)
+                    .ease_out()
+                    .focus_visible(apply_focus_ring)
                     .flex_row()
                     .items_center()
-                    .cursor(Cursor::Pointer)
                     .on_press(move || {
                         rule_target.commit(&clear_controls, String::new());
                     })
                     .child(
                         text(tr("清空", "Clear"))
-                            .text_size(px(11.5))
+                            .text_size(px(TEXT_XS))
                             .text_color(fg_muted()),
                     )
             },
@@ -720,7 +723,7 @@ fn proxy_tab_body(profiles: ProfileSignals, controls: Arc<Controls>) -> impl Int
                 .w_full()
                 .px_2p5()
                 .py_2()
-                .rounded(px(8.0))
+                .rounded(px(RADIUS_MD))
                 .border_1()
                 .border_color(border_subtle())
                 .bg(bg_canvas())
@@ -736,7 +739,7 @@ fn proxy_tab_body(profiles: ProfileSignals, controls: Arc<Controls>) -> impl Int
                         .flex_col()
                         .child(
                             text(tr("显示隧道失败", "Show tunnel failures"))
-                                .text_size(px(12.0))
+                                .text_size(px(TEXT_SM))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(fg_primary()),
                         )
@@ -745,7 +748,7 @@ fn proxy_tab_body(profiles: ProfileSignals, controls: Arc<Controls>) -> impl Int
                                 "在流量列表显示直通或源站 TLS 握手失败的隧道记录",
                                 "Show bypassed or failed TLS CONNECT tunnels in the flow list",
                             ))
-                            .text_size(px(11.0))
+                            .text_size(px(TEXT_XS))
                             .text_color(fg_muted()),
                         ),
                 )
@@ -796,20 +799,22 @@ pub(crate) fn preset_pill_popover(
         .align(Align::Start)
         .offset(px(6.0))
         .margin(px(10.0))
+        .popup_style(ui_popup_style)
+        .popup_starting_style(ui_popup_starting_style)
         .trigger(
             view()
                 .window_drag(false)
-                .h(px(24.0))
+                .role(AccessibilityRole::Button)
+                .h(px(CONTROL_H))
                 .max_w(px(140.0))
                 .min_w(px(0.0))
-                .px_1p5()
-                .gap_1()
-                .rounded(px(6.0))
+                .px_2()
+                .gap_1p5()
+                .rounded(px(RADIUS_MD))
                 .overflow_hidden()
                 .flex_shrink(1.0)
                 .flex_row()
                 .items_center()
-                .cursor(Cursor::Pointer)
                 .border_1()
                 .border_color(move || {
                     if is_dirty() && !open.get() {
@@ -817,14 +822,14 @@ pub(crate) fn preset_pill_popover(
                     } else if is_active() {
                         accent_blue_border()
                     } else {
-                        border_control()
+                        AdaptiveColor::TRANSPARENT
                     }
                 })
                 .bg(move || {
                     if is_active() {
                         accent_blue_soft()
                     } else {
-                        bg_control()
+                        AdaptiveColor::TRANSPARENT
                     }
                 })
                 .hover(|style| {
@@ -836,30 +841,24 @@ pub(crate) fn preset_pill_popover(
                         }
                     })
                 })
-                .active(|style| style.opacity(0.8))
+                .active(|style| style.bg(bg_control_active()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .focus_visible(apply_focus_ring)
                 .tooltip(
-                    tooltip().child(
-                        view()
-                            .max_w(px(360.0))
-                            .px_2p5()
-                            .py_1p5()
-                            .rounded(px(6.0))
-                            .bg(bg_card())
-                            .border_1()
-                            .border_color(border_strong())
-                            .child(
-                                text(move || -> SharedString {
-                                    format_preset_pill_tooltip(
-                                        active_name().as_deref(),
-                                        is_dirty(),
-                                        ui_lang(langs),
-                                    )
-                                    .into()
-                                })
-                                .text_size(px(11.5))
-                                .text_color(fg_primary()),
-                            ),
-                    ),
+                    tooltip().child(ui_tooltip_surface(
+                        text(move || -> SharedString {
+                            format_preset_pill_tooltip(
+                                active_name().as_deref(),
+                                is_dirty(),
+                                ui_lang(langs),
+                            )
+                            .into()
+                        })
+                        .text_size(px(TEXT_SM))
+                        .text_color(fg_primary()),
+                    )),
                 )
                 .child(when(is_dirty, move || {
                     view()
@@ -873,7 +872,7 @@ pub(crate) fn preset_pill_popover(
                     move || !is_dirty(),
                     move || {
                         glyph_px(
-                            10.5,
+                            12.0,
                             move || {
                                 if active_name().is_some() {
                                     Glyph::Check
@@ -900,7 +899,7 @@ pub(crate) fn preset_pill_popover(
                     .flex_shrink(1.0)
                     .number_of_lines(1)
                     .text_overflow(EllipsizeMode::Tail)
-                    .text_size(px(11.5))
+                    .text_size(px(TEXT_SM))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(move || {
                         if is_active() {
@@ -928,11 +927,6 @@ pub(crate) fn preset_pill_popover(
                 .max_w(move || px((window().width.0 - 16.0).max(280.0)))
                 .flex_col()
                 .overflow_hidden()
-                .rounded(px(10.0))
-                .border_1()
-                .border_color(border_strong())
-                .bg(bg_card())
-                .shadow_md()
                 .child(
                     view()
                         .w_full()
@@ -946,7 +940,7 @@ pub(crate) fn preset_pill_popover(
                                 "配置预设（同时保存过滤、规则、直通与上游）",
                                 "Presets (saves filter, rules, bypass & upstream)",
                             ))
-                            .text_size(px(11.5))
+                            .text_size(px(TEXT_SM))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(fg_secondary()),
                         ),

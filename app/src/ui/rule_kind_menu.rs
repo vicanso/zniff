@@ -119,21 +119,27 @@ pub(crate) fn quick_kind_dropdown(kind: Signal<u8>) -> impl IntoElement {
         .align(Align::Start)
         .offset(px(4.0))
         .margin(px(8.0))
+        .popup_style(ui_popup_style)
+        .popup_starting_style(ui_popup_starting_style)
         .trigger(
             view()
-                .h(px(28.0))
+                .role(AccessibilityRole::Button)
+                .h(px(CONTROL_H))
                 .px_2()
                 .flex_shrink_0()
                 .flex_row()
                 .items_center()
                 .gap_1()
-                .rounded(px(6.0))
+                .rounded(px(RADIUS_MD))
                 .border_1()
                 .border_color(accent_blue_border())
                 .bg(accent_blue_soft())
                 .hover(|style| style.bg(accent_blue_soft_hover()))
-                .active(|style| style.opacity(0.8))
-                .cursor(Cursor::Pointer)
+                .active(|style| style.bg(bg_control_active()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .focus_visible(apply_focus_ring)
                 .tooltip(label_tip("选择规则类型", "Select rule type"))
                 .child(
                     text(move || {
@@ -141,35 +147,27 @@ pub(crate) fn quick_kind_dropdown(kind: Signal<u8>) -> impl IntoElement {
                         SharedString::from(t(ui_lang(langs), zh, en))
                     })
                     .number_of_lines(1)
-                    .text_size(px(11.5))
+                    .text_size(px(TEXT_SM))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(accent_blue_text()),
                 )
                 .child(glyph_px(
-                    9.5,
+                    10.0,
                     || Glyph::Chevron,
                     || color(accent_blue_text()),
                 )),
         )
         .child(
-            view()
-                .w(px(276.0))
-                .rounded(px(8.0))
-                .border_1()
-                .border_color(border_strong())
-                .bg(bg_card())
-                .shadow_md()
-                .overflow_hidden()
-                .child(
-                    scroll().w_full().max_h(px(320.0)).child(
-                        view().w_full().p_1p5().gap_1().flex_col().children(
-                            QUICK_KIND_GROUPS
-                                .iter()
-                                .copied()
-                                .map(move |group| quick_kind_group_block(group, kind, open)),
-                        ),
+            view().w(px(276.0)).overflow_hidden().child(
+                scroll().w_full().max_h(px(320.0)).child(
+                    view().w_full().p_1p5().gap_1().flex_col().children(
+                        QUICK_KIND_GROUPS
+                            .iter()
+                            .copied()
+                            .map(move |group| quick_kind_group_block(group, kind, open)),
                     ),
                 ),
+            ),
         )
 }
 
@@ -186,7 +184,7 @@ fn quick_kind_group_block(
             text(tr(group.title_zh, group.title_en))
                 .px_2()
                 .pt_1()
-                .text_size(px(10.5))
+                .text_size(px(TEXT_XS))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(fg_muted()),
         )
@@ -196,12 +194,11 @@ fn quick_kind_group_block(
                 .w_full()
                 .h(px(26.0))
                 .px_2()
-                .rounded(px(5.0))
+                .rounded(px(RADIUS_MD))
                 .flex_row()
                 .items_center()
                 .justify_between()
                 .gap_2()
-                .cursor(Cursor::Pointer)
                 .bg(move || {
                     if kind.get() == item.idx {
                         accent_blue_soft()
@@ -218,14 +215,18 @@ fn quick_kind_group_block(
                         }
                     })
                 })
-                .active(|style| style.opacity(0.8))
+                .active(|style| style.bg(bg_control_active()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .focus_visible(apply_focus_ring)
                 .on_select(move || {
                     kind.set(item.idx);
                     open.set(false);
                 })
                 .child(
                     text(tr(zh, en))
-                        .text_size(px(11.5))
+                        .text_size(px(TEXT_SM))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(move || {
                             if kind.get() == item.idx {
@@ -235,7 +236,11 @@ fn quick_kind_group_block(
                             }
                         }),
                 )
-                .child(mono(item.syntax).text_size(px(10.5)).text_color(fg_muted()))
+                .child(
+                    mono(item.syntax)
+                        .text_size(px(TEXT_XS))
+                        .text_color(fg_muted()),
+                )
         }))
 }
 
@@ -266,15 +271,18 @@ pub(crate) fn quick_var_menu(target: Signal<String>) -> impl IntoElement {
         .align(Align::End)
         .offset(px(4.0))
         .margin(px(8.0))
+        .popup_style(ui_popup_style)
+        .popup_starting_style(ui_popup_starting_style)
         .trigger(
             view()
-                .h(px(26.0))
+                .role(AccessibilityRole::Button)
+                .h(px(CONTROL_H))
                 .px_1p5()
                 .flex_shrink_0()
                 .flex_row()
                 .items_center()
                 .gap_1()
-                .rounded(px(5.0))
+                .rounded(px(RADIUS_MD))
                 .bg(move || {
                     if open.get() {
                         accent_blue_soft()
@@ -283,12 +291,15 @@ pub(crate) fn quick_var_menu(target: Signal<String>) -> impl IntoElement {
                     }
                 })
                 .hover(|style| style.bg(bg_control_hover()))
-                .active(|style| style.opacity(0.8))
-                .cursor(Cursor::Pointer)
+                .active(|style| style.bg(bg_control_active()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .focus_visible(apply_focus_ring)
                 .tooltip(label_tip("插入动态模板变量", "Insert template variable"))
                 .child(
                     mono("{{}}")
-                        .text_size(px(11.0))
+                        .text_size(px(TEXT_XS))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(move || {
                             if open.get() {
@@ -298,49 +309,44 @@ pub(crate) fn quick_var_menu(target: Signal<String>) -> impl IntoElement {
                             }
                         }),
                 )
-                .child(glyph_px(9.0, || Glyph::Chevron, || color(fg_muted()))),
+                .child(glyph_px(10.0, || Glyph::Chevron, || color(fg_muted()))),
         )
         .child(
-            view()
-                .w(px(268.0))
-                .rounded(px(8.0))
-                .border_1()
-                .border_color(border_strong())
-                .bg(bg_card())
-                .shadow_md()
-                .overflow_hidden()
-                .child(
-                    scroll().w_full().max_h(px(240.0)).child(
-                        view()
-                            .w_full()
-                            .p_1p5()
-                            .gap_0p5()
-                            .flex_col()
-                            .children(VARS.iter().map(|&(label, snippet, desc_zh, desc_en)| {
-                                menu_item()
-                                    .w_full()
-                                    .h(px(26.0))
-                                    .px_2()
-                                    .rounded(px(5.0))
-                                    .flex_row()
-                                    .items_center()
-                                    .justify_between()
-                                    .gap_2()
-                                    .cursor(Cursor::Pointer)
-                                    .hover(|style| style.bg(bg_control_hover()))
-                                    .active(|style| style.opacity(0.8))
-                                    .on_select(move || {
-                                        target.update(|s| s.push_str(snippet));
-                                        open.set(false);
-                                    })
-                                    .child(mono(label).text_size(px(11.0)).text_color(fg_primary()))
-                                    .child(
-                                        text(tr(desc_zh, desc_en))
-                                            .text_size(px(10.5))
-                                            .text_color(fg_muted()),
-                                    )
-                            })),
-                    ),
+            view().w(px(268.0)).overflow_hidden().child(
+                scroll().w_full().max_h(px(240.0)).child(
+                    view()
+                        .w_full()
+                        .p_1p5()
+                        .gap_0p5()
+                        .flex_col()
+                        .children(VARS.iter().map(|&(label, snippet, desc_zh, desc_en)| {
+                            menu_item()
+                                .w_full()
+                                .h(px(26.0))
+                                .px_2()
+                                .rounded(px(RADIUS_MD))
+                                .flex_row()
+                                .items_center()
+                                .justify_between()
+                                .gap_2()
+                                .hover(|style| style.bg(bg_control_hover()))
+                                .active(|style| style.bg(bg_control_active()))
+                                .transition_colors()
+                                .duration(MOTION_INSTANT_MS)
+                                .ease_out()
+                                .focus_visible(apply_focus_ring)
+                                .on_select(move || {
+                                    target.update(|s| s.push_str(snippet));
+                                    open.set(false);
+                                })
+                                .child(mono(label).text_size(px(TEXT_XS)).text_color(fg_primary()))
+                                .child(
+                                    text(tr(desc_zh, desc_en))
+                                        .text_size(px(TEXT_XS))
+                                        .text_color(fg_muted()),
+                                )
+                        })),
                 ),
+            ),
         )
 }

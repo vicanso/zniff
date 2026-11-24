@@ -29,6 +29,8 @@ pub(crate) fn saved_filter_menu(
         .align(Align::End)
         .offset(px(6.0))
         .margin(px(10.0))
+        .popup_style(ui_popup_style)
+        .popup_starting_style(ui_popup_starting_style)
         .trigger(
             view()
                 .window_drag(false)
@@ -142,11 +144,6 @@ pub(crate) fn saved_filter_panel(
         .max_h(move || px(adaptive_filter_panel_max_height(window().height.0)))
         .flex_col()
         .overflow_hidden()
-        .rounded(px(10.0))
-        .border_1()
-        .border_color(border_strong())
-        .bg(bg_card())
-        .shadow_md()
         .child(
             scroll()
                 .w_full()
@@ -180,7 +177,7 @@ pub(crate) fn saved_filter_panel(
                                         .gap_2()
                                         .child(
                                             text(tr("流量过滤", "Traffic Filter"))
-                                                .text_size(px(13.0))
+                                                .text_size(px(TEXT_MD))
                                                 .font_weight(FontWeight::SEMIBOLD)
                                                 .text_color(fg_primary()),
                                         )
@@ -189,7 +186,7 @@ pub(crate) fn saved_filter_panel(
                                                 "多项用 | 或逗号分隔",
                                                 "Separate OR items with | or comma",
                                             ))
-                                            .text_size(px(11.0))
+                                            .text_size(px(TEXT_XS))
                                             .text_color(fg_muted()),
                                         ),
                                 )
@@ -197,21 +194,25 @@ pub(crate) fn saved_filter_panel(
                                     move || !reset_filter.get().trim().is_empty(),
                                     move || {
                                         view()
-                                            .h(px(24.0))
+                                            .role(AccessibilityRole::Button)
+                                            .h(px(ControlSize::Xs.height()))
                                             .px_2()
-                                            .rounded(px(6.0))
+                                            .rounded(px(RADIUS_SM))
                                             .border_1()
                                             .border_color(border_control())
                                             .bg(bg_control())
                                             .hover(|style| style.bg(bg_control_hover()))
-                                            .active(|style| style.opacity(0.8))
+                                            .active(|style| style.bg(bg_control_active()))
+                                            .transition_colors()
+                                            .duration(MOTION_INSTANT_MS)
+                                            .ease_out()
+                                            .focus_visible(apply_focus_ring)
                                             .flex_row()
                                             .items_center()
-                                            .cursor(Cursor::Pointer)
                                             .on_press(move || reset_filter.set(String::new()))
                                             .child(
                                                 text(tr("清空条件", "Reset"))
-                                                    .text_size(px(11.5))
+                                                    .text_size(px(TEXT_XS))
                                                     .text_color(fg_secondary()),
                                             )
                                     },
@@ -265,7 +266,7 @@ pub(crate) fn saved_filter_panel(
                                 .w_full()
                                 .child(
                                     text(tr("快捷筛选", "Quick Filters"))
-                                        .text_size(px(11.5))
+                                        .text_size(px(TEXT_XS))
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(fg_muted()),
                                 )

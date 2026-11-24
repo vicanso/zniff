@@ -145,13 +145,14 @@ pub(crate) fn append_template_rule(current: &str, rule_line: &str) -> String {
 
 fn rule_templates_menu_trigger(open: Signal<bool>) -> impl IntoElement {
     view()
-        .h(px(24.0))
+        .role(AccessibilityRole::Button)
+        .h(px(ControlSize::Xs.height()))
         .px_1p5()
         .flex_shrink_0()
         .flex_row()
         .items_center()
         .gap_1()
-        .rounded(px(5.0))
+        .rounded(px(RADIUS_SM))
         .bg(move || {
             if open.get() {
                 accent_blue_soft()
@@ -168,8 +169,11 @@ fn rule_templates_menu_trigger(open: Signal<bool>) -> impl IntoElement {
                 }
             })
         })
-        .active(|style| style.opacity(0.8))
-        .cursor(Cursor::Pointer)
+        .active(|style| style.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .tooltip(label_tip(
             "插入常用示例或按类型配置规则",
             "Use a common example or configure a rule by type",
@@ -177,12 +181,12 @@ fn rule_templates_menu_trigger(open: Signal<bool>) -> impl IntoElement {
         .child(
             text(tr("+ 添加规则", "+ Add rule"))
                 .number_of_lines(1)
-                .text_size(px(11.5))
+                .text_size(px(TEXT_XS))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(accent_blue_text()),
         )
         .child(glyph_px(
-            9.0,
+            10.0,
             || Glyph::Chevron,
             || color(accent_blue_text()),
         ))
@@ -198,62 +202,48 @@ fn rule_templates_menu_body(
     let langs = ui_langs();
     let last_group = QUICK_KIND_GROUPS.len().saturating_sub(1);
     let preset_controls = controls.clone();
-    view()
-        .w(px(330.0))
-        .rounded(px(8.0))
-        .border_1()
-        .border_color(border_strong())
-        .bg(bg_card())
-        .shadow_md()
-        .overflow_hidden()
-        .child(
-            scroll().w_full().max_h(px(360.0)).child(
-                view()
-                    .w_full()
-                    .p_1p5()
-                    .gap_0p5()
-                    .flex_col()
-                    .child(
-                        text(tr("常用示例", "Common Examples"))
-                            .px_2()
-                            .pt_0p5()
-                            .text_size(px(10.5))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(fg_muted()),
+    view().w(px(330.0)).overflow_hidden().child(
+        scroll().w_full().max_h(px(360.0)).child(
+            view()
+                .w_full()
+                .p_1p5()
+                .gap_0p5()
+                .flex_col()
+                .child(
+                    text(tr("常用示例", "Common Examples"))
+                        .px_2()
+                        .pt_0p5()
+                        .text_size(px(TEXT_XS))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(fg_muted()),
+                )
+                .children(QUICK_RULE_PRESETS.iter().copied().map(move |tpl| {
+                    rule_preset_menu_item(
+                        tpl,
+                        target,
+                        preset_controls.clone(),
+                        draft,
+                        quick_add_open,
+                        open,
                     )
-                    .children(QUICK_RULE_PRESETS.iter().copied().map(move |tpl| {
-                        rule_preset_menu_item(
-                            tpl,
-                            target,
-                            preset_controls.clone(),
-                            draft,
-                            quick_add_open,
-                            open,
-                        )
-                    }))
-                    .child(view().w_full().h(px(1.0)).my_1().bg(border_subtle()))
-                    .child(
-                        text(tr("按类型配置", "Build by Type"))
-                            .px_2()
-                            .text_size(px(10.5))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(fg_muted()),
-                    )
-                    .children(QUICK_KIND_GROUPS.iter().copied().enumerate().map(
-                        move |(idx, group)| {
-                            let proto_ctx =
-                                (idx == last_group).then_some((target, controls.clone(), langs));
-                            rule_kind_form_group_section(
-                                group,
-                                draft,
-                                quick_add_open,
-                                open,
-                                proto_ctx,
-                            )
-                        },
-                    )),
-            ),
-        )
+                }))
+                .child(view().w_full().h(px(1.0)).my_1().bg(border_subtle()))
+                .child(
+                    text(tr("按类型配置", "Build by Type"))
+                        .px_2()
+                        .text_size(px(TEXT_XS))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(fg_muted()),
+                )
+                .children(QUICK_KIND_GROUPS.iter().copied().enumerate().map(
+                    move |(idx, group)| {
+                        let proto_ctx =
+                            (idx == last_group).then_some((target, controls.clone(), langs));
+                        rule_kind_form_group_section(group, draft, quick_add_open, open, proto_ctx)
+                    },
+                )),
+        ),
+    )
 }
 
 /// Single unified `+ Add rule ▾` menu: common examples on top, typed form builders below.
@@ -275,6 +265,8 @@ pub(crate) fn rule_templates_menu(
         .align(Align::End)
         .offset(px(4.0))
         .margin(px(8.0))
+        .popup_style(ui_popup_style)
+        .popup_starting_style(ui_popup_starting_style)
         .trigger(rule_templates_menu_trigger(open))
         .child(rule_templates_menu_body(
             target,
@@ -298,12 +290,15 @@ fn rule_preset_menu_item(
         .w_full()
         .px_2()
         .py_1()
-        .rounded(px(5.0))
+        .rounded(px(RADIUS_MD))
         .gap_0p5()
         .flex_col()
-        .cursor(Cursor::Pointer)
         .hover(|style| style.bg(bg_control_hover()))
-        .active(|style| style.opacity(0.8))
+        .active(|style| style.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .on_select(move || {
             if tpl.open_in_form {
                 fill_draft_from_rule_line(
@@ -334,7 +329,7 @@ fn rule_preset_menu_item(
                     text(move || SharedString::from(tpl.label(ui_lang(langs))))
                         .flex_shrink_0()
                         .number_of_lines(1)
-                        .text_size(px(11.5))
+                        .text_size(px(TEXT_SM))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(fg_primary()),
                 )
@@ -345,7 +340,7 @@ fn rule_preset_menu_item(
                         .text_right()
                         .number_of_lines(1)
                         .text_overflow(EllipsizeMode::Tail)
-                        .text_size(px(10.0))
+                        .text_size(px(TEXT_XS))
                         .text_color(accent_blue_text()),
                 ),
         )
@@ -353,7 +348,7 @@ fn rule_preset_menu_item(
             text(move || SharedString::from(tpl.description(ui_lang(langs))))
                 .number_of_lines(1)
                 .text_overflow(EllipsizeMode::Tail)
-                .text_size(px(10.5))
+                .text_size(px(TEXT_XS))
                 .text_color(fg_muted()),
         )
 }
@@ -373,7 +368,7 @@ fn rule_kind_form_group_section(
             text(tr(group.title_zh, group.title_en))
                 .px_2()
                 .pt_1()
-                .text_size(px(10.0))
+                .text_size(px(TEXT_XS))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(fg_muted()),
         )
@@ -383,14 +378,17 @@ fn rule_kind_form_group_section(
                 .w_full()
                 .h(px(26.0))
                 .px_2()
-                .rounded(px(5.0))
+                .rounded(px(RADIUS_MD))
                 .flex_row()
                 .items_center()
                 .justify_between()
                 .gap_2()
-                .cursor(Cursor::Pointer)
                 .hover(|style| style.bg(bg_control_hover()))
-                .active(|style| style.opacity(0.8))
+                .active(|style| style.bg(bg_control_active()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .focus_visible(apply_focus_ring)
                 .on_select(move || {
                     draft.kind.set(item.idx);
                     quick_add_open.set(true);
@@ -398,25 +396,32 @@ fn rule_kind_form_group_section(
                 })
                 .child(
                     text(tr(zh, en))
-                        .text_size(px(11.5))
+                        .text_size(px(TEXT_SM))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(fg_primary()),
                 )
-                .child(mono(item.syntax).text_size(px(10.5)).text_color(fg_muted()))
+                .child(
+                    mono(item.syntax)
+                        .text_size(px(TEXT_XS))
+                        .text_color(fg_muted()),
+                )
         }))
         .children(proto_ctx.into_iter().map(move |(target, controls, langs)| {
             menu_item()
                 .w_full()
                 .h(px(26.0))
                 .px_2()
-                .rounded(px(5.0))
+                .rounded(px(RADIUS_MD))
                 .flex_row()
                 .items_center()
                 .justify_between()
                 .gap_2()
-                .cursor(Cursor::Pointer)
                 .hover(|style| style.bg(bg_control_hover()))
-                .active(|style| style.opacity(0.8))
+                .active(|style| style.bg(bg_control_active()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .focus_visible(apply_focus_ring)
                 .on_select(move || {
                     let next = append_template_rule(
                         &target.current_text_untracked(),
@@ -427,11 +432,11 @@ fn rule_kind_form_group_section(
                 })
                 .child(
                     text(move || SharedString::from(PROTO_RULE_TEMPLATE.label(ui_lang(langs))))
-                        .text_size(px(11.5))
+                        .text_size(px(TEXT_SM))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(fg_primary()),
                 )
-                .child(mono("proto").text_size(px(10.5)).text_color(fg_muted()))
+                .child(mono("proto").text_size(px(TEXT_XS)).text_color(fg_muted()))
         }))
 }
 

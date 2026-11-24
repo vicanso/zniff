@@ -11,37 +11,40 @@ pub(crate) fn column_menu(
         .align(Align::End)
         .offset(px(4.0))
         .margin(px(8.0))
+        .popup_style(ui_popup_style)
+        .popup_starting_style(ui_popup_starting_style)
         .on_open_change(move |event: &nsh_base::MenuEvent| {
             if let nsh_base::MenuEvent::OpenChange(next, _) = event {
                 open.set(*next);
             }
         })
         .trigger(column_picker_trigger(open))
-        .child(column_picker_panel(columns, controls))
+        .child(column_picker_content(columns, controls))
 }
 
 pub(crate) fn column_picker_trigger(open: Signal<bool>) -> impl IntoElement {
     view()
-        .w(px(30.0))
-        .h(px(30.0))
+        .role(AccessibilityRole::Button)
+        .w(px(CONTROL_H))
+        .h(px(CONTROL_H))
         .flex_shrink_0()
         .flex_row()
         .items_center()
         .justify_center()
-        .rounded(px(CONTROL_RADIUS))
+        .rounded(px(RADIUS_MD))
         .border_1()
         .border_color(move || {
             if open.get() {
                 accent_blue_border()
             } else {
-                border_control()
+                AdaptiveColor::TRANSPARENT
             }
         })
         .bg(move || {
             if open.get() {
                 accent_blue_soft()
             } else {
-                bg_control()
+                AdaptiveColor::TRANSPARENT
             }
         })
         .hover(|style| {
@@ -53,8 +56,11 @@ pub(crate) fn column_picker_trigger(open: Signal<bool>) -> impl IntoElement {
                 }
             })
         })
-        .active(|style| style.opacity(0.8))
-        .cursor(Cursor::Pointer)
+        .active(|style| style.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .label(tr("列", "Columns"))
         .tooltip(label_tip("列", "Columns"))
         .child(glyph(
@@ -73,6 +79,20 @@ pub(crate) fn column_picker_panel(
     columns: Signal<ListColumns>,
     controls: Arc<Controls>,
 ) -> impl IntoElement {
+    view()
+        .rounded(px(RADIUS_LG))
+        .border_1()
+        .border_color(border_strong())
+        .bg(bg_card())
+        .shadow_lg()
+        .overflow_hidden()
+        .child(column_picker_content(columns, controls))
+}
+
+fn column_picker_content(
+    columns: Signal<ListColumns>,
+    controls: Arc<Controls>,
+) -> impl IntoElement {
     let fixed_controls = controls.clone();
     let scroll_controls = controls.clone();
     let reset_controls = controls.clone();
@@ -80,11 +100,6 @@ pub(crate) fn column_picker_panel(
         .w(px(204.0))
         .max_w(move || px((window().width.0 - 16.0).max(160.0)))
         .max_h(move || px((window().height.0 - 24.0).max(180.0)))
-        .rounded(px(10.0))
-        .border_1()
-        .border_color(border_strong())
-        .bg(bg_card())
-        .shadow_md()
         .overflow_hidden()
         .child(
             scroll()
@@ -188,7 +203,7 @@ pub(crate) fn column_slot_row(
                 .pl_2p5()
                 .pr_1p5()
                 .gap_2()
-                .rounded(px(6.0))
+                .rounded(px(RADIUS_MD))
                 .flex_row()
                 .items_center()
                 .opacity(move || if locked() { 0.55_f32 } else { 1.0_f32 })
@@ -201,10 +216,20 @@ pub(crate) fn column_slot_row(
                         }
                     })
                 })
-                .active(|style| style.opacity(move || if locked() { 0.55_f32 } else { 0.75_f32 }))
-                .cursor(Cursor::Pointer)
+                .active(|style| {
+                    style.bg(move || {
+                        if locked() {
+                            AdaptiveColor::TRANSPARENT
+                        } else {
+                            bg_control_active()
+                        }
+                    })
+                })
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .focus_visible(apply_focus_ring)
                 .disabled(locked)
-                .disabled_style(|style| style.cursor(Cursor::Default))
                 .on_press(move || {
                     let current = columns.get();
                     let next = current.toggle(current.order[slot]);
@@ -224,10 +249,10 @@ pub(crate) fn column_slot_row(
                 })
                 .child(
                     view()
-                        .w(px(8.5))
-                        .h(px(8.5))
+                        .w(px(10.0))
+                        .h(px(10.0))
                         .flex_shrink_0()
-                        .rounded(px(2.5))
+                        .rounded(px(RADIUS_SM))
                         .border_1()
                         .border_color(move || if is_on() { accent_blue() } else { fg_muted() })
                         .bg(move || if is_on() { accent_blue() } else { bg_card() }),
@@ -271,22 +296,26 @@ pub(crate) fn column_move_button(
         ("下移", "Move down")
     };
     let btn = view()
-        .w(px(22.0))
-        .h(px(22.0))
+        .role(AccessibilityRole::Button)
+        .w(px(ControlSize::Xs.height()))
+        .h(px(ControlSize::Xs.height()))
         .flex_shrink_0()
-        .rounded(px(5.0))
+        .rounded(px(RADIUS_SM))
         .flex_row()
         .items_center()
         .justify_center()
         .child(glyph_px(
-            11.5,
+            12.0,
             move || icon,
             move || color(if can_move { fg_secondary() } else { fg_muted() }),
         ));
     if can_move {
         btn.hover(|style| style.bg(bg_control_hover()))
-            .active(|style| style.opacity(0.75))
-            .cursor(Cursor::Pointer)
+            .active(|style| style.bg(bg_control_active()))
+            .transition_colors()
+            .duration(MOTION_INSTANT_MS)
+            .ease_out()
+            .focus_visible(apply_focus_ring)
             .label(tr(zh, en))
             .tooltip(label_tip(zh, en))
             .on_press(move || {
@@ -308,7 +337,7 @@ pub(crate) fn column_move_button(
                 }
             })
     } else {
-        btn.opacity(0.28).cursor(Cursor::Default)
+        btn.opacity(0.28)
     }
 }
 
@@ -317,15 +346,19 @@ pub(crate) fn column_reset_order(
     controls: Arc<Controls>,
 ) -> impl IntoElement {
     view()
-        .h(px(28.0))
+        .role(AccessibilityRole::Button)
+        .h(px(CONTROL_H))
         .px_2p5()
         .gap_2()
-        .rounded(px(6.0))
+        .rounded(px(RADIUS_MD))
         .flex_row()
         .items_center()
         .hover(|style| style.bg(bg_control_hover()))
-        .active(|style| style.opacity(0.75))
-        .cursor(Cursor::Pointer)
+        .active(|style| style.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .on_press(move || {
             let current = columns.get();
             let next = current.reset_order();
@@ -343,10 +376,10 @@ pub(crate) fn column_reset_order(
                 );
             }
         })
-        .child(view().w(px(8.5)).h(px(8.5)).flex_shrink_0())
+        .child(view().w(px(10.0)).h(px(10.0)).flex_shrink_0())
         .child(
             control_text(tr("恢复默认列序", "Reset column order"))
-                .text_size(px(11.5))
+                .text_size(px(TEXT_SM))
                 .text_color(accent_blue_text()),
         )
 }
@@ -489,11 +522,11 @@ pub(crate) fn row_context_menu(
         .w(px(196.0))
         .max_w(move || px((window().width.0 - 16.0).max(160.0)))
         .max_h(move || px((window().height.0 - 24.0).max(160.0)))
-        .rounded(px(10.0))
+        .rounded(px(RADIUS_LG))
         .border_1()
         .border_color(border_strong())
         .bg(bg_card())
-        .shadow_md()
+        .shadow_lg()
         .overflow_hidden()
         .child(
             scroll()

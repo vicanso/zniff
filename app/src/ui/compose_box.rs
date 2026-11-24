@@ -431,11 +431,16 @@ pub(crate) fn compose_box(
                                                         .align(Align::Start)
                                                         .offset(px(4.0))
                                                         .margin(px(8.0))
+                                                        .popup_style(ui_popup_style)
+                                                        .popup_starting_style(
+                                                            ui_popup_starting_style,
+                                                        )
                                                         .trigger(
                                                             view()
+                                                                .role(AccessibilityRole::Button)
                                                                 .w(px(26.0))
                                                                 .h(px(30.0))
-                                                                .rounded(px(7.0))
+                                                                .rounded(px(RADIUS_MD))
                                                                 .border_1()
                                                                 .border_color(move || {
                                                                     if method_open.get() {
@@ -460,8 +465,13 @@ pub(crate) fn compose_box(
                                                                         }
                                                                     })
                                                                 })
-                                                                .active(|style| style.opacity(0.8))
-                                                                .cursor(Cursor::Pointer)
+                                                                .active(|style| {
+                                                                    style.bg(bg_control_active())
+                                                                })
+                                                                .transition_colors()
+                                                                .duration(MOTION_INSTANT_MS)
+                                                                .ease_out()
+                                                                .focus_visible(apply_focus_ring)
                                                                 .items_center()
                                                                 .justify_center()
                                                                 .label(tr(
@@ -494,11 +504,6 @@ pub(crate) fn compose_box(
                                                                     px((window().height.0 - 24.0)
                                                                         .max(120.0))
                                                                 })
-                                                                .rounded(px(9.0))
-                                                                .border_1()
-                                                                .border_color(border_strong())
-                                                                .bg(bg_card())
-                                                                .shadow_md()
                                                                 .overflow_hidden()
                                                                 .child(
                                                                     scroll()
@@ -874,32 +879,69 @@ fn compose_recent_menu(compose: Compose) -> impl IntoElement {
         .align(Align::End)
         .offset(px(4.0))
         .margin(px(8.0))
+        .popup_style(ui_popup_style)
+        .popup_starting_style(ui_popup_starting_style)
         .trigger(
             view()
-                .h(px(26.0))
+                .role(AccessibilityRole::Button)
+                .h(px(CONTROL_H))
                 .px_2()
-                .rounded(px(6.0))
+                .rounded(px(RADIUS_MD))
                 .border_1()
-                .border_color(border_control())
-                .bg(bg_control())
-                .hover(|style| style.bg(bg_control_hover()))
-                .active(|style| style.opacity(0.75))
-                .cursor(Cursor::Pointer)
+                .border_color(move || {
+                    if recent_open.get() {
+                        accent_blue_border()
+                    } else {
+                        border_control()
+                    }
+                })
+                .bg(move || {
+                    if recent_open.get() {
+                        accent_blue_soft()
+                    } else {
+                        bg_control()
+                    }
+                })
+                .hover(|style| {
+                    style.bg(move || {
+                        if recent_open.get() {
+                            accent_blue_soft_hover()
+                        } else {
+                            bg_control_hover()
+                        }
+                    })
+                })
+                .active(|style| style.bg(bg_control_active()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .focus_visible(apply_focus_ring)
                 .flex_row()
                 .items_center()
                 .gap_1()
-                .on_press(move || recent_open.set(!recent_open.get()))
                 .child(glyph_px(
                     12.0,
                     || Glyph::History,
-                    move || color(fg_secondary()),
+                    move || {
+                        color(if recent_open.get() {
+                            accent_blue_text()
+                        } else {
+                            fg_secondary()
+                        })
+                    },
                 ))
                 .child(
                     text(tr("最近", "Recent"))
                         .number_of_lines(1)
-                        .text_size(px(12.0))
+                        .text_size(px(TEXT_SM))
                         .font_weight(FontWeight::MEDIUM)
-                        .text_color(fg_secondary()),
+                        .text_color(move || {
+                            if recent_open.get() {
+                                accent_blue_text()
+                            } else {
+                                fg_secondary()
+                            }
+                        }),
                 ),
         )
         .child(
@@ -907,11 +949,6 @@ fn compose_recent_menu(compose: Compose) -> impl IntoElement {
                 .w(px(360.0))
                 .max_h(px(312.0))
                 .p_1()
-                .rounded(px(8.0))
-                .border_1()
-                .border_color(border_strong())
-                .bg(bg_card())
-                .shadow_md()
                 .child(
                     scroll()
                         .w_full()
@@ -924,13 +961,17 @@ fn compose_recent_menu(compose: Compose) -> impl IntoElement {
                                 let read_m = item;
                                 let read_u = item;
                                 view()
+                                    .role(AccessibilityRole::Button)
                                     .w_full()
                                     .px_2()
                                     .py_1p5()
-                                    .rounded(px(5.0))
+                                    .rounded(px(RADIUS_MD))
                                     .hover(|style| style.bg(bg_control_hover()))
-                                    .active(|style| style.opacity(0.75))
-                                    .cursor(Cursor::Pointer)
+                                    .active(|style| style.bg(bg_control_active()))
+                                    .transition_colors()
+                                    .duration(MOTION_INSTANT_MS)
+                                    .ease_out()
+                                    .focus_visible(apply_focus_ring)
                                     .flex_row()
                                     .items_center()
                                     .gap_1p5()
@@ -948,7 +989,7 @@ fn compose_recent_menu(compose: Compose) -> impl IntoElement {
                                         })
                                         .number_of_lines(1)
                                         .flex_shrink_0()
-                                        .text_size(px(10.5))
+                                        .text_size(px(TEXT_XS))
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(accent_blue()),
                                     )
@@ -960,7 +1001,7 @@ fn compose_recent_menu(compose: Compose) -> impl IntoElement {
                                         .min_w(px(0.0))
                                         .number_of_lines(1)
                                         .text_overflow(EllipsizeMode::Middle)
-                                        .text_size(px(11.5))
+                                        .text_size(px(TEXT_SM))
                                         .text_color(fg_primary()),
                                     )
                             },
@@ -988,16 +1029,21 @@ fn compose_recent_menu(compose: Compose) -> impl IntoElement {
                                     }
                                     .into()
                                 })
-                                .text_size(px(10.5))
+                                .text_size(px(TEXT_XS))
                                 .text_color(fg_muted()),
                             )
                             .child(
                                 view()
+                                    .role(AccessibilityRole::Button)
                                     .px_1p5()
                                     .py_0p5()
-                                    .rounded(px(4.0))
-                                    .cursor(Cursor::Pointer)
+                                    .rounded(px(RADIUS_SM))
                                     .hover(|s| s.bg(bg_control_hover()))
+                                    .active(|s| s.bg(bg_control_active()))
+                                    .transition_colors()
+                                    .duration(MOTION_INSTANT_MS)
+                                    .ease_out()
+                                    .focus_visible(apply_focus_ring)
                                     .on_press(move || {
                                         compose.recent.set(Vec::new());
                                         let _ = save_config(|config| {
@@ -1007,7 +1053,7 @@ fn compose_recent_menu(compose: Compose) -> impl IntoElement {
                                     })
                                     .child(
                                         text(tr("清空历史", "Clear history"))
-                                            .text_size(px(10.5))
+                                            .text_size(px(TEXT_XS))
                                             .text_color(status_warn_fg()),
                                     ),
                             )

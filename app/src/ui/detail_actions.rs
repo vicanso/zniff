@@ -339,17 +339,14 @@ pub(crate) fn detail_actions(
         .align(Align::End)
         .offset(px(6.0))
         .margin(px(8.0))
+        .popup_style(ui_popup_style)
+        .popup_starting_style(ui_popup_starting_style)
         .trigger(detail_more_trigger(open))
         .child(
             view()
                 .w(px(208.0))
                 .max_w(move || px((window().width.0 - 16.0).max(160.0)))
                 .max_h(move || px((window().height.0 - 96.0).max(160.0)))
-                .rounded(px(10.0))
-                .border_1()
-                .border_color(border_strong())
-                .bg(bg_card())
-                .shadow_md()
                 .overflow_hidden()
                 .child(
                     scroll()
@@ -362,13 +359,14 @@ pub(crate) fn detail_actions(
 
 pub(crate) fn detail_more_trigger(open: Signal<bool>) -> impl IntoElement {
     view()
-        .h(px(26.0))
+        .role(AccessibilityRole::Button)
+        .h(px(CONTROL_H))
         .px_2()
         .gap_1()
         .flex_shrink_0()
         .flex_row()
         .items_center()
-        .rounded(px(6.0))
+        .rounded(px(RADIUS_MD))
         .border_1()
         .border_color(move || {
             if open.get() {
@@ -393,12 +391,15 @@ pub(crate) fn detail_more_trigger(open: Signal<bool>) -> impl IntoElement {
                 }
             })
         })
-        .cursor(Cursor::Pointer)
-        .active(|style| style.opacity(0.75))
+        .active(|style| style.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .child(
             text(tr("更多", "More"))
                 .number_of_lines(1)
-                .text_size(px(12.0))
+                .text_size(px(TEXT_SM))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(move || {
                     if open.get() {
@@ -438,11 +439,11 @@ pub(crate) fn action_item_enabled(
     let fg_check = enabled;
     menu_item()
         .disabled(move || !disabled_check())
-        .disabled_style(|style| style.opacity(0.45).cursor(Cursor::Default))
+        .disabled_style(|style| style.opacity(0.45))
         .on_select(on_select)
         .h(px(30.0))
         .px_2p5()
-        .rounded(px(6.0))
+        .rounded(px(RADIUS_MD))
         .flex_row()
         .items_center()
         .hover(|style| {
@@ -454,8 +455,19 @@ pub(crate) fn action_item_enabled(
                 }
             })
         })
-        .active(|style| style.opacity(move || if active_check() { 0.75_f32 } else { 1.0_f32 }))
-        .cursor(Cursor::Pointer)
+        .active(|style| {
+            style.bg(move || {
+                if active_check() {
+                    bg_control_active()
+                } else {
+                    AdaptiveColor::TRANSPARENT
+                }
+            })
+        })
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .child(control_text(label).text_color(move || {
             if fg_check() {
                 fg_secondary()
@@ -496,12 +508,15 @@ pub(crate) fn marked_action_inner(
         .h(px(30.0))
         .px_2p5()
         .gap_2()
-        .rounded(px(6.0))
+        .rounded(px(RADIUS_MD))
         .flex_row()
         .items_center()
         .hover(|style| style.bg(bg_control_hover()))
-        .active(|style| style.opacity(0.75))
-        .cursor(Cursor::Pointer)
+        .active(|style| style.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .child(
             view()
                 .w(px(8.0))
@@ -525,23 +540,27 @@ pub(crate) fn detail_button(
     on_press: impl Fn() + 'static,
 ) -> impl IntoElement {
     view()
-        .h(px(26.0))
+        .role(AccessibilityRole::Button)
+        .h(px(CONTROL_H))
         .px_2()
         .flex_shrink_0()
         .flex_row()
         .items_center()
-        .rounded(px(6.0))
+        .rounded(px(RADIUS_MD))
         .border_1()
         .border_color(border_control())
         .bg(bg_control())
         .hover(|style| style.bg(bg_control_hover()))
-        .cursor(Cursor::Pointer)
-        .active(|style| style.opacity(0.75))
+        .active(|style| style.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .on_press(on_press)
         .child(
             text(label)
                 .number_of_lines(1)
-                .text_size(px(12.0))
+                .text_size(px(TEXT_SM))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(fg_secondary()),
         )
@@ -549,13 +568,13 @@ pub(crate) fn detail_button(
 
 pub(crate) fn section_title(label: impl IntoReactive<SharedString>) -> Text {
     text(label)
-        .text_size(px(12.0))
+        .text_size(px(TEXT_SM))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(fg_secondary())
 }
 
 pub(crate) fn muted_line(label: impl IntoReactive<SharedString>) -> Text {
-    text(label).text_size(px(12.0)).text_color(fg_muted())
+    text(label).text_size(px(TEXT_SM)).text_color(fg_muted())
 }
 
 pub(crate) fn cert_display_name(path: &str) -> &str {

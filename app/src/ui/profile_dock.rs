@@ -24,16 +24,31 @@ pub(crate) fn profile_dock(
     let show_tunnels = profiles.show_tunnels;
     let saved = profiles.saved;
     let history = profiles.history;
-    let preset_controls = controls.clone();
-    let history_controls = controls.clone();
     let blank_controls = controls.clone();
     let export_controls = controls.clone();
     let import_controls = controls.clone();
     let import_panel_controls = controls.clone();
-    let save_controls = controls;
+    let save_controls = controls.clone();
     let dropdown_open = signal(false);
     let history_open = signal(false);
     let import_text = signal(String::new());
+    let draft = QuickRuleDraftSignals {
+        kind: draft_kind,
+        host: draft_host,
+        path: draft_path,
+        op: draft_op,
+        from: draft_from,
+        to: draft_to,
+        modes: draft_modes,
+    };
+    let menu_ctx = ProfileDockMenuCtx {
+        profiles,
+        draft,
+        adopted: signal(false),
+        dropdown_open,
+        history_open,
+        controls,
+    };
     let matched_name = move || {
         saved.with(|items| {
             matched_saved_profile(
@@ -48,15 +63,7 @@ pub(crate) fn profile_dock(
     // The dropdown follows the name field. Adding a rule changes the live
     // text, so a content match would drop the current setup. Seed the name
     // once from that match, then leave it until 新建配置.
-    let shown_name = move || {
-        let typed = rule_name.get();
-        let typed = typed.trim();
-        if !typed.is_empty() {
-            return Some(typed.to_string());
-        }
-        matched_name()
-    };
-    let adopted = signal(false);
+    let adopted = menu_ctx.adopted;
     effect(move || {
         if adopted.get() {
             return;
@@ -110,7 +117,7 @@ pub(crate) fn profile_dock(
                     .w_full()
                     .p_2p5()
                     .gap_2()
-                    .rounded(px(8.0))
+                    .rounded(px(RADIUS_MD))
                     .border_1()
                     .border_color(border_subtle())
                     .bg(bg_canvas())
@@ -130,7 +137,7 @@ pub(crate) fn profile_dock(
                                 .min_w(px(0.0))
                                 .number_of_lines(1)
                                 .text_overflow(EllipsizeMode::Tail)
-                                .text_size(px(11.5))
+                                .text_size(px(TEXT_SM))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(fg_muted()),
                             )
@@ -144,53 +151,62 @@ pub(crate) fn profile_dock(
                                         move || !import_text.get().is_empty(),
                                         move || {
                                             view()
-                                                .h(px(24.0))
+                                                .role(AccessibilityRole::Button)
+                                                .h(px(ControlSize::Xs.height()))
                                                 .px_2()
-                                                .rounded(px(6.0))
+                                                .rounded(px(RADIUS_SM))
                                                 .border_1()
                                                 .border_color(border_control())
                                                 .bg(bg_control())
                                                 .hover(|style| style.bg(bg_control_hover()))
-                                                .active(|style| style.opacity(0.8))
+                                                .active(|style| style.bg(bg_control_active()))
+                                                .transition_colors()
+                                                .duration(MOTION_INSTANT_MS)
+                                                .ease_out()
+                                                .focus_visible(apply_focus_ring)
                                                 .flex_row()
                                                 .items_center()
-                                                .cursor(Cursor::Pointer)
                                                 .on_press(move || import_text.set(String::new()))
                                                 .child(
                                                     text(tr("清空", "Clear"))
-                                                        .text_size(px(11.0))
+                                                        .text_size(px(TEXT_XS))
                                                         .text_color(fg_secondary()),
                                                 )
                                         },
                                     ))
                                     .child(
                                         view()
-                                            .h(px(24.0))
+                                            .role(AccessibilityRole::Button)
+                                            .h(px(ControlSize::Xs.height()))
                                             .px_2p5()
-                                            .rounded(px(6.0))
+                                            .rounded(px(RADIUS_SM))
                                             .border_1()
                                             .border_color(border_control())
                                             .bg(bg_control())
                                             .hover(|style| style.bg(bg_control_hover()))
-                                            .active(|style| style.opacity(0.8))
+                                            .active(|style| style.bg(bg_control_active()))
+                                            .transition_colors()
+                                            .duration(MOTION_INSTANT_MS)
+                                            .ease_out()
+                                            .focus_visible(apply_focus_ring)
                                             .flex_row()
                                             .items_center()
-                                            .cursor(Cursor::Pointer)
                                             .on_press(move || {
                                                 import_text.set(String::new());
                                                 import_open.set(false);
                                             })
                                             .child(
                                                 text(tr("取消", "Cancel"))
-                                                    .text_size(px(11.0))
+                                                    .text_size(px(TEXT_XS))
                                                     .text_color(fg_secondary()),
                                             ),
                                     )
                                     .child(
                                         view()
-                                            .h(px(24.0))
+                                            .role(AccessibilityRole::Button)
+                                            .h(px(ControlSize::Xs.height()))
                                             .px_2p5()
-                                            .rounded(px(6.0))
+                                            .rounded(px(RADIUS_SM))
                                             .border_1()
                                             .border_color(move || {
                                                 if ready() {
@@ -199,13 +215,15 @@ pub(crate) fn profile_dock(
                                                     border_control()
                                                 }
                                             })
-                                            .bg(move || {
-                                                if ready() {
-                                                    accent_blue()
-                                                } else {
-                                                    bg_control()
-                                                }
-                                            })
+                                            .bg(
+                                                move || {
+                                                    if ready() {
+                                                        accent_blue()
+                                                    } else {
+                                                        bg_control()
+                                                    }
+                                                },
+                                            )
                                             .hover(|style| {
                                                 style.bg(move || {
                                                     if ready() {
@@ -216,15 +234,21 @@ pub(crate) fn profile_dock(
                                                 })
                                             })
                                             .active(|style| {
-                                                style.opacity(move || {
-                                                    if ready() { 0.85_f32 } else { 1.0_f32 }
+                                                style.bg(move || {
+                                                    if ready() {
+                                                        accent_blue_active()
+                                                    } else {
+                                                        bg_control()
+                                                    }
                                                 })
                                             })
+                                            .transition_colors()
+                                            .duration(MOTION_INSTANT_MS)
+                                            .ease_out()
+                                            .focus_visible(apply_focus_ring)
                                             .flex_row()
                                             .items_center()
-                                            .cursor(Cursor::Pointer)
                                             .disabled(move || !ready())
-                                            .disabled_style(|style| style.cursor(Cursor::Default))
                                             .on_press(move || {
                                                 if !ready() {
                                                     return;
@@ -249,7 +273,7 @@ pub(crate) fn profile_dock(
                                             })
                                             .child(
                                                 text(tr("确认导入", "Confirm Import"))
-                                                    .text_size(px(11.0))
+                                                    .text_size(px(TEXT_XS))
                                                     .font_weight(FontWeight::MEDIUM)
                                                     .text_color(move || {
                                                         if ready() {
@@ -266,7 +290,7 @@ pub(crate) fn profile_dock(
                         guard_culled_pointer_events(view())
                             .w_full()
                             .h(px(116.0))
-                            .rounded(px(6.0))
+                            .rounded(px(RADIUS_MD))
                             .border_1()
                             .border_color(border_control())
                             .bg(bg_code())
@@ -286,7 +310,8 @@ pub(crate) fn profile_dock(
                                         SharedString::from(tr(
                                             "粘贴 TOML 配置、Whistle 规则或 Charles XML...",
                                             "Paste TOML setup, Whistle rules, or Charles XML...",
-                                        )())
+                                        )(
+                                        ))
                                     })
                                     .on_change(move |text: &SharedString| {
                                         import_text.set(text.to_string());
@@ -297,7 +322,9 @@ pub(crate) fn profile_dock(
                     .child(when(
                         {
                             let langs = ui_langs();
-                            move || preview_rule_import(&import_text.get(), ui_lang(langs)).is_some()
+                            move || {
+                                preview_rule_import(&import_text.get(), ui_lang(langs)).is_some()
+                            }
                         },
                         {
                             let langs = ui_langs();
@@ -308,7 +335,7 @@ pub(crate) fn profile_dock(
                                             .unwrap_or_default(),
                                     )
                                 })
-                                .text_size(px(11.0))
+                                .text_size(px(TEXT_XS))
                                 .text_color(accent_blue_text())
                             }
                         },
@@ -318,845 +345,38 @@ pub(crate) fn profile_dock(
         .child(
             view()
                 .w_full()
-                .h(px(30.0))
+                .h(px(CONTROL_H))
                 .flex_row()
                 .items_center()
                 .gap_1p5()
-                .child(
-                    menu()
-                        .open(move || Some(dropdown_open.get() && !saved.with(Vec::is_empty)))
-                        .on_open_change(move |event: &nsh_base::MenuEvent| {
-                            if let nsh_base::MenuEvent::OpenChange(next, _) = event {
-                                dropdown_open.set(*next && !saved.with(Vec::is_empty));
-                            }
-                        })
-                        .placement(Placement::Bottom)
-                        .align(Align::Start)
-                        .offset(px(6.0))
-                        .margin(px(8.0))
-                        .trigger(
-                            view()
-                                .min_w(px(132.0))
-                                .max_w(px(176.0))
-                                .h(px(30.0))
-                                .px_2p5()
-                                .flex_shrink_0()
-                                .rounded(px(7.0))
-                                .border_1()
-                                .border_color(move || {
-                                    if dropdown_open.get() || shown_name().is_some() {
-                                        accent_blue_border()
-                                    } else {
-                                        border_control()
-                                    }
-                                })
-                                .bg(move || {
-                                    if dropdown_open.get() || shown_name().is_some() {
-                                        accent_blue_soft()
-                                    } else {
-                                        bg_control()
-                                    }
-                                })
-                                .hover(|style| {
-                                    style.bg(move || {
-                                        if saved.with(Vec::is_empty) {
-                                            bg_control()
-                                        } else if dropdown_open.get() || shown_name().is_some() {
-                                            accent_blue_soft_hover()
-                                        } else {
-                                            bg_control_hover()
-                                        }
-                                    })
-                                })
-                                .active(|style| {
-                                    style.opacity(move || {
-                                        if saved.with(Vec::is_empty) {
-                                            1.0_f32
-                                        } else {
-                                            0.8_f32
-                                        }
-                                    })
-                                })
-                                .flex_row()
-                                .items_center()
-                                .gap_1p5()
-                                .cursor(Cursor::Pointer)
-                                .disabled(move || saved.with(Vec::is_empty))
-                                .disabled_style(|style| style.cursor(Cursor::Default))
-                                .child(
-                                    view()
-                                        .w(px(6.0))
-                                        .h(px(6.0))
-                                        .rounded_full()
-                                        .flex_shrink_0()
-                                        .bg(move || {
-                                            if shown_name().is_some() {
-                                                accent_blue()
-                                            } else {
-                                                fg_muted()
-                                            }
-                                        }),
-                                )
-                                .child(
-                                    text({
-                                        let langs = ui_langs();
-                                        move || -> SharedString {
-                                            let lang = ui_lang(langs);
-                                            if let Some(name) = shown_name() {
-                                                name.into()
-                                            } else if saved.with(Vec::is_empty) {
-                                                t(lang, "暂无已保存配置", "No saved setups").into()
-                                            } else {
-                                                t(lang, "选择已保存配置", "Saved setups").into()
-                                            }
-                                        }
-                                    })
-                                    .flex_auto()
-                                    .min_w(px(0.0))
-                                    .number_of_lines(1)
-                                    .text_overflow(EllipsizeMode::Tail)
-                                    .text_size(px(12.0))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(move || {
-                                        if shown_name().is_some() {
-                                            accent_blue_text()
-                                        } else if saved.with(Vec::is_empty) {
-                                            fg_muted()
-                                        } else {
-                                            fg_secondary()
-                                        }
-                                    }),
-                                )
-                                .child(when(
-                                    move || !saved.with(Vec::is_empty),
-                                    move || {
-                                        view()
-                                            .h(px(16.0))
-                                            .px_1()
-                                            .rounded(px(4.0))
-                                            .flex_shrink_0()
-                                            .flex_row()
-                                            .items_center()
-                                            .bg(bg_card())
-                                            .child(
-                                                mono(move || saved.with(Vec::len).to_string())
-                                                    .tabular_nums()
-                                                    .text_size(px(10.5))
-                                                    .font_weight(FontWeight::SEMIBOLD)
-                                                    .text_color(fg_muted()),
-                                            )
-                                    },
-                                ))
-                                .child(glyph_px(12.0, || Glyph::Chevron, || color(fg_muted()))),
-                        )
-                        .child(
-                            view()
-                                .w(px(360.0))
-                                .max_w(move || px((window().width.0 - 24.0).clamp(220.0, 360.0)))
-                                .max_h(move || px((window().height.0 - 96.0).clamp(140.0, 220.0)))
-                                .overflow_hidden()
-                                .rounded(px(10.0))
-                                .border_1()
-                                .border_color(border_strong())
-                                .bg(bg_card())
-                                .shadow_md()
-                                .child(
-                                    scroll()
-                                        .w_full()
-                                        .max_h(move || {
-                                            px((window().height.0 - 98.0).clamp(138.0, 218.0))
-                                        })
-                                        .child(
-                                            view()
-                                                .w_full()
-                                                .p_1()
-                                                .gap_0p5()
-                                                .child(when(
-                                                    move || shown_name().is_some(),
-                                                    {
-                                                        let clear_controls =
-                                                            preset_controls.clone();
-                                                        move || {
-                                                            let clear_controls =
-                                                                clear_controls.clone();
-                                                            view()
-                                                                .w_full()
-                                                                .gap_1()
-                                                                .child(
-                                                                    menu_item()
-                                                                        .w_full()
-                                                                        .h(px(28.0))
-                                                                        .px_2()
-                                                                        .rounded(px(6.0))
-                                                                        .flex_row()
-                                                                        .items_center()
-                                                                        .gap_2()
-                                                                        .hover(|style| {
-                                                                            style.bg(
-                                                                                bg_control_hover(),
-                                                                            )
-                                                                        })
-                                                                        .active(|style| {
-                                                                            style.opacity(0.8)
-                                                                        })
-                                                                        .cursor(Cursor::Pointer)
-                                                                        .on_select(move || {
-                                                                            adopted.set(true);
-                                                                            deselect_active_profile(
-                                                                                profiles,
-                                                                                &clear_controls,
-                                                                            );
-                                                                            dropdown_open
-                                                                                .set(false);
-                                                                        })
-                                                                        .child(glyph_px(
-                                                                            11.0,
-                                                                            || Glyph::Close,
-                                                                            || color(fg_muted()),
-                                                                        ))
-                                                                        .child(
-                                                                            text(tr(
-                                                                                "取消选择当前配置",
-                                                                                "Deselect current setup",
-                                                                            ))
-                                                                            .flex_1()
-                                                                            .min_w(px(0.0))
-                                                                            .number_of_lines(1)
-                                                                            .text_overflow(
-                                                                                EllipsizeMode::Tail,
-                                                                            )
-                                                                            .text_size(px(11.5))
-                                                                            .font_weight(
-                                                                                FontWeight::MEDIUM,
-                                                                            )
-                                                                            .text_color(
-                                                                                fg_secondary(),
-                                                                            ),
-                                                                        ),
-                                                                )
-                                                                .child(
-                                                                    view()
-                                                                        .w_full()
-                                                                        .h(px(1.0))
-                                                                        .my_0p5()
-                                                                        .bg(border_subtle()),
-                                                                )
-                                                        }
-                                                    },
-                                                ))
-                                                .child(each(
-                                                saved,
-                                                |item| {
-                                                    format!(
-                                                        "{}\t{}\t{}\t{}\t{}",
-                                                        item.name,
-                                                        item.filter,
-                                                        item.bypass_hosts,
-                                                        item.rules,
-                                                        item.upstream_proxy
-                                                    )
-                                                },
-                                                move |item, _| {
-                                                    let apply = item;
-                                                    let remove = item;
-                                                    let mark = item;
-                                                    let display_name = item;
-                                                    let display_rules = item;
-                                                    let preset_controls = preset_controls.clone();
-                                                    let remove_controls = preset_controls.clone();
-                                                    let filter_apply = filter;
-                                                    let bypass_apply = bypass_text;
-                                                    let rules_apply = rules_text;
-                                                    let upstream_apply = upstream_text;
-                                                    let rules_on_apply = rules_on;
-                                                    let breaks_on_apply = breaks_on;
-                                                    let tunnels_apply = show_tunnels;
-                                                    let is_active = move || {
-                                                        let typed = rule_name.get();
-                                                        let typed = typed.trim();
-                                                        if !typed.is_empty() {
-                                                            return mark.with(|preset| {
-                                                                preset
-                                                                    .name
-                                                                    .eq_ignore_ascii_case(typed)
-                                                            });
-                                                        }
-                                                        let f = filter.get();
-                                                        let b = bypass_text.get();
-                                                        let r = rules_text.get();
-                                                        let u = upstream_text.get();
-                                                        if f.trim().is_empty()
-                                                            && b.trim().is_empty()
-                                                            && r.trim().is_empty()
-                                                            && u.trim().is_empty()
-                                                        {
-                                                            return false;
-                                                        }
-                                                        mark.with(|preset| {
-                                                            preset.filter.trim() == f.trim()
-                                                                && preset.bypass_hosts.trim()
-                                                                    == b.trim()
-                                                                && preset.rules.trim() == r.trim()
-                                                                && preset.upstream_proxy.trim()
-                                                                    == u.trim()
-                                                        })
-                                                    };
-                                                    view()
-                                                        .h(px(30.0))
-                                                        .gap_1()
-                                                        .flex_row()
-                                                        .items_center()
-                                                        .child(
-                                                            menu_item()
-                                                                .flex_1()
-                                                                .min_w(px(0.0))
-                                                                .h_full()
-                                                                .px_2()
-                                                                .rounded(px(6.0))
-                                                                .overflow_hidden()
-                                                                .flex_row()
-                                                                .items_center()
-                                                                .gap_2()
-                                                                .border_1()
-                                                                .border_color(move || {
-                                                                    if is_active() {
-                                                                        accent_blue_border()
-                                                                    } else {
-                                                                        AdaptiveColor::TRANSPARENT
-                                                                    }
-                                                                })
-                                                                .bg(move || {
-                                                                    if is_active() {
-                                                                        accent_blue_soft()
-                                                                    } else {
-                                                                        AdaptiveColor::TRANSPARENT
-                                                                    }
-                                                                })
-                                                                .hover(|style| {
-                                                                    style.bg(move || {
-                                                                        if is_active() {
-                                                                            accent_blue_soft_hover()
-                                                                        } else {
-                                                                            bg_control_hover()
-                                                                        }
-                                                                    })
-                                                                })
-                                                                .active(|style| style.opacity(0.8))
-                                                                .cursor(Cursor::Pointer)
-                                                                .on_select(move || {
-                                                                    if is_active() {
-                                                                        adopted.set(true);
-                                                                        deselect_active_profile(
-                                                                            profiles,
-                                                                            &preset_controls,
-                                                                        );
-                                                                        dropdown_open.set(false);
-                                                                        return;
-                                                                    }
-                                                                    let preset = apply.with(
-                                                                        |preset| preset.clone(),
-                                                                    );
-                                                                    record_profile_history(
-                                                                        &rule_name.get(),
-                                                                        &filter_apply.get(),
-                                                                        &bypass_apply.get(),
-                                                                        &rules_apply.get(),
-                                                                        &upstream_apply.get(),
-                                                                        rules_on_apply.get(),
-                                                                        breaks_on_apply.get(),
-                                                                        tunnels_apply.get(),
-                                                                        history,
-                                                                    );
-                                                                    rule_name
-                                                                        .set(preset.name.clone());
-                                                                    clear_rule_draft(
-                                                                        draft_host,
-                                                                        draft_path,
-                                                                        draft_op,
-                                                                        draft_from,
-                                                                        draft_to,
-                                                                        draft_modes,
-                                                                        draft_kind,
-                                                                    );
-                                                                    apply_saved_profile(
-                                                                        &preset,
-                                                                        filter_apply,
-                                                                        bypass_apply,
-                                                                        rules_apply,
-                                                                        upstream_apply,
-                                                                        rules_on_apply,
-                                                                        breaks_on_apply,
-                                                                        tunnels_apply,
-                                                                        &preset_controls,
-                                                                    );
-                                                                    record_profile_history(
-                                                                        &preset.name,
-                                                                        &preset.filter,
-                                                                        &preset.bypass_hosts,
-                                                                        &preset.rules,
-                                                                        &preset.upstream_proxy,
-                                                                        preset.rules_enabled,
-                                                                        preset.breaks_enabled,
-                                                                        preset.show_tunnel_failures,
-                                                                        history,
-                                                                    );
-                                                                })
-                                                                .child(
-                                                                    view()
-                                                                        .w(px(6.0))
-                                                                        .h(px(6.0))
-                                                                        .rounded_full()
-                                                                        .flex_shrink_0()
-                                                                        .bg(move || {
-                                                                            if is_active() {
-                                                                                accent_blue()
-                                                                            } else {
-                                                                                fg_muted()
-                                                                            }
-                                                                        }),
-                                                                )
-                                                                .child(
-                                                                    view()
-                                                                        .h(px(18.0))
-                                                                        .max_w(px(124.0))
-                                                                        .px_1p5()
-                                                                        .rounded(px(4.0))
-                                                                        .flex_shrink_0()
-                                                                        .overflow_hidden()
-                                                                        .flex_row()
-                                                                        .items_center()
-                                                                        .bg(accent_blue_soft())
-                                                                        .child(
-                                                                            text(move || {
-                                                                                display_name.with(
-                                                                                    |preset| {
-                                                                                        preset
-                                                                                            .name
-                                                                                            .clone()
-                                                                                    },
-                                                                                )
-                                                                            })
-                                                                            .max_w(px(112.0))
-                                                                            .min_w(px(0.0))
-                                                                            .number_of_lines(1)
-                                                                            .text_overflow(
-                                                                                EllipsizeMode::Tail,
-                                                                            )
-                                                                            .text_size(px(11.0))
-                                                                            .font_weight(
-                                                                                FontWeight::MEDIUM,
-                                                                            )
-                                                                            .text_color(
-                                                                                accent_blue_text(),
-                                                                            ),
-                                                                        ),
-                                                                )
-                                                                .child(
-                                                                    control_text(move || {
-                                                                        display_rules
-                                                                            .with(profile_preview)
-                                                                    })
-                                                                    .flex_1()
-                                                                    .min_w(px(0.0))
-                                                                    .number_of_lines(1)
-                                                                    .text_overflow(
-                                                                        EllipsizeMode::Tail,
-                                                                    )
-                                                                    .text_color(fg_secondary()),
-                                                                )
-                                                                .child(when(is_active, || {
-                                                                    text(tr(
-                                                                        "点击取消",
-                                                                        "Click to clear",
-                                                                    ))
-                                                                    .flex_shrink_0()
-                                                                    .text_size(px(10.5))
-                                                                    .font_weight(FontWeight::MEDIUM)
-                                                                    .text_color(accent_blue_text())
-                                                                })),
-                                                        )
-                                                        .child(
-                                                            view()
-                                                                .w(px(26.0))
-                                                                .h(px(26.0))
-                                                                .flex_shrink_0()
-                                                                .flex_row()
-                                                                .items_center()
-                                                                .justify_center()
-                                                                .rounded(px(6.0))
-                                                                .cursor(Cursor::Pointer)
-                                                                .hover(|style| {
-                                                                    style.bg(bg_control_hover())
-                                                                })
-                                                                .active(|style| style.opacity(0.75))
-                                                                .label(tr(
-                                                                    "删除配置",
-                                                                    "Delete setup",
-                                                                ))
-                                                                .tooltip(label_tip(
-                                                                    "删除配置",
-                                                                    "Delete setup",
-                                                                ))
-                                                                .on_press(move || {
-                                                                    let target = remove.with(
-                                                                        |preset| preset.clone(),
-                                                                    );
-                                                                    adopted.set(true);
-                                                                    drop_saved_profile(
-                                                                        &target,
-                                                                        rule_name,
-                                                                        saved,
-                                                                        history,
-                                                                        &remove_controls,
-                                                                    );
-                                                                    if saved.with(Vec::is_empty) {
-                                                                        dropdown_open.set(false);
-                                                                    }
-                                                                })
-                                                                .child(glyph_px(
-                                                                    12.0,
-                                                                    || Glyph::Trash,
-                                                                    || color(fg_muted()),
-                                                                )),
-                                                        )
-                                                },
-                                            )),
-                                        ),
-                                ),
-                        ),
-                )
-                .child(
-                    menu()
-                        .open(move || Some(history_open.get() && !history.with(Vec::is_empty)))
-                        .on_open_change(move |event: &nsh_base::MenuEvent| {
-                            if let nsh_base::MenuEvent::OpenChange(next, _) = event {
-                                history_open.set(*next && !history.with(Vec::is_empty));
-                                if *next {
-                                    dropdown_open.set(false);
-                                }
-                            }
-                        })
-                        .placement(Placement::Bottom)
-                        .align(Align::Start)
-                        .offset(px(6.0))
-                        .margin(px(8.0))
-                        .trigger(
-                            view()
-                                .h(px(30.0))
-                                .px_2()
-                                .flex_shrink_0()
-                                .rounded(px(7.0))
-                                .border_1()
-                                .border_color(move || {
-                                    if history_open.get() {
-                                        accent_blue_border()
-                                    } else {
-                                        border_control()
-                                    }
-                                })
-                                .bg(move || {
-                                    if history_open.get() {
-                                        accent_blue_soft()
-                                    } else {
-                                        bg_control()
-                                    }
-                                })
-                                .hover(|style| {
-                                    style.bg(move || {
-                                        if history.with(Vec::is_empty) {
-                                            bg_control()
-                                        } else if history_open.get() {
-                                            accent_blue_soft_hover()
-                                        } else {
-                                            bg_control_hover()
-                                        }
-                                    })
-                                })
-                                .active(|style| {
-                                    style.opacity(move || {
-                                        if history.with(Vec::is_empty) {
-                                            1.0_f32
-                                        } else {
-                                            0.8_f32
-                                        }
-                                    })
-                                })
-                                .flex_row()
-                                .items_center()
-                                .gap_1()
-                                .cursor(Cursor::Pointer)
-                                .disabled(move || history.with(Vec::is_empty))
-                                .disabled_style(|style| style.cursor(Cursor::Default))
-                                .tooltip(label_tip(
-                                    "最近 10 个配置历史版本，点击可恢复",
-                                    "Last 10 setup versions, click to restore",
-                                ))
-                                .child(glyph_px(
-                                    12.5,
-                                    || Glyph::History,
-                                    move || {
-                                        color(if history_open.get() {
-                                            accent_blue_text()
-                                        } else if history.with(Vec::is_empty) {
-                                            fg_muted()
-                                        } else {
-                                            fg_secondary()
-                                        })
-                                    },
-                                ))
-                                .child(
-                                    text(tr("历史", "History"))
-                                        .text_size(px(11.5))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .text_color(move || {
-                                            if history_open.get() {
-                                                accent_blue_text()
-                                            } else if history.with(Vec::is_empty) {
-                                                fg_muted()
-                                            } else {
-                                                fg_secondary()
-                                            }
-                                        }),
-                                )
-                                .child(when(
-                                    move || !history.with(Vec::is_empty),
-                                    move || {
-                                        view()
-                                            .h(px(16.0))
-                                            .px_1()
-                                            .rounded(px(4.0))
-                                            .flex_shrink_0()
-                                            .flex_row()
-                                            .items_center()
-                                            .bg(bg_card())
-                                            .child(
-                                                mono(move || history.with(Vec::len).to_string())
-                                                    .tabular_nums()
-                                                    .text_size(px(10.5))
-                                                    .font_weight(FontWeight::SEMIBOLD)
-                                                    .text_color(fg_muted()),
-                                            )
-                                    },
-                                )),
-                        )
-                        .child(
-                            view()
-                                .w(px(380.0))
-                                .max_w(move || px((window().width.0 - 24.0).clamp(220.0, 380.0)))
-                                .max_h(move || px((window().height.0 - 96.0).clamp(140.0, 240.0)))
-                                .overflow_hidden()
-                                .rounded(px(10.0))
-                                .border_1()
-                                .border_color(border_strong())
-                                .bg(bg_card())
-                                .shadow_md()
-                                .child(
-                                    scroll()
-                                        .w_full()
-                                        .max_h(move || {
-                                            px((window().height.0 - 98.0).clamp(138.0, 238.0))
-                                        })
-                                        .child(
-                                            view().w_full().p_1().gap_0p5().child(each(
-                                                history,
-                                                |item| {
-                                                    format!(
-                                                        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-                                                        item.name,
-                                                        item.filter,
-                                                        item.bypass_hosts,
-                                                        item.rules,
-                                                        item.upstream_proxy,
-                                                        item.rules_enabled,
-                                                        item.breaks_enabled,
-                                                        item.show_tunnel_failures
-                                                    )
-                                                },
-                                                move |item, index| {
-                                                    let apply = item;
-                                                    let mark = item;
-                                                    let display_name = item;
-                                                    let display_rules = item;
-                                                    let history_controls =
-                                                        history_controls.clone();
-                                                    let filter_apply = filter;
-                                                    let bypass_apply = bypass_text;
-                                                    let rules_apply = rules_text;
-                                                    let upstream_apply = upstream_text;
-                                                    let rules_on_apply = rules_on;
-                                                    let breaks_on_apply = breaks_on;
-                                                    let tunnels_apply = show_tunnels;
-                                                    let is_current = move || {
-                                                        mark.with(|preset| {
-                                                            preset.filter.trim()
-                                                                == filter.get().trim()
-                                                                && preset.bypass_hosts.trim()
-                                                                    == bypass_text.get().trim()
-                                                                && preset.rules.trim()
-                                                                    == rules_text.get().trim()
-                                                                && preset.upstream_proxy.trim()
-                                                                    == upstream_text.get().trim()
-                                                                && preset.rules_enabled
-                                                                    == rules_on.get()
-                                                                && preset.breaks_enabled
-                                                                    == breaks_on.get()
-                                                                && preset.show_tunnel_failures
-                                                                    == show_tunnels.get()
-                                                        })
-                                                    };
-                                                    menu_item()
-                                                        .w_full()
-                                                        .h(px(30.0))
-                                                        .px_2()
-                                                        .rounded(px(6.0))
-                                                        .overflow_hidden()
-                                                        .flex_row()
-                                                        .items_center()
-                                                        .gap_1p5()
-                                                        .border_1()
-                                                        .border_color(move || {
-                                                            if is_current() {
-                                                                accent_blue_border()
-                                                            } else {
-                                                                AdaptiveColor::TRANSPARENT
-                                                            }
-                                                        })
-                                                        .bg(move || {
-                                                            if is_current() {
-                                                                accent_blue_soft()
-                                                            } else {
-                                                                AdaptiveColor::TRANSPARENT
-                                                            }
-                                                        })
-                                                        .hover(|style| {
-                                                            style.bg(move || {
-                                                                if is_current() {
-                                                                    accent_blue_soft_hover()
-                                                                } else {
-                                                                    bg_control_hover()
-                                                                }
-                                                            })
-                                                        })
-                                                        .active(|style| style.opacity(0.8))
-                                                        .cursor(Cursor::Pointer)
-                                                        .on_select(move || {
-                                                            let preset = apply
-                                                                .with(|preset| preset.clone());
-                                                            record_profile_history(
-                                                                &rule_name.get(),
-                                                                &filter_apply.get(),
-                                                                &bypass_apply.get(),
-                                                                &rules_apply.get(),
-                                                                &upstream_apply.get(),
-                                                                rules_on_apply.get(),
-                                                                breaks_on_apply.get(),
-                                                                tunnels_apply.get(),
-                                                                history,
-                                                            );
-                                                            rule_name.set(preset.name.clone());
-                                                            clear_rule_draft(
-                                                                draft_host,
-                                                                draft_path,
-                                                                draft_op,
-                                                                draft_from,
-                                                                draft_to,
-                                                                draft_modes,
-                                                                draft_kind,
-                                                            );
-                                                            apply_saved_profile(
-                                                                &preset,
-                                                                filter_apply,
-                                                                bypass_apply,
-                                                                rules_apply,
-                                                                upstream_apply,
-                                                                rules_on_apply,
-                                                                breaks_on_apply,
-                                                                tunnels_apply,
-                                                                &history_controls,
-                                                            );
-                                                            set_status(
-                                                                &history_controls,
-                                                                StatusMsg::ProfileRestored(
-                                                                    preset.name.clone(),
-                                                                ),
-                                                            );
-                                                        })
-                                                        .child(
-                                                            mono(move || {
-                                                                format!("#{}", index.get() + 1)
-                                                            })
-                                                            .tabular_nums()
-                                                            .text_size(px(10.5))
-                                                            .text_color(fg_muted()),
-                                                        )
-                                                        .child(
-                                                            view()
-                                                                .h(px(18.0))
-                                                                .max_w(px(120.0))
-                                                                .px_1p5()
-                                                                .rounded(px(4.0))
-                                                                .flex_shrink_0()
-                                                                .overflow_hidden()
-                                                                .flex_row()
-                                                                .items_center()
-                                                                .bg(accent_blue_soft())
-                                                                .child(
-                                                                    text(move || {
-                                                                        display_name.with(
-                                                                            |preset| {
-                                                                                preset.name.clone()
-                                                                            },
-                                                                        )
-                                                                    })
-                                                                    .max_w(px(108.0))
-                                                                    .min_w(px(0.0))
-                                                                    .number_of_lines(1)
-                                                                    .text_overflow(
-                                                                        EllipsizeMode::Tail,
-                                                                    )
-                                                                    .text_size(px(11.0))
-                                                                    .font_weight(FontWeight::MEDIUM)
-                                                                    .text_color(accent_blue_text()),
-                                                                ),
-                                                        )
-                                                        .child(
-                                                            control_text(move || {
-                                                                display_rules.with(profile_preview)
-                                                            })
-                                                            .flex_1()
-                                                            .min_w(px(0.0))
-                                                            .number_of_lines(1)
-                                                            .text_overflow(EllipsizeMode::Tail)
-                                                            .text_color(fg_secondary()),
-                                                        )
-                                                },
-                                            )),
-                                        ),
-                                ),
-                        ),
-                )
+                .child(profile_saved_menu(menu_ctx.clone()))
+                .child(profile_history_menu(menu_ctx))
                 .child(view().flex_1().min_w(px(0.0)).child(side_input(
                     rule_name,
                     tr("配置名称 (可选，同名覆盖)", "Setup name (optional)"),
-                    30.0,
+                    CONTROL_H,
                     false,
                     move |text| rule_name.set(text.to_string()),
                 )))
                 .child(
                     view()
-                        .h(px(30.0))
+                        .role(AccessibilityRole::Button)
+                        .h(px(CONTROL_H))
                         .px_2p5()
                         .flex_shrink_0()
-                        .rounded(px(7.0))
+                        .rounded(px(RADIUS_MD))
                         .border_1()
                         .border_color(border_control())
                         .bg(bg_control())
                         .hover(|style| style.bg(bg_control_hover()))
-                        .active(|style| style.opacity(0.8))
+                        .active(|style| style.bg(bg_control_active()))
+                        .transition_colors()
+                        .duration(MOTION_INSTANT_MS)
+                        .ease_out()
+                        .focus_visible(apply_focus_ring)
                         .flex_row()
                         .items_center()
                         .justify_center()
-                        .cursor(Cursor::Pointer)
                         .tooltip(label_tip(
                             "导出配置 TOML 到剪贴板",
                             "Copy setups as TOML to clipboard",
@@ -1189,17 +409,18 @@ pub(crate) fn profile_dock(
                         })
                         .child(
                             text(tr("导出", "Export"))
-                                .text_size(px(11.5))
+                                .text_size(px(TEXT_SM))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(fg_secondary()),
                         ),
                 )
                 .child(
                     view()
-                        .h(px(30.0))
+                        .role(AccessibilityRole::Button)
+                        .h(px(CONTROL_H))
                         .px_2p5()
                         .flex_shrink_0()
-                        .rounded(px(7.0))
+                        .rounded(px(RADIUS_MD))
                         .border_1()
                         .border_color(move || {
                             if import_open.get() {
@@ -1224,11 +445,14 @@ pub(crate) fn profile_dock(
                                 }
                             })
                         })
-                        .active(|style| style.opacity(0.8))
+                        .active(|style| style.bg(bg_control_active()))
+                        .transition_colors()
+                        .duration(MOTION_INSTANT_MS)
+                        .ease_out()
+                        .focus_visible(apply_focus_ring)
                         .flex_row()
                         .items_center()
                         .justify_center()
-                        .cursor(Cursor::Pointer)
                         .tooltip(label_tip(
                             "粘贴 TOML 配置文本导入（或拖拽 .toml 到窗口）",
                             "Paste TOML setup text to import (or drop .toml)",
@@ -1259,7 +483,7 @@ pub(crate) fn profile_dock(
                         })
                         .child(
                             text(tr("导入", "Import"))
-                                .text_size(px(11.5))
+                                .text_size(px(TEXT_SM))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(move || {
                                     if import_open.get() {
@@ -1272,19 +496,23 @@ pub(crate) fn profile_dock(
                 )
                 .child(
                     view()
-                        .h(px(30.0))
+                        .role(AccessibilityRole::Button)
+                        .h(px(CONTROL_H))
                         .px_3()
                         .flex_shrink_0()
-                        .rounded(px(7.0))
+                        .rounded(px(RADIUS_MD))
                         .border_1()
                         .border_color(border_control())
                         .bg(bg_control())
                         .hover(|style| style.bg(bg_control_hover()))
-                        .active(|style| style.opacity(0.8))
+                        .active(|style| style.bg(bg_control_active()))
+                        .transition_colors()
+                        .duration(MOTION_INSTANT_MS)
+                        .ease_out()
+                        .focus_visible(apply_focus_ring)
                         .flex_row()
                         .items_center()
                         .justify_center()
-                        .cursor(Cursor::Pointer)
                         .on_press(move || {
                             dropdown_open.set(false);
                             history_open.set(false);
@@ -1321,7 +549,7 @@ pub(crate) fn profile_dock(
                         })
                         .child(
                             text(tr("新建配置", "New setup"))
-                                .text_size(px(11.5))
+                                .text_size(px(TEXT_SM))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(fg_secondary()),
                         ),
@@ -1352,10 +580,11 @@ pub(crate) fn profile_dock(
                     });
                     let ready_text = move || save_ready.get();
                     view()
-                        .h(px(30.0))
+                        .role(AccessibilityRole::Button)
+                        .h(px(CONTROL_H))
                         .px_3p5()
                         .flex_shrink_0()
-                        .rounded(px(7.0))
+                        .rounded(px(RADIUS_MD))
                         .border_1()
                         .border_color(move || {
                             if save_ready.get() {
@@ -1384,13 +613,19 @@ pub(crate) fn profile_dock(
                             })
                         })
                         .active(|style| {
-                            style.opacity(move || {
-                                if save_ready.get() { 0.85_f32 } else { 1.0_f32 }
+                            style.bg(move || {
+                                if save_ready.get() {
+                                    accent_blue_active()
+                                } else {
+                                    bg_control()
+                                }
                             })
                         })
-                        .cursor(Cursor::Pointer)
+                        .transition_colors()
+                        .duration(MOTION_INSTANT_MS)
+                        .ease_out()
+                        .focus_visible(apply_focus_ring)
                         .disabled(move || !save_ready.get())
-                        .disabled_style(|style| style.cursor(Cursor::Default))
                         .on_press(move || {
                             if !save_ready.get() {
                                 return;
@@ -1413,7 +648,7 @@ pub(crate) fn profile_dock(
                         })
                         .child(
                             text(tr("保存", "Save"))
-                                .text_size(px(11.5))
+                                .text_size(px(TEXT_SM))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(move || {
                                     if ready_text() {

@@ -1655,6 +1655,7 @@ fn auto_height_popover_scroll_containers_never_use_flex_1() {
         include_str!("more_menu_rows.rs"),
         include_str!("preset_sync.rs"),
         include_str!("profile_dock.rs"),
+        include_str!("profile_dock_menus.rs"),
         include_str!("profile_io.rs"),
         include_str!("profile_store.rs"),
         include_str!("quick_rules.rs"),
