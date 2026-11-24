@@ -80,9 +80,10 @@ pub(crate) fn seq_action_button(
     let enabled_off = enabled.clone();
     let enabled_text = enabled;
     view()
-        .h(px(26.0))
+        .role(AccessibilityRole::Button)
+        .h(px(CONTROL_H))
         .px_2p5()
-        .rounded(px(6.0))
+        .rounded(px(RADIUS_MD))
         .border_1()
         .border_color(move || {
             if enabled_border() {
@@ -101,10 +102,20 @@ pub(crate) fn seq_action_button(
                 }
             })
         })
-        .active(|style| style.opacity(move || if enabled_active() { 0.75_f32 } else { 1.0_f32 }))
-        .cursor(Cursor::Pointer)
+        .active(|style| {
+            style.bg(move || {
+                if enabled_active() {
+                    bg_control_active()
+                } else {
+                    bg_control()
+                }
+            })
+        })
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .disabled(move || !enabled_off())
-        .disabled_style(|style| style.cursor(Cursor::Default))
         .flex_row()
         .items_center()
         .on_press(on_press)
@@ -124,9 +135,10 @@ pub(crate) fn seq_option_toggle(
     on_toggle: impl Fn() + 'static,
 ) -> impl IntoElement {
     view()
-        .h(px(26.0))
+        .role(AccessibilityRole::Button)
+        .h(px(CONTROL_H))
         .px_2p5()
-        .rounded(px(6.0))
+        .rounded(px(RADIUS_MD))
         .border_1()
         .border_color(move || {
             if on.get() {
@@ -151,8 +163,11 @@ pub(crate) fn seq_option_toggle(
                 }
             })
         })
-        .active(|style| style.opacity(0.8))
-        .cursor(Cursor::Pointer)
+        .active(|style| style.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .flex_row()
         .items_center()
         .gap_1p5()
@@ -170,7 +185,7 @@ pub(crate) fn seq_option_toggle(
         .child(
             text(tr(zh, en))
                 .number_of_lines(1)
-                .text_size(px(11.5))
+                .text_size(px(TEXT_SM))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(move || {
                     if on.get() {
@@ -229,9 +244,10 @@ pub(crate) fn seq_mode_tab(
 ) -> impl IntoElement {
     let is_active = move || mode.get() == target;
     view()
-        .h(px(22.0))
+        .role(AccessibilityRole::Tab)
+        .h(px(24.0))
         .px_2p5()
-        .rounded(px(5.0))
+        .rounded(px(RADIUS_SM))
         .bg(move || if is_active() { bg_card() } else { bg_control() })
         .hover(|style| {
             style.bg(move || {
@@ -242,7 +258,11 @@ pub(crate) fn seq_mode_tab(
                 }
             })
         })
-        .active(|style| style.opacity(0.85))
+        .active(|style| style.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .border_1()
         .border_color(move || {
             if is_active() {
@@ -251,7 +271,6 @@ pub(crate) fn seq_mode_tab(
                 bg_control()
             }
         })
-        .cursor(Cursor::Pointer)
         .flex_row()
         .items_center()
         .on_press(move || {
@@ -265,7 +284,7 @@ pub(crate) fn seq_mode_tab(
         .child(
             text(tr(zh, en))
                 .number_of_lines(1)
-                .text_size(px(11.0))
+                .text_size(px(TEXT_XS))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(move || {
                     if is_active() {
@@ -374,7 +393,7 @@ pub(crate) fn seq_swimlane_view(
                 seq_builder.items.with(Vec::len),
             ))
         })
-        .rounded(px(7.0))
+        .rounded(px(RADIUS_MD))
         .border_1()
         .border_color(border_control())
         .bg(bg_code())
@@ -390,7 +409,7 @@ pub(crate) fn seq_swimlane_view(
             || {
                 view().size_full().items_center().justify_center().child(
                     text(tr("请勾选至少一条流量", "Select at least one flow"))
-                        .text_size(px(12.0))
+                        .text_size(px(TEXT_SM))
                         .text_color(fg_muted()),
                 )
             },
@@ -423,7 +442,7 @@ pub(crate) fn seq_swimlane_view(
                                         .top(px(8.0))
                                         .w(px(76.0))
                                         .h(px(26.0))
-                                        .rounded(px(6.0))
+                                        .rounded(px(RADIUS_MD))
                                         .border_1()
                                         .border_color(accent_blue_border())
                                         .bg(accent_blue_soft())
@@ -432,7 +451,7 @@ pub(crate) fn seq_swimlane_view(
                                         .justify_center()
                                         .child(
                                             mono(tr("客户端", "Client"))
-                                                .text_size(px(11.5))
+                                                .text_size(px(TEXT_XS))
                                                 .font_weight(FontWeight::BOLD)
                                                 .text_color(accent_blue_text()),
                                         ),
@@ -465,7 +484,7 @@ pub(crate) fn seq_swimlane_view(
                                             })
                                             .h(px(26.0))
                                             .px_2p5()
-                                            .rounded(px(6.0))
+                                            .rounded(px(RADIUS_MD))
                                             .border_1()
                                             .border_color(border_control())
                                             .bg(bg_control())
@@ -480,7 +499,7 @@ pub(crate) fn seq_swimlane_view(
                                                 })
                                                 .tabular_nums()
                                                 .flex_shrink_0()
-                                                .text_size(px(11.0))
+                                                .text_size(px(TEXT_XS))
                                                 .font_weight(FontWeight::BOLD)
                                                 .text_color(accent_blue_text()),
                                             )
@@ -489,7 +508,7 @@ pub(crate) fn seq_swimlane_view(
                                                     .min_w(px(0.0))
                                                     .number_of_lines(1)
                                                     .text_overflow(EllipsizeMode::Middle)
-                                                    .text_size(px(11.0))
+                                                    .text_size(px(TEXT_XS))
                                                     .font_weight(FontWeight::SEMIBOLD)
                                                     .text_color(fg_primary()),
                                             )
@@ -534,12 +553,16 @@ pub(crate) fn seq_swimlane_row(
             .unwrap_or_default()
     });
     view()
+        .role(AccessibilityRole::Button)
         .w(move || layout.with(|(_, total_w)| px(*total_w)))
         .h(px(SEQ_SWIMLANE_STEP_H))
         .relative()
         .hover(|style| style.bg(bg_control_hover()))
-        .active(|style| style.opacity(0.85))
-        .cursor(Cursor::Pointer)
+        .active(|style| style.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .on_press(move || {
             jump_to_seq_flow(step.with(|s| s.flow_id), selected, compose, seq_builder);
         })
@@ -636,13 +659,13 @@ pub(crate) fn seq_swimlane_row(
                     view()
                         .px_1p5()
                         .py(px(0.5))
-                        .rounded(px(3.5))
+                        .rounded(px(RADIUS_SM))
                         .flex_shrink_0()
                         .bg(bg_control())
                         .child(
                             mono(move || step.with(|s| s.step_no.to_string()))
                                 .tabular_nums()
-                                .text_size(px(11.0))
+                                .text_size(px(TEXT_XS))
                                 .font_weight(FontWeight::BOLD)
                                 .text_color(fg_secondary()),
                         ),
@@ -651,7 +674,7 @@ pub(crate) fn seq_swimlane_row(
                     view()
                         .px_1p5()
                         .py(px(0.5))
-                        .rounded(px(3.5))
+                        .rounded(px(RADIUS_SM))
                         .min_w(px(0.0))
                         .overflow_hidden()
                         .bg(bg_card())
@@ -673,7 +696,7 @@ pub(crate) fn seq_swimlane_row(
                                 })
                                 .number_of_lines(1)
                                 .text_overflow(EllipsizeMode::Middle)
-                                .text_size(px(11.0))
+                                .text_size(px(TEXT_XS))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(move || {
                                     step.with(|s| {
@@ -694,7 +717,7 @@ pub(crate) fn seq_swimlane_row(
                         view()
                             .px_1p5()
                             .py(px(0.5))
-                            .rounded(px(3.5))
+                            .rounded(px(RADIUS_SM))
                             .max_w(px(140.0))
                             .flex_shrink_0()
                             .bg(accent_blue_soft())
@@ -702,7 +725,7 @@ pub(crate) fn seq_swimlane_row(
                                 text(move || step.with(|s| format!("# {}", s.note)))
                                     .number_of_lines(1)
                                     .text_overflow(EllipsizeMode::Tail)
-                                    .text_size(px(11.0))
+                                    .text_size(px(TEXT_XS))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(accent_blue_text()),
                             )

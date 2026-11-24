@@ -100,7 +100,7 @@ pub(crate) fn kv_value_cell(line: ReadSignal<HeaderLine>) -> impl IntoElement {
         .child(
             mono(move || line.with(|line| line.value.clone()))
                 .selectable(true)
-                .text_size(px(12.0))
+                .text_size(px(TEXT_SM))
                 .text_color(fg_primary()),
         )
         .child(when(
@@ -109,14 +109,14 @@ pub(crate) fn kv_value_cell(line: ReadSignal<HeaderLine>) -> impl IntoElement {
                 view()
                     .px_2()
                     .py_1()
-                    .rounded(px(4.0))
+                    .rounded(px(RADIUS_SM))
                     .bg(bg_control())
                     .border_1()
                     .border_color(border_subtle())
                     .child(
                         mono(move || line.with(|line| line.hint.clone().unwrap_or_default()))
                             .selectable(true)
-                            .text_size(px(11.0))
+                            .text_size(px(TEXT_XS))
                             .text_color(fg_secondary()),
                     )
             },
@@ -141,7 +141,7 @@ pub(crate) fn detail_loading_row() -> impl IntoElement {
             view()
                 .w(px(6.0))
                 .h(px(6.0))
-                .rounded(px(3.0))
+                .rounded(px(RADIUS_SM))
                 .flex_shrink_0()
                 .bg(accent_blue())
                 .style_with(|s| {
@@ -160,7 +160,7 @@ pub(crate) fn detail_loading_box() -> impl IntoElement {
         view()
             .w(relative(width))
             .h(px(8.0))
-            .rounded(px(4.0))
+            .rounded(px(RADIUS_SM))
             .bg(bg_control())
             .style_with(|s| {
                 if reduce_motion() {
@@ -249,17 +249,21 @@ fn row_copy_button(
     on_copy: impl Fn() + 'static,
 ) -> impl IntoElement {
     view()
-        .w(px(22.0))
-        .h(px(20.0))
+        .role(AccessibilityRole::Button)
+        .w(px(ControlSize::Xs.height()))
+        .h(px(ControlSize::Xs.height()))
         .flex_shrink_0()
         .flex_row()
         .items_center()
         .justify_center()
-        .rounded(px(4.0))
+        .rounded(px(RADIUS_SM))
         .bg(AdaptiveColor::TRANSPARENT)
         .hover(|style| style.bg(bg_control_hover()))
-        .active(|style| style.opacity(0.75))
-        .cursor(Cursor::Pointer)
+        .active(|style| style.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .label(tr(zh_label, en_label))
         .tooltip(label_tip(zh_tip, en_tip))
         .on_press(on_copy)
@@ -348,7 +352,7 @@ pub(crate) fn header_section(props: HeaderSectionProps) -> impl IntoElement {
     let copy_all_controls = controls.clone();
     let row_controls = controls;
     view()
-        .rounded(px(10.0))
+        .rounded(px(RADIUS_LG))
         .border_1()
         .border_color(border_strong())
         .bg(bg_card())
@@ -373,15 +377,21 @@ pub(crate) fn header_section(props: HeaderSectionProps) -> impl IntoElement {
                 .border_b_color(border_subtle())
                 .child(
                     view()
+                        .role(AccessibilityRole::Button)
                         .flex_1()
                         .min_w(px(0.0))
                         .flex_row()
                         .items_center()
                         .gap_1p5()
-                        .rounded(px(5.0))
+                        .px_1()
+                        .py_0p5()
+                        .rounded(px(RADIUS_SM))
                         .hover(|style| style.bg(bg_control_hover()))
-                        .active(|style| style.opacity(0.85))
-                        .cursor(Cursor::Pointer)
+                        .active(|style| style.bg(bg_control_active()))
+                        .transition_colors()
+                        .duration(MOTION_INSTANT_MS)
+                        .ease_out()
+                        .focus_visible(apply_focus_ring)
                         .on_press(move || toggle_card_and_persist(folded, bit, &fold_controls))
                         .child(fold_mark(folded, bit))
                         .child(section_title(tr(zh, en)))
@@ -389,7 +399,7 @@ pub(crate) fn header_section(props: HeaderSectionProps) -> impl IntoElement {
                             view()
                                 .px_1p5()
                                 .py(px(1.0))
-                                .rounded(px(4.0))
+                                .rounded(px(RADIUS_SM))
                                 .bg(bg_control())
                                 .child(
                                     mono(move || {
@@ -400,7 +410,7 @@ pub(crate) fn header_section(props: HeaderSectionProps) -> impl IntoElement {
                                         }
                                     })
                                     .tabular_nums()
-                                    .text_size(px(11.0))
+                                    .text_size(px(TEXT_XS))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(fg_muted()),
                                 ),
@@ -449,7 +459,7 @@ pub(crate) fn header_section(props: HeaderSectionProps) -> impl IntoElement {
                                             .selectable(true)
                                             .number_of_lines(1)
                                             .text_overflow(EllipsizeMode::Tail)
-                                            .text_size(px(12.0))
+                                            .text_size(px(TEXT_SM))
                                             .font_weight(FontWeight::MEDIUM)
                                             .text_color(fg_muted()),
                                     )
@@ -501,11 +511,11 @@ pub(crate) fn llm_mode_chip(
     en: &'static str,
 ) -> impl IntoElement {
     view()
-        .h(px(20.0))
+        .role(AccessibilityRole::Button)
+        .h(px(ControlSize::Xs.height()))
         .px_2()
         .items_center()
         .justify_center()
-        .cursor(Cursor::Pointer)
         .bg(move || {
             if current.get() == target {
                 accent_blue_soft()
@@ -522,11 +532,16 @@ pub(crate) fn llm_mode_chip(
                 }
             })
         })
+        .active(|style| style.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .on_press(move || current.set(target))
         .child(
             text(tr(zh, en))
                 .number_of_lines(1)
-                .text_size(px(10.5))
+                .text_size(px(TEXT_XS))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(move || {
                     if current.get() == target {
@@ -546,7 +561,8 @@ fn msg_filter_chip(
 ) -> impl IntoElement {
     let active = move || state.get() == val;
     view()
-        .h(px(22.0))
+        .role(AccessibilityRole::Button)
+        .h(px(ControlSize::Xs.height()))
         .px_2()
         .flex_row()
         .items_center()
@@ -560,13 +576,24 @@ fn msg_filter_chip(
                 }
             })
         })
-        .active(|style| style.opacity(0.8))
-        .cursor(Cursor::Pointer)
+        .active(|style| {
+            style.bg(move || {
+                if active() {
+                    accent_blue_active()
+                } else {
+                    bg_control_active()
+                }
+            })
+        })
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .on_press(move || state.set(val))
         .child(
             text(tr(zh, en))
                 .number_of_lines(1)
-                .text_size(px(11.0))
+                .text_size(px(TEXT_XS))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(move || {
                     if active() {
@@ -594,9 +621,9 @@ pub(crate) fn msg_search_box(
                 .placeholder(tr("搜索…", "Search…"))
                 .placeholder_color(move || color(fg_muted()))
                 .w(px(120.0))
-                .h(px(22.0))
+                .h(px(ControlSize::Xs.height()))
                 .px_2()
-                .rounded(px(6.0))
+                .rounded(px(RADIUS_MD))
                 .bg(bg_code())
                 .border_1()
                 .border_color(move || {
@@ -607,7 +634,7 @@ pub(crate) fn msg_search_box(
                     }
                 })
                 .focus(|style| style.border_color(accent_blue()))
-                .text_size(px(11.5))
+                .text_size(px(TEXT_XS))
                 .text_color(fg_primary())
                 .on_change(move |text: &str| search.set(text.to_string())),
         )
@@ -615,17 +642,21 @@ pub(crate) fn msg_search_box(
             move || !search.get().trim().is_empty(),
             move || {
                 view()
-                    .h(px(22.0))
+                    .role(AccessibilityRole::Button)
+                    .h(px(ControlSize::Xs.height()))
                     .px_1p5()
-                    .rounded(px(6.0))
+                    .rounded(px(RADIUS_MD))
                     .bg(accent_blue_soft())
                     .hover(|style| style.bg(accent_blue_soft_hover()))
-                    .active(|style| style.opacity(0.8))
+                    .active(|style| style.bg(bg_control_active()))
+                    .transition_colors()
+                    .duration(MOTION_INSTANT_MS)
+                    .ease_out()
+                    .focus_visible(apply_focus_ring)
                     .border_1()
                     .border_color(accent_blue_border())
                     .flex_row()
                     .items_center()
-                    .cursor(Cursor::Pointer)
                     .tooltip(label_tip("点击清空搜索", "Click to clear search"))
                     .on_press(move || search.set(String::new()))
                     .child(
@@ -640,7 +671,7 @@ pub(crate) fn msg_search_box(
                             format!("{} ×", present::format_thousands(matched as u64))
                         })
                         .tabular_nums()
-                        .text_size(px(11.0))
+                        .text_size(px(TEXT_XS))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(accent_blue_text()),
                     )
@@ -670,7 +701,7 @@ pub(crate) fn messages_section(
     let has_llm_view = move || llm_stream.with(Option::is_some);
     let is_llm_ai_mode = move || has_llm_view() && msg_llm_view.get();
     view()
-        .rounded(px(10.0))
+        .rounded(px(RADIUS_LG))
         .border_1()
         .border_color(border_strong())
         .bg(bg_card())
@@ -696,15 +727,19 @@ pub(crate) fn messages_section(
                 .border_b_color(border_subtle())
                 .child(
                     view()
+                        .role(AccessibilityRole::Button)
                         .flex_row()
                         .items_center()
                         .gap_1p5()
                         .px_1()
                         .py_0p5()
-                        .rounded(px(5.0))
+                        .rounded(px(RADIUS_SM))
                         .hover(|style| style.bg(bg_control_hover()))
-                        .active(|style| style.opacity(0.85))
-                        .cursor(Cursor::Pointer)
+                        .active(|style| style.bg(bg_control_active()))
+                        .transition_colors()
+                        .duration(MOTION_INSTANT_MS)
+                        .ease_out()
+                        .focus_visible(apply_focus_ring)
                         .on_press(move || {
                             toggle_card_and_persist(folded, FOLD_MESSAGES, &fold_controls)
                         })
@@ -714,7 +749,7 @@ pub(crate) fn messages_section(
                             view()
                                 .px_1p5()
                                 .py(px(1.0))
-                                .rounded(px(4.0))
+                                .rounded(px(RADIUS_SM))
                                 .bg(bg_control())
                                 .child(
                                     mono(move || {
@@ -743,7 +778,7 @@ pub(crate) fn messages_section(
                                         }
                                     })
                                     .tabular_nums()
-                                    .text_size(px(11.0))
+                                    .text_size(px(TEXT_XS))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(fg_muted()),
                                 ),
@@ -761,8 +796,8 @@ pub(crate) fn messages_section(
                             .child(when(has_llm_view, move || {
                                 view()
                                     .flex_row()
-                                    .h(px(22.0))
-                                    .rounded(px(6.0))
+                                    .h(px(ControlSize::Xs.height()))
+                                    .rounded(px(RADIUS_MD))
                                     .border_1()
                                     .border_color(border_control())
                                     .overflow_hidden()
@@ -779,8 +814,8 @@ pub(crate) fn messages_section(
                                 move || {
                                     view()
                                         .flex_row()
-                                        .h(px(22.0))
-                                        .rounded(px(6.0))
+                                        .h(px(ControlSize::Xs.height()))
+                                        .rounded(px(RADIUS_MD))
                                         .border_1()
                                         .border_color(border_control())
                                         .overflow_hidden()
@@ -794,8 +829,8 @@ pub(crate) fn messages_section(
                                 move || {
                                     view()
                                         .flex_row()
-                                        .h(px(22.0))
-                                        .rounded(px(6.0))
+                                        .h(px(ControlSize::Xs.height()))
+                                        .rounded(px(RADIUS_MD))
                                         .border_1()
                                         .border_color(border_control())
                                         .overflow_hidden()
@@ -889,7 +924,7 @@ pub(crate) fn messages_section(
                                                     .selectable(true)
                                                     .number_of_lines(1)
                                                     .text_overflow(EllipsizeMode::Tail)
-                                                    .text_size(px(12.0))
+                                                    .text_size(px(TEXT_SM))
                                                     .font_weight(FontWeight::MEDIUM)
                                                     .text_color(fg_muted()),
                                             )
@@ -898,7 +933,7 @@ pub(crate) fn messages_section(
                                                     .flex_1()
                                                     .min_w(px(0.0))
                                                     .selectable(true)
-                                                    .text_size(px(12.0))
+                                                    .text_size(px(TEXT_SM))
                                                     .text_color(fg_primary()),
                                             )
                                             .child(row_copy_slot(
@@ -935,7 +970,7 @@ pub(crate) fn messages_section(
 pub(crate) fn diff_card(shown: Shown, folded: Signal<u8>) -> impl IntoElement {
     let scope_sig = shown.diff_scope;
     view()
-        .rounded(px(10.0))
+        .rounded(px(RADIUS_LG))
         .border_1()
         .border_color(border_strong())
         .bg(bg_card())
@@ -960,6 +995,7 @@ pub(crate) fn diff_card(shown: Shown, folded: Signal<u8>) -> impl IntoElement {
                 .border_b_color(border_subtle())
                 .child(
                     view()
+                        .role(AccessibilityRole::Button)
                         .flex_1()
                         .min_w(px(96.0))
                         .flex_row()
@@ -967,10 +1003,13 @@ pub(crate) fn diff_card(shown: Shown, folded: Signal<u8>) -> impl IntoElement {
                         .gap_1p5()
                         .px_1()
                         .py_0p5()
-                        .rounded(px(5.0))
+                        .rounded(px(RADIUS_SM))
                         .hover(|style| style.bg(bg_control_hover()))
-                        .active(|style| style.opacity(0.85))
-                        .cursor(Cursor::Pointer)
+                        .active(|style| style.bg(bg_control_active()))
+                        .transition_colors()
+                        .duration(MOTION_INSTANT_MS)
+                        .ease_out()
+                        .focus_visible(apply_focus_ring)
                         .on_press(move || toggle_card(folded, FOLD_DIFF))
                         .child(fold_mark(folded, FOLD_DIFF))
                         .child(section_title(tr("对比", "Diff"))),
@@ -980,8 +1019,8 @@ pub(crate) fn diff_card(shown: Shown, folded: Signal<u8>) -> impl IntoElement {
                     move || {
                         view()
                             .flex_row()
-                            .h(px(22.0))
-                            .rounded(px(6.0))
+                            .h(px(ControlSize::Xs.height()))
+                            .rounded(px(RADIUS_MD))
                             .border_1()
                             .border_color(border_control())
                             .overflow_hidden()
@@ -1056,7 +1095,7 @@ pub(crate) fn diff_key(
         .child(
             text(label)
                 .number_of_lines(1)
-                .text_size(px(11.0))
+                .text_size(px(TEXT_XS))
                 .text_color(fg_muted()),
         )
 }

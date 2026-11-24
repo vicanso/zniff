@@ -58,7 +58,7 @@ pub(crate) fn body_section(
     let switch_controls = controls.clone();
     let tree_controls = controls;
     view()
-        .rounded(px(10.0))
+        .rounded(px(RADIUS_LG))
         .border_1()
         .border_color(border_strong())
         .bg(bg_card())
@@ -84,6 +84,7 @@ pub(crate) fn body_section(
                 .border_b_color(border_subtle())
                 .child(
                     view()
+                        .role(AccessibilityRole::Button)
                         .flex_shrink_0()
                         .max_w(relative(1.0))
                         .overflow_hidden()
@@ -92,10 +93,13 @@ pub(crate) fn body_section(
                         .gap_1p5()
                         .px_1()
                         .py_0p5()
-                        .rounded(px(5.0))
+                        .rounded(px(RADIUS_SM))
                         .hover(|style| style.bg(bg_control_hover()))
-                        .active(|style| style.opacity(0.85))
-                        .cursor(Cursor::Pointer)
+                        .active(|style| style.bg(bg_control_active()))
+                        .transition_colors()
+                        .duration(MOTION_INSTANT_MS)
+                        .ease_out()
+                        .focus_visible(apply_focus_ring)
                         .on_press(move || toggle_card_and_persist(folded, bit, &fold_controls))
                         .child(fold_mark(folded, bit))
                         .child(
@@ -110,33 +114,24 @@ pub(crate) fn body_section(
                                     .flex_shrink_0()
                                     .px_1p5()
                                     .py(px(1.0))
-                                    .rounded(px(4.0))
+                                    .rounded(px(RADIUS_SM))
                                     .bg(bg_control())
                                     .tooltip(
-                                        tooltip().child(
-                                            view()
-                                                .px_2()
-                                                .py_1()
-                                                .rounded(px(6.0))
-                                                .bg(bg_card())
-                                                .border_1()
-                                                .border_color(border_strong())
-                                                .child(
-                                                    mono(move || {
-                                                        if loading.get() {
-                                                            t(ui_lang(langs), "加载中…", "Loading…")
-                                                                .to_string()
-                                                        } else {
-                                                            present::format_exact_bytes(
-                                                                body_bytes.get() as u64,
-                                                            )
-                                                        }
-                                                    })
-                                                    .tabular_nums()
-                                                    .text_size(px(11.5))
-                                                    .text_color(fg_primary()),
-                                                ),
-                                        ),
+                                        tooltip().child(ui_tooltip_surface(
+                                            mono(move || {
+                                                if loading.get() {
+                                                    t(ui_lang(langs), "加载中…", "Loading…")
+                                                        .to_string()
+                                                } else {
+                                                    present::format_exact_bytes(
+                                                        body_bytes.get() as u64
+                                                    )
+                                                }
+                                            })
+                                            .tabular_nums()
+                                            .text_size(px(TEXT_SM))
+                                            .text_color(fg_primary()),
+                                        )),
                                     )
                                     .child(
                                         mono(move || {
@@ -147,7 +142,7 @@ pub(crate) fn body_section(
                                             }
                                         })
                                         .tabular_nums()
-                                        .text_size(px(11.0))
+                                        .text_size(px(TEXT_XS))
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(fg_muted()),
                                     )
@@ -258,13 +253,13 @@ pub(crate) fn body_section(
                         view()
                             .px_3()
                             .py_2()
-                            .rounded(px(7.0))
+                            .rounded(px(RADIUS_MD))
                             .bg(status_warn_bg())
                             .border_1()
                             .border_color(status_warn_fg())
                             .child(
                                 text(move || note.get())
-                                    .text_size(px(12.0))
+                                    .text_size(px(TEXT_SM))
                                     .text_color(status_warn_fg()),
                             ),
                     )
@@ -322,7 +317,7 @@ pub(crate) fn body_section(
                             .min_w(px(64.0))
                             .min_h(px(64.0))
                             .flex_shrink_0()
-                            .rounded(px(8.0))
+                            .rounded(px(RADIUS_MD))
                             .border_1()
                             .border_color(border_strong())
                             .bg(bg_code())
@@ -735,9 +730,9 @@ pub(crate) fn body_search_box(
                 .placeholder(tr("搜索…", "Search…"))
                 .placeholder_color(move || color(fg_muted()))
                 .w(move || px(body_search_width(pane_width.get())))
-                .h(px(22.0))
+                .h(px(ControlSize::Xs.height()))
                 .px_1p5()
-                .rounded(px(6.0))
+                .rounded(px(RADIUS_MD))
                 .bg(bg_code())
                 .border_1()
                 .border_color(move || {
@@ -748,7 +743,7 @@ pub(crate) fn body_search_box(
                     }
                 })
                 .focus(|style| style.border_color(accent_blue()))
-                .text_size(px(11.5))
+                .text_size(px(TEXT_XS))
                 .text_color(fg_primary())
                 .on_change(move |text: &str| search.set(text.to_string())),
         )
@@ -763,17 +758,21 @@ pub(crate) fn body_search_box(
                     .child(when(is_paged, move || {
                         let jump_controls = jump_controls.clone();
                         view()
-                            .h(px(22.0))
+                            .role(AccessibilityRole::Button)
+                            .h(px(ControlSize::Xs.height()))
                             .px_1p5()
-                            .rounded(px(6.0))
+                            .rounded(px(RADIUS_MD))
                             .bg(status_warn_bg())
-                            .hover(|style| style.opacity(0.9))
-                            .active(|style| style.opacity(0.75))
+                            .hover(|style| style.bg(status_warn_bg()))
+                            .active(|style| style.bg(bg_control_active()))
+                            .transition_colors()
+                            .duration(MOTION_INSTANT_MS)
+                            .ease_out()
+                            .focus_visible(apply_focus_ring)
                             .border_1()
                             .border_color(status_warn_fg())
                             .flex_row()
                             .items_center()
-                            .cursor(Cursor::Pointer)
                             .tooltip(label_tip(
                                 "仅在当前 256 KB 分页内匹配；点击跳转到其它分页中的命中",
                                 "Matches current 256 KB page; click to jump to match in other pages",
@@ -792,24 +791,28 @@ pub(crate) fn body_search_box(
                             .child(
                                 text(tr("当前页 · 下一处", "Page · Next"))
                                     .number_of_lines(1)
-                                    .text_size(px(10.5))
+                                    .text_size(px(TEXT_XS))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(status_warn_fg()),
                             )
                     }))
                     .child(
                         view()
-                            .h(px(22.0))
+                            .role(AccessibilityRole::Button)
+                            .h(px(ControlSize::Xs.height()))
                             .px_1p5()
-                            .rounded(px(6.0))
+                            .rounded(px(RADIUS_MD))
                             .bg(accent_blue_soft())
                             .hover(|style| style.bg(accent_blue_soft_hover()))
-                            .active(|style| style.opacity(0.8))
+                            .active(|style| style.bg(bg_control_active()))
+                            .transition_colors()
+                            .duration(MOTION_INSTANT_MS)
+                            .ease_out()
+                            .focus_visible(apply_focus_ring)
                             .border_1()
                             .border_color(accent_blue_border())
                             .flex_row()
                             .items_center()
-                            .cursor(Cursor::Pointer)
                             .tooltip(label_tip("点击清空搜索", "Click to clear search"))
                             .on_press(move || search.set(String::new()))
                             .child(
@@ -826,7 +829,7 @@ pub(crate) fn body_search_box(
                                     format!("{} ×", present::format_thousands(hits as u64))
                                 })
                                 .tabular_nums()
-                                .text_size(px(11.0))
+                                .text_size(px(TEXT_XS))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(accent_blue_text()),
                             ),
@@ -943,15 +946,16 @@ pub(crate) fn doc_body(doc: Signal<Option<nsh_base::text_view::Document>>) -> im
             } else {
                 format!("[img: {} ({})]", img.alt, img.src)
             };
-            mono(label).text_size(px(11.5)).text_color(fg_muted())
+            mono(label).text_size(px(TEXT_XS)).text_color(fg_muted())
         })
 }
 
 pub(crate) fn doc_preview_chip(preview: Signal<bool>) -> impl IntoElement {
     view()
-        .h(px(22.0))
+        .role(AccessibilityRole::Button)
+        .h(px(ControlSize::Xs.height()))
         .px_2()
-        .rounded(px(6.0))
+        .rounded(px(RADIUS_MD))
         .border_1()
         .border_color(move || {
             if preview.get() {
@@ -976,17 +980,28 @@ pub(crate) fn doc_preview_chip(preview: Signal<bool>) -> impl IntoElement {
                 }
             })
         })
-        .active(|style| style.opacity(0.8))
+        .active(|style| {
+            style.bg(move || {
+                if preview.get() {
+                    accent_blue_active()
+                } else {
+                    bg_control_active()
+                }
+            })
+        })
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .flex_row()
         .items_center()
-        .cursor(Cursor::Pointer)
         .on_press(move || {
             preview.set(!preview.get());
         })
         .child(
             text(tr("预览", "Preview"))
                 .number_of_lines(1)
-                .text_size(px(11.5))
+                .text_size(px(TEXT_XS))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(move || {
                     if preview.get() {
@@ -1010,8 +1025,8 @@ pub(crate) fn pretty_switch(
     view()
         .flex_row()
         .flex_shrink_0()
-        .h(px(22.0))
-        .rounded(px(6.0))
+        .h(px(ControlSize::Xs.height()))
+        .rounded(px(RADIUS_MD))
         .border_1()
         .border_color(border_control())
         .overflow_hidden()
@@ -1043,7 +1058,8 @@ fn body_mode_chip(
     on_press: impl Fn() + 'static,
 ) -> impl IntoElement {
     view()
-        .h(px(22.0))
+        .role(AccessibilityRole::Button)
+        .h(px(ControlSize::Xs.height()))
         .px_1p5()
         .flex_row()
         .items_center()
@@ -1065,13 +1081,24 @@ fn body_mode_chip(
                 }
             })
         })
-        .active(|style| style.opacity(0.8))
-        .cursor(Cursor::Pointer)
+        .active(|style| {
+            style.bg(move || {
+                if is_active() {
+                    accent_blue_active()
+                } else {
+                    bg_control_active()
+                }
+            })
+        })
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .on_press(on_press)
         .child(
             text(tr(zh, en))
                 .number_of_lines(1)
-                .text_size(px(11.5))
+                .text_size(px(TEXT_XS))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(move || {
                     if is_active() {

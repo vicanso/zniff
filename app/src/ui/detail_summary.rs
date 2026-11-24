@@ -322,7 +322,7 @@ pub(crate) fn detail_pane(
                                                     }
                                                 })
                                                 .text_center()
-                                                .text_size(px(13.5))
+                                                .text_size(px(TEXT_MD))
                                                 .font_weight(FontWeight::SEMIBOLD)
                                                 .text_color(fg_secondary()),
                                             )
@@ -348,21 +348,25 @@ pub(crate) fn detail_pane(
                                                     }
                                                 })
                                                 .text_center()
-                                                .text_size(px(12.0))
+                                                .text_size(px(TEXT_SM))
                                                 .text_color(fg_muted()),
                                             )
                                             .child(
                                                 view()
+                                                    .role(AccessibilityRole::Button)
                                                     .mt_1p5()
-                                                    .h(px(28.0))
+                                                    .h(px(CONTROL_H))
                                                     .px_3()
-                                                    .rounded(px(6.0))
+                                                    .rounded(px(RADIUS_MD))
                                                     .border_1()
                                                     .border_color(border_control())
                                                     .bg(bg_control())
                                                     .hover(|style| style.bg(bg_control_hover()))
-                                                    .active(|style| style.opacity(0.8))
-                                                    .cursor(Cursor::Pointer)
+                                                    .active(|style| style.bg(bg_control_active()))
+                                                    .transition_colors()
+                                                    .duration(MOTION_INSTANT_MS)
+                                                    .ease_out()
+                                                    .focus_visible(apply_focus_ring)
                                                     .flex_row()
                                                     .items_center()
                                                     .gap_1p5()
@@ -370,14 +374,14 @@ pub(crate) fn detail_pane(
                                                         begin_new_request(compose, selected)
                                                     })
                                                     .child(glyph_px(
-                                                        13.0,
+                                                        12.0,
                                                         || Glyph::Prompt,
                                                         || color(fg_secondary()),
                                                     ))
                                                     .child(
                                                         text(tr("构造请求", "New request"))
                                                             .number_of_lines(1)
-                                                            .text_size(px(12.0))
+                                                            .text_size(px(TEXT_SM))
                                                             .font_weight(FontWeight::MEDIUM)
                                                             .text_color(fg_primary()),
                                                     ),
@@ -400,7 +404,7 @@ pub(crate) fn filtered_summary_card(
     view()
         .p_3p5()
         .gap_3()
-        .rounded(px(10.0))
+        .rounded(px(RADIUS_LG))
         .border_1()
         .border_color(border_strong())
         .bg(bg_card())
@@ -498,7 +502,7 @@ pub(crate) fn filtered_summary_card(
                         .flex_row()
                         .items_center()
                         .justify_center()
-                        .rounded(px(5.0))
+                        .rounded(px(RADIUS_SM))
                         .bg(bg_control())
                         .child(
                             mono(move || {
@@ -510,7 +514,7 @@ pub(crate) fn filtered_summary_card(
                             })
                             .tabular_nums()
                             .number_of_lines(1)
-                            .text_size(px(11.0))
+                            .text_size(px(TEXT_XS))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(fg_muted()),
                         )
@@ -520,15 +524,19 @@ pub(crate) fn filtered_summary_card(
             move || stats.with(|s| s.max_elapsed.is_some()),
             move || {
                 view()
+                    .role(AccessibilityRole::Button)
                     .px_3()
                     .py_2()
-                    .rounded(px(7.0))
+                    .rounded(px(RADIUS_MD))
                     .border_1()
                     .border_color(border_subtle())
                     .bg(bg_code())
                     .hover(|style| style.bg(bg_control_hover()))
-                    .active(|style| style.opacity(0.8))
-                    .cursor(Cursor::Pointer)
+                    .active(|style| style.bg(bg_control_active()))
+                    .transition_colors()
+                    .duration(MOTION_INSTANT_MS)
+                    .ease_out()
+                    .focus_visible(apply_focus_ring)
                     .flex_row()
                     .items_center()
                     .gap_2()
@@ -542,7 +550,7 @@ pub(crate) fn filtered_summary_card(
                     .child(
                         text(tr("最慢请求", "Slowest"))
                             .flex_shrink_0()
-                            .text_size(px(11.5))
+                            .text_size(px(TEXT_XS))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(fg_muted()),
                     )
@@ -558,7 +566,7 @@ pub(crate) fn filtered_summary_card(
                         .min_w(px(0.0))
                         .number_of_lines(1)
                         .text_overflow(EllipsizeMode::Middle)
-                        .text_size(px(12.0))
+                        .text_size(px(TEXT_SM))
                         .text_color(accent_blue_text()),
                     )
             },
@@ -583,14 +591,14 @@ pub(crate) fn summary_stat_tile(
         .px_3()
         .py_2()
         .gap_0p5()
-        .rounded(px(7.0))
+        .rounded(px(RADIUS_MD))
         .border_1()
         .border_color(border_subtle())
         .bg(bg_code())
         .child(
             text(label)
                 .number_of_lines(1)
-                .text_size(px(11.0))
+                .text_size(px(TEXT_XS))
                 .text_color(fg_muted()),
         )
         .child(
@@ -606,7 +614,7 @@ pub(crate) fn summary_stat_tile(
                         .tabular_nums()
                         .number_of_lines(1)
                         .text_overflow(EllipsizeMode::Tail)
-                        .text_size(px(12.5))
+                        .text_size(px(TEXT_MD))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(fg_primary()),
                 )
@@ -617,7 +625,7 @@ pub(crate) fn summary_stat_tile(
                         mono(move || sub().unwrap_or_default())
                             .tabular_nums()
                             .number_of_lines(1)
-                            .text_size(px(11.0))
+                            .text_size(px(TEXT_XS))
                             .text_color(fg_muted())
                     },
                 )),
@@ -636,13 +644,13 @@ pub(crate) fn status_count_badge(
         .flex_row()
         .items_center()
         .justify_center()
-        .rounded(px(5.0))
+        .rounded(px(RADIUS_SM))
         .bg(bg_color)
         .child(
             mono(move || format!("{tag} {}", present::format_thousands(count() as u64)))
                 .tabular_nums()
                 .number_of_lines(1)
-                .text_size(px(11.0))
+                .text_size(px(TEXT_XS))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(fg_color),
         )
@@ -899,7 +907,7 @@ pub(crate) fn summary(
         .px_3p5()
         .py(move || if is_compact() { px(9.0) } else { px(14.0) })
         .gap(move || if is_compact() { px(7.0) } else { px(10.0) })
-        .rounded(px(10.0))
+        .rounded(px(RADIUS_LG))
         .border_1()
         .border_color(border_strong())
         .bg(bg_card())
@@ -914,11 +922,11 @@ pub(crate) fn summary(
                     view()
                         .px_2()
                         .py_0p5()
-                        .rounded(px(5.0))
+                        .rounded(px(RADIUS_SM))
                         .bg(move || method_bg(&shown.method.get()))
                         .child(
                             mono(move || shown.method.get())
-                                .text_size(px(11.5))
+                                .text_size(px(TEXT_XS))
                                 .font_weight(FontWeight::BOLD)
                                 .text_color(move || method_fg(&shown.method.get())),
                         ),
@@ -927,7 +935,7 @@ pub(crate) fn summary(
                     view()
                         .px_2()
                         .py_0p5()
-                        .rounded(px(5.0))
+                        .rounded(px(RADIUS_SM))
                         .bg(move || {
                             http_status_bg(
                                 shown.status.get(),
@@ -944,7 +952,7 @@ pub(crate) fn summary(
                                 }
                             })
                             .tabular_nums()
-                            .text_size(px(11.5))
+                            .text_size(px(TEXT_XS))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(move || {
                                 http_status_fg(
@@ -958,11 +966,11 @@ pub(crate) fn summary(
                     view()
                         .px_2()
                         .py_0p5()
-                        .rounded(px(5.0))
+                        .rounded(px(RADIUS_SM))
                         .bg(bg_control())
                         .child(
                             mono(move || shown.protocol.get())
-                                .text_size(px(11.5))
+                                .text_size(px(TEXT_XS))
                                 .text_color(fg_muted()),
                         ),
                 )
@@ -971,17 +979,21 @@ pub(crate) fn summary(
                     move || !shown.comment.get().is_empty() && !shown.editing_comment.get(),
                     move || {
                         view()
+                            .role(AccessibilityRole::Button)
                             .max_w(px(180.0))
                             .overflow_hidden()
                             .px_2()
                             .py_0p5()
-                            .rounded(px(5.0))
+                            .rounded(px(RADIUS_SM))
                             .border_1()
                             .border_color(accent_blue_border())
                             .bg(accent_blue_soft())
                             .hover(|style| style.bg(accent_blue_soft_hover()))
-                            .active(|style| style.opacity(0.8))
-                            .cursor(Cursor::Pointer)
+                            .active(|style| style.bg(bg_control_active()))
+                            .transition_colors()
+                            .duration(MOTION_INSTANT_MS)
+                            .ease_out()
+                            .focus_visible(apply_focus_ring)
                             .on_press(move || {
                                 shown.repeating.set(false);
                                 shown.editing_comment.set(true);
@@ -990,7 +1002,7 @@ pub(crate) fn summary(
                                 text(move || format!("# {}", shown.comment.get()))
                                     .number_of_lines(1)
                                     .text_overflow(EllipsizeMode::Tail)
-                                    .text_size(px(11.5))
+                                    .text_size(px(TEXT_XS))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(accent_blue_text()),
                             )
@@ -1109,7 +1121,7 @@ fn summary_url_box(shown: Shown, compact: bool) -> impl IntoElement {
         .overflow_hidden()
         .px_2p5()
         .py(if compact { px(5.0) } else { px(8.0) })
-        .rounded(px(7.0))
+        .rounded(px(RADIUS_MD))
         .bg(bg_code())
         .border_1()
         .border_color(border_subtle())
@@ -1124,7 +1136,7 @@ fn summary_url_box(shown: Shown, compact: bool) -> impl IntoElement {
                         s
                     }
                 })
-                .text_size(px(12.5))
+                .text_size(px(TEXT_SM))
                 .text_color(fg_primary()),
         )
 }
@@ -1136,6 +1148,6 @@ fn summary_metrics_text(shown: Shown) -> impl IntoElement {
         .on_press_up(dismiss_keyboard)
         .number_of_lines(1)
         .text_overflow(EllipsizeMode::Tail)
-        .text_size(px(11.5))
+        .text_size(px(TEXT_XS))
         .text_color(fg_muted())
 }

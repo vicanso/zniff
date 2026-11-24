@@ -64,9 +64,10 @@ pub(crate) fn seq_source_kind_chip(
 ) -> impl IntoElement {
     let is_active = move || source_flowchart.get() == target_flowchart;
     view()
+        .role(AccessibilityRole::Button)
         .h(px(20.0))
         .px_2()
-        .rounded(px(4.0))
+        .rounded(px(RADIUS_SM))
         .bg(move || if is_active() { bg_card() } else { bg_control() })
         .hover(|style| {
             style.bg(move || {
@@ -77,7 +78,11 @@ pub(crate) fn seq_source_kind_chip(
                 }
             })
         })
-        .active(|style| style.opacity(0.85))
+        .active(|style| style.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .border_1()
         .border_color(move || {
             if is_active() {
@@ -86,14 +91,13 @@ pub(crate) fn seq_source_kind_chip(
                 bg_control()
             }
         })
-        .cursor(Cursor::Pointer)
         .flex_row()
         .items_center()
         .on_press(move || source_flowchart.set(target_flowchart))
         .child(
             mono(label)
                 .number_of_lines(1)
-                .text_size(px(10.5))
+                .text_size(px(TEXT_XS))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(move || {
                     if is_active() {
@@ -118,7 +122,7 @@ pub(crate) fn seq_mermaid_source_view(
                 seq_builder.items.with(Vec::len),
             ))
         })
-        .rounded(px(7.0))
+        .rounded(px(RADIUS_MD))
         .border_1()
         .border_color(border_control())
         .bg(bg_code())
@@ -159,7 +163,7 @@ pub(crate) fn seq_mermaid_source_view(
                             view()
                                 .h(px(24.0))
                                 .px(px(2.0))
-                                .rounded(px(5.0))
+                                .rounded(px(RADIUS_SM))
                                 .border_1()
                                 .border_color(border_control())
                                 .bg(bg_control())
@@ -180,15 +184,19 @@ pub(crate) fn seq_mermaid_source_view(
                     ))
                     .child(
                         view()
-                            .h(px(24.0))
+                            .role(AccessibilityRole::Button)
+                            .h(px(ControlSize::Xs.height()))
                             .px_2()
-                            .rounded(px(5.0))
+                            .rounded(px(RADIUS_SM))
                             .border_1()
                             .border_color(border_control())
                             .bg(bg_card())
                             .hover(|style| style.bg(bg_control_hover()))
-                            .active(|style| style.opacity(0.75))
-                            .cursor(Cursor::Pointer)
+                            .active(|style| style.bg(bg_control_active()))
+                            .transition_colors()
+                            .duration(MOTION_INSTANT_MS)
+                            .ease_out()
+                            .focus_visible(apply_focus_ring)
                             .flex_row()
                             .items_center()
                             .on_press(move || {
@@ -198,7 +206,7 @@ pub(crate) fn seq_mermaid_source_view(
                             .child(
                                 text(tr("复制", "Copy"))
                                     .number_of_lines(1)
-                                    .text_size(px(11.0))
+                                    .text_size(px(TEXT_XS))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(fg_secondary()),
                             ),
@@ -238,6 +246,7 @@ pub(crate) fn seq_candidate_row(
             .unwrap_or_default()
     });
     view()
+        .role(AccessibilityRole::Checkbox)
         .w_full()
         .h(px(32.0))
         .px_2p5()
@@ -254,8 +263,11 @@ pub(crate) fn seq_candidate_row(
         .border_t(move || if at.index() > 0 { px(1.0) } else { px(0.0) })
         .border_t_color(border_subtle())
         .hover(|style| style.bg(bg_control_hover()))
-        .active(|style| style.opacity(0.85))
-        .cursor(Cursor::Pointer)
+        .active(|style| style.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .on_press(move || {
             let index = at.index();
             seq_builder.items.update(|items| {
@@ -270,7 +282,7 @@ pub(crate) fn seq_candidate_row(
                 .w(px(14.0))
                 .h(px(14.0))
                 .flex_shrink_0()
-                .rounded(px(4.0))
+                .rounded(px(RADIUS_SM))
                 .border_1()
                 .border_color(move || {
                     if item.with(|i| i.checked) {
@@ -307,7 +319,7 @@ pub(crate) fn seq_candidate_row(
                 .tabular_nums()
                 .min_w(px(36.0))
                 .flex_shrink_0()
-                .text_size(px(11.5))
+                .text_size(px(TEXT_XS))
                 .text_color(fg_muted()),
         )
         .child(
@@ -315,14 +327,14 @@ pub(crate) fn seq_candidate_row(
                 .min_w(px(44.0))
                 .px(px(5.0))
                 .py_0p5()
-                .rounded(px(4.0))
+                .rounded(px(RADIUS_SM))
                 .flex_shrink_0()
                 .items_center()
                 .justify_center()
                 .bg(move || item.with(|i| method_bg(&i.method)))
                 .child(
                     mono(move || item.with(|i| i.method.clone()))
-                        .text_size(px(10.5))
+                        .text_size(px(TEXT_XS))
                         .font_weight(FontWeight::BOLD)
                         .text_color(move || item.with(|i| method_fg(&i.method))),
                 ),
@@ -333,7 +345,7 @@ pub(crate) fn seq_candidate_row(
                 .min_w(px(0.0))
                 .number_of_lines(1)
                 .text_overflow(EllipsizeMode::Middle)
-                .text_size(px(12.0))
+                .text_size(px(TEXT_SM))
                 .text_color(fg_primary()),
         )
         .child(when(
@@ -342,7 +354,7 @@ pub(crate) fn seq_candidate_row(
                 view()
                     .px_1p5()
                     .py(px(1.0))
-                    .rounded(px(4.0))
+                    .rounded(px(RADIUS_SM))
                     .max_w(px(140.0))
                     .flex_shrink_0()
                     .bg(accent_blue_soft())
@@ -350,7 +362,7 @@ pub(crate) fn seq_candidate_row(
                         text(move || item.with(|i| format!("# {}", i.comment)))
                             .number_of_lines(1)
                             .text_overflow(EllipsizeMode::Tail)
-                            .text_size(px(11.0))
+                            .text_size(px(TEXT_XS))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(accent_blue_text()),
                     )
@@ -362,7 +374,7 @@ pub(crate) fn seq_candidate_row(
                 .min_w(px(32.0))
                 .text_right()
                 .flex_shrink_0()
-                .text_size(px(11.5))
+                .text_size(px(TEXT_XS))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(move || item.with(|i| http_status_fg(i.status, i.failed))),
         )
@@ -372,7 +384,7 @@ pub(crate) fn seq_candidate_row(
                 .min_w(px(52.0))
                 .text_right()
                 .flex_shrink_0()
-                .text_size(px(11.5))
+                .text_size(px(TEXT_XS))
                 .text_color(fg_muted()),
         )
 }
@@ -398,7 +410,7 @@ pub(crate) fn sequence_diagram_panel(
             .with(|items| items.iter().any(|item| item.checked))
     };
     view()
-        .rounded(px(10.0))
+        .rounded(px(RADIUS_LG))
         .border_1()
         .border_color(border_strong())
         .bg(bg_card())
@@ -424,7 +436,7 @@ pub(crate) fn sequence_diagram_panel(
                             view()
                                 .px_2()
                                 .py_0p5()
-                                .rounded(px(5.0))
+                                .rounded(px(RADIUS_SM))
                                 .bg(accent_blue_soft())
                                 .child(
                                     mono({
@@ -450,7 +462,7 @@ pub(crate) fn sequence_diagram_panel(
                                         }
                                     })
                                     .tabular_nums()
-                                    .text_size(px(11.0))
+                                    .text_size(px(TEXT_XS))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(accent_blue_text()),
                                 ),
@@ -532,7 +544,7 @@ pub(crate) fn sequence_diagram_panel(
                             let rows = seq_builder.items.with(Vec::len).clamp(1, max_rows) as f32;
                             px(rows * 32.0)
                         })
-                        .rounded(px(7.0))
+                        .rounded(px(RADIUS_MD))
                         .border_1()
                         .border_color(border_subtle())
                         .bg(bg_code())
@@ -553,9 +565,10 @@ pub(crate) fn sequence_diagram_panel(
                                 .gap_1p5()
                                 .child(
                                     view()
-                                        .h(px(26.0))
+                                        .role(AccessibilityRole::Button)
+                                        .h(px(CONTROL_H))
                                         .px_3()
-                                        .rounded(px(6.0))
+                                        .rounded(px(RADIUS_MD))
                                         .bg(move || {
                                             if has_checked() {
                                                 accent_blue()
@@ -573,13 +586,19 @@ pub(crate) fn sequence_diagram_panel(
                                             })
                                         })
                                         .active(|style| {
-                                            style.opacity(move || {
-                                                if has_checked() { 0.85_f32 } else { 1.0_f32 }
+                                            style.bg(move || {
+                                                if has_checked() {
+                                                    accent_blue_active()
+                                                } else {
+                                                    bg_control()
+                                                }
                                             })
                                         })
-                                        .cursor(Cursor::Pointer)
+                                        .transition_colors()
+                                        .duration(MOTION_INSTANT_MS)
+                                        .ease_out()
+                                        .focus_visible(apply_focus_ring)
                                         .disabled(move || !has_checked())
-                                        .disabled_style(|style| style.cursor(Cursor::Default))
                                         .flex_row()
                                         .items_center()
                                         .on_press(move || {
@@ -602,7 +621,7 @@ pub(crate) fn sequence_diagram_panel(
                                         .child(
                                             text(tr("复制 Mermaid", "Copy Mermaid"))
                                                 .number_of_lines(1)
-                                                .text_size(px(12.0))
+                                                .text_size(px(TEXT_SM))
                                                 .font_weight(FontWeight::SEMIBOLD)
                                                 .text_color(move || {
                                                     if has_checked() {
@@ -635,9 +654,9 @@ pub(crate) fn sequence_diagram_panel(
                         )
                         .child(
                             view()
-                                .h(px(26.0))
+                                .h(px(CONTROL_H))
                                 .px(px(2.0))
-                                .rounded(px(6.5))
+                                .rounded(px(RADIUS_MD))
                                 .border_1()
                                 .border_color(border_subtle())
                                 .bg(bg_control())
@@ -687,7 +706,7 @@ pub(crate) fn sequence_diagram_panel(
                             .w_full()
                             .px_3()
                             .py_1p5()
-                            .rounded(px(6.0))
+                            .rounded(px(RADIUS_MD))
                             .bg(status_warn_bg())
                             .border_1()
                             .border_color(status_warn_fg())
@@ -715,7 +734,7 @@ pub(crate) fn sequence_diagram_panel(
                                 .flex_1()
                                 .min_w(px(0.0))
                                 .tabular_nums()
-                                .text_size(px(12.0))
+                                .text_size(px(TEXT_SM))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(status_warn_fg()),
                             )

@@ -587,7 +587,7 @@ fn render_node_row(
     match meta.kind {
         JsonNodeKind::Truncated => row.child(
             mono(tr("… 节点过多，已省略剩余项", "… Remaining nodes omitted"))
-                .text_size(px(11.5))
+                .text_size(px(TEXT_XS))
                 .text_color(fg_muted()),
         ),
         JsonNodeKind::Object(_) | JsonNodeKind::Array(_) => row
@@ -595,7 +595,7 @@ fn render_node_row(
             .child(
                 mono(meta.key)
                     .flex_shrink_0()
-                    .text_size(px(12.0))
+                    .text_size(px(TEXT_SM))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(key_color),
             )
@@ -603,21 +603,21 @@ fn render_node_row(
                 mono(move || folder_summary(meta.kind, ui_lang(langs)))
                     .number_of_lines(1)
                     .text_overflow(EllipsizeMode::Tail)
-                    .text_size(px(11.5))
+                    .text_size(px(TEXT_XS))
                     .text_color(fg_muted()),
             ),
         kind => row
             .child(
                 mono(meta.key)
                     .flex_shrink_0()
-                    .text_size(px(12.0))
+                    .text_size(px(TEXT_SM))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(key_color),
             )
             .child(
                 mono(" : ")
                     .flex_shrink_0()
-                    .text_size(px(12.0))
+                    .text_size(px(TEXT_SM))
                     .text_color(fg_muted()),
             )
             .child(
@@ -626,7 +626,7 @@ fn render_node_row(
                     .min_w(px(0.0))
                     .number_of_lines(1)
                     .text_overflow(EllipsizeMode::Tail)
-                    .text_size(px(12.0))
+                    .text_size(px(TEXT_SM))
                     .text_color(value_color(kind)),
             ),
     }
@@ -689,7 +689,7 @@ fn build_tree_memos(
 fn empty_tree_placeholder() -> impl IntoElement {
     view().size_full().items_center().justify_center().child(
         text(tr("无匹配节点", "No matching nodes"))
-            .text_size(px(12.0))
+            .text_size(px(TEXT_SM))
             .text_color(fg_muted()),
     )
 }
@@ -771,13 +771,7 @@ pub(crate) fn json_tree_panel(
                 })
                 .list_style(|s| s.py_1p5())
                 .item_class("group")
-                .item_style(|s| {
-                    s.w_full()
-                        .h(px(TREE_ROW_H))
-                        .flex_row()
-                        .items_center()
-                        .cursor(Cursor::Pointer)
-                })
+                .item_style(|s| s.w_full().h(px(TREE_ROW_H)).flex_row().items_center())
                 .render_item(move |entry: &TreeEntry| {
                     let node_id = entry.id.clone();
                     let sel_id = entry.id.clone();

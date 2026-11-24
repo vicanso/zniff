@@ -36,7 +36,7 @@ fn llm_meta_strip(summary: Signal<Option<llm_stream::LlmStreamSummary>>) -> impl
             view()
                 .h(px(22.0))
                 .px_2()
-                .rounded(px(5.0))
+                .rounded(px(RADIUS_SM))
                 .border_1()
                 .border_color(accent_blue_border())
                 .bg(accent_blue_soft())
@@ -48,7 +48,7 @@ fn llm_meta_strip(summary: Signal<Option<llm_stream::LlmStreamSummary>>) -> impl
                             .with(|opt| opt.as_ref().map(|s| s.provider.label()).unwrap_or("LLM"))
                             .into()
                     })
-                    .text_size(px(11.0))
+                    .text_size(px(TEXT_XS))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(accent_blue_text()),
                 ),
@@ -99,7 +99,7 @@ fn llm_badge(label: impl Fn() -> String + 'static) -> impl IntoElement {
     view()
         .h(px(22.0))
         .px_2()
-        .rounded(px(5.0))
+        .rounded(px(RADIUS_SM))
         .border_1()
         .border_color(border_control())
         .bg(bg_code())
@@ -107,7 +107,7 @@ fn llm_badge(label: impl Fn() -> String + 'static) -> impl IntoElement {
         .items_center()
         .child(
             mono(move || -> SharedString { label().into() })
-                .text_size(px(10.5))
+                .text_size(px(TEXT_XS))
                 .text_color(fg_secondary()),
         )
 }
@@ -159,7 +159,7 @@ fn llm_thinking_card(
 ) -> impl IntoElement {
     view()
         .w_full()
-        .rounded(px(8.0))
+        .rounded(px(RADIUS_MD))
         .border_1()
         .border_color(border_control())
         .bg(bg_code())
@@ -176,10 +176,19 @@ fn llm_thinking_card(
                 .border_b_color(border_subtle())
                 .child(
                     view()
+                        .role(AccessibilityRole::Button)
+                        .px_1()
+                        .py_0p5()
+                        .rounded(px(RADIUS_SM))
                         .flex_row()
                         .items_center()
                         .gap_1p5()
-                        .cursor(Cursor::Pointer)
+                        .hover(|s| s.bg(bg_control_hover()))
+                        .active(|s| s.bg(bg_control_active()))
+                        .transition_colors()
+                        .duration(MOTION_INSTANT_MS)
+                        .ease_out()
+                        .focus_visible(apply_focus_ring)
                         .on_press(move || open.update(|v| *v = !*v))
                         .child(
                             text(move || -> SharedString {
@@ -189,7 +198,7 @@ fn llm_thinking_card(
                                 });
                                 format!("{marker} Thinking ({count} chars)").into()
                             })
-                            .text_size(px(11.0))
+                            .text_size(px(TEXT_XS))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(fg_secondary()),
                         ),
@@ -222,8 +231,8 @@ fn llm_thinking_card(
                             .into()
                     })
                     .selectable(true)
-                    .text_size(px(11.5))
-                    .line_height(px(17.5))
+                    .text_size(px(TEXT_SM))
+                    .line_height(px(18.0))
                     .text_color(fg_muted()),
                 )
             },
@@ -236,7 +245,7 @@ fn llm_output_card(
 ) -> impl IntoElement {
     view()
         .w_full()
-        .rounded(px(8.0))
+        .rounded(px(RADIUS_MD))
         .border_1()
         .border_color(border_control())
         .bg(bg_code())
@@ -253,7 +262,7 @@ fn llm_output_card(
                 .border_b_color(border_subtle())
                 .child(
                     text(tr("模型输出", "Assistant Output"))
-                        .text_size(px(11.0))
+                        .text_size(px(TEXT_XS))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(fg_secondary()),
                 )
@@ -291,8 +300,8 @@ fn llm_output_card(
                     }
                 })
                 .selectable(true)
-                .text_size(px(12.0))
-                .line_height(px(18.5))
+                .text_size(px(TEXT_SM))
+                .line_height(px(18.0))
                 .text_color(move || {
                     if summary.with(|opt| opt.as_ref().is_some_and(|s| s.content.is_empty())) {
                         fg_muted()
@@ -329,7 +338,7 @@ fn llm_tool_calls_card(
                 }
                 .into()
             })
-            .text_size(px(11.0))
+            .text_size(px(TEXT_XS))
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(fg_secondary()),
         )
@@ -341,7 +350,7 @@ fn llm_tool_calls_card(
                 let formatted = move || format_tool_args(&tc.with(|item| item.arguments.clone()));
                 view()
                     .w_full()
-                    .rounded(px(8.0))
+                    .rounded(px(RADIUS_MD))
                     .border_1()
                     .border_color(border_control())
                     .bg(bg_code())
@@ -367,7 +376,7 @@ fn llm_tool_calls_card(
                                     })
                                     .into()
                                 })
-                                .text_size(px(11.5))
+                                .text_size(px(TEXT_SM))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(accent_blue_text()),
                             )
@@ -388,8 +397,8 @@ fn llm_tool_calls_card(
                         view().w_full().p_2p5().child(
                             mono(move || -> SharedString { formatted().into() })
                                 .selectable(true)
-                                .text_size(px(11.5))
-                                .line_height(px(17.5))
+                                .text_size(px(TEXT_SM))
+                                .line_height(px(18.0))
                                 .text_color(fg_primary()),
                         ),
                     )

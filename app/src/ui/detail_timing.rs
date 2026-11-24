@@ -26,7 +26,7 @@ pub(crate) fn summary_timing_bar(timing: Signal<present::TimingBreakdown>) -> im
         .px_2p5()
         .py_2()
         .gap_1p5()
-        .rounded(px(7.0))
+        .rounded(px(RADIUS_MD))
         .bg(bg_code())
         .border_1()
         .border_color(border_subtle())
@@ -50,11 +50,11 @@ pub(crate) fn summary_timing_bar(timing: Signal<present::TimingBreakdown>) -> im
                                 view()
                                     .px_1p5()
                                     .py(px(1.5))
-                                    .rounded(px(4.0))
+                                    .rounded(px(RADIUS_SM))
                                     .bg(status_ok_bg())
                                     .child(
                                         text(tr("复用连接", "Reused"))
-                                            .text_size(px(10.5))
+                                            .text_size(px(TEXT_XS))
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(status_ok_fg()),
                                     )
@@ -73,11 +73,11 @@ pub(crate) fn summary_timing_bar(timing: Signal<present::TimingBreakdown>) -> im
                                 view()
                                     .px_1p5()
                                     .py(px(1.5))
-                                    .rounded(px(4.0))
+                                    .rounded(px(RADIUS_SM))
                                     .bg(accent_blue_soft())
                                     .child(
                                         text(tr("新建连接", "New conn"))
-                                            .text_size(px(10.5))
+                                            .text_size(px(TEXT_XS))
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(accent_blue_text()),
                                     )
@@ -89,11 +89,11 @@ pub(crate) fn summary_timing_bar(timing: Signal<present::TimingBreakdown>) -> im
                                 view()
                                     .px_1p5()
                                     .py(px(1.5))
-                                    .rounded(px(4.0))
+                                    .rounded(px(RADIUS_SM))
                                     .bg(bg_control())
                                     .child(
                                         mono(move || timing.with(|tb| tb.tls_version.clone()))
-                                            .text_size(px(10.5))
+                                            .text_size(px(TEXT_XS))
                                             .font_weight(FontWeight::MEDIUM)
                                             .text_color(fg_secondary()),
                                     )
@@ -105,25 +105,14 @@ pub(crate) fn summary_timing_bar(timing: Signal<present::TimingBreakdown>) -> im
                                 view()
                                     .px_1p5()
                                     .py(px(1.5))
-                                    .rounded(px(4.0))
+                                    .rounded(px(RADIUS_SM))
                                     .bg(accent_blue_soft())
                                     .tooltip(
-                                        tooltip().child(
-                                            view()
-                                                .px_2()
-                                                .py_1()
-                                                .rounded(px(6.0))
-                                                .bg(bg_card())
-                                                .border_1()
-                                                .border_color(border_strong())
-                                                .child(
-                                                    mono(move || {
-                                                        timing.with(|tb| tb.client_cert.clone())
-                                                    })
-                                                    .text_size(px(11.5))
-                                                    .text_color(fg_primary()),
-                                                ),
-                                        ),
+                                        tooltip().child(ui_tooltip_surface(
+                                            mono(move || timing.with(|tb| tb.client_cert.clone()))
+                                                .text_size(px(TEXT_SM))
+                                                .text_color(fg_primary()),
+                                        )),
                                     )
                                     .child(
                                         mono(move || {
@@ -131,7 +120,7 @@ pub(crate) fn summary_timing_bar(timing: Signal<present::TimingBreakdown>) -> im
                                             format!("mTLS {}", cert_display_name(&path))
                                         })
                                         .selectable(true)
-                                        .text_size(px(10.5))
+                                        .text_size(px(TEXT_XS))
                                         .font_weight(FontWeight::MEDIUM)
                                         .text_color(accent_blue_text()),
                                     )
@@ -143,7 +132,7 @@ pub(crate) fn summary_timing_bar(timing: Signal<present::TimingBreakdown>) -> im
                                 view()
                                     .px_1p5()
                                     .py(px(1.5))
-                                    .rounded(px(4.0))
+                                    .rounded(px(RADIUS_SM))
                                     .bg(bg_control())
                                     .child(
                                         mono({
@@ -157,7 +146,7 @@ pub(crate) fn summary_timing_bar(timing: Signal<present::TimingBreakdown>) -> im
                                             }
                                         })
                                         .selectable(true)
-                                        .text_size(px(10.5))
+                                        .text_size(px(TEXT_XS))
                                         .text_color(fg_muted()),
                                     )
                             },
@@ -207,7 +196,7 @@ pub(crate) fn summary_timing_bar(timing: Signal<present::TimingBreakdown>) -> im
                 view()
                     .w_full()
                     .h(px(5.0))
-                    .rounded(px(2.5))
+                    .rounded_full()
                     .bg(bg_control())
                     .overflow_hidden()
                     .flex_row()
@@ -245,14 +234,14 @@ pub(crate) fn timing_phase_chip(
                 .flex_row()
                 .items_center()
                 .gap_1()
-                .child(view().w(px(6.5)).h(px(6.5)).rounded_full().bg(color))
+                .child(view().w(px(6.0)).h(px(6.0)).rounded_full().bg(color))
                 .child(
                     mono(move || {
                         let ms = get_ms().unwrap_or(0);
                         format!("{} {ms} ms", t(ui_lang(langs), zh, en))
                     })
                     .tabular_nums()
-                    .text_size(px(11.0))
+                    .text_size(px(TEXT_XS))
                     .text_color(fg_secondary()),
                 )
         },
@@ -291,14 +280,14 @@ pub(crate) fn repeat_inline_bar(
         .gap_1p5()
         .px_3()
         .py_2()
-        .rounded(px(7.0))
+        .rounded(px(RADIUS_MD))
         .bg(bg_code())
         .border_1()
         .border_color(border_subtle())
         .child(
             text(tr("次数", "Count"))
                 .number_of_lines(1)
-                .text_size(px(11.5))
+                .text_size(px(TEXT_XS))
                 .text_color(fg_secondary()),
         )
         .child(
@@ -319,7 +308,7 @@ pub(crate) fn repeat_inline_bar(
             text(tr("并发", "Concurrency"))
                 .pl_1()
                 .number_of_lines(1)
-                .text_size(px(11.5))
+                .text_size(px(TEXT_XS))
                 .text_color(fg_secondary()),
         )
         .child(
@@ -337,7 +326,7 @@ pub(crate) fn repeat_inline_bar(
             text(tr("间隔 ms", "Interval (ms)"))
                 .pl_1()
                 .number_of_lines(1)
-                .text_size(px(11.5))
+                .text_size(px(TEXT_XS))
                 .text_color(fg_secondary()),
         )
         .child(
@@ -354,13 +343,17 @@ pub(crate) fn repeat_inline_bar(
         .child(view().flex_1())
         .child(
             view()
-                .h(px(26.0))
+                .role(AccessibilityRole::Button)
+                .h(px(CONTROL_H))
                 .px_2p5()
-                .rounded(px(6.0))
+                .rounded(px(RADIUS_MD))
                 .bg(accent_blue())
                 .hover(|style| style.bg(accent_blue_hover()))
-                .active(|style| style.opacity(0.85))
-                .cursor(Cursor::Pointer)
+                .active(|style| style.bg(accent_blue_active()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .focus_visible(apply_focus_ring)
                 .flex_row()
                 .items_center()
                 .on_press(move || {
@@ -369,7 +362,7 @@ pub(crate) fn repeat_inline_bar(
                 .child(
                     text(tr("开始重放", "Run"))
                         .number_of_lines(1)
-                        .text_size(px(11.5))
+                        .text_size(px(TEXT_SM))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(fg_on_accent()),
                 ),
@@ -386,9 +379,10 @@ pub(crate) fn repeat_preset_chip(
 ) -> impl IntoElement {
     let is_active = move || count_sig.get().trim() == val;
     view()
-        .h(px(24.0))
+        .role(AccessibilityRole::Button)
+        .h(px(ControlSize::Xs.height()))
         .px_2()
-        .rounded(px(5.0))
+        .rounded(px(RADIUS_SM))
         .border_1()
         .border_color(move || {
             if is_active() {
@@ -413,15 +407,18 @@ pub(crate) fn repeat_preset_chip(
                 }
             })
         })
-        .active(|style| style.opacity(0.8))
-        .cursor(Cursor::Pointer)
+        .active(|style| style.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .flex_row()
         .items_center()
         .on_press(move || count_sig.set(val.to_string()))
         .child(
             mono(label)
                 .tabular_nums()
-                .text_size(px(11.0))
+                .text_size(px(TEXT_XS))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(move || {
                     if is_active() {

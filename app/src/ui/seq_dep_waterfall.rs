@@ -73,7 +73,7 @@ pub(crate) fn seq_dependency_view(
                 seq_builder.items.with(Vec::len),
             ))
         })
-        .rounded(px(7.0))
+        .rounded(px(RADIUS_MD))
         .border_1()
         .border_color(border_control())
         .bg(bg_code())
@@ -87,7 +87,7 @@ pub(crate) fn seq_dependency_view(
                     .justify_center()
                     .child(
                         text(tr("请勾选至少一条流量", "Select at least one flow"))
-                            .text_size(px(12.0))
+                            .text_size(px(TEXT_SM))
                             .text_color(fg_muted()),
                     )
             },
@@ -132,7 +132,7 @@ pub(crate) fn seq_dependency_view(
                                 })
                                 .tabular_nums()
                                 .number_of_lines(1)
-                                .text_size(px(11.0))
+                                .text_size(px(TEXT_XS))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(fg_secondary()),
                             )
@@ -145,11 +145,11 @@ pub(crate) fn seq_dependency_view(
                                         view()
                                             .px_1p5()
                                             .py(px(1.0))
-                                            .rounded(px(4.0))
+                                            .rounded(px(RADIUS_SM))
                                             .bg(accent_blue_soft())
                                             .child(
                                                 text(tr("↪ 参数/Cookie 传递", "↪ Data flow"))
-                                                    .text_size(px(11.0))
+                                                    .text_size(px(TEXT_XS))
                                                     .font_weight(FontWeight::MEDIUM)
                                                     .text_color(accent_blue_text()),
                                             ),
@@ -158,11 +158,11 @@ pub(crate) fn seq_dependency_view(
                                         view()
                                             .px_1p5()
                                             .py(px(1.0))
-                                            .rounded(px(4.0))
+                                            .rounded(px(RADIUS_SM))
                                             .bg(status_warn_bg())
                                             .child(
                                                 text(tr("★ 关键路径", "★ Critical path"))
-                                                    .text_size(px(11.0))
+                                                    .text_size(px(TEXT_XS))
                                                     .font_weight(FontWeight::MEDIUM)
                                                     .text_color(status_warn_fg()),
                                             ),
@@ -209,7 +209,7 @@ pub(crate) fn seq_dep_badge(
             view()
                 .px_2()
                 .py(px(1.5))
-                .rounded(px(4.0))
+                .rounded(px(RADIUS_SM))
                 .border_1()
                 .border_color(move || {
                     if dep.with(|d| d.as_ref().is_some_and(|d| d.kind.is_hard())) {
@@ -236,7 +236,7 @@ pub(crate) fn seq_dep_badge(
                         })
                     })
                     .tabular_nums()
-                    .text_size(px(11.0))
+                    .text_size(px(TEXT_XS))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(move || {
                         if dep.with(|d| d.as_ref().is_some_and(|d| d.kind.is_hard())) {
@@ -276,7 +276,7 @@ pub(crate) fn seq_dependency_row(
                     .gap_2()
                     .child(
                         mono("↓")
-                            .text_size(px(13.0))
+                            .text_size(px(TEXT_MD))
                             .font_weight(FontWeight::BOLD)
                             .text_color(accent_blue_text()),
                     )
@@ -284,7 +284,7 @@ pub(crate) fn seq_dependency_row(
                         view()
                             .px_2()
                             .py(px(1.5))
-                            .rounded(px(4.0))
+                            .rounded(px(RADIUS_SM))
                             .border_1()
                             .border_color(border_subtle())
                             .bg(bg_card())
@@ -314,7 +314,7 @@ pub(crate) fn seq_dependency_row(
                                         }
                                     })
                                 })
-                                .text_size(px(11.0))
+                                .text_size(px(TEXT_XS))
                                 .text_color(fg_muted()),
                             ),
                     )
@@ -327,7 +327,7 @@ pub(crate) fn seq_dependency_row(
                     .w_full()
                     .h(px(26.0))
                     .px_3()
-                    .rounded_t(px(7.0))
+                    .rounded_t(px(RADIUS_MD))
                     .border_t_1()
                     .border_l_1()
                     .border_r_1()
@@ -353,7 +353,7 @@ pub(crate) fn seq_dependency_row(
                                     }
                                 })
                                 .tabular_nums()
-                                .text_size(px(11.0))
+                                .text_size(px(TEXT_XS))
                                 .font_weight(FontWeight::BOLD)
                                 .text_color(fg_primary()),
                             )
@@ -361,7 +361,7 @@ pub(crate) fn seq_dependency_row(
                                 view()
                                     .px_1p5()
                                     .py(px(0.5))
-                                    .rounded(px(4.0))
+                                    .rounded(px(RADIUS_SM))
                                     .bg(move || {
                                         if row.with(|r| r.stage_bar_count > 1) {
                                             accent_blue_soft()
@@ -382,7 +382,7 @@ pub(crate) fn seq_dependency_row(
                                             }
                                         })
                                         .tabular_nums()
-                                        .text_size(px(11.0))
+                                        .text_size(px(TEXT_XS))
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(
                                             move || {
@@ -403,13 +403,14 @@ pub(crate) fn seq_dependency_row(
                             })
                         })
                         .tabular_nums()
-                        .text_size(px(11.0))
+                        .text_size(px(TEXT_XS))
                         .text_color(fg_muted()),
                     )
             },
         ))
         .child(
             view()
+                .role(AccessibilityRole::Button)
                 .w_full()
                 .px_3()
                 .py_2()
@@ -436,14 +437,17 @@ pub(crate) fn seq_dependency_row(
                 .border_b_color(border_control())
                 .rounded_b(move || {
                     if row.with(|r| r.is_last_in_stage) {
-                        px(7.0)
+                        px(RADIUS_MD)
                     } else {
                         px(0.0)
                     }
                 })
                 .hover(|style| style.bg(bg_control_hover()))
-                .active(|style| style.opacity(0.85))
-                .cursor(Cursor::Pointer)
+                .active(|style| style.bg(bg_control_active()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .focus_visible(apply_focus_ring)
                 .on_press(move || {
                     jump_to_seq_flow(row.with(|r| r.bar.flow_id), selected, compose, seq_builder);
                 })
@@ -480,7 +484,7 @@ pub(crate) fn seq_dependency_row(
                                 .tabular_nums()
                                 .min_w(px(36.0))
                                 .flex_shrink_0()
-                                .text_size(px(11.5))
+                                .text_size(px(TEXT_XS))
                                 .text_color(fg_muted()),
                         )
                         .child(
@@ -488,14 +492,14 @@ pub(crate) fn seq_dependency_row(
                                 .min_w(px(44.0))
                                 .px(px(5.0))
                                 .py_0p5()
-                                .rounded(px(4.0))
+                                .rounded(px(RADIUS_SM))
                                 .flex_shrink_0()
                                 .items_center()
                                 .justify_center()
                                 .bg(move || row.with(|r| method_bg(&r.bar.method)))
                                 .child(
                                     mono(move || row.with(|r| r.bar.method.clone()))
-                                        .text_size(px(10.5))
+                                        .text_size(px(TEXT_XS))
                                         .font_weight(FontWeight::BOLD)
                                         .text_color(move || row.with(|r| method_fg(&r.bar.method))),
                                 ),
@@ -517,7 +521,7 @@ pub(crate) fn seq_dependency_row(
                             .min_w(px(0.0))
                             .number_of_lines(1)
                             .text_overflow(EllipsizeMode::Middle)
-                            .text_size(px(12.0))
+                            .text_size(px(TEXT_SM))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(fg_primary()),
                         )
@@ -527,12 +531,12 @@ pub(crate) fn seq_dependency_row(
                                 view()
                                     .px_1p5()
                                     .py(px(0.5))
-                                    .rounded(px(3.5))
+                                    .rounded(px(RADIUS_SM))
                                     .flex_shrink_0()
                                     .bg(status_warn_bg())
                                     .child(
                                         text(tr("★ 关键路径", "★ Critical"))
-                                            .text_size(px(11.0))
+                                            .text_size(px(TEXT_XS))
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(status_warn_fg()),
                                     )
@@ -544,7 +548,7 @@ pub(crate) fn seq_dependency_row(
                                 .min_w(px(32.0))
                                 .text_right()
                                 .flex_shrink_0()
-                                .text_size(px(11.5))
+                                .text_size(px(TEXT_XS))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(move || {
                                     row.with(|r| http_status_fg(r.bar.status, r.bar.failed))
@@ -566,7 +570,7 @@ pub(crate) fn seq_dependency_row(
                             })
                             .tabular_nums()
                             .flex_shrink_0()
-                            .text_size(px(11.0))
+                            .text_size(px(TEXT_XS))
                             .text_color(fg_muted()),
                         ),
                 )
@@ -590,7 +594,7 @@ pub(crate) fn seq_dependency_row(
                                     view()
                                         .px_2()
                                         .py(px(1.5))
-                                        .rounded(px(4.0))
+                                        .rounded(px(RADIUS_SM))
                                         .max_w(px(200.0))
                                         .bg(accent_blue_soft())
                                         .child(
@@ -599,7 +603,7 @@ pub(crate) fn seq_dependency_row(
                                             })
                                             .number_of_lines(1)
                                             .text_overflow(EllipsizeMode::Tail)
-                                            .text_size(px(11.0))
+                                            .text_size(px(TEXT_XS))
                                             .text_color(accent_blue_text()),
                                         )
                                 },
@@ -638,7 +642,7 @@ pub(crate) fn seq_waterfall_view(
                 seq_builder.items.with(Vec::len),
             ))
         })
-        .rounded(px(7.0))
+        .rounded(px(RADIUS_MD))
         .border_1()
         .border_color(border_control())
         .bg(bg_code())
@@ -658,7 +662,7 @@ pub(crate) fn seq_waterfall_view(
                     .justify_center()
                     .child(
                         text(tr("请勾选至少一条流量", "Select at least one flow"))
-                            .text_size(px(12.0))
+                            .text_size(px(TEXT_SM))
                             .text_color(fg_muted()),
                     )
             },
@@ -689,7 +693,7 @@ pub(crate) fn seq_waterfall_view(
                                 .min_w(px(0.0))
                                 .number_of_lines(1)
                                 .text_overflow(EllipsizeMode::Tail)
-                                .text_size(px(11.0))
+                                .text_size(px(TEXT_XS))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(fg_secondary()),
                             )
@@ -733,7 +737,7 @@ pub(crate) fn seq_waterfall_view(
                                 .tabular_nums()
                                 .flex_shrink_0()
                                 .number_of_lines(1)
-                                .text_size(px(11.0))
+                                .text_size(px(TEXT_XS))
                                 .text_color(accent_blue_text()),
                             ),
                     )
@@ -761,7 +765,7 @@ pub(crate) fn seq_waterfall_view(
                                         text(tr("阶段 / 接口", "Stage / Endpoint"))
                                             .number_of_lines(1)
                                             .text_overflow(EllipsizeMode::Tail)
-                                            .text_size(px(11.0))
+                                            .text_size(px(TEXT_XS))
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(fg_muted()),
                                     ),
@@ -805,7 +809,7 @@ pub(crate) fn seq_waterfall_view(
                                                 }
                                             })
                                             .tabular_nums()
-                                            .text_size(px(11.0))
+                                            .text_size(px(TEXT_XS))
                                             .text_color(fg_muted())
                                         },
                                     )),
@@ -844,12 +848,16 @@ pub(crate) fn seq_waterfall_row(
             .unwrap_or_default()
     });
     view()
+        .role(AccessibilityRole::Button)
         .w_full()
         .h(px(SEQ_WF_ROW_H))
         .flex_row()
         .items_center()
-        .active(|style| style.opacity(0.85))
-        .cursor(Cursor::Pointer)
+        .active(|style| style.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
         .on_press(move || {
             jump_to_seq_flow(bar_item.with(|b| b.flow_id), selected, compose, seq_builder);
         })
@@ -889,13 +897,13 @@ pub(crate) fn seq_waterfall_row(
                     view()
                         .px_1()
                         .py(px(0.5))
-                        .rounded(px(3.0))
+                        .rounded(px(RADIUS_SM))
                         .flex_shrink_0()
                         .bg(bg_control())
                         .child(
                             mono(move || bar_item.with(|b| format!("S{}", b.stage)))
                                 .tabular_nums()
-                                .text_size(px(10.5))
+                                .text_size(px(TEXT_XS))
                                 .font_weight(FontWeight::BOLD)
                                 .text_color(accent_blue_text()),
                         ),
@@ -904,19 +912,19 @@ pub(crate) fn seq_waterfall_row(
                     mono(move || bar_item.with(|b| format!("#{}", b.flow_id)))
                         .tabular_nums()
                         .flex_shrink_0()
-                        .text_size(px(11.0))
+                        .text_size(px(TEXT_XS))
                         .text_color(fg_muted()),
                 )
                 .child(
                     view()
                         .px(px(4.5))
                         .py(px(1.0))
-                        .rounded(px(3.5))
+                        .rounded(px(RADIUS_SM))
                         .flex_shrink_0()
                         .bg(move || bar_item.with(|b| method_bg(&b.method)))
                         .child(
                             mono(move || bar_item.with(|b| b.method.clone()))
-                                .text_size(px(10.5))
+                                .text_size(px(TEXT_XS))
                                 .font_weight(FontWeight::BOLD)
                                 .text_color(move || bar_item.with(|b| method_fg(&b.method))),
                         ),
@@ -927,14 +935,14 @@ pub(crate) fn seq_waterfall_row(
                         .min_w(px(0.0))
                         .number_of_lines(1)
                         .text_overflow(EllipsizeMode::Middle)
-                        .text_size(px(11.0))
+                        .text_size(px(TEXT_XS))
                         .text_color(fg_primary()),
                 )
                 .child(
                     mono(move || bar_item.with(|b| list_status(b.status, b.failed)))
                         .tabular_nums()
                         .flex_shrink_0()
-                        .text_size(px(11.0))
+                        .text_size(px(TEXT_XS))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(move || bar_item.with(|b| http_status_fg(b.status, b.failed))),
                 ),
@@ -1086,7 +1094,7 @@ pub(crate) fn seq_waterfall_row(
                         .top(px(5.0))
                         .px_1p5()
                         .py(px(0.5))
-                        .rounded(px(3.0))
+                        .rounded(px(RADIUS_SM))
                         .bg(bg_card())
                         .child(
                             mono(move || {
@@ -1107,7 +1115,7 @@ pub(crate) fn seq_waterfall_row(
                             })
                             .tabular_nums()
                             .number_of_lines(1)
-                            .text_size(px(11.0))
+                            .text_size(px(TEXT_XS))
                             .text_color(fg_secondary()),
                         ),
                 ),
