@@ -147,6 +147,7 @@ async fn main() {
     if let Ok(mut guard) = ctrl.lock() {
         guard.disable();
     }
+    drop(ctrl);
 }
 
 #[cfg(not(target_os = "linux"))]
