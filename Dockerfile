@@ -5,7 +5,7 @@
 # address as their HTTP proxy. This image does not change the system proxy.
 #
 # Both the headless server binary (built with `--no-default-features`, without
-# GTK/GStreamer) and the shared `nsh 0.6` Wasm UI (`/usr/share/zniff/web`) are
+# GTK/GStreamer) and the shared `nsh 0.7` Wasm UI (`/usr/share/zniff/web`) are
 # baked into the image out of the box:
 #
 #   docker run --rm -p 8080:8080 -p 8877:8877 \
@@ -43,7 +43,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && rustup target add wasm32-unknown-unknown
 
-ARG NSH_VERSION=v0.6.1
+ARG NSH_VERSION=v0.7.0
 RUN set -eux; \
     case "$(uname -m)" in \
       x86_64|amd64) nsh_arch="linux-x86_64" ;; \

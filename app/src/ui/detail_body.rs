@@ -1,6 +1,16 @@
 #[allow(unused_imports)]
 use super::*;
 
+fn on_body_scroll_reset(reset_key: Memo<(Option<u64>, usize)>, reset: impl Fn() + 'static) {
+    let prev = stored(None::<(Option<u64>, usize)>);
+    effect(move || {
+        let key = reset_key.get();
+        if prev.replace(Some(key)).is_some_and(|old| old != key) {
+            reset();
+        }
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn body_section(
     zh: &'static str,
@@ -21,13 +31,14 @@ pub(crate) fn body_section(
     bit: u8,
     loading: Signal<bool>,
 ) -> impl IntoElement {
-    let (preview_flag, json, tree_flag, side, body_bytes) = if embed_image {
+    let (preview_flag, json, tree_flag, side, body_bytes, body_window) = if embed_image {
         (
             shown.res_doc_preview,
             shown.response_json,
             shown.res_json_tree,
             Side::Response,
             shown.response_body_bytes,
+            shown.response_window,
         )
     } else {
         (
@@ -36,8 +47,10 @@ pub(crate) fn body_section(
             shown.req_json_tree,
             Side::Request,
             shown.request_body_bytes,
+            shown.request_window,
         )
     };
+    let reset_key = computed(move || (selected.get(), body_window.get().offset));
     let image_on = move || embed_image && shown.pretty.get() && !shown.preview.get().is_empty();
     let doc_on = move || preview_flag.get() && doc.with(Option::is_some);
     let tree_on = move || !doc_on() && tree_flag.get() && json.with(Option::is_some);
@@ -297,6 +310,10 @@ pub(crate) fn body_section(
             move || !card_folded(folded, bit) && !loading.get() && doc_on(),
             move || {
                 let divided = !note.get().is_empty();
+                let doc_scroll = element_ref();
+                on_body_scroll_reset(reset_key, move || {
+                    doc_scroll.scroll_to_offset(px(0.0), false);
+                });
                 view()
                     .w_full()
                     .h(move || px(editor_box_height(&body.get(), 0.0).max(140.0)))
@@ -306,6 +323,7 @@ pub(crate) fn body_section(
                     .border_t_color(border_subtle())
                     .child(
                         scroll()
+                            .element_ref(&doc_scroll)
                             .size_full()
                             .pl_3p5()
                             .pr_5()
@@ -391,6 +409,10 @@ pub(crate) fn body_section(
                         })
                 };
                 when(no_match, move || body_search_empty_state(search)).otherwise(move || {
+                    let plain_scroll = element_ref();
+                    on_body_scroll_reset(reset_key, move || {
+                        plain_scroll.scroll_to_offset(px(0.0), false);
+                    });
                     view()
                         .w_full()
                         .min_w(move || px(hex_area_width(shown.pane_width.get())))
@@ -416,7 +438,7 @@ pub(crate) fn body_section(
                         .border_t(move || if divided { px(1.0) } else { px(0.0) })
                         .border_t_color(border_subtle())
                         .child(
-                            scroll().size_full().child(
+                            scroll().element_ref(&plain_scroll).size_full().child(
                                 mono(move || {
                                     let bytes = hex.with(|bytes| bytes.clone());
                                     filtered_plain_body(
@@ -458,7 +480,7 @@ pub(crate) fn body_section(
                     view()
                         .border_t(move || if divided { px(1.0) } else { px(0.0) })
                         .border_t_color(border_subtle())
-                        .child(code_body(body, code, search))
+                        .child(code_body(body, code, search, reset_key))
                 })
             },
         ))
@@ -672,6 +694,18 @@ pub(crate) fn code_body(
     body: Signal<String>,
     code: Signal<String>,
     search: Signal<String>,
+    reset_key: Memo<(Option<u64>, usize)>,
+) -> impl IntoElement {
+    let editor_ref = component_ref::<Editor>();
+    code_body_with_ref(body, code, search, reset_key, editor_ref)
+}
+
+pub(crate) fn code_body_with_ref(
+    body: Signal<String>,
+    code: Signal<String>,
+    search: Signal<String>,
+    reset_key: Memo<(Option<u64>, usize)>,
+    editor_ref: ComponentRef<Editor>,
 ) -> impl IntoElement {
     let shown_text = move || {
         let raw = body.get();
@@ -683,6 +717,11 @@ pub(crate) fn code_body(
         }
     };
     let width = signal(0.0_f32);
+    on_body_scroll_reset(reset_key, move || {
+        if let Some(api) = editor_ref.api::<EditorApi>() {
+            api.set_scroll_offset(Point::new(px(0.0), px(0.0)));
+        }
+    });
     guard_culled_pointer_events(view())
         .w_full()
         .h(move || px(editor_box_height(&shown_text(), width.get())))
@@ -696,6 +735,7 @@ pub(crate) fn code_body(
         .overflow_hidden()
         .child(
             editor()
+                .component_ref(&editor_ref)
                 .value(move || SharedString::from(shown_text()))
                 .read_only(true)
                 .language(move || {

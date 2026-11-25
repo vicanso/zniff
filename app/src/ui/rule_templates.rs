@@ -452,7 +452,7 @@ fn rule_kind_form_group_section(
                 .ease_out()
                 .focus_visible(apply_focus_ring)
                 .on_select(move || {
-                    draft.kind.set(item.idx);
+                    switch_quick_kind(draft, item.idx);
                     quick_add_open.set(true);
                     open.set(false);
                 })

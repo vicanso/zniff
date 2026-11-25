@@ -1,7 +1,7 @@
 //! System tray / menu bar icon and opt-in minimize-to-tray lifecycle (ADR-23).
 //!
-//! Uses `nsh_core::element::desktop::tray()`, `set_tray()`, and
-//! `main_window().on_close_press(...)` on desktop targets; compiles cleanly as a no-op on wasm32.
+//! Uses `nsh_core::element::desktop::tray()`, `set_tray()`, and `WindowRef`
+//! / `desktop::window()` close hooks on desktop targets; compiles cleanly as a no-op on wasm32.
 
 #[allow(unused_imports)]
 use super::*;
@@ -92,21 +92,38 @@ pub(crate) struct TrayProps {
     pub(crate) controls: Arc<Controls>,
     pub(crate) langs: Signal<Option<Lang>>,
     pub(crate) show_tray: Signal<bool>,
+    pub(crate) main_win: Signal<Option<nsh_core::element::desktop::WindowRef>>,
+    pub(crate) main_open: Signal<bool>,
     pub(crate) running: Signal<bool>,
     pub(crate) listen: Signal<String>,
     pub(crate) use_system_proxy: Signal<bool>,
     pub(crate) on_clear: Rc<dyn Fn()>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn reveal_main_window(
+    main_win: Signal<Option<nsh_core::element::desktop::WindowRef>>,
+    main_open: Signal<bool>,
+) {
+    if !main_open.get_untracked() {
+        main_open.set(true);
+    } else if let Some(win) = main_win.get_untracked() {
+        win.show();
+        win.focus();
+    }
+}
+
 /// Installs the reactive desktop system tray / menu bar icon and lightweight menu.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn install_system_tray(props: TrayProps) {
-    use nsh_core::element::desktop::{MenuItem, main_window, quit, set_tray, tray};
+    use nsh_core::element::desktop::{MenuItem, quit, set_tray, tray};
 
     let TrayProps {
         controls,
         langs,
         show_tray,
+        main_win,
+        main_open,
         running,
         listen,
         use_system_proxy,
@@ -132,11 +149,7 @@ pub(crate) fn install_system_tray(props: TrayProps) {
         let items = [
             MenuItem::new(labels.show_window)
                 .icon(show_icon)
-                .on_select(|| {
-                    let win = main_window();
-                    win.show();
-                    win.focus();
-                }),
+                .on_select(move || reveal_main_window(main_win, main_open)),
             MenuItem::separator(),
             MenuItem::new(labels.toggle_capture)
                 .icon(capture_icon)
@@ -152,9 +165,7 @@ pub(crate) fn install_system_tray(props: TrayProps) {
             MenuItem::new(labels.clear_traffic)
                 .icon(clear_icon)
                 .on_select(move || {
-                    let win = main_window();
-                    win.show();
-                    win.focus();
+                    reveal_main_window(main_win, main_open);
                     clear_action();
                 }),
             MenuItem::separator(),
@@ -171,31 +182,6 @@ pub(crate) fn install_system_tray(props: TrayProps) {
 
     cleanup(|| {
         set_tray(None);
-    });
-}
-
-/// Syncs `main_window` `close_on_press` with `show_tray && minimize_to_tray` and hides the window
-/// instead of quitting when the user has opted into tray residency.
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn install_minimize_to_tray_handler(
-    show_tray: Signal<bool>,
-    minimize_to_tray: Signal<bool>,
-) {
-    use nsh_core::element::desktop::main_window;
-
-    effect(move || {
-        let keep_in_tray = show_tray.get() && minimize_to_tray.get();
-        let mut attrs = nsh_core::desktop::WindowAttributes::default();
-        attrs.close_on_press = Some(!keep_in_tray);
-        main_window().set(attrs);
-    });
-
-    main_window().on_close_press(move |_| {
-        if show_tray.get_untracked() && minimize_to_tray.get_untracked() {
-            main_window().hide();
-        } else {
-            main_window().close();
-        }
     });
 }
 

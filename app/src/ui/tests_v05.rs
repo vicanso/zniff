@@ -1832,23 +1832,26 @@ fn preset_sync_bar_surfaces_unsaved_state_and_opens_presets_zh_en() {
         assert!(!tree.has_text(t(lang, "更新预设", "Update preset")));
         assert!(!tree.has_text(t(lang, "存为预设…", "Save as preset…")));
 
-        // Step 1: Modify filter -> Filter popover surfaces unsaved preset status and Update button.
+        // Step 1: Modify filter -> Filter popover surfaces unsaved changed field, Discard, and Update button.
         assert!(tree.press_text(&mut core, "SYNC_STEP"));
         assert!(tree.has_text(t(
             lang,
-            "预设「test」有未保存修改",
-            "Preset \"test\" has unsaved changes",
+            "预设「test」未保存：过滤",
+            "Preset \"test\" unsaved: Filter",
         )));
+        assert!(tree.has_text(t(lang, "丢弃", "Discard")));
         assert!(tree.has_text(t(lang, "更新预设", "Update preset")));
 
-        // Step 2: Open Rules popover -> same quick-update bar appears inside Rules popover.
+        // Step 2: Open Rules popover -> same quick-update bar & Discard button appear inside Rules popover.
         assert!(tree.press_text(&mut core, "SYNC_STEP"));
         assert!(tree.has_text(t(lang, "直通与上游", "Bypass & Proxy")));
+        assert!(tree.has_text(t(lang, "丢弃", "Discard")));
         assert!(tree.has_text(t(lang, "更新预设", "Update preset")));
 
-        // Step 3: Clear preset name with active filter -> shows "Save as preset…", clicking opens Presets.
+        // Step 3: Clear preset name with active filter -> shows "Save as preset…" without Discard; clicking opens Presets.
         assert!(tree.press_text(&mut core, "SYNC_STEP"));
         assert!(tree.has_text(t(lang, "存为预设…", "Save as preset…")));
+        assert!(!tree.has_text(t(lang, "丢弃", "Discard")));
         assert!(tree.press_text(&mut core, t(lang, "存为预设…", "Save as preset…")));
         assert!(tree.has_text("OPEN:f=false,r=false,p=true"));
     }
@@ -2013,7 +2016,7 @@ fn persisted_folded_cards_cover_content_cards_and_skip_diff() {
 }
 
 #[test]
-fn header_and_message_rows_reveal_copy_icon_only_on_hover() {
+fn header_and_message_rows_omit_per_row_copy_buttons_and_keep_copy_all() {
     #[component]
     fn HoverRowHarness() -> impl IntoElement {
         let lang = TEST_LANG.with(Cell::get);
@@ -2078,8 +2081,8 @@ fn header_and_message_rows_reveal_copy_icon_only_on_hover() {
             .count()
     };
 
-    let enter_row_by_text =
-        |tree: &mut HeadlessTree, core: &mut Core<ApproxTextEngine>, exact: &str| -> NodeId {
+    let enter_ancestors =
+        |tree: &mut HeadlessTree, core: &mut Core<ApproxTextEngine>, exact: &str| {
             let text_id = tree
                 .live_node_ids()
                 .into_iter()
@@ -2092,12 +2095,9 @@ fn header_and_message_rows_reveal_copy_icon_only_on_hover() {
                     EventKind::MouseEnter,
                     &EventPayload::Mouse(MouseEvent::default()),
                 );
-                if tree.pump(core) {
-                    return cur;
-                }
+                tree.pump(core);
                 cur = tree.parent.get(&cur).copied().expect("ancestor view");
             }
-            panic!("MouseEnter on {exact} ancestors did not trigger hover state");
         };
 
     for lang in [Lang::Zh, Lang::En] {
@@ -2112,33 +2112,19 @@ fn header_and_message_rows_reveal_copy_icon_only_on_hover() {
             "at rest, only the 2 card chevrons should render canvases in {lang:?}"
         );
 
-        let hdr_row = enter_row_by_text(&mut tree, &mut core, "x-trace-id");
+        enter_ancestors(&mut tree, &mut core, "x-trace-id");
         assert_eq!(
             live_canvas_count(&tree),
-            3,
-            "hovering a header row must reveal strictly 1 copy icon in {lang:?}"
+            2,
+            "hovering a header row must not add a per-row copy icon in {lang:?}"
         );
-        core.component_event(
-            hdr_row,
-            EventKind::MouseLeave,
-            &EventPayload::Mouse(MouseEvent::default()),
-        );
-        tree.pump(&mut core);
-        assert_eq!(live_canvas_count(&tree), 2);
 
-        let msg_row = enter_row_by_text(&mut tree, &mut core, "msg-alpha");
+        enter_ancestors(&mut tree, &mut core, "msg-alpha");
         assert_eq!(
             live_canvas_count(&tree),
-            3,
-            "hovering a message row must reveal strictly 1 copy icon in {lang:?}"
+            2,
+            "hovering a message row must not add a per-row copy icon in {lang:?}"
         );
-        core.component_event(
-            msg_row,
-            EventKind::MouseLeave,
-            &EventPayload::Mouse(MouseEvent::default()),
-        );
-        tree.pump(&mut core);
-        assert_eq!(live_canvas_count(&tree), 2);
     }
 }
 
@@ -2161,6 +2147,125 @@ fn facet_tab_has_filter_tracks_domain_mute_and_app_tokens() {
 
     assert!(!facet_tab_has_filter("type:json slow:", 0));
     assert!(!facet_tab_has_filter("type:json slow:", 1));
+}
+
+#[test]
+fn facet_drawer_overlay_dismisses_on_press_outside_and_toggles_tabs() {
+    use crate::session::{FacetEntry, FacetKind, SessionFacets};
+    use nsh_core::{PointerType, TouchEvent, TouchPhase, TouchPoint};
+
+    #[component]
+    fn FacetOverlayHarness() -> impl IntoElement {
+        let lang = TEST_LANG.with(Cell::get);
+        provide_base_contexts(lang);
+        let facets = signal(SessionFacets {
+            domains: vec![FacetEntry {
+                label: "api.vicanso.dev".into(),
+                token: "api.vicanso.dev".into(),
+                kind: FacetKind::Domain,
+                count: 1,
+                error_count: 0,
+            }],
+            apps: vec![FacetEntry {
+                label: "curl".into(),
+                token: "curl".into(),
+                kind: FacetKind::App,
+                count: 1,
+                error_count: 0,
+            }],
+        });
+        let facets_open = signal(false);
+        let facet_tab = signal(0_u8);
+        let filter = signal(String::new());
+        let anchor = element_ref();
+        view()
+            .w(px(520.0))
+            .h(px(640.0))
+            .child(facet_quick_bar(
+                facets,
+                facets_open,
+                facet_tab,
+                filter,
+                anchor,
+            ))
+            .child(when(
+                move || facets_open.get(),
+                move || {
+                    facet_drawer_overlay(facets, facets_open, facet_tab, filter, anchor, || 360.0)
+                },
+            ))
+    }
+
+    let touch_down = |path: Vec<NodeId>| -> EventPayload {
+        EventPayload::Touch(Box::new(TouchEvent {
+            phase: TouchPhase::Start,
+            timestamp: 0.0,
+            points: vec![TouchPoint {
+                id: 1,
+                target: path[0],
+                path,
+                page: Point::new(px(120.0), px(220.0)),
+                location: Point::new(px(120.0), px(220.0)),
+                changed: true,
+                pointer_type: PointerType::Mouse,
+                pressure: 0.5,
+                tilt_x: 0.0,
+                tilt_y: 0.0,
+            }],
+            activated: None,
+            modifiers: Default::default(),
+        }))
+    };
+
+    for lang in [Lang::Zh, Lang::En] {
+        TEST_LANG.set(lang);
+        let (mut core, mut tree) = mount::<FacetOverlayHarness>(Size::new(px(520.0), px(640.0)));
+        let domains_btn = t(lang, "域名 (1)", "Domains (1)");
+        let apps_btn = t(lang, "应用 (1)", "Apps (1)");
+
+        assert!(!tree.has_text("api.vicanso.dev"));
+        assert!(tree.press_text(&mut core, domains_btn));
+        assert!(tree.has_text("api.vicanso.dev"));
+
+        // Pressing outside the overlay and its tab anchor closes the drawer.
+        core.component_event(ROOT_ID, EventKind::Touch, &touch_down(vec![ROOT_ID]));
+        tree.pump(&mut core);
+        assert!(
+            !tree.has_text("api.vicanso.dev"),
+            "PressOutside on window root must dismiss facet drawer in {lang:?}"
+        );
+
+        // Re-open Domains, then simulate touching & pressing the Apps tab inside the anchor:
+        // anchor exclusion prevents premature dismissal and switches cleanly to Apps.
+        assert!(tree.press_text(&mut core, domains_btn));
+        assert!(tree.has_text("api.vicanso.dev"));
+
+        let apps_text_id = tree
+            .live_node_ids()
+            .into_iter()
+            .find(|id| tree.texts.get(id).is_some_and(|s| s == apps_btn))
+            .expect("Apps button label");
+        let mut anchor_path = Vec::new();
+        let mut cur = Some(apps_text_id);
+        while let Some(node) = cur {
+            anchor_path.push(node);
+            cur = tree.parent.get(&node).copied();
+        }
+        core.component_event(ROOT_ID, EventKind::Touch, &touch_down(anchor_path));
+        tree.pump(&mut core);
+        assert!(
+            tree.has_text("api.vicanso.dev"),
+            "Touch inside tab anchor must not dismiss overlay in {lang:?}"
+        );
+
+        assert!(tree.press_text(&mut core, apps_btn));
+        assert!(!tree.has_text("api.vicanso.dev"));
+        assert!(tree.has_text("curl"));
+
+        // Pressing active Apps tab again toggles the drawer closed.
+        assert!(tree.press_text(&mut core, apps_btn));
+        assert!(!tree.has_text("curl"));
+    }
 }
 
 #[test]
@@ -2596,4 +2701,225 @@ fn popover_closes_when_focus_moves_into_outside_workspace_input() {
     core.set_states(outside_input, nsh_core::tailwind::state::FOCUSED);
     tree.pump(&mut core);
     assert!(tree.has_text("POPOVER_OPEN:false"));
+}
+
+#[test]
+fn switching_quick_rule_kind_clears_incompatible_action_inputs_and_preserves_target() {
+    assert!(quick_kind_shares_action_inputs(6, 6));
+    assert!(quick_kind_shares_action_inputs(0, 0));
+    assert!(quick_kind_shares_action_inputs(4, 5));
+    assert!(quick_kind_shares_action_inputs(5, 4));
+    assert!(!quick_kind_shares_action_inputs(6, 4));
+    assert!(!quick_kind_shares_action_inputs(0, 3));
+
+    #[component]
+    fn QuickKindSwitchHarness() -> impl IntoElement {
+        provide_base_contexts(Lang::En);
+        let controls = make_controls("quick-kind-switch");
+        let profiles = make_profiles();
+        let draft = make_rule_draft();
+        draft.kind.set(6);
+        draft.host.set("api.vicanso.dev".into());
+        draft.path.set("/v1".into());
+        draft.op.set("GetUser".into());
+        draft.from.set("X-Signature123".into());
+        draft
+            .to
+            .set(r#"{{hmac_sha256("dev-secret", req.body)}}"#.into());
+        let open = signal(true);
+
+        view()
+            .w(px(720.0))
+            .h(px(640.0))
+            .flex_col()
+            .child(quick_add_section(
+                RuleEditTarget::from_profiles(profiles),
+                controls,
+                draft,
+                open,
+            ))
+            .child(
+                view()
+                    .role(AccessibilityRole::Button)
+                    .on_press(move || switch_quick_kind(draft, 6))
+                    .child(text("btn_same")),
+            )
+            .child(
+                view()
+                    .role(AccessibilityRole::Button)
+                    .on_press(move || switch_quick_kind(draft, 4))
+                    .child(text("btn_to_break")),
+            )
+            .child(
+                view()
+                    .role(AccessibilityRole::Button)
+                    .on_press(move || {
+                        draft.from.set("X-Debug:1".into());
+                        draft.to.set("error".into());
+                        switch_quick_kind(draft, 5);
+                    })
+                    .child(text("btn_to_break_res")),
+            )
+            .child(
+                view()
+                    .role(AccessibilityRole::Button)
+                    .on_press(move || switch_quick_kind(draft, 3))
+                    .child(text("btn_to_delay")),
+            )
+            .child(
+                view()
+                    .role(AccessibilityRole::Button)
+                    .on_press(move || draft.from.set("2000ms".into()))
+                    .child(text("btn_seed_delay")),
+            )
+            .child(text(move || {
+                format!(
+                    "DRAFT|{}|{}|{}|{}|{}|{}",
+                    draft.kind.get(),
+                    draft.host.get(),
+                    draft.path.get(),
+                    draft.op.get(),
+                    draft.from.get(),
+                    draft.to.get(),
+                )
+            }))
+    }
+
+    let (mut core, mut tree) = mount::<QuickKindSwitchHarness>(Size::new(px(720.0), px(640.0)));
+    assert!(tree.has_text(
+        r#"DRAFT|6|api.vicanso.dev|/v1|GetUser|X-Signature123|{{hmac_sha256("dev-secret", req.body)}}"#
+    ));
+
+    // Selecting the same kind preserves both action inputs.
+    assert!(tree.press_text(&mut core, "btn_same"));
+    assert!(tree.has_text(
+        r#"DRAFT|6|api.vicanso.dev|/v1|GetUser|X-Signature123|{{hmac_sha256("dev-secret", req.body)}}"#
+    ));
+
+    // Switching Header (6) -> Break (4) preserves host/path/op and clears from/to.
+    assert!(tree.press_text(&mut core, "btn_to_break"));
+    assert!(tree.has_text("DRAFT|4|api.vicanso.dev|/v1|GetUser||"));
+
+    // Switching Break (4) -> Break-Res (5) preserves shared condition inputs and target.
+    assert!(tree.press_text(&mut core, "btn_to_break_res"));
+    assert!(tree.has_text("DRAFT|5|api.vicanso.dev|/v1|GetUser|X-Debug:1|error"));
+
+    // Switching Break-Res (5) -> Delay (3) preserves target and clears from/to.
+    assert!(tree.press_text(&mut core, "btn_to_delay"));
+    assert!(tree.has_text("DRAFT|3|api.vicanso.dev|/v1|GetUser||"));
+
+    // Switching via the live quick_kind_dropdown menu clears Delay input too.
+    assert!(tree.press_text(&mut core, "btn_seed_delay"));
+    assert!(tree.has_text("DRAFT|3|api.vicanso.dev|/v1|GetUser|2000ms|"));
+    assert!(tree.press_text(&mut core, "Delay"));
+    assert!(tree.press_text(&mut core, "Break"));
+    assert!(tree.has_text("DRAFT|4|api.vicanso.dev|/v1|GetUser||"));
+}
+
+#[tokio::test]
+async fn preset_sync_bar_shows_diff_and_discards_with_two_step_confirm_zh_en() {
+    #[component]
+    fn SyncDiscardHarness() -> impl IntoElement {
+        let lang = TEST_LANG.with(Cell::get);
+        provide_base_contexts(lang);
+        let controls = make_controls("preset-sync-discard");
+        let profiles = make_profiles();
+        let draft = make_rule_draft();
+        profiles.saved.set(vec![config::SavedProfile {
+            name: "test".into(),
+            filter: "host:api.vicanso.dev".into(),
+            bypass_hosts: String::new(),
+            rules: "cors *".into(),
+            upstream_proxy: String::new(),
+            rules_enabled: true,
+            breaks_enabled: true,
+            show_tunnel_failures: false,
+        }]);
+        profiles.name.set("test".into());
+        profiles.filter.set("host:api.vicanso.dev".into());
+        profiles.rules.set("cors *".into());
+        profiles.rules_on.set(true);
+        profiles.breaks_on.set(true);
+
+        view()
+            .w(px(720.0))
+            .h(px(360.0))
+            .flex_col()
+            .child(
+                view()
+                    .role(AccessibilityRole::Button)
+                    .on_press(move || {
+                        profiles.filter.set("host:api.vicanso.dev path:/v2".into());
+                        profiles.breaks_on.set(false);
+                        draft.kind.set(4);
+                        draft.host.set("api.vicanso.dev".into());
+                        draft.path.set("/v1".into());
+                    })
+                    .child(text("DIRTY_ALL")),
+            )
+            .child(
+                view()
+                    .role(AccessibilityRole::Button)
+                    .on_press(move || {
+                        profiles.filter.set("host:cdn.vicanso.dev".into());
+                    })
+                    .child(text("DIRTY_CDN")),
+            )
+            .child(
+                view()
+                    .role(AccessibilityRole::Button)
+                    .on_press(move || {
+                        profiles.filter.set("host:api.vicanso.dev".into());
+                    })
+                    .child(text("DIRTY_API")),
+            )
+            .child(text(move || {
+                format!(
+                    "SNAP|{}|{}|{}|{}",
+                    profiles.filter.get(),
+                    profiles.rules.get(),
+                    profiles.breaks_on.get(),
+                    draft.host.get(),
+                )
+            }))
+            .child(preset_sync_bar(profiles, draft, controls))
+    }
+
+    for lang in [Lang::Zh, Lang::En] {
+        TEST_LANG.set(lang);
+        let (mut core, mut tree) = mount::<SyncDiscardHarness>(Size::new(px(720.0), px(360.0)));
+        assert!(!tree.has_text(t(lang, "更新预设", "Update preset")));
+        assert!(!tree.has_text(t(lang, "丢弃", "Discard")));
+
+        // Dirty filter + toggle + quick-rule draft -> status lists every changed part.
+        assert!(tree.press_text(&mut core, "DIRTY_ALL"));
+        assert!(tree.has_text(t(
+            lang,
+            "预设「test」未保存：过滤、规则（含草稿）、断点开关",
+            "Preset \"test\" unsaved: Filter, Rules (incl. draft), Breaks toggle",
+        )));
+        assert!(tree.has_text(t(lang, "丢弃", "Discard")));
+
+        // First click arms confirm state without reverting workspace changes.
+        assert!(tree.press_text(&mut core, t(lang, "丢弃", "Discard")));
+        assert!(tree.has_text(t(lang, "确认丢弃", "Confirm")));
+        assert!(tree.has_text("SNAP|host:api.vicanso.dev path:/v2|cors *|false|api.vicanso.dev"));
+
+        // Second click discards all edits + draft and returns preset to Clean.
+        assert!(tree.press_text(&mut core, t(lang, "确认丢弃", "Confirm")));
+        assert!(tree.has_text("SNAP|host:api.vicanso.dev|cors *|true|"));
+        assert!(!tree.has_text(t(lang, "更新预设", "Update preset")));
+        assert!(!tree.has_text(t(lang, "丢弃", "Discard")));
+
+        // Arming Discard then clicking Update preset clears pending confirm state cleanly.
+        assert!(tree.press_text(&mut core, "DIRTY_CDN"));
+        assert!(tree.press_text(&mut core, t(lang, "丢弃", "Discard")));
+        assert!(tree.has_text(t(lang, "确认丢弃", "Confirm")));
+        assert!(tree.press_text(&mut core, t(lang, "更新预设", "Update preset")));
+        assert!(!tree.has_text(t(lang, "更新预设", "Update preset")));
+
+        assert!(tree.press_text(&mut core, "DIRTY_API"));
+        assert!(tree.has_text(t(lang, "丢弃", "Discard")));
+        assert!(!tree.has_text(t(lang, "确认丢弃", "Confirm")));
+    }
 }

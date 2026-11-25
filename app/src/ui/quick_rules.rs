@@ -204,6 +204,25 @@ pub(crate) fn clear_quick_draft(draft: QuickRuleDraftSignals) {
     draft.modes.reset();
 }
 
+/// Returns whether switching from `prev_kind` to `next_kind` keeps the same
+/// semantics for the two action inputs (`from` and `to`).
+pub(crate) fn quick_kind_shares_action_inputs(prev_kind: u8, next_kind: u8) -> bool {
+    let prev = prev_kind % 16;
+    let next = next_kind % 16;
+    prev == next || matches!((prev, next), (4, 5) | (5, 4))
+}
+
+/// Switches the quick-rule builder to `next_kind`, keeping match target fields
+/// (`host`, `path`, `op`) while clearing incompatible action inputs (`from`, `to`).
+pub(crate) fn switch_quick_kind(draft: QuickRuleDraftSignals, next_kind: u8) {
+    let prev_kind = draft.kind.get_untracked();
+    if !quick_kind_shares_action_inputs(prev_kind, next_kind) {
+        draft.from.set(String::new());
+        draft.to.set(String::new());
+    }
+    draft.kind.set(next_kind);
+}
+
 pub(crate) fn quick_draft_has_input(draft: QuickRuleDraftSignals) -> bool {
     draft.editing_line.get().is_some()
         || !draft.host.get().trim().is_empty()
@@ -452,7 +471,7 @@ fn quick_add_row_one(
         .flex_row()
         .items_center()
         .gap_1()
-        .child(quick_kind_dropdown(kind))
+        .child(quick_kind_dropdown(draft))
         .child(view().flex_1().min_w(px(0.0)).child(submit_input(
             draft.host,
             tr("域名 (*)", "Host (*)"),

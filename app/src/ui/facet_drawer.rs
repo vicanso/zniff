@@ -295,6 +295,8 @@ pub(crate) fn flow_list(
     let menu_open = signal(false);
     let menu_at = signal(Point::<Points>::default());
     let facet_tab = signal(0_u8);
+    let facet_anchor = element_ref();
+    bind_popover_dismiss(facets_open);
     let effective_width = move || {
         let mode = layout_mode.get();
         let collapsed = sidebar_effectively_collapsed(sidebar_collapsed.get(), window().width.0);
@@ -504,7 +506,7 @@ pub(crate) fn flow_list(
                 layout_mode.get() == config::LayoutMode::TopBottom
                     || sidebar_effectively_collapsed(sidebar_collapsed.get(), window().width.0)
             },
-            move || facet_quick_bar(facets, facets_open, facet_tab, list_filter),
+            move || facet_quick_bar(facets, facets_open, facet_tab, list_filter, facet_anchor),
         ))
         .child(tls_failure_banner_from_context())
         .child(
@@ -538,35 +540,55 @@ pub(crate) fn flow_list(
                             && facets_open.get()
                     },
                     move || {
-                        view()
-                            .absolute()
-                            .inset_0()
-                            .child(
-                                view()
-                                    .absolute()
-                                    .inset_0()
-                                    .bg(backdrop_scrim_soft())
-                                    .on_press(move || facets_open.set(false)),
-                            )
-                            .child(
-                                view()
-                                    .absolute()
-                                    .top(px(0.0))
-                                    .left_0()
-                                    .right_0()
-                                    .bg(bg_card())
-                                    .border_b_1()
-                                    .border_b_color(border_strong())
-                                    .shadow_md()
-                                    .child(facet_drawer(
-                                        facets,
-                                        facets_open,
-                                        facet_tab,
-                                        list_filter,
-                                    )),
-                            )
+                        facet_drawer_overlay(
+                            facets,
+                            facets_open,
+                            facet_tab,
+                            list_filter,
+                            facet_anchor,
+                            move || {
+                                let max_w = (window().width.0 - 16.0).max(240.0);
+                                if is_top_bottom() {
+                                    max_w.min(520.0)
+                                } else {
+                                    (effective_width() - 12.0).clamp(260.0, max_w)
+                                }
+                            },
+                        )
                     },
                 )),
+        )
+}
+
+/// Anchored window-level overlay hosting the narrow/top-bottom domain and app filter drawer.
+pub(crate) fn facet_drawer_overlay(
+    facets: Signal<session::SessionFacets>,
+    facets_open: Signal<bool>,
+    facet_tab: Signal<u8>,
+    filter: Signal<String>,
+    anchor: ElementRef,
+    popup_width: impl Fn() -> f32 + 'static,
+) -> impl IntoElement {
+    overlay()
+        .anchor(&anchor)
+        .placement(Placement::Bottom)
+        .align(Align::Start)
+        .offset(px(6.0))
+        .margin(px(8.0))
+        .on_press_outside(move |_: &Point<Points>| facets_open.set(false))
+        .on_cancel(move || facets_open.set(false))
+        .child(
+            view()
+                .w(move || px(popup_width()))
+                .max_w(move || px((window().width.0 - 16.0).max(240.0)))
+                .max_h(move || px((window().height.0 - 96.0).max(200.0)))
+                .rounded(px(RADIUS_LG))
+                .border_1()
+                .border_color(border_strong())
+                .bg(bg_card())
+                .shadow_lg()
+                .overflow_hidden()
+                .child(facet_drawer(facets, facets_open, facet_tab, filter)),
         )
 }
 
@@ -583,6 +605,7 @@ pub(crate) fn facet_quick_bar(
     facets_open: Signal<bool>,
     facet_tab: Signal<u8>,
     filter: Signal<String>,
+    tab_anchor: ElementRef,
 ) -> impl IntoElement {
     let tab_btn = move |idx: u8,
                         zh: &'static str,
@@ -684,8 +707,16 @@ pub(crate) fn facet_quick_bar(
         .items_center()
         .gap_1()
         .overflow_hidden()
-        .child(tab_btn(0, "域名", "Domains", |f| f.domains.len()))
-        .child(tab_btn(1, "应用", "Apps", |f| f.apps.len()))
+        .child(
+            view()
+                .element_ref(&tab_anchor)
+                .flex_shrink_0()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .child(tab_btn(0, "域名", "Domains", |f| f.domains.len()))
+                .child(tab_btn(1, "应用", "Apps", |f| f.apps.len())),
+        )
         .child(view().w(px(1.0)).h(px(14.0)).mx_0p5().bg(border_subtle()))
         .child(
             view().flex_1().min_w(px(0.0)).overflow_hidden().child(

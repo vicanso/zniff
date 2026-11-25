@@ -666,7 +666,7 @@ fn flow_columns_pin_method_and_path_and_keep_a_dragged_width() {
             .all(|column| column.fixed == super::ColumnFixed::Left)
     );
     let default_sum: f32 = default_cols.iter().map(|c| c.width.unwrap().0).sum();
-    assert_eq!(default_sum, 648.0);
+    assert_eq!(default_sum, 656.0);
 
     let all_shown = super::ListColumns {
         id: true,
@@ -754,6 +754,62 @@ fn flow_columns_pin_method_and_path_and_keep_a_dragged_width() {
     );
     assert_eq!(
         super::column_pad_right(Some(super::ListColumn::Status), false, all_shown).0,
+        4.0
+    );
+    assert_eq!(
+        super::column_header_pad_left(Some(super::ListColumn::Id), default_shown).0,
+        super::LIST_INSET
+    );
+    assert_eq!(
+        super::column_cell_pad_left(super::ListColumn::Id, default_shown).0,
+        super::LIST_INSET - 2.0
+    );
+    assert_eq!(
+        super::column_header_pad_left(Some(super::ListColumn::Method), default_shown).0,
+        super::LIST_INSET
+    );
+    assert_eq!(
+        super::column_cell_pad_left(super::ListColumn::Method, default_shown).0,
+        4.0
+    );
+    assert_eq!(
+        super::column_header_pad_left(Some(super::ListColumn::Path), default_shown).0,
+        4.0
+    );
+    assert_eq!(
+        super::column_cell_pad_left(super::ListColumn::Path, default_shown).0,
+        4.0
+    );
+    assert_eq!(
+        super::column_header_pad_left(Some(super::ListColumn::Method), moved).0,
+        super::LIST_INSET
+    );
+    assert_eq!(
+        super::column_cell_pad_left(super::ListColumn::Method, moved).0,
+        2.0
+    );
+    assert_eq!(
+        super::column_header_pad_left(Some(super::ListColumn::Id), moved).0,
+        4.0
+    );
+    assert_eq!(
+        super::column_cell_pad_left(super::ListColumn::Id, moved).0,
+        4.0
+    );
+    assert_eq!(
+        super::column_header_pad_left(Some(super::ListColumn::Path), dragged).0,
+        super::LIST_INSET
+    );
+    assert_eq!(
+        super::column_cell_pad_left(super::ListColumn::Path, dragged).0,
+        super::LIST_INSET - 2.0
+    );
+    assert_eq!(
+        super::column_header_pad_left(Some(super::ListColumn::Id), dragged).0,
+        4.0
+    );
+    assert_eq!(
+        super::column_cell_pad_left(super::ListColumn::Id, dragged).0,
         4.0
     );
     let dragged_cols = super::flow_table_columns(dragged, &std::collections::HashMap::new());
@@ -1914,7 +1970,12 @@ async fn nested_scroll_widgets_emit_scroll_content_under_content_culling() {
                                             .child(text(format!("header-{i}: val")))
                                     }))
                                     // 1. Response/Request `code_body` (`editor()`)
-                                    .child(super::code_body(body, lang, search))
+                                    .child(super::code_body(
+                                        body,
+                                        lang,
+                                        search,
+                                        computed(|| (Some(1), 0)),
+                                    ))
                                     // 2. Editable `editor()` (`compose_editor` / `rules_editor`)
                                     .child(
                                         super::guard_culled_pointer_events(view())
@@ -3136,6 +3197,14 @@ fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
         }
     };
 
+    let mut env = Environment {
+        os: nsh_core::platform::Os::Linux,
+        idiom: nsh_core::platform::Idiom::Desktop,
+        window: Size::new(px(800.0), px(500.0)),
+        ..Default::default()
+    };
+    core.set_environment(env);
+
     pump(&mut core, &mut tree);
 
     let toolbar_id = tree.children[&2][0];
@@ -3168,15 +3237,11 @@ fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
     );
 
     // 2. Simulate Linux GTK4 asynchronous `WindowControls` measurement (`right = 104pt` at 800x500).
-    let mut env = Environment {
-        window: Size::new(px(800.0), px(500.0)),
-        title_bar: Edges {
-            top: Points(42.0),
-            right: Points(104.0),
-            bottom: Points(0.0),
-            left: Points(0.0),
-        },
-        ..Default::default()
+    env.title_bar = Edges {
+        top: Points(42.0),
+        right: Points(104.0),
+        bottom: Points(0.0),
+        left: Points(0.0),
     };
     core.set_environment(env);
     pump(&mut core, &mut tree);
@@ -3194,6 +3259,7 @@ fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
     );
 
     // 3. Simulate Windows caption buttons (`right = 138pt`).
+    env.os = nsh_core::platform::Os::Windows;
     env.title_bar = Edges {
         top: Points(42.0),
         right: Points(138.0),
@@ -3211,6 +3277,7 @@ fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
     );
 
     // 4. Simulate macOS traffic lights (`left = 78pt`, `right = 0pt`) and tall bar (`top = 48pt`).
+    env.os = nsh_core::platform::Os::MacOs;
     env.title_bar = Edges {
         top: Points(48.0),
         right: Points(0.0),
@@ -3521,7 +3588,7 @@ fn top_bottom_layout_expands_unset_columns_to_fill_window_width() {
 
     let split_cols = super::flow_table_columns_for_layout(shown, &custom, false, 1200.0);
     let split_sum: f32 = split_cols.iter().map(|c| c.width.unwrap().0).sum();
-    assert_eq!(split_sum, 648.0);
+    assert_eq!(split_sum, 656.0);
 
     let tb_unset = super::flow_table_columns_for_layout(
         shown,
@@ -4764,6 +4831,99 @@ fn keyboard_step_selected_auto_scrolls_row_into_viewport() {
 }
 
 #[test]
+fn data_table_selection_clears_when_selected_becomes_none() {
+    use nsh_core::{EventKind, EventPayload, PressEvent};
+
+    assert_eq!(
+        super::table_selection_for_row(Some(2)).and_then(|s| s.row),
+        Some(2)
+    );
+    let cleared = super::table_selection_for_row(None).expect("controlled empty selection");
+    assert!(cleared.row.is_none());
+    assert!(cleared.column.is_none());
+
+    #[component]
+    fn DataTableSelectionHarness() -> impl IntoElement {
+        let selected_row = signal(Some(1_usize));
+        let step = signal(0_u8);
+        let readout = signal(String::new());
+        let table = component_ref::<super::DataTable>();
+        view()
+            .w(px(320.0))
+            .h(px(160.0))
+            .on_press(move || {
+                let cur = step.get();
+                step.set(cur + 1);
+                let sel_row = table
+                    .api::<super::DataTableApi>()
+                    .and_then(|api| api.selection())
+                    .and_then(|sel| sel.row);
+                match cur {
+                    0 => {
+                        readout.set(format!("before={sel_row:?}"));
+                        selected_row.set(None);
+                    }
+                    _ => {
+                        readout.set(format!("after={sel_row:?}"));
+                    }
+                }
+            })
+            .child(text(move || readout.get()))
+            .child(
+                super::data_table()
+                    .component_ref(&table)
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .w_full()
+                    .columns(|| {
+                        let mut col = super::DataTableColumn::default();
+                        col.key = "id".into();
+                        col.width = Some(px(120.0));
+                        vec![col]
+                    })
+                    .data(super::DataTableRows::default())
+                    .row_count(|| Some(3))
+                    .row_height(|| px(32.0))
+                    .header_height(px(28.0))
+                    .row_header(false)
+                    .column_selectable(false)
+                    .cell_selectable(false)
+                    .selection(move || super::table_selection_for_row(selected_row.get()))
+                    .render_cell(|cell: &super::DataTableCell| {
+                        text(format!("row-{}", cell.row)).into_element()
+                    }),
+            )
+    }
+
+    let (mut core, mut tree) =
+        mount_headless_component::<DataTableSelectionHarness>(Size::new(px(320.0), px(160.0)));
+
+    core.component_event(
+        2,
+        EventKind::Press,
+        &EventPayload::Press(PressEvent::default()),
+    );
+    tree.pump(&mut core);
+    let before = tree.collect_live_texts(2);
+    assert!(
+        before.iter().any(|t| t == "before=Some(1)"),
+        "expected initial table selection Some(1), got: {before:?}"
+    );
+
+    core.component_event(
+        2,
+        EventKind::Press,
+        &EventPayload::Press(PressEvent::default()),
+    );
+    tree.pump(&mut core);
+    let after = tree.collect_live_texts(2);
+    assert!(
+        after.iter().any(|t| t == "after=None"),
+        "expected cleared table selection None, got: {after:?}"
+    );
+}
+
+#[test]
 fn filter_syntax_validation_flags_errors_and_allows_in_progress_prefix() {
     use crate::i18n::Lang;
 
@@ -5683,4 +5843,105 @@ fn path_cell_rule_badge_centers_icons_with_gap_and_clears_path() {
         "path x={} overlapped or crowded badge right edge={badge_right}",
         path.origin.x.0
     );
+}
+
+#[tokio::test]
+async fn code_body_resets_scroll_on_flow_or_page_change_and_keeps_same_flow_scroll() {
+    use nsh_core::{EventKind, EventPayload, PressEvent};
+
+    fn json_lines(prefix: &str, count: usize) -> String {
+        let lines = (0..count)
+            .map(|i| format!("  \"{prefix}_{i}\": {i}"))
+            .collect::<Vec<_>>()
+            .join(",\n");
+        format!("{{\n{lines}\n}}")
+    }
+
+    #[component]
+    fn CodeBodyScrollResetHarness() -> impl IntoElement {
+        let selected = signal(Some(1_u64));
+        let page_offset = signal(0_usize);
+        let reset_key = computed(move || (selected.get(), page_offset.get()));
+        let body = signal(json_lines("flow1", 80));
+        let lang = signal("json".to_string());
+        let search = signal(String::new());
+        let editor_ref = component_ref::<super::Editor>();
+        let step = signal(0_u8);
+        let readout = signal(String::new());
+
+        view()
+            .w(px(560.0))
+            .h(px(500.0))
+            .on_press(move || {
+                let cur = step.get();
+                step.set(cur + 1);
+                let y = editor_ref
+                    .api::<super::EditorApi>()
+                    .map(|api| api.scroll_offset().y.0);
+                match cur {
+                    0 => {
+                        if let Some(api) = editor_ref.api::<super::EditorApi>() {
+                            api.set_scroll_offset(Point::new(px(0.0), px(240.0)));
+                        }
+                        let after = editor_ref
+                            .api::<super::EditorApi>()
+                            .map(|api| api.scroll_offset().y.0);
+                        readout.set(format!("step0={after:?}"));
+                    }
+                    1 => {
+                        readout.set(format!("scrolled={y:?}"));
+                        body.set(json_lines("flow1_chunk2", 80));
+                    }
+                    2 => {
+                        readout.set(format!("same_flow={y:?}"));
+                        selected.set(Some(2));
+                        body.set(json_lines("flow2", 80));
+                    }
+                    3 => {
+                        readout.set(format!("after_flow={y:?}"));
+                        if let Some(api) = editor_ref.api::<super::EditorApi>() {
+                            api.set_scroll_offset(Point::new(px(0.0), px(180.0)));
+                        }
+                    }
+                    4 => {
+                        readout.set(format!("rescrolled={y:?}"));
+                        page_offset.set(65_536);
+                        body.set(json_lines("flow2_page2", 80));
+                    }
+                    _ => {
+                        readout.set(format!("after_page={y:?}"));
+                    }
+                }
+            })
+            .child(text(move || readout.get()))
+            .child(super::code_body_with_ref(
+                body, lang, search, reset_key, editor_ref,
+            ))
+    }
+
+    let (mut core, mut tree) =
+        mount_headless_component::<CodeBodyScrollResetHarness>(Size::new(px(560.0), px(500.0)));
+
+    let step_press = |core: &mut nsh_core::Core<nsh_core::ApproxTextEngine>,
+                      tree: &mut HeadlessMountTree,
+                      expected: &str| {
+        core.component_event(
+            2,
+            EventKind::Press,
+            &EventPayload::Press(PressEvent::default()),
+        );
+        tree.pump(core);
+        let texts = tree.collect_live_texts(2);
+        assert!(
+            texts.iter().any(|t| t == expected),
+            "expected `{expected}` in live texts, got: {texts:?}"
+        );
+    };
+
+    step_press(&mut core, &mut tree, "step0=Some(240.0)");
+    step_press(&mut core, &mut tree, "scrolled=Some(240.0)");
+    step_press(&mut core, &mut tree, "same_flow=Some(240.0)");
+    step_press(&mut core, &mut tree, "after_flow=Some(0.0)");
+    step_press(&mut core, &mut tree, "rescrolled=Some(180.0)");
+    step_press(&mut core, &mut tree, "after_page=Some(0.0)");
 }

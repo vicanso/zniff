@@ -1385,8 +1385,8 @@ pub fn column_width_limit(key: &str) -> Option<ColumnWidth> {
             max: 220,
         },
         "id" => ColumnWidth {
-            default: 38,
-            min: 34,
+            default: 46,
+            min: 42,
             max: 120,
         },
         "path" => ColumnWidth {
@@ -2298,6 +2298,13 @@ mod tests {
         let limit = column_width_limit("size").unwrap();
         assert_eq!(limit.default, 74);
         assert_eq!(limit.min, 48);
+    }
+
+    #[test]
+    fn id_column_width_accounts_for_left_list_inset() {
+        let limit = column_width_limit("id").unwrap();
+        assert_eq!(limit.default, 46);
+        assert_eq!(limit.min, 42);
     }
 
     #[test]

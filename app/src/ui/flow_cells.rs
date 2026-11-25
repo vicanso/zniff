@@ -54,6 +54,26 @@ pub(crate) fn column_pad_right(
     }
 }
 
+pub(crate) fn column_header_pad_left(column: Option<ListColumn>, columns: ListColumns) -> Points {
+    if column == Some(ListColumn::Method) || (column.is_some() && columns.first_visible() == column)
+    {
+        px(LIST_INSET)
+    } else {
+        px(4.0)
+    }
+}
+
+pub(crate) fn column_cell_pad_left(column: ListColumn, columns: ListColumns) -> Points {
+    let is_first = columns.first_visible() == Some(column);
+    if column == ListColumn::Method {
+        if is_first { px(2.0) } else { px(4.0) }
+    } else if is_first {
+        px(LIST_INSET - 2.0)
+    } else {
+        px(4.0)
+    }
+}
+
 pub(crate) fn flow_header(
     cell: &DataTableHeaderCell,
     columns: Signal<ListColumns>,
@@ -63,11 +83,6 @@ pub(crate) fn flow_header(
     let key = cell.key.to_string();
     let column = ListColumn::from_key(&key);
     let align_right = matches!(key.as_str(), "gap" | "elapsed" | "size");
-    let pad_left = match key.as_str() {
-        "method" => 14.0,
-        "id" => 6.0,
-        _ => 4.0,
-    };
     let is_sorted =
         move || column.is_some_and(|col| sort.get().is_some_and(|current| current.column == col));
     let mut row = view()
@@ -75,7 +90,7 @@ pub(crate) fn flow_header(
         .w_full()
         .h(px(28.0))
         .min_w(px(0.0))
-        .pl(px(pad_left))
+        .pl(move || column_header_pad_left(column, columns.get()))
         .pr(move || column_pad_right(column, align_right, columns.get()))
         .gap_0p5()
         .flex_row()
@@ -160,6 +175,7 @@ pub(crate) fn method_cell(
     columns: Signal<ListColumns>,
     index: usize,
 ) -> impl IntoElement {
+    let is_first = move || columns.get().first_visible() == Some(ListColumn::Method);
     view()
         .w_full()
         .h_full()
@@ -169,16 +185,10 @@ pub(crate) fn method_cell(
         .border_b_1()
         .border_t_color(move || marker_row_border(rows, index))
         .border_b_color(move || marker_row_border(rows, index))
-        .pl(px(2.0))
+        .pl(move || column_cell_pad_left(ListColumn::Method, columns.get()))
         .pr(move || column_pad_right(Some(ListColumn::Method), false, columns.get()))
-        .border_l(px(2.0))
-        .border_l_color(move || {
-            if columns.get().first_visible() == Some(ListColumn::Method) {
-                row_edge_mark(rows, selected, baseline, index)
-            } else {
-                AdaptiveColor::TRANSPARENT
-            }
-        })
+        .border_l(move || if is_first() { px(2.0) } else { px(0.0) })
+        .border_l_color(move || row_edge_mark(rows, selected, baseline, index))
         .flex_row()
         .items_center()
         .overflow_hidden()
@@ -255,6 +265,7 @@ pub(crate) fn id_cell(
     columns: Signal<ListColumns>,
     index: usize,
 ) -> impl IntoElement {
+    let is_first = move || columns.get().first_visible() == Some(ListColumn::Id);
     view()
         .w_full()
         .h_full()
@@ -264,16 +275,10 @@ pub(crate) fn id_cell(
         .border_b_1()
         .border_t_color(move || marker_row_border(rows, index))
         .border_b_color(move || marker_row_border(rows, index))
-        .pl(px(4.0))
+        .pl(move || column_cell_pad_left(ListColumn::Id, columns.get()))
         .pr(move || column_pad_right(Some(ListColumn::Id), false, columns.get()))
-        .border_l(px(2.0))
-        .border_l_color(move || {
-            if columns.get().first_visible() == Some(ListColumn::Id) {
-                row_edge_mark(rows, selected, baseline, index)
-            } else {
-                AdaptiveColor::TRANSPARENT
-            }
-        })
+        .border_l(move || if is_first() { px(2.0) } else { px(0.0) })
+        .border_l_color(move || row_edge_mark(rows, selected, baseline, index))
         .flex_row()
         .items_center()
         .overflow_hidden()
@@ -317,7 +322,7 @@ pub(crate) fn status_cell(
         .border_b_1()
         .border_t_color(move || marker_row_border(rows, index))
         .border_b_color(move || marker_row_border(rows, index))
-        .pl(move || if is_first() { px(2.0) } else { px(4.0) })
+        .pl(move || column_cell_pad_left(ListColumn::Status, columns.get()))
         .pr(move || column_pad_right(Some(ListColumn::Status), false, columns.get()))
         .border_l(move || if is_first() { px(2.0) } else { px(0.0) })
         .border_l_color(move || row_edge_mark(rows, selected, baseline, index))
@@ -373,7 +378,7 @@ pub(crate) fn time_cell(
         .border_b_1()
         .border_t_color(move || marker_row_border(rows, index))
         .border_b_color(move || marker_row_border(rows, index))
-        .pl(move || if is_first() { px(2.0) } else { px(4.0) })
+        .pl(move || column_cell_pad_left(ListColumn::Gap, columns.get()))
         .pr(move || column_pad_right(Some(ListColumn::Gap), true, columns.get()))
         .border_l(move || if is_first() { px(2.0) } else { px(0.0) })
         .border_l_color(move || row_edge_mark(rows, selected, baseline, index))
@@ -424,7 +429,7 @@ pub(crate) fn elapsed_cell(
         .border_b_1()
         .border_t_color(move || marker_row_border(rows, index))
         .border_b_color(move || marker_row_border(rows, index))
-        .pl(move || if is_first() { px(2.0) } else { px(4.0) })
+        .pl(move || column_cell_pad_left(ListColumn::Elapsed, columns.get()))
         .pr(move || column_pad_right(Some(ListColumn::Elapsed), true, columns.get()))
         .border_l(move || if is_first() { px(2.0) } else { px(0.0) })
         .border_l_color(move || row_edge_mark(rows, selected, baseline, index))
@@ -474,7 +479,7 @@ pub(crate) fn host_cell(
         .border_b_1()
         .border_t_color(move || marker_row_border(rows, index))
         .border_b_color(move || marker_row_border(rows, index))
-        .pl(move || if is_first() { px(2.0) } else { px(4.0) })
+        .pl(move || column_cell_pad_left(ListColumn::Host, columns.get()))
         .pr(move || column_pad_right(Some(ListColumn::Host), false, columns.get()))
         .border_l(move || if is_first() { px(2.0) } else { px(0.0) })
         .border_l_color(move || row_edge_mark(rows, selected, baseline, index))
@@ -526,7 +531,7 @@ pub(crate) fn client_ip_cell(
         .border_b_1()
         .border_t_color(move || marker_row_border(rows, index))
         .border_b_color(move || marker_row_border(rows, index))
-        .pl(move || if is_first() { px(2.0) } else { px(4.0) })
+        .pl(move || column_cell_pad_left(ListColumn::ClientIp, columns.get()))
         .pr(move || column_pad_right(Some(ListColumn::ClientIp), false, columns.get()))
         .border_l(move || if is_first() { px(2.0) } else { px(0.0) })
         .border_l_color(move || row_edge_mark(rows, selected, baseline, index))
@@ -582,7 +587,7 @@ pub(crate) fn protocol_cell(
         .border_b_1()
         .border_t_color(move || marker_row_border(rows, index))
         .border_b_color(move || marker_row_border(rows, index))
-        .pl(move || if is_first() { px(2.0) } else { px(4.0) })
+        .pl(move || column_cell_pad_left(ListColumn::Protocol, columns.get()))
         .pr(move || column_pad_right(Some(ListColumn::Protocol), false, columns.get()))
         .border_l(move || if is_first() { px(2.0) } else { px(0.0) })
         .border_l_color(move || row_edge_mark(rows, selected, baseline, index))
@@ -622,7 +627,7 @@ pub(crate) fn size_cell(
         .border_b_1()
         .border_t_color(move || marker_row_border(rows, index))
         .border_b_color(move || marker_row_border(rows, index))
-        .pl(move || if is_first() { px(2.0) } else { px(4.0) })
+        .pl(move || column_cell_pad_left(ListColumn::Size, columns.get()))
         .pr(move || column_pad_right(Some(ListColumn::Size), true, columns.get()))
         .border_l(move || if is_first() { px(2.0) } else { px(0.0) })
         .border_l_color(move || row_edge_mark(rows, selected, baseline, index))
@@ -668,7 +673,7 @@ pub(crate) fn path_cell(
         .border_b_1()
         .border_t_color(move || marker_row_border(rows, index))
         .border_b_color(move || marker_row_border(rows, index))
-        .pl(move || if is_first() { px(2.0) } else { px(4.0) })
+        .pl(move || column_cell_pad_left(ListColumn::Path, columns.get()))
         .pr(move || column_pad_right(Some(ListColumn::Path), false, columns.get()))
         .border_l(move || if is_first() { px(2.0) } else { px(0.0) })
         .border_l_color(move || row_edge_mark(rows, selected, baseline, index))

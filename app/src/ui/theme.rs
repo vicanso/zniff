@@ -160,10 +160,6 @@ pub(crate) fn backdrop_scrim() -> AdaptiveColor {
     AdaptiveColor::new(rgba(0x0F172A5C), rgba(0x0000008F))
 }
 
-pub(crate) fn backdrop_scrim_soft() -> AdaptiveColor {
-    AdaptiveColor::new(rgba(0x00000018), rgba(0x00000044))
-}
-
 pub(crate) fn timing_dns() -> AdaptiveColor {
     AdaptiveColor::rgb(0x0284c7, 0x38bdf8)
 }

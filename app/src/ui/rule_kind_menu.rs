@@ -105,7 +105,8 @@ pub(crate) const QUICK_KIND_GROUPS: &[QuickKindGroup] = &[
     },
 ];
 
-pub(crate) fn quick_kind_dropdown(kind: Signal<u8>) -> impl IntoElement {
+pub(crate) fn quick_kind_dropdown(draft: QuickRuleDraftSignals) -> impl IntoElement {
+    let kind = draft.kind;
     let open = signal(false);
     let langs = ui_langs();
     menu()
@@ -165,7 +166,7 @@ pub(crate) fn quick_kind_dropdown(kind: Signal<u8>) -> impl IntoElement {
                         QUICK_KIND_GROUPS
                             .iter()
                             .copied()
-                            .map(move |group| quick_kind_group_block(group, kind, open)),
+                            .map(move |group| quick_kind_group_block(group, draft, open)),
                     ),
                 ),
             ),
@@ -174,9 +175,10 @@ pub(crate) fn quick_kind_dropdown(kind: Signal<u8>) -> impl IntoElement {
 
 fn quick_kind_group_block(
     group: QuickKindGroup,
-    kind: Signal<u8>,
+    draft: QuickRuleDraftSignals,
     open: Signal<bool>,
 ) -> impl IntoElement {
+    let kind = draft.kind;
     view()
         .w_full()
         .gap_0p5()
@@ -222,7 +224,7 @@ fn quick_kind_group_block(
                 .ease_out()
                 .focus_visible(apply_focus_ring)
                 .on_select(move || {
-                    kind.set(item.idx);
+                    switch_quick_kind(draft, item.idx);
                     open.set(false);
                 })
                 .child(

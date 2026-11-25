@@ -116,7 +116,6 @@ pub enum StatusMsg {
         tool: String,
     },
     CopiedUrl,
-    CopiedHeaderValue(String),
     CopiedHeaders {
         zh: &'static str,
         en: &'static str,
@@ -209,6 +208,7 @@ pub enum StatusMsg {
     },
     ProfileSaved(String),
     ProfileRestored(String),
+    ProfileReverted(String),
     MappedLocal(String),
     BreakRuleAdded(String),
     PrimaryFilterPausedForWatch,
@@ -506,10 +506,6 @@ impl StatusMsg {
                 Lang::En => format!("{tool} CA unavailable; fell back to zniff root CA"),
             },
             Self::CopiedUrl => t(lang, "已复制 URL", "Copied the URL").into(),
-            Self::CopiedHeaderValue(name) => match lang {
-                Lang::Zh => format!("已复制 {name}"),
-                Lang::En => format!("Copied {name}"),
-            },
             Self::CopiedHeaders { zh, en } => match lang {
                 Lang::Zh => format!("已复制全部{zh}"),
                 Lang::En => format!("Copied all {}", en.to_lowercase()),
@@ -762,6 +758,10 @@ impl StatusMsg {
             Self::ProfileRestored(name) => match lang {
                 Lang::Zh => format!("已恢复历史预设「{name}」"),
                 Lang::En => format!("Restored preset \"{name}\" from history"),
+            },
+            Self::ProfileReverted(name) => match lang {
+                Lang::Zh => format!("已丢弃修改，还原预设「{name}」"),
+                Lang::En => format!("Discarded changes and restored preset \"{name}\""),
             },
             Self::MappedLocal(target) => match lang {
                 Lang::Zh => format!("已添加本地映射规则 · {target}"),
@@ -1092,12 +1092,12 @@ impl StatusMsg {
             | Self::RulesMigrated { .. }
             | Self::ProfileSaved(_)
             | Self::ProfileRestored(_)
+            | Self::ProfileReverted(_)
             | Self::Exported(_)
             | Self::MockExported { .. }
             | Self::Imported { .. }
             | Self::Saved(_)
             | Self::CopiedUrl
-            | Self::CopiedHeaderValue(_)
             | Self::CopiedHeaders { .. }
             | Self::CopiedCurl { .. }
             | Self::CopiedBody { .. }
@@ -1243,8 +1243,8 @@ impl StatusMsg {
             Self::RulesCleared | Self::ComposeHistoryCleared => t(lang, "已清空", "Cleared"),
             Self::RuleGroupDeleted(_) | Self::PresetDeleted(_) => t(lang, "已删除", "Deleted"),
             Self::ProfileRestored(_) => t(lang, "已恢复历史版本", "History Restored"),
+            Self::ProfileReverted(_) => t(lang, "已还原预设", "Preset Restored"),
             Self::CopiedUrl
-            | Self::CopiedHeaderValue(_)
             | Self::CopiedHeaders { .. }
             | Self::CopiedCurl { .. }
             | Self::CopiedBody { .. }

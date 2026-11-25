@@ -296,31 +296,7 @@ pub(crate) fn row_copy_button(
         )
 }
 
-fn row_copy_slot(
-    visible: impl Fn() -> bool + 'static,
-    zh_label: &'static str,
-    en_label: &'static str,
-    zh_tip: &'static str,
-    en_tip: &'static str,
-    on_copy: impl Fn() + Clone + 'static,
-) -> impl IntoElement {
-    view()
-        .w(px(22.0))
-        .h(px(20.0))
-        .flex_shrink_0()
-        .flex_row()
-        .items_center()
-        .justify_center()
-        .child(when(visible, move || {
-            row_copy_button(zh_label, en_label, zh_tip, en_tip, on_copy.clone())
-        }))
-}
-
-fn hoverable_kv_row(
-    index: ReadSignal<usize>,
-    hovered_key: Signal<Option<u32>>,
-    row_key: impl Fn() -> u32 + Copy + 'static,
-) -> View {
+fn hoverable_kv_row(index: ReadSignal<usize>) -> View {
     view()
         .flex_row()
         .items_start()
@@ -328,28 +304,15 @@ fn hoverable_kv_row(
         .px_3p5()
         .py_2()
         .bg(move || {
-            if hovered_key.get() == Some(row_key()) {
-                bg_control()
-            } else if index.get() % 2 == 1 {
+            if index.get() % 2 == 1 {
                 bg_code()
             } else {
                 bg_card()
             }
         })
+        .hover(|style| style.bg(bg_control()))
         .border_t(move || if index.get() > 0 { px(1.0) } else { px(0.0) })
         .border_t_color(border_subtle())
-        .on_mouse_enter(move |_: &MouseEvent| hovered_key.set(Some(row_key())))
-        .on_mouse_move(move |_: &MouseEvent| {
-            let key = row_key();
-            if hovered_key.get_untracked() != Some(key) {
-                hovered_key.set(Some(key));
-            }
-        })
-        .on_mouse_leave(move |_: &MouseEvent| {
-            if hovered_key.get_untracked() == Some(row_key()) {
-                hovered_key.set(None);
-            }
-        })
 }
 
 pub(crate) fn header_section(props: HeaderSectionProps) -> impl IntoElement {
@@ -364,17 +327,14 @@ pub(crate) fn header_section(props: HeaderSectionProps) -> impl IntoElement {
         controls,
     } = props;
     let is_query = bit == FOLD_QUERY;
-    let hovered_key = signal(None::<u32>);
     let fold_controls = controls.clone();
-    let copy_all_controls = controls.clone();
-    let row_controls = controls;
+    let copy_all_controls = controls;
     view()
         .rounded(px(RADIUS_LG))
         .border_1()
         .border_color(border_strong())
         .bg(bg_card())
         .overflow_hidden()
-        .on_mouse_leave(move |_: &MouseEvent| hovered_key.set(None))
         .child(
             view()
                 .flex_shrink_0()
@@ -453,22 +413,17 @@ pub(crate) fn header_section(props: HeaderSectionProps) -> impl IntoElement {
         .child(when(
             move || !card_folded(folded, bit),
             move || {
-                let row_controls = row_controls.clone();
                 when(move || loading.get(), detail_loading_row).otherwise(move || {
-                    let row_controls = row_controls.clone();
                     when(
                         move || lines.with(Vec::is_empty),
                         || view().px_3p5().py_2p5().child(muted_line(tr("无", "None"))),
                     )
                     .otherwise(move || {
-                        let row_controls = row_controls.clone();
                         each(
                             lines,
                             |line| line.key,
                             move |line, index| {
-                                let controls = row_controls.clone();
-                                let row_key = move || line.with(|l| l.key);
-                                hoverable_kv_row(index, hovered_key, row_key)
+                                hoverable_kv_row(index)
                                     .child(
                                         mono(move || line.with(|line| line.name.clone()))
                                             .w(move || px(kv_key_width(pane_width.get())))
@@ -481,22 +436,6 @@ pub(crate) fn header_section(props: HeaderSectionProps) -> impl IntoElement {
                                             .text_color(fg_muted()),
                                     )
                                     .child(kv_value_cell(line))
-                                    .child(row_copy_slot(
-                                        move || hovered_key.get() == Some(row_key()),
-                                        "复制值",
-                                        "Copy value",
-                                        "复制此项的值",
-                                        "Copy value",
-                                        move || {
-                                            let (name, value) =
-                                                line.with(|l| (l.name.clone(), l.value.clone()));
-                                            set_clipboard(value);
-                                            set_status(
-                                                &controls,
-                                                StatusMsg::CopiedHeaderValue(name),
-                                            );
-                                        },
-                                    ))
                             },
                         )
                     })
@@ -710,9 +649,7 @@ pub(crate) fn messages_section(
     let pane_width = shown.pane_width;
     let copy_all_controls = controls.clone();
     let fold_controls = controls.clone();
-    let llm_controls = controls.clone();
-    let row_controls = controls;
-    let hovered_key = signal(None::<u32>);
+    let llm_controls = controls;
     let has_ws_dirs =
         move || lines.with(|items| items.iter().any(|line| present::is_ws_message(&line.name)));
     let has_llm_view = move || llm_stream.with(Option::is_some);
@@ -723,7 +660,6 @@ pub(crate) fn messages_section(
         .border_color(border_strong())
         .bg(bg_card())
         .overflow_hidden()
-        .on_mouse_leave(move |_: &MouseEvent| hovered_key.set(None))
         .child(
             view()
                 .flex_shrink_0()
@@ -902,33 +838,27 @@ pub(crate) fn messages_section(
         .child(when(
             move || !card_folded(folded, FOLD_MESSAGES),
             move || {
-                let row_controls = row_controls.clone();
                 let ai_controls = llm_controls.clone();
                 let filtered = move || {
                     filter_message_lines(&lines.get(), &search.get(), dir.get(), kind.get())
                 };
                 when(move || shown.messages_loading.get(), detail_loading_row).otherwise(
                     move || {
-                        let row_controls = row_controls.clone();
                         let ai_controls = ai_controls.clone();
                         when(is_llm_ai_mode, move || {
                             llm_stream_panel(llm_stream, ai_controls.clone())
                         })
                         .otherwise(move || {
-                            let row_controls = row_controls.clone();
                             when(
                                 move || filtered().is_empty(),
                                 || view().px_3p5().py_2p5().child(muted_line(tr("无", "None"))),
                             )
                             .otherwise(move || {
-                                let row_controls = row_controls.clone();
                                 each(
                                     filtered,
                                     |line| line.key,
                                     move |line, index| {
-                                        let controls = row_controls.clone();
-                                        let row_key = move || line.with(|l| l.key);
-                                        hoverable_kv_row(index, hovered_key, row_key)
+                                        hoverable_kv_row(index)
                                             .child(
                                                 mono(move || line.with(|line| line.name.clone()))
                                                     .w(move || px(kv_key_width(pane_width.get())))
@@ -948,21 +878,6 @@ pub(crate) fn messages_section(
                                                     .text_size(move || scaled_px(TEXT_SM))
                                                     .text_color(fg_primary()),
                                             )
-                                            .child(row_copy_slot(
-                                                move || {
-                                                    hovered_key.get() == Some(row_key())
-                                                        && line.with(|l| l.name != "…")
-                                                },
-                                                "复制消息",
-                                                "Copy message",
-                                                "复制此条消息",
-                                                "Copy message",
-                                                move || {
-                                                    let payload = line.with(|l| l.value.clone());
-                                                    set_clipboard(payload);
-                                                    set_status(&controls, StatusMsg::CopiedMessage);
-                                                },
-                                            ))
                                     },
                                 )
                             })
@@ -1000,14 +915,6 @@ mod tests {
         assert_eq!(
             format_header_lines_for_copy(&lines, true),
             "content-type=application/json\nx-trace-id=abc-123"
-        );
-        assert_eq!(
-            StatusMsg::CopiedHeaderValue("x-trace-id".into()).text(Lang::Zh),
-            "已复制 x-trace-id"
-        );
-        assert_eq!(
-            StatusMsg::CopiedHeaderValue("x-trace-id".into()).text(Lang::En),
-            "Copied x-trace-id"
         );
         assert_eq!(
             StatusMsg::CopiedHeaders {

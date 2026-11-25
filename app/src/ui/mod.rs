@@ -22,10 +22,10 @@ pub(crate) use nsh_base::data_table::ColumnFixed;
 pub(crate) use nsh_base::{
     Anchor, DataTable, DataTableApi, DataTableCell, DataTableClasses, DataTableColumn,
     DataTableColumnMove, DataTableContextMenu, DataTableEvent, DataTableHeaderCell, DataTablePress,
-    DataTableRange, DataTableRows, DataTableSelection, DiffLayout, ToastManager, ToastMotion,
-    ToastOptions, ToastStackState, ToastTransitionStatus, Tree, TreeEntry, TreeEvent, TreeItem,
-    data_table, diff_view, editor, input, menu, menu_item, popover, progress, switch, tab, tabs,
-    theme, toast, toast_stack, tooltip, tree,
+    DataTableRange, DataTableRows, DataTableSelection, DiffLayout, Editor, EditorApi, ToastManager,
+    ToastMotion, ToastOptions, ToastStackState, ToastTransitionStatus, Tree, TreeEntry, TreeEvent,
+    TreeItem, data_table, diff_view, editor, input, menu, menu_item, popover, progress, switch,
+    tab, tabs, theme, toast, toast_stack, tooltip, tree,
 };
 #[allow(unused_imports)]
 pub(crate) use nsh_core::EllipsizeMode;
@@ -33,6 +33,12 @@ pub(crate) use nsh_core::EllipsizeMode;
 pub(crate) use nsh_core::platform::Lifecycle;
 #[allow(unused_imports)]
 pub(crate) use nsh_core::prelude::*;
+
+/// Writes `text` to the system clipboard, discarding `Answer<ClipboardWrite>`
+/// (the write still runs per `nsh-core` 0.7).
+pub(crate) fn set_clipboard(text: impl Into<String>) {
+    drop(nsh_core::prelude::set_clipboard(text));
+}
 
 #[allow(unused_imports)]
 pub(crate) use crate::ca::Ca;

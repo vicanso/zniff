@@ -1,0 +1,11 @@
+# `nsh package` compiles from the generated workspace `app/.nsh/rust/Cargo.toml`,
+# where Cargo ignores `app/Cargo.toml`'s `[profile.release]`. Placing the
+# release profile here ensures `nsh package` (manual, Makefile, and CI across
+# macOS/Linux/Windows) gets the same size optimizations without affecting
+# `linux/ebpf/` or `[profile.web]` (which overrides all keys explicitly).
+[profile.release]
+opt-level = "s"
+codegen-units = 1
+lto = true
+strip = true
+panic = "abort"

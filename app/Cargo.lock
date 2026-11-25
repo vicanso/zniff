@@ -1871,9 +1871,9 @@ dependencies = [
 
 [[package]]
 name = "nsh-base"
-version = "0.6.1"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e083cbd14b906efbd94076939c7effd43fa3d1574f1d555919d099e9e0ec3e1c"
+checksum = "6e7fd6e665b57d8cce62b9e6266ea1af3d5599d7d2acce09ddf7539b80ce7245"
 dependencies = [
  "chrono",
  "html5ever",
@@ -1895,19 +1895,21 @@ dependencies = [
 
 [[package]]
 name = "nsh-core"
-version = "0.6.1"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b45a8b194c6879bcb26c6e430b804e49e97ec0fea5fad8c78d7710fd41f74a6"
+checksum = "cb2176bb7caf0a6bb0744e837a993fe010bb1117a4292a10712c8aeb46251250"
 dependencies = [
  "cap-std",
  "chrono",
  "crc32fast",
  "httpdate",
+ "image",
  "imagesize",
  "libc",
  "log",
  "nsh-macros",
  "ordered-float",
+ "percent-encoding",
  "rust-i18n",
  "rustc-hash",
  "serde",
@@ -1926,9 +1928,9 @@ dependencies = [
 
 [[package]]
 name = "nsh-engine"
-version = "0.6.1"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4de944c36204b3f778b4fcf90373496d29507e8d38fb5e92a6e29a4cce637d7"
+checksum = "c28430939002b8fba3f43162f7131cf5950763a1eca086b539405883ce17cba7"
 dependencies = [
  "crossbeam-channel",
  "env_filter",
@@ -1945,9 +1947,9 @@ dependencies = [
 
 [[package]]
 name = "nsh-macros"
-version = "0.6.1"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f1b3ce01247cac072395d42177725e7972de498eb148d37443196d870cdaf2b"
+checksum = "11d47cf2e51019c6755275925aa2258e9708302383ad0fda611eed643a6d0f8a"
 dependencies = [
  "imagesize",
  "proc-macro2",
@@ -1959,9 +1961,9 @@ dependencies = [
 
 [[package]]
 name = "nsh-platform-apple"
-version = "0.6.1"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3a094eee9e29979fd0fd1bcc8fca568c386d5ab10a46a67c72409c1c257561f"
+checksum = "606e9c39ec513c32134ebc9dbc5d052adaac97bdf79fb70a9d7652449642bc7d"
 dependencies = [
  "block2",
  "cc",
@@ -1974,17 +1976,19 @@ dependencies = [
  "objc2-app-kit",
  "objc2-core-foundation",
  "objc2-core-graphics",
+ "objc2-core-text",
  "objc2-foundation",
  "objc2-image-io",
  "objc2-ui-kit",
  "serde_json",
+ "unicode-bidi",
 ]
 
 [[package]]
 name = "nsh-platform-linux"
-version = "0.6.1"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6d734b61a5b522c1ecf692c97e478d3944608ba7a0db88cc621207a5ed37919"
+checksum = "584efe788dbcdf758c0965b22df1f5106c74400c177910dc65d4693787b22854"
 dependencies = [
  "crossbeam-channel",
  "gtk4",
@@ -2002,9 +2006,9 @@ dependencies = [
 
 [[package]]
 name = "nsh-platform-macos"
-version = "0.6.1"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8fe81366570211925b77823c8210868d0943976da55944bb327eaa27f215d49e"
+checksum = "2b91b4ec02d9eec10020d6610344b6c6ac04c039a3e9711581a063fd248ca1c1"
 dependencies = [
  "block2",
  "crossbeam-channel",
@@ -2027,13 +2031,14 @@ dependencies = [
  "objc2-quartz-core",
  "rustc-hash",
  "serde_json",
+ "unicode-bidi",
 ]
 
 [[package]]
 name = "nsh-platform-windows"
-version = "0.6.1"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7280c4bccaa7a9b1fa7f3a1cd85112ef59b88f479d153894a7a6b366ad5499b1"
+checksum = "021898e353b95ab66c13664bea74fe9e0de40af2bced920d5ccebc5902880cba"
 dependencies = [
  "crossbeam-channel",
  "image",
@@ -2052,9 +2057,9 @@ dependencies = [
 
 [[package]]
 name = "nsh-updater"
-version = "0.6.1"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c263483a4e5c6977dcade98dd1865b0bbdfbf4ff8dafbacaa3ad198e7bf1e2fe"
+checksum = "313d2e77678eeaf5d9274533984b5dd5dad264de322cf08a86b5373b5efaf534"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
@@ -2066,6 +2071,7 @@ dependencies = [
  "tar",
  "thiserror",
  "zip",
+ "zstd",
 ]
 
 [[package]]
@@ -3081,9 +3087,9 @@ dependencies = [
 
 [[package]]
 name = "taffy"
-version = "0.15.1"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "31f7bd2d97198df05186f93a3a3c306845f40e8b3c22bf9279cdd7e5cf5fea7d"
+checksum = "cae92eb1b204bfd239b5c463e1bd2c3ce4913d2d3abfb5c64f5cfee9d65e5c68"
 dependencies = [
  "serde",
  "slotmap",
@@ -3384,6 +3390,12 @@ name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
+
+[[package]]
+name = "unicode-bidi"
+version = "0.3.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c1cb5db39152898a79168971543b1cb5020dff7fe43c8dc468b0885f5e29df5"
 
 [[package]]
 name = "unicode-id"

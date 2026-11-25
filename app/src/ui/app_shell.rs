@@ -1,21 +1,114 @@
 #[allow(unused_imports)]
 use super::*;
 
-/// The root view: a flow list and the selected flow.
+/// The root view: hosts the NSH 0.7 desktop window (no-op wrapper off desktop) and workspace.
 #[component]
 pub fn App() -> impl IntoElement {
     #[cfg(not(target_arch = "wasm32"))]
     crate::ensure_desktop_runtime_init();
     crate::startup_metrics::mark_app_mount();
+    let initial_cfg = saved_config();
+    let main_open = signal(true);
+    let show_tray = signal(initial_cfg.show_tray);
+    let minimize_to_tray = signal(initial_cfg.minimize_to_tray);
+    let main_win = signal(None::<nsh_core::element::desktop::WindowRef>);
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let mut bar = nsh_core::desktop::TitleBarOptions::default();
-        bar.style = nsh_core::desktop::TitleBarStyle::Hidden;
-        bar.height = Some(px(TOOLBAR_H));
-        let mut attributes = nsh_core::desktop::WindowAttributes::default();
-        attributes.title_bar = Some(bar);
-        nsh_core::element::desktop::main_window().set(attributes);
+        use nsh_core::desktop::QuitMode;
+        use nsh_core::element::desktop::{on_reopen, set_quit_mode};
+
+        effect(move || {
+            let mode = if show_tray.get() && minimize_to_tray.get() {
+                QuitMode::Explicit
+            } else {
+                QuitMode::LastWindowClosed
+            };
+            set_quit_mode(mode);
+        });
+        on_reopen(move || {
+            if !main_open.get_untracked() {
+                main_open.set(true);
+            } else if let Some(win) = main_win.get_untracked() {
+                win.show();
+                win.focus();
+            }
+        });
     }
+    let mut title_bar = nsh_core::desktop::TitleBarOptions::default();
+    title_bar.style = nsh_core::desktop::TitleBarStyle::Hidden;
+    title_bar.height = Some(px(TOOLBAR_H));
+    let mut base_attrs = nsh_core::desktop::WindowAttributes::default();
+    base_attrs.title_bar = Some(title_bar);
+    base_attrs.min_size = Some(Some(Size {
+        width: px(960.0),
+        height: px(640.0),
+    }));
+    #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
+    let mut main_window_node = nsh_core::element::desktop::window()
+        .id("main")
+        .title("zniff")
+        .default_size(Size {
+            width: px(initial_cfg.window_width as f32),
+            height: px(initial_cfg.window_height as f32),
+        })
+        .attributes(base_attrs)
+        .attributes(move || {
+            let mut attrs = nsh_core::desktop::WindowAttributes::default();
+            attrs.close_on_press = Some(!(show_tray.get() && minimize_to_tray.get()));
+            attrs
+        })
+        .open(main_open)
+        .on_open_change(move |ev| main_open.set(ev.open));
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use nsh_core::desktop::{DisplayId, WindowMode, WindowPosition};
+
+        if let Some(id) = initial_cfg
+            .window_display_id
+            .as_deref()
+            .and_then(config::parse_window_display_id)
+        {
+            main_window_node = main_window_node.display(DisplayId(id));
+        }
+        if let (Some(x), Some(y)) = (initial_cfg.window_x, initial_cfg.window_y) {
+            main_window_node = main_window_node.default_position(WindowPosition::At(Point {
+                x: px(x as f32),
+                y: px(y as f32),
+            }));
+        }
+        if let Some(mode) = match initial_cfg.window_mode.as_str() {
+            "maximized" => Some(WindowMode::Maximized),
+            "fullscreen" => Some(WindowMode::FullScreen),
+            _ => None,
+        } {
+            main_window_node = main_window_node.default_mode(mode);
+        }
+        main_window_node = main_window_node.on_close_press(move |_| {
+            let win = main_win
+                .get_untracked()
+                .unwrap_or_else(nsh_core::element::desktop::current_window);
+            if show_tray.get_untracked() && minimize_to_tray.get_untracked() {
+                win.hide();
+            } else {
+                win.close();
+            }
+        });
+    }
+    main_window_node.content(move || {
+        #[cfg(not(target_arch = "wasm32"))]
+        main_win.set(Some(nsh_core::element::desktop::current_window()));
+        app_workspace(show_tray, minimize_to_tray, main_win, main_open)
+    })
+}
+
+fn app_workspace(
+    show_tray: Signal<bool>,
+    minimize_to_tray: Signal<bool>,
+    main_win: Signal<Option<nsh_core::element::desktop::WindowRef>>,
+    main_open: Signal<bool>,
+) -> impl IntoElement {
+    #[cfg(target_arch = "wasm32")]
+    let _ = (main_win, main_open);
     let langs = signal(load_lang_pref());
     provide_context(langs);
     hydrate_web_local_prefs();
@@ -296,8 +389,8 @@ pub fn App() -> impl IntoElement {
         watch_open: signal(false),
         about_open: signal(false),
         default_json_tree: shown.default_json_tree,
-        show_tray: signal(saved.show_tray),
-        minimize_to_tray: signal(saved.minimize_to_tray),
+        show_tray,
+        minimize_to_tray,
         onboarding_strip_dismissed: signal(saved.onboarding_strip_dismissed),
         deselect_rev: signal(0),
     };
@@ -324,6 +417,7 @@ pub fn App() -> impl IntoElement {
     let tp_apps = signal(crate::transparent_proxy::cached_running_apps());
     #[cfg(not(target_arch = "wasm32"))]
     refresh_transparent_proxy_state_async();
+    #[cfg(not(target_arch = "wasm32"))]
     let tp_probe_at = Cell::new(clock::now());
     let controls = open_controls();
     #[cfg(not(target_arch = "wasm32"))]
@@ -346,6 +440,8 @@ pub fn App() -> impl IntoElement {
             controls: controls.clone(),
             langs,
             show_tray: profile_signals.show_tray,
+            main_win,
+            main_open,
             running,
             listen,
             use_system_proxy,
@@ -360,10 +456,6 @@ pub fn App() -> impl IntoElement {
                 );
             }),
         });
-        install_minimize_to_tray_handler(
-            profile_signals.show_tray,
-            profile_signals.minimize_to_tray,
-        );
     }
     let config_broken = signal(lock_config_error(&controls));
     let default_json_tree_effect = shown.default_json_tree;

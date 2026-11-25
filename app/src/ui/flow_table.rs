@@ -18,6 +18,15 @@ pub(crate) fn should_reveal_selected_row(row: u32, visible: DataTableRange) -> b
     visible.start >= visible.end || row < visible.start || row >= visible.end
 }
 
+/// Builds a controlled `DataTable` selection value.
+/// `nsh-base` treats `None` on `.selection(...)` as uncontrolled (leaving the
+/// previous highlight intact), so clearing requires `Some(DataTableSelection::default())`.
+pub(crate) fn table_selection_for_row(row: Option<usize>) -> Option<DataTableSelection> {
+    let mut selection = DataTableSelection::default();
+    selection.row = row.map(|r| r as u32);
+    Some(selection)
+}
+
 pub(crate) fn list_empty_subtitle(lang: Lang, filtered: bool, running: bool) -> &'static str {
     if filtered {
         t(lang, "试试调整上方的过滤关键词", "Try a different filter")
@@ -331,10 +340,17 @@ pub(crate) fn flow_table(
         }
     });
 
-    // Keep keyboard/programmatic selection inside the visible viewport.
+    // Keep keyboard/programmatic selection inside the visible viewport, and clear
+    // the native DataTable highlight whenever `selected` is cleared or filtered out.
     // Reading `rows` untracked ensures incoming traffic does not yank manual scroll.
     effect(move || {
+        let clear_table_selection = || {
+            if let Some(api) = table.api::<DataTableApi>() {
+                api.select(None);
+            }
+        };
         let Some(id) = selected.get() else {
+            clear_table_selection();
             return;
         };
         let (idx, count) = rows.with_untracked(|rows| {
@@ -344,6 +360,7 @@ pub(crate) fn flow_table(
             )
         });
         let Some(idx) = idx else {
+            clear_table_selection();
             return;
         };
         if let Some(api) = table.api::<DataTableApi>() {
@@ -351,9 +368,7 @@ pub(crate) fn flow_table(
             if should_reveal_selected_row(idx, visible) {
                 follow.replace(idx.saturating_add(1) >= count);
             }
-            let mut selection = DataTableSelection::default();
-            selection.row = Some(idx);
-            api.select(Some(selection));
+            api.select(table_selection_for_row(Some(idx as usize)));
         }
     });
 
@@ -435,11 +450,7 @@ pub(crate) fn flow_table(
                     .selection(move || {
                         let id = selected.get();
                         let row = rows.with(|rows| rows.iter().position(|row| Some(row.id) == id));
-                        row.map(|row| {
-                            let mut selection = DataTableSelection::default();
-                            selection.row = Some(row as u32);
-                            selection
-                        })
+                        table_selection_for_row(row)
                     })
                     .render_cell(move |cell: &DataTableCell| {
                         flow_cell(
