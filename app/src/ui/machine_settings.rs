@@ -139,6 +139,11 @@ pub(crate) fn machine_settings_modal(
     profiles: ProfileSignals,
     controls: Arc<Controls>,
 ) -> impl IntoElement {
+    bind_escape_while(
+        move || profiles.machine_settings_open.get(),
+        nsh_core::keymap::When::Auto,
+        move || profiles.machine_settings_open.set(false),
+    );
     when(
         move || profiles.machine_settings_open.get(),
         move || {
@@ -186,8 +191,7 @@ pub(crate) fn machine_settings_modal(
                 .border_t_color(border_subtle())
                 .bg(bg_chrome())
                 .child(
-                    view()
-                        .role(AccessibilityRole::Button)
+                    button()
                         .h(px(ControlSize::Sm.height()))
                         .px_3p5()
                         .flex_row()
@@ -203,7 +207,8 @@ pub(crate) fn machine_settings_modal(
                         .duration(MOTION_INSTANT_MS)
                         .ease_out()
                         .focus_visible(apply_focus_ring)
-                        .on_press(move || profiles.machine_settings_open.set(false))
+                        .accessibility_label(tr_opt("完成", "Done"))
+                        .on_press(move |_: &()| profiles.machine_settings_open.set(false))
                         .child(control_text(tr("完成", "Done")).text_color(accent_blue_text())),
                 );
 
@@ -219,17 +224,21 @@ pub(crate) fn machine_settings_modal(
                 )
                 .child(footer);
 
-            overlay()
-                .inset_0()
+            dialog()
+                .animation(nsh_core::ModalAnimation::None)
+                .close_on_escape(false)
+                .optional_label(tr_opt("中继设置", "Relay Settings"))
                 .on_cancel(move || profiles.machine_settings_open.set(false))
                 .child(
-                    view()
-                        .w_full()
-                        .h_full()
-                        .items_center()
-                        .justify_center()
-                        .child(backdrop)
-                        .child(card),
+                    overlay().inset_0().child(
+                        view()
+                            .w_full()
+                            .h_full()
+                            .items_center()
+                            .justify_center()
+                            .child(backdrop)
+                            .child(card),
+                    ),
                 )
         },
     )

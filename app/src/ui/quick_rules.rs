@@ -148,8 +148,8 @@ pub(crate) fn quick_side_chip(
     zh: &'static str,
     en: &'static str,
 ) -> impl IntoElement {
-    view()
-        .role(AccessibilityRole::Button)
+    button()
+        .selected(move || response.get() == target_res)
         .h(px(26.0))
         .px_2()
         .flex_row()
@@ -178,7 +178,7 @@ pub(crate) fn quick_side_chip(
         .duration(MOTION_INSTANT_MS)
         .ease_out()
         .focus_visible(apply_focus_ring)
-        .on_press(move || response.set(target_res))
+        .on_press(move |_: &()| response.set(target_res))
         .child(
             text(tr(zh, en))
                 .number_of_lines(1)
@@ -269,59 +269,72 @@ pub(crate) fn quick_add_section(
                         .gap_1p5()
                         .child(
                             view()
-                                .role(AccessibilityRole::Button)
                                 .flex_1()
                                 .min_w(px(0.0))
                                 .h_full()
-                                .px_1()
-                                .rounded(px(RADIUS_SM))
-                                .flex_row()
-                                .items_center()
-                                .gap_1()
-                                .hover(|style| style.bg(bg_control_hover()))
-                                .active(|style| style.bg(bg_control_active()))
-                                .transition_colors()
-                                .duration(MOTION_INSTANT_MS)
-                                .ease_out()
-                                .focus_visible(apply_focus_ring)
                                 .tooltip(label_tip(
                                     "折叠表单并保留当前草稿",
                                     "Collapse form while keeping current draft",
                                 ))
-                                .on_press(move || open.set(false))
-                                .child(glyph_px(9.5, || Glyph::Chevron, || color(fg_muted())))
                                 .child(
-                                    text(tr("按类型配置规则", "Configure Rule"))
-                                        .text_size(px(TEXT_XS))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(fg_muted()),
-                                )
-                                .child(when(
-                                    move || editing_line.get().is_some(),
-                                    move || {
-                                        view()
-                                            .px_1p5()
-                                            .py_0p5()
-                                            .rounded(px(RADIUS_SM))
-                                            .bg(status_warn_bg())
-                                            .child(
-                                                text(move || -> SharedString {
-                                                    let n = editing_line
-                                                        .get()
-                                                        .map(|i| i + 1)
-                                                        .unwrap_or(0);
-                                                    match ui_lang(langs) {
-                                                        Lang::Zh => format!("编辑第 {n} 行"),
-                                                        Lang::En => format!("Editing line {n}"),
-                                                    }
-                                                    .into()
-                                                })
+                                    button()
+                                        .w_full()
+                                        .min_w(px(0.0))
+                                        .h_full()
+                                        .px_1()
+                                        .rounded(px(RADIUS_SM))
+                                        .flex_row()
+                                        .items_center()
+                                        .gap_1()
+                                        .hover(|style| style.bg(bg_control_hover()))
+                                        .active(|style| style.bg(bg_control_active()))
+                                        .transition_colors()
+                                        .duration(MOTION_INSTANT_MS)
+                                        .ease_out()
+                                        .focus_visible(apply_focus_ring)
+                                        .on_press(move |_: &()| open.set(false))
+                                        .child(glyph_px(
+                                            9.5,
+                                            || Glyph::Chevron,
+                                            || color(fg_muted()),
+                                        ))
+                                        .child(
+                                            text(tr("按类型配置规则", "Configure Rule"))
                                                 .text_size(px(TEXT_XS))
                                                 .font_weight(FontWeight::SEMIBOLD)
-                                                .text_color(status_warn_fg()),
-                                            )
-                                    },
-                                )),
+                                                .text_color(fg_muted()),
+                                        )
+                                        .child(when(
+                                            move || editing_line.get().is_some(),
+                                            move || {
+                                                view()
+                                                    .px_1p5()
+                                                    .py_0p5()
+                                                    .rounded(px(RADIUS_SM))
+                                                    .bg(status_warn_bg())
+                                                    .child(
+                                                        text(move || -> SharedString {
+                                                            let n = editing_line
+                                                                .get()
+                                                                .map(|i| i + 1)
+                                                                .unwrap_or(0);
+                                                            match ui_lang(langs) {
+                                                                Lang::Zh => {
+                                                                    format!("编辑第 {n} 行")
+                                                                }
+                                                                Lang::En => {
+                                                                    format!("Editing line {n}")
+                                                                }
+                                                            }
+                                                            .into()
+                                                        })
+                                                        .text_size(px(TEXT_XS))
+                                                        .font_weight(FontWeight::SEMIBOLD)
+                                                        .text_color(status_warn_fg()),
+                                                    )
+                                            },
+                                        )),
+                                ),
                         )
                         .child(
                             view()
@@ -332,8 +345,7 @@ pub(crate) fn quick_add_section(
                                 .child(when(
                                     move || quick_draft_has_input(draft),
                                     move || {
-                                        view()
-                                            .role(AccessibilityRole::Button)
+                                        button()
                                             .h(px(22.0))
                                             .px_1p5()
                                             .rounded(px(RADIUS_SM))
@@ -342,7 +354,7 @@ pub(crate) fn quick_add_section(
                                             .focus_visible(apply_focus_ring)
                                             .items_center()
                                             .justify_center()
-                                            .on_press(move || clear_quick_draft(draft))
+                                            .on_press(move |_: &()| clear_quick_draft(draft))
                                             .child(
                                                 text(tr("清空", "Clear"))
                                                     .text_size(px(TEXT_XS))
@@ -352,27 +364,29 @@ pub(crate) fn quick_add_section(
                                 ))
                                 .child(
                                     view()
-                                        .role(AccessibilityRole::Button)
-                                        .h(px(22.0))
-                                        .px_1p5()
-                                        .rounded(px(RADIUS_SM))
-                                        .hover(|style| style.bg(bg_control_hover()))
-                                        .active(|style| style.bg(bg_control_active()))
-                                        .focus_visible(apply_focus_ring)
-                                        .items_center()
-                                        .justify_center()
                                         .tooltip(label_tip(
                                             "关闭并清空当前草稿",
                                             "Close form and discard draft",
                                         ))
-                                        .on_press(move || {
-                                            clear_quick_draft(draft);
-                                            open.set(false);
-                                        })
                                         .child(
-                                            text(tr("关闭", "Close"))
-                                                .text_size(px(TEXT_XS))
-                                                .text_color(fg_muted()),
+                                            button()
+                                                .h(px(22.0))
+                                                .px_1p5()
+                                                .rounded(px(RADIUS_SM))
+                                                .hover(|style| style.bg(bg_control_hover()))
+                                                .active(|style| style.bg(bg_control_active()))
+                                                .focus_visible(apply_focus_ring)
+                                                .items_center()
+                                                .justify_center()
+                                                .on_press(move |_: &()| {
+                                                    clear_quick_draft(draft);
+                                                    open.set(false);
+                                                })
+                                                .child(
+                                                    text(tr("关闭", "Close"))
+                                                        .text_size(px(TEXT_XS))
+                                                        .text_color(fg_muted()),
+                                                ),
                                         ),
                                 ),
                         ),
@@ -420,42 +434,44 @@ fn quick_add_example_row(draft: QuickRuleDraftSignals) -> impl IntoElement {
         )
         .child(
             view()
-                .role(AccessibilityRole::Button)
-                .h(px(20.0))
-                .px_1p5()
                 .flex_shrink_0()
-                .rounded(px(RADIUS_SM))
-                .flex_row()
-                .items_center()
-                .bg(AdaptiveColor::TRANSPARENT)
-                .hover(|s| s.bg(bg_control_hover()))
-                .active(|s| s.bg(bg_control_active()))
-                .transition_colors()
-                .duration(MOTION_INSTANT_MS)
-                .ease_out()
-                .focus_visible(apply_focus_ring)
                 .tooltip(label_tip(
                     "将当前类型的常用示例填入上方输入框",
                     "Fill fields above with this rule example",
                 ))
-                .on_press(move || {
-                    fill_draft_from_rule_line(
-                        quick_rule_example(kind.get_untracked()),
-                        draft.kind,
-                        draft.host,
-                        draft.path,
-                        draft.op,
-                        draft.from,
-                        draft.to,
-                        draft.modes,
-                    );
-                })
                 .child(
-                    text(tr("填入示例", "Use example"))
-                        .number_of_lines(1)
-                        .text_size(px(TEXT_XS))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(accent_blue_text()),
+                    button()
+                        .h(px(20.0))
+                        .px_1p5()
+                        .rounded(px(RADIUS_SM))
+                        .flex_row()
+                        .items_center()
+                        .bg(AdaptiveColor::TRANSPARENT)
+                        .hover(|s| s.bg(bg_control_hover()))
+                        .active(|s| s.bg(bg_control_active()))
+                        .transition_colors()
+                        .duration(MOTION_INSTANT_MS)
+                        .ease_out()
+                        .focus_visible(apply_focus_ring)
+                        .on_press(move |_: &()| {
+                            fill_draft_from_rule_line(
+                                quick_rule_example(kind.get_untracked()),
+                                draft.kind,
+                                draft.host,
+                                draft.path,
+                                draft.op,
+                                draft.from,
+                                draft.to,
+                                draft.modes,
+                            );
+                        })
+                        .child(
+                            text(tr("填入示例", "Use example"))
+                                .number_of_lines(1)
+                                .text_size(px(TEXT_XS))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(accent_blue_text()),
+                        ),
                 ),
         )
 }
@@ -518,30 +534,32 @@ fn quick_add_row_one(
             move || quick_kind(kind.get()).supports_graphql_op() && !show_op_input(),
             move || {
                 view()
-                    .role(AccessibilityRole::Button)
-                    .h(px(26.0))
-                    .px_1p5()
                     .flex_shrink_0()
-                    .rounded(px(RADIUS_SM))
-                    .items_center()
-                    .justify_center()
-                    .bg(AdaptiveColor::TRANSPARENT)
-                    .hover(|s| s.bg(bg_control_hover()))
-                    .active(|s| s.bg(bg_control_active()))
-                    .transition_colors()
-                    .duration(MOTION_INSTANT_MS)
-                    .ease_out()
-                    .focus_visible(apply_focus_ring)
                     .tooltip(label_tip(
                         "附加 GraphQL 操作名条件 (op=...)",
                         "Filter by GraphQL operation name (op=...)",
                     ))
-                    .on_press(move || op_open.set(true))
                     .child(
-                        mono("GQL")
-                            .text_size(px(TEXT_XS))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(fg_muted()),
+                        button()
+                            .h(px(26.0))
+                            .px_1p5()
+                            .rounded(px(RADIUS_SM))
+                            .items_center()
+                            .justify_center()
+                            .bg(AdaptiveColor::TRANSPARENT)
+                            .hover(|s| s.bg(bg_control_hover()))
+                            .active(|s| s.bg(bg_control_active()))
+                            .transition_colors()
+                            .duration(MOTION_INSTANT_MS)
+                            .ease_out()
+                            .focus_visible(apply_focus_ring)
+                            .on_press(move |_: &()| op_open.set(true))
+                            .child(
+                                mono("GQL")
+                                    .text_size(px(TEXT_XS))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(fg_muted()),
+                            ),
                     )
             },
         ))
@@ -718,8 +736,7 @@ fn quick_file_picker_button(
     target_input: Signal<String>,
     label: impl Fn() -> String + 'static,
 ) -> impl IntoElement {
-    view()
-        .role(AccessibilityRole::Button)
+    button()
         .h(px(ControlSize::Sm.height()))
         .px_2p5()
         .flex_shrink_0()
@@ -736,7 +753,7 @@ fn quick_file_picker_button(
         .duration(MOTION_INSTANT_MS)
         .ease_out()
         .focus_visible(apply_focus_ring)
-        .on_press(move || {
+        .on_press(move |_: &()| {
             spawn(async move {
                 if let DialogOutcome::Picked(paths) =
                     pick_paths_after_paint(open_files_dialog()).await
@@ -1015,9 +1032,6 @@ fn quick_add_submit_button(
     let modes = draft.modes;
     let editing_line = draft.editing_line;
     view()
-        .role(AccessibilityRole::Button)
-        .h(px(ControlSize::Sm.height()))
-        .px_3()
         .flex_grow(move || {
             if matches!(kind.get(), 8 | 12) || (kind.get() == 13 && modes.status_drop.get()) {
                 1.0_f32
@@ -1026,48 +1040,6 @@ fn quick_add_submit_button(
             }
         })
         .flex_shrink_0()
-        .items_center()
-        .justify_center()
-        .rounded(px(RADIUS_MD))
-        .border_1()
-        .border_color(move || {
-            if quick_add_ready(draft) {
-                accent_blue_border()
-            } else {
-                border_control()
-            }
-        })
-        .bg(move || {
-            if quick_add_ready(draft) {
-                accent_blue_soft()
-            } else {
-                bg_control()
-            }
-        })
-        .hover(|style| {
-            style.bg(move || {
-                if quick_add_ready(draft) {
-                    accent_blue_soft_hover()
-                } else {
-                    bg_control()
-                }
-            })
-        })
-        .active(|style| {
-            style.bg(move || {
-                if quick_add_ready(draft) {
-                    bg_control_active()
-                } else {
-                    bg_control()
-                }
-            })
-        })
-        .transition_colors()
-        .duration(MOTION_INSTANT_MS)
-        .ease_out()
-        .focus_visible(apply_focus_ring)
-        .disabled(move || !quick_add_ready(draft))
-        .disabled_style(|style| style.opacity(0.55))
         .tooltip(
             tooltip().child(ui_tooltip_surface(
                 text(move || -> SharedString {
@@ -1093,29 +1065,77 @@ fn quick_add_submit_button(
                 .text_color(fg_primary()),
             )),
         )
-        .on_press(move || submit_quick_add(target, &controls, draft, open))
         .child(
-            text(move || -> SharedString {
-                let lang = ui_lang(langs);
-                if let Some(idx) = editing_line.get() {
-                    let n = idx + 1;
-                    match lang {
-                        Lang::Zh => format!("更新第 {n} 行").into(),
-                        Lang::En => format!("Update line {n}").into(),
+            button()
+                .w_full()
+                .h(px(ControlSize::Sm.height()))
+                .px_3()
+                .items_center()
+                .justify_center()
+                .rounded(px(RADIUS_MD))
+                .border_1()
+                .border_color(move || {
+                    if quick_add_ready(draft) {
+                        accent_blue_border()
+                    } else {
+                        border_control()
                     }
-                } else {
-                    t(lang, "确认添加", "Add").into()
-                }
-            })
-            .text_size(px(TEXT_SM))
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(move || {
-                if quick_add_ready(draft) {
-                    accent_blue_text()
-                } else {
-                    fg_muted()
-                }
-            }),
+                })
+                .bg(move || {
+                    if quick_add_ready(draft) {
+                        accent_blue_soft()
+                    } else {
+                        bg_control()
+                    }
+                })
+                .hover(|style| {
+                    style.bg(move || {
+                        if quick_add_ready(draft) {
+                            accent_blue_soft_hover()
+                        } else {
+                            bg_control()
+                        }
+                    })
+                })
+                .active(|style| {
+                    style.bg(move || {
+                        if quick_add_ready(draft) {
+                            bg_control_active()
+                        } else {
+                            bg_control()
+                        }
+                    })
+                })
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .focus_visible(apply_focus_ring)
+                .disabled(move || !quick_add_ready(draft))
+                .disabled_style(|style| style.opacity(0.55))
+                .on_press(move |_: &()| submit_quick_add(target, &controls, draft, open))
+                .child(
+                    text(move || -> SharedString {
+                        let lang = ui_lang(langs);
+                        if let Some(idx) = editing_line.get() {
+                            let n = idx + 1;
+                            match lang {
+                                Lang::Zh => format!("更新第 {n} 行").into(),
+                                Lang::En => format!("Update line {n}").into(),
+                            }
+                        } else {
+                            t(lang, "确认添加", "Add").into()
+                        }
+                    })
+                    .text_size(px(TEXT_SM))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(move || {
+                        if quick_add_ready(draft) {
+                            accent_blue_text()
+                        } else {
+                            fg_muted()
+                        }
+                    }),
+                ),
         )
 }
 

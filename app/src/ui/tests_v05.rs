@@ -26,6 +26,7 @@ struct HeadlessTree {
     children: HashMap<NodeId, Vec<NodeId>>,
     texts: HashMap<NodeId, String>,
     placeholders: HashMap<NodeId, String>,
+    pressed: HashMap<NodeId, Option<nsh_core::Checked>>,
     keymap: Option<Arc<nsh_core::keymap::Keymap>>,
 }
 
@@ -78,12 +79,16 @@ impl HeadlessTree {
                             self.kinds.remove(id);
                             self.texts.remove(id);
                             self.placeholders.remove(id);
+                            self.pressed.remove(id);
                         }
                         MountItem::Text { id, text, .. } => {
                             self.texts.insert(*id, text.text.clone());
                         }
                         MountItem::Input { id, config } => {
                             self.placeholders.insert(*id, config.placeholder.clone());
+                        }
+                        MountItem::ViewProps { id, props } => {
+                            self.pressed.insert(*id, props.accessibility.state.pressed);
                         }
                         MountItem::Command {
                             id,
@@ -3630,6 +3635,159 @@ fn rules_select_escape_closes_dropdown_before_parent_modal_zh_en() {
         assert!(
             tree.has_text("PANEL|false"),
             "second Escape must close parent panel in {lang:?}"
+        );
+    }
+}
+
+#[test]
+fn nested_overlay_escape_closes_innermost_first_zh_en() {
+    #[component]
+    fn NestedEscapeHarness() -> impl IntoElement {
+        let lang = TEST_LANG.with(Cell::get);
+        provide_base_contexts(lang);
+        provide_popover_dismiss();
+        let root_count = signal(0_u32);
+        let outer = signal(true);
+        let inner = signal(true);
+        on_key("escape", move |_| root_count.update(|n| *n += 1));
+        bind_popover_dismiss(outer);
+        bind_escape_while(
+            move || inner.get(),
+            nsh_core::keymap::When::Always,
+            move || inner.set(false),
+        );
+        view()
+            .w(px(640.0))
+            .h(px(480.0))
+            .child(
+                button()
+                    .on_press(move |_: &()| inner.set(true))
+                    .child(text("REOPEN_INNER")),
+            )
+            .child(text(move || format!("ROOT|{}", root_count.get())))
+            .child(text(move || {
+                format!("OVERLAY|{}|{}", outer.get(), inner.get())
+            }))
+    }
+
+    for lang in [Lang::Zh, Lang::En] {
+        TEST_LANG.set(lang);
+        let (mut core, mut tree) = mount::<NestedEscapeHarness>(Size::new(px(640.0), px(480.0)));
+        core.set_environment(nsh_core::element::Environment {
+            reduce_motion: true,
+            ..Default::default()
+        });
+        tree.pump(&mut core);
+        assert!(tree.has_text("ROOT|0"));
+        assert!(tree.has_text("OVERLAY|true|true"));
+
+        // (a) Editing: inner (When::Always) closes; outer (When::Auto) stays open.
+        assert!(tree.press_escape(&mut core, true));
+        assert!(tree.has_text("OVERLAY|true|false"));
+        assert!(tree.has_text("ROOT|0"));
+
+        // (b) Reopen inner, then non-editing Esc closes inner -> outer -> (c) root.
+        assert!(tree.press_text(&mut core, "REOPEN_INNER"));
+        assert!(tree.has_text("OVERLAY|true|true"));
+
+        assert!(tree.press_escape(&mut core, false));
+        assert!(tree.has_text("OVERLAY|true|false"));
+        assert!(tree.has_text("ROOT|0"));
+
+        assert!(tree.press_escape(&mut core, false));
+        assert!(tree.has_text("OVERLAY|false|false"));
+        assert!(tree.has_text("ROOT|0"));
+
+        assert!(tree.press_escape(&mut core, false));
+        assert!(tree.has_text("ROOT|1"));
+    }
+}
+
+#[test]
+fn shortcuts_modal_escape_closes_via_own_binding_zh_en() {
+    #[component]
+    fn ShortcutsEscapeHarness() -> impl IntoElement {
+        let lang = TEST_LANG.with(Cell::get);
+        provide_base_contexts(lang);
+        let open = signal(true);
+        view()
+            .w(px(800.0))
+            .h(px(640.0))
+            .child(shortcuts_modal(open))
+    }
+
+    for lang in [Lang::Zh, Lang::En] {
+        TEST_LANG.set(lang);
+        let (mut core, mut tree) = mount::<ShortcutsEscapeHarness>(Size::new(px(800.0), px(640.0)));
+        core.set_environment(nsh_core::element::Environment {
+            reduce_motion: true,
+            ..Default::default()
+        });
+        tree.pump(&mut core);
+        let title = t(lang, "导航与视图", "Navigation & View");
+        assert!(tree.has_text(title));
+
+        assert!(tree.press_escape(&mut core, false));
+        assert!(
+            !tree.has_text(title),
+            "shortcuts_modal must close on its own Escape binding in {lang:?}"
+        );
+    }
+}
+
+#[test]
+fn quick_filter_chips_are_toggles_and_flip_filter_zh_en() {
+    #[component]
+    fn ToggleChipHarness() -> impl IntoElement {
+        let lang = TEST_LANG.with(Cell::get);
+        provide_base_contexts(lang);
+        let filter = signal(String::new());
+        view()
+            .w(px(360.0))
+            .h(px(120.0))
+            .child(toggle_group().flex_row().gap_1p5().child(filter_chip(
+                filter,
+                "慢请求",
+                "Slow",
+                "slow:",
+                SLOW_ALIASES,
+            )))
+            .child(text(move || format!("FILTER|{}", filter.get())))
+    }
+
+    for lang in [Lang::Zh, Lang::En] {
+        TEST_LANG.set(lang);
+        let (mut core, mut tree) = mount::<ToggleChipHarness>(Size::new(px(360.0), px(120.0)));
+        tree.pump(&mut core);
+        let label = t(lang, "慢请求", "Slow");
+        let text_id = tree
+            .live_node_ids()
+            .into_iter()
+            .find(|id| tree.texts.get(id).is_some_and(|s| s == label))
+            .expect("chip label");
+        let chip_id = tree.parent[&text_id];
+
+        assert!(tree.has_text("FILTER|"));
+        assert_eq!(
+            tree.pressed.get(&chip_id),
+            Some(&Some(nsh_core::Checked::False)),
+            "initial toggle chip pressed state must be False in {lang:?}"
+        );
+
+        assert!(tree.press_text(&mut core, label));
+        assert!(tree.has_text("FILTER|slow:"));
+        assert_eq!(
+            tree.pressed.get(&chip_id),
+            Some(&Some(nsh_core::Checked::True)),
+            "active toggle chip pressed state must be True in {lang:?}"
+        );
+
+        assert!(tree.press_text(&mut core, label));
+        assert!(tree.has_text("FILTER|"));
+        assert_eq!(
+            tree.pressed.get(&chip_id),
+            Some(&Some(nsh_core::Checked::False)),
+            "deactivated toggle chip pressed state must return to False in {lang:?}"
         );
     }
 }

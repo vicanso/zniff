@@ -36,8 +36,7 @@ pub(crate) fn diff_card(
                 })
                 .border_b_color(border_subtle())
                 .child(
-                    view()
-                        .role(AccessibilityRole::Button)
+                    button()
                         .flex_1()
                         .min_w(px(120.0))
                         .flex_row()
@@ -52,7 +51,8 @@ pub(crate) fn diff_card(
                         .duration(MOTION_INSTANT_MS)
                         .ease_out()
                         .focus_visible(apply_focus_ring)
-                        .on_press(move || toggle_card(folded, FOLD_DIFF))
+                        .accessibility_label(tr_opt("对比", "Diff"))
+                        .on_press(move |_: &()| toggle_card(folded, FOLD_DIFF))
                         .child(fold_mark(folded, FOLD_DIFF))
                         .child(section_title(tr("对比", "Diff")))
                         .child(when(

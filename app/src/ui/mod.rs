@@ -27,9 +27,9 @@ pub(crate) use nsh_base::{
     ResizeHandleEvent, ResizeHandleState, SelectEntry, SelectEvent, SelectGroup, SelectItem,
     SelectValue, SheetEvent, ToastManager, ToastMotion, ToastOptions, ToastStackState,
     ToastTransitionStatus, Tree, TreeEntry, TreeEvent, TreeItem, button, checkbox, collapsible,
-    data_table, diff_view, editor, input, link, menu, menu_item, popover, progress, radio,
+    data_table, dialog, diff_view, editor, input, link, menu, menu_item, popover, progress, radio,
     radio_group, resize_handle, select, sheet, switch, tab, tabs, theme, toast, toast_stack,
-    tooltip, tree,
+    toggle, toggle_group, tooltip, tree,
 };
 #[allow(unused_imports)]
 pub(crate) use nsh_core::EllipsizeMode;

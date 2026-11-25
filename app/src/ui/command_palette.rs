@@ -565,6 +565,11 @@ pub(crate) fn command_palette_modal(
     baseline: Signal<Option<u64>>,
     shown: Shown,
 ) -> impl IntoElement {
+    bind_escape_while(
+        move || open.get(),
+        nsh_core::keymap::When::Always,
+        move || open.set(false),
+    );
     when(
         move || open.get(),
         move || {
@@ -871,19 +876,25 @@ pub(crate) fn command_palette_modal(
                     }
                 });
 
-            overlay()
-                .inset_0()
-                .flex_col()
-                .items_center()
-                .pt(px(72.0))
-                .px_4()
+            dialog()
+                .animation(nsh_core::ModalAnimation::None)
+                .close_on_escape(false)
+                .optional_label(tr_opt("命令面板", "Command Palette"))
                 .on_cancel(move || open.set(false))
-                .child(backdrop)
                 .child(
-                    ui_modal_card()
-                        .w(move || px((window().width.0 - 32.0).clamp(300.0, 560.0)))
-                        .max_h(move || px((window().height.0 - 110.0).max(200.0)))
-                        .child(palette),
+                    overlay()
+                        .inset_0()
+                        .flex_col()
+                        .items_center()
+                        .pt(px(72.0))
+                        .px_4()
+                        .child(backdrop)
+                        .child(
+                            ui_modal_card()
+                                .w(move || px((window().width.0 - 32.0).clamp(300.0, 560.0)))
+                                .max_h(move || px((window().height.0 - 110.0).max(200.0)))
+                                .child(palette),
+                        ),
                 )
         },
     )

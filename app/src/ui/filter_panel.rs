@@ -206,8 +206,8 @@ pub(crate) fn saved_filter_panel(
                                             move || {
                                                 let langs = ui_langs();
                                                 let enabled = profiles.filter_enabled;
-                                                view()
-                                                    .role(AccessibilityRole::Button)
+                                                toggle()
+                                                    .pressed(enabled)
                                                     .h(px(ControlSize::Xs.height()))
                                                     .px_2()
                                                     .rounded(px(RADIUS_SM))
@@ -234,7 +234,9 @@ pub(crate) fn saved_filter_panel(
                                                     .focus_visible(apply_focus_ring)
                                                     .flex_row()
                                                     .items_center()
-                                                    .on_press(move || enabled.set(!enabled.get()))
+                                                    .on_change(move |_: &bool| {
+                                                        enabled.set(!enabled.get());
+                                                    })
                                                     .child(
                                                         text(move || -> SharedString {
                                                             let lang = ui_lang(langs);
@@ -259,8 +261,7 @@ pub(crate) fn saved_filter_panel(
                                         .child(when(
                                             move || !reset_filter.get().trim().is_empty(),
                                             move || {
-                                                view()
-                                                    .role(AccessibilityRole::Button)
+                                                button()
                                                     .h(px(ControlSize::Xs.height()))
                                                     .px_2()
                                                     .rounded(px(RADIUS_SM))
@@ -275,7 +276,7 @@ pub(crate) fn saved_filter_panel(
                                                     .focus_visible(apply_focus_ring)
                                                     .flex_row()
                                                     .items_center()
-                                                    .on_press(move || {
+                                                    .on_press(move |_: &()| {
                                                         profiles.filter_enabled.set(true);
                                                         reset_filter.set(String::new());
                                                     })
@@ -378,7 +379,7 @@ pub(crate) fn saved_filter_panel(
                                         .text_color(fg_muted()),
                                 )
                                 .child(
-                                    view()
+                                    toggle_group()
                                         .w_full()
                                         .flex_row()
                                         .items_center()

@@ -177,8 +177,7 @@ fn undo_clear_button(
     controls: Arc<Controls>,
     on_dismiss: impl Fn() + Copy + 'static,
 ) -> impl IntoElement {
-    view()
-        .role(AccessibilityRole::Button)
+    button()
         .px_2p5()
         .py_1()
         .rounded(px(RADIUS_MD))
@@ -195,7 +194,7 @@ fn undo_clear_button(
         .duration(MOTION_INSTANT_MS)
         .ease_out()
         .focus_visible(apply_focus_ring)
-        .on_press(move || {
+        .on_press(move |_: &()| {
             undo_clear_captured(&controls);
             on_dismiss();
         })
@@ -208,8 +207,7 @@ fn undo_clear_button(
 }
 
 fn toast_close_button(on_dismiss: impl Fn() + Copy + 'static) -> impl IntoElement {
-    view()
-        .role(AccessibilityRole::Button)
+    button()
         .w(px(20.0))
         .h(px(20.0))
         .rounded(px(RADIUS_SM))
@@ -223,7 +221,7 @@ fn toast_close_button(on_dismiss: impl Fn() + Copy + 'static) -> impl IntoElemen
         .duration(MOTION_INSTANT_MS)
         .ease_out()
         .focus_visible(apply_focus_ring)
-        .label(tr("关闭", "Dismiss"))
-        .on_press(on_dismiss)
+        .accessibility_label(tr_opt("关闭", "Dismiss"))
+        .on_press(move |_: &()| on_dismiss())
         .child(glyph_px(11.0, || Glyph::Close, || color(fg_muted())))
 }

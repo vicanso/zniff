@@ -70,8 +70,7 @@ fn denied_summary_header(
                 ),
         )
         .child(
-            view()
-                .role(AccessibilityRole::Button)
+            button()
                 .h(px(20.0))
                 .px_1p5()
                 .rounded(px(RADIUS_SM))
@@ -86,7 +85,7 @@ fn denied_summary_header(
                 .focus_visible(apply_focus_ring)
                 .items_center()
                 .justify_center()
-                .on_press(move || {
+                .on_press(move |_: &()| {
                     controls.hub.reset_allow_denied();
                     denied.set(controls.hub.allow_denied_summary());
                 })
@@ -159,8 +158,7 @@ fn denied_host_row(
             move || !allow_hosts_locked.get(),
             move || {
                 let row_controls = controls.clone();
-                view()
-                    .role(AccessibilityRole::Button)
+                button()
                     .h(px(18.0))
                     .px_1p5()
                     .flex_shrink_0()
@@ -176,7 +174,7 @@ fn denied_host_row(
                     .focus_visible(apply_focus_ring)
                     .items_center()
                     .justify_center()
-                    .on_press(move || {
+                    .on_press(move |_: &()| {
                         let host = entry.with_untracked(|(host, _)| host.clone());
                         let next =
                             allow_hosts::append_allow_host(&allow_hosts.get_untracked(), &host);

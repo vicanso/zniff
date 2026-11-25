@@ -897,8 +897,8 @@ fn filter_autocomplete_popup(
                 let pick = item.clone();
                 let is_selected = move || selected_idx.get() == Some(idx);
                 col = col.child(
-                    view()
-                        .role(AccessibilityRole::Button)
+                    button()
+                        .selected(is_selected)
                         .w_full()
                         .h(px(26.0))
                         .px_2()
@@ -928,8 +928,8 @@ fn filter_autocomplete_popup(
                         .duration(MOTION_INSTANT_MS)
                         .ease_out()
                         .focus_visible(apply_focus_ring)
-                        .label(item.insert_token.clone())
-                        .on_press(move || {
+                        .accessibility_label(item.insert_token.clone())
+                        .on_press(move |_: &()| {
                             let next = apply_filter_suggestion(&value.get_untracked(), &pick);
                             value.set(next);
                             selected_idx.set(None);

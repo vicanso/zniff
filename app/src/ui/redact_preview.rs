@@ -104,8 +104,8 @@ pub(crate) fn redact_preview_panel(
                             "Export & share redaction",
                         )))
                         .child(
-                            view()
-                                .role(AccessibilityRole::Button)
+                            toggle()
+                                .pressed(move || seq_builder.redact_export.get())
                                 .h(px(24.0))
                                 .px_2p5()
                                 .rounded(px(RADIUS_MD))
@@ -140,7 +140,7 @@ pub(crate) fn redact_preview_panel(
                                 .focus_visible(apply_focus_ring)
                                 .flex_row()
                                 .items_center()
-                                .on_press(move || {
+                                .on_change(move |_: &bool| {
                                     let next = !seq_builder.redact_export.get();
                                     seq_builder.redact_export.set(next);
                                     *toggle_controls
@@ -181,71 +181,74 @@ pub(crate) fn redact_preview_panel(
                         )
                         .child(
                             view()
-                                .role(AccessibilityRole::Button)
-                                .h(px(24.0))
-                                .px_2p5()
-                                .rounded(px(RADIUS_MD))
-                                .border_1()
-                                .border_color(move || {
-                                    if seq_builder.redact_strict.get() {
-                                        accent_blue_border()
-                                    } else {
-                                        border_control()
-                                    }
-                                })
-                                .bg(move || {
-                                    if seq_builder.redact_strict.get() {
-                                        accent_blue_soft()
-                                    } else {
-                                        bg_control()
-                                    }
-                                })
-                                .hover(|style| {
-                                    style.bg(move || {
-                                        if seq_builder.redact_strict.get() {
-                                            accent_blue_soft_hover()
-                                        } else {
-                                            bg_control_hover()
-                                        }
-                                    })
-                                })
-                                .active(|style| style.bg(bg_control_active()))
-                                .transition_colors()
-                                .duration(MOTION_INSTANT_MS)
-                                .ease_out()
-                                .focus_visible(apply_focus_ring)
-                                .flex_row()
-                                .items_center()
-                                .label(tr("严格遮罩", "Strict mask"))
                                 .tooltip(label_tip(
                                     "开启后将无法按字段脱敏的非结构化或二进制正文替换为占位文本",
                                     "Replace unstructured or binary bodies with a placeholder when redacting",
                                 ))
-                                .on_press(move || {
-                                    let next = !seq_builder.redact_strict.get();
-                                    seq_builder.redact_strict.set(next);
-                                    *strict_controls
-                                        .redact_strict
-                                        .lock()
-                                        .unwrap_or_else(|err| err.into_inner()) = next;
-                                    save_config_or_notify(
-                                        &strict_controls,
-                                        PrefName::Redact,
-                                        |cfg| cfg.redact_strict = next,
-                                    );
-                                })
                                 .child(
-                                    text(tr("严格遮罩", "Strict mask"))
-                                        .number_of_lines(1)
-                                        .text_size(px(TEXT_XS))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(move || {
+                                    toggle()
+                                        .pressed(move || seq_builder.redact_strict.get())
+                                        .h(px(24.0))
+                                        .px_2p5()
+                                        .rounded(px(RADIUS_MD))
+                                        .border_1()
+                                        .border_color(move || {
                                             if seq_builder.redact_strict.get() {
-                                                accent_blue_text()
+                                                accent_blue_border()
                                             } else {
-                                                fg_secondary()
+                                                border_control()
                                             }
-                                        }),
+                                        })
+                                        .bg(move || {
+                                            if seq_builder.redact_strict.get() {
+                                                accent_blue_soft()
+                                            } else {
+                                                bg_control()
+                                            }
+                                        })
+                                        .hover(|style| {
+                                            style.bg(move || {
+                                                if seq_builder.redact_strict.get() {
+                                                    accent_blue_soft_hover()
+                                                } else {
+                                                    bg_control_hover()
+                                                }
+                                            })
+                                        })
+                                        .active(|style| style.bg(bg_control_active()))
+                                        .transition_colors()
+                                        .duration(MOTION_INSTANT_MS)
+                                        .ease_out()
+                                        .focus_visible(apply_focus_ring)
+                                        .flex_row()
+                                        .items_center()
+                                        .accessibility_label(tr_opt("严格遮罩", "Strict mask"))
+                                        .on_change(move |_: &bool| {
+                                            let next = !seq_builder.redact_strict.get();
+                                            seq_builder.redact_strict.set(next);
+                                            *strict_controls
+                                                .redact_strict
+                                                .lock()
+                                                .unwrap_or_else(|err| err.into_inner()) = next;
+                                            save_config_or_notify(
+                                                &strict_controls,
+                                                PrefName::Redact,
+                                                |cfg| cfg.redact_strict = next,
+                                            );
+                                        })
+                                        .child(
+                                            text(tr("严格遮罩", "Strict mask"))
+                                                .number_of_lines(1)
+                                                .text_size(px(TEXT_XS))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(move || {
+                                                    if seq_builder.redact_strict.get() {
+                                                        accent_blue_text()
+                                                    } else {
+                                                        fg_secondary()
+                                                    }
+                                                }),
+                                        ),
                                 ),
                         ),
                 )

@@ -247,28 +247,30 @@ fn strip_progress_badge(label: impl Fn() -> String + 'static) -> impl IntoElemen
 
 fn strip_dismiss_button(dismissed: Signal<bool>, controls: Arc<Controls>) -> impl IntoElement {
     view()
-        .role(AccessibilityRole::Button)
-        .w(px(22.0))
-        .h(px(22.0))
         .flex_shrink_0()
-        .rounded(px(RADIUS_SM))
-        .hover(|s| s.bg(bg_control_hover()))
-        .active(|s| s.bg(bg_control_active()))
-        .transition_colors()
-        .duration(move || motion_ms(MOTION_INSTANT_MS))
-        .ease_out()
-        .focus_visible(apply_focus_ring)
-        .items_center()
-        .justify_center()
-        .label(tr("关闭引导条", "Dismiss setup strip"))
         .tooltip(label_tip("不再显示顶部引导条", "Dismiss setup guide strip"))
-        .on_press(move || {
-            dismissed.set(true);
-            save_config_or_notify(&controls, PrefName::Onboarding, |cfg| {
-                cfg.onboarding_strip_dismissed = true;
-            });
-        })
-        .child(glyph_px(11.0, || Glyph::Close, || color(fg_muted())))
+        .child(
+            button()
+                .w(px(22.0))
+                .h(px(22.0))
+                .rounded(px(RADIUS_SM))
+                .hover(|s| s.bg(bg_control_hover()))
+                .active(|s| s.bg(bg_control_active()))
+                .transition_colors()
+                .duration(move || motion_ms(MOTION_INSTANT_MS))
+                .ease_out()
+                .focus_visible(apply_focus_ring)
+                .items_center()
+                .justify_center()
+                .accessibility_label(tr_opt("关闭引导条", "Dismiss setup strip"))
+                .on_press(move |_: &()| {
+                    dismissed.set(true);
+                    save_config_or_notify(&controls, PrefName::Onboarding, |cfg| {
+                        cfg.onboarding_strip_dismissed = true;
+                    });
+                })
+                .child(glyph_px(11.0, || Glyph::Close, || color(fg_muted()))),
+        )
 }
 
 #[cfg(not(target_arch = "wasm32"))]

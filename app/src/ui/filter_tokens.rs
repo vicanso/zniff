@@ -9,8 +9,8 @@ pub(crate) fn filter_chip(
     aliases: &'static [&'static str],
 ) -> impl IntoElement {
     let is_active = computed(move || filter_has_token(&filter.get(), aliases));
-    view()
-        .role(AccessibilityRole::Button)
+    toggle()
+        .pressed(move || is_active.get())
         .h(px(ControlSize::Sm.height()))
         .px_2p5()
         .flex_1()
@@ -49,7 +49,8 @@ pub(crate) fn filter_chip(
         .duration(MOTION_INSTANT_MS)
         .ease_out()
         .focus_visible(apply_focus_ring)
-        .on_press(move || filter.set(toggle_filter_chip(&filter.get(), token, aliases)))
+        .accessibility_label(tr_opt(zh, en))
+        .on_change(move |_: &bool| filter.set(toggle_filter_chip(&filter.get(), token, aliases)))
         .child(view().w(px(5.0)).h(px(5.0)).rounded_full().bg(move || {
             if is_active.get() {
                 accent_blue()
@@ -69,6 +70,78 @@ pub(crate) fn filter_chip(
                     }
                 }),
         )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn drawer_quick_chip(
+    filter: Signal<String>,
+    zh: &'static str,
+    en: &'static str,
+    token: &'static str,
+    aliases: &'static [&'static str],
+    tip_zh: &'static str,
+    tip_en: &'static str,
+) -> impl IntoElement {
+    let is_active = computed(move || filter_has_token(&filter.get(), aliases));
+    view().tooltip(label_tip(tip_zh, tip_en)).child(
+        toggle()
+            .pressed(move || is_active.get())
+            .h(px(ControlSize::Xs.height()))
+            .px(px(5.0))
+            .rounded(px(RADIUS_SM))
+            .border_1()
+            .border_color(move || {
+                if is_active.get() {
+                    accent_blue_border()
+                } else {
+                    border_control()
+                }
+            })
+            .bg(move || {
+                if is_active.get() {
+                    accent_blue_soft()
+                } else {
+                    bg_control()
+                }
+            })
+            .hover(|style| {
+                style.bg(move || {
+                    if is_active.get() {
+                        accent_blue_soft_hover()
+                    } else {
+                        bg_control_hover()
+                    }
+                })
+            })
+            .active(|style| style.bg(bg_control_active()))
+            .transition_colors()
+            .duration(MOTION_INSTANT_MS)
+            .ease_out()
+            .focus_visible(apply_focus_ring)
+            .accessibility_label(tr_opt(zh, en))
+            .flex_row()
+            .items_center()
+            .gap(px(3.0))
+            .on_change(move |_: &bool| {
+                filter.set(toggle_filter_chip(&filter.get(), token, aliases))
+            })
+            .child(view().w(px(4.0)).h(px(4.0)).rounded_full().bg(move || {
+                if is_active.get() {
+                    accent_blue()
+                } else {
+                    fg_muted()
+                }
+            }))
+            .child(
+                compact_control_text(tr(zh, en), TEXT_XS).text_color(move || {
+                    if is_active.get() {
+                        accent_blue_text()
+                    } else {
+                        fg_secondary()
+                    }
+                }),
+            ),
+    )
 }
 
 pub(crate) fn filter_has_token(filter: &str, aliases: &[&str]) -> bool {

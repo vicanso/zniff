@@ -412,8 +412,7 @@ pub(crate) fn seq_dependency_row(
             },
         ))
         .child(
-            view()
-                .role(AccessibilityRole::Button)
+            button()
                 .w_full()
                 .px_3()
                 .py_2()
@@ -451,7 +450,7 @@ pub(crate) fn seq_dependency_row(
                 .duration(MOTION_INSTANT_MS)
                 .ease_out()
                 .focus_visible(apply_focus_ring)
-                .on_press(move || {
+                .on_press(move |_: &()| {
                     jump_to_seq_flow(row.with(|r| r.bar.flow_id), selected, compose, seq_builder);
                 })
                 .child(
@@ -875,8 +874,7 @@ pub(crate) fn seq_waterfall_row(
             .with(|d| d.bars.get(at.index()).cloned())
             .unwrap_or_default()
     });
-    view()
-        .role(AccessibilityRole::Button)
+    button()
         .w_full()
         .h(px(SEQ_WF_ROW_H))
         .flex_row()
@@ -886,7 +884,7 @@ pub(crate) fn seq_waterfall_row(
         .duration(MOTION_INSTANT_MS)
         .ease_out()
         .focus_visible(apply_focus_ring)
-        .on_press(move || {
+        .on_press(move |_: &()| {
             jump_to_seq_flow(bar_item.with(|b| b.flow_id), selected, compose, seq_builder);
         })
         .bg(move || {

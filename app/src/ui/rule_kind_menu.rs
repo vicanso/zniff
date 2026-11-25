@@ -116,19 +116,11 @@ fn quick_kind_syntax(idx: u8) -> &'static str {
 pub(crate) fn quick_kind_dropdown(draft: QuickRuleDraftSignals) -> impl IntoElement {
     let kind = draft.kind;
     let open = signal(false);
-    effect(move || {
-        if !open.get() {
-            return;
-        }
-        on_key_with(
-            "escape",
-            KeyOptions {
-                when: nsh_core::keymap::When::Always,
-                ..KeyOptions::default()
-            },
-            move |_| open.set(false),
-        );
-    });
+    bind_escape_while(
+        move || open.get(),
+        nsh_core::keymap::When::Always,
+        move || open.set(false),
+    );
     let langs = ui_langs();
     let items = move || -> Vec<SelectItem> {
         let lang = ui_lang(langs);
@@ -268,6 +260,11 @@ pub(crate) fn quick_var_menu(target: Signal<String>) -> impl IntoElement {
         ),
     ];
     let open = signal(false);
+    bind_escape_while(
+        move || open.get(),
+        nsh_core::keymap::When::Always,
+        move || open.set(false),
+    );
     menu()
         .open(move || Some(open.get()))
         .on_open_change(move |event: &nsh_base::MenuEvent| {

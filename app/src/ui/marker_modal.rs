@@ -37,6 +37,11 @@ fn submit_marker(controls: &Arc<Controls>, open: Signal<bool>, draft: Signal<Str
 }
 
 pub(crate) fn marker_modal(open: Signal<bool>, controls: Arc<Controls>) -> impl IntoElement {
+    bind_escape_while(
+        move || open.get(),
+        nsh_core::keymap::When::Auto,
+        move || open.set(false),
+    );
     let draft = signal(String::new());
     let focus = element_ref();
     let focus_job = stored(None::<Spawned<()>>);
@@ -62,55 +67,59 @@ pub(crate) fn marker_modal(open: Signal<bool>, controls: Arc<Controls>) -> impl 
             let apple = is_apple_platform();
             let badge = format_shortcut_badge("mod+shift+m", apple);
 
-            overlay()
-                .inset_0()
+            dialog()
+                .animation(nsh_core::ModalAnimation::None)
+                .close_on_escape(false)
+                .optional_label(tr_opt("时间标记", "Session Marker"))
                 .on_cancel(move || open.set(false))
                 .child(
-                    view()
-                        .w_full()
-                        .h_full()
-                        .items_center()
-                        .justify_center()
-                        .child(ui_modal_backdrop(move || open.set(false)))
-                        .child(
-                            ui_modal_card()
-                                .w(move || px((window().width.0 - 32.0).clamp(280.0, 420.0)))
-                                .p_4()
-                                .gap_3()
-                                .child(marker_modal_header(open, badge))
-                                .child(
-                                    view().gap_1p5().child(
-                                        input()
-                                            .element_ref(&focus)
-                                            .w_full()
-                                            .h(px(ControlSize::Md.height()))
-                                            .px_2p5()
-                                            .rounded(px(RADIUS_MD))
-                                            .border_1()
-                                            .border_color(border_control())
-                                            .focus(|s| s.border_color(accent_blue()))
-                                            .bg(bg_canvas())
-                                            .text_size(px(TEXT_SM))
-                                            .text_color(fg_primary())
-                                            .placeholder(tr(
-                                                "输入标记名称（如：开始测登录）",
-                                                "Marker name (e.g. Start login test)",
-                                            ))
-                                            .value(move || draft.get())
-                                            .on_change(move |v: &str| draft.set(v.to_string()))
-                                            .on_submit(move |_: &str| {
-                                                submit_marker(
-                                                    &controls_enter,
-                                                    open,
-                                                    draft,
-                                                    ui_lang(langs),
-                                                );
-                                            }),
-                                    ),
-                                )
-                                .child(marker_preset_chips(controls_presets, open, draft))
-                                .child(marker_modal_footer(controls_submit, open, draft)),
-                        ),
+                    overlay().inset_0().child(
+                        view()
+                            .w_full()
+                            .h_full()
+                            .items_center()
+                            .justify_center()
+                            .child(ui_modal_backdrop(move || open.set(false)))
+                            .child(
+                                ui_modal_card()
+                                    .w(move || px((window().width.0 - 32.0).clamp(280.0, 420.0)))
+                                    .p_4()
+                                    .gap_3()
+                                    .child(marker_modal_header(open, badge))
+                                    .child(
+                                        view().gap_1p5().child(
+                                            input()
+                                                .element_ref(&focus)
+                                                .w_full()
+                                                .h(px(ControlSize::Md.height()))
+                                                .px_2p5()
+                                                .rounded(px(RADIUS_MD))
+                                                .border_1()
+                                                .border_color(border_control())
+                                                .focus(|s| s.border_color(accent_blue()))
+                                                .bg(bg_canvas())
+                                                .text_size(px(TEXT_SM))
+                                                .text_color(fg_primary())
+                                                .placeholder(tr(
+                                                    "输入标记名称（如：开始测登录）",
+                                                    "Marker name (e.g. Start login test)",
+                                                ))
+                                                .value(move || draft.get())
+                                                .on_change(move |v: &str| draft.set(v.to_string()))
+                                                .on_submit(move |_: &str| {
+                                                    submit_marker(
+                                                        &controls_enter,
+                                                        open,
+                                                        draft,
+                                                        ui_lang(langs),
+                                                    );
+                                                }),
+                                        ),
+                                    )
+                                    .child(marker_preset_chips(controls_presets, open, draft))
+                                    .child(marker_modal_footer(controls_submit, open, draft)),
+                            ),
+                    ),
                 )
         },
     )
@@ -163,8 +172,7 @@ fn marker_preset_chips(
         )
         .children((0..PRESETS_ZH.len()).map(move |idx| {
             let controls = controls.clone();
-            view()
-                .role(AccessibilityRole::Button)
+            button()
                 .h(px(24.0))
                 .px_2()
                 .rounded(px(RADIUS_MD))
@@ -179,7 +187,7 @@ fn marker_preset_chips(
                 .focus_visible(apply_focus_ring)
                 .items_center()
                 .justify_center()
-                .on_press(move || {
+                .on_press(move |_: &()| {
                     if guard_read_only_tab(&controls) {
                         open.set(false);
                         return;
@@ -214,8 +222,7 @@ fn marker_modal_footer(
         .gap_2()
         .pt_1()
         .child(
-            view()
-                .role(AccessibilityRole::Button)
+            button()
                 .h(px(ControlSize::Sm.height()))
                 .px_3()
                 .rounded(px(RADIUS_MD))
@@ -230,7 +237,7 @@ fn marker_modal_footer(
                 .focus_visible(apply_focus_ring)
                 .items_center()
                 .justify_center()
-                .on_press(move || open.set(false))
+                .on_press(move |_: &()| open.set(false))
                 .child(
                     control_text(tr("取消", "Cancel"))
                         .text_size(px(TEXT_SM))
@@ -238,8 +245,7 @@ fn marker_modal_footer(
                 ),
         )
         .child(
-            view()
-                .role(AccessibilityRole::Button)
+            button()
                 .h(px(ControlSize::Sm.height()))
                 .px_3()
                 .rounded(px(RADIUS_MD))
@@ -254,7 +260,7 @@ fn marker_modal_footer(
                 .focus_visible(apply_focus_ring)
                 .items_center()
                 .justify_center()
-                .on_press(move || submit_marker(&controls, open, draft, ui_lang(langs)))
+                .on_press(move |_: &()| submit_marker(&controls, open, draft, ui_lang(langs)))
                 .child(
                     control_text(tr("插入标记", "Add marker"))
                         .text_size(px(TEXT_SM))
@@ -402,8 +408,7 @@ pub(crate) fn marker_detail_card(
                                     }),
                             )
                             .child(
-                                view()
-                                    .role(AccessibilityRole::Button)
+                                button()
                                     .h(px(ControlSize::Sm.height()))
                                     .px_2p5()
                                     .rounded(px(RADIUS_MD))
@@ -428,7 +433,7 @@ pub(crate) fn marker_detail_card(
                                     .disabled_style(|s| s.opacity(0.5))
                                     .items_center()
                                     .justify_center()
-                                    .on_press(move || {
+                                    .on_press(move |_: &()| {
                                         if guard_read_only_tab(&controls_rename) {
                                             return;
                                         }
@@ -467,8 +472,7 @@ pub(crate) fn marker_detail_card(
                         .gap_2()
                         .pt_1()
                         .child(
-                            view()
-                                .role(AccessibilityRole::Button)
+                            button()
                                 .h(px(ControlSize::Sm.height()))
                                 .px_3()
                                 .rounded(px(RADIUS_MD))
@@ -483,7 +487,7 @@ pub(crate) fn marker_detail_card(
                                 .focus_visible(apply_focus_ring)
                                 .items_center()
                                 .justify_center()
-                                .on_press(move || {
+                                .on_press(move |_: &()| {
                                     let tok = marker_filter_token(&shown.url.get_untracked());
                                     list_filter.set(tok);
                                 })
@@ -495,8 +499,7 @@ pub(crate) fn marker_detail_card(
                                 ),
                         )
                         .child(
-                            view()
-                                .role(AccessibilityRole::Button)
+                            button()
                                 .h(px(ControlSize::Sm.height()))
                                 .px_3()
                                 .rounded(px(RADIUS_MD))
@@ -511,7 +514,7 @@ pub(crate) fn marker_detail_card(
                                 .focus_visible(apply_focus_ring)
                                 .items_center()
                                 .justify_center()
-                                .on_press(move || {
+                                .on_press(move |_: &()| {
                                     let label = shown.url.get_untracked();
                                     set_clipboard(label);
                                     set_status(&controls_copy, StatusMsg::CopiedMarker);
@@ -529,8 +532,7 @@ pub(crate) fn marker_detail_card(
                                 let confirm = signal(false);
                                 let reset_job = stored(None::<Spawned<()>>);
                                 let langs = ui_langs();
-                                view()
-                                    .role(AccessibilityRole::Button)
+                                button()
                                     .h(px(ControlSize::Sm.height()))
                                     .px_3()
                                     .rounded(px(RADIUS_MD))
@@ -557,7 +559,7 @@ pub(crate) fn marker_detail_card(
                                     .focus_visible(apply_focus_ring)
                                     .items_center()
                                     .justify_center()
-                                    .on_press(move || {
+                                    .on_press(move |_: &()| {
                                         if guard_read_only_tab(&controls_del) {
                                             return;
                                         }

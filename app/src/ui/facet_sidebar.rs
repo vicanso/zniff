@@ -203,7 +203,7 @@ pub(crate) fn facet_sidebar(
                                 ),
                             )
                             .child(
-                                view()
+                                toggle_group()
                                     .w_full()
                                     .flex_row()
                                     .flex_wrap()

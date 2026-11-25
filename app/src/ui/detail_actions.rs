@@ -245,6 +245,11 @@ pub(crate) fn detail_actions(
                 .is_some_and(|(id, side)| selected.get() == Some(id) && side == BreakSide::Request)
     };
     let open = signal(false);
+    bind_escape_while(
+        move || open.get(),
+        nsh_core::keymap::When::Always,
+        move || open.set(false),
+    );
     let code_open = signal(false);
     let items = view()
         .w_full()
@@ -482,6 +487,7 @@ pub(crate) fn detail_actions(
             },
         ));
     menu()
+        .open(move || Some(open.get()))
         .on_open_change(move |event: &nsh_base::MenuEvent| {
             if let nsh_base::MenuEvent::OpenChange(next, _) = event {
                 open.set(*next);

@@ -658,8 +658,7 @@ fn hub_android_cert_guide(controls: Arc<Controls>) -> impl IntoElement {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn hub_android_cert_guide_header(expanded: Signal<bool>) -> impl IntoElement {
-    view()
-        .role(AccessibilityRole::Button)
+    button()
         .w_full()
         .px_2p5()
         .py_1p5()
@@ -673,7 +672,7 @@ fn hub_android_cert_guide_header(expanded: Signal<bool>) -> impl IntoElement {
         .duration(MOTION_INSTANT_MS)
         .ease_out()
         .focus_visible(apply_focus_ring)
-        .on_press(move || expanded.set(!expanded.get_untracked()))
+        .on_press(move |_: &()| expanded.set(!expanded.get_untracked()))
         .child(
             view()
                 .flex_1()
@@ -861,13 +860,14 @@ fn hub_action_row_reactive(
     active: impl Fn() -> bool + 'static + Clone,
     on_press: impl Fn() + 'static,
 ) -> impl IntoElement {
+    let active_selected = active.clone();
     let active_border = active.clone();
     let active_bg = active.clone();
     let active_hover = active.clone();
     let active_icon = active.clone();
     let active_text = active;
-    view()
-        .role(AccessibilityRole::Button)
+    button()
+        .selected(active_selected)
         .w_full()
         .px_2p5()
         .py_1p5()
@@ -904,7 +904,7 @@ fn hub_action_row_reactive(
         .duration(MOTION_INSTANT_MS)
         .ease_out()
         .focus_visible(apply_focus_ring)
-        .on_press(on_press)
+        .on_press(move |_: &()| on_press())
         .child(glyph_px(
             ControlSize::Sm.icon_size(),
             move || icon,

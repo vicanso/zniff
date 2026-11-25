@@ -268,6 +268,11 @@ pub(crate) fn rule_templates_menu(
     quick_add_open: Signal<bool>,
 ) -> impl IntoElement {
     let open = signal(false);
+    bind_escape_while(
+        move || open.get(),
+        nsh_core::keymap::When::Always,
+        move || open.set(false),
+    );
     menu()
         .open(move || Some(open.get()))
         .on_open_change(move |event: &nsh_base::MenuEvent| {

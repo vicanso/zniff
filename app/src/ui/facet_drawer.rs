@@ -540,18 +540,8 @@ pub(crate) fn facet_drawer_overlay(
     open: impl Fn() -> bool + Copy + 'static,
     popup_width: impl Fn() -> f32 + Copy + 'static,
 ) -> impl IntoElement {
-    effect(move || {
-        if !open() {
-            return;
-        }
-        on_key_with(
-            "escape",
-            KeyOptions {
-                when: nsh_core::keymap::When::Always,
-                ..KeyOptions::default()
-            },
-            move |_| facets_open.set(false),
-        );
+    bind_escape_while(open, nsh_core::keymap::When::Always, move || {
+        facets_open.set(false);
     });
     sheet()
         .open(move || Some(open()))
@@ -709,7 +699,7 @@ pub(crate) fn facet_quick_bar(
         .child(
             view().flex_1().min_w(px(0.0)).overflow_hidden().child(
                 scroll().horizontal().w_full().child(
-                    view()
+                    toggle_group()
                         .flex_row()
                         .items_center()
                         .gap_1()
@@ -1057,76 +1047,6 @@ pub(crate) fn facet_drawer(
                     )
             }),
         )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn drawer_quick_chip(
-    filter: Signal<String>,
-    zh: &'static str,
-    en: &'static str,
-    token: &'static str,
-    aliases: &'static [&'static str],
-    tip_zh: &'static str,
-    tip_en: &'static str,
-) -> impl IntoElement {
-    let is_active = computed(move || filter_has_token(&filter.get(), aliases));
-    view().tooltip(label_tip(tip_zh, tip_en)).child(
-        button()
-            .selected(move || is_active.get())
-            .h(px(ControlSize::Xs.height()))
-            .px(px(5.0))
-            .rounded(px(RADIUS_SM))
-            .border_1()
-            .border_color(move || {
-                if is_active.get() {
-                    accent_blue_border()
-                } else {
-                    border_control()
-                }
-            })
-            .bg(move || {
-                if is_active.get() {
-                    accent_blue_soft()
-                } else {
-                    bg_control()
-                }
-            })
-            .hover(|style| {
-                style.bg(move || {
-                    if is_active.get() {
-                        accent_blue_soft_hover()
-                    } else {
-                        bg_control_hover()
-                    }
-                })
-            })
-            .active(|style| style.bg(bg_control_active()))
-            .transition_colors()
-            .duration(MOTION_INSTANT_MS)
-            .ease_out()
-            .focus_visible(apply_focus_ring)
-            .accessibility_label(tr_opt(zh, en))
-            .flex_row()
-            .items_center()
-            .gap(px(3.0))
-            .on_press(move |_: &()| filter.set(toggle_filter_chip(&filter.get(), token, aliases)))
-            .child(view().w(px(4.0)).h(px(4.0)).rounded_full().bg(move || {
-                if is_active.get() {
-                    accent_blue()
-                } else {
-                    fg_muted()
-                }
-            }))
-            .child(
-                compact_control_text(tr(zh, en), TEXT_XS).text_color(move || {
-                    if is_active.get() {
-                        accent_blue_text()
-                    } else {
-                        fg_secondary()
-                    }
-                }),
-            ),
-    )
 }
 
 pub(crate) const JSON_ALIASES: &[&str] = &["type:json", "ct:json"];

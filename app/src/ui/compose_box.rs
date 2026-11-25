@@ -90,7 +90,6 @@ pub(crate) fn compose_box(
     selected: Signal<Option<u64>>,
     paused: Signal<Option<(u64, BreakSide)>>,
 ) -> impl IntoElement {
-    let controls_continue = controls.clone();
     let controls_touch_status = controls.clone();
     let controls_touch_method = controls.clone();
     let controls_touch_url = controls.clone();
@@ -165,8 +164,7 @@ pub(crate) fn compose_box(
                             move || compose_clear_button(compose),
                         ))
                         .child(
-                            view()
-                                .role(AccessibilityRole::Button)
+                            button()
                                 .h(px(26.0))
                                 .px_2p5()
                                 .rounded(px(RADIUS_MD))
@@ -181,7 +179,7 @@ pub(crate) fn compose_box(
                                 .focus_visible(apply_focus_ring)
                                 .flex_row()
                                 .items_center()
-                                .on_press(move || reset_compose(compose))
+                                .on_press(move |_: &()| reset_compose(compose))
                                 .child(
                                     text(tr("取消", "Cancel"))
                                         .number_of_lines(1)
@@ -190,54 +188,82 @@ pub(crate) fn compose_box(
                                         .text_color(fg_secondary()),
                                 ),
                         )
-                        .child(when(
-                            move || compose.response.get(),
-                            move || {
-                                let controls = controls_continue.clone();
-                                view()
-                                    .role(AccessibilityRole::Button)
-                                    .h(px(26.0))
-                                    .px_2p5()
-                                    .rounded(px(RADIUS_MD))
-                                    .bg(move || {
-                                        if status_invalid() {
-                                            bg_control()
+                        .child({
+                            let controls = controls.clone();
+                            let langs = ui_langs();
+                            let is_continue =
+                                move || compose.response.get() || is_req_break();
+                            view()
+                                .tooltip(tooltip().child(ui_tooltip_surface(
+                                    text(move || -> SharedString {
+                                        if is_continue() {
+                                            t(
+                                                ui_lang(langs),
+                                                "Cmd/Ctrl+Enter 放行",
+                                                "Cmd/Ctrl+Enter to continue",
+                                            )
                                         } else {
-                                            accent_blue()
+                                            t(
+                                                ui_lang(langs),
+                                                "Cmd/Ctrl+Enter 发送",
+                                                "Cmd/Ctrl+Enter to send",
+                                            )
                                         }
+                                        .into()
                                     })
-                                    .hover(|style| {
-                                        style.bg(move || {
+                                    .text_size(px(TEXT_SM))
+                                    .text_color(fg_primary()),
+                                )))
+                                .child(
+                                    button()
+                                        .h(px(26.0))
+                                        .px_2p5()
+                                        .rounded(px(RADIUS_MD))
+                                        .bg(move || {
                                             if status_invalid() {
                                                 bg_control()
                                             } else {
-                                                accent_blue_hover()
+                                                accent_blue()
                                             }
                                         })
-                                    })
-                                    .active(|style| {
-                                        style.bg(move || {
-                                            if status_invalid() {
-                                                bg_control()
-                                            } else {
-                                                accent_blue_active()
-                                            }
+                                        .hover(|style| {
+                                            style.bg(move || {
+                                                if status_invalid() {
+                                                    bg_control()
+                                                } else {
+                                                    accent_blue_hover()
+                                                }
+                                            })
                                         })
-                                    })
-                                    .transition_colors()
-                                    .duration(MOTION_INSTANT_MS)
-                                    .ease_out()
-                                    .focus_visible(apply_focus_ring)
-                                    .disabled(status_invalid)
-                                    .disabled_style(|style| style.opacity(0.55))
-                                    .flex_row()
-                                    .items_center()
-                                    .tooltip(label_tip("Cmd/Ctrl+Enter 放行", "Cmd/Ctrl+Enter to continue"))
-                                    .on_press(move || {
-                                        submit_compose(&controls, compose, selected, paused);
-                                    })
-                                    .child(
-                                        text(tr("放行", "Continue"))
+                                        .active(|style| {
+                                            style.bg(move || {
+                                                if status_invalid() {
+                                                    bg_control()
+                                                } else {
+                                                    accent_blue_active()
+                                                }
+                                            })
+                                        })
+                                        .transition_colors()
+                                        .duration(MOTION_INSTANT_MS)
+                                        .ease_out()
+                                        .focus_visible(apply_focus_ring)
+                                        .disabled(status_invalid)
+                                        .disabled_style(|style| style.opacity(0.55))
+                                        .flex_row()
+                                        .items_center()
+                                        .on_press(move |_: &()| {
+                                            submit_compose(&controls, compose, selected, paused);
+                                        })
+                                        .child(
+                                            text(move || -> SharedString {
+                                                if is_continue() {
+                                                    t(ui_lang(langs), "放行", "Continue")
+                                                } else {
+                                                    t(ui_lang(langs), "发送", "Send")
+                                                }
+                                                .into()
+                                            })
                                             .number_of_lines(1)
                                             .text_size(px(TEXT_SM))
                                             .font_weight(FontWeight::SEMIBOLD)
@@ -248,57 +274,9 @@ pub(crate) fn compose_box(
                                                     fg_on_accent()
                                                 }
                                             }),
-                                    )
-                            },
-                        ))
-                        .child(when(
-                            move || !compose.response.get(),
-                            move || {
-                                let controls = controls.clone();
-                                let langs = ui_langs();
-                                view()
-                                    .role(AccessibilityRole::Button)
-                                    .h(px(26.0))
-                                    .px_2p5()
-                                    .rounded(px(RADIUS_MD))
-                                    .bg(accent_blue())
-                                    .hover(|style| style.bg(accent_blue_hover()))
-                                    .active(|style| style.bg(accent_blue_active()))
-                                    .transition_colors()
-                                    .duration(MOTION_INSTANT_MS)
-                                    .ease_out()
-                                    .focus_visible(apply_focus_ring)
-                                    .flex_row()
-                                    .items_center()
-                                    .tooltip(tooltip().child(ui_tooltip_surface(
-                                        text(move || -> SharedString {
-                                            if is_req_break() {
-                                                t(ui_lang(langs), "Cmd/Ctrl+Enter 放行", "Cmd/Ctrl+Enter to continue").into()
-                                            } else {
-                                                t(ui_lang(langs), "Cmd/Ctrl+Enter 发送", "Cmd/Ctrl+Enter to send").into()
-                                            }
-                                        })
-                                        .text_size(px(TEXT_SM))
-                                        .text_color(fg_primary()),
-                                    )))
-                                    .on_press(move || {
-                                        submit_compose(&controls, compose, selected, paused);
-                                    })
-                                    .child(
-                                        text(move || -> SharedString {
-                                            if is_req_break() {
-                                                t(ui_lang(langs), "放行", "Continue").into()
-                                            } else {
-                                                t(ui_lang(langs), "发送", "Send").into()
-                                            }
-                                        })
-                                        .number_of_lines(1)
-                                        .text_size(px(TEXT_SM))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(fg_on_accent()),
-                                    )
-                            },
-                        )),
+                                        ),
+                                )
+                        }),
                 ),
         )
         .child(
@@ -424,6 +402,11 @@ pub(crate) fn compose_box(
                                     let controls_url = controls_url.clone();
                                     let controls_url_submit = controls_url_submit.clone();
                                     let method_open = signal(false);
+                                    bind_escape_while(
+                                        move || method_open.get(),
+                                        nsh_core::keymap::When::Always,
+                                        move || method_open.set(false),
+                                    );
                                     view()
                                         .flex_1()
                                         .min_w(px(0.0))
@@ -447,6 +430,7 @@ pub(crate) fn compose_box(
                                                 )))
                                                 .child(
                                                     menu()
+                                                        .open(move || Some(method_open.get()))
                                                         .on_open_change(
                                                             move |event: &nsh_base::MenuEvent| {
                                                                 if let nsh_base::MenuEvent::OpenChange(
@@ -899,8 +883,7 @@ fn compose_clear_button(compose: Compose) -> impl IntoElement {
     let confirm = signal(false);
     let reset_job = stored(None::<Spawned<()>>);
     let langs = ui_langs();
-    view()
-        .role(AccessibilityRole::Button)
+    button()
         .h(px(26.0))
         .px_2p5()
         .rounded(px(RADIUS_MD))
@@ -935,7 +918,7 @@ fn compose_clear_button(compose: Compose) -> impl IntoElement {
         .focus_visible(apply_focus_ring)
         .flex_row()
         .items_center()
-        .on_press(move || {
+        .on_press(move |_: &()| {
             if confirm.get_untracked() {
                 reset_job.replace(None);
                 confirm.set(false);
@@ -979,6 +962,11 @@ fn compose_clear_button(compose: Compose) -> impl IntoElement {
 
 fn compose_recent_menu(compose: Compose, controls: Arc<Controls>) -> impl IntoElement {
     let recent_open = signal(false);
+    bind_escape_while(
+        move || recent_open.get(),
+        nsh_core::keymap::When::Always,
+        move || recent_open.set(false),
+    );
     let confirm_clear = signal(false);
     popover()
         .open(move || Some(recent_open.get()))
@@ -1076,8 +1064,7 @@ fn compose_recent_menu(compose: Compose, controls: Arc<Controls>) -> impl IntoEl
                                 let pick = item;
                                 let read_m = item;
                                 let read_u = item;
-                                view()
-                                    .role(AccessibilityRole::Button)
+                                button()
                                     .w_full()
                                     .px_2()
                                     .py_1p5()
@@ -1091,7 +1078,7 @@ fn compose_recent_menu(compose: Compose, controls: Arc<Controls>) -> impl IntoEl
                                     .flex_row()
                                     .items_center()
                                     .gap_1p5()
-                                    .on_press(move || {
+                                    .on_press(move |_: &()| {
                                         let (m, u, h, b) = pick.get();
                                         compose.method.set(m);
                                         compose.url.set(u);
@@ -1151,8 +1138,7 @@ fn compose_recent_menu(compose: Compose, controls: Arc<Controls>) -> impl IntoEl
                                 .text_color(fg_muted()),
                             )
                             .child(
-                                view()
-                                    .role(AccessibilityRole::Button)
+                                button()
                                     .px_1p5()
                                     .py_0p5()
                                     .rounded(px(RADIUS_SM))
@@ -1185,20 +1171,22 @@ fn compose_recent_menu(compose: Compose, controls: Arc<Controls>) -> impl IntoEl
                                     .duration(MOTION_INSTANT_MS)
                                     .ease_out()
                                     .focus_visible(apply_focus_ring)
-                                    .label(move || -> SharedString {
+                                    .accessibility_label(move || -> Option<SharedString> {
                                         let lang = ui_lang(ui_langs());
-                                        if confirm_clear.get() {
-                                            t(
-                                                lang,
-                                                "再次点击确认清空构造历史",
-                                                "Click again to clear compose history",
-                                            )
-                                            .into()
-                                        } else {
-                                            t(lang, "清空历史", "Clear history").into()
-                                        }
+                                        Some(
+                                            if confirm_clear.get() {
+                                                t(
+                                                    lang,
+                                                    "再次点击确认清空构造历史",
+                                                    "Click again to clear compose history",
+                                                )
+                                            } else {
+                                                t(lang, "清空历史", "Clear history")
+                                            }
+                                            .into(),
+                                        )
                                     })
-                                    .on_press(move || {
+                                    .on_press(move |_: &()| {
                                         if !confirm_clear.get_untracked() {
                                             confirm_clear.set(true);
                                             return;

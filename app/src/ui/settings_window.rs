@@ -118,6 +118,11 @@ pub(crate) fn settings_window(props: SettingsWindowProps) -> impl IntoElement {
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn settings_window(props: SettingsWindowProps) -> impl IntoElement {
     let open = props.profiles.settings_open;
+    bind_escape_while(
+        move || open.get(),
+        nsh_core::keymap::When::Auto,
+        move || open.set(false),
+    );
     when(
         move || open.get(),
         move || {
@@ -134,17 +139,21 @@ pub(crate) fn settings_window(props: SettingsWindowProps) -> impl IntoElement {
                         .w_full()
                         .child(settings_shell(props, true)),
                 );
-            overlay()
-                .inset_0()
+            dialog()
+                .animation(nsh_core::ModalAnimation::None)
+                .close_on_escape(false)
+                .optional_label(tr_opt("设置", "Settings"))
                 .on_cancel(move || open.set(false))
                 .child(
-                    view()
-                        .w_full()
-                        .h_full()
-                        .items_center()
-                        .justify_center()
-                        .child(backdrop)
-                        .child(card),
+                    overlay().inset_0().child(
+                        view()
+                            .w_full()
+                            .h_full()
+                            .items_center()
+                            .justify_center()
+                            .child(backdrop)
+                            .child(card),
+                    ),
                 )
         },
     )

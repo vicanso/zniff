@@ -117,6 +117,11 @@ pub(crate) fn is_apple_platform() -> bool {
 }
 
 pub(crate) fn shortcuts_modal(open: Signal<bool>) -> impl IntoElement {
+    bind_escape_while(
+        move || open.get(),
+        nsh_core::keymap::When::Auto,
+        move || open.set(false),
+    );
     when(
         move || open.get(),
         move || {
@@ -171,8 +176,7 @@ pub(crate) fn shortcuts_modal(open: Signal<bool>) -> impl IntoElement {
                     .text_color(fg_muted()),
                 )
                 .child(
-                    view()
-                        .role(AccessibilityRole::Button)
+                    button()
                         .h(px(ControlSize::Sm.height()))
                         .px_3()
                         .flex_row()
@@ -188,7 +192,7 @@ pub(crate) fn shortcuts_modal(open: Signal<bool>) -> impl IntoElement {
                         .duration(MOTION_INSTANT_MS)
                         .ease_out()
                         .focus_visible(apply_focus_ring)
-                        .on_press(move || open.set(false))
+                        .on_press(move |_: &()| open.set(false))
                         .child(control_text(tr("关闭", "Close")).text_color(accent_blue_text())),
                 );
 
@@ -204,17 +208,21 @@ pub(crate) fn shortcuts_modal(open: Signal<bool>) -> impl IntoElement {
                 )
                 .child(footer);
 
-            overlay()
-                .inset_0()
+            dialog()
+                .animation(nsh_core::ModalAnimation::None)
+                .close_on_escape(false)
+                .optional_label(tr_opt("键盘快捷键", "Keyboard Shortcuts"))
                 .on_cancel(move || open.set(false))
                 .child(
-                    view()
-                        .w_full()
-                        .h_full()
-                        .items_center()
-                        .justify_center()
-                        .child(backdrop)
-                        .child(card),
+                    overlay().inset_0().child(
+                        view()
+                            .w_full()
+                            .h_full()
+                            .items_center()
+                            .justify_center()
+                            .child(backdrop)
+                            .child(card),
+                    ),
                 )
         },
     )

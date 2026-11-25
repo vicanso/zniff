@@ -385,47 +385,9 @@ pub(crate) fn toolbar(
                                 let is_active_pill = move || profiles.filter_enabled.get();
                                 view()
                                     .window_drag(false)
-                                    .role(AccessibilityRole::Button)
-                                    .h(px(CONTROL_H))
                                     .max_w(px(240.0))
                                     .min_w(px(0.0))
-                                    .px_2()
-                                    .gap_1()
-                                    .rounded(px(RADIUS_MD))
-                                    .overflow_hidden()
                                     .flex_shrink(1.0)
-                                    .flex_row()
-                                    .items_center()
-                                    .border_1()
-                                    .border_color(move || {
-                                        if is_active_pill() {
-                                            accent_blue_border()
-                                        } else {
-                                            border_control()
-                                        }
-                                    })
-                                    .bg(move || {
-                                        if is_active_pill() {
-                                            accent_blue_soft()
-                                        } else {
-                                            bg_control()
-                                        }
-                                    })
-                                    .hover(|style| {
-                                        style.bg(move || {
-                                            if is_active_pill() {
-                                                accent_blue_soft_hover()
-                                            } else {
-                                                bg_control_hover()
-                                            }
-                                        })
-                                    })
-                                    .active(|style| style.bg(bg_control_active()))
-                                    .transition_colors()
-                                    .duration(MOTION_INSTANT_MS)
-                                    .ease_out()
-                                    .focus_visible(apply_focus_ring)
-                                    .label(tr("切换过滤生效状态", "Toggle filter active state"))
                                     .tooltip(
                                         tooltip().child(ui_tooltip_surface(
                                             text(move || -> SharedString {
@@ -441,47 +403,96 @@ pub(crate) fn toolbar(
                                             .text_color(fg_primary()),
                                         )),
                                     )
-                                    .on_press(move || {
-                                        profiles.filter_enabled.update(|on| *on = !*on);
-                                    })
-                                    .child(glyph_px(
-                                        ControlSize::Xs.icon_size(),
-                                        move || {
-                                            if profiles.filter_enabled.get() {
-                                                Glyph::Check
-                                            } else {
-                                                Glyph::History
-                                            }
-                                        },
-                                        move || {
-                                            if is_active_pill() {
-                                                color(accent_blue_text())
-                                            } else {
-                                                color(fg_muted())
-                                            }
-                                        },
-                                    ))
                                     .child(
-                                        mono(move || {
-                                            let prefix = t(ui_lang(langs), "过滤: ", "Filter: ");
-                                            let expr = profiles.filter.get();
-                                            SharedString::from(format!("{prefix}{}", expr.trim()))
-                                        })
-                                        .min_w(px(0.0))
-                                        .flex_shrink(1.0)
-                                        .number_of_lines(1)
-                                        .text_overflow(EllipsizeMode::Tail)
-                                        .text_size(px(TEXT_SM))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .text_color(
-                                            move || {
+                                        nsh_base::toggle()
+                                            .pressed(is_active_pill)
+                                            .h(px(CONTROL_H))
+                                            .max_w(px(240.0))
+                                            .min_w(px(0.0))
+                                            .px_2()
+                                            .gap_1()
+                                            .rounded(px(RADIUS_MD))
+                                            .overflow_hidden()
+                                            .flex_shrink(1.0)
+                                            .flex_row()
+                                            .items_center()
+                                            .border_1()
+                                            .border_color(move || {
                                                 if is_active_pill() {
-                                                    accent_blue_text()
+                                                    accent_blue_border()
                                                 } else {
-                                                    fg_muted()
+                                                    border_control()
                                                 }
-                                            },
-                                        ),
+                                            })
+                                            .bg(move || {
+                                                if is_active_pill() {
+                                                    accent_blue_soft()
+                                                } else {
+                                                    bg_control()
+                                                }
+                                            })
+                                            .hover(|style| {
+                                                style.bg(move || {
+                                                    if is_active_pill() {
+                                                        accent_blue_soft_hover()
+                                                    } else {
+                                                        bg_control_hover()
+                                                    }
+                                                })
+                                            })
+                                            .active(|style| style.bg(bg_control_active()))
+                                            .transition_colors()
+                                            .duration(MOTION_INSTANT_MS)
+                                            .ease_out()
+                                            .focus_visible(apply_focus_ring)
+                                            .accessibility_label(tr_opt(
+                                                "切换过滤生效状态",
+                                                "Toggle filter active state",
+                                            ))
+                                            .on_change(move |_: &bool| {
+                                                profiles.filter_enabled.update(|on| *on = !*on);
+                                            })
+                                            .child(glyph_px(
+                                                ControlSize::Xs.icon_size(),
+                                                move || {
+                                                    if profiles.filter_enabled.get() {
+                                                        Glyph::Check
+                                                    } else {
+                                                        Glyph::History
+                                                    }
+                                                },
+                                                move || {
+                                                    if is_active_pill() {
+                                                        color(accent_blue_text())
+                                                    } else {
+                                                        color(fg_muted())
+                                                    }
+                                                },
+                                            ))
+                                            .child(
+                                                mono(move || {
+                                                    let prefix =
+                                                        t(ui_lang(langs), "过滤: ", "Filter: ");
+                                                    let expr = profiles.filter.get();
+                                                    SharedString::from(format!(
+                                                        "{prefix}{}",
+                                                        expr.trim()
+                                                    ))
+                                                })
+                                                .min_w(px(0.0))
+                                                .flex_shrink(1.0)
+                                                .number_of_lines(1)
+                                                .text_overflow(EllipsizeMode::Tail)
+                                                .text_size(px(TEXT_SM))
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_color(move || {
+                                                    if is_active_pill() {
+                                                        accent_blue_text()
+                                                    } else {
+                                                        fg_muted()
+                                                    }
+                                                }),
+                                            ),
                                     )
                             },
                         ))

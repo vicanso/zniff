@@ -491,8 +491,7 @@ fn rule_line_summary_bar(
             }),
         )
         .child(
-            view()
-                .role(AccessibilityRole::Button)
+            button()
                 .h(px(ControlSize::Xs.height()))
                 .px_1p5()
                 .flex_shrink_0()
@@ -507,7 +506,7 @@ fn rule_line_summary_bar(
                 .duration(move || motion_ms(MOTION_INSTANT_MS))
                 .ease_out()
                 .focus_visible(apply_focus_ring)
-                .on_press(move || {
+                .on_press(move |_: &()| {
                     if show_chips() {
                         manual_open.set(false);
                         target.focused_line.set(None);
@@ -549,46 +548,49 @@ fn rule_chip_toggle_btn(
     is_zero_hit: impl Fn() -> bool + Copy + 'static,
 ) -> impl IntoElement {
     view()
-        .role(AccessibilityRole::Button)
-        .w(px(18.0))
-        .h(px(18.0))
         .flex_shrink_0()
-        .rounded(px(RADIUS_SM))
-        .items_center()
-        .justify_center()
-        .hover(|s| s.bg(bg_control_hover()))
-        .active(|s| s.bg(bg_control_active()))
-        .transition_colors()
-        .duration(MOTION_INSTANT_MS)
-        .ease_out()
-        .focus_visible(apply_focus_ring)
-        .label(tr("启用或注释规则", "Toggle rule comment"))
         .tooltip(label_tip(
             "启用 / 注释此规则 (#)",
             "Enable / comment this rule (#)",
         ))
-        .on_press(move || {
-            let idx = item.with(|it| it.line_idx);
-            let next = toggle_rule_line_comment(&target.current_text_untracked(), idx);
-            target.commit(&controls, next);
-        })
         .child(
-            mono(move || -> SharedString {
-                if item.with(|it| it.commented) {
-                    "#".into()
-                } else {
-                    "✓".into()
-                }
-            })
-            .text_size(px(TEXT_XS))
-            .font_weight(FontWeight::BOLD)
-            .text_color(move || {
-                if item.with(|it| it.commented) || is_zero_hit() {
-                    fg_muted()
-                } else {
-                    accent_blue_text()
-                }
-            }),
+            toggle()
+                .pressed(move || item.with(|it| !it.commented))
+                .accessibility_label(tr_opt("启用或注释规则", "Toggle rule comment"))
+                .w(px(18.0))
+                .h(px(18.0))
+                .rounded(px(RADIUS_SM))
+                .items_center()
+                .justify_center()
+                .hover(|s| s.bg(bg_control_hover()))
+                .active(|s| s.bg(bg_control_active()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .focus_visible(apply_focus_ring)
+                .on_change(move |_: &bool| {
+                    let idx = item.with(|it| it.line_idx);
+                    let next = toggle_rule_line_comment(&target.current_text_untracked(), idx);
+                    target.commit(&controls, next);
+                })
+                .child(
+                    mono(move || -> SharedString {
+                        if item.with(|it| it.commented) {
+                            "#".into()
+                        } else {
+                            "✓".into()
+                        }
+                    })
+                    .text_size(px(TEXT_XS))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(move || {
+                        if item.with(|it| it.commented) || is_zero_hit() {
+                            fg_muted()
+                        } else {
+                            accent_blue_text()
+                        }
+                    }),
+                ),
         )
 }
 
@@ -643,16 +645,8 @@ fn rule_chip_label(
         })
     };
     view()
-        .role(AccessibilityRole::Button)
         .flex_1()
         .min_w(px(0.0))
-        .rounded(px(RADIUS_SM))
-        .hover(|s| s.bg(bg_control_hover()))
-        .active(|s| s.bg(bg_control_active()))
-        .transition_colors()
-        .duration(MOTION_INSTANT_MS)
-        .ease_out()
-        .focus_visible(apply_focus_ring)
         .tooltip(
             tooltip().child(ui_tooltip_surface(
                 text(move || -> SharedString {
@@ -682,27 +676,46 @@ fn rule_chip_label(
                 .text_color(fg_primary()),
             )),
         )
-        .on_press(move || {
-            let (raw, line_idx) = item.with(|it| (it.raw.clone(), it.line_idx));
-            fill_line_into_quick_editor(&raw, line_idx, target, draft, quick_add_open, &controls);
-        })
         .child(
-            mono(move || -> SharedString {
-                item.with(|it| format!("#{} {}", it.line_idx + 1, it.preview))
-                    .into()
-            })
-            .number_of_lines(1)
-            .text_overflow(EllipsizeMode::Tail)
-            .text_size(px(TEXT_XS))
-            .text_color(move || {
-                if item.with(|it| it.commented) || is_zero_hit() {
-                    fg_muted()
-                } else if item.with(|it| !it.valid) {
-                    status_err_fg()
-                } else {
-                    fg_primary()
-                }
-            }),
+            button()
+                .w_full()
+                .min_w(px(0.0))
+                .rounded(px(RADIUS_SM))
+                .hover(|s| s.bg(bg_control_hover()))
+                .active(|s| s.bg(bg_control_active()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .focus_visible(apply_focus_ring)
+                .on_press(move |_: &()| {
+                    let (raw, line_idx) = item.with(|it| (it.raw.clone(), it.line_idx));
+                    fill_line_into_quick_editor(
+                        &raw,
+                        line_idx,
+                        target,
+                        draft,
+                        quick_add_open,
+                        &controls,
+                    );
+                })
+                .child(
+                    mono(move || -> SharedString {
+                        item.with(|it| format!("#{} {}", it.line_idx + 1, it.preview))
+                            .into()
+                    })
+                    .number_of_lines(1)
+                    .text_overflow(EllipsizeMode::Tail)
+                    .text_size(px(TEXT_XS))
+                    .text_color(move || {
+                        if item.with(|it| it.commented) || is_zero_hit() {
+                            fg_muted()
+                        } else if item.with(|it| !it.valid) {
+                            status_err_fg()
+                        } else {
+                            fg_primary()
+                        }
+                    }),
+                ),
         )
 }
 
@@ -716,29 +729,7 @@ fn rule_chip_hit_badge(
         move || item.with(|it| !it.commented && it.valid),
         move || {
             view()
-                .role(AccessibilityRole::Button)
-                .px_1()
-                .h(px(15.0))
                 .flex_shrink_0()
-                .rounded(px(RADIUS_SM))
-                .items_center()
-                .justify_center()
-                .hover(|s| {
-                    s.bg(move || {
-                        if hit_count() > 0 {
-                            bg_control_hover()
-                        } else {
-                            AdaptiveColor::TRANSPARENT
-                        }
-                    })
-                })
-                .active(|s| s.bg(bg_control_active()))
-                .transition_colors()
-                .duration(MOTION_INSTANT_MS)
-                .ease_out()
-                .focus_visible(apply_focus_ring)
-                .disabled(move || hit_count() == 0)
-                .disabled_style(|s| s.opacity(0.45))
                 .tooltip(
                     tooltip().child(ui_tooltip_surface(
                         text(move || -> SharedString {
@@ -758,36 +749,60 @@ fn rule_chip_hit_badge(
                         .text_color(fg_primary()),
                     )),
                 )
-                .on_press(move || {
-                    if hit_count() == 0 {
-                        return;
-                    }
-                    let line_no = item.with(|it| it.line_idx + 1);
-                    let group = target.editing.get_untracked();
-                    let token = rule_filter_token_for_line(group.as_deref(), line_no);
-                    target.filter.set(token);
-                    target.filter_enabled.set(true);
-                    target.panel_open.set(false);
-                })
                 .child(
-                    mono(move || -> SharedString {
-                        let count = hit_count();
-                        if count > 0 {
-                            format!("×{}", present::format_thousands(count as u64)).into()
-                        } else {
-                            "0".into()
-                        }
-                    })
-                    .tabular_nums()
-                    .text_size(px(TEXT_XS))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(move || {
-                        if hit_count() > 0 {
-                            accent_blue_text()
-                        } else {
-                            fg_muted()
-                        }
-                    }),
+                    button()
+                        .px_1()
+                        .h(px(15.0))
+                        .rounded(px(RADIUS_SM))
+                        .items_center()
+                        .justify_center()
+                        .hover(|s| {
+                            s.bg(move || {
+                                if hit_count() > 0 {
+                                    bg_control_hover()
+                                } else {
+                                    AdaptiveColor::TRANSPARENT
+                                }
+                            })
+                        })
+                        .active(|s| s.bg(bg_control_active()))
+                        .transition_colors()
+                        .duration(MOTION_INSTANT_MS)
+                        .ease_out()
+                        .focus_visible(apply_focus_ring)
+                        .disabled(move || hit_count() == 0)
+                        .disabled_style(|s| s.opacity(0.45))
+                        .on_press(move |_: &()| {
+                            if hit_count() == 0 {
+                                return;
+                            }
+                            let line_no = item.with(|it| it.line_idx + 1);
+                            let group = target.editing.get_untracked();
+                            let token = rule_filter_token_for_line(group.as_deref(), line_no);
+                            target.filter.set(token);
+                            target.filter_enabled.set(true);
+                            target.panel_open.set(false);
+                        })
+                        .child(
+                            mono(move || -> SharedString {
+                                let count = hit_count();
+                                if count > 0 {
+                                    format!("×{}", present::format_thousands(count as u64)).into()
+                                } else {
+                                    "0".into()
+                                }
+                            })
+                            .tabular_nums()
+                            .text_size(px(TEXT_XS))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(move || {
+                                if hit_count() > 0 {
+                                    accent_blue_text()
+                                } else {
+                                    fg_muted()
+                                }
+                            }),
+                        ),
                 )
         },
     )
@@ -801,84 +816,91 @@ fn rule_chip_remove_btn(
     let confirm = signal(false);
     let reset_job = stored(None::<Spawned<()>>);
     view()
-        .role(AccessibilityRole::Button)
-        .h(px(18.0))
-        .min_w(px(18.0))
-        .px(move || if confirm.get() { px(4.0) } else { px(0.0) })
         .flex_shrink_0()
-        .rounded(px(RADIUS_SM))
-        .items_center()
-        .justify_center()
-        .bg(move || {
-            if confirm.get() {
-                status_err_bg()
-            } else {
-                AdaptiveColor::TRANSPARENT
-            }
-        })
-        .hover(|s| {
-            s.bg(move || {
-                if confirm.get() {
-                    status_err_bg_hover()
-                } else {
-                    bg_control_hover()
-                }
-            })
-        })
-        .active(|s| s.bg(bg_control_active()))
-        .transition_colors()
-        .duration(MOTION_INSTANT_MS)
-        .ease_out()
-        .focus_visible(apply_focus_ring)
-        .label(move || -> SharedString {
-            let langs = ui_langs();
-            if confirm.get() {
-                t(
-                    ui_lang(langs),
-                    "再次点击确认删除规则行",
-                    "Click again to confirm rule removal",
-                )
-            } else {
-                t(ui_lang(langs), "删除规则行", "Remove rule line")
-            }
-            .into()
-        })
         .tooltip(label_tip(
             "删除此规则行（需二次确认）",
             "Remove rule line (click twice)",
         ))
-        .on_press(move || {
-            if confirm.get_untracked() {
-                reset_job.replace(None);
-                confirm.set(false);
-                let idx = item.with(|it| it.line_idx);
-                let next = remove_rule_line(&target.current_text_untracked(), idx);
-                target.commit(&controls, next);
-            } else {
-                confirm.set(true);
-                reset_job.replace(Some(set_timeout(Duration::from_millis(3500), move || {
-                    confirm.set(false);
-                })));
-            }
-        })
         .child(
-            text(move || -> SharedString {
-                let langs = ui_langs();
-                if confirm.get() {
-                    t(ui_lang(langs), "删?", "Del?").into()
-                } else {
-                    "×".into()
-                }
-            })
-            .text_size(px(TEXT_XS))
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(move || {
-                if confirm.get() {
-                    status_err_fg()
-                } else {
-                    fg_muted()
-                }
-            }),
+            button()
+                .h(px(18.0))
+                .min_w(px(18.0))
+                .px(move || if confirm.get() { px(4.0) } else { px(0.0) })
+                .rounded(px(RADIUS_SM))
+                .items_center()
+                .justify_center()
+                .bg(move || {
+                    if confirm.get() {
+                        status_err_bg()
+                    } else {
+                        AdaptiveColor::TRANSPARENT
+                    }
+                })
+                .hover(|s| {
+                    s.bg(move || {
+                        if confirm.get() {
+                            status_err_bg_hover()
+                        } else {
+                            bg_control_hover()
+                        }
+                    })
+                })
+                .active(|s| s.bg(bg_control_active()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .focus_visible(apply_focus_ring)
+                .accessibility_label(move || -> Option<SharedString> {
+                    let langs = ui_langs();
+                    Some(
+                        if confirm.get() {
+                            t(
+                                ui_lang(langs),
+                                "再次点击确认删除规则行",
+                                "Click again to confirm rule removal",
+                            )
+                        } else {
+                            t(ui_lang(langs), "删除规则行", "Remove rule line")
+                        }
+                        .into(),
+                    )
+                })
+                .on_press(move |_: &()| {
+                    if confirm.get_untracked() {
+                        reset_job.replace(None);
+                        confirm.set(false);
+                        let idx = item.with(|it| it.line_idx);
+                        let next = remove_rule_line(&target.current_text_untracked(), idx);
+                        target.commit(&controls, next);
+                    } else {
+                        confirm.set(true);
+                        reset_job.replace(Some(set_timeout(
+                            Duration::from_millis(3500),
+                            move || {
+                                confirm.set(false);
+                            },
+                        )));
+                    }
+                })
+                .child(
+                    text(move || -> SharedString {
+                        let langs = ui_langs();
+                        if confirm.get() {
+                            t(ui_lang(langs), "删?", "Del?").into()
+                        } else {
+                            "×".into()
+                        }
+                    })
+                    .text_size(px(TEXT_XS))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(move || {
+                        if confirm.get() {
+                            status_err_fg()
+                        } else {
+                            fg_muted()
+                        }
+                    }),
+                ),
         )
 }
 
@@ -1001,8 +1023,7 @@ fn rule_focused_banner(
                         .items_center()
                         .gap_1()
                         .child(
-                            view()
-                                .role(AccessibilityRole::Button)
+                            button()
                                 .h(px(ControlSize::Xs.height()))
                                 .px_1p5()
                                 .rounded(px(RADIUS_SM))
@@ -1011,7 +1032,7 @@ fn rule_focused_banner(
                                 .focus_visible(apply_focus_ring)
                                 .items_center()
                                 .justify_center()
-                                .on_press(move || {
+                                .on_press(move |_: &()| {
                                     if let Some((idx, raw)) = focused_entry.get() {
                                         fill_line_into_quick_editor(
                                             &raw,
@@ -1031,8 +1052,7 @@ fn rule_focused_banner(
                                 ),
                         )
                         .child(
-                            view()
-                                .role(AccessibilityRole::Button)
+                            button()
                                 .w(px(ControlSize::Xs.height()))
                                 .h(px(ControlSize::Xs.height()))
                                 .rounded(px(RADIUS_SM))
@@ -1041,8 +1061,11 @@ fn rule_focused_banner(
                                 .focus_visible(apply_focus_ring)
                                 .items_center()
                                 .justify_center()
-                                .label(tr("清除定位高亮", "Clear focus highlight"))
-                                .on_press(move || target.focused_line.set(None))
+                                .accessibility_label(tr_opt(
+                                    "清除定位高亮",
+                                    "Clear focus highlight",
+                                ))
+                                .on_press(move |_: &()| target.focused_line.set(None))
                                 .child(
                                     text("×")
                                         .text_size(px(TEXT_XS))

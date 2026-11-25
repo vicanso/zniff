@@ -103,23 +103,7 @@ pub(crate) fn footer(
                     move || config_broken.get().is_some(),
                     move || {
                         view()
-                            .role(AccessibilityRole::Button)
-                            .h(px(ControlSize::Xs.height()))
-                            .px(px(ControlSize::Xs.padding_x()))
                             .flex_shrink_0()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(ControlSize::Xs.gap()))
-                            .rounded(px(RADIUS_SM))
-                            .border_1()
-                            .border_color(status_warn_fg())
-                            .bg(status_warn_bg())
-                            .hover(|style| style.bg(bg_control_hover()))
-                            .active(|style| style.bg(bg_control_active()))
-                            .transition_colors()
-                            .duration(MOTION_INSTANT_MS)
-                            .ease_out()
-                            .focus_visible(apply_focus_ring)
                             .tooltip(
                                 tooltip().child(ui_tooltip_surface(
                                     text(move || config_broken.get().unwrap_or_default())
@@ -127,18 +111,37 @@ pub(crate) fn footer(
                                         .text_color(fg_primary()),
                                 )),
                             )
-                            .on_press(move || config_broken_dismissed.set(false))
-                            .child(glyph_px(
-                                ControlSize::Xs.icon_size(),
-                                || Glyph::Alert,
-                                || color(status_warn_fg()),
-                            ))
                             .child(
-                                text(tr("配置错误", "Config error"))
-                                    .number_of_lines(1)
-                                    .text_size(px(TEXT_XS))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(status_warn_fg()),
+                                button()
+                                    .h(px(ControlSize::Xs.height()))
+                                    .px(px(ControlSize::Xs.padding_x()))
+                                    .flex_shrink_0()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap(px(ControlSize::Xs.gap()))
+                                    .rounded(px(RADIUS_SM))
+                                    .border_1()
+                                    .border_color(status_warn_fg())
+                                    .bg(status_warn_bg())
+                                    .hover(|style| style.bg(bg_control_hover()))
+                                    .active(|style| style.bg(bg_control_active()))
+                                    .transition_colors()
+                                    .duration(MOTION_INSTANT_MS)
+                                    .ease_out()
+                                    .focus_visible(apply_focus_ring)
+                                    .on_press(move |_: &()| config_broken_dismissed.set(false))
+                                    .child(glyph_px(
+                                        ControlSize::Xs.icon_size(),
+                                        || Glyph::Alert,
+                                        || color(status_warn_fg()),
+                                    ))
+                                    .child(
+                                        text(tr("配置错误", "Config error"))
+                                            .number_of_lines(1)
+                                            .text_size(px(TEXT_XS))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(status_warn_fg()),
+                                    ),
                             )
                     },
                 )),
@@ -685,8 +688,8 @@ pub(crate) fn lan_choice_row(
     let picked = move || lan_choice.get() == addr.with(|item| item.ip.to_string());
     let picked_bg = picked;
     let picked_dot = picked;
-    view()
-        .role(AccessibilityRole::Button)
+    button()
+        .selected(picked)
         .h(px(ControlSize::Sm.height()))
         .px_2()
         .w_full()
@@ -723,7 +726,7 @@ pub(crate) fn lan_choice_row(
         .duration(MOTION_INSTANT_MS)
         .ease_out()
         .focus_visible(apply_focus_ring)
-        .on_press(move || {
+        .on_press(move |_: &()| {
             let ip = addr.with(|item| item.ip.to_string());
             publish_lan(&listen.get(), &ip, lan_addrs, lan_choice, lan_url, qr_path);
         })

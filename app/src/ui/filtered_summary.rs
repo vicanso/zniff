@@ -130,8 +130,7 @@ pub(crate) fn filtered_summary_card(
         .child(when(
             move || stats.with(|s| s.max_elapsed.is_some()),
             move || {
-                view()
-                    .role(AccessibilityRole::Button)
+                button()
                     .px_3()
                     .py_2()
                     .rounded(px(RADIUS_MD))
@@ -147,7 +146,7 @@ pub(crate) fn filtered_summary_card(
                     .flex_row()
                     .items_center()
                     .gap_2()
-                    .on_press(move || {
+                    .on_press(move |_: &()| {
                         if let Some(id) =
                             stats.with(|s| s.max_elapsed.as_ref().map(|(id, _, _)| *id))
                         {

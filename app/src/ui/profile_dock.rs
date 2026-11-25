@@ -67,6 +67,11 @@ fn profile_export_menu(
 ) -> impl IntoElement {
     let langs = ui_langs();
     let open = signal(false);
+    bind_escape_while(
+        move || open.get(),
+        nsh_core::keymap::When::Always,
+        move || open.set(false),
+    );
     let can_current = move || profile_export_current_snapshot(profiles, draft).is_some();
     let can_all = move || !profiles.saved.with(Vec::is_empty);
     let current_controls = controls.clone();
@@ -327,8 +332,7 @@ pub(crate) fn profile_dock(
                                     .child(when(
                                         move || !import_text.get().is_empty(),
                                         move || {
-                                            view()
-                                                .role(AccessibilityRole::Button)
+                                            button()
                                                 .h(px(ControlSize::Xs.height()))
                                                 .px_2()
                                                 .rounded(px(RADIUS_SM))
@@ -343,7 +347,7 @@ pub(crate) fn profile_dock(
                                                 .focus_visible(apply_focus_ring)
                                                 .flex_row()
                                                 .items_center()
-                                                .on_press(move || import_text.set(String::new()))
+                                                .on_press(move |_: &()| import_text.set(String::new()))
                                                 .child(
                                                     text(tr("清空", "Clear"))
                                                         .text_size(px(TEXT_XS))
@@ -352,8 +356,7 @@ pub(crate) fn profile_dock(
                                         },
                                     ))
                                     .child(
-                                        view()
-                                            .role(AccessibilityRole::Button)
+                                        button()
                                             .h(px(ControlSize::Xs.height()))
                                             .px_2p5()
                                             .rounded(px(RADIUS_SM))
@@ -368,7 +371,7 @@ pub(crate) fn profile_dock(
                                             .focus_visible(apply_focus_ring)
                                             .flex_row()
                                             .items_center()
-                                            .on_press(move || {
+                                            .on_press(move |_: &()| {
                                                 import_text.set(String::new());
                                                 import_open.set(false);
                                             })
@@ -379,8 +382,7 @@ pub(crate) fn profile_dock(
                                             ),
                                     )
                                     .child(
-                                        view()
-                                            .role(AccessibilityRole::Button)
+                                        button()
                                             .h(px(ControlSize::Xs.height()))
                                             .px_2p5()
                                             .rounded(px(RADIUS_SM))
@@ -425,7 +427,7 @@ pub(crate) fn profile_dock(
                                             .items_center()
                                             .disabled(move || !ready())
                                             .disabled_style(|s| s.opacity(0.55))
-                                            .on_press(move || {
+                                            .on_press(move |_: &()| {
                                                 if !ready() {
                                                     return;
                                                 }
@@ -557,43 +559,7 @@ pub(crate) fn profile_dock(
                                 ))
                                 .child(
                                     view()
-                                        .role(AccessibilityRole::Button)
-                                        .h(px(CONTROL_H))
-                                        .px_2p5()
                                         .flex_shrink_0()
-                                        .rounded(px(RADIUS_MD))
-                                        .border_1()
-                                        .border_color(move || {
-                                            if import_open.get() {
-                                                accent_blue_border()
-                                            } else {
-                                                border_control()
-                                            }
-                                        })
-                                        .bg(move || {
-                                            if import_open.get() {
-                                                accent_blue_soft()
-                                            } else {
-                                                bg_control()
-                                            }
-                                        })
-                                        .hover(|style| {
-                                            style.bg(move || {
-                                                if import_open.get() {
-                                                    accent_blue_soft_hover()
-                                                } else {
-                                                    bg_control_hover()
-                                                }
-                                            })
-                                        })
-                                        .active(|style| style.bg(bg_control_active()))
-                                        .transition_colors()
-                                        .duration(MOTION_INSTANT_MS)
-                                        .ease_out()
-                                        .focus_visible(apply_focus_ring)
-                                        .flex_row()
-                                        .items_center()
-                                        .justify_center()
                                         .tooltip(label_tip(
                                             if cfg!(target_arch = "wasm32") {
                                                 "展开/收起粘贴 TOML / Whistle / Charles XML 导入面板"
@@ -606,22 +572,62 @@ pub(crate) fn profile_dock(
                                                 "Toggle import drawer for TOML, Whistle, or Charles XML (or drop file)"
                                             },
                                         ))
-                                        .on_press(move || {
-                                            dropdown_open.set(false);
-                                            history_open.set(false);
-                                            import_open.update(|open| *open = !*open);
-                                        })
                                         .child(
-                                            text(tr("导入", "Import"))
-                                                .text_size(px(TEXT_SM))
-                                                .font_weight(FontWeight::MEDIUM)
-                                                .text_color(move || {
+                                            toggle()
+                                                .pressed(move || import_open.get())
+                                                .h(px(CONTROL_H))
+                                                .px_2p5()
+                                                .flex_shrink_0()
+                                                .rounded(px(RADIUS_MD))
+                                                .border_1()
+                                                .border_color(move || {
                                                     if import_open.get() {
-                                                        accent_blue_text()
+                                                        accent_blue_border()
                                                     } else {
-                                                        fg_secondary()
+                                                        border_control()
                                                     }
-                                                }),
+                                                })
+                                                .bg(move || {
+                                                    if import_open.get() {
+                                                        accent_blue_soft()
+                                                    } else {
+                                                        bg_control()
+                                                    }
+                                                })
+                                                .hover(|style| {
+                                                    style.bg(move || {
+                                                        if import_open.get() {
+                                                            accent_blue_soft_hover()
+                                                        } else {
+                                                            bg_control_hover()
+                                                        }
+                                                    })
+                                                })
+                                                .active(|style| style.bg(bg_control_active()))
+                                                .transition_colors()
+                                                .duration(MOTION_INSTANT_MS)
+                                                .ease_out()
+                                                .focus_visible(apply_focus_ring)
+                                                .flex_row()
+                                                .items_center()
+                                                .justify_center()
+                                                .on_change(move |_: &bool| {
+                                                    dropdown_open.set(false);
+                                                    history_open.set(false);
+                                                    import_open.update(|open| *open = !*open);
+                                                })
+                                                .child(
+                                                    text(tr("导入", "Import"))
+                                                        .text_size(px(TEXT_SM))
+                                                        .font_weight(FontWeight::MEDIUM)
+                                                        .text_color(move || {
+                                                            if import_open.get() {
+                                                                accent_blue_text()
+                                                            } else {
+                                                                fg_secondary()
+                                                            }
+                                                        }),
+                                                ),
                                         ),
                                 ),
                         ),
@@ -642,101 +648,58 @@ pub(crate) fn profile_dock(
                         )))
                         .child(
                             view()
-                                .role(AccessibilityRole::Button)
-                                .h(px(CONTROL_H))
-                                .px_3()
                                 .flex_shrink_0()
-                                .rounded(px(RADIUS_MD))
-                                .border_1()
-                                .border_color(border_control())
-                                .bg(bg_control())
-                                .hover(|style| style.bg(bg_control_hover()))
-                                .active(|style| style.bg(bg_control_active()))
-                                .transition_colors()
-                                .duration(MOTION_INSTANT_MS)
-                                .ease_out()
-                                .focus_visible(apply_focus_ring)
-                                .flex_row()
-                                .items_center()
-                                .justify_center()
                                 .tooltip(label_tip(
                                     "清空当前工作区条件以开始新预设（原内容会保留在历史中）",
                                     "Clear workspace filter/rules to start a new preset (previous state kept in History)",
                                 ))
-                                .on_press(move || {
-                                    dropdown_open.set(false);
-                                    history_open.set(false);
-                                    adopted.set(true);
-                                    record_profile_history(
-                                        &rule_name.get(),
-                                        &filter.get(),
-                                        &bypass_text.get(),
-                                        &rules_text.get(),
-                                        &upstream_text.get(),
-                                        rules_on.get(),
-                                        breaks_on.get(),
-                                        show_tunnels.get(),
-                                        history,
-                                    );
-                                    blank_working_setup(profiles, draft, &blank_controls);
-                                })
                                 .child(
-                                    text(tr("新建预设", "New preset"))
-                                        .text_size(px(TEXT_SM))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .text_color(fg_secondary()),
+                                    button()
+                                        .h(px(CONTROL_H))
+                                        .px_3()
+                                        .flex_shrink_0()
+                                        .rounded(px(RADIUS_MD))
+                                        .border_1()
+                                        .border_color(border_control())
+                                        .bg(bg_control())
+                                        .hover(|style| style.bg(bg_control_hover()))
+                                        .active(|style| style.bg(bg_control_active()))
+                                        .transition_colors()
+                                        .duration(MOTION_INSTANT_MS)
+                                        .ease_out()
+                                        .focus_visible(apply_focus_ring)
+                                        .flex_row()
+                                        .items_center()
+                                        .justify_center()
+                                        .on_press(move |_: &()| {
+                                            dropdown_open.set(false);
+                                            history_open.set(false);
+                                            adopted.set(true);
+                                            record_profile_history(
+                                                &rule_name.get(),
+                                                &filter.get(),
+                                                &bypass_text.get(),
+                                                &rules_text.get(),
+                                                &upstream_text.get(),
+                                                rules_on.get(),
+                                                breaks_on.get(),
+                                                show_tunnels.get(),
+                                                history,
+                                            );
+                                            blank_working_setup(profiles, draft, &blank_controls);
+                                        })
+                                        .child(
+                                            text(tr("新建预设", "New preset"))
+                                                .text_size(px(TEXT_SM))
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_color(fg_secondary()),
+                                        ),
                                 ),
                         )
                         .child({
                             let ready_text = move || save_ready.get();
                             view()
-                                .role(AccessibilityRole::Button)
-                                .h(px(CONTROL_H))
-                                .px_3p5()
                                 .flex_shrink_0()
-                                .rounded(px(RADIUS_MD))
-                                .border_1()
-                                .border_color(move || {
-                                    if save_ready.get() {
-                                        accent_blue()
-                                    } else {
-                                        border_control()
-                                    }
-                                })
-                                .flex_row()
-                                .items_center()
-                                .justify_center()
-                                .bg(move || {
-                                    if save_ready.get() {
-                                        accent_blue()
-                                    } else {
-                                        bg_control()
-                                    }
-                                })
-                                .hover(|style| {
-                                    style.bg(move || {
-                                        if save_ready.get() {
-                                            accent_blue_hover()
-                                        } else {
-                                            bg_control()
-                                        }
-                                    })
-                                })
-                                .active(|style| {
-                                    style.bg(move || {
-                                        if save_ready.get() {
-                                            accent_blue_active()
-                                        } else {
-                                            bg_control()
-                                        }
-                                    })
-                                })
-                                .transition_colors()
-                                .duration(MOTION_INSTANT_MS)
-                                .ease_out()
-                                .focus_visible(apply_focus_ring)
-                                .disabled(move || !save_ready.get())
-                                .disabled_style(|s| s.opacity(0.55))
                                 .tooltip(tooltip().child(ui_tooltip_surface(
                                     text(move || -> SharedString {
                                         let lang = ui_lang(langs);
@@ -762,25 +725,74 @@ pub(crate) fn profile_dock(
                                     .text_size(px(TEXT_SM))
                                     .text_color(fg_primary()),
                                 )))
-                                .on_press(move || {
-                                    if !save_ready.get() {
-                                        return;
-                                    }
-                                    dropdown_open.set(false);
-                                    commit_and_save_profile(profiles, draft, None, &save_controls);
-                                    dismiss_keyboard();
-                                })
                                 .child(
-                                    text(tr("保存", "Save"))
-                                        .text_size(px(TEXT_SM))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .text_color(move || {
-                                            if ready_text() {
-                                                fg_on_accent()
+                                    button()
+                                        .h(px(CONTROL_H))
+                                        .px_3p5()
+                                        .flex_shrink_0()
+                                        .rounded(px(RADIUS_MD))
+                                        .border_1()
+                                        .border_color(move || {
+                                            if save_ready.get() {
+                                                accent_blue()
                                             } else {
-                                                fg_muted()
+                                                border_control()
                                             }
-                                        }),
+                                        })
+                                        .flex_row()
+                                        .items_center()
+                                        .justify_center()
+                                        .bg(move || {
+                                            if save_ready.get() {
+                                                accent_blue()
+                                            } else {
+                                                bg_control()
+                                            }
+                                        })
+                                        .hover(|style| {
+                                            style.bg(move || {
+                                                if save_ready.get() {
+                                                    accent_blue_hover()
+                                                } else {
+                                                    bg_control()
+                                                }
+                                            })
+                                        })
+                                        .active(|style| {
+                                            style.bg(move || {
+                                                if save_ready.get() {
+                                                    accent_blue_active()
+                                                } else {
+                                                    bg_control()
+                                                }
+                                            })
+                                        })
+                                        .transition_colors()
+                                        .duration(MOTION_INSTANT_MS)
+                                        .ease_out()
+                                        .focus_visible(apply_focus_ring)
+                                        .disabled(move || !save_ready.get())
+                                        .disabled_style(|s| s.opacity(0.55))
+                                        .on_press(move |_: &()| {
+                                            if !save_ready.get() {
+                                                return;
+                                            }
+                                            dropdown_open.set(false);
+                                            commit_and_save_profile(profiles, draft, None, &save_controls);
+                                            dismiss_keyboard();
+                                        })
+                                        .child(
+                                            text(tr("保存", "Save"))
+                                                .text_size(px(TEXT_SM))
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_color(move || {
+                                                    if ready_text() {
+                                                        fg_on_accent()
+                                                    } else {
+                                                        fg_muted()
+                                                    }
+                                                }),
+                                        ),
                                 )
                         }),
                 ),

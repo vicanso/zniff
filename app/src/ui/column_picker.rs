@@ -6,7 +6,13 @@ pub(crate) fn column_menu(
     controls: Arc<Controls>,
 ) -> impl IntoElement {
     let open = signal(false);
+    bind_escape_while(
+        move || open.get(),
+        nsh_core::keymap::When::Always,
+        move || open.set(false),
+    );
     menu()
+        .open(move || Some(open.get()))
         .placement(Placement::Bottom)
         .align(Align::End)
         .offset(px(4.0))
@@ -239,9 +245,9 @@ pub(crate) fn column_slot_row(
         .flex_row()
         .items_center()
         .child(
-            view()
-                .role(AccessibilityRole::Button)
-                .label(row_label)
+            toggle()
+                .pressed(is_on)
+                .accessibility_label(move || Some(row_label()))
                 .flex_1()
                 .min_w(px(0.0))
                 .h_full()
@@ -275,7 +281,7 @@ pub(crate) fn column_slot_row(
                 .ease_out()
                 .focus_visible(apply_focus_ring)
                 .disabled(locked)
-                .on_press(move || {
+                .on_change(move |_: &bool| {
                     let current = columns.get();
                     let next = current.toggle(current.order[slot]);
                     if next == current {
@@ -340,8 +346,7 @@ pub(crate) fn column_move_button(
     } else {
         ("下移", "Move down")
     };
-    let btn = view()
-        .role(AccessibilityRole::Button)
+    let btn = button()
         .w(px(ControlSize::Xs.height()))
         .h(px(ControlSize::Xs.height()))
         .flex_shrink_0()
@@ -349,40 +354,42 @@ pub(crate) fn column_move_button(
         .flex_row()
         .items_center()
         .justify_center()
+        .disabled(!can_move)
+        .accessibility_label(tr_opt(zh, en))
         .child(glyph_px(
             12.0,
             move || icon,
             move || color(if can_move { fg_secondary() } else { fg_muted() }),
         ));
     if can_move {
-        btn.hover(|style| style.bg(bg_control_hover()))
-            .active(|style| style.bg(bg_control_active()))
-            .transition_colors()
-            .duration(MOTION_INSTANT_MS)
-            .ease_out()
-            .focus_visible(apply_focus_ring)
-            .label(tr(zh, en))
-            .tooltip(label_tip(zh, en))
-            .on_press(move || {
-                let current = columns.get();
-                let column = current.order[slot];
-                let next = current.move_by(column, delta);
-                if next == current {
-                    return;
-                }
-                columns.set(next);
-                if let Err(err) = save_config(|config| next.write(config)) {
-                    set_status(
-                        &controls,
-                        StatusMsg::PrefUnsaved {
-                            name: PrefName::List,
-                            err: err.to_string(),
-                        },
-                    );
-                }
-            })
+        view().flex_shrink_0().tooltip(label_tip(zh, en)).child(
+            btn.hover(|style| style.bg(bg_control_hover()))
+                .active(|style| style.bg(bg_control_active()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .focus_visible(apply_focus_ring)
+                .on_press(move |_: &()| {
+                    let current = columns.get();
+                    let column = current.order[slot];
+                    let next = current.move_by(column, delta);
+                    if next == current {
+                        return;
+                    }
+                    columns.set(next);
+                    if let Err(err) = save_config(|config| next.write(config)) {
+                        set_status(
+                            &controls,
+                            StatusMsg::PrefUnsaved {
+                                name: PrefName::List,
+                                err: err.to_string(),
+                            },
+                        );
+                    }
+                }),
+        )
     } else {
-        btn.opacity(0.28)
+        view().flex_shrink_0().child(btn.opacity(0.28))
     }
 }
 
@@ -390,8 +397,7 @@ pub(crate) fn column_reset_order(
     columns: Signal<ListColumns>,
     controls: Arc<Controls>,
 ) -> impl IntoElement {
-    view()
-        .role(AccessibilityRole::Button)
+    button()
         .h(px(CONTROL_H))
         .px_2p5()
         .gap_2()
@@ -404,7 +410,7 @@ pub(crate) fn column_reset_order(
         .duration(MOTION_INSTANT_MS)
         .ease_out()
         .focus_visible(apply_focus_ring)
-        .on_press(move || {
+        .on_press(move |_: &()| {
             let current = columns.get();
             let next = current.reset_order();
             if next == current {

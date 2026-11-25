@@ -83,8 +83,7 @@ pub(crate) fn config_broken_bar(
                     set_status(&copy_controls, StatusMsg::CopiedConfigPath(target));
                 }))
                 .child(
-                    view()
-                        .role(AccessibilityRole::Button)
+                    button()
                         .h(px(CONTROL_H))
                         .px_2p5()
                         .rounded(px(RADIUS_MD))
@@ -97,7 +96,7 @@ pub(crate) fn config_broken_bar(
                         .focus_visible(apply_focus_ring)
                         .flex_row()
                         .items_center()
-                        .on_press(move || {
+                        .on_press(move |_: &()| {
                             reset_broken_config_action(
                                 reset_controls.clone(),
                                 config_broken,
@@ -118,30 +117,33 @@ pub(crate) fn config_broken_bar(
                 )
                 .child(
                     view()
-                        .role(AccessibilityRole::Button)
-                        .w(px(CONTROL_H))
-                        .h(px(CONTROL_H))
-                        .rounded(px(RADIUS_MD))
-                        .hover(|style| style.bg(bg_control_hover()))
-                        .active(|style| style.bg(bg_control_active()))
-                        .transition_colors()
-                        .duration(MOTION_INSTANT_MS)
-                        .ease_out()
-                        .focus_visible(apply_focus_ring)
-                        .flex_row()
-                        .items_center()
-                        .justify_center()
-                        .label(tr("隐藏横幅", "Dismiss banner"))
+                        .flex_shrink_0()
                         .tooltip(label_tip(
                             "暂时收起（可从底部状态栏重新打开）",
                             "Dismiss (reopen from status bar)",
                         ))
-                        .on_press(move || config_broken_dismissed.set(true))
-                        .child(glyph_px(
-                            12.0,
-                            || Glyph::Close,
-                            || color(status_warn_fg()),
-                        )),
+                        .child(
+                            button()
+                                .w(px(CONTROL_H))
+                                .h(px(CONTROL_H))
+                                .rounded(px(RADIUS_MD))
+                                .hover(|style| style.bg(bg_control_hover()))
+                                .active(|style| style.bg(bg_control_active()))
+                                .transition_colors()
+                                .duration(MOTION_INSTANT_MS)
+                                .ease_out()
+                                .focus_visible(apply_focus_ring)
+                                .flex_row()
+                                .items_center()
+                                .justify_center()
+                                .accessibility_label(tr_opt("隐藏横幅", "Dismiss banner"))
+                                .on_press(move |_: &()| config_broken_dismissed.set(true))
+                                .child(glyph_px(
+                                    12.0,
+                                    || Glyph::Close,
+                                    || color(status_warn_fg()),
+                                )),
+                        ),
                 ),
         )
 }
@@ -393,33 +395,39 @@ pub(crate) fn break_bar(
                             move || paused.get().is_some_and(|(id, _)| selected.get() != Some(id)),
                             move || {
                                 view()
-                                    .role(AccessibilityRole::Button)
-                                    .h(px(ControlSize::Xs.height()))
-                                    .px_2()
                                     .flex_shrink_0()
-                                    .rounded(px(RADIUS_SM))
-                                    .border_1()
-                                    .border_color(status_warn_fg())
-                                    .bg(bg_card())
-                                    .hover(|s| s.bg(status_warn_bg_hover()))
-                                    .active(|s| s.bg(bg_control_active()))
-                                    .transition_colors()
-                                    .duration(MOTION_INSTANT_MS)
-                                    .ease_out()
-                                    .focus_visible(apply_focus_ring)
-                                    .items_center()
-                                    .justify_center()
-                                    .tooltip(label_tip("在列表中选中并查看此暂停流量", "Select and inspect paused flow"))
-                                    .on_press(move || {
-                                        if let Some((id, _)) = paused.get() {
-                                            selected.set(Some(id));
-                                        }
-                                    })
+                                    .tooltip(label_tip(
+                                        "在列表中选中并查看此暂停流量",
+                                        "Select and inspect paused flow",
+                                    ))
                                     .child(
-                                        text(tr("查看", "View"))
-                                            .text_size(px(TEXT_XS))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(status_warn_fg()),
+                                        button()
+                                            .h(px(ControlSize::Xs.height()))
+                                            .px_2()
+                                            .flex_shrink_0()
+                                            .rounded(px(RADIUS_SM))
+                                            .border_1()
+                                            .border_color(status_warn_fg())
+                                            .bg(bg_card())
+                                            .hover(|s| s.bg(status_warn_bg_hover()))
+                                            .active(|s| s.bg(bg_control_active()))
+                                            .transition_colors()
+                                            .duration(MOTION_INSTANT_MS)
+                                            .ease_out()
+                                            .focus_visible(apply_focus_ring)
+                                            .items_center()
+                                            .justify_center()
+                                            .on_press(move |_: &()| {
+                                                if let Some((id, _)) = paused.get() {
+                                                    selected.set(Some(id));
+                                                }
+                                            })
+                                            .child(
+                                                text(tr("查看", "View"))
+                                                    .text_size(px(TEXT_XS))
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(status_warn_fg()),
+                                            ),
                                     )
                             },
                         )),
@@ -431,32 +439,35 @@ pub(crate) fn break_bar(
                         .gap_1p5()
                         .child(
                             view()
-                                .role(AccessibilityRole::Button)
-                                .h(px(CONTROL_H))
-                                .px_2p5()
-                                .rounded(px(RADIUS_MD))
-                                .bg(accent_blue())
-                                .hover(|style| style.bg(accent_blue_hover()))
-                                .active(|style| style.bg(accent_blue_active()))
-                                .transition_colors()
-                                .duration(MOTION_INSTANT_MS)
-                                .ease_out()
-                                .focus_visible(apply_focus_ring)
-                                .flex_row()
-                                .items_center()
+                                .flex_shrink_0()
                                 .tooltip(label_tip(
                                     "放行当前断点流量（若已编辑则会应用修改；60 秒未操作将自动放行）",
                                     "Continue paused flow with current edits (auto-continues after 60s)",
                                 ))
-                                .on_press(move || {
-                                    continue_break(&release, compose, selected, paused);
-                                })
                                 .child(
-                                    text(tr("放行", "Continue"))
-                                        .number_of_lines(1)
-                                        .text_size(px(TEXT_SM))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(fg_on_accent()),
+                                    button()
+                                        .h(px(CONTROL_H))
+                                        .px_2p5()
+                                        .rounded(px(RADIUS_MD))
+                                        .bg(accent_blue())
+                                        .hover(|style| style.bg(accent_blue_hover()))
+                                        .active(|style| style.bg(accent_blue_active()))
+                                        .transition_colors()
+                                        .duration(MOTION_INSTANT_MS)
+                                        .ease_out()
+                                        .focus_visible(apply_focus_ring)
+                                        .flex_row()
+                                        .items_center()
+                                        .on_press(move |_: &()| {
+                                            continue_break(&release, compose, selected, paused);
+                                        })
+                                        .child(
+                                            text(tr("放行", "Continue"))
+                                                .number_of_lines(1)
+                                                .text_size(px(TEXT_SM))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(fg_on_accent()),
+                                        ),
                                 ),
                         )
                         .child(when(
@@ -483,51 +494,54 @@ pub(crate) fn break_bar(
                         ))
                         .child(
                             view()
-                                .role(AccessibilityRole::Button)
                                 .ml_2()
-                                .h(px(CONTROL_H))
-                                .px_2p5()
-                                .rounded(px(RADIUS_MD))
-                                .bg(danger_button_bg())
-                                .hover(|style| style.bg(danger_button_hover()))
-                                .active(|style| style.bg(danger_button_active()))
-                                .transition_colors()
-                                .duration(MOTION_INSTANT_MS)
-                                .ease_out()
-                                .focus_visible(apply_focus_ring)
-                                .flex_row()
-                                .items_center()
+                                .flex_shrink_0()
                                 .tooltip(label_tip(
                                     "中断并丢弃当前断点连接",
                                     "Drop and abort the paused connection",
                                 ))
-                                .on_press(move || {
-                                    let paused_now =
-                                        drop_controls.hub.paused().or_else(|| paused.get());
-                                    if !break_action_allowed(paused_now.map(|(id, _)| id)) {
-                                        return;
-                                    }
-                                    if compose.composing.get()
-                                        && compose
-                                            .paused_id
-                                            .get()
-                                            .is_some_and(|pid| paused_now.is_some_and(|(id, _)| id == pid))
-                                    {
-                                        reset_compose(compose);
-                                    }
-                                    let _ = drop_controls.hub.resolve_break(BreakDecision {
-                                        drop: true,
-                                        headers: None,
-                                        body: None,
-                                        status: None,
-                                    });
-                                })
                                 .child(
-                                    text(tr("丢弃", "Drop"))
-                                        .number_of_lines(1)
-                                        .text_size(px(TEXT_SM))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(fg_on_accent()),
+                                    button()
+                                        .h(px(CONTROL_H))
+                                        .px_2p5()
+                                        .rounded(px(RADIUS_MD))
+                                        .bg(danger_button_bg())
+                                        .hover(|style| style.bg(danger_button_hover()))
+                                        .active(|style| style.bg(danger_button_active()))
+                                        .transition_colors()
+                                        .duration(MOTION_INSTANT_MS)
+                                        .ease_out()
+                                        .focus_visible(apply_focus_ring)
+                                        .flex_row()
+                                        .items_center()
+                                        .on_press(move |_: &()| {
+                                            let paused_now =
+                                                drop_controls.hub.paused().or_else(|| paused.get());
+                                            if !break_action_allowed(paused_now.map(|(id, _)| id)) {
+                                                return;
+                                            }
+                                            if compose.composing.get()
+                                                && compose
+                                                    .paused_id
+                                                    .get()
+                                                    .is_some_and(|pid| paused_now.is_some_and(|(id, _)| id == pid))
+                                            {
+                                                reset_compose(compose);
+                                            }
+                                            let _ = drop_controls.hub.resolve_break(BreakDecision {
+                                                drop: true,
+                                                headers: None,
+                                                body: None,
+                                                status: None,
+                                            });
+                                        })
+                                        .child(
+                                            text(tr("丢弃", "Drop"))
+                                                .number_of_lines(1)
+                                                .text_size(px(TEXT_SM))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(fg_on_accent()),
+                                        ),
                                 ),
                         ),
                 ),
@@ -544,86 +558,90 @@ pub(crate) fn break_bar(
                         let label_controls = controls.clone();
                         let is_head = move || index.get() == 0;
                         view()
-                            .role(AccessibilityRole::Button)
-                            .h(px(ControlSize::Xs.height()))
                             .max_w(px(260.0))
-                            .overflow_hidden()
-                            .px_2()
-                            .rounded(px(RADIUS_SM))
-                            .border_1()
-                            .border_color(move || {
-                                if is_head() {
-                                    accent_blue_border()
-                                } else {
-                                    border_control()
-                                }
-                            })
-                            .bg(move || {
-                                if is_head() {
-                                    accent_blue_soft()
-                                } else {
-                                    bg_control()
-                                }
-                            })
-                            .hover(|style| {
-                                style.bg(move || {
-                                    if is_head() {
-                                        accent_blue_soft_hover()
-                                    } else {
-                                        bg_control_hover()
-                                    }
-                                })
-                            })
-                            .active(|style| style.bg(bg_control_active()))
-                            .transition_colors()
-                            .duration(MOTION_INSTANT_MS)
-                            .ease_out()
-                            .focus_visible(apply_focus_ring)
-                            .flex_row()
-                            .items_center()
                             .tooltip(label_tip(
                                 "点击切换处理此排队断点（最多排队 8 条）",
                                 "Focus queued breakpoint (up to 8 queued)",
                             ))
-                            .on_press(move || {
-                                let id = item.with(|pair| pair.0);
-                                focus_queued_break(&controls, id, selected, compose);
-                            })
                             .child(
-                                text({
-                                    let langs = ui_langs();
-                                    move || -> SharedString {
-                                        let (id, side) = item.with(|pair| *pair);
-                                        let which = match side {
-                                            BreakSide::Request => {
-                                                t(ui_lang(langs), "请求", "Req")
-                                            }
-                                            BreakSide::Response => {
-                                                t(ui_lang(langs), "响应", "Res")
-                                            }
-                                        };
-                                        let ctx = paused_flow_summary(&label_controls, id);
-                                        if ctx.is_empty() {
-                                            format!("#{id} {which}").into()
+                                button()
+                                    .selected(is_head)
+                                    .h(px(ControlSize::Xs.height()))
+                                    .max_w(px(260.0))
+                                    .overflow_hidden()
+                                    .px_2()
+                                    .rounded(px(RADIUS_SM))
+                                    .border_1()
+                                    .border_color(move || {
+                                        if is_head() {
+                                            accent_blue_border()
                                         } else {
-                                            format!("#{id} {ctx} · {which}").into()
+                                            border_control()
                                         }
-                                    }
-                                })
-                                .min_w(px(0.0))
-                                .flex_shrink(1.0)
-                                .tabular_nums()
-                                .number_of_lines(1)
-                                .text_overflow(EllipsizeMode::Tail)
-                                .text_size(px(TEXT_XS))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(move || {
-                                    if is_head() {
-                                        accent_blue_text()
-                                    } else {
-                                        fg_secondary()
-                                    }
-                                }),
+                                    })
+                                    .bg(move || {
+                                        if is_head() {
+                                            accent_blue_soft()
+                                        } else {
+                                            bg_control()
+                                        }
+                                    })
+                                    .hover(|style| {
+                                        style.bg(move || {
+                                            if is_head() {
+                                                accent_blue_soft_hover()
+                                            } else {
+                                                bg_control_hover()
+                                            }
+                                        })
+                                    })
+                                    .active(|style| style.bg(bg_control_active()))
+                                    .transition_colors()
+                                    .duration(MOTION_INSTANT_MS)
+                                    .ease_out()
+                                    .focus_visible(apply_focus_ring)
+                                    .flex_row()
+                                    .items_center()
+                                    .on_press(move |_: &()| {
+                                        let id = item.with(|pair| pair.0);
+                                        focus_queued_break(&controls, id, selected, compose);
+                                    })
+                                    .child(
+                                        text({
+                                            let langs = ui_langs();
+                                            move || -> SharedString {
+                                                let (id, side) = item.with(|pair| *pair);
+                                                let which = match side {
+                                                    BreakSide::Request => {
+                                                        t(ui_lang(langs), "请求", "Req")
+                                                    }
+                                                    BreakSide::Response => {
+                                                        t(ui_lang(langs), "响应", "Res")
+                                                    }
+                                                };
+                                                let ctx = paused_flow_summary(&label_controls, id);
+                                                if ctx.is_empty() {
+                                                    format!("#{id} {which}").into()
+                                                } else {
+                                                    format!("#{id} {ctx} · {which}").into()
+                                                }
+                                            }
+                                        })
+                                        .min_w(px(0.0))
+                                        .flex_shrink(1.0)
+                                        .tabular_nums()
+                                        .number_of_lines(1)
+                                        .text_overflow(EllipsizeMode::Tail)
+                                        .text_size(px(TEXT_XS))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(move || {
+                                            if is_head() {
+                                                accent_blue_text()
+                                            } else {
+                                                fg_secondary()
+                                            }
+                                        }),
+                                    ),
                             )
                     },
                 ))

@@ -522,8 +522,7 @@ fn error_action_chip(
             bypass_contains_host(&profiles.bypass.get(), &host)
         }
     };
-    view()
-        .role(AccessibilityRole::Button)
+    button()
         .h(px(24.0))
         .px_2()
         .flex_shrink_0()
@@ -562,7 +561,7 @@ fn error_action_chip(
         .focus_visible(apply_focus_ring)
         .disabled(is_bypassed)
         .disabled_style(|style| style.opacity(0.6))
-        .on_press(move || {
+        .on_press(move |_: &()| {
             let url = shown.url.get_untracked();
             let host = extract_host_from_url(&url);
             execute_error_action(action, &controls, profiles, &url, &host);

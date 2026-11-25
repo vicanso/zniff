@@ -731,51 +731,7 @@ fn preset_sync_discard_button(ctx: SyncBarCtx) -> impl IntoElement {
     let confirm = ctx.confirm_discard;
     let confirm_job = ctx.confirm_job;
     view()
-        .role(AccessibilityRole::Button)
-        .h(px(CONTROL_H))
-        .px_2p5()
         .flex_shrink_0()
-        .rounded(px(RADIUS_MD))
-        .border_1()
-        .border_color(move || {
-            if confirm.get() {
-                status_err_fg()
-            } else {
-                border_control()
-            }
-        })
-        .bg(move || {
-            if confirm.get() {
-                status_err_bg()
-            } else {
-                bg_control()
-            }
-        })
-        .hover(|style| {
-            style.bg(move || {
-                if confirm.get() {
-                    status_err_bg()
-                } else {
-                    bg_control_hover()
-                }
-            })
-        })
-        .active(|style| style.bg(bg_control_active()))
-        .transition_colors()
-        .duration(MOTION_INSTANT_MS)
-        .ease_out()
-        .flex_row()
-        .items_center()
-        .justify_center()
-        .focus_visible(apply_focus_ring)
-        .label(move || -> SharedString {
-            let lang = ui_lang(langs);
-            if confirm.get() {
-                t(lang, "确认丢弃", "Confirm").into()
-            } else {
-                t(lang, "丢弃", "Discard").into()
-            }
-        })
         .tooltip(
             tooltip().child(ui_tooltip_surface(
                 text(move || -> SharedString {
@@ -800,38 +756,90 @@ fn preset_sync_discard_button(ctx: SyncBarCtx) -> impl IntoElement {
                 .text_color(fg_primary()),
             )),
         )
-        .on_press(move || {
-            if confirm.get_untracked() {
-                confirm_job.replace(None);
-                confirm.set(false);
-                if let PresetSaveState::UpdateExisting(name) = state.get_untracked() {
-                    discard_preset_changes(profiles, draft, &name, &controls);
-                }
-            } else {
-                confirm.set(true);
-                confirm_job.replace(Some(set_timeout(Duration::from_millis(3500), move || {
-                    confirm.set(false);
-                })));
-            }
-        })
         .child(
-            text(move || -> SharedString {
-                let lang = ui_lang(langs);
-                if confirm.get() {
-                    t(lang, "确认丢弃", "Confirm").into()
-                } else {
-                    t(lang, "丢弃", "Discard").into()
-                }
-            })
-            .text_size(px(TEXT_SM))
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(move || {
-                if confirm.get() {
-                    status_err_fg()
-                } else {
-                    fg_secondary()
-                }
-            }),
+            button()
+                .h(px(CONTROL_H))
+                .px_2p5()
+                .rounded(px(RADIUS_MD))
+                .border_1()
+                .border_color(move || {
+                    if confirm.get() {
+                        status_err_fg()
+                    } else {
+                        border_control()
+                    }
+                })
+                .bg(move || {
+                    if confirm.get() {
+                        status_err_bg()
+                    } else {
+                        bg_control()
+                    }
+                })
+                .hover(|style| {
+                    style.bg(move || {
+                        if confirm.get() {
+                            status_err_bg()
+                        } else {
+                            bg_control_hover()
+                        }
+                    })
+                })
+                .active(|style| style.bg(bg_control_active()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .flex_row()
+                .items_center()
+                .justify_center()
+                .focus_visible(apply_focus_ring)
+                .accessibility_label(move || -> Option<SharedString> {
+                    let lang = ui_lang(langs);
+                    Some(
+                        if confirm.get() {
+                            t(lang, "确认丢弃", "Confirm")
+                        } else {
+                            t(lang, "丢弃", "Discard")
+                        }
+                        .into(),
+                    )
+                })
+                .on_press(move |_: &()| {
+                    if confirm.get_untracked() {
+                        confirm_job.replace(None);
+                        confirm.set(false);
+                        if let PresetSaveState::UpdateExisting(name) = state.get_untracked() {
+                            discard_preset_changes(profiles, draft, &name, &controls);
+                        }
+                    } else {
+                        confirm.set(true);
+                        confirm_job.replace(Some(set_timeout(
+                            Duration::from_millis(3500),
+                            move || {
+                                confirm.set(false);
+                            },
+                        )));
+                    }
+                })
+                .child(
+                    text(move || -> SharedString {
+                        let lang = ui_lang(langs);
+                        if confirm.get() {
+                            t(lang, "确认丢弃", "Confirm").into()
+                        } else {
+                            t(lang, "丢弃", "Discard").into()
+                        }
+                    })
+                    .text_size(px(TEXT_SM))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(move || {
+                        if confirm.get() {
+                            status_err_fg()
+                        } else {
+                            fg_secondary()
+                        }
+                    }),
+                ),
         )
 }
 
@@ -844,8 +852,7 @@ fn preset_sync_action_button(ctx: SyncBarCtx) -> impl IntoElement {
     let confirm_discard = ctx.confirm_discard;
     let confirm_job = ctx.confirm_job;
     let is_dirty = move || state.with(PresetSaveState::is_dirty);
-    view()
-        .role(AccessibilityRole::Button)
+    button()
         .h(px(CONTROL_H))
         .px_2p5()
         .flex_shrink_0()
@@ -890,10 +897,10 @@ fn preset_sync_action_button(ctx: SyncBarCtx) -> impl IntoElement {
         .items_center()
         .justify_center()
         .focus_visible(apply_focus_ring)
-        .label(move || -> SharedString {
-            state.with(|s| sync_button_label(s, ui_lang(langs))).into()
+        .accessibility_label(move || -> Option<SharedString> {
+            Some(state.with(|s| sync_button_label(s, ui_lang(langs))).into())
         })
-        .on_press(move || {
+        .on_press(move |_: &()| {
             confirm_job.replace(None);
             confirm_discard.set(false);
             match state.get() {

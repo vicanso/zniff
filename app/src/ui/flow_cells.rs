@@ -79,14 +79,13 @@ pub(crate) fn flow_header(
     columns: Signal<ListColumns>,
     effective_filter: Signal<String>,
     sort: Signal<Option<ListSort>>,
-) -> View {
+) -> ButtonElement {
     let key = cell.key.to_string();
     let column = ListColumn::from_key(&key);
     let align_right = matches!(key.as_str(), "gap" | "elapsed" | "size");
     let is_sorted =
         move || column.is_some_and(|col| sort.get().is_some_and(|current| current.column == col));
-    let mut row = view()
-        .role(AccessibilityRole::Button)
+    let mut row = button()
         .w_full()
         .h(px(28.0))
         .min_w(px(0.0))

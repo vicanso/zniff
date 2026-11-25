@@ -353,8 +353,7 @@ pub(crate) fn detail_pane(
                                                 .text_color(fg_muted()),
                                             )
                                             .child(
-                                                view()
-                                                    .role(AccessibilityRole::Button)
+                                                button()
                                                     .mt_1p5()
                                                     .h(px(CONTROL_H))
                                                     .px_3()
@@ -371,7 +370,7 @@ pub(crate) fn detail_pane(
                                                     .flex_row()
                                                     .items_center()
                                                     .gap_1p5()
-                                                    .on_press(move || {
+                                                    .on_press(move |_: &()| {
                                                         begin_new_request(compose, selected)
                                                     })
                                                     .child(glyph_px(
@@ -742,8 +741,7 @@ pub(crate) fn summary(
                 .child(when(
                     move || !shown.comment.get().is_empty() && !shown.editing_comment.get(),
                     move || {
-                        view()
-                            .role(AccessibilityRole::Button)
+                        button()
                             .max_w(px(180.0))
                             .overflow_hidden()
                             .px_2()
@@ -758,7 +756,7 @@ pub(crate) fn summary(
                             .duration(MOTION_INSTANT_MS)
                             .ease_out()
                             .focus_visible(apply_focus_ring)
-                            .on_press(move || {
+                            .on_press(move |_: &()| {
                                 shown.repeating.set(false);
                                 shown.editing_comment.set(true);
                             })

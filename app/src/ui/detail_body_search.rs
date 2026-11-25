@@ -217,31 +217,6 @@ pub(crate) fn body_search_box(
                     .child(when(is_paged, move || {
                         let jump_controls = jump_controls.clone();
                         view()
-                            .role(AccessibilityRole::Button)
-                            .h(px(ControlSize::Xs.height()))
-                            .px_1p5()
-                            .rounded(px(RADIUS_MD))
-                            .bg(status_warn_bg())
-                            .hover(|style| {
-                                style.bg(move || {
-                                    if has_other_page.get() {
-                                        status_warn_bg_hover()
-                                    } else {
-                                        status_warn_bg()
-                                    }
-                                })
-                            })
-                            .active(|style| style.bg(bg_control_active()))
-                            .transition_colors()
-                            .duration(MOTION_INSTANT_MS)
-                            .ease_out()
-                            .focus_visible(apply_focus_ring)
-                            .disabled(move || !has_other_page.get())
-                            .disabled_style(|s| s.opacity(0.45))
-                            .border_1()
-                            .border_color(status_warn_fg())
-                            .flex_row()
-                            .items_center()
                             .tooltip(tooltip().child(ui_tooltip_surface(
                                 text(move || -> SharedString {
                                     let lang = ui_lang(langs);
@@ -264,61 +239,90 @@ pub(crate) fn body_search_box(
                                 .text_size(px(TEXT_SM))
                                 .text_color(fg_primary()),
                             )))
-                            .on_press(move || {
-                                jump_next_body_match(
-                                    shown,
-                                    &jump_controls,
-                                    selected,
-                                    baseline,
-                                    ui_lang(langs),
-                                    response,
-                                    &search.get(),
-                                );
-                            })
                             .child(
-                                text(tr("当前页 · 下一处", "Page · Next"))
-                                    .number_of_lines(1)
-                                    .text_size(px(TEXT_XS))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(status_warn_fg()),
+                                button()
+                                    .h(px(ControlSize::Xs.height()))
+                                    .px_1p5()
+                                    .rounded(px(RADIUS_MD))
+                                    .bg(status_warn_bg())
+                                    .hover(|style| {
+                                        style.bg(move || {
+                                            if has_other_page.get() {
+                                                status_warn_bg_hover()
+                                            } else {
+                                                status_warn_bg()
+                                            }
+                                        })
+                                    })
+                                    .active(|style| style.bg(bg_control_active()))
+                                    .transition_colors()
+                                    .duration(MOTION_INSTANT_MS)
+                                    .ease_out()
+                                    .focus_visible(apply_focus_ring)
+                                    .disabled(move || !has_other_page.get())
+                                    .disabled_style(|s| s.opacity(0.45))
+                                    .border_1()
+                                    .border_color(status_warn_fg())
+                                    .flex_row()
+                                    .items_center()
+                                    .on_press(move |_: &()| {
+                                        jump_next_body_match(
+                                            shown,
+                                            &jump_controls,
+                                            selected,
+                                            baseline,
+                                            ui_lang(langs),
+                                            response,
+                                            &search.get(),
+                                        );
+                                    })
+                                    .child(
+                                        text(tr("当前页 · 下一处", "Page · Next"))
+                                            .number_of_lines(1)
+                                            .text_size(px(TEXT_XS))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(status_warn_fg()),
+                                    ),
                             )
                     }))
                     .child(
                         view()
-                            .role(AccessibilityRole::Button)
-                            .h(px(ControlSize::Xs.height()))
-                            .px_1p5()
-                            .rounded(px(RADIUS_MD))
-                            .bg(accent_blue_soft())
-                            .hover(|style| style.bg(accent_blue_soft_hover()))
-                            .active(|style| style.bg(bg_control_active()))
-                            .transition_colors()
-                            .duration(MOTION_INSTANT_MS)
-                            .ease_out()
-                            .focus_visible(apply_focus_ring)
-                            .border_1()
-                            .border_color(accent_blue_border())
-                            .flex_row()
-                            .items_center()
                             .tooltip(label_tip("点击清空搜索", "Click to clear search"))
-                            .on_press(move || search.set(String::new()))
                             .child(
-                                mono(move || {
-                                    let hits = body_search_hit_count(
-                                        body,
-                                        hex,
-                                        form,
-                                        json,
-                                        tree_flag,
-                                        pane_width,
-                                        &search.get(),
-                                    );
-                                    format!("{} ×", present::format_thousands(hits as u64))
-                                })
-                                .tabular_nums()
-                                .text_size(px(TEXT_XS))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(accent_blue_text()),
+                                button()
+                                    .h(px(ControlSize::Xs.height()))
+                                    .px_1p5()
+                                    .rounded(px(RADIUS_MD))
+                                    .bg(accent_blue_soft())
+                                    .hover(|style| style.bg(accent_blue_soft_hover()))
+                                    .active(|style| style.bg(bg_control_active()))
+                                    .transition_colors()
+                                    .duration(MOTION_INSTANT_MS)
+                                    .ease_out()
+                                    .focus_visible(apply_focus_ring)
+                                    .border_1()
+                                    .border_color(accent_blue_border())
+                                    .flex_row()
+                                    .items_center()
+                                    .on_press(move |_: &()| search.set(String::new()))
+                                    .child(
+                                        mono(move || {
+                                            let hits = body_search_hit_count(
+                                                body,
+                                                hex,
+                                                form,
+                                                json,
+                                                tree_flag,
+                                                pane_width,
+                                                &search.get(),
+                                            );
+                                            format!("{} ×", present::format_thousands(hits as u64))
+                                        })
+                                        .tabular_nums()
+                                        .text_size(px(TEXT_XS))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(accent_blue_text()),
+                                    ),
                             ),
                     )
             },

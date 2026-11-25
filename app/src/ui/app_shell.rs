@@ -1591,29 +1591,7 @@ fn app_workspace(
         move |_| reset_ui_zoom(&controls_zoom_reset),
     );
     on_key("escape", move |_| {
-        if palette_open.get() {
-            palette_open.set(false);
-        } else if shortcuts_open.get() {
-            shortcuts_open.set(false);
-        } else if profile_signals.marker_modal_open.get() {
-            profile_signals.marker_modal_open.set(false);
-        } else if profile_signals.watch_open.get() {
-            profile_signals.watch_open.set(false);
-        } else if profile_signals.filter_panel_open.get() {
-            profile_signals.filter_panel_open.set(false);
-        } else if profile_signals.panel_open.get() {
-            profile_signals.panel_open.set(false);
-        } else if profile_signals.preset_panel_open.get() {
-            profile_signals.preset_panel_open.set(false);
-        } else if profile_signals.settings_open.get() {
-            profile_signals.settings_open.set(false);
-        } else if profile_signals.about_open.get() {
-            profile_signals.about_open.set(false);
-        } else if profile_signals.machine_settings_open.get() {
-            profile_signals.machine_settings_open.set(false);
-        } else if facets_open.get() {
-            facets_open.set(false);
-        } else if compose_esc.composing.get() || compose_esc.inline_mock.open.get() {
+        if compose_esc.composing.get() || compose_esc.inline_mock.open.get() {
             reset_compose(compose_esc);
         } else if seq_esc.open.get() {
             close_sequence_diagram(seq_esc);

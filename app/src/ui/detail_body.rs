@@ -772,8 +772,8 @@ pub(crate) fn doc_body(doc: Signal<Option<nsh_base::text_view::Document>>) -> im
 }
 
 pub(crate) fn doc_preview_chip(preview: Signal<bool>) -> impl IntoElement {
-    button()
-        .selected(move || preview.get())
+    toggle()
+        .pressed(move || preview.get())
         .h(px(ControlSize::Xs.height()))
         .px_2()
         .rounded(px(RADIUS_MD))
@@ -817,8 +817,8 @@ pub(crate) fn doc_preview_chip(preview: Signal<bool>) -> impl IntoElement {
         .flex_row()
         .items_center()
         .accessibility_label(tr_opt("预览", "Preview"))
-        .on_press(move |_: &()| {
-            preview.set(!preview.get());
+        .on_change(move |next: &bool| {
+            preview.set(*next);
         })
         .child(
             text(tr("预览", "Preview"))

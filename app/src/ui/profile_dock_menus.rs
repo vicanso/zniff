@@ -73,6 +73,11 @@ pub(crate) fn profile_saved_menu(ctx: ProfileDockMenuCtx) -> impl IntoElement {
     let dropdown_open = ctx.dropdown_open;
     let history_open = ctx.history_open;
     let confirm_delete = signal(None::<String>);
+    bind_escape_while(
+        move || dropdown_open.get() && !saved.with(Vec::is_empty),
+        nsh_core::keymap::When::Always,
+        move || dropdown_open.set(false),
+    );
     let trigger_ctx = ctx.clone();
     menu()
         .open(move || Some(dropdown_open.get() && !saved.with(Vec::is_empty)))
@@ -420,75 +425,87 @@ fn saved_profile_menu_row(
             when(is_confirming, move || {
                 let remove_controls = remove_controls.clone();
                 view()
-                    .role(AccessibilityRole::Button)
-                    .h(px(ControlSize::Xs.height()))
-                    .px_2()
                     .flex_shrink_0()
-                    .flex_row()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(RADIUS_SM))
-                    .bg(danger_button_bg())
-                    .hover(|style| style.bg(danger_button_hover()))
-                    .active(|style| style.bg(danger_button_active()))
-                    .transition_colors()
-                    .duration(MOTION_INSTANT_MS)
-                    .ease_out()
-                    .focus_visible(apply_focus_ring)
-                    .label(tr("再次点击确认删除预设", "Click again to delete preset"))
                     .tooltip(label_tip(
                         "再次点击确认删除预设",
                         "Click again to delete preset",
                     ))
-                    .on_press(move || {
-                        let target = item.with(Clone::clone);
-                        let deleted_name = target.name.clone();
-                        confirm_delete.set(None);
-                        adopted.set(true);
-                        drop_saved_profile(
-                            &target,
-                            profiles.name,
-                            profiles.saved,
-                            profiles.history,
-                            &remove_controls,
-                        );
-                        set_status(&remove_controls, StatusMsg::PresetDeleted(deleted_name));
-                        if profiles.saved.with(Vec::is_empty) {
-                            dropdown_open.set(false);
-                        }
-                    })
                     .child(
-                        compact_control_text(tr("确认删除？", "Delete?"), TEXT_XS)
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(fg_on_accent()),
+                        button()
+                            .h(px(ControlSize::Xs.height()))
+                            .px_2()
+                            .flex_shrink_0()
+                            .flex_row()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(RADIUS_SM))
+                            .bg(danger_button_bg())
+                            .hover(|style| style.bg(danger_button_hover()))
+                            .active(|style| style.bg(danger_button_active()))
+                            .transition_colors()
+                            .duration(MOTION_INSTANT_MS)
+                            .ease_out()
+                            .focus_visible(apply_focus_ring)
+                            .accessibility_label(tr_opt(
+                                "再次点击确认删除预设",
+                                "Click again to delete preset",
+                            ))
+                            .on_press(move |_: &()| {
+                                let target = item.with(Clone::clone);
+                                let deleted_name = target.name.clone();
+                                confirm_delete.set(None);
+                                adopted.set(true);
+                                drop_saved_profile(
+                                    &target,
+                                    profiles.name,
+                                    profiles.saved,
+                                    profiles.history,
+                                    &remove_controls,
+                                );
+                                set_status(
+                                    &remove_controls,
+                                    StatusMsg::PresetDeleted(deleted_name),
+                                );
+                                if profiles.saved.with(Vec::is_empty) {
+                                    dropdown_open.set(false);
+                                }
+                            })
+                            .child(
+                                compact_control_text(tr("确认删除？", "Delete?"), TEXT_XS)
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(fg_on_accent()),
+                            ),
                     )
             })
             .otherwise(move || {
                 view()
-                    .role(AccessibilityRole::Button)
-                    .w(px(26.0))
-                    .h(px(26.0))
                     .flex_shrink_0()
-                    .flex_row()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(RADIUS_MD))
-                    .hover(|style| style.bg(bg_control_hover()))
-                    .active(|style| style.bg(bg_control_active()))
-                    .transition_colors()
-                    .duration(MOTION_INSTANT_MS)
-                    .ease_out()
-                    .focus_visible(apply_focus_ring)
-                    .label(tr("删除预设", "Delete preset"))
                     .tooltip(label_tip(
                         "删除此预设（点击两次确认）",
                         "Delete preset (click twice to confirm)",
                     ))
-                    .on_press(move || {
-                        let name = item.with_untracked(|preset| preset.name.clone());
-                        confirm_delete.set(Some(name));
-                    })
-                    .child(glyph_px(12.0, || Glyph::Trash, || color(fg_muted())))
+                    .child(
+                        button()
+                            .w(px(26.0))
+                            .h(px(26.0))
+                            .flex_shrink_0()
+                            .flex_row()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(RADIUS_MD))
+                            .hover(|style| style.bg(bg_control_hover()))
+                            .active(|style| style.bg(bg_control_active()))
+                            .transition_colors()
+                            .duration(MOTION_INSTANT_MS)
+                            .ease_out()
+                            .focus_visible(apply_focus_ring)
+                            .accessibility_label(tr_opt("删除预设", "Delete preset"))
+                            .on_press(move |_: &()| {
+                                let name = item.with_untracked(|preset| preset.name.clone());
+                                confirm_delete.set(Some(name));
+                            })
+                            .child(glyph_px(12.0, || Glyph::Trash, || color(fg_muted()))),
+                    )
             }),
         )
 }
@@ -599,6 +616,11 @@ pub(crate) fn profile_history_menu(ctx: ProfileDockMenuCtx) -> impl IntoElement 
     let history = ctx.profiles.history;
     let history_open = ctx.history_open;
     let dropdown_open = ctx.dropdown_open;
+    bind_escape_while(
+        move || history_open.get() && !history.with(Vec::is_empty),
+        nsh_core::keymap::When::Always,
+        move || history_open.set(false),
+    );
     let trigger_ctx = ctx.clone();
     menu()
         .open(move || Some(history_open.get() && !history.with(Vec::is_empty)))

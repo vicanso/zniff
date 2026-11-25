@@ -60,8 +60,7 @@ fn tp_header_row(
 ) -> impl IntoElement {
     let langs = ui_langs();
     let toggle_controls = controls;
-    view()
-        .role(AccessibilityRole::Button)
+    button()
         .w_full()
         .px_2p5()
         .py_1p5()
@@ -75,7 +74,7 @@ fn tp_header_row(
         .duration(MOTION_INSTANT_MS)
         .ease_out()
         .focus_visible(apply_focus_ring)
-        .on_press(move || {
+        .on_press(move |_: &()| {
             let next = !expanded.get_untracked();
             expanded.set(next);
             if next {

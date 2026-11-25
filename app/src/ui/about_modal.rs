@@ -357,6 +357,11 @@ pub(crate) fn about_modal(
     update_state: Signal<UpdateState>,
     controls: Arc<Controls>,
 ) -> impl IntoElement {
+    bind_escape_while(
+        move || profiles.about_open.get(),
+        nsh_core::keymap::When::Auto,
+        move || profiles.about_open.set(false),
+    );
     #[cfg(target_arch = "wasm32")]
     let _ = update_state;
     let gpu_label = signal(get_basic_gpu_info().to_string());
@@ -818,17 +823,21 @@ pub(crate) fn about_modal(
                 )
                 .child(footer);
 
-            overlay()
-                .inset_0()
+            dialog()
+                .animation(nsh_core::ModalAnimation::None)
+                .close_on_escape(false)
+                .optional_label(tr_opt("关于 zniff", "About zniff"))
                 .on_cancel(move || profiles.about_open.set(false))
                 .child(
-                    view()
-                        .w_full()
-                        .h_full()
-                        .items_center()
-                        .justify_center()
-                        .child(backdrop)
-                        .child(card),
+                    overlay().inset_0().child(
+                        view()
+                            .w_full()
+                            .h_full()
+                            .items_center()
+                            .justify_center()
+                            .child(backdrop)
+                            .child(card),
+                    ),
                 )
         },
     )

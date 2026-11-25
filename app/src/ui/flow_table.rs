@@ -128,8 +128,7 @@ fn empty_clear_filter_button(
     list_filter: Signal<String>,
     on_clear_primary: Option<Rc<dyn Fn()>>,
 ) -> impl IntoElement {
-    view()
-        .role(AccessibilityRole::Button)
+    button()
         .h(px(CONTROL_H))
         .px_3()
         .flex_row()
@@ -145,8 +144,8 @@ fn empty_clear_filter_button(
         .duration(move || motion_ms(MOTION_INSTANT_MS))
         .ease_out()
         .focus_visible(apply_focus_ring)
-        .label(tr("清空过滤", "Clear filter"))
-        .on_press(move || {
+        .accessibility_label(tr_opt("清空过滤", "Clear filter"))
+        .on_press(move |_: &()| {
             if !list_filter.get_untracked().is_empty() {
                 list_filter.set(String::new());
             }
@@ -166,8 +165,7 @@ fn empty_clear_filter_button(
 }
 
 fn empty_pause_primary_button(filter_enabled: Signal<bool>) -> impl IntoElement {
-    view()
-        .role(AccessibilityRole::Button)
+    button()
         .h(px(CONTROL_H))
         .px_3()
         .flex_row()
@@ -183,8 +181,8 @@ fn empty_pause_primary_button(filter_enabled: Signal<bool>) -> impl IntoElement 
         .duration(move || motion_ms(MOTION_INSTANT_MS))
         .ease_out()
         .focus_visible(apply_focus_ring)
-        .label(tr("暂停主过滤", "Pause primary filter"))
-        .on_press(move || filter_enabled.set(false))
+        .accessibility_label(tr_opt("暂停主过滤", "Pause primary filter"))
+        .on_press(move |_: &()| filter_enabled.set(false))
         .child(
             control_text(tr("暂停主过滤", "Pause primary filter"))
                 .text_size(px(TEXT_SM))
@@ -211,6 +209,16 @@ pub(crate) fn list_menu(
     menu_at: Signal<Point<Points>>,
 ) -> impl IntoElement {
     let header_menu = signal(false);
+    bind_escape_while(
+        move || menu_open.get(),
+        nsh_core::keymap::When::Always,
+        move || menu_open.set(false),
+    );
+    bind_escape_while(
+        move || header_menu.get(),
+        nsh_core::keymap::When::Always,
+        move || header_menu.set(false),
+    );
     let header_controls = controls.clone();
     let list_filter = empty_state.list_filter;
     let layout_mode = profiles.layout_mode;

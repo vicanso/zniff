@@ -17,7 +17,7 @@ fn apple_ease_timing(duration_ms: f32) -> KeyframeTiming {
     timing
 }
 
-/// Full-viewport modal backdrop scrim that dismisses on press.
+/// Modal backdrop scrim chrome paired inside `nsh_base::dialog()` that dismisses on press.
 #[allow(dead_code)]
 pub(crate) fn ui_modal_backdrop(on_close: impl Fn() + 'static) -> View {
     let fade = motion().entering(
@@ -32,7 +32,7 @@ pub(crate) fn ui_modal_backdrop(on_close: impl Fn() + 'static) -> View {
         .on_press(on_close)
 }
 
-/// Shared modal dialog card chrome.
+/// Modal card surface chrome hosted inside `nsh_base::dialog()`.
 #[allow(dead_code)]
 pub(crate) fn ui_modal_card() -> View {
     let spec = MotionSpec::new(apple_ease_timing(MOTION_FAST_MS))
@@ -299,6 +299,31 @@ impl PopoverDismiss {
     }
 }
 
+/// While `active` holds, Escape runs `on_escape`. Registered when it opens, so the
+/// newest overlay wins over older ones and over the root-level Escape binding.
+#[allow(dead_code)]
+pub(crate) fn bind_escape_while(
+    active: impl Fn() -> bool + 'static,
+    when: nsh_core::keymap::When,
+    on_escape: impl Fn() + Clone + 'static,
+) {
+    let active = computed(active);
+    effect(move || {
+        if !active.get() {
+            return;
+        }
+        let on_escape = on_escape.clone();
+        on_key_with(
+            "escape",
+            KeyOptions {
+                when,
+                ..KeyOptions::default()
+            },
+            move |_| on_escape(),
+        );
+    });
+}
+
 /// Provides the root-level [`PopoverDismiss`] bus to descendant UI components.
 #[allow(dead_code)]
 pub(crate) fn provide_popover_dismiss() -> PopoverDismiss {
@@ -333,4 +358,9 @@ pub(crate) fn bind_popover_dismiss(open: Signal<bool>) {
             }
         });
     }
+    bind_escape_while(
+        move || open.get(),
+        nsh_core::keymap::When::Auto,
+        move || open.set(false),
+    );
 }

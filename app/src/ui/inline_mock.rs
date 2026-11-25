@@ -406,65 +406,68 @@ pub(crate) fn inline_mock_trigger_button(
             let controls = controls.clone();
             let is_open = move || compose.inline_mock.open.get();
             view()
-                .role(AccessibilityRole::Button)
-                .h(px(ControlSize::Sm.height()))
-                .px_2()
-                .rounded(px(RADIUS_MD))
-                .label("Mock")
-                .border_1()
-                .border_color(move || {
-                    if is_open() {
-                        accent_blue_border()
-                    } else {
-                        border_control()
-                    }
-                })
-                .bg(move || {
-                    if is_open() {
-                        accent_blue_soft()
-                    } else {
-                        bg_control()
-                    }
-                })
-                .hover(|style| {
-                    style.bg(move || {
-                        if is_open() {
-                            accent_blue_soft_hover()
-                        } else {
-                            bg_control_hover()
-                        }
-                    })
-                })
-                .active(|style| style.bg(bg_control_active()))
-                .transition_colors()
-                .duration(move || motion_ms(MOTION_INSTANT_MS))
-                .ease_out()
-                .focus_visible(apply_focus_ring)
-                .flex_row()
-                .items_center()
                 .tooltip(label_tip(
                     "内联编辑响应并生成 map-local 规则",
                     "Edit response inline & append map-local rule",
                 ))
-                .on_press(move || {
-                    if compose.inline_mock.open.get_untracked() {
-                        compose.inline_mock.close();
-                    } else {
-                        begin_inline_mock(&controls, selected.get(), compose);
-                    }
-                })
                 .child(
-                    text(tr("Mock", "Mock"))
-                        .number_of_lines(1)
-                        .text_size(px(TEXT_SM))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(move || {
+                    toggle()
+                        .pressed(is_open)
+                        .h(px(ControlSize::Sm.height()))
+                        .px_2()
+                        .rounded(px(RADIUS_MD))
+                        .accessibility_label("Mock")
+                        .border_1()
+                        .border_color(move || {
                             if is_open() {
-                                accent_blue_text()
+                                accent_blue_border()
                             } else {
-                                fg_secondary()
+                                border_control()
                             }
-                        }),
+                        })
+                        .bg(move || {
+                            if is_open() {
+                                accent_blue_soft()
+                            } else {
+                                bg_control()
+                            }
+                        })
+                        .hover(|style| {
+                            style.bg(move || {
+                                if is_open() {
+                                    accent_blue_soft_hover()
+                                } else {
+                                    bg_control_hover()
+                                }
+                            })
+                        })
+                        .active(|style| style.bg(bg_control_active()))
+                        .transition_colors()
+                        .duration(move || motion_ms(MOTION_INSTANT_MS))
+                        .ease_out()
+                        .focus_visible(apply_focus_ring)
+                        .flex_row()
+                        .items_center()
+                        .on_change(move |_: &bool| {
+                            if compose.inline_mock.open.get_untracked() {
+                                compose.inline_mock.close();
+                            } else {
+                                begin_inline_mock(&controls, selected.get(), compose);
+                            }
+                        })
+                        .child(
+                            text(tr("Mock", "Mock"))
+                                .number_of_lines(1)
+                                .text_size(px(TEXT_SM))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(move || {
+                                    if is_open() {
+                                        accent_blue_text()
+                                    } else {
+                                        fg_secondary()
+                                    }
+                                }),
+                        ),
                 )
         },
     )
@@ -547,8 +550,7 @@ fn inline_mock_header(
                 .items_center()
                 .gap_1p5()
                 .child(
-                    view()
-                        .role(AccessibilityRole::Button)
+                    button()
                         .h(px(26.0))
                         .px_2p5()
                         .rounded(px(RADIUS_MD))
@@ -563,7 +565,7 @@ fn inline_mock_header(
                         .focus_visible(apply_focus_ring)
                         .flex_row()
                         .items_center()
-                        .on_press(move || mock.close())
+                        .on_press(move |_: &()| mock.close())
                         .child(
                             text(tr("取消", "Cancel"))
                                 .number_of_lines(1)
@@ -574,62 +576,64 @@ fn inline_mock_header(
                 )
                 .child(
                     view()
-                        .role(AccessibilityRole::Button)
-                        .h(px(26.0))
-                        .px_2p5()
-                        .rounded(px(RADIUS_MD))
-                        .bg(move || {
-                            if save_disabled() {
-                                bg_control()
-                            } else {
-                                accent_blue()
-                            }
-                        })
-                        .hover(|style| {
-                            style.bg(move || {
-                                if save_disabled() {
-                                    bg_control()
-                                } else {
-                                    accent_blue_hover()
-                                }
-                            })
-                        })
-                        .active(|style| {
-                            style.bg(move || {
-                                if save_disabled() {
-                                    bg_control()
-                                } else {
-                                    accent_blue_active()
-                                }
-                            })
-                        })
-                        .transition_colors()
-                        .duration(MOTION_INSTANT_MS)
-                        .ease_out()
-                        .focus_visible(apply_focus_ring)
-                        .disabled(save_disabled)
-                        .disabled_style(|style| style.opacity(0.55))
                         .tooltip(label_tip(
                             "保存并生成 map-local 规则 (Cmd/Ctrl+Enter)",
                             "Save & apply map-local rule (Cmd/Ctrl+Enter)",
                         ))
-                        .flex_row()
-                        .items_center()
-                        .on_press(move || {
-                            save_inline_mock(&controls, compose, profiles);
-                        })
                         .child(
-                            text(tr("保存并生效", "Save & Apply"))
-                                .number_of_lines(1)
-                                .text_size(px(TEXT_SM))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(move || {
+                            button()
+                                .h(px(26.0))
+                                .px_2p5()
+                                .rounded(px(RADIUS_MD))
+                                .bg(move || {
                                     if save_disabled() {
-                                        fg_muted()
+                                        bg_control()
                                     } else {
-                                        fg_on_accent()
+                                        accent_blue()
                                     }
-                                }),
+                                })
+                                .hover(|style| {
+                                    style.bg(move || {
+                                        if save_disabled() {
+                                            bg_control()
+                                        } else {
+                                            accent_blue_hover()
+                                        }
+                                    })
+                                })
+                                .active(|style| {
+                                    style.bg(move || {
+                                        if save_disabled() {
+                                            bg_control()
+                                        } else {
+                                            accent_blue_active()
+                                        }
+                                    })
+                                })
+                                .transition_colors()
+                                .duration(MOTION_INSTANT_MS)
+                                .ease_out()
+                                .focus_visible(apply_focus_ring)
+                                .disabled(save_disabled)
+                                .disabled_style(|style| style.opacity(0.55))
+                                .flex_row()
+                                .items_center()
+                                .on_press(move |_: &()| {
+                                    save_inline_mock(&controls, compose, profiles);
+                                })
+                                .child(
+                                    text(tr("保存并生效", "Save & Apply"))
+                                        .number_of_lines(1)
+                                        .text_size(px(TEXT_SM))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(move || {
+                                            if save_disabled() {
+                                                fg_muted()
+                                            } else {
+                                                fg_on_accent()
+                                            }
+                                        }),
+                                ),
                         ),
                 ),
         )

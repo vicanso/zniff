@@ -342,8 +342,7 @@ pub(crate) fn repeat_inline_bar(
         )
         .child(view().flex_1())
         .child(
-            view()
-                .role(AccessibilityRole::Button)
+            button()
                 .h(px(CONTROL_H))
                 .px_2p5()
                 .rounded(px(RADIUS_MD))
@@ -356,7 +355,7 @@ pub(crate) fn repeat_inline_bar(
                 .focus_visible(apply_focus_ring)
                 .flex_row()
                 .items_center()
-                .on_press(move || {
+                .on_press(move |_: &()| {
                     repeat_flow_batch(&run_controls, selected.get(), shown);
                 })
                 .child(
@@ -378,8 +377,8 @@ pub(crate) fn repeat_preset_chip(
     label: &'static str,
 ) -> impl IntoElement {
     let is_active = move || count_sig.get().trim() == val;
-    view()
-        .role(AccessibilityRole::Button)
+    button()
+        .selected(is_active)
         .h(px(ControlSize::Xs.height()))
         .px_2()
         .rounded(px(RADIUS_SM))
@@ -414,7 +413,7 @@ pub(crate) fn repeat_preset_chip(
         .focus_visible(apply_focus_ring)
         .flex_row()
         .items_center()
-        .on_press(move || count_sig.set(val.to_string()))
+        .on_press(move |_: &()| count_sig.set(val.to_string()))
         .child(
             mono(label)
                 .tabular_nums()

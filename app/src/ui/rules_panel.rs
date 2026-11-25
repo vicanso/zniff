@@ -675,88 +675,93 @@ fn rules_editor_toolbar(
                 let is_confirming =
                     move || confirm_key.with(|k| k.as_ref() == Some(&current_key()));
                 view()
-                    .role(AccessibilityRole::Button)
-                    .h(px(ControlSize::Xs.height()))
-                    .px_1p5()
                     .flex_shrink_0()
-                    .rounded(px(RADIUS_SM))
-                    .bg(move || {
-                        if is_confirming() {
-                            danger_button_bg()
-                        } else {
-                            AdaptiveColor::TRANSPARENT
-                        }
-                    })
-                    .hover(|style| {
-                        style.bg(move || {
-                            if is_confirming() {
-                                danger_button_hover()
-                            } else {
-                                bg_control_hover()
-                            }
-                        })
-                    })
-                    .active(|style| {
-                        style.bg(move || {
-                            if is_confirming() {
-                                danger_button_active()
-                            } else {
-                                bg_control_active()
-                            }
-                        })
-                    })
-                    .transition_colors()
-                    .duration(MOTION_INSTANT_MS)
-                    .ease_out()
-                    .focus_visible(apply_focus_ring)
-                    .flex_row()
-                    .items_center()
-                    .label(move || -> SharedString {
-                        let lang = ui_lang(langs);
-                        if is_confirming() {
-                            t(
-                                lang,
-                                "再次点击确认清空当前规则",
-                                "Click again to clear rules",
-                            )
-                            .into()
-                        } else {
-                            t(lang, "清空", "Clear").into()
-                        }
-                    })
                     .tooltip(label_tip(
                         "清空当前规则内容（点击两次确认）",
                         "Clear current rules (click twice to confirm)",
                     ))
-                    .on_press(move || {
-                        let key = current_key();
-                        if confirm_key.with_untracked(|k| k.as_ref() == Some(&key)) {
-                            confirm_key.set(None);
-                            rule_target.commit(&clear_controls, String::new());
-                            set_status(&clear_controls, StatusMsg::RulesCleared);
-                        } else {
-                            confirm_key.set(Some(key));
-                        }
-                    })
                     .child(
-                        text(move || -> SharedString {
-                            let lang = ui_lang(langs);
-                            if is_confirming() {
-                                t(lang, "确认清空？", "Confirm clear?").into()
-                            } else {
-                                t(lang, "清空", "Clear").into()
-                            }
-                        })
-                        .number_of_lines(1)
-                        .text_size(px(TEXT_XS))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(move || {
-                            if is_confirming() {
-                                fg_on_accent()
-                            } else {
-                                fg_muted()
-                            }
-                        }),
+                        button()
+                            .h(px(ControlSize::Xs.height()))
+                            .px_1p5()
+                            .flex_shrink_0()
+                            .rounded(px(RADIUS_SM))
+                            .bg(move || {
+                                if is_confirming() {
+                                    danger_button_bg()
+                                } else {
+                                    AdaptiveColor::TRANSPARENT
+                                }
+                            })
+                            .hover(|style| {
+                                style.bg(move || {
+                                    if is_confirming() {
+                                        danger_button_hover()
+                                    } else {
+                                        bg_control_hover()
+                                    }
+                                })
+                            })
+                            .active(|style| {
+                                style.bg(move || {
+                                    if is_confirming() {
+                                        danger_button_active()
+                                    } else {
+                                        bg_control_active()
+                                    }
+                                })
+                            })
+                            .transition_colors()
+                            .duration(MOTION_INSTANT_MS)
+                            .ease_out()
+                            .focus_visible(apply_focus_ring)
+                            .flex_row()
+                            .items_center()
+                            .accessibility_label(move || -> Option<SharedString> {
+                                let lang = ui_lang(langs);
+                                Some(
+                                    if is_confirming() {
+                                        t(
+                                            lang,
+                                            "再次点击确认清空当前规则",
+                                            "Click again to clear rules",
+                                        )
+                                    } else {
+                                        t(lang, "清空", "Clear")
+                                    }
+                                    .into(),
+                                )
+                            })
+                            .on_press(move |_: &()| {
+                                let key = current_key();
+                                if confirm_key.with_untracked(|k| k.as_ref() == Some(&key)) {
+                                    confirm_key.set(None);
+                                    rule_target.commit(&clear_controls, String::new());
+                                    set_status(&clear_controls, StatusMsg::RulesCleared);
+                                } else {
+                                    confirm_key.set(Some(key));
+                                }
+                            })
+                            .child(
+                                text(move || -> SharedString {
+                                    let lang = ui_lang(langs);
+                                    if is_confirming() {
+                                        t(lang, "确认清空？", "Confirm clear?").into()
+                                    } else {
+                                        t(lang, "清空", "Clear").into()
+                                    }
+                                })
+                                .number_of_lines(1)
+                                .text_size(px(TEXT_XS))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(move || {
+                                    if is_confirming() {
+                                        fg_on_accent()
+                                    } else {
+                                        fg_muted()
+                                    }
+                                }),
+                            ),
                     )
             },
         ))
