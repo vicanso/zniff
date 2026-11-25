@@ -26,8 +26,23 @@ pub(crate) fn llm_stream_panel(
 }
 
 fn llm_meta_strip(summary: Signal<Option<llm_stream::LlmStreamSummary>>) -> impl IntoElement {
+    let langs = ui_langs();
+    let metric_chips = move || {
+        let lang = ui_lang(langs);
+        summary.with(|opt| {
+            opt.as_ref()
+                .map(|s| {
+                    format_metrics_chips(s, lang)
+                        .into_iter()
+                        .enumerate()
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        })
+    };
     view()
         .w_full()
+        .min_w(px(0.0))
         .flex_row()
         .flex_wrap()
         .items_center()
@@ -36,6 +51,7 @@ fn llm_meta_strip(summary: Signal<Option<llm_stream::LlmStreamSummary>>) -> impl
             view()
                 .h(px(22.0))
                 .px_2()
+                .flex_shrink_0()
                 .rounded(px(RADIUS_SM))
                 .border_1()
                 .border_color(accent_blue_border())
@@ -48,6 +64,7 @@ fn llm_meta_strip(summary: Signal<Option<llm_stream::LlmStreamSummary>>) -> impl
                             .with(|opt| opt.as_ref().map(|s| s.provider.label()).unwrap_or("LLM"))
                             .into()
                     })
+                    .number_of_lines(1)
                     .text_size(px(TEXT_XS))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(accent_blue_text()),
@@ -65,15 +82,11 @@ fn llm_meta_strip(summary: Signal<Option<llm_stream::LlmStreamSummary>>) -> impl
                 })
             },
         ))
-        .child(llm_badge(move || {
-            let langs = ui_langs();
-            summary.with(|opt| {
-                let Some(s) = opt.as_ref() else {
-                    return String::new();
-                };
-                format_metrics_summary(s, ui_lang(langs))
-            })
-        }))
+        .child(each(
+            metric_chips,
+            |(idx, _)| *idx,
+            move |chip, _| llm_badge(move || chip.with(|(_, text)| text.clone())),
+        ))
         .child(when(
             move || {
                 summary.with(|opt| {
@@ -85,11 +98,14 @@ fn llm_meta_strip(summary: Signal<Option<llm_stream::LlmStreamSummary>>) -> impl
             move || {
                 let langs = ui_langs();
                 llm_badge(move || {
-                    let stop_lbl = t(ui_lang(langs), "结束原因", "finish");
+                    let lang = ui_lang(langs);
                     summary.with(|opt| {
                         opt.as_ref()
                             .and_then(|s| s.finish_reason.as_ref())
-                            .map(|r| format!("{stop_lbl}: {r}"))
+                            .map(|r| match lang {
+                                Lang::Zh => format!("结束原因：{r}"),
+                                Lang::En => format!("finish: {r}"),
+                            })
                             .unwrap_or_default()
                     })
                 })
@@ -101,6 +117,8 @@ fn llm_badge(label: impl Fn() -> String + 'static) -> impl IntoElement {
     view()
         .h(px(22.0))
         .px_2()
+        .min_w(px(0.0))
+        .flex_shrink_0()
         .rounded(px(RADIUS_SM))
         .border_1()
         .border_color(border_control())
@@ -109,12 +127,14 @@ fn llm_badge(label: impl Fn() -> String + 'static) -> impl IntoElement {
         .items_center()
         .child(
             mono(move || -> SharedString { label().into() })
+                .number_of_lines(1)
+                .text_overflow(EllipsizeMode::Tail)
                 .text_size(px(TEXT_XS))
                 .text_color(fg_secondary()),
         )
 }
 
-fn format_metrics_summary(s: &llm_stream::LlmStreamSummary, lang: Lang) -> String {
+pub(crate) fn format_metrics_chips(s: &llm_stream::LlmStreamSummary, lang: Lang) -> Vec<String> {
     let mut parts = Vec::new();
     if let Some(ttft) = s.ttft_ms {
         parts.push(format!("TTFT {ttft}ms"));
@@ -127,19 +147,19 @@ fn format_metrics_summary(s: &llm_stream::LlmStreamSummary, lang: Lang) -> Strin
         parts.push(format!("{lbl} {total}ms"));
     }
     let u = &s.usage;
-    let (in_lbl, out_lbl, reason_lbl) = match lang {
-        Lang::Zh => ("输入", "输出", "思考"),
-        Lang::En => ("in", "out", "reason"),
+    let (in_lbl, out_lbl, reason_lbl, sep) = match lang {
+        Lang::Zh => ("输入", "输出", "思考", "："),
+        Lang::En => ("in", "out", "reason", ":"),
     };
     let mut tok_parts = Vec::new();
     if let Some(v) = u.input_tokens {
-        tok_parts.push(format!("{in_lbl}:{v}"));
+        tok_parts.push(format!("{in_lbl}{sep}{v}"));
     }
     if let Some(v) = u.output_tokens {
-        tok_parts.push(format!("{out_lbl}:{v}"));
+        tok_parts.push(format!("{out_lbl}{sep}{v}"));
     }
     if let Some(v) = u.reasoning_tokens {
-        tok_parts.push(format!("{reason_lbl}:{v}"));
+        tok_parts.push(format!("{reason_lbl}{sep}{v}"));
     }
     if !tok_parts.is_empty() {
         let total = u
@@ -149,7 +169,10 @@ fn format_metrics_summary(s: &llm_stream::LlmStreamSummary, lang: Lang) -> Strin
                 _ => None,
             });
         if let Some(total) = total {
-            parts.push(format!("{} ({total})", tok_parts.join(" ")));
+            match lang {
+                Lang::Zh => parts.push(format!("{}（{total}）", tok_parts.join(" "))),
+                Lang::En => parts.push(format!("{} ({total})", tok_parts.join(" "))),
+            }
         } else {
             parts.push(tok_parts.join(" "));
         }
@@ -161,7 +184,12 @@ fn format_metrics_summary(s: &llm_stream::LlmStreamSummary, lang: Lang) -> Strin
         Lang::Zh => format!("{} 帧", s.chunk_count),
         Lang::En => format!("{} chunks", s.chunk_count),
     });
-    parts.join(" · ")
+    parts
+}
+
+#[cfg(test)]
+fn format_metrics_summary(s: &llm_stream::LlmStreamSummary, lang: Lang) -> String {
+    format_metrics_chips(s, lang).join(" · ")
 }
 
 fn llm_thinking_card(
@@ -484,6 +512,18 @@ mod tests {
         };
         let sum = format_metrics_summary(&s, Lang::En);
         assert!(sum.contains("in:12 out:8 (20)"), "{sum}");
+
+        let zh_chips = format_metrics_chips(&s, Lang::Zh);
+        assert_eq!(
+            zh_chips,
+            vec![
+                "TTFT 100ms",
+                "总耗时 500ms",
+                "输入：12 输出：8（20）",
+                "20.0 tok/s",
+                "3 帧",
+            ]
+        );
 
         s.usage.input_tokens = None;
         let partial = format_metrics_summary(&s, Lang::En);

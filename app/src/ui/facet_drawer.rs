@@ -56,23 +56,29 @@ pub(crate) fn row_splitter(height: Signal<f32>, controls: Arc<Controls>) -> impl
     let origin = signal(0.0_f32);
     let state = signal(ResizeHandleState::Idle);
     let clamp_cur = |target: f32| clamp_list_height_for_window(target, window().height.0);
-    view().relative().w_full().h(px(1.0)).flex_shrink_0().child(
-        resize_handle()
-            .axis(Axis::Vertical)
-            .accessibility_label(tr_opt(
-                "调整列表与详情高度",
-                "Resize list and detail height",
-            ))
-            .on_state_change(move |next: &ResizeHandleState| state.set(*next))
-            .on_drag_start(move || origin.set(clamp_cur(height.get_untracked())))
-            .on_drag_move(move |offset: &Points| height.set(clamp_cur(origin.get() + offset.0)))
-            .on_drag_end(move |offset: &Points| {
-                let next = clamp_cur(origin.get() + offset.0);
-                height.set(next);
-                store_list_height(next, &controls);
-            })
-            .child(splitter_indicator(Axis::Vertical, state, 3.0)),
-    )
+    view()
+        .relative()
+        .z_index(10)
+        .w_full()
+        .h(px(1.0))
+        .flex_shrink_0()
+        .child(
+            resize_handle()
+                .axis(Axis::Vertical)
+                .accessibility_label(tr_opt(
+                    "调整列表与详情高度",
+                    "Resize list and detail height",
+                ))
+                .on_state_change(move |next: &ResizeHandleState| state.set(*next))
+                .on_drag_start(move || origin.set(clamp_cur(height.get_untracked())))
+                .on_drag_move(move |offset: &Points| height.set(clamp_cur(origin.get() + offset.0)))
+                .on_drag_end(move |offset: &Points| {
+                    let next = clamp_cur(origin.get() + offset.0);
+                    height.set(next);
+                    store_list_height(next, &controls);
+                })
+                .child(splitter_indicator(Axis::Vertical, state, 3.0)),
+        )
 }
 
 pub(crate) fn column_splitter(
@@ -92,6 +98,7 @@ pub(crate) fn column_splitter(
     };
     view()
         .relative()
+        .z_index(10)
         .w(px(1.0))
         .self_stretch()
         .flex_shrink_0()

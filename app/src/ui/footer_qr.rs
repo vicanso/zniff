@@ -1,6 +1,58 @@
 #[allow(unused_imports)]
 use super::*;
 
+pub(crate) fn footer_config_error_button(
+    config_broken: Signal<Option<String>>,
+    config_broken_dismissed: Signal<bool>,
+) -> impl IntoElement {
+    when(
+        move || config_broken.get().is_some(),
+        move || {
+            view()
+                .flex_shrink_0()
+                .tooltip(
+                    tooltip().child(ui_tooltip_surface(
+                        text(move || config_broken.get().unwrap_or_default())
+                            .text_size(px(TEXT_SM))
+                            .text_color(fg_primary()),
+                    )),
+                )
+                .child(
+                    button()
+                        .h(px(ControlSize::Xs.height()))
+                        .px(px(ControlSize::Xs.padding_x()))
+                        .flex_shrink_0()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(ControlSize::Xs.gap()))
+                        .rounded(px(RADIUS_SM))
+                        .border_1()
+                        .border_color(status_warn_fg())
+                        .bg(status_warn_bg())
+                        .hover(|style| style.bg(bg_control_hover()))
+                        .active(|style| style.bg(bg_control_active()))
+                        .transition_colors()
+                        .duration(MOTION_INSTANT_MS)
+                        .ease_out()
+                        .focus_visible(apply_focus_ring)
+                        .on_press(move |_: &()| config_broken_dismissed.set(false))
+                        .child(glyph_px(
+                            ControlSize::Xs.icon_size(),
+                            || Glyph::Alert,
+                            || color(status_warn_fg()),
+                        ))
+                        .child(
+                            text(tr("配置错误", "Config error"))
+                                .number_of_lines(1)
+                                .text_size(px(TEXT_XS))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(status_warn_fg()),
+                        ),
+                )
+        },
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn footer(
     listen: Signal<String>,
@@ -99,51 +151,9 @@ pub(crate) fn footer(
                             )
                     }),
                 )
-                .child(when(
-                    move || config_broken.get().is_some(),
-                    move || {
-                        view()
-                            .flex_shrink_0()
-                            .tooltip(
-                                tooltip().child(ui_tooltip_surface(
-                                    text(move || config_broken.get().unwrap_or_default())
-                                        .text_size(px(TEXT_SM))
-                                        .text_color(fg_primary()),
-                                )),
-                            )
-                            .child(
-                                button()
-                                    .h(px(ControlSize::Xs.height()))
-                                    .px(px(ControlSize::Xs.padding_x()))
-                                    .flex_shrink_0()
-                                    .flex_row()
-                                    .items_center()
-                                    .gap(px(ControlSize::Xs.gap()))
-                                    .rounded(px(RADIUS_SM))
-                                    .border_1()
-                                    .border_color(status_warn_fg())
-                                    .bg(status_warn_bg())
-                                    .hover(|style| style.bg(bg_control_hover()))
-                                    .active(|style| style.bg(bg_control_active()))
-                                    .transition_colors()
-                                    .duration(MOTION_INSTANT_MS)
-                                    .ease_out()
-                                    .focus_visible(apply_focus_ring)
-                                    .on_press(move |_: &()| config_broken_dismissed.set(false))
-                                    .child(glyph_px(
-                                        ControlSize::Xs.icon_size(),
-                                        || Glyph::Alert,
-                                        || color(status_warn_fg()),
-                                    ))
-                                    .child(
-                                        text(tr("配置错误", "Config error"))
-                                            .number_of_lines(1)
-                                            .text_size(px(TEXT_XS))
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(status_warn_fg()),
-                                    ),
-                            )
-                    },
+                .child(footer_config_error_button(
+                    config_broken,
+                    config_broken_dismissed,
                 )),
         )
         .child(when(

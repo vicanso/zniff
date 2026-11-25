@@ -200,6 +200,23 @@ impl HeadlessTree {
         self.press_matching(core, |s| s == exact)
     }
 
+    fn press_label(&mut self, core: &mut Core<ApproxTextEngine>, exact: &str) -> bool {
+        let Some(target) = self
+            .live_node_ids()
+            .into_iter()
+            .find(|id| self.labels.get(id).and_then(|l| l.as_deref()) == Some(exact))
+        else {
+            return false;
+        };
+        core.component_event(
+            target,
+            EventKind::Press,
+            &EventPayload::Press(PressEvent::default()),
+        );
+        self.pump(core);
+        true
+    }
+
     fn live_node_ids(&self) -> Vec<NodeId> {
         let mut out = Vec::new();
         let mut stack = vec![ROOT_ID];
@@ -2403,10 +2420,16 @@ fn resize_handles_update_and_clamp_pane_dimensions() {
     let (mut core, mut tree) = mount::<ResizeHarness>(Size::new(px(1200.0), px(800.0)));
     assert!(tree.has_text("DIMS|380|320"));
 
-    // Column splitter is the second child (after row_splitter wrapper) and holds the horizontal ResizeHandle.
+    // Locate handles by accessible label (z-index stacking places splitters after sibling text).
     let harness_root = tree.children[&ROOT_ID][0];
-    let col_wrapper = tree.children[&harness_root][1];
-    let col_handle = tree.children[&col_wrapper][0];
+    let col_handle = tree
+        .live_node_ids()
+        .into_iter()
+        .find(|id| {
+            tree.labels.get(id).and_then(|l| l.as_deref()) == Some("Resize list and detail width")
+        })
+        .expect("column resize handle");
+    let col_wrapper = tree.parent[&col_handle];
     let col_path = vec![col_handle, col_wrapper, harness_root, ROOT_ID];
     core.component_event(
         ROOT_ID,
@@ -2432,9 +2455,14 @@ fn resize_handles_update_and_clamp_pane_dimensions() {
         tree.all_live_texts()
     );
 
-    // Row splitter is the first child and holds the vertical ResizeHandle.
-    let row_wrapper = tree.children[&harness_root][0];
-    let row_handle = tree.children[&row_wrapper][0];
+    let row_handle = tree
+        .live_node_ids()
+        .into_iter()
+        .find(|id| {
+            tree.labels.get(id).and_then(|l| l.as_deref()) == Some("Resize list and detail height")
+        })
+        .expect("row resize handle");
+    let row_wrapper = tree.parent[&row_handle];
     let row_path = vec![row_handle, row_wrapper, harness_root, ROOT_ID];
     core.component_event(
         ROOT_ID,
@@ -4300,5 +4328,262 @@ fn a11y_backdrop_hidden_inputs_labeled_and_native_layout_and_kind_controls() {
             .find(|id| tree.labels.get(id).and_then(|l| l.as_deref()) == Some(tb_label))
             .expect("top/bottom layout button");
         assert_eq!(tree.roles.get(&tb_btn), Some(&AccessibilityRole::Button));
+    }
+}
+
+#[test]
+fn pane_splitter_stacks_above_detail_pane_in_split_and_top_bottom_modes() {
+    #[component]
+    fn SplitterStackingHarness() -> impl IntoElement {
+        let lang = TEST_LANG.with(Cell::get);
+        provide_base_contexts(lang);
+        let controls = make_controls("splitter-z");
+        let list_width = signal(config::LIST_WIDTH_DEFAULT as f32);
+        let list_height = signal(320.0_f32);
+        let layout_mode = signal(config::LayoutMode::Split);
+        let sidebar_width = signal(config::SIDEBAR_WIDTH_DEFAULT as f32);
+        let sidebar_collapsed = signal(false);
+
+        view()
+            .w(px(1200.0))
+            .h(px(760.0))
+            .flex_col()
+            .child(
+                button()
+                    .on_press(move |_: &()| {
+                        layout_mode.set(config::LayoutMode::TopBottom);
+                    })
+                    .child(text("TO_TOP_BOTTOM")),
+            )
+            .child(
+                view()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .flex_row()
+                    .child(view().w(px(500.0)).h_full().child(text("FLOW_LIST_STUB")))
+                    .child(pane_splitter(
+                        list_width,
+                        list_height,
+                        layout_mode,
+                        sidebar_width,
+                        sidebar_collapsed,
+                        controls,
+                    ))
+                    .child(view().flex_1().h_full().child(text("DETAIL_PANE_STUB"))),
+            )
+    }
+
+    TEST_LANG.set(Lang::En);
+    let (mut core, mut tree) = mount::<SplitterStackingHarness>(Size::new(px(1200.0), px(760.0)));
+    tree.pump(&mut core);
+
+    let assert_splitter_after_detail = |tree: &HeadlessTree, handle_label: &str| {
+        let detail_text = tree
+            .live_node_ids()
+            .into_iter()
+            .find(|id| tree.texts.get(id).is_some_and(|s| s == "DETAIL_PANE_STUB"))
+            .expect("detail stub text");
+        let detail_pane = tree.parent[&detail_text];
+        let container = tree.parent[&detail_pane];
+        let handle_id = tree
+            .live_node_ids()
+            .into_iter()
+            .find(|id| tree.labels.get(id).and_then(|l| l.as_deref()) == Some(handle_label))
+            .expect("resize handle");
+        let mut splitter_top = handle_id;
+        while let Some(&p) = tree.parent.get(&splitter_top) {
+            if p == container {
+                break;
+            }
+            splitter_top = p;
+        }
+        assert_eq!(tree.parent.get(&splitter_top), Some(&container));
+        let siblings = &tree.children[&container];
+        let detail_pos = siblings
+            .iter()
+            .position(|&id| id == detail_pane)
+            .expect("detail pane in container");
+        let splitter_pos = siblings
+            .iter()
+            .position(|&id| id == splitter_top)
+            .expect("splitter in container");
+        assert!(
+            splitter_pos > detail_pos,
+            "{handle_label} (pos {splitter_pos}) must stack after detail_pane (pos {detail_pos}) so center/trailing hit area is unoccluded"
+        );
+    };
+
+    assert_splitter_after_detail(&tree, "Resize list and detail width");
+    assert!(tree.press_text(&mut core, "TO_TOP_BOTTOM"));
+    assert_splitter_after_detail(&tree, "Resize list and detail height");
+}
+
+#[test]
+fn llm_stream_panel_renders_individual_wrapping_metric_badges_and_zh_punctuation() {
+    #[component]
+    fn LlmBadgesHarness() -> impl IntoElement {
+        let lang = TEST_LANG.with(Cell::get);
+        provide_base_contexts(lang);
+        let controls = make_controls("llm-badges");
+        let summary = signal(Some(llm_stream::LlmStreamSummary {
+            provider: llm_stream::LlmProvider::OpenAiChat,
+            model: Some("gpt-4o-mini".into()),
+            finish_reason: Some("tool_calls".into()),
+            thinking: "Step 1: inspect api.vicanso.dev".into(),
+            content: "All checks green.".into(),
+            tool_calls: vec![llm_stream::LlmToolCall {
+                id: "call_1".into(),
+                name: "get_weather".into(),
+                arguments: r#"{"city":"Shanghai"}"#.into(),
+            }],
+            usage: llm_stream::LlmUsage {
+                input_tokens: Some(42),
+                output_tokens: Some(18),
+                reasoning_tokens: Some(10),
+                total_tokens: Some(60),
+            },
+            chunk_count: 4,
+            ttft_ms: Some(12),
+            total_ms: Some(250),
+        }));
+        view()
+            .w(px(360.0))
+            .h(px(520.0))
+            .child(llm_stream_panel(summary, controls))
+    }
+
+    for lang in [Lang::Zh, Lang::En] {
+        TEST_LANG.set(lang);
+        let (mut core, mut tree) = mount::<LlmBadgesHarness>(Size::new(px(360.0), px(520.0)));
+        tree.pump(&mut core);
+
+        assert!(tree.has_text("OpenAI Chat"));
+        assert!(tree.has_text("gpt-4o-mini"));
+        assert!(tree.has_text("TTFT 12ms"));
+        assert!(tree.has_text("75.6 tok/s"));
+        // Metrics must render as separate wrapping badges, never one long concatenated line.
+        assert!(!tree.has_text_containing("TTFT 12ms · "));
+        match lang {
+            Lang::Zh => {
+                assert!(tree.has_text("总耗时 250ms"));
+                assert!(tree.has_text("输入：42 输出：18 思考：10（60）"));
+                assert!(tree.has_text("4 帧"));
+                assert!(tree.has_text("结束原因：tool_calls"));
+            }
+            Lang::En => {
+                assert!(tree.has_text("Total 250ms"));
+                assert!(tree.has_text("in:42 out:18 reason:10 (60)"));
+                assert!(tree.has_text("4 chunks"));
+                assert!(tree.has_text("finish: tool_calls"));
+            }
+        }
+    }
+}
+
+#[test]
+fn config_broken_bar_dismiss_reopen_and_backup_reset_clears_error_zh_en() {
+    #[component]
+    fn ConfigBrokenBarHarness() -> impl IntoElement {
+        let lang = TEST_LANG.with(Cell::get);
+        provide_base_contexts(lang);
+        let controls = make_controls("cfg-broken-bar");
+        let cfg_dir = ca::data_dir();
+        let dev = config::is_dev_mode();
+        let cfg_path = config::config_path_for(&cfg_dir, dev);
+        let _ = std::fs::create_dir_all(&cfg_dir);
+        std::fs::write(&cfg_path, "listen_port = [broken toml\n").expect("write broken config");
+        *controls.config_path.lock().unwrap() = cfg_path.display().to_string();
+        *controls.config_error.lock().unwrap() = Some("invalid array syntax".to_string());
+
+        let config_broken = signal(Some("invalid array syntax".to_string()));
+        let config_broken_dismissed = signal(false);
+        let profiles = make_profiles();
+        let port_text = signal("8878".to_string());
+        let listen_all = signal(false);
+        let bar_controls = controls.clone();
+        let check_controls = controls;
+
+        view()
+            .w(px(900.0))
+            .h(px(240.0))
+            .flex_col()
+            .child(when(
+                move || config_broken.get().is_some() && !config_broken_dismissed.get(),
+                move || {
+                    config_broken_bar(
+                        config_broken,
+                        config_broken_dismissed,
+                        profiles,
+                        port_text,
+                        listen_all,
+                        bar_controls.clone(),
+                    )
+                },
+            ))
+            .child(footer_config_error_button(
+                config_broken,
+                config_broken_dismissed,
+            ))
+            .child(text(move || {
+                let ctrl_err = check_controls
+                    .config_error
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or_default();
+                format!(
+                    "CFG_STATE|broken={}|dismissed={}|ctrl_err={}",
+                    config_broken.get().is_some(),
+                    config_broken_dismissed.get(),
+                    ctrl_err
+                )
+            }))
+    }
+
+    for lang in [Lang::Zh, Lang::En] {
+        TEST_LANG.set(lang);
+        let (mut core, mut tree) = mount::<ConfigBrokenBarHarness>(Size::new(px(900.0), px(240.0)));
+        tree.pump(&mut core);
+
+        let reset_label = t(lang, "备份并重置", "Backup & reset");
+        let footer_label = t(lang, "配置错误", "Config error");
+        let dismiss_label = t(lang, "隐藏横幅", "Dismiss banner");
+
+        // 1. Initial broken state shows both banner and footer indicator.
+        assert!(tree.has_text(reset_label));
+        assert!(tree.has_text(footer_label));
+        assert!(
+            tree.has_text("CFG_STATE|broken=true|dismissed=false|ctrl_err=invalid array syntax")
+        );
+
+        // 2. Dismiss hides banner while keeping footer reopen pill visible.
+        assert!(tree.press_label(&mut core, dismiss_label));
+        assert!(!tree.has_text(reset_label));
+        assert!(tree.has_text(footer_label));
+        assert!(
+            tree.has_text("CFG_STATE|broken=true|dismissed=true|ctrl_err=invalid array syntax")
+        );
+
+        // 3. Clicking footer `Config error` / `配置错误` pill reopens banner.
+        assert!(tree.press_text(&mut core, footer_label));
+        assert!(tree.has_text(reset_label));
+        assert!(
+            tree.has_text("CFG_STATE|broken=true|dismissed=false|ctrl_err=invalid array syntax")
+        );
+
+        // 4. Clicking `Backup & reset` / `备份并重置` clears banner, footer pill, and error state.
+        assert!(tree.press_text(&mut core, reset_label));
+        assert!(!tree.has_text(reset_label));
+        assert!(!tree.has_text(footer_label));
+        assert!(tree.has_text("CFG_STATE|broken=false|dismissed=false|ctrl_err="));
+
+        // Verify valid replacement config was written inside the isolated test data dir.
+        let cfg_dir = ca::data_dir();
+        let (_cfg, load_err) = config::load_mode_ext(&cfg_dir, config::is_dev_mode());
+        assert!(
+            load_err.is_none(),
+            "reset config must parse cleanly in {lang:?}: {:?}",
+            load_err
+        );
     }
 }

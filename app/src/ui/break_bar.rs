@@ -224,37 +224,40 @@ pub(crate) fn reset_broken_config_action(
     _listen_all: Signal<bool>,
     _langs: Signal<Option<Lang>>,
 ) {
-    spawn(async move {
-        let body = b"{\"op\":\"reset_broken_config\"}".to_vec();
-        let request = HttpRequest::post("api/hub", body).header("content-type", "application/json");
-        match fetch(request).await {
-            Ok(response) => {
-                let value: serde_json::Value =
-                    serde_json::from_str(&response.text()).unwrap_or(serde_json::json!({}));
-                if response.ok() {
-                    let backup = value
-                        .get("backup")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("config.toml.broken")
-                        .to_string();
-                    *controls
-                        .config_error
-                        .lock()
-                        .unwrap_or_else(|err| err.into_inner()) = None;
-                    config_broken.set(None);
-                    config_broken_dismissed.set(false);
-                    set_status(&controls, StatusMsg::ConfigReset { backup });
-                } else {
-                    let err = value
-                        .get("error")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("reset failed")
-                        .to_string();
-                    set_status(&controls, StatusMsg::SaveFailed(err));
+    nsh_core::prelude::Owner::detached().run(|| {
+        spawn(async move {
+            let body = b"{\"op\":\"reset_broken_config\"}".to_vec();
+            let request =
+                HttpRequest::post("api/hub", body).header("content-type", "application/json");
+            match fetch(request).await {
+                Ok(response) => {
+                    let value: serde_json::Value =
+                        serde_json::from_str(&response.text()).unwrap_or(serde_json::json!({}));
+                    if response.ok() {
+                        let backup = value
+                            .get("backup")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("config.toml.broken")
+                            .to_string();
+                        *controls
+                            .config_error
+                            .lock()
+                            .unwrap_or_else(|err| err.into_inner()) = None;
+                        config_broken.set(None);
+                        config_broken_dismissed.set(false);
+                        set_status(&controls, StatusMsg::ConfigReset { backup });
+                    } else {
+                        let err = value
+                            .get("error")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("reset failed")
+                            .to_string();
+                        set_status(&controls, StatusMsg::SaveFailed(err));
+                    }
                 }
+                Err(err) => set_status(&controls, StatusMsg::SaveFailed(err)),
             }
-            Err(err) => set_status(&controls, StatusMsg::SaveFailed(err)),
-        }
+        });
     });
 }
 
