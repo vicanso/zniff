@@ -27,6 +27,10 @@ struct HeadlessTree {
     texts: HashMap<NodeId, String>,
     placeholders: HashMap<NodeId, String>,
     pressed: HashMap<NodeId, Option<nsh_core::Checked>>,
+    roles: HashMap<NodeId, AccessibilityRole>,
+    labels: HashMap<NodeId, Option<String>>,
+    elements_hidden: HashMap<NodeId, bool>,
+    focusable: HashMap<NodeId, Option<bool>>,
     keymap: Option<Arc<nsh_core::keymap::Keymap>>,
 }
 
@@ -80,6 +84,10 @@ impl HeadlessTree {
                             self.texts.remove(id);
                             self.placeholders.remove(id);
                             self.pressed.remove(id);
+                            self.roles.remove(id);
+                            self.labels.remove(id);
+                            self.elements_hidden.remove(id);
+                            self.focusable.remove(id);
                         }
                         MountItem::Text { id, text, .. } => {
                             self.texts.insert(*id, text.text.clone());
@@ -89,6 +97,13 @@ impl HeadlessTree {
                         }
                         MountItem::ViewProps { id, props } => {
                             self.pressed.insert(*id, props.accessibility.state.pressed);
+                            self.roles.insert(*id, props.accessibility.role);
+                            self.labels.insert(
+                                *id,
+                                props.accessibility.label.as_deref().map(str::to_string),
+                            );
+                            self.elements_hidden.insert(*id, props.accessibility.hidden);
+                            self.focusable.insert(*id, props.focusable);
                         }
                         MountItem::Command {
                             id,
@@ -2488,15 +2503,15 @@ fn rules_panel_redesign_tabs_grouped_kind_menu_and_collapsible_quick_add() {
         assert!(!tree.has_text(t(lang, "+ 表单添加规则", "+ Add rule via form")));
         assert!(!tree.has_text(t(lang, "按类型配置规则", "Configure Rule")));
         assert!(!tree.has_text("#1 cors *"));
-        assert!(!tree.has_text(t(lang, "直通名单 (不解密)", "TLS Bypass (No MITM)")));
+        assert!(!tree.has_text(t(lang, "直通名单（不解密）", "TLS Bypass (No MITM)")));
         assert!(!tree.has_text(t(lang, "上游代理", "Upstream Proxy")));
         assert!(!tree.has_text(t(lang, "开发期 CORS", "Dev CORS")));
 
         // Open `+ Add rule` -> click 1-click preset `Throttle (3G)` -> inserts directly without opening form.
         assert!(tree.press_text(&mut core, t(lang, "+ 添加规则", "+ Add rule")));
         assert!(tree.has_text(t(lang, "开发期 CORS", "Dev CORS")));
-        assert!(tree.has_text(t(lang, "弱网限速 (3G)", "Throttle (3G)")));
-        assert!(tree.press_text(&mut core, t(lang, "弱网限速 (3G)", "Throttle (3G)")));
+        assert!(tree.has_text(t(lang, "弱网限速（3G）", "Throttle (3G)")));
+        assert!(tree.press_text(&mut core, t(lang, "弱网限速（3G）", "Throttle (3G)")));
         assert!(tree.has_text_containing(t(lang, "3 条规则", "3 rules")));
         assert!(!tree.has_text(t(lang, "按类型配置规则", "Configure Rule")));
 
@@ -2551,7 +2566,7 @@ fn rules_panel_redesign_tabs_grouped_kind_menu_and_collapsible_quick_add() {
 
         // Switch to Tab 1 ("直通与上游" / "Bypass & Proxy").
         assert!(tree.press_text(&mut core, t(lang, "直通与上游", "Bypass & Proxy")));
-        assert!(tree.has_text(t(lang, "直通名单 (不解密)", "TLS Bypass (No MITM)")));
+        assert!(tree.has_text(t(lang, "直通名单（不解密）", "TLS Bypass (No MITM)")));
         assert!(tree.has_text(t(lang, "上游代理", "Upstream Proxy")));
         assert!(tree.has_text(t(lang, "显示隧道失败", "Show tunnel failures")));
     }
@@ -3789,5 +3804,501 @@ fn quick_filter_chips_are_toggles_and_flip_filter_zh_en() {
             Some(&Some(nsh_core::Checked::False)),
             "deactivated toggle chip pressed state must return to False in {lang:?}"
         );
+    }
+}
+
+#[test]
+fn folded_header_and_message_sections_stay_hidden_after_async_hydration() {
+    #[component]
+    fn FoldedHydrationHarness() -> impl IntoElement {
+        let lang = TEST_LANG.with(Cell::get);
+        provide_base_contexts(lang);
+        let controls = make_controls("folded-hydrate");
+        let shown = make_shown("https://api.vicanso.dev/v1/orders", Some(200), "");
+        let folded = signal(FOLD_RES_HEADERS | FOLD_MESSAGES);
+        let hydrate_headers = shown.response_headers;
+        let hydrate_messages = shown.messages;
+        view()
+            .w(px(640.0))
+            .h(px(600.0))
+            .flex_col()
+            .gap_2()
+            .child(
+                button()
+                    .on_press(move |_: &()| {
+                        hydrate_headers.set(vec![HeaderLine {
+                            key: 1,
+                            name: "X-Hydrated-Header".into(),
+                            value: "hydrated-secret-value".into(),
+                            hint: None,
+                        }]);
+                        hydrate_messages.set(vec![HeaderLine {
+                            key: 2,
+                            name: "↑ 文本".into(),
+                            value: "ws-hydrated-frame".into(),
+                            hint: None,
+                        }]);
+                    })
+                    .child(text("HYDRATE_ASYNC")),
+            )
+            .child(header_section(HeaderSectionProps {
+                zh: "响应头",
+                en: "Response headers",
+                lines: shown.response_headers,
+                loading: shown.res_headers_loading,
+                pane_width: shown.pane_width,
+                folded,
+                bit: FOLD_RES_HEADERS,
+                controls: controls.clone(),
+            }))
+            .child(messages_section(shown, controls, folded))
+    }
+
+    for lang in [Lang::Zh, Lang::En] {
+        TEST_LANG.set(lang);
+        let (mut core, mut tree) = mount::<FoldedHydrationHarness>(Size::new(px(640.0), px(600.0)));
+        core.set_environment(nsh_core::element::Environment {
+            reduce_motion: true,
+            ..Default::default()
+        });
+        tree.pump(&mut core);
+
+        let hdr_title = t(lang, "响应头", "Response headers");
+        let msg_title = t(lang, "消息", "Messages");
+        assert!(tree.has_text(hdr_title));
+        assert!(tree.has_text(msg_title));
+        assert!(!tree.has_text("hydrated-secret-value"));
+        assert!(!tree.has_text("ws-hydrated-frame"));
+
+        // Simulate async `/api/flows/{id}` payload arriving while cards are pre-folded.
+        assert!(tree.press_text(&mut core, "HYDRATE_ASYNC"));
+        assert!(
+            !tree.has_text("hydrated-secret-value"),
+            "pre-folded header_section leaked content on async hydration in {lang:?}"
+        );
+        assert!(
+            !tree.has_text("ws-hydrated-frame"),
+            "pre-folded messages_section leaked content on async hydration in {lang:?}"
+        );
+
+        // Expanding each section reveals the hydrated rows; collapsing hides them again.
+        assert!(tree.press_text(&mut core, hdr_title));
+        assert!(tree.has_text("hydrated-secret-value"));
+        assert!(tree.press_text(&mut core, hdr_title));
+        assert!(!tree.has_text("hydrated-secret-value"));
+
+        assert!(tree.press_text(&mut core, msg_title));
+        assert!(tree.has_text("ws-hydrated-frame"));
+        assert!(tree.press_text(&mut core, msg_title));
+        assert!(!tree.has_text("ws-hydrated-frame"));
+    }
+}
+
+#[test]
+fn escape_closes_marker_command_palette_and_watch_while_editing_and_toast_visible() {
+    #[component]
+    fn EscapeWhileEditingAndToastHarness() -> impl IntoElement {
+        let lang = TEST_LANG.with(Cell::get);
+        provide_base_contexts(lang);
+        let _dismiss = provide_popover_dismiss();
+        let controls = make_controls("esc-editing-toast");
+        let profiles = make_profiles();
+        let compose = make_compose();
+        let seq_builder = make_seq_builder();
+        let shown = make_shown("https://api.vicanso.dev/v1/health", Some(200), "");
+        let rows = signal(Vec::new());
+        let selected = signal(None::<u64>);
+        let baseline = signal(None::<u64>);
+        let active_tab = signal(0_u64);
+        let filter = signal(String::new());
+        let list_filter = signal(String::new());
+        let primary_filter = signal(String::new());
+        let filter_enabled = signal(true);
+        let pretty = signal(true);
+        let running = signal(false);
+        let proxy_on = signal(false);
+        let filter_focus = element_ref();
+
+        let marker_open = signal(true);
+        let palette_open = signal(false);
+        let shortcuts_open = signal(false);
+        let watch_open = signal(false);
+        let watch_rules = signal(Vec::new());
+        let watch_eval = signal(crate::watch::WatchEvaluation::default());
+
+        let toast_manager = stored(ToastManager::<u64, StatusMsg>::new(ToastMotion::sonner()));
+        let initial_toasts = toast_manager.with(|m| {
+            let now = nsh_core::time::now();
+            m.push(
+                1_u64,
+                StatusMsg::ClearedFlows { count: 1 },
+                ToastOptions::timeout(Some(Duration::from_millis(5000))),
+                now,
+            );
+            m.visible(3)
+                .map(|(id, data, status)| (*id, data.clone(), status))
+                .collect::<Vec<_>>()
+        });
+        let toast_shown = signal(initial_toasts);
+        let toast_gen = signal(1_u64);
+        let toast_state = ToastStackState::new();
+
+        view()
+            .w(px(900.0))
+            .h(px(640.0))
+            .flex_col()
+            .child(
+                view()
+                    .flex_row()
+                    .gap_2()
+                    .child(
+                        button()
+                            .on_press(move |_: &()| watch_open.set(true))
+                            .child(text("OPEN_WATCH")),
+                    )
+                    .child(
+                        button()
+                            .on_press(move |_: &()| palette_open.set(true))
+                            .child(text("OPEN_PALETTE")),
+                    ),
+            )
+            .child(text(move || {
+                format!(
+                    "STATE|m={}|p={}|w={}",
+                    marker_open.get(),
+                    palette_open.get(),
+                    watch_open.get()
+                )
+            }))
+            .child(watch_popover(WatchPopoverProps {
+                open: watch_open,
+                rules: watch_rules,
+                eval: watch_eval,
+                effective_filter: filter,
+                list_filter,
+                selected,
+                active_tab,
+                baseline,
+                primary_filter,
+                filter_enabled,
+                controls: controls.clone(),
+            }))
+            .child(marker_modal(marker_open, controls.clone()))
+            .child(command_palette_modal(
+                palette_open,
+                shortcuts_open,
+                filter_focus,
+                controls.clone(),
+                running,
+                proxy_on,
+                rows,
+                filter,
+                pretty,
+                profiles,
+                compose,
+                seq_builder,
+                selected,
+                baseline,
+                shown,
+            ))
+            .child(toast_overlay(
+                toast_shown,
+                toast_gen,
+                toast_state,
+                toast_manager,
+                controls,
+            ))
+    }
+
+    for lang in [Lang::Zh, Lang::En] {
+        TEST_LANG.set(lang);
+        let (mut core, mut tree) =
+            mount::<EscapeWhileEditingAndToastHarness>(Size::new(px(900.0), px(640.0)));
+        core.set_environment(nsh_core::element::Environment {
+            reduce_motion: true,
+            ..Default::default()
+        });
+        tree.pump(&mut core);
+
+        // 1. Session Marker closes on Escape even while editing an input AND toast is visible.
+        assert!(tree.has_text("STATE|m=true|p=false|w=false"));
+        assert!(tree.press_escape(&mut core, true));
+        assert!(
+            tree.has_text("STATE|m=false|p=false|w=false"),
+            "marker_modal must close on Escape while editing with toast visible in {lang:?}"
+        );
+
+        // 2. Watch popover opens, closes on Escape while editing AND toast is visible.
+        assert!(tree.press_text(&mut core, "OPEN_WATCH"));
+        assert!(tree.has_text("STATE|m=false|p=false|w=true"));
+        assert!(tree.press_escape(&mut core, true));
+        assert!(
+            tree.has_text("STATE|m=false|p=false|w=false"),
+            "watch_popover must close on Escape while editing with toast visible in {lang:?}"
+        );
+
+        // 3. Opening Command Palette while Watch popover is open dismisses Watch,
+        // and Escape while editing closes Command Palette even with toast visible.
+        assert!(tree.press_text(&mut core, "OPEN_WATCH"));
+        assert!(tree.has_text("STATE|m=false|p=false|w=true"));
+        assert!(tree.press_text(&mut core, "OPEN_PALETTE"));
+        assert!(
+            tree.has_text("STATE|m=false|p=true|w=false"),
+            "opening command_palette must dismiss background watch_popover in {lang:?}"
+        );
+        assert!(tree.press_escape(&mut core, true));
+        assert!(
+            tree.has_text("STATE|m=false|p=false|w=false"),
+            "command_palette must close on Escape while editing with toast visible in {lang:?}"
+        );
+    }
+}
+
+#[test]
+fn marker_modal_submit_and_detached_spawn_survive_immediate_modal_close() {
+    #[component]
+    fn MarkerSubmitHarness() -> impl IntoElement {
+        let lang = TEST_LANG.with(Cell::get);
+        provide_base_contexts(lang);
+        let controls = make_controls("marker-submit");
+        let open = signal(true);
+        let attached_ran = signal(false);
+        let detached_ran = signal(false);
+        let hub_for_count = controls.hub.clone();
+        let refresh = signal(0_u64);
+        view()
+            .w(px(720.0))
+            .h(px(520.0))
+            .flex_col()
+            .child(marker_modal(open, controls))
+            .child(when(
+                move || !open.get(),
+                move || {
+                    view().child(
+                        button()
+                            .on_press(move |_: &()| {
+                                refresh.update(|n| *n += 1);
+                            })
+                            .child(text("SYNC_COUNT")),
+                    )
+                },
+            ))
+            .child(when(
+                move || !detached_ran.get(),
+                move || {
+                    let close_flag = signal(true);
+                    when(
+                        move || close_flag.get(),
+                        move || {
+                            button()
+                                .on_press(move |_: &()| {
+                                    // Attached spawn is cancelled when `close_flag.set(false)`
+                                    // disposes this `when(...)` owner.
+                                    nsh_core::prelude::spawn(async move {
+                                        attached_ran.set(true);
+                                    });
+                                    // Detached spawn (`hub_web::spawn_detached`) survives disposal.
+                                    nsh_core::prelude::Owner::detached().run(|| {
+                                        nsh_core::prelude::spawn(async move {
+                                            detached_ran.set(true);
+                                        });
+                                    });
+                                    close_flag.set(false);
+                                })
+                                .child(text("RUN_DETACHED"))
+                        },
+                    )
+                },
+            ))
+            .child(text(move || {
+                let _ = refresh.get();
+                let (count, last) = hub_for_count.with_session(|s| {
+                    (
+                        s.len(),
+                        s.iter().last().map(|f| f.path.clone()).unwrap_or_default(),
+                    )
+                });
+                format!(
+                    "MARKERS|open={}|count={}|last={}|attached={}|detached={}",
+                    open.get(),
+                    count,
+                    last,
+                    attached_ran.get(),
+                    detached_ran.get()
+                )
+            }))
+    }
+
+    for lang in [Lang::Zh, Lang::En] {
+        TEST_LANG.set(lang);
+        let (mut core, mut tree) = mount::<MarkerSubmitHarness>(Size::new(px(720.0), px(520.0)));
+        core.set_environment(nsh_core::element::Environment {
+            reduce_motion: true,
+            ..Default::default()
+        });
+        tree.pump(&mut core);
+
+        assert!(tree.has_text("MARKERS|open=true|count=0|last=|attached=false|detached=false"));
+        let submit_label = t(lang, "插入标记", "Add marker");
+        assert!(tree.press_text(&mut core, submit_label));
+        assert!(tree.press_text(&mut core, "SYNC_COUNT"));
+        let expected_default = t(lang, "时间标记", "Marker");
+        assert!(
+            tree.has_text(&format!(
+                "MARKERS|open=false|count=1|last={expected_default}|attached=false|detached=false"
+            )),
+            "clicking {submit_label} must add marker and close modal in {lang:?}"
+        );
+
+        assert!(tree.press_text(&mut core, "RUN_DETACHED"));
+        core.run_component_tasks();
+        tree.pump(&mut core);
+        assert!(
+            tree.has_text(&format!(
+                "MARKERS|open=false|count=1|last={expected_default}|attached=false|detached=true"
+            )),
+            "attached spawn should cancel while detached spawn completes after when-owner disposal"
+        );
+    }
+}
+
+#[test]
+fn narrow_split_layout_keeps_status_column_visible_without_overriding_user_widths() {
+    let shown = ListColumns::from_config(&config::Config::default());
+
+    // 780px Split layout (sidebar auto-collapses < 880px): list pane clamps to 440px.
+    let list_w_780 = clamp_list_px_for_layout(
+        config::LIST_WIDTH_DEFAULT as f32,
+        780.0,
+        config::LayoutMode::Split,
+        0.0,
+    );
+    assert_eq!(list_w_780, 440.0);
+
+    let cols = flow_table_columns_for_layout(shown, &HashMap::new(), false, list_w_780);
+    let width_of = |key: &str| {
+        cols.iter()
+            .find(|c| c.key.as_ref() == key)
+            .and_then(|c| c.width)
+            .map(|p| p.0)
+            .unwrap_or(0.0)
+    };
+    let core_total = width_of("id") + width_of("method") + width_of("path") + width_of("status");
+    assert_eq!(width_of("status"), 52.0);
+    assert!(
+        core_total <= list_w_780 - 8.0,
+        "core columns ({core_total}px) must fit within 780px split pane ({list_w_780}px)"
+    );
+    assert!(width_of("path") >= 120.0 && width_of("path") < 300.0);
+
+    // Wide 1280px Split pane keeps default path width (300px) intact.
+    let wide_cols = flow_table_columns_for_layout(shown, &HashMap::new(), false, 660.0);
+    let wide_path = wide_cols
+        .iter()
+        .find(|c| c.key.as_ref() == "path")
+        .and_then(|c| c.width)
+        .map(|p| p.0);
+    assert_eq!(wide_path, Some(300.0));
+
+    // User-resized path width is respected and never auto-shrunk.
+    let mut custom = HashMap::new();
+    custom.insert("path".to_string(), 320_u32);
+    let custom_cols = flow_table_columns_for_layout(shown, &custom, false, list_w_780);
+    let custom_path = custom_cols
+        .iter()
+        .find(|c| c.key.as_ref() == "path")
+        .and_then(|c| c.width)
+        .map(|p| p.0);
+    assert_eq!(custom_path, Some(320.0));
+}
+
+#[test]
+fn a11y_backdrop_hidden_inputs_labeled_and_native_layout_and_kind_controls() {
+    #[component]
+    fn A11yControlsHarness() -> impl IntoElement {
+        let lang = TEST_LANG.with(Cell::get);
+        provide_base_contexts(lang);
+        let controls = make_controls("a11y-controls");
+        let layout_mode = signal(config::LayoutMode::Split);
+        let draft = make_rule_draft();
+        let backdrop_closed = signal(false);
+        let sample_val = signal(String::new());
+        view()
+            .w(px(900.0))
+            .h(px(400.0))
+            .flex_col()
+            .gap_2()
+            .child(
+                ui_modal_backdrop(move || backdrop_closed.set(true))
+                    .child(text("BACKDROP_INNER_MARKER")),
+            )
+            .child(
+                ui_input_a11y(input(), tr("测试域名输入", "Test host input"))
+                    .value(move || sample_val.get())
+                    .placeholder(tr("输入 api.vicanso.dev", "Enter api.vicanso.dev")),
+            )
+            .child(toolbar_layout_switcher(layout_mode, controls))
+            .child(quick_kind_dropdown(draft))
+            .child(text(move || {
+                format!("BACKDROP_CLOSED|{}", backdrop_closed.get())
+            }))
+    }
+
+    for lang in [Lang::Zh, Lang::En] {
+        TEST_LANG.set(lang);
+        let (mut core, mut tree) = mount::<A11yControlsHarness>(Size::new(px(900.0), px(400.0)));
+        tree.pump(&mut core);
+
+        // 1. Backdrop is hidden from accessibility and non-focusable, yet still dismisses on press.
+        let marker_id = tree
+            .live_node_ids()
+            .into_iter()
+            .find(|id| {
+                tree.texts
+                    .get(id)
+                    .is_some_and(|s| s == "BACKDROP_INNER_MARKER")
+            })
+            .expect("backdrop marker");
+        let backdrop_id = tree.parent[&marker_id];
+        assert_eq!(tree.elements_hidden.get(&backdrop_id), Some(&true));
+        assert_eq!(tree.focusable.get(&backdrop_id), Some(&Some(false)));
+        assert!(tree.press_text(&mut core, "BACKDROP_INNER_MARKER"));
+        assert!(tree.has_text("BACKDROP_CLOSED|true"));
+
+        // 2. ui_input_a11y sets explicit label and native Textbox role.
+        let expected_input_label = t(lang, "测试域名输入", "Test host input");
+        let input_id = tree
+            .live_node_ids()
+            .into_iter()
+            .find(|id| tree.kinds.get(id) == Some(&ViewKind::Input))
+            .expect("input node");
+        assert_eq!(
+            tree.labels.get(&input_id).and_then(|l| l.as_deref()),
+            Some(expected_input_label)
+        );
+        assert_eq!(tree.roles.get(&input_id), Some(&AccessibilityRole::Textbox));
+
+        // 3. quick_kind_dropdown exposes native Combobox role with localized label.
+        let kind_label = t(lang, "选择规则类型", "Select rule type");
+        let combobox_id = tree
+            .live_node_ids()
+            .into_iter()
+            .find(|id| tree.labels.get(id).and_then(|l| l.as_deref()) == Some(kind_label))
+            .expect("quick_kind_dropdown combobox");
+        assert_eq!(
+            tree.roles.get(&combobox_id),
+            Some(&AccessibilityRole::Combobox)
+        );
+
+        // 4. Layout switcher opens native Button menu items with labels.
+        let switcher_label = t(lang, "分栏", "Layout");
+        assert!(tree.press_text(&mut core, switcher_label));
+        let tb_label = t(lang, "上下分栏", "Top / Bottom split");
+        let tb_btn = tree
+            .live_node_ids()
+            .into_iter()
+            .find(|id| tree.labels.get(id).and_then(|l| l.as_deref()) == Some(tb_label))
+            .expect("top/bottom layout button");
+        assert_eq!(tree.roles.get(&tb_btn), Some(&AccessibilityRole::Button));
     }
 }

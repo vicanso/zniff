@@ -498,7 +498,7 @@ fn quick_add_row_one(
         .child(quick_kind_dropdown(draft))
         .child(view().flex_1().min_w(px(0.0)).child(submit_input(
             draft.host,
-            tr("域名 (*)", "Host (*)"),
+            tr("域名（*）", "Host (*)"),
             28.0,
             move |text| draft.host.set(text.to_string()),
             move |_| submit_quick_add(target, &submit_host, draft, open),
@@ -509,7 +509,7 @@ fn quick_add_row_one(
                 let sc = submit_path.clone();
                 view().flex_1().min_w(px(0.0)).child(submit_input(
                     draft.path,
-                    tr("路径 (*)", "Path (*)"),
+                    tr("路径（*）", "Path (*)"),
                     28.0,
                     move |text| draft.path.set(text.to_string()),
                     move |_| submit_quick_add(target, &sc, draft, open),
@@ -536,8 +536,8 @@ fn quick_add_row_one(
                 view()
                     .flex_shrink_0()
                     .tooltip(label_tip(
-                        "附加 GraphQL 操作名条件 (op=...)",
-                        "Filter by GraphQL operation name (op=...)",
+                        "附加 GraphQL 操作名条件（op=…）",
+                        "Filter by GraphQL operation name (op=…)",
                     ))
                     .child(
                         button()
@@ -647,7 +647,7 @@ fn quick_from_placeholder(kind: u8, lang: Lang) -> &'static str {
         ),
         2 => t(
             lang,
-            "本地文件或目录路径 (或留空仅填状态码)",
+            "本地文件或目录路径（或留空仅填状态码）",
             "Local file or directory (or empty for status)",
         ),
         3 => t(
@@ -657,7 +657,7 @@ fn quick_from_placeholder(kind: u8, lang: Lang) -> &'static str {
         ),
         4 | 5 => t(
             lang,
-            "请求头条件 (可选): X-Debug:1",
+            "请求头条件（可选）: X-Debug:1",
             "Header cond (optional): X-Debug:1",
         ),
         6 => t(lang, "请求头名: X-Debug", "Header name: X-Debug"),
@@ -669,7 +669,7 @@ fn quick_from_placeholder(kind: u8, lang: Lang) -> &'static str {
         ),
         10 => t(
             lang,
-            "证书链文件 (.crt / .pem)",
+            "证书链文件（.crt / .pem）",
             "Certificate chain (.crt / .pem)",
         ),
         11 => t(
@@ -679,7 +679,7 @@ fn quick_from_placeholder(kind: u8, lang: Lang) -> &'static str {
         ),
         13 => t(
             lang,
-            "状态码 (默认 403): 403 / 404 / 503",
+            "状态码（默认 403）: 403 / 404 / 503",
             "Status (default 403): 403 / 404 / 503",
         ),
         14 => t(
@@ -692,42 +692,42 @@ fn quick_from_placeholder(kind: u8, lang: Lang) -> &'static str {
             "本地回环 URL: http://127.0.0.1:9000/hook",
             "Loopback URL: http://127.0.0.1:9000/hook",
         ),
-        _ => t(lang, "查找原文 (from)", "Find text (from)"),
+        _ => t(lang, "查找原文（from）", "Find text (from)"),
     }
 }
 
 fn quick_to_placeholder(kind: u8, lang: Lang) -> &'static str {
     match kind {
-        2 => t(lang, "状态码: 200 (可选)", "Status: 200 (optional)"),
+        2 => t(lang, "状态码: 200（可选）", "Status: 200 (optional)"),
         4 | 5 => t(
             lang,
-            "正文子串 (可选): error",
+            "正文子串（可选）: error",
             "Body substr (optional): error",
         ),
-        6 => t(lang, "请求头值 (留空删除)", "Value (empty to delete)"),
-        7 => t(lang, "参数值 (留空删除)", "Value (empty to delete)"),
+        6 => t(lang, "请求头值（留空删除）", "Value (empty to delete)"),
+        7 => t(lang, "参数值（留空删除）", "Value (empty to delete)"),
         9 => t(
             lang,
-            "上行速率 (可选): 64kbps",
+            "上行速率（可选）: 64kbps",
             "Up rate (optional): 64kbps",
         ),
         10 => t(
             lang,
-            "私钥文件 (.key，合并 PEM 可留空)",
+            "私钥文件（.key，合并 PEM 可留空）",
             "Private key (.key, optional if combined)",
         ),
         11 => t(
             lang,
-            "JSON 值: true / 42 / \"text\" (留空删除)",
+            "JSON 值: true / 42 / \"text\"（留空删除）",
             "JSON value: true / 42 / \"text\" (empty to delete)",
         ),
-        14 => t(lang, "端口 (可选): 8080", "Port (optional): 8080"),
+        14 => t(lang, "端口（可选）: 8080", "Port (optional): 8080"),
         15 => t(
             lang,
-            "模式/超时 (可选): preview / both / 3000ms",
+            "模式/超时（可选）: preview / both / 3000ms",
             "Mode/timeout (optional): preview / both / 3000ms",
         ),
-        _ => t(lang, "替换成 (to)", "Replace with (to)"),
+        _ => t(lang, "替换成（to）", "Replace with (to)"),
     }
 }
 
@@ -912,7 +912,7 @@ pub(crate) fn quick_add_validation_error(
         ),
         2 => t(
             lang,
-            "请填写本地文件路径，或填写有效状态码 (100-599)",
+            "请填写本地文件路径，或填写有效状态码（100-599）",
             "Provide a local file path or valid status code (100-599)",
         ),
         3 => t(
@@ -927,7 +927,7 @@ pub(crate) fn quick_add_validation_error(
         ),
         10 => t(
             lang,
-            "请填写或选择证书文件 (.crt / .pem)",
+            "请填写或选择证书文件（.crt / .pem）",
             "Select or enter a certificate file (.crt / .pem)",
         ),
         14 => t(
@@ -1049,13 +1049,13 @@ fn quick_add_submit_button(
                     } else if let Some(idx) = editing_line.get() {
                         let n = idx + 1;
                         match lang {
-                            Lang::Zh => format!("原地替换第 {n} 行规则 (Enter)").into(),
+                            Lang::Zh => format!("原地替换第 {n} 行规则（Enter）").into(),
                             Lang::En => format!("Replace rule line {n} in place (Enter)").into(),
                         }
                     } else {
                         t(
                             lang,
-                            "添加规则到当前编辑器 (Enter)",
+                            "添加规则到当前编辑器（Enter）",
                             "Add rule to editor (Enter)",
                         )
                         .into()

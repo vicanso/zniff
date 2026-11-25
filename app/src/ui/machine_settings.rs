@@ -141,9 +141,17 @@ pub(crate) fn machine_settings_modal(
 ) -> impl IntoElement {
     bind_escape_while(
         move || profiles.machine_settings_open.get(),
-        nsh_core::keymap::When::Auto,
+        nsh_core::keymap::When::Always,
         move || profiles.machine_settings_open.set(false),
     );
+    let dismiss = popover_dismiss_context();
+    effect(move || {
+        if profiles.machine_settings_open.get()
+            && let Some(d) = dismiss
+        {
+            d.dismiss();
+        }
+    });
     when(
         move || profiles.machine_settings_open.get(),
         move || {
@@ -230,15 +238,18 @@ pub(crate) fn machine_settings_modal(
                 .optional_label(tr_opt("中继设置", "Relay Settings"))
                 .on_cancel(move || profiles.machine_settings_open.set(false))
                 .child(
-                    overlay().inset_0().child(
-                        view()
-                            .w_full()
-                            .h_full()
-                            .items_center()
-                            .justify_center()
-                            .child(backdrop)
-                            .child(card),
-                    ),
+                    overlay()
+                        .inset_0()
+                        .on_cancel(move || profiles.machine_settings_open.set(false))
+                        .child(
+                            view()
+                                .w_full()
+                                .h_full()
+                                .items_center()
+                                .justify_center()
+                                .child(backdrop)
+                                .child(card),
+                        ),
                 )
         },
     )

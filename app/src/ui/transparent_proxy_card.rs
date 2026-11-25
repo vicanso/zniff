@@ -263,7 +263,7 @@ fn tp_inline_notice(tp_status: Signal<TransparentProxyStatus>) -> impl IntoEleme
                                 #[cfg(target_os = "linux")]
                                 return t(
                                     lang,
-                                    "需要 Linux 5.12+ 内核并挂载 cgroup v2 (/sys/fs/cgroup/cgroup.controllers) 才能启用 eBPF 透明代理。",
+                                    "需要 Linux 5.12+ 内核并挂载 cgroup v2（/sys/fs/cgroup/cgroup.controllers）才能启用 eBPF 透明代理。",
                                     "Requires Linux 5.12+ kernel and cgroup v2 (/sys/fs/cgroup/cgroup.controllers) for eBPF transparent proxy.",
                                 )
                                 .into();
@@ -413,7 +413,7 @@ fn tp_expanded_body(
                 .gap_1p5()
                 .child(
                     text(tr(
-                        "阻止 UDP 443 (HTTP/3 → HTTPS)",
+                        "阻止 UDP 443（HTTP/3 → HTTPS）",
                         "Block UDP 443 (HTTP/3 → HTTPS)",
                     ))
                     .number_of_lines(1)
@@ -444,7 +444,7 @@ fn tp_expanded_body(
         .child({
             #[cfg(target_os = "linux")]
             let note = tr(
-                "基于 eBPF (cgroup v2) 按进程拦截，自动排除 zniff 与系统 DNS 服务；请求流直接附带来源进程名。",
+                "基于 eBPF（cgroup v2）按进程拦截，自动排除 zniff 与系统 DNS 服务；请求流直接附带来源进程名。",
                 "Per-process eBPF (cgroup v2) capture, excludes zniff and DNS services; attaches source app names.",
             );
             #[cfg(not(target_os = "linux"))]
@@ -612,35 +612,38 @@ fn tp_targets_section(
             },
         )))
         .child(
-            input()
-                .value(targets)
-                .placeholder({
-                    #[cfg(target_os = "linux")]
-                    let ph = tr(
-                        "进程名、可执行名或 PID，逗号分隔（如 firefox, curl, node）",
-                        "Process names or PIDs, comma-separated (e.g. firefox, curl, node)",
-                    );
-                    #[cfg(not(target_os = "linux"))]
-                    let ph = tr(
-                        "进程名或 Bundle ID，逗号分隔（如 Safari, curl, node）",
-                        "Process names or bundle IDs, comma-separated (e.g. Safari, curl)",
-                    );
-                    ph
-                })
-                .placeholder_color(move || color(fg_muted()))
-                .w_full()
-                .h(px(28.0))
-                .px_2()
-                .rounded(px(6.0))
-                .bg(bg_card())
-                .border_1()
-                .border_color(border_control())
-                .focus(|style| style.border_color(accent_blue()))
-                .text_size(px(11.5))
-                .text_color(fg_primary())
-                .on_change(move |text: &str| {
-                    set_tp_targets(&input_controls, targets, text);
-                }),
+            ui_input_a11y(
+                input(),
+                tr("透明抓包目标进程", "Transparent proxy target apps"),
+            )
+            .value(targets)
+            .placeholder({
+                #[cfg(target_os = "linux")]
+                let ph = tr(
+                    "进程名、可执行名或 PID，逗号分隔（如 firefox, curl, node）",
+                    "Process names or PIDs, comma-separated (e.g. firefox, curl, node)",
+                );
+                #[cfg(not(target_os = "linux"))]
+                let ph = tr(
+                    "进程名或 Bundle ID，逗号分隔（如 Safari, curl, node）",
+                    "Process names or bundle IDs, comma-separated (e.g. Safari, curl)",
+                );
+                ph
+            })
+            .placeholder_color(move || color(fg_muted()))
+            .w_full()
+            .h(px(28.0))
+            .px_2()
+            .rounded(px(6.0))
+            .bg(bg_card())
+            .border_1()
+            .border_color(border_control())
+            .focus(|style| style.border_color(accent_blue()))
+            .text_size(px(11.5))
+            .text_color(fg_primary())
+            .on_change(move |text: &str| {
+                set_tp_targets(&input_controls, targets, text);
+            }),
         )
 }
 

@@ -119,9 +119,17 @@ pub(crate) fn is_apple_platform() -> bool {
 pub(crate) fn shortcuts_modal(open: Signal<bool>) -> impl IntoElement {
     bind_escape_while(
         move || open.get(),
-        nsh_core::keymap::When::Auto,
+        nsh_core::keymap::When::Always,
         move || open.set(false),
     );
+    let dismiss = popover_dismiss_context();
+    effect(move || {
+        if open.get()
+            && let Some(d) = dismiss
+        {
+            d.dismiss();
+        }
+    });
     when(
         move || open.get(),
         move || {
@@ -214,15 +222,18 @@ pub(crate) fn shortcuts_modal(open: Signal<bool>) -> impl IntoElement {
                 .optional_label(tr_opt("键盘快捷键", "Keyboard Shortcuts"))
                 .on_cancel(move || open.set(false))
                 .child(
-                    overlay().inset_0().child(
-                        view()
-                            .w_full()
-                            .h_full()
-                            .items_center()
-                            .justify_center()
-                            .child(backdrop)
-                            .child(card),
-                    ),
+                    overlay()
+                        .inset_0()
+                        .on_cancel(move || open.set(false))
+                        .child(
+                            view()
+                                .w_full()
+                                .h_full()
+                                .items_center()
+                                .justify_center()
+                                .child(backdrop)
+                                .child(card),
+                        ),
                 )
         },
     )

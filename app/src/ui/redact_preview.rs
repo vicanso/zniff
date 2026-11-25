@@ -334,8 +334,11 @@ pub(crate) fn redact_preview_panel(
                             .text_color(fg_secondary()),
                         )
                         .child(
-                            input()
-                                .value(seq_builder.redact_fields)
+                            ui_input_a11y(
+                                input(),
+                                tr("自定义脱敏字段", "Custom redaction fields"),
+                            )
+                            .value(seq_builder.redact_fields)
                                 .placeholder(tr(
                                     "例如: x-custom-token, phone, id_card",
                                     "e.g. x-custom-token, phone, card_number",

@@ -184,7 +184,7 @@ pub(crate) fn body_search_box(
         .items_center()
         .gap_1()
         .child(
-            input()
+            ui_input_a11y(input(), tr("搜索正文", "Search body"))
                 .value(search)
                 .placeholder(tr("搜索…", "Search…"))
                 .placeholder_color(move || color(fg_muted()))

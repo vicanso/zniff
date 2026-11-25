@@ -310,7 +310,7 @@ pub(crate) fn proxy_auth_section(
                 .items_center()
                 .gap_1p5()
                 .child(
-                    input()
+                    ui_input_a11y(input(), tr("代理认证凭据", "Proxy auth credentials"))
                         .value(move || draft.get())
                         .masked(move || !show_secret.get())
                         .placeholder(tr(
@@ -507,7 +507,7 @@ pub(crate) fn allow_hosts_section(
                             mono(move || -> SharedString {
                                 let raw = allow_hosts.get();
                                 if raw.trim().is_empty() {
-                                    t(ui_lang(langs), "(未配置 · 全部拒绝)", "(empty · all denied)")
+                                    t(ui_lang(langs), "（未配置 · 全部拒绝）", "(empty · all denied)")
                                         .into()
                                 } else {
                                     raw.into()
@@ -525,7 +525,7 @@ pub(crate) fn allow_hosts_section(
                     .w_full()
                     .gap_1p5()
                     .child(
-                        input()
+                        ui_input_a11y(input(), tr("允许域名列表", "Allowed hosts"))
                             .value(move || draft.get())
                             .multiline(true)
                             .placeholder(tr(

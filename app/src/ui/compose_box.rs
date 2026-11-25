@@ -624,14 +624,14 @@ pub(crate) fn compose_box(
                                     if compose.response.get() {
                                         t(
                                             ui_lang(langs),
-                                            "响应头 (Name: Value)",
+                                            "响应头（Name: Value）",
                                             "Response headers (Name: Value)",
                                         )
                                         .into()
                                     } else {
                                         t(
                                             ui_lang(langs),
-                                            "请求头 (Name: Value)",
+                                            "请求头（Name: Value）",
                                             "Request headers (Name: Value)",
                                         )
                                         .into()
@@ -762,9 +762,11 @@ pub(crate) fn compose_input_on(
     multiline: bool,
     on_change: impl Fn(&str) + 'static,
 ) -> Input {
-    input()
+    let placeholder_rx = placeholder.into_reactive();
+    let label_rx = placeholder_rx.clone();
+    ui_input_a11y(input(), move || SharedString::from(label_rx.get()))
         .value(value)
-        .placeholder(placeholder)
+        .placeholder(placeholder_rx)
         .placeholder_color(move || color(fg_muted()))
         .w_full()
         .h(px(height))

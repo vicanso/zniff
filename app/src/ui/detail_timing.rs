@@ -33,13 +33,13 @@ pub(crate) fn summary_timing_bar(timing: Signal<present::TimingBreakdown>) -> im
         .child(
             view()
                 .w_full()
-                .flex_row()
-                .flex_wrap()
-                .items_center()
-                .justify_between()
-                .gap_2()
+                .min_w(px(0.0))
+                .flex_col()
+                .gap_1p5()
                 .child(
                     view()
+                        .w_full()
+                        .min_w(px(0.0))
                         .flex_row()
                         .flex_wrap()
                         .items_center()
@@ -154,10 +154,13 @@ pub(crate) fn summary_timing_bar(timing: Signal<present::TimingBreakdown>) -> im
                 )
                 .child(
                     view()
+                        .w_full()
+                        .min_w(px(0.0))
                         .flex_row()
                         .flex_wrap()
                         .items_center()
-                        .gap_2p5()
+                        .gap_x_2p5()
+                        .gap_y_1()
                         .child(timing_phase_chip(
                             "DNS",
                             "DNS",
@@ -231,6 +234,7 @@ pub(crate) fn timing_phase_chip(
         move || {
             let langs = ui_langs();
             view()
+                .flex_shrink_0()
                 .flex_row()
                 .items_center()
                 .gap_1()
@@ -295,6 +299,7 @@ pub(crate) fn repeat_inline_bar(
                 compose_input_on(shown.repeat_count, "5", 26.0, false, move |text| {
                     shown.repeat_count.set(text.to_string())
                 })
+                .label(tr("重放次数", "Repeat count"))
                 .on_submit(move |text: &str| {
                     shown.repeat_count.set(text.to_string());
                     repeat_flow_batch(&submit_count_controls, selected.get(), shown);
@@ -316,6 +321,7 @@ pub(crate) fn repeat_inline_bar(
                 compose_input_on(shown.repeat_concurrency, "1", 26.0, false, move |text| {
                     shown.repeat_concurrency.set(text.to_string())
                 })
+                .label(tr("并发数", "Concurrency"))
                 .on_submit(move |text: &str| {
                     shown.repeat_concurrency.set(text.to_string());
                     repeat_flow_batch(&submit_concurrency_controls, selected.get(), shown);
@@ -334,6 +340,7 @@ pub(crate) fn repeat_inline_bar(
                 compose_input_on(shown.repeat_interval, "200", 26.0, false, move |text| {
                     shown.repeat_interval.set(text.to_string())
                 })
+                .label(tr("重放间隔（毫秒）", "Interval (ms)"))
                 .on_submit(move |text: &str| {
                     shown.repeat_interval.set(text.to_string());
                     repeat_flow_batch(&submit_interval_controls, selected.get(), shown);

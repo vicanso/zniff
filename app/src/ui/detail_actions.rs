@@ -185,7 +185,7 @@ fn code_snippets_section(
                 .focus_visible(apply_focus_ring)
                 .child(
                     control_text(move || -> SharedString {
-                        t(ui_lang(langs), "复制为代码 (11)", "Copy as code (11)").into()
+                        t(ui_lang(langs), "复制为代码（11）", "Copy as code (11)").into()
                     })
                     .text_color(fg_secondary()),
                 )

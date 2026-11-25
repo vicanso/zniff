@@ -233,7 +233,7 @@ fn llm_thinking_card(
                                     opt.as_ref().map_or(0, |s| s.thinking.chars().count())
                                 });
                                 match ui_lang(langs) {
-                                    Lang::Zh => format!("思考过程 ({count} 字)").into(),
+                                    Lang::Zh => format!("思考过程（{count} 字）").into(),
                                     Lang::En => format!("Thinking ({count} chars)").into(),
                                 }
                             })
@@ -355,7 +355,7 @@ fn llm_tool_calls_card(
                 let n = items().len();
                 let langs = ui_langs();
                 match ui_lang(langs) {
-                    Lang::Zh => format!("工具调用 ({n})"),
+                    Lang::Zh => format!("工具调用（{n}）"),
                     Lang::En => format!("Tool Calls ({n})"),
                 }
                 .into()

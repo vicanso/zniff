@@ -779,7 +779,7 @@ fn proxy_tab_body(profiles: ProfileSignals, controls: Arc<Controls>) -> impl Int
         .gap_2p5()
         .flex_col()
         .child(config_field(
-            "直通名单 (不解密)",
+            "直通名单（不解密）",
             "TLS Bypass (No MITM)",
             side_input(
                 bypass_text,

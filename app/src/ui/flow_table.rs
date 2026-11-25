@@ -191,6 +191,46 @@ fn empty_pause_primary_button(filter_enabled: Signal<bool>) -> impl IntoElement 
         )
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct FlowTableLayout {
+    pub(crate) mode: Signal<config::LayoutMode>,
+    pub(crate) list_width: Signal<f32>,
+    pub(crate) sidebar_width: Signal<f32>,
+    pub(crate) sidebar_collapsed: Signal<bool>,
+}
+
+impl FlowTableLayout {
+    pub(crate) fn from_profiles(profiles: ProfileSignals) -> Self {
+        Self {
+            mode: profiles.layout_mode,
+            list_width: profiles.list_width,
+            sidebar_width: profiles.sidebar_width,
+            sidebar_collapsed: profiles.sidebar_collapsed,
+        }
+    }
+
+    pub(crate) fn available_width(self, window_w: f32) -> f32 {
+        match self.mode.get() {
+            config::LayoutMode::TopBottom => window_w,
+            config::LayoutMode::Split => {
+                let collapsed =
+                    sidebar_effectively_collapsed(self.sidebar_collapsed.get(), window_w);
+                let sidebar_px = effective_sidebar_px(
+                    config::LayoutMode::Split,
+                    self.sidebar_width.get(),
+                    collapsed,
+                );
+                clamp_list_px_for_layout(
+                    self.list_width.get(),
+                    window_w,
+                    config::LayoutMode::Split,
+                    sidebar_px,
+                )
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn list_menu(
     rows: Signal<Vec<Arc<RowLine>>>,
@@ -221,7 +261,7 @@ pub(crate) fn list_menu(
     );
     let header_controls = controls.clone();
     let list_filter = empty_state.list_filter;
-    let layout_mode = profiles.layout_mode;
+    let table_layout = FlowTableLayout::from_profiles(profiles);
     // The table is a direct flex child. Wrapping it in `context_menu` gave
     // that component a content-sized root, so the rows collapsed to nothing
     // while the toolbar count still updated.
@@ -238,7 +278,7 @@ pub(crate) fn list_menu(
             sort,
             controls.clone(),
             empty_state,
-            layout_mode,
+            table_layout,
             picked,
             menu_open,
             header_menu,
@@ -295,12 +335,13 @@ pub(crate) fn flow_table(
     sort: Signal<Option<ListSort>>,
     controls: Arc<Controls>,
     empty_state: EmptyFilterState,
-    layout_mode: Signal<config::LayoutMode>,
+    table_layout: FlowTableLayout,
     picked: Signal<Option<u64>>,
     menu_open: Signal<bool>,
     header_menu: Signal<bool>,
     menu_at: Signal<Point<Points>>,
 ) -> impl IntoElement {
+    let layout_mode = table_layout.mode;
     let filter = empty_state.effective_filter;
     let saved_cols = saved_config();
     let widths = signal(saved_cols.column_widths);
@@ -436,7 +477,7 @@ pub(crate) fn flow_table(
                             shown_at_mount,
                             &current_widths,
                             is_tb,
-                            window().width.0,
+                            table_layout.available_width(window().width.0),
                         );
                         for column in &mut built {
                             let key = column.key.to_string();

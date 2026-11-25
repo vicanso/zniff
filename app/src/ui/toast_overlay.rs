@@ -31,6 +31,7 @@ pub(crate) fn toast_overlay(
                     toast_stack()
                         .placement(Anchor::BottomRight)
                         .state(toast_state)
+                        .close_on_escape(false)
                         .w(move || px((window().width.0 - 24.0).clamp(220.0, 380.0)))
                         .max_w(move || px((window().width.0 - 24.0).max(200.0)))
                         .pointer_events(PointerEvents::Auto)

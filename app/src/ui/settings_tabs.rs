@@ -224,7 +224,7 @@ fn upstream_proxy_card(upstream_text: Signal<String>, controls: Arc<Controls>) -
             .gap_1p5()
             .flex_col()
             .child(
-                input()
+                ui_input_a11y(input(), tr("上游代理地址", "Upstream proxy URL"))
                     .value(upstream_text)
                     .placeholder(tr(
                         "http://127.0.0.1:7890 或 socks5h://127.0.0.1:1080",

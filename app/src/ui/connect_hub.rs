@@ -687,7 +687,7 @@ fn hub_android_cert_guide_header(expanded: Signal<bool>) -> impl IntoElement {
                 ))
                 .child(
                     text(tr(
-                        "Android 7+ 证书配置 (network_security_config)",
+                        "Android 7+ 证书配置（network_security_config）",
                         "Android 7+ Cert Guide (network_security_config)",
                     ))
                     .number_of_lines(1)

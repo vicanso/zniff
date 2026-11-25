@@ -52,7 +52,7 @@ pub(crate) fn build_command_items(state: CommandPaletteState) -> Vec<CommandItem
         .keywords(["capture", "start", "stop", "proxy", "抓包", "开始", "停止"]),
         CommandItem::new(
             "open_watch",
-            t(lang, "打开匹配提醒 (Watch)", "Open Watch Alerts"),
+            t(lang, "打开匹配提醒（Watch）", "Open Watch Alerts"),
         )
         .group(g_capture)
         .keywords([
@@ -118,7 +118,7 @@ pub(crate) fn build_command_items(state: CommandPaletteState) -> Vec<CommandItem
                 "launch_browser",
                 t(
                     lang,
-                    "启动免证书隔离浏览器 (Chromium)",
+                    "启动免证书隔离浏览器（Chromium）",
                     "Launch isolated browser",
                 ),
             )
@@ -185,7 +185,7 @@ pub(crate) fn build_command_items(state: CommandPaletteState) -> Vec<CommandItem
             "copy_for_ai",
             t(
                 lang,
-                "复制给 AI (脱敏 Markdown 上下文)",
+                "复制给 AI（脱敏 Markdown 上下文）",
                 "Copy for AI (redacted Markdown)",
             ),
         )
@@ -209,7 +209,7 @@ pub(crate) fn build_command_items(state: CommandPaletteState) -> Vec<CommandItem
             "copy_powershell",
             t(
                 lang,
-                "复制为 PowerShell (Invoke-RestMethod)",
+                "复制为 PowerShell（Invoke-RestMethod）",
                 "Copy as PowerShell (Invoke-RestMethod)",
             ),
         )
@@ -227,7 +227,7 @@ pub(crate) fn build_command_items(state: CommandPaletteState) -> Vec<CommandItem
     items.push(
         CommandItem::new(
             "copy_axios",
-            t(lang, "复制为 JS (axios)", "Copy as JS (axios)"),
+            t(lang, "复制为 JS（axios）", "Copy as JS (axios)"),
         )
         .group(g_copy)
         .disabled(!has_selection)
@@ -236,7 +236,7 @@ pub(crate) fn build_command_items(state: CommandPaletteState) -> Vec<CommandItem
     items.push(
         CommandItem::new(
             "copy_kotlin_okhttp",
-            t(lang, "复制为 Kotlin (OkHttp)", "Copy as Kotlin (OkHttp)"),
+            t(lang, "复制为 Kotlin（OkHttp）", "Copy as Kotlin (OkHttp)"),
         )
         .group(g_copy)
         .disabled(!has_selection)
@@ -247,7 +247,7 @@ pub(crate) fn build_command_items(state: CommandPaletteState) -> Vec<CommandItem
             "copy_swift_urlsession",
             t(
                 lang,
-                "复制为 Swift (URLSession)",
+                "复制为 Swift（URLSession）",
                 "Copy as Swift (URLSession)",
             ),
         )
@@ -318,7 +318,7 @@ pub(crate) fn build_command_items(state: CommandPaletteState) -> Vec<CommandItem
     items.push(
         CommandItem::new(
             "export_bruno",
-            t(lang, "导出 Bruno (.bru)", "Export Bruno (.bru)"),
+            t(lang, "导出 Bruno（.bru）", "Export Bruno (.bru)"),
         )
         .group(g_export)
         .keywords(["bruno", "bru", "collection", "api", "export", "导出"]),
@@ -328,7 +328,7 @@ pub(crate) fn build_command_items(state: CommandPaletteState) -> Vec<CommandItem
             "export_http",
             t(
                 lang,
-                "导出 .http (REST Client)",
+                "导出 .http（REST Client）",
                 "Export .http (REST Client)",
             ),
         )
@@ -507,7 +507,7 @@ pub(crate) fn build_command_items(state: CommandPaletteState) -> Vec<CommandItem
     items.push(
         CommandItem::new(
             "zoom_reset",
-            t(lang, "重置界面缩放 (100%)", "Reset UI zoom (100%)"),
+            t(lang, "重置界面缩放（100%）", "Reset UI zoom (100%)"),
         )
         .group(g_view)
         .shortcut("mod+0")
@@ -570,6 +570,14 @@ pub(crate) fn command_palette_modal(
         nsh_core::keymap::When::Always,
         move || open.set(false),
     );
+    let dismiss = popover_dismiss_context();
+    effect(move || {
+        if open.get()
+            && let Some(d) = dismiss
+        {
+            d.dismiss();
+        }
+    });
     when(
         move || open.get(),
         move || {
@@ -612,7 +620,7 @@ pub(crate) fn command_palette_modal(
                 })
                 .placeholder(move || {
                     Some(SharedString::from(tr(
-                        "输入命令或关键词… (↑↓ 选择，Enter 执行，Esc 关闭)",
+                        "输入命令或关键词…（↑↓ 选择，Enter 执行，Esc 关闭）",
                         "Type a command or keyword… (↑↓ navigate, Enter run, Esc close)",
                     )()))
                 })
@@ -884,6 +892,7 @@ pub(crate) fn command_palette_modal(
                 .child(
                     overlay()
                         .inset_0()
+                        .on_cancel(move || open.set(false))
                         .flex_col()
                         .items_center()
                         .pt(px(72.0))

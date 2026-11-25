@@ -176,7 +176,7 @@ fn list_clear_button(controls: Arc<Controls>, on_clear: Rc<dyn Fn()>) -> impl In
                             "Read-only imported tab cannot be cleared (switch to Live)",
                         )
                     } else {
-                        t(lang, "清空会话 (Cmd/Ctrl+K)", "Clear session (Cmd/Ctrl+K)")
+                        t(lang, "清空会话（Cmd/Ctrl+K）", "Clear session (Cmd/Ctrl+K)")
                     }
                     .into()
                 })
@@ -709,7 +709,7 @@ pub(crate) fn facet_quick_bar(
                             "Slow",
                             "slow:",
                             SLOW_ALIASES,
-                            "过滤耗时 ≥ 1s 或进行中的慢请求 (slow:)",
+                            "过滤耗时 ≥ 1s 或进行中的慢请求（slow:）",
                             "Filter slow requests >= 1s (slow:)",
                         ))
                         .child(drawer_quick_chip(
@@ -718,7 +718,7 @@ pub(crate) fn facet_quick_bar(
                             "Error",
                             "status:4xx|5xx|err",
                             ERR_ALIASES,
-                            "过滤 4xx / 5xx / 连接失败请求 (status:4xx|5xx|err)",
+                            "过滤 4xx / 5xx / 连接失败请求（status:4xx|5xx|err）",
                             "Filter 4xx / 5xx / failed requests (status:4xx|5xx|err)",
                         ))
                         .child(drawer_quick_chip(
@@ -727,7 +727,7 @@ pub(crate) fn facet_quick_bar(
                             "JSON",
                             "type:json",
                             JSON_ALIASES,
-                            "过滤 JSON 请求/响应 (type:json)",
+                            "过滤 JSON 请求/响应（type:json）",
                             "Filter JSON traffic (type:json)",
                         ))
                         .child(drawer_quick_chip(
@@ -736,7 +736,7 @@ pub(crate) fn facet_quick_bar(
                             "Star",
                             "pin:",
                             PIN_ALIASES,
-                            "只看已星标请求 (pin:)",
+                            "只看已星标请求（pin:）",
                             "Show starred requests only (pin:)",
                         )),
                 ),
@@ -923,7 +923,7 @@ pub(crate) fn facet_drawer(
                         .w_full()
                         .relative()
                         .child(
-                            input()
+                            ui_input_a11y(input(), tr("过滤域名或应用", "Filter domains or apps"))
                                 .value(drawer_query)
                                 .placeholder(tr("过滤域名或应用…", "Filter domains / apps…"))
                                 .placeholder_color(move || color(fg_muted()))

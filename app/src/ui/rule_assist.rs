@@ -550,7 +550,7 @@ fn rule_chip_toggle_btn(
     view()
         .flex_shrink_0()
         .tooltip(label_tip(
-            "启用 / 注释此规则 (#)",
+            "启用 / 注释此规则（#）",
             "Enable / comment this rule (#)",
         ))
         .child(

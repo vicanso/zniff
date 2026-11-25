@@ -790,7 +790,7 @@ pub(crate) fn summary(
                                 move || -> SharedString {
                                     let count = sb.resume_ids.with(Vec::len);
                                     match ui_lang(langs) {
-                                        Lang::Zh => format!("返回图表 ({count})").into(),
+                                        Lang::Zh => format!("返回图表（{count}）").into(),
                                         Lang::En => format!("Diagram ({count})").into(),
                                     }
                                 },

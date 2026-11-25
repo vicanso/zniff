@@ -102,7 +102,7 @@ pub(crate) fn settings_window(props: SettingsWindowProps) -> impl IntoElement {
         .id("settings")
         .kind(nsh_core::desktop::WindowKind::Normal)
         .parent("main")
-        .default_size(Size::new(px(740.0), px(540.0)))
+        .default_size(Size::new(px(768.0), px(540.0)))
         .restore_bounds(true)
         .title(tr("设置 — zniff", "Settings — zniff"))
         .open(move || open.get())
@@ -120,16 +120,24 @@ pub(crate) fn settings_window(props: SettingsWindowProps) -> impl IntoElement {
     let open = props.profiles.settings_open;
     bind_escape_while(
         move || open.get(),
-        nsh_core::keymap::When::Auto,
+        nsh_core::keymap::When::Always,
         move || open.set(false),
     );
+    let dismiss = popover_dismiss_context();
+    effect(move || {
+        if open.get()
+            && let Some(d) = dismiss
+        {
+            d.dismiss();
+        }
+    });
     when(
         move || open.get(),
         move || {
             let props = props.clone();
             let backdrop = ui_modal_backdrop(move || open.set(false));
             let card = ui_modal_card()
-                .w(move || px((window().width.0 - 40.0).clamp(520.0, 760.0)))
+                .w(move || px((window().width.0 - 40.0).clamp(540.0, 788.0)))
                 .h(move || px((window().height.0 - 64.0).clamp(360.0, 560.0)))
                 .child(settings_modal_header(open))
                 .child(
@@ -145,15 +153,18 @@ pub(crate) fn settings_window(props: SettingsWindowProps) -> impl IntoElement {
                 .optional_label(tr_opt("设置", "Settings"))
                 .on_cancel(move || open.set(false))
                 .child(
-                    overlay().inset_0().child(
-                        view()
-                            .w_full()
-                            .h_full()
-                            .items_center()
-                            .justify_center()
-                            .child(backdrop)
-                            .child(card),
-                    ),
+                    overlay()
+                        .inset_0()
+                        .on_cancel(move || open.set(false))
+                        .child(
+                            view()
+                                .w_full()
+                                .h_full()
+                                .items_center()
+                                .justify_center()
+                                .child(backdrop)
+                                .child(card),
+                        ),
                 )
         },
     )
@@ -248,7 +259,7 @@ fn settings_sidebar(active_tab: Signal<SettingsTab>) -> impl IntoElement {
     tabs()
         .orientation(Axis::Vertical)
         .accessibility_label(tr_opt("设置分组", "Settings sections"))
-        .w(px(168.0))
+        .w(px(196.0))
         .h_full()
         .flex_shrink_0()
         .p_2p5()

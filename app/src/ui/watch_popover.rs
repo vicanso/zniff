@@ -331,7 +331,7 @@ fn watch_add_form(
         )
         .child(filter_syntax_error_inline(draft_filter))
         .child(
-            input()
+            ui_input_a11y(input(), tr("可选备注名", "Optional label"))
                 .w_full()
                 .h(px(ControlSize::Sm.height()))
                 .px_2()

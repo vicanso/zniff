@@ -58,7 +58,7 @@ pub(crate) const QUICK_RULE_PRESETS: &[RuleTemplate] = &[
     RuleTemplate {
         id: "throttle-3g",
         open_in_form: false,
-        label_zh: "弱网限速 (3G)",
+        label_zh: "弱网限速（3G）",
         label_en: "Throttle (3G)",
         desc_zh: "一键按 3G 带宽上限模拟弱网环境",
         desc_en: "Simulate a slow mobile connection using 3G limits",

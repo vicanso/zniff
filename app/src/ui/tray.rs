@@ -27,7 +27,7 @@ pub(crate) fn tray_menu_labels(lang: Lang, running: bool, listen_addr: &str) -> 
             t(lang, "zniff · 抓包中", "zniff · Capturing").to_string()
         } else {
             match lang {
-                Lang::Zh => format!("zniff · 抓包中 ({addr})"),
+                Lang::Zh => format!("zniff · 抓包中（{addr}）"),
                 Lang::En => format!("zniff · Capturing ({addr})"),
             }
         }
@@ -200,7 +200,7 @@ mod tests {
         assert_eq!(zh_idle.quit, "退出 zniff");
 
         let zh_on = tray_menu_labels(Lang::Zh, true, "127.0.0.1:8877");
-        assert_eq!(zh_on.tooltip, "zniff · 抓包中 (127.0.0.1:8877)");
+        assert_eq!(zh_on.tooltip, "zniff · 抓包中（127.0.0.1:8877）");
         assert_eq!(zh_on.toggle_capture, "停止抓包");
 
         let en_idle = tray_menu_labels(Lang::En, false, "");

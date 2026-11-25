@@ -390,15 +390,43 @@ mod tests {
         let imported = crate::har::import_har(&doc);
         assert_eq!(imported.len(), SAMPLE_FLOW_COUNT);
 
-        // Verify 2xx, 4xx, 5xx, and ERR (status None + error) are all represented.
+        // Verify 2xx, 4xx, 5xx, and ERR (status None + error) are all represented,
+        // and normal HTTP status flows never carry bogus `statusText` errors like `"OK"`.
         assert!(imported.iter().any(|f| f.status == Some(200)));
         assert!(imported.iter().any(|f| f.status == Some(401)));
         assert!(imported.iter().any(|f| f.status == Some(502)));
+        for flow in imported.iter().filter(|f| f.status.is_some()) {
+            assert_eq!(
+                flow.error, None,
+                "normal HTTP response {} {} should not populate Flow::error",
+                flow.method, flow.path
+            );
+        }
+        let tls_err = imported
+            .iter()
+            .find(|f| f.status.is_none() && f.error.as_deref().unwrap_or("").contains("证书被拒绝"))
+            .expect("TLS pinning ERR sample flow");
+        assert_eq!(
+            crate::ui::classify_error(tls_err.status, tls_err.error.as_deref().unwrap_or("")),
+            Some(crate::ui::ErrorCategory::TlsTrust)
+        );
         assert!(
-            imported
-                .iter()
-                .any(|f| f.status.is_none()
-                    && f.error.as_deref().unwrap_or("").contains("证书被拒绝"))
+            !crate::ui::actions_for_error(
+                tls_err.status,
+                tls_err.error.as_deref().unwrap_or(""),
+                &tls_err.host,
+                true,
+            )
+            .is_empty()
+        );
+        assert!(
+            !crate::ui::actions_for_error(
+                tls_err.status,
+                tls_err.error.as_deref().unwrap_or(""),
+                &tls_err.host,
+                false,
+            )
+            .is_empty()
         );
 
         // Verify slow flow (>= 1s) exists.

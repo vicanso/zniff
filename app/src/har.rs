@@ -162,6 +162,9 @@ fn entry(flow: &Flow) -> Value {
             "receive": total.saturating_sub(wait),
         },
     });
+    if let Some(err) = flow.error.as_deref().filter(|s| !s.is_empty()) {
+        obj["_error"] = json!(err);
+    }
     if !flow.conn_info.server_addr.is_empty() {
         let ip_only = flow
             .conn_info
@@ -325,10 +328,21 @@ fn import_entry(entry: &Value) -> Option<Imported> {
         .get("httpVersion")
         .and_then(|version| version.as_str())
         .unwrap_or("HTTP/1.1");
-    let error = response
-        .and_then(|response| response.get("statusText"))
-        .and_then(|text| text.as_str())
+    let error = entry
+        .get("_error")
+        .or_else(|| response.and_then(|response| response.get("_error")))
+        .and_then(Value::as_str)
         .filter(|text| !text.is_empty())
+        .or_else(|| {
+            if status.is_none() {
+                response
+                    .and_then(|response| response.get("statusText"))
+                    .and_then(Value::as_str)
+                    .filter(|text| !text.is_empty())
+            } else {
+                None
+            }
+        })
         .map(str::to_string);
     let started = entry
         .get("startedDateTime")
@@ -1364,5 +1378,105 @@ mod tests {
         assert_eq!(imported[0].path, "开始测登录");
         assert_eq!(imported[1].protocol, Protocol::Http11);
         assert_eq!(imported[1].path, "/login");
+    }
+
+    #[test]
+    fn import_ignores_normal_http_status_text_and_round_trips_explicit_error() {
+        let doc = json!({
+            "log": {
+                "version": "1.2",
+                "entries": [
+                    {
+                        "startedDateTime": "2026-01-01T00:00:00.000Z",
+                        "time": 12,
+                        "request": {
+                            "method": "GET",
+                            "url": "https://api.vicanso.dev/ok",
+                            "httpVersion": "HTTP/2",
+                            "headers": []
+                        },
+                        "response": {
+                            "status": 200,
+                            "statusText": "OK",
+                            "httpVersion": "HTTP/2",
+                            "headers": [],
+                            "content": { "size": 2, "mimeType": "application/json", "text": "{}" }
+                        }
+                    },
+                    {
+                        "startedDateTime": "2026-01-01T00:00:01.000Z",
+                        "time": 18,
+                        "request": {
+                            "method": "GET",
+                            "url": "https://api.vicanso.dev/unauth",
+                            "httpVersion": "HTTP/1.1",
+                            "headers": []
+                        },
+                        "response": {
+                            "status": 401,
+                            "statusText": "Unauthorized",
+                            "httpVersion": "HTTP/1.1",
+                            "headers": [],
+                            "content": { "size": 0, "mimeType": "application/json", "text": "" }
+                        }
+                    },
+                    {
+                        "startedDateTime": "2026-01-01T00:00:02.000Z",
+                        "time": 25,
+                        "request": {
+                            "method": "CONNECT",
+                            "url": "https://pinned.vicanso.dev/v1/telemetry",
+                            "httpVersion": "HTTP/1.1",
+                            "headers": []
+                        },
+                        "response": {
+                            "status": 0,
+                            "statusText": "证书被拒绝。猜测：该客户端多半做了证书钉扎。",
+                            "httpVersion": "HTTP/1.1",
+                            "headers": [],
+                            "content": { "size": 0, "mimeType": "text/plain", "text": "" }
+                        }
+                    }
+                ]
+            }
+        });
+        let imported = import_har(&doc);
+        assert_eq!(imported.len(), 3);
+        assert_eq!(imported[0].status, Some(200));
+        assert_eq!(imported[0].error, None);
+        assert_eq!(imported[1].status, Some(401));
+        assert_eq!(imported[1].error, None);
+        assert_eq!(imported[2].status, None);
+        assert!(
+            imported[2]
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("证书被拒绝")
+        );
+
+        // Round-trip a flow with both HTTP status and explicit proxy error via `_error`.
+        let mut session = Session::default();
+        let id = session.open(FlowDraft {
+            protocol: Protocol::Http11,
+            method: "GET".into(),
+            host: "api.vicanso.dev".into(),
+            path: "/partial".into(),
+            url: "https://api.vicanso.dev/partial".into(),
+            request_headers: vec![],
+        });
+        session.set_response(id, 200, vec![], None);
+        session.set_error(id, "upstream reset mid-stream");
+        let exported = export_har(&[session.get(id).unwrap().clone()]);
+        assert_eq!(
+            exported["log"]["entries"][0]["_error"],
+            "upstream reset mid-stream"
+        );
+        let reimported = import_har(&exported);
+        assert_eq!(reimported[0].status, Some(200));
+        assert_eq!(
+            reimported[0].error.as_deref(),
+            Some("upstream reset mid-stream")
+        );
     }
 }

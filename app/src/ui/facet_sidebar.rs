@@ -142,8 +142,11 @@ pub(crate) fn facet_sidebar(
                                         .min_w(px(0.0))
                                         .relative()
                                         .child(
-                                            input()
-                                                .value(side_query)
+                                            ui_input_a11y(
+                                                input(),
+                                                tr("过滤域名或应用", "Filter domains or apps"),
+                                            )
+                                            .value(side_query)
                                                 .placeholder(tr(
                                                     "过滤域名或应用…",
                                                     "Filter domains / apps…",
@@ -214,7 +217,7 @@ pub(crate) fn facet_sidebar(
                                         "Slow",
                                         "slow:",
                                         SLOW_ALIASES,
-                                        "过滤耗时 ≥ 1s 或进行中的慢请求 (slow:)",
+                                        "过滤耗时 ≥ 1s 或进行中的慢请求（slow:）",
                                         "Filter slow requests >= 1s (slow:)",
                                     ))
                                     .child(drawer_quick_chip(
@@ -223,7 +226,7 @@ pub(crate) fn facet_sidebar(
                                         "Error",
                                         "status:4xx|5xx|err",
                                         ERR_ALIASES,
-                                        "过滤 4xx / 5xx / 连接失败请求 (status:4xx|5xx|err)",
+                                        "过滤 4xx / 5xx / 连接失败请求（status:4xx|5xx|err）",
                                         "Filter 4xx / 5xx / failed requests (status:4xx|5xx|err)",
                                     ))
                                     .child(drawer_quick_chip(
@@ -232,7 +235,7 @@ pub(crate) fn facet_sidebar(
                                         "JSON",
                                         "type:json",
                                         JSON_ALIASES,
-                                        "过滤 JSON 请求/响应 (type:json)",
+                                        "过滤 JSON 请求/响应（type:json）",
                                         "Filter JSON traffic (type:json)",
                                     ))
                                     .child(drawer_quick_chip(
@@ -241,7 +244,7 @@ pub(crate) fn facet_sidebar(
                                         "Star",
                                         "pin:",
                                         PIN_ALIASES,
-                                        "只看已星标请求 (pin:)",
+                                        "只看已星标请求（pin:）",
                                         "Show starred requests only (pin:)",
                                     )),
                             ),

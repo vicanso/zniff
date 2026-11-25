@@ -438,7 +438,7 @@ pub(crate) fn qr_local_only_notice(
                             let addr = listen.get();
                             match ui_lang(langs) {
                                 Lang::Zh => format!(
-                                    "代理当前只监听 {addr}，手机等局域网设备无法连接。请切换为「局域网监听 (0.0.0.0)」后再扫码。"
+                                    "代理当前只监听 {addr}，手机等局域网设备无法连接。请切换为「局域网监听（0.0.0.0）」后再扫码。"
                                 )
                                 .into(),
                                 Lang::En => format!(
@@ -802,7 +802,7 @@ pub(crate) fn port_field(port_text: Signal<String>, controls: Arc<Controls>) -> 
                 }),
         )
         .child(
-            input()
+            ui_input_a11y(input(), tr("监听端口", "Listen port"))
                 .value(port_text)
                 .placeholder(config::default_listen_port(config::is_dev_mode()).to_string())
                 .placeholder_color(move || color(fg_muted()))

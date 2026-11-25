@@ -410,6 +410,32 @@ pub(crate) fn flow_table_columns_for_layout(
             widths.get(key).copied().unwrap_or(limit.default)
         })
         .collect();
+    if !top_bottom
+        && available_w.is_finite()
+        && available_w > 0.0
+        && let Some(status_idx) = visible.iter().position(|col| *col == ListColumn::Status)
+    {
+        let core_total: u32 = resolved[..=status_idx].iter().sum();
+        let target = (available_w - 8.0).max(0.0) as u32;
+        if core_total > target {
+            let mut excess = core_total - target;
+            for (idx, col) in visible[..=status_idx].iter().enumerate() {
+                if excess == 0 {
+                    break;
+                }
+                if !matches!(col, ListColumn::Path | ListColumn::Host)
+                    || widths.contains_key(col.key())
+                {
+                    continue;
+                }
+                let limit = config::column_width_limit(col.key()).expect("known column");
+                let spare = resolved[idx].saturating_sub(limit.min);
+                let cut = spare.min(excess);
+                resolved[idx] -= cut;
+                excess -= cut;
+            }
+        }
+    }
     if top_bottom && available_w.is_finite() && available_w > 0.0 {
         let total: u32 = resolved.iter().sum();
         let target = (available_w - 16.0).max(0.0) as u32;

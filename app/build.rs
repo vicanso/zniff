@@ -22,13 +22,45 @@ const FACES: [(&str, &str); 4] = [
     ("JetBrainsMonoNL-Bold.ttf", "ZNIFF_MONO_BOLD"),
 ];
 
+fn resolve_git_dir(repo_root: &std::path::Path) -> Option<PathBuf> {
+    let dot_git = repo_root.join(".git");
+    if dot_git.is_dir() {
+        return Some(dot_git);
+    }
+    if dot_git.is_file() {
+        let raw = fs::read_to_string(&dot_git).ok()?;
+        let rel = raw.trim().strip_prefix("gitdir:")?.trim();
+        let path = PathBuf::from(rel);
+        return Some(if path.is_absolute() {
+            path
+        } else {
+            repo_root.join(path)
+        });
+    }
+    None
+}
+
 fn emit_git_metadata() {
     let manifest_dir =
         PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
-    if let Some(repo_root) = manifest_dir.parent() {
-        let git_head = repo_root.join(".git/HEAD");
-        if git_head.exists() {
+    if let Some(repo_root) = manifest_dir.parent()
+        && let Some(git_dir) = resolve_git_dir(repo_root)
+    {
+        let git_head = git_dir.join("HEAD");
+        if git_head.is_file() {
             println!("cargo:rerun-if-changed={}", git_head.display());
+            if let Ok(head_contents) = fs::read_to_string(&git_head)
+                && let Some(ref_rel) = head_contents.trim().strip_prefix("ref:")
+            {
+                let ref_path = git_dir.join(ref_rel.trim());
+                if ref_path.is_file() {
+                    println!("cargo:rerun-if-changed={}", ref_path.display());
+                }
+            }
+        }
+        let packed_refs = git_dir.join("packed-refs");
+        if packed_refs.is_file() {
+            println!("cargo:rerun-if-changed={}", packed_refs.display());
         }
     }
     let sha = Command::new("git")

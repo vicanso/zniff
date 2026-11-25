@@ -666,7 +666,7 @@ fn flow_columns_pin_method_and_path_and_keep_a_dragged_width() {
             .all(|column| column.fixed == super::ColumnFixed::Left)
     );
     let default_sum: f32 = default_cols.iter().map(|c| c.width.unwrap().0).sum();
-    assert_eq!(default_sum, 656.0);
+    assert_eq!(default_sum, 662.0);
 
     let all_shown = super::ListColumns {
         id: true,
@@ -3651,7 +3651,7 @@ fn top_bottom_layout_expands_unset_columns_to_fill_window_width() {
 
     let split_cols = super::flow_table_columns_for_layout(shown, &custom, false, 1200.0);
     let split_sum: f32 = split_cols.iter().map(|c| c.width.unwrap().0).sum();
-    assert_eq!(split_sum, 656.0);
+    assert_eq!(split_sum, 662.0);
 
     let tb_unset = super::flow_table_columns_for_layout(
         shown,
@@ -4812,7 +4812,12 @@ fn keyboard_step_selected_auto_scrolls_row_into_viewport() {
             running: signal(false),
             on_clear_primary: None,
         };
-        let layout_mode = signal(crate::config::LayoutMode::Split);
+        let table_layout = super::FlowTableLayout {
+            mode: signal(crate::config::LayoutMode::Split),
+            list_width: signal(crate::config::LIST_WIDTH_DEFAULT as f32),
+            sidebar_width: signal(crate::config::SIDEBAR_WIDTH_DEFAULT as f32),
+            sidebar_collapsed: signal(false),
+        };
         let picked = signal(None::<u64>);
         let menu_open = signal(false);
         let header_menu = signal(false);
@@ -4849,7 +4854,7 @@ fn keyboard_step_selected_auto_scrolls_row_into_viewport() {
                 sort,
                 controls,
                 empty_state,
-                layout_mode,
+                table_layout,
                 picked,
                 menu_open,
                 header_menu,

@@ -1395,8 +1395,8 @@ pub fn column_width_limit(key: &str) -> Option<ColumnWidth> {
             max: 800,
         },
         "status" => ColumnWidth {
-            default: 46,
-            min: 40,
+            default: 52,
+            min: 44,
             max: 160,
         },
         "protocol" => ColumnWidth {

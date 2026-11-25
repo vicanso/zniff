@@ -464,7 +464,7 @@ fn group_pill_rename_input(
         .items_center()
         .gap_1()
         .child(
-            input()
+            ui_input_a11y(input(), tr("重命名分组", "Rename group"))
                 .value(draft_name)
                 .placeholder(tr("重命名…", "Rename…"))
                 .placeholder_color(move || color(fg_muted()))
@@ -493,7 +493,10 @@ fn group_pill_rename_input(
         .child(
             view()
                 .flex_shrink_0()
-                .tooltip(label_tip("保存分组名称 (Enter)", "Save group name (Enter)"))
+                .tooltip(label_tip(
+                    "保存分组名称（Enter）",
+                    "Save group name (Enter)",
+                ))
                 .child(
                     button()
                         .w(px(ControlSize::Xs.height()))
@@ -522,7 +525,7 @@ fn group_pill_rename_input(
         .child(
             view()
                 .flex_shrink_0()
-                .tooltip(label_tip("取消重命名 (Esc)", "Cancel rename (Esc)"))
+                .tooltip(label_tip("取消重命名（Esc）", "Cancel rename (Esc)"))
                 .child(
                     button()
                         .w(px(ControlSize::Xs.height()))
@@ -860,7 +863,7 @@ fn new_group_inline(
         .items_center()
         .gap_1()
         .child(
-            input()
+            ui_input_a11y(input(), tr("新建分组名称", "New group name"))
                 .value(draft_name)
                 .placeholder(tr("分组名…", "Group…"))
                 .placeholder_color(move || color(fg_muted()))
@@ -914,7 +917,7 @@ fn new_group_inline(
         .child(
             view()
                 .flex_shrink_0()
-                .tooltip(label_tip("取消新建分组 (Esc)", "Cancel new group (Esc)"))
+                .tooltip(label_tip("取消新建分组（Esc）", "Cancel new group (Esc)"))
                 .child(
                     button()
                         .w(px(ControlSize::Xs.height()))

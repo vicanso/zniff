@@ -544,9 +544,11 @@ fn styled_input_box(
     multiline: bool,
     on_change: impl Fn(&str) + 'static,
 ) -> nsh_base::Input {
-    let field = input()
+    let placeholder_rx = placeholder.into_reactive();
+    let label_rx = placeholder_rx.clone();
+    let field = ui_input_a11y(input(), move || SharedString::from(label_rx.get()))
         .value(value)
-        .placeholder(placeholder)
+        .placeholder(placeholder_rx)
         .placeholder_color(move || color(fg_muted()))
         .w_full()
         .h(px(height))

@@ -342,33 +342,37 @@ pub(crate) fn header_section(props: HeaderSectionProps) -> impl IntoElement {
         .bg(bg_card())
         .overflow_hidden()
         .content(
-            when(move || loading.get(), detail_loading_row).otherwise(move || {
-                when(
-                    move || lines.with(Vec::is_empty),
-                    || view().px_3p5().py_2p5().child(muted_line(tr("无", "None"))),
-                )
-                .otherwise(move || {
-                    each(
-                        lines,
-                        |line| line.key,
-                        move |line, index| {
-                            hoverable_kv_row(index)
-                                .child(
-                                    mono(move || line.with(|line| line.name.clone()))
-                                        .w(move || px(kv_key_width(pane_width.get())))
-                                        .flex_shrink_0()
-                                        .selectable(true)
-                                        .number_of_lines(1)
-                                        .text_overflow(EllipsizeMode::Tail)
-                                        .text_size(move || scaled_px(TEXT_SM))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .text_color(fg_muted()),
-                                )
-                                .child(kv_value_cell(line))
-                        },
-                    )
-                })
-            }),
+            view()
+                .w_full()
+                .child(
+                    when(move || loading.get(), detail_loading_row).otherwise(move || {
+                        when(
+                            move || lines.with(Vec::is_empty),
+                            || view().px_3p5().py_2p5().child(muted_line(tr("无", "None"))),
+                        )
+                        .otherwise(move || {
+                            each(
+                                lines,
+                                |line| line.key,
+                                move |line, index| {
+                                    hoverable_kv_row(index)
+                                        .child(
+                                            mono(move || line.with(|line| line.name.clone()))
+                                                .w(move || px(kv_key_width(pane_width.get())))
+                                                .flex_shrink_0()
+                                                .selectable(true)
+                                                .number_of_lines(1)
+                                                .text_overflow(EllipsizeMode::Tail)
+                                                .text_size(move || scaled_px(TEXT_SM))
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_color(fg_muted()),
+                                        )
+                                        .child(kv_value_cell(line))
+                                },
+                            )
+                        })
+                    }),
+                ),
         )
         .child(
             view()
@@ -580,7 +584,7 @@ pub(crate) fn msg_search_box(
         .items_center()
         .gap_1()
         .child(
-            input()
+            ui_input_a11y(input(), tr("搜索消息", "Search messages"))
                 .value(search)
                 .placeholder(tr("搜索…", "Search…"))
                 .placeholder_color(move || color(fg_muted()))
@@ -677,46 +681,50 @@ pub(crate) fn messages_section(
             let ai_controls = llm_controls.clone();
             let filtered =
                 move || filter_message_lines(&lines.get(), &search.get(), dir.get(), kind.get());
-            when(move || shown.messages_loading.get(), detail_loading_row).otherwise(move || {
-                let ai_controls = ai_controls.clone();
-                when(is_llm_ai_mode, move || {
-                    llm_stream_panel(llm_stream, ai_controls.clone())
-                })
-                .otherwise(move || {
-                    when(
-                        move || filtered().is_empty(),
-                        || view().px_3p5().py_2p5().child(muted_line(tr("无", "None"))),
-                    )
-                    .otherwise(move || {
-                        each(
-                            filtered,
-                            |line| line.key,
-                            move |line, index| {
-                                hoverable_kv_row(index)
-                                    .child(
-                                        mono(move || line.with(|line| line.name.clone()))
-                                            .w(move || px(kv_key_width(pane_width.get())))
-                                            .flex_shrink_0()
-                                            .selectable(true)
-                                            .number_of_lines(1)
-                                            .text_overflow(EllipsizeMode::Tail)
-                                            .text_size(move || scaled_px(TEXT_SM))
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(fg_muted()),
-                                    )
-                                    .child(
-                                        mono(move || line.with(|line| line.value.clone()))
-                                            .flex_1()
-                                            .min_w(px(0.0))
-                                            .selectable(true)
-                                            .text_size(move || scaled_px(TEXT_SM))
-                                            .text_color(fg_primary()),
-                                    )
-                            },
-                        )
-                    })
-                })
-            })
+            view().w_full().child(
+                when(move || shown.messages_loading.get(), detail_loading_row).otherwise(
+                    move || {
+                        let ai_controls = ai_controls.clone();
+                        when(is_llm_ai_mode, move || {
+                            llm_stream_panel(llm_stream, ai_controls.clone())
+                        })
+                        .otherwise(move || {
+                            when(
+                                move || filtered().is_empty(),
+                                || view().px_3p5().py_2p5().child(muted_line(tr("无", "None"))),
+                            )
+                            .otherwise(move || {
+                                each(
+                                    filtered,
+                                    |line| line.key,
+                                    move |line, index| {
+                                        hoverable_kv_row(index)
+                                            .child(
+                                                mono(move || line.with(|line| line.name.clone()))
+                                                    .w(move || px(kv_key_width(pane_width.get())))
+                                                    .flex_shrink_0()
+                                                    .selectable(true)
+                                                    .number_of_lines(1)
+                                                    .text_overflow(EllipsizeMode::Tail)
+                                                    .text_size(move || scaled_px(TEXT_SM))
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .text_color(fg_muted()),
+                                            )
+                                            .child(
+                                                mono(move || line.with(|line| line.value.clone()))
+                                                    .flex_1()
+                                                    .min_w(px(0.0))
+                                                    .selectable(true)
+                                                    .text_size(move || scaled_px(TEXT_SM))
+                                                    .text_color(fg_primary()),
+                                            )
+                                    },
+                                )
+                            })
+                        })
+                    },
+                ),
+            )
         })
         .child(
             view()

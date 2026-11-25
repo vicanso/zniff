@@ -18,6 +18,8 @@ fn apple_ease_timing(duration_ms: f32) -> KeyframeTiming {
 }
 
 /// Modal backdrop scrim chrome paired inside `nsh_base::dialog()` that dismisses on press.
+/// Hidden from assistive technology and keyboard focus so it never exposes an unnamed
+/// `role="button"` backdrop node while keeping pointer click-to-dismiss active.
 #[allow(dead_code)]
 pub(crate) fn ui_modal_backdrop(on_close: impl Fn() + 'static) -> View {
     let fade = motion().entering(
@@ -28,8 +30,25 @@ pub(crate) fn ui_modal_backdrop(on_close: impl Fn() + 'static) -> View {
         .absolute()
         .inset_0()
         .bg(backdrop_scrim())
+        .focusable(false)
+        .accessibility_elements_hidden(true)
         .bind_motion(&fade)
         .on_press(on_close)
+}
+
+/// Applies cross-platform accessible label and (on native targets) explicit `Textbox` role
+/// to an `nsh_core::Input`. On `wasm32`, `nsh.js` renders a native `<input>`/`<textarea>`
+/// inside the wrapper and projects `aria-label` onto the field; adding `role="textbox"` on
+/// the outer wrapper would create nested textbox nodes.
+#[allow(dead_code)]
+pub(crate) fn ui_input_a11y(
+    field: Input,
+    label: impl IntoReactive<SharedString> + 'static,
+) -> Input {
+    let field = field.label(label);
+    #[cfg(not(target_arch = "wasm32"))]
+    let field = field.role(AccessibilityRole::Textbox);
+    field
 }
 
 /// Modal card surface chrome hosted inside `nsh_base::dialog()`.
@@ -360,7 +379,7 @@ pub(crate) fn bind_popover_dismiss(open: Signal<bool>) {
     }
     bind_escape_while(
         move || open.get(),
-        nsh_core::keymap::When::Auto,
+        nsh_core::keymap::When::Always,
         move || open.set(false),
     );
 }

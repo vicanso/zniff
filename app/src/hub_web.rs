@@ -1040,12 +1040,21 @@ pub fn take_save_error() -> Option<String> {
         .take()
 }
 
+fn spawn_detached<F>(future: F)
+where
+    F: std::future::Future<Output = ()> + 'static,
+{
+    nsh_core::prelude::Owner::detached().run(|| {
+        nsh_core::prelude::spawn(future);
+    });
+}
+
 fn post_op(value: Value) {
     let Ok(body) = serde_json::to_vec(&value) else {
         push_web_op_error("请求没有编码");
         return;
     };
-    nsh_core::prelude::spawn(async move {
+    spawn_detached(async move {
         let request = nsh_core::prelude::HttpRequest::post("api/hub", body)
             .header("content-type", "application/json");
         match nsh_core::prelude::fetch(request).await {
@@ -1095,7 +1104,7 @@ where
         on_done(Err(anyhow!("请求没有编码")));
         return;
     };
-    nsh_core::prelude::spawn(async move {
+    spawn_detached(async move {
         on_done(post_id(bytes).await);
     });
 }
@@ -1108,7 +1117,7 @@ where
         on_done(Err(anyhow!("请求没有编码")));
         return;
     };
-    nsh_core::prelude::spawn(async move {
+    spawn_detached(async move {
         on_done(post_ids(bytes).await);
     });
 }

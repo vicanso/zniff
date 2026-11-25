@@ -115,7 +115,7 @@ fn profile_export_menu(
                 .gap_1()
                 .tooltip(label_tip_unless(
                     open,
-                    "选择导出当前预设或全部已保存预设 (TOML)",
+                    "选择导出当前预设或全部已保存预设（TOML）",
                     "Export current or all saved presets as TOML",
                 ))
                 .child(
@@ -145,7 +145,7 @@ fn profile_export_menu(
                     move || -> SharedString {
                         let n = profiles.saved.with(Vec::len);
                         match ui_lang(langs) {
-                            Lang::Zh => format!("导出全部已保存预设 ({n})"),
+                            Lang::Zh => format!("导出全部已保存预设（{n}）"),
                             Lang::En => format!("Export all saved presets ({n})"),
                         }
                         .into()

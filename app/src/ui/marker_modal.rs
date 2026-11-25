@@ -39,16 +39,20 @@ fn submit_marker(controls: &Arc<Controls>, open: Signal<bool>, draft: Signal<Str
 pub(crate) fn marker_modal(open: Signal<bool>, controls: Arc<Controls>) -> impl IntoElement {
     bind_escape_while(
         move || open.get(),
-        nsh_core::keymap::When::Auto,
+        nsh_core::keymap::When::Always,
         move || open.set(false),
     );
     let draft = signal(String::new());
     let focus = element_ref();
     let focus_job = stored(None::<Spawned<()>>);
     let langs = ui_langs();
+    let dismiss = popover_dismiss_context();
 
     effect(move || {
         if open.get() {
+            if let Some(d) = dismiss {
+                d.dismiss();
+            }
             draft.set(String::new());
             focus_job.replace(Some(set_timeout(Duration::from_millis(20), move || {
                 focus.focus();
@@ -73,22 +77,32 @@ pub(crate) fn marker_modal(open: Signal<bool>, controls: Arc<Controls>) -> impl 
                 .optional_label(tr_opt("时间标记", "Session Marker"))
                 .on_cancel(move || open.set(false))
                 .child(
-                    overlay().inset_0().child(
-                        view()
-                            .w_full()
-                            .h_full()
-                            .items_center()
-                            .justify_center()
-                            .child(ui_modal_backdrop(move || open.set(false)))
-                            .child(
-                                ui_modal_card()
-                                    .w(move || px((window().width.0 - 32.0).clamp(280.0, 420.0)))
-                                    .p_4()
-                                    .gap_3()
-                                    .child(marker_modal_header(open, badge))
-                                    .child(
-                                        view().gap_1p5().child(
-                                            input()
+                    overlay()
+                        .inset_0()
+                        .on_cancel(move || open.set(false))
+                        .child(
+                            view()
+                                .w_full()
+                                .h_full()
+                                .items_center()
+                                .justify_center()
+                                .child(ui_modal_backdrop(move || open.set(false)))
+                                .child(
+                                    ui_modal_card()
+                                        .w(
+                                            move || {
+                                                px((window().width.0 - 32.0).clamp(280.0, 420.0))
+                                            },
+                                        )
+                                        .p_4()
+                                        .gap_3()
+                                        .child(marker_modal_header(open, badge))
+                                        .child(
+                                            view().gap_1p5().child(
+                                                ui_input_a11y(
+                                                    input(),
+                                                    tr("标记名称", "Marker name"),
+                                                )
                                                 .element_ref(&focus)
                                                 .w_full()
                                                 .h(px(ControlSize::Md.height()))
@@ -114,12 +128,12 @@ pub(crate) fn marker_modal(open: Signal<bool>, controls: Arc<Controls>) -> impl 
                                                         ui_lang(langs),
                                                     );
                                                 }),
-                                        ),
-                                    )
-                                    .child(marker_preset_chips(controls_presets, open, draft))
-                                    .child(marker_modal_footer(controls_submit, open, draft)),
-                            ),
-                    ),
+                                            ),
+                                        )
+                                        .child(marker_preset_chips(controls_presets, open, draft))
+                                        .child(marker_modal_footer(controls_submit, open, draft)),
+                                ),
+                        ),
                 )
         },
     )
@@ -380,7 +394,7 @@ pub(crate) fn marker_detail_card(
                             .items_center()
                             .gap_2()
                             .child(
-                                input()
+                                ui_input_a11y(input(), tr("重命名标记", "Rename marker"))
                                     .flex_1()
                                     .h(px(ControlSize::Sm.height()))
                                     .px_2()

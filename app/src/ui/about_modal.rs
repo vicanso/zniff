@@ -134,9 +134,9 @@ fn system_info_rows(lang: Lang) -> Vec<(&'static str, String)> {
     let win = window();
     let ratio = pixel_ratio();
     let theme = if dark() {
-        t(lang, "深色 (Dark)", "Dark")
+        t(lang, "深色（Dark）", "Dark")
     } else {
-        t(lang, "浅色 (Light)", "Light")
+        t(lang, "浅色（Light）", "Light")
     };
     let (os_major, os_minor) = os_version();
     let os_line = if os_major > 0 {
@@ -359,9 +359,17 @@ pub(crate) fn about_modal(
 ) -> impl IntoElement {
     bind_escape_while(
         move || profiles.about_open.get(),
-        nsh_core::keymap::When::Auto,
+        nsh_core::keymap::When::Always,
         move || profiles.about_open.set(false),
     );
+    let dismiss = popover_dismiss_context();
+    effect(move || {
+        if profiles.about_open.get()
+            && let Some(d) = dismiss
+        {
+            d.dismiss();
+        }
+    });
     #[cfg(target_arch = "wasm32")]
     let _ = update_state;
     let gpu_label = signal(get_basic_gpu_info().to_string());
@@ -829,15 +837,18 @@ pub(crate) fn about_modal(
                 .optional_label(tr_opt("关于 zniff", "About zniff"))
                 .on_cancel(move || profiles.about_open.set(false))
                 .child(
-                    overlay().inset_0().child(
-                        view()
-                            .w_full()
-                            .h_full()
-                            .items_center()
-                            .justify_center()
-                            .child(backdrop)
-                            .child(card),
-                    ),
+                    overlay()
+                        .inset_0()
+                        .on_cancel(move || profiles.about_open.set(false))
+                        .child(
+                            view()
+                                .w_full()
+                                .h_full()
+                                .items_center()
+                                .justify_center()
+                                .child(backdrop)
+                                .child(card),
+                        ),
                 )
         },
     )

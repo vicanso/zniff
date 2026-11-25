@@ -735,7 +735,8 @@ pub(crate) fn toolbar_layout_switcher(
     for (mode, icon, zh, en) in modes {
         let mode_controls = controls.clone();
         menu = menu.child(
-            view()
+            button()
+                .selected(move || layout_mode.get() == mode)
                 .w_full()
                 .h(px(ControlSize::Sm.height()))
                 .px_2()
@@ -763,7 +764,9 @@ pub(crate) fn toolbar_layout_switcher(
                 .transition_colors()
                 .duration(MOTION_INSTANT_MS)
                 .ease_out()
-                .on_press(move || {
+                .focus_visible(apply_focus_ring)
+                .accessibility_label(tr_opt(zh, en))
+                .on_press(move |_: &()| {
                     open.set(false);
                     if layout_mode.get() == mode {
                         return;

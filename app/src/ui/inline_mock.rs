@@ -577,7 +577,7 @@ fn inline_mock_header(
                 .child(
                     view()
                         .tooltip(label_tip(
-                            "保存并生成 map-local 规则 (Cmd/Ctrl+Enter)",
+                            "保存并生成 map-local 规则（Cmd/Ctrl+Enter）",
                             "Save & apply map-local rule (Cmd/Ctrl+Enter)",
                         ))
                         .child(
@@ -672,7 +672,7 @@ fn inline_mock_status_row(
                 .items_center()
                 .justify_center()
                 .child(
-                    input()
+                    ui_input_a11y(input(), tr("状态码", "Status code"))
                         .value(move || mock.status.get())
                         .placeholder("200")
                         .on_change(move |text: &str| {

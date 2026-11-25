@@ -645,13 +645,13 @@ pub(crate) fn sequence_diagram_panel(
                                                 if is_flow {
                                                     t(
                                                         lang,
-                                                        "复制 Mermaid (流程图)",
+                                                        "复制 Mermaid（流程图）",
                                                         "Copy Mermaid (Flowchart)",
                                                     )
                                                 } else {
                                                     t(
                                                         lang,
-                                                        "复制 Mermaid (时序图)",
+                                                        "复制 Mermaid（时序图）",
                                                         "Copy Mermaid (Sequence)",
                                                     )
                                                 }

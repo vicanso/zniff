@@ -343,7 +343,7 @@ pub(crate) fn break_bar(
                                     let count = paused_count.get();
                                     let queue_suffix = if count > 1 {
                                         match lang {
-                                            Lang::Zh => format!(" (1 / {count}, 上限 {BREAK_QUEUE_LIMIT})"),
+                                            Lang::Zh => format!("（1 / {count}，上限 {BREAK_QUEUE_LIMIT}）"),
                                             Lang::En => format!(" (1 / {count}, max {BREAK_QUEUE_LIMIT})"),
                                         }
                                     } else {

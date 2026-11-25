@@ -44,7 +44,7 @@ impl NetworkPreset {
         match self {
             Self::None => t(lang, "无限制", "No throttling"),
             Self::Fast3g => "3G",
-            Self::Slow3g => t(lang, "弱网 (Slow 3G)", "Slow 3G"),
+            Self::Slow3g => t(lang, "弱网（Slow 3G）", "Slow 3G"),
             Self::HighLatency => t(lang, "高延迟", "High latency"),
             Self::Offline => t(lang, "离线", "Offline"),
         }

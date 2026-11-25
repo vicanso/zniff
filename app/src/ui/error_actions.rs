@@ -78,8 +78,8 @@ pub(crate) fn classify_error(status: Option<u16>, error: &str) -> Option<ErrorCa
 
 pub(crate) fn is_non_actionable_notice(lower: &str) -> bool {
     const IGNORED: &[&str] = &[
-        "直通名单",
-        "bypass list",
+        "直通名单，未解密",
+        "bypass list, not decrypted",
         "断点丢弃",
         "dropped at the break",
         "规则阻断",
@@ -94,7 +94,12 @@ pub(crate) fn is_non_actionable_notice(lower: &str) -> bool {
 
 pub(crate) fn is_tunnel_notice(error: &str) -> bool {
     let lower = error.trim().to_ascii_lowercase();
-    const TUNNEL_HINTS: &[&str] = &["直通名单", "bypass list", "不是 tls", "not tls"];
+    const TUNNEL_HINTS: &[&str] = &[
+        "直通名单，未解密",
+        "bypass list, not decrypted",
+        "不是 tls",
+        "not tls",
+    ];
     TUNNEL_HINTS.iter().any(|needle| lower.contains(needle))
 }
 
@@ -602,6 +607,8 @@ mod tests {
             "证书被拒绝",
             "证书被拒绝。猜测：客户端不信任 zniff CA，请安装并信任根证书。",
             "证书被拒绝。猜测：该客户端多半做了证书钉扎，不接受代理签发的证书。",
+            "证书被拒绝。猜测：该客户端多半做了证书钉扎，不接受代理签发的证书。把主机加入直通名单。若还没安装 zniff CA，先安装。",
+            "Certificate rejected. Likely certificate pinning. Add the host to the bypass list, or install zniff CA first.",
             "客户端 TLS 失败: received fatal alert CertificateUnknown",
             "源站证书不在内置根证书里，已改为隧道",
             "源站中止握手（handshake failure）",
@@ -657,6 +664,7 @@ mod tests {
         assert_eq!(classify_error(Some(200), ""), None);
         assert_eq!(classify_error(Some(500), ""), None);
         assert_eq!(classify_error(None, "直通名单，未解密"), None);
+        assert_eq!(classify_error(None, "Bypass list, not decrypted"), None);
         assert_eq!(classify_error(None, "断点丢弃"), None);
         assert_eq!(classify_error(None, "规则阻断 (连接已断开)"), None);
         assert_eq!(classify_error(None, "不是 TLS，已改为隧道"), None);

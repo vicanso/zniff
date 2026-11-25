@@ -170,7 +170,7 @@ const PREFIX_SPECS: &[PrefixMeta] = &[
     pmeta("method:", "HTTP 方法", "HTTP method", false, true),
     pmeta(
         "type:",
-        "内容类型 (json, html…)",
+        "内容类型（json, html…）",
         "Content-Type (json, html…)",
         false,
         true,
@@ -752,6 +752,8 @@ pub(crate) fn filter_assist_input(
         }
     };
 
+    let placeholder_rx = placeholder.into_reactive();
+    let label_rx = placeholder_rx.clone();
     view()
         .element_ref(&anchor)
         .w_full()
@@ -759,10 +761,10 @@ pub(crate) fn filter_assist_input(
         .flex_row()
         .items_center()
         .child(
-            input()
+            ui_input_a11y(input(), move || SharedString::from(label_rx.get()))
                 .element_ref(&focus_ref)
                 .value(value)
-                .placeholder(placeholder)
+                .placeholder(placeholder_rx)
                 .placeholder_color(move || color(fg_muted()))
                 .w_full()
                 .h(px(height))
