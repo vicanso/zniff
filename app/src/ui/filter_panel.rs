@@ -75,7 +75,11 @@ pub(crate) fn saved_filter_menu(
                 .duration(move || motion_ms(MOTION_INSTANT_MS))
                 .ease_out()
                 .focus_visible(apply_focus_ring)
-                .tooltip(label_tip("视图流量过滤", "Traffic view filter"))
+                .tooltip(label_tip_unless(
+                    open,
+                    "视图流量过滤",
+                    "Traffic view filter",
+                ))
                 .child(when(is_paused, move || {
                     view()
                         .w(px(6.0))

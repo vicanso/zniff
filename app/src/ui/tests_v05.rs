@@ -25,6 +25,7 @@ struct HeadlessTree {
     parent: HashMap<NodeId, NodeId>,
     children: HashMap<NodeId, Vec<NodeId>>,
     texts: HashMap<NodeId, String>,
+    placeholders: HashMap<NodeId, String>,
 }
 
 impl HeadlessTree {
@@ -75,9 +76,13 @@ impl HeadlessTree {
                             self.children.remove(id);
                             self.kinds.remove(id);
                             self.texts.remove(id);
+                            self.placeholders.remove(id);
                         }
                         MountItem::Text { id, text, .. } => {
                             self.texts.insert(*id, text.text.clone());
+                        }
+                        MountItem::Input { id, config } => {
+                            self.placeholders.insert(*id, config.placeholder.clone());
                         }
                         MountItem::Command {
                             id,
@@ -2785,35 +2790,74 @@ fn switching_quick_rule_kind_clears_incompatible_action_inputs_and_preserves_tar
             }))
     }
 
+    let input_with_placeholder = |tree: &HeadlessTree, placeholder: &str| -> Option<NodeId> {
+        tree.live_node_ids().into_iter().find(|id| {
+            tree.kinds.get(id) == Some(&ViewKind::Input)
+                && tree.placeholders.get(id).is_some_and(|p| p == placeholder)
+        })
+    };
+
+    assert_eq!(quick_action_input_group(4), quick_action_input_group(5));
+    assert_ne!(quick_action_input_group(6), quick_action_input_group(4));
+
     let (mut core, mut tree) = mount::<QuickKindSwitchHarness>(Size::new(px(720.0), px(640.0)));
     assert!(tree.has_text(
         r#"DRAFT|6|api.vicanso.dev|/v1|GetUser|X-Signature123|{{hmac_sha256("dev-secret", req.body)}}"#
     ));
+    let header_from_id =
+        input_with_placeholder(&tree, "Header name: X-Debug").expect("Header from input mounted");
+    let header_to_id =
+        input_with_placeholder(&tree, "Value (empty to delete)").expect("Header to input mounted");
 
-    // Selecting the same kind preserves both action inputs.
+    // Selecting the same kind preserves both action inputs and node identities.
     assert!(tree.press_text(&mut core, "btn_same"));
     assert!(tree.has_text(
         r#"DRAFT|6|api.vicanso.dev|/v1|GetUser|X-Signature123|{{hmac_sha256("dev-secret", req.body)}}"#
     ));
+    assert_eq!(
+        input_with_placeholder(&tree, "Value (empty to delete)"),
+        Some(header_to_id)
+    );
 
-    // Switching Header (6) -> Break (4) preserves host/path/op and clears from/to.
+    // Switching Header (6) -> Break (4) preserves host/path/op, clears from/to, and
+    // remounts action inputs with new NodeIds and updated placeholders.
     assert!(tree.press_text(&mut core, "btn_to_break"));
     assert!(tree.has_text("DRAFT|4|api.vicanso.dev|/v1|GetUser||"));
+    let live_ids = tree.live_node_ids();
+    assert!(
+        !live_ids.contains(&header_from_id) && !live_ids.contains(&header_to_id),
+        "Header from/to inputs must unmount on incompatible kind switch"
+    );
+    let break_from_id = input_with_placeholder(&tree, "Header cond (optional): X-Debug:1")
+        .expect("Break from input remounted with updated placeholder");
+    let break_to_id = input_with_placeholder(&tree, "Body substr (optional): error")
+        .expect("Break to input remounted with updated placeholder");
 
-    // Switching Break (4) -> Break-Res (5) preserves shared condition inputs and target.
+    // Switching Break (4) -> Break-Res (5) preserves shared condition inputs in place.
     assert!(tree.press_text(&mut core, "btn_to_break_res"));
     assert!(tree.has_text("DRAFT|5|api.vicanso.dev|/v1|GetUser|X-Debug:1|error"));
+    assert_eq!(
+        input_with_placeholder(&tree, "Header cond (optional): X-Debug:1"),
+        Some(break_from_id)
+    );
+    assert_eq!(
+        input_with_placeholder(&tree, "Body substr (optional): error"),
+        Some(break_to_id)
+    );
 
-    // Switching Break-Res (5) -> Delay (3) preserves target and clears from/to.
+    // Switching Break-Res (5) -> Delay (3) preserves target, clears from/to, and unmounts `to`.
     assert!(tree.press_text(&mut core, "btn_to_delay"));
     assert!(tree.has_text("DRAFT|3|api.vicanso.dev|/v1|GetUser||"));
+    assert!(input_with_placeholder(&tree, "Body substr (optional): error").is_none());
+    assert!(input_with_placeholder(&tree, "Delay duration: 2000ms or 2s").is_some());
 
-    // Switching via the live quick_kind_dropdown menu clears Delay input too.
+    // Switching via the live quick_kind_dropdown menu clears Delay input too and refreshes `to`.
     assert!(tree.press_text(&mut core, "btn_seed_delay"));
     assert!(tree.has_text("DRAFT|3|api.vicanso.dev|/v1|GetUser|2000ms|"));
     assert!(tree.press_text(&mut core, "Delay"));
     assert!(tree.press_text(&mut core, "Break"));
     assert!(tree.has_text("DRAFT|4|api.vicanso.dev|/v1|GetUser||"));
+    assert!(input_with_placeholder(&tree, "Body substr (optional): error").is_some());
 }
 
 #[tokio::test]
@@ -2921,5 +2965,123 @@ async fn preset_sync_bar_shows_diff_and_discards_with_two_step_confirm_zh_en() {
         assert!(tree.press_text(&mut core, "DIRTY_API"));
         assert!(tree.has_text(t(lang, "丢弃", "Discard")));
         assert!(!tree.has_text(t(lang, "确认丢弃", "Confirm")));
+    }
+}
+
+#[tokio::test]
+async fn popover_trigger_tooltips_stay_suppressed_while_open_and_single_escape_closes_zh_en() {
+    #[component]
+    fn PopoverEscapeHarness() -> impl IntoElement {
+        let lang = TEST_LANG.with(Cell::get);
+        provide_base_contexts(lang);
+        provide_popover_dismiss();
+        let controls = make_controls("popover-esc");
+        let profiles = make_profiles();
+        let draft = make_rule_draft();
+
+        view()
+            .w(px(960.0))
+            .h(px(640.0))
+            .flex_row()
+            .gap_2()
+            .child(saved_filter_menu(profiles, controls.clone(), draft))
+            .child(rules_menu_popover(profiles, controls.clone(), draft))
+            .child(preset_pill_popover(profiles, controls, draft))
+            .child(text(move || {
+                format!(
+                    "OPEN|{}|{}|{}",
+                    profiles.filter_panel_open.get(),
+                    profiles.panel_open.get(),
+                    profiles.preset_panel_open.get(),
+                )
+            }))
+    }
+
+    for lang in [Lang::Zh, Lang::En] {
+        TEST_LANG.set(lang);
+        let (mut core, mut tree) = mount::<PopoverEscapeHarness>(Size::new(px(960.0), px(640.0)));
+        core.set_environment(nsh_core::element::Environment {
+            reduce_motion: true,
+            ..Default::default()
+        });
+        tree.pump(&mut core);
+        let cases = [
+            (
+                t(lang, "过滤", "Filter"),
+                t(lang, "流量过滤", "Traffic Filter"),
+                t(lang, "视图流量过滤", "Traffic view filter"),
+            ),
+            (
+                t(lang, "规则", "Rules"),
+                t(lang, "直通与上游", "Bypass & Proxy"),
+                t(
+                    lang,
+                    "规则、分组、直通与上游代理",
+                    "Rules, groups, TLS bypass & upstream",
+                ),
+            ),
+            (
+                t(lang, "预设", "Presets"),
+                t(lang, "新建预设", "New preset"),
+                t(
+                    lang,
+                    "切换或保存配置预设（包含过滤与规则）",
+                    "Switch or save presets (filter + rules)",
+                ),
+            ),
+        ];
+
+        for (trigger_label, open_marker, tip_substr) in cases {
+            let trigger_text_id = tree
+                .live_node_ids()
+                .into_iter()
+                .find(|id| tree.texts.get(id).is_some_and(|s| s == trigger_label))
+                .unwrap_or_else(|| panic!("missing trigger {trigger_label} in {lang:?}"));
+            let trigger_id = tree.parent[&trigger_text_id];
+
+            // Keyboard focus while closed shows the trigger tooltip hint.
+            core.set_input_modality(nsh_core::platform::InputModality::Keyboard);
+            core.set_states(trigger_id, nsh_core::tailwind::state::FOCUSED);
+            tree.pump(&mut core);
+            assert!(
+                tree.has_text_containing(tip_substr),
+                "closed trigger {trigger_label} tooltip should render on keyboard focus in {lang:?}"
+            );
+
+            // Opening the popover immediately hides/disables the trigger tooltip.
+            assert!(tree.press_text(&mut core, trigger_label));
+            assert!(tree.has_text(open_marker));
+            assert!(!tree.has_text("OPEN|false|false|false"));
+            assert!(
+                !tree.has_text_containing(tip_substr),
+                "trigger {trigger_label} tooltip must stay suppressed while open in {lang:?}"
+            );
+
+            // Re-focusing the trigger via keyboard while open must NOT surface the tooltip.
+            core.set_input_modality(nsh_core::platform::InputModality::Keyboard);
+            core.set_states(trigger_id, nsh_core::tailwind::state::FOCUSED);
+            tree.pump(&mut core);
+            assert!(
+                !tree.has_text_containing(tip_substr),
+                "re-focused trigger {trigger_label} tooltip must remain disabled while open in {lang:?}"
+            );
+
+            // A single Escape keystroke flips the open signal and unmounts the popover immediately.
+            core.component_event(
+                ROOT_ID,
+                EventKind::KeyCommand,
+                &EventPayload::Value(nsh_core::PayloadValue::Number(u32::MAX as f64)),
+            );
+            tree.pump(&mut core);
+            assert!(
+                tree.has_text("OPEN|false|false|false"),
+                "single Escape must close open signal for {trigger_label} in {lang:?}; texts={:?}",
+                tree.all_live_texts()
+            );
+            assert!(
+                !tree.has_text(open_marker),
+                "single Escape must unmount open {trigger_label} popover in {lang:?}"
+            );
+        }
     }
 }

@@ -144,47 +144,50 @@ fn connect_hub_trigger(
         .ease_out()
         .focus_visible(apply_focus_ring)
         .tooltip(
-            tooltip().child(ui_tooltip_surface(
-                text(move || -> SharedString {
-                    let lang = ui_lang(langs);
-                    let mut parts = vec![
-                        t(
-                            lang,
-                            "接入中心：免配浏览器 / 终端 / ADB / 手机扫码",
-                            "Connect Hub: Browser / Terminal / ADB / Mobile QR",
-                        )
-                        .to_string(),
-                    ];
-                    if use_system_proxy.get() {
-                        if running.get() {
-                            parts
-                                .push(t(lang, "系统代理已接管", "System proxy active").to_string());
-                        } else {
+            tooltip()
+                .disabled(move || open.get())
+                .child(ui_tooltip_surface(
+                    text(move || -> SharedString {
+                        let lang = ui_lang(langs);
+                        let mut parts = vec![
+                            t(
+                                lang,
+                                "接入中心：免配浏览器 / 终端 / ADB / 手机扫码",
+                                "Connect Hub: Browser / Terminal / ADB / Mobile QR",
+                            )
+                            .to_string(),
+                        ];
+                        if use_system_proxy.get() {
+                            if running.get() {
+                                parts.push(
+                                    t(lang, "系统代理已接管", "System proxy active").to_string(),
+                                );
+                            } else {
+                                parts.push(
+                                    t(
+                                        lang,
+                                        "系统代理已开启（启动抓包后生效）",
+                                        "System proxy armed (applies when started)",
+                                    )
+                                    .to_string(),
+                                );
+                            }
+                        }
+                        if ca_needs_attention() {
                             parts.push(
                                 t(
                                     lang,
-                                    "系统代理已开启（启动抓包后生效）",
-                                    "System proxy armed (applies when started)",
+                                    "本机根证书未安装或未信任",
+                                    "Host root CA not installed or untrusted",
                                 )
                                 .to_string(),
                             );
                         }
-                    }
-                    if ca_needs_attention() {
-                        parts.push(
-                            t(
-                                lang,
-                                "本机根证书未安装或未信任",
-                                "Host root CA not installed or untrusted",
-                            )
-                            .to_string(),
-                        );
-                    }
-                    parts.join(" · ").into()
-                })
-                .text_size(px(TEXT_SM))
-                .text_color(fg_primary()),
-            )),
+                        parts.join(" · ").into()
+                    })
+                    .text_size(px(TEXT_SM))
+                    .text_color(fg_primary()),
+                )),
         )
         .child(when(show_dot, move || {
             view().w(px(6.0)).h(px(6.0)).rounded_full().bg(move || {

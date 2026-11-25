@@ -204,19 +204,27 @@ pub(crate) fn clear_quick_draft(draft: QuickRuleDraftSignals) {
     draft.modes.reset();
 }
 
+/// Groups rule kinds that share identical `from`/`to` input semantics (`break`/`break-res`).
+pub(crate) fn quick_action_input_group(kind: u8) -> u8 {
+    match kind % 16 {
+        4 | 5 => 4,
+        other => other,
+    }
+}
+
 /// Returns whether switching from `prev_kind` to `next_kind` keeps the same
 /// semantics for the two action inputs (`from` and `to`).
 pub(crate) fn quick_kind_shares_action_inputs(prev_kind: u8, next_kind: u8) -> bool {
-    let prev = prev_kind % 16;
-    let next = next_kind % 16;
-    prev == next || matches!((prev, next), (4, 5) | (5, 4))
+    quick_action_input_group(prev_kind) == quick_action_input_group(next_kind)
 }
 
 /// Switches the quick-rule builder to `next_kind`, keeping match target fields
-/// (`host`, `path`, `op`) while clearing incompatible action inputs (`from`, `to`).
+/// (`host`, `path`, `op`) while clearing incompatible action inputs (`from`, `to`)
+/// and ending active field editing so native placeholders refresh cleanly.
 pub(crate) fn switch_quick_kind(draft: QuickRuleDraftSignals, next_kind: u8) {
     let prev_kind = draft.kind.get_untracked();
     if !quick_kind_shares_action_inputs(prev_kind, next_kind) {
+        dismiss_keyboard();
         draft.from.set(String::new());
         draft.to.set(String::new());
     }
@@ -759,9 +767,16 @@ fn quick_add_row_two(
     let to = draft.to;
     let submit_from = controls.clone();
     let submit_to = controls.clone();
-    let row = view().flex_row().items_center().gap_1().child(when(
-        move || !matches!(kind.get(), 8 | 12) && !(kind.get() == 13 && modes.status_drop.get()),
+    let row = view().flex_row().items_center().gap_1().child(each(
         move || {
+            if !matches!(kind.get(), 8 | 12) && !(kind.get() == 13 && modes.status_drop.get()) {
+                vec![quick_action_input_group(kind.get())]
+            } else {
+                Vec::new()
+            }
+        },
+        |group| *group,
+        move |_, _| {
             let sc = submit_from.clone();
             view().flex_1().min_w(px(0.0)).child(submit_input(
                 from,
@@ -788,9 +803,16 @@ fn quick_add_row_two(
         )
     );
     let row = row
-        .child(when(
-            move || matches!(kind.get(), 0 | 2 | 4 | 5 | 6 | 7 | 9 | 10 | 11 | 14 | 15),
+        .child(each(
             move || {
+                if matches!(kind.get(), 0 | 2 | 4 | 5 | 6 | 7 | 9 | 10 | 11 | 14 | 15) {
+                    vec![quick_action_input_group(kind.get())]
+                } else {
+                    Vec::new()
+                }
+            },
+            |group| *group,
+            move |_, _| {
                 let sc = submit_to.clone();
                 view().flex_1().min_w(px(0.0)).child(submit_input(
                     to,

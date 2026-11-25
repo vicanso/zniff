@@ -142,7 +142,7 @@ pub(crate) fn quick_kind_dropdown(draft: QuickRuleDraftSignals) -> impl IntoElem
                 .duration(MOTION_INSTANT_MS)
                 .ease_out()
                 .focus_visible(apply_focus_ring)
-                .tooltip(label_tip("选择规则类型", "Select rule type"))
+                .tooltip(label_tip_unless(open, "选择规则类型", "Select rule type"))
                 .child(
                     text(move || {
                         let (zh, en) = quick_kind(kind.get()).label();
@@ -300,7 +300,11 @@ pub(crate) fn quick_var_menu(target: Signal<String>) -> impl IntoElement {
                 .duration(MOTION_INSTANT_MS)
                 .ease_out()
                 .focus_visible(apply_focus_ring)
-                .tooltip(label_tip("插入动态模板变量", "Insert template variable"))
+                .tooltip(label_tip_unless(
+                    open,
+                    "插入动态模板变量",
+                    "Insert template variable",
+                ))
                 .child(
                     mono("{{}}")
                         .text_size(px(TEXT_XS))

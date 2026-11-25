@@ -3139,16 +3139,20 @@ fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
 
     struct MountedToolbar {
         kinds: HashMap<NodeId, ViewKind>,
+        parent: HashMap<NodeId, NodeId>,
         children: HashMap<NodeId, Vec<NodeId>>,
         frames: HashMap<NodeId, Bounds<Points>>,
         window_drag: HashMap<NodeId, Option<bool>>,
+        events: HashMap<NodeId, nsh_core::EventMask>,
     }
 
     let mut tree = MountedToolbar {
         kinds: HashMap::new(),
+        parent: HashMap::new(),
         children: HashMap::new(),
         frames: HashMap::new(),
         window_drag: HashMap::new(),
+        events: HashMap::new(),
     };
 
     let pump = |core: &mut Core<ApproxTextEngine>, tree: &mut MountedToolbar| {
@@ -3166,6 +3170,7 @@ fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
                             child,
                             before,
                         } => {
+                            tree.parent.insert(*child, *parent);
                             let list = tree.children.entry(*parent).or_default();
                             list.retain(|c| c != child);
                             match before.and_then(|b| list.iter().position(|c| *c == b)) {
@@ -3173,11 +3178,22 @@ fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
                                 None => list.push(*child),
                             }
                         }
+                        MountItem::Remove { id } => {
+                            tree.parent.remove(id);
+                        }
+                        MountItem::Delete { id } => {
+                            tree.parent.remove(id);
+                            tree.children.remove(id);
+                            tree.events.remove(id);
+                        }
                         MountItem::Frame { id, frame } => {
                             tree.frames.insert(*id, *frame);
                         }
                         MountItem::ViewProps { id, props } => {
                             tree.window_drag.insert(*id, props.window_drag);
+                        }
+                        MountItem::Events { id, events } => {
+                            tree.events.insert(*id, *events);
                         }
                         _ => {}
                     }
@@ -3224,6 +3240,43 @@ fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
         tree.window_drag.get(&start_btn_id),
         Some(&Some(false)),
         "Start/Stop button must opt out of window_drag"
+    );
+
+    // Every interactive control mounted inside the toolbar must opt out of window_drag.
+    let mut stack = vec![toolbar_id];
+    let mut pressable_in_toolbar = 0usize;
+    while let Some(id) = stack.pop() {
+        if id != toolbar_id
+            && tree
+                .events
+                .get(&id)
+                .is_some_and(|ev| ev.contains(EventKind::Press))
+        {
+            pressable_in_toolbar += 1;
+            let mut cur = Some(id);
+            let mut opted_out = false;
+            while let Some(node) = cur {
+                if node == toolbar_id {
+                    break;
+                }
+                if tree.window_drag.get(&node) == Some(&Some(false)) {
+                    opted_out = true;
+                    break;
+                }
+                cur = tree.parent.get(&node).copied();
+            }
+            assert!(
+                opted_out,
+                "interactive toolbar node {id} must opt out of window_drag"
+            );
+        }
+        if let Some(kids) = tree.children.get(&id) {
+            stack.extend(kids.iter().copied());
+        }
+    }
+    assert!(
+        pressable_in_toolbar >= 7,
+        "expected >= 7 toolbar interactive buttons, got {pressable_in_toolbar}"
     );
 
     // 1. Default environment (`title_bar` = 0): standard edge insets.

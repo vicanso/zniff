@@ -336,7 +336,8 @@ pub(crate) fn toolbar_network_preset_popover(
                 .ease_out()
                 .focus_visible(apply_focus_ring)
                 .label(tr("网络条件预设", "Network conditions"))
-                .tooltip(label_tip(
+                .tooltip(label_tip_unless(
+                    open,
                     "网络条件预设（3G / 弱网 / 高延迟 / 离线）",
                     "Network conditions (3G / Slow 3G / High latency / Offline)",
                 ))

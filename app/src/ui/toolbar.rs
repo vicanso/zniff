@@ -851,7 +851,11 @@ pub(crate) fn toolbar_layout_switcher(
                 .ease_out()
                 .focus_visible(apply_focus_ring)
                 .label(tr("分栏布局", "Split layout"))
-                .tooltip(label_tip("切换分栏布局", "Switch split layout"))
+                .tooltip(label_tip_unless(
+                    open,
+                    "切换分栏布局",
+                    "Switch split layout",
+                ))
                 .child(glyph_px(
                     ControlSize::Sm.icon_size(),
                     current_icon,

@@ -850,6 +850,22 @@ pub(crate) fn label_tip(zh: &'static str, en: &'static str) -> impl IntoTooltip 
     ))
 }
 
+/// Hover tooltip disabled while `open` is true so an open popup's trigger hint
+/// neither overlaps the popup nor consumes its first `Escape` key press.
+pub(crate) fn label_tip_unless(
+    open: Signal<bool>,
+    zh: &'static str,
+    en: &'static str,
+) -> impl IntoTooltip {
+    tooltip()
+        .disabled(move || open.get())
+        .child(ui_tooltip_surface(
+            text(tr(zh, en))
+                .text_size(move || scaled_px(TEXT_SM))
+                .text_color(fg_primary()),
+        ))
+}
+
 /// The list's one hover bubble. It lives beside the table, not inside a
 /// cell: DataTable disposes a cell when the row in that slot changes.
 pub(crate) fn cell_tip(full: impl Fn() -> String + 'static) -> impl IntoElement {

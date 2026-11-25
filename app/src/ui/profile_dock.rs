@@ -108,7 +108,8 @@ fn profile_export_menu(
                 .items_center()
                 .justify_center()
                 .gap_1()
-                .tooltip(label_tip(
+                .tooltip(label_tip_unless(
+                    open,
                     "选择导出当前预设或全部已保存预设 (TOML)",
                     "Export current or all saved presets as TOML",
                 ))
@@ -767,6 +768,7 @@ pub(crate) fn profile_dock(
                                     }
                                     dropdown_open.set(false);
                                     commit_and_save_profile(profiles, draft, None, &save_controls);
+                                    dismiss_keyboard();
                                 })
                                 .child(
                                     text(tr("保存", "Save"))

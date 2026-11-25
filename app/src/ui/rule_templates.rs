@@ -187,7 +187,8 @@ fn rule_templates_menu_trigger(open: Signal<bool>) -> impl IntoElement {
         .duration(MOTION_INSTANT_MS)
         .ease_out()
         .focus_visible(apply_focus_ring)
-        .tooltip(label_tip(
+        .tooltip(label_tip_unless(
+            open,
             "插入常用示例或按类型配置规则",
             "Use a common example or configure a rule by type",
         ))

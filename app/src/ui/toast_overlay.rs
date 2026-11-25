@@ -22,12 +22,14 @@ pub(crate) fn toast_overlay(
             overlay()
                 .inset_0()
                 .flex_col()
-                .items_center()
-                .pt(px(54.0))
+                .items_end()
+                .justify_end()
+                .pb(px(40.0))
+                .pr(px(14.0))
                 .pointer_events(PointerEvents::None)
                 .child(
                     toast_stack()
-                        .placement(Anchor::TopCenter)
+                        .placement(Anchor::BottomRight)
                         .state(toast_state)
                         .w(move || px((window().width.0 - 24.0).clamp(220.0, 380.0)))
                         .max_w(move || px((window().width.0 - 24.0).max(200.0)))
@@ -88,7 +90,7 @@ fn toast_card(
         .starting_class(if reduce_motion() {
             ""
         } else {
-            "opacity-0 -translate-y-2"
+            "opacity-0 translate-y-2"
         })
         .ending_class(if reduce_motion() {
             ""

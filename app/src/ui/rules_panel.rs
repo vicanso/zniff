@@ -185,20 +185,22 @@ pub(crate) fn rules_menu_popover(
                 .ease_out()
                 .focus_visible(apply_focus_ring)
                 .tooltip(
-                    tooltip().child(ui_tooltip_surface(
-                        text(move || -> SharedString {
-                            format_rules_pill_tooltip(
-                                active_rules_count.get(),
-                                enabled_groups_count.get(),
-                                rules_on.get(),
-                                breaks_on.get(),
-                                ui_lang(langs),
-                            )
-                            .into()
-                        })
-                        .text_size(px(TEXT_SM))
-                        .text_color(fg_primary()),
-                    )),
+                    tooltip()
+                        .disabled(move || open.get())
+                        .child(ui_tooltip_surface(
+                            text(move || -> SharedString {
+                                format_rules_pill_tooltip(
+                                    active_rules_count.get(),
+                                    enabled_groups_count.get(),
+                                    rules_on.get(),
+                                    breaks_on.get(),
+                                    ui_lang(langs),
+                                )
+                                .into()
+                            })
+                            .text_size(px(TEXT_SM))
+                            .text_color(fg_primary()),
+                        )),
                 )
                 .child(when(
                     move || capture_muted(rules_on, breaks_on),
@@ -940,7 +942,7 @@ pub(crate) fn preset_pill_popover(
                 .ease_out()
                 .focus_visible(apply_focus_ring)
                 .tooltip(
-                    tooltip().child(ui_tooltip_surface(
+                    tooltip().disabled(move || open.get()).child(ui_tooltip_surface(
                         text(move || -> SharedString {
                             format_preset_pill_tooltip(
                                 active_name().as_deref(),

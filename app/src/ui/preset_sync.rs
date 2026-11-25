@@ -899,8 +899,10 @@ fn preset_sync_action_button(ctx: SyncBarCtx) -> impl IntoElement {
             match state.get() {
                 PresetSaveState::UpdateExisting(name) | PresetSaveState::SaveNamed(name) => {
                     commit_and_save_profile(profiles, draft, Some(&name), &controls);
+                    dismiss_keyboard();
                 }
                 PresetSaveState::SaveAsNew => {
+                    dismiss_keyboard();
                     profiles.filter_panel_open.set(false);
                     profiles.panel_open.set(false);
                     profiles.preset_panel_open.set(true);

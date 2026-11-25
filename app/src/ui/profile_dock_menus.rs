@@ -155,23 +155,25 @@ fn profile_saved_trigger(ctx: ProfileDockMenuCtx) -> impl IntoElement {
         .disabled(move || saved.with(Vec::is_empty))
         .disabled_style(|style| style.opacity(0.6))
         .tooltip(
-            tooltip().child(ui_tooltip_surface(
-                text(move || -> SharedString {
-                    let lang = ui_lang(langs);
-                    if saved.with(Vec::is_empty) {
-                        t(
-                            lang,
-                            "暂无已保存预设，可在下方填写名称后点保存",
-                            "No saved presets yet — enter a name below and click Save",
-                        )
-                    } else {
-                        t(lang, "选择或切换已保存预设", "Switch or clear saved preset")
-                    }
-                    .into()
-                })
-                .text_size(px(TEXT_SM))
-                .text_color(fg_primary()),
-            )),
+            tooltip()
+                .disabled(move || dropdown_open.get())
+                .child(ui_tooltip_surface(
+                    text(move || -> SharedString {
+                        let lang = ui_lang(langs);
+                        if saved.with(Vec::is_empty) {
+                            t(
+                                lang,
+                                "暂无已保存预设，可在下方填写名称后点保存",
+                                "No saved presets yet — enter a name below and click Save",
+                            )
+                        } else {
+                            t(lang, "选择或切换已保存预设", "Switch or clear saved preset")
+                        }
+                        .into()
+                    })
+                    .text_size(px(TEXT_SM))
+                    .text_color(fg_primary()),
+                )),
         )
         .child(
             view()
@@ -674,23 +676,25 @@ fn profile_history_trigger(ctx: ProfileDockMenuCtx) -> impl IntoElement {
         .disabled(move || history.with(Vec::is_empty))
         .disabled_style(|style| style.opacity(0.6))
         .tooltip(
-            tooltip().child(ui_tooltip_surface(
-                text(move || -> SharedString {
-                    let lang = ui_lang(langs);
-                    if history.with(Vec::is_empty) {
-                        t(lang, "暂无历史版本", "No version history yet")
-                    } else {
-                        t(
-                            lang,
-                            "最近 10 个预设历史版本，点击可恢复",
-                            "Last 10 preset versions, click to restore",
-                        )
-                    }
-                    .into()
-                })
-                .text_size(px(TEXT_SM))
-                .text_color(fg_primary()),
-            )),
+            tooltip()
+                .disabled(move || history_open.get())
+                .child(ui_tooltip_surface(
+                    text(move || -> SharedString {
+                        let lang = ui_lang(langs);
+                        if history.with(Vec::is_empty) {
+                            t(lang, "暂无历史版本", "No version history yet")
+                        } else {
+                            t(
+                                lang,
+                                "最近 10 个预设历史版本，点击可恢复",
+                                "Last 10 preset versions, click to restore",
+                            )
+                        }
+                        .into()
+                    })
+                    .text_size(px(TEXT_SM))
+                    .text_color(fg_primary()),
+                )),
         )
         .child(glyph_px(
             12.0,
