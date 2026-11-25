@@ -90,8 +90,7 @@ pub(crate) fn facet_sidebar(
     let domains_open = signal(true);
     let collapsed_roots = signal(std::collections::HashSet::<String>::new());
     let resize_origin = signal(SIDEBAR_WIDTH_DEFAULT);
-    let resize_hot = signal(false);
-    let resizing = signal(false);
+    let resize_state = signal(ResizeHandleState::Idle);
 
     let filtered_apps = computed(move || -> Vec<session::FacetEntry> {
         let q = side_query.get().trim().to_ascii_lowercase();
@@ -117,11 +116,12 @@ pub(crate) fn facet_sidebar(
         move || !sidebar_collapsed.get(),
         move || {
             view()
-            .w(move || px(clamp_sidebar_px(sidebar_width.get())))
-            .h_full()
-            .flex_shrink_0()
-            .flex_row()
-            .bg(bg_chrome())
+                .relative()
+                .w(move || px(clamp_sidebar_px(sidebar_width.get())))
+                .h_full()
+                .flex_shrink_0()
+                .flex_row()
+                .bg(bg_chrome())
             .child(
                 view()
                     .flex_1()
@@ -173,8 +173,7 @@ pub(crate) fn facet_sidebar(
                                         .child(when(
                                             move || !side_query.get().is_empty(),
                                             move || {
-                                                view()
-                                                    .role(AccessibilityRole::Button)
+                                                button()
                                                     .absolute()
                                                     .right(px(3.0))
                                                     .top(px(3.0))
@@ -190,8 +189,10 @@ pub(crate) fn facet_sidebar(
                                                     .duration(move || motion_ms(MOTION_INSTANT_MS))
                                                     .ease_out()
                                                     .focus_visible(apply_focus_ring)
-                                                    .label(tr("清空过滤", "Clear filter"))
-                                                    .on_press(move || side_query.set(String::new()))
+                                                    .accessibility_label(tr_opt("清空过滤", "Clear filter"))
+                                                    .on_press(move |_: &()| {
+                                                        side_query.set(String::new())
+                                                    })
                                                     .child(
                                                         text("×")
                                                             .text_size(px(TEXT_MD))
@@ -251,137 +252,128 @@ pub(crate) fn facet_sidebar(
                                 .w_full()
                                 .p_1p5()
                                 .gap_1()
-                                .child(sidebar_section_header(
-                                    "应用 / 来源",
-                                    "Apps",
-                                    move || filtered_apps.with(Vec::len),
-                                    apps_open,
-                                ))
-                                .child(when(
-                                    move || apps_open.get(),
-                                    move || {
-                                        when(
-                                            move || filtered_apps.with(Vec::is_empty),
-                                            move || {
-                                                let has_query = !side_query.get().trim().is_empty();
-                                                let any_total = facets.with(|f| !f.apps.is_empty());
-                                                text(if has_query && any_total {
-                                                    tr("无匹配应用", "No matching apps")()
-                                                } else {
-                                                    tr("暂无应用", "No apps yet")()
-                                                })
-                                                .px_2p5()
-                                                .py_1()
-                                                .text_size(px(TEXT_XS))
-                                                .text_color(fg_muted())
-                                            },
+                                .child(
+                                    collapsible()
+                                        .w_full()
+                                        .open(move || apps_open.get())
+                                        .reveal(true)
+                                        .content(
+                                            view().w_full().pt_1().child(
+                                                when(
+                                                    move || filtered_apps.with(Vec::is_empty),
+                                                    move || {
+                                                        let has_query =
+                                                            !side_query.get().trim().is_empty();
+                                                        let any_total =
+                                                            facets.with(|f| !f.apps.is_empty());
+                                                        text(if has_query && any_total {
+                                                            tr("无匹配应用", "No matching apps")()
+                                                        } else {
+                                                            tr("暂无应用", "No apps yet")()
+                                                        })
+                                                        .px_2p5()
+                                                        .py_1()
+                                                        .text_size(px(TEXT_XS))
+                                                        .text_color(fg_muted())
+                                                    },
+                                                )
+                                                .otherwise(move || {
+                                                    view().w_full().gap_0p5().child(each(
+                                                        move || filtered_apps.get(),
+                                                        |entry| entry.token.clone(),
+                                                        move |entry, _| {
+                                                            sidebar_app_row(entry, filter)
+                                                        },
+                                                    ))
+                                                }),
+                                            ),
                                         )
-                                        .otherwise(move || {
-                                            view().w_full().gap_0p5().child(each(
-                                                move || filtered_apps.get(),
-                                                |entry| entry.token.clone(),
-                                                move |entry, _| sidebar_app_row(entry, filter),
-                                            ))
-                                        })
-                                    },
-                                ))
+                                        .child(sidebar_section_header(
+                                            "应用 / 来源",
+                                            "Apps",
+                                            move || filtered_apps.with(Vec::len),
+                                            apps_open,
+                                        )),
+                                )
                                 .child(view().h(px(4.0)))
-                                .child(sidebar_section_header(
-                                    "域名",
-                                    "Domains",
-                                    move || {
-                                        grouped_domains.with(|groups| {
-                                            groups.iter().map(|g| g.entries.len()).sum::<usize>()
-                                        })
-                                    },
-                                    domains_open,
-                                ))
-                                .child(when(
-                                    move || domains_open.get(),
-                                    move || {
-                                        when(
-                                            move || grouped_domains.with(Vec::is_empty),
-                                            move || {
-                                                let has_query = !side_query.get().trim().is_empty();
-                                                let any_total =
-                                                    facets.with(|f| !f.domains.is_empty());
-                                                text(if has_query && any_total {
-                                                    tr("无匹配域名", "No matching domains")()
-                                                } else {
-                                                    tr("暂无域名", "No domains yet")()
-                                                })
-                                                .px_2p5()
-                                                .py_1()
-                                                .text_size(px(TEXT_XS))
-                                                .text_color(fg_muted())
-                                            },
+                                .child(
+                                    collapsible()
+                                        .w_full()
+                                        .open(move || domains_open.get())
+                                        .reveal(true)
+                                        .content(
+                                            view().w_full().pt_1().child(
+                                                when(
+                                                    move || grouped_domains.with(Vec::is_empty),
+                                                    move || {
+                                                        let has_query =
+                                                            !side_query.get().trim().is_empty();
+                                                        let any_total =
+                                                            facets.with(|f| !f.domains.is_empty());
+                                                        text(if has_query && any_total {
+                                                            tr("无匹配域名", "No matching domains")(
+                                                            )
+                                                        } else {
+                                                            tr("暂无域名", "No domains yet")()
+                                                        })
+                                                        .px_2p5()
+                                                        .py_1()
+                                                        .text_size(px(TEXT_XS))
+                                                        .text_color(fg_muted())
+                                                    },
+                                                )
+                                                .otherwise(move || {
+                                                    view().w_full().gap_0p5().child(each(
+                                                        move || grouped_domains.get(),
+                                                        |group| group.root.clone(),
+                                                        move |group, _| {
+                                                            sidebar_domain_group_view(
+                                                                group,
+                                                                filter,
+                                                                side_query,
+                                                                collapsed_roots,
+                                                            )
+                                                        },
+                                                    ))
+                                                }),
+                                            ),
                                         )
-                                        .otherwise(move || {
-                                            view().w_full().gap_0p5().child(each(
-                                                move || grouped_domains.get(),
-                                                |group| group.root.clone(),
-                                                move |group, _| {
-                                                    sidebar_domain_group_view(
-                                                        group,
-                                                        filter,
-                                                        side_query,
-                                                        collapsed_roots,
-                                                    )
-                                                },
-                                            ))
-                                        })
-                                    },
-                                )),
+                                        .child(sidebar_section_header(
+                                            "域名",
+                                            "Domains",
+                                            move || {
+                                                grouped_domains.with(|groups| {
+                                                    groups
+                                                        .iter()
+                                                        .map(|g| g.entries.len())
+                                                        .sum::<usize>()
+                                                })
+                                            },
+                                            domains_open,
+                                        )),
+                                ),
                         ),
                     ),
             )
             .child(
-                view()
-                    .w(px(5.0))
-                    .h_full()
-                    .flex_shrink_0()
-                    .flex_row()
-                    .justify_end()
-                    .cursor(Cursor::ColResize)
-                    .claim_touches(TouchClaim::on_start())
-                    .keep_touches(true)
-                    .on_mouse_enter(move |_: &MouseEvent| resize_hot.set(true))
-                    .on_mouse_leave(move |_: &MouseEvent| resize_hot.set(false))
-                    .on_responder_grant(move |_event: &ResponderEvent| {
-                        resizing.set(true);
-                        resize_origin.set(clamp_sidebar_px(sidebar_width.get()));
+                resize_handle()
+                    .axis(Axis::Horizontal)
+                    .edge(HandleEdge::Trailing)
+                    .accessibility_label(tr_opt("调整侧栏宽度", "Resize sidebar width"))
+                    .on_state_change(move |next: &ResizeHandleState| resize_state.set(*next))
+                    .on_drag_start(move || {
+                        resize_origin.set(clamp_sidebar_px(sidebar_width.get_untracked()));
                     })
-                    .on_responder_move(move |event: &ResponderEvent| {
-                        sidebar_width.set(clamp_sidebar_px(
-                            resize_origin.get() + event.gesture.delta.x.0,
-                        ));
+                    .on_drag_move(move |offset: &Points| {
+                        sidebar_width.set(clamp_sidebar_px(resize_origin.get() + offset.0));
                     })
-                    .on_responder_release(move |_event: &ResponderEvent| {
-                        resizing.set(false);
-                        let width_u32 = clamp_sidebar_px(sidebar_width.get_untracked()).round() as u32;
+                    .on_drag_end(move |offset: &Points| {
+                        let next = clamp_sidebar_px(resize_origin.get() + offset.0);
+                        sidebar_width.set(next);
+                        let width_u32 = next.round() as u32;
                         let _ = save_config(|cfg| cfg.sidebar_width = width_u32);
                     })
-                    .on_responder_terminate(move |_event: &ResponderEvent| {
-                        resizing.set(false);
-                    })
-                    .child(
-                        view()
-                            .w(move || {
-                                if resize_hot.get() || resizing.get() {
-                                    px(2.5)
-                                } else {
-                                    px(1.0)
-                                }
-                            })
-                            .h_full()
-                            .bg(move || {
-                                if resize_hot.get() || resizing.get() {
-                                    accent_blue()
-                                } else {
-                                    border_strong()
-                                }
-                            }),
-                    ),
+                    .child(splitter_indicator(Axis::Horizontal, resize_state, 2.5)),
             )
         },
     )
@@ -394,8 +386,7 @@ fn sidebar_section_header(
     open: Signal<bool>,
 ) -> impl IntoElement {
     let langs = ui_langs();
-    view()
-        .role(AccessibilityRole::Button)
+    button()
         .w_full()
         .h(px(24.0))
         .px_1p5()
@@ -409,7 +400,8 @@ fn sidebar_section_header(
         .duration(move || motion_ms(MOTION_INSTANT_MS))
         .ease_out()
         .focus_visible(apply_focus_ring)
-        .on_press(move || open.update(|v| *v = !*v))
+        .accessibility_label(tr_opt(zh, en))
+        .on_press(move |_: &()| open.update(|v| *v = !*v))
         .child(ui_rotating_chevron(
             10.0,
             move || open.get(),
@@ -478,36 +470,7 @@ pub(crate) fn sidebar_app_row(
             .into()
     };
     view()
-        .role(AccessibilityRole::Button)
         .w_full()
-        .h(px(25.0))
-        .pl_3()
-        .pr_1p5()
-        .rounded(px(RADIUS_SM))
-        .flex_row()
-        .items_center()
-        .gap_1p5()
-        .bg(move || {
-            if is_active() {
-                accent_blue_soft()
-            } else {
-                AdaptiveColor::TRANSPARENT
-            }
-        })
-        .hover(|s| {
-            s.bg(move || {
-                if is_active() {
-                    accent_blue_soft_hover()
-                } else {
-                    bg_control_hover()
-                }
-            })
-        })
-        .active(|s| s.bg(bg_control_active()))
-        .transition_colors()
-        .duration(MOTION_INSTANT_MS)
-        .ease_out()
-        .focus_visible(apply_focus_ring)
         .tooltip(
             tooltip().child(ui_tooltip_surface(
                 text(display_label)
@@ -515,36 +478,70 @@ pub(crate) fn sidebar_app_row(
                     .text_color(fg_primary()),
             )),
         )
-        .on_press(move || {
-            let tok = entry.with(|e| e.token.clone());
-            filter.set(toggle_app_facet(&filter.get(), &tok));
-        })
-        .child(facet_app_or_device_icon(entry, is_active))
         .child(
-            text(display_label)
-                .flex_1()
-                .min_w(px(0.0))
-                .number_of_lines(1)
-                .text_overflow(EllipsizeMode::Tail)
-                .text_size(px(TEXT_SM))
-                .text_color(move || {
+            button()
+                .selected(is_active)
+                .w_full()
+                .h(px(25.0))
+                .pl_3()
+                .pr_1p5()
+                .rounded(px(RADIUS_SM))
+                .flex_row()
+                .items_center()
+                .gap_1p5()
+                .bg(move || {
                     if is_active() {
-                        accent_blue_text()
+                        accent_blue_soft()
                     } else {
-                        fg_primary()
+                        AdaptiveColor::TRANSPARENT
                     }
-                }),
-        )
-        .child(sidebar_error_pill(move || entry.with(|e| e.error_count)))
-        .child(
-            mono(move || -> SharedString {
-                entry
-                    .with(|e| present::format_thousands(e.count as u64))
-                    .into()
-            })
-            .tabular_nums()
-            .text_size(px(TEXT_XS))
-            .text_color(fg_muted()),
+                })
+                .hover(|s| {
+                    s.bg(move || {
+                        if is_active() {
+                            accent_blue_soft_hover()
+                        } else {
+                            bg_control_hover()
+                        }
+                    })
+                })
+                .active(|s| s.bg(bg_control_active()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .focus_visible(apply_focus_ring)
+                .accessibility_label(move || Some(display_label()))
+                .on_press(move |_: &()| {
+                    let tok = entry.with(|e| e.token.clone());
+                    filter.set(toggle_app_facet(&filter.get(), &tok));
+                })
+                .child(facet_app_or_device_icon(entry, is_active))
+                .child(
+                    text(display_label)
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .number_of_lines(1)
+                        .text_overflow(EllipsizeMode::Tail)
+                        .text_size(px(TEXT_SM))
+                        .text_color(move || {
+                            if is_active() {
+                                accent_blue_text()
+                            } else {
+                                fg_primary()
+                            }
+                        }),
+                )
+                .child(sidebar_error_pill(move || entry.with(|e| e.error_count)))
+                .child(
+                    mono(move || -> SharedString {
+                        entry
+                            .with(|e| present::format_thousands(e.count as u64))
+                            .into()
+                    })
+                    .tabular_nums()
+                    .text_size(px(TEXT_XS))
+                    .text_color(fg_muted()),
+                ),
         )
 }
 
@@ -577,9 +574,15 @@ pub(crate) fn sidebar_domain_group_view(
         ))
     })
     .otherwise(move || {
-        view()
+        collapsible()
             .w_full()
-            .gap_0p5()
+            .open(is_expanded)
+            .reveal(true)
+            .content(view().w_full().pt_0p5().gap_0p5().child(each(
+                move || group.with(|g| g.entries.clone()),
+                |entry| entry.token.clone(),
+                move |entry, _| sidebar_domain_leaf_row(entry, true, filter),
+            )))
             .child(
                 view()
                     .w_full()
@@ -613,8 +616,7 @@ pub(crate) fn sidebar_domain_group_view(
                     .child(when(
                         move || side_query.get().trim().is_empty(),
                         move || {
-                            view()
-                                .role(AccessibilityRole::Button)
+                            button()
                                 .w(px(18.0))
                                 .h(px(ControlSize::Xs.height()))
                                 .flex_shrink_0()
@@ -628,8 +630,8 @@ pub(crate) fn sidebar_domain_group_view(
                                 .duration(MOTION_INSTANT_MS)
                                 .ease_out()
                                 .focus_visible(apply_focus_ring)
-                                .label(tr("展开或收起子域", "Toggle subdomains"))
-                                .on_press(move || {
+                                .accessibility_label(tr_opt("展开或收起子域", "Toggle subdomains"))
+                                .on_press(move |_: &()| {
                                     let root = group.with(|g| g.root.clone());
                                     collapsed_roots.update(|set| {
                                         if !set.remove(&root) {
@@ -642,77 +644,77 @@ pub(crate) fn sidebar_domain_group_view(
                     ))
                     .child(
                         view()
-                            .role(AccessibilityRole::Button)
                             .flex_1()
                             .min_w(px(0.0))
                             .h_full()
-                            .flex_row()
-                            .items_center()
-                            .gap_1()
-                            .rounded(px(RADIUS_SM))
-                            .active(|s| s.bg(bg_control_active()))
-                            .transition_colors()
-                            .duration(MOTION_INSTANT_MS)
-                            .ease_out()
-                            .focus_visible(apply_focus_ring)
                             .tooltip(label_tip(
                                 "点击只看此根域及其子域",
                                 "Click to filter this root domain & subdomains",
                             ))
-                            .on_press(move || {
-                                let root = group.with(|g| g.root.clone());
-                                filter.set(toggle_root_domain_facet(&filter.get(), &root));
-                            })
                             .child(
-                                mono(move || -> SharedString {
-                                    group.with(|g| g.root.clone()).into()
-                                })
-                                .flex_1()
-                                .min_w(px(0.0))
-                                .number_of_lines(1)
-                                .text_overflow(EllipsizeMode::Middle)
-                                .text_size(px(TEXT_SM))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(move || {
-                                    if root_active() {
-                                        accent_blue_text()
-                                    } else if root_muted() {
-                                        status_err_fg()
-                                    } else {
-                                        fg_secondary()
-                                    }
-                                }),
-                            )
-                            .child(sidebar_error_pill(move || group.with(|g| g.total_errors)))
-                            .child(
-                                mono(move || -> SharedString {
-                                    group
-                                        .with(|g| present::format_thousands(g.total_count as u64))
-                                        .into()
-                                })
-                                .tabular_nums()
-                                .text_size(px(TEXT_XS))
-                                .text_color(fg_muted()),
+                                button()
+                                    .selected(root_active)
+                                    .w_full()
+                                    .h_full()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_1()
+                                    .rounded(px(RADIUS_SM))
+                                    .active(|s| s.bg(bg_control_active()))
+                                    .transition_colors()
+                                    .duration(MOTION_INSTANT_MS)
+                                    .ease_out()
+                                    .focus_visible(apply_focus_ring)
+                                    .accessibility_label(move || {
+                                        Some(group.with(|g| g.root.clone()).into())
+                                    })
+                                    .on_press(move |_: &()| {
+                                        let root = group.with(|g| g.root.clone());
+                                        filter.set(toggle_root_domain_facet(&filter.get(), &root));
+                                    })
+                                    .child(
+                                        mono(move || -> SharedString {
+                                            group.with(|g| g.root.clone()).into()
+                                        })
+                                        .flex_1()
+                                        .min_w(px(0.0))
+                                        .number_of_lines(1)
+                                        .text_overflow(EllipsizeMode::Middle)
+                                        .text_size(px(TEXT_SM))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(
+                                            move || {
+                                                if root_active() {
+                                                    accent_blue_text()
+                                                } else if root_muted() {
+                                                    status_err_fg()
+                                                } else {
+                                                    fg_secondary()
+                                                }
+                                            },
+                                        ),
+                                    )
+                                    .child(sidebar_error_pill(move || {
+                                        group.with(|g| g.total_errors)
+                                    }))
+                                    .child(
+                                        mono(move || -> SharedString {
+                                            group
+                                                .with(|g| {
+                                                    present::format_thousands(g.total_count as u64)
+                                                })
+                                                .into()
+                                        })
+                                        .tabular_nums()
+                                        .text_size(px(TEXT_XS))
+                                        .text_color(fg_muted()),
+                                    ),
                             ),
                     )
                     .child({
                         let langs = ui_langs();
                         view()
-                            .role(AccessibilityRole::Button)
-                            .w(px(ControlSize::Xs.height()))
-                            .h(px(ControlSize::Xs.height()))
                             .flex_shrink_0()
-                            .rounded(px(RADIUS_SM))
-                            .flex_row()
-                            .items_center()
-                            .justify_center()
-                            .hover(|s| s.bg(bg_control_hover()))
-                            .active(|s| s.bg(bg_control_active()))
-                            .transition_colors()
-                            .duration(MOTION_INSTANT_MS)
-                            .ease_out()
-                            .focus_visible(apply_focus_ring)
-                            .label(tr("屏蔽或取消屏蔽整组域名", "Toggle mute root domain"))
                             .tooltip(
                                 tooltip().child(ui_tooltip_surface(
                                     text(move || -> SharedString {
@@ -728,26 +730,40 @@ pub(crate) fn sidebar_domain_group_view(
                                     .text_color(fg_primary()),
                                 )),
                             )
-                            .on_press(move || {
-                                let root = group.with(|g| g.root.clone());
-                                filter.set(toggle_mute_facet(&filter.get(), &root));
-                            })
-                            .child(text("×").text_size(px(TEXT_SM)).text_color(move || {
-                                if root_muted() {
-                                    status_err_fg()
-                                } else {
-                                    fg_muted()
-                                }
-                            }))
+                            .child(
+                                button()
+                                    .w(px(ControlSize::Xs.height()))
+                                    .h(px(ControlSize::Xs.height()))
+                                    .rounded(px(RADIUS_SM))
+                                    .flex_row()
+                                    .items_center()
+                                    .justify_center()
+                                    .hover(|s| s.bg(bg_control_hover()))
+                                    .active(|s| s.bg(bg_control_active()))
+                                    .transition_colors()
+                                    .duration(MOTION_INSTANT_MS)
+                                    .ease_out()
+                                    .focus_visible(apply_focus_ring)
+                                    .accessibility_label(tr_opt(
+                                        "屏蔽或取消屏蔽整组域名",
+                                        "Toggle mute root domain",
+                                    ))
+                                    .on_press(move |_: &()| {
+                                        let root = group.with(|g| g.root.clone());
+                                        filter.set(toggle_mute_facet(&filter.get(), &root));
+                                    })
+                                    .child(text("×").text_size(px(TEXT_SM)).text_color(
+                                        move || {
+                                            if root_muted() {
+                                                status_err_fg()
+                                            } else {
+                                                fg_muted()
+                                            }
+                                        },
+                                    )),
+                            )
                     }),
             )
-            .child(when(is_expanded, move || {
-                view().w_full().gap_0p5().child(each(
-                    move || group.with(|g| g.entries.clone()),
-                    |entry| entry.token.clone(),
-                    move |entry, _| sidebar_domain_leaf_row(entry, true, filter),
-                ))
-            }))
     })
 }
 
@@ -795,19 +811,9 @@ fn sidebar_domain_leaf_row(
         })
         .child(
             view()
-                .role(AccessibilityRole::Button)
                 .flex_1()
                 .min_w(px(0.0))
                 .h_full()
-                .flex_row()
-                .items_center()
-                .gap_1p5()
-                .rounded(px(RADIUS_SM))
-                .active(|s| s.bg(bg_control_active()))
-                .transition_colors()
-                .duration(MOTION_INSTANT_MS)
-                .ease_out()
-                .focus_visible(apply_focus_ring)
                 .tooltip(
                     tooltip().child(ui_tooltip_surface(
                         mono(move || -> SharedString { entry.with(|e| e.label.clone()).into() })
@@ -815,73 +821,77 @@ fn sidebar_domain_leaf_row(
                             .text_color(fg_primary()),
                     )),
                 )
-                .on_press(move || {
-                    let tok = entry.with(|e| e.token.clone());
-                    filter.set(toggle_host_facet(&filter.get(), &tok));
-                })
                 .child(
-                    view()
-                        .w(px(6.0))
-                        .h(px(6.0))
-                        .rounded_full()
-                        .flex_shrink_0()
-                        .bg(move || {
-                            if is_active() {
-                                accent_blue()
-                            } else if is_muted() {
-                                status_err_fg()
-                            } else {
-                                fg_muted()
-                            }
-                        }),
-                )
-                .child(
-                    mono(move || -> SharedString { entry.with(|e| e.label.clone()).into() })
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .number_of_lines(1)
-                        .text_overflow(EllipsizeMode::Middle)
-                        .text_size(px(TEXT_SM))
-                        .text_color(move || {
-                            if is_active() {
-                                accent_blue_text()
-                            } else if is_muted() {
-                                status_err_fg()
-                            } else {
-                                fg_primary()
-                            }
-                        }),
-                )
-                .child(sidebar_error_pill(move || entry.with(|e| e.error_count)))
-                .child(
-                    mono(move || -> SharedString {
-                        entry
-                            .with(|e| present::format_thousands(e.count as u64))
-                            .into()
-                    })
-                    .tabular_nums()
-                    .text_size(px(TEXT_XS))
-                    .text_color(fg_muted()),
+                    button()
+                        .selected(is_active)
+                        .w_full()
+                        .h_full()
+                        .flex_row()
+                        .items_center()
+                        .gap_1p5()
+                        .rounded(px(RADIUS_SM))
+                        .active(|s| s.bg(bg_control_active()))
+                        .transition_colors()
+                        .duration(MOTION_INSTANT_MS)
+                        .ease_out()
+                        .focus_visible(apply_focus_ring)
+                        .accessibility_label(move || Some(entry.with(|e| e.label.clone()).into()))
+                        .on_press(move |_: &()| {
+                            let tok = entry.with(|e| e.token.clone());
+                            filter.set(toggle_host_facet(&filter.get(), &tok));
+                        })
+                        .child(
+                            view()
+                                .w(px(6.0))
+                                .h(px(6.0))
+                                .rounded_full()
+                                .flex_shrink_0()
+                                .bg(move || {
+                                    if is_active() {
+                                        accent_blue()
+                                    } else if is_muted() {
+                                        status_err_fg()
+                                    } else {
+                                        fg_muted()
+                                    }
+                                }),
+                        )
+                        .child(
+                            mono(move || -> SharedString {
+                                entry.with(|e| e.label.clone()).into()
+                            })
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .number_of_lines(1)
+                            .text_overflow(EllipsizeMode::Middle)
+                            .text_size(px(TEXT_SM))
+                            .text_color(move || {
+                                if is_active() {
+                                    accent_blue_text()
+                                } else if is_muted() {
+                                    status_err_fg()
+                                } else {
+                                    fg_primary()
+                                }
+                            }),
+                        )
+                        .child(sidebar_error_pill(move || entry.with(|e| e.error_count)))
+                        .child(
+                            mono(move || -> SharedString {
+                                entry
+                                    .with(|e| present::format_thousands(e.count as u64))
+                                    .into()
+                            })
+                            .tabular_nums()
+                            .text_size(px(TEXT_XS))
+                            .text_color(fg_muted()),
+                        ),
                 ),
         )
         .child({
             let langs = ui_langs();
             view()
-                .role(AccessibilityRole::Button)
-                .w(px(ControlSize::Xs.height()))
-                .h(px(ControlSize::Xs.height()))
                 .flex_shrink_0()
-                .rounded(px(RADIUS_SM))
-                .flex_row()
-                .items_center()
-                .justify_center()
-                .hover(|s| s.bg(bg_control_hover()))
-                .active(|s| s.bg(bg_control_active()))
-                .transition_colors()
-                .duration(MOTION_INSTANT_MS)
-                .ease_out()
-                .focus_visible(apply_focus_ring)
-                .label(tr("屏蔽或取消屏蔽此域名", "Toggle mute domain"))
                 .tooltip(
                     tooltip().child(ui_tooltip_surface(
                         text(move || -> SharedString {
@@ -897,16 +907,32 @@ fn sidebar_domain_leaf_row(
                         .text_color(fg_primary()),
                     )),
                 )
-                .on_press(move || {
-                    let tok = entry.with(|e| e.token.clone());
-                    filter.set(toggle_mute_facet(&filter.get(), &tok));
-                })
-                .child(text("×").text_size(px(TEXT_SM)).text_color(move || {
-                    if is_muted() {
-                        status_err_fg()
-                    } else {
-                        fg_muted()
-                    }
-                }))
+                .child(
+                    button()
+                        .w(px(ControlSize::Xs.height()))
+                        .h(px(ControlSize::Xs.height()))
+                        .rounded(px(RADIUS_SM))
+                        .flex_row()
+                        .items_center()
+                        .justify_center()
+                        .hover(|s| s.bg(bg_control_hover()))
+                        .active(|s| s.bg(bg_control_active()))
+                        .transition_colors()
+                        .duration(MOTION_INSTANT_MS)
+                        .ease_out()
+                        .focus_visible(apply_focus_ring)
+                        .accessibility_label(tr_opt("屏蔽或取消屏蔽此域名", "Toggle mute domain"))
+                        .on_press(move |_: &()| {
+                            let tok = entry.with(|e| e.token.clone());
+                            filter.set(toggle_mute_facet(&filter.get(), &tok));
+                        })
+                        .child(text("×").text_size(px(TEXT_SM)).text_color(move || {
+                            if is_muted() {
+                                status_err_fg()
+                            } else {
+                                fg_muted()
+                            }
+                        })),
+                )
         })
 }

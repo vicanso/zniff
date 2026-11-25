@@ -45,7 +45,7 @@
   - **文件行数**：新增模块目标 `<= 600` 行，建议上限 `800` 行，**硬性上限 `1200` 行**（不含 `#[cfg(test)]`；测试超 `400` 行拆为独立 `tests.rs`）。
   - **函数复杂度**：单函数目标 `<= 80` 行，**硬性上限 `120` 行**；嵌套 `<= 4` 层；参数 `<= 7` 个（禁止继续为新函数加 `#[allow(clippy::too_many_arguments)]`）。
   - **历史大文件治理**：改动已超 1200 行的文件（`present.rs`、`share.rs`、`session.rs`、`rules.rs`、`web.rs`）时，禁止继续追加成块新系统，优先顺手抽离内聚子模块。
-- **nsh 组件使用原则**：写新 UI 前先查 `https://nsh.dev/elements/{name}.md`（打不开时查全局 `nsh` / `nsh-design-guides` skill 及本机已安装 `nsh` 源码），优先复用 `nsh_core::prelude` 与 `nsh_base` 原生能力，不造重复轮子；窗口尺寸/坐标/模式经 `window_state()` 停半秒写入配置并在启动恢复（显示器消失时居中回落主屏）。
+- **nsh 组件与设计规范优先原则**：新增或重构任何 UI 组件前，**必须先确认 `nsh`（`nsh_base` / `nsh_core` 本机源码或 `https://nsh.dev/elements/{name}.md`）是否已有对应原生组件**（如 `button`、`tabs`/`tab`、`select`、`sheet`、`resize_handle`、`collapsible`/`accordion`、`checkbox`、`radio_group`/`radio`、`switch`、`link`、`popover`、`menu`、`tooltip`、`data_table`、`command` 等），优先直接复用原生组件，不重复造轮子，也不用 `view().role(...)` 模拟标准控件（`popover()` / `menu()` 的 `.trigger(...)` 等要求 `View` 的宿主除外）；设计布局、间距密度、交互动效与键盘/无障碍规范时尽量参考 `nsh-design-guides` 与 `nsh` 官方设计/编码指南（查全局 `nsh` / `nsh-design-guides` skill 及本机源码），再叠加项目自身主题与桌面/Web 约束；窗口尺寸/坐标/模式经 `window_state()` 停半秒写入配置并在启动恢复（显示器消失时居中回落主屏）。
 
 ---
 

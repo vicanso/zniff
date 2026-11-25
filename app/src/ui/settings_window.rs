@@ -235,8 +235,10 @@ pub(crate) fn settings_shell(props: SettingsWindowProps, is_modal: bool) -> impl
         )
 }
 
-fn settings_sidebar(tab: Signal<SettingsTab>) -> impl IntoElement {
-    view()
+fn settings_sidebar(active_tab: Signal<SettingsTab>) -> impl IntoElement {
+    tabs()
+        .orientation(Axis::Vertical)
+        .accessibility_label(tr_opt("设置分组", "Settings sections"))
         .w(px(168.0))
         .h_full()
         .flex_shrink_0()
@@ -249,9 +251,10 @@ fn settings_sidebar(tab: Signal<SettingsTab>) -> impl IntoElement {
         .children(SettingsTab::ALL.into_iter().map(move |item| {
             let (zh, en) = item.label();
             let icon = item.glyph();
-            let active = move || tab.get() == item;
-            view()
-                .role(AccessibilityRole::Tab)
+            let active = move || active_tab.get() == item;
+            tab()
+                .selected(active)
+                .on_press(move |_: &()| active_tab.set(item))
                 .w_full()
                 .h(px(ControlSize::Md.height()))
                 .px_2p5()
@@ -288,7 +291,6 @@ fn settings_sidebar(tab: Signal<SettingsTab>) -> impl IntoElement {
                 .duration(MOTION_INSTANT_MS)
                 .ease_out()
                 .focus_visible(apply_focus_ring)
-                .on_press(move || tab.set(item))
                 .child(glyph_px(
                     14.0,
                     move || icon,
@@ -466,7 +468,7 @@ fn settings_general_tab(props: SettingsWindowProps) -> impl IntoElement {
     )
 }
 
-fn settings_layout_row(
+pub(crate) fn settings_layout_row(
     layout_mode: Signal<config::LayoutMode>,
     controls: Arc<Controls>,
 ) -> impl IntoElement {
@@ -485,11 +487,12 @@ fn settings_layout_row(
                 .text_color(fg_secondary()),
         )
         .child(
-            view()
+            radio_group()
                 .flex_row()
                 .items_center()
                 .gap_1()
-                .child(menu_inline_pill(
+                .accessibility_label(tr_opt("主界面布局", "Layout"))
+                .child(ui_radio_pill(
                     tr("左右分栏", "Split"),
                     move || layout_mode.get() == config::LayoutMode::Split,
                     move || {
@@ -499,7 +502,7 @@ fn settings_layout_row(
                         });
                     },
                 ))
-                .child(menu_inline_pill(
+                .child(ui_radio_pill(
                     tr("上下分栏", "Top / Bottom"),
                     move || layout_mode.get() == config::LayoutMode::TopBottom,
                     move || {

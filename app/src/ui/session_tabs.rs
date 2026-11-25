@@ -436,9 +436,9 @@ pub(crate) fn session_tab_bar() -> impl IntoElement {
     let Some(props) = use_context::<SessionTabBarProps>() else {
         return view().into_element();
     };
-    let tabs = props.tabs;
+    let tabs_sig = props.tabs;
     when(
-        move || tabs.with(|list| list.len() > 1),
+        move || tabs_sig.with(|list| list.len() > 1),
         move || {
             let props = props.clone();
             view()
@@ -458,11 +458,19 @@ pub(crate) fn session_tab_bar() -> impl IntoElement {
                         .flex_row()
                         .items_center()
                         .gap_1()
-                        .child(view().flex_row().items_center().gap_1().child(each(
-                            move || props.tabs.get(),
-                            |tab| tab.id,
-                            move |item, _index| session_tab_chip(props.clone(), item),
-                        ))),
+                        .child(
+                            tabs()
+                                .orientation(Axis::Horizontal)
+                                .accessibility_label(tr_opt("会话标签页", "Session tabs"))
+                                .flex_row()
+                                .items_center()
+                                .gap_1()
+                                .child(each(
+                                    move || props.tabs.get(),
+                                    |tab| tab.id,
+                                    move |item, _index| session_tab_chip(props.clone(), item),
+                                )),
+                        ),
                 )
         },
     )
@@ -478,9 +486,8 @@ fn session_tab_chip(props: SessionTabBarProps, item: ReadSignal<TabSummary>) -> 
     let close_props = props;
 
     view()
-        .role(AccessibilityRole::Tab)
+        .flex_shrink_0()
         .h(px(ControlSize::Xs.height()))
-        .px_2()
         .rounded(px(RADIUS_MD))
         .border_1()
         .border_color(move || {
@@ -498,109 +505,125 @@ fn session_tab_chip(props: SessionTabBarProps, item: ReadSignal<TabSummary>) -> 
             }
         })
         .hover(|s| s.bg(bg_control_hover()))
-        .active(|s| s.bg(bg_control_active()))
         .transition_colors()
         .duration(MOTION_INSTANT_MS)
         .ease_out()
-        .focus_visible(apply_focus_ring)
-        .flex_shrink_0()
         .flex_row()
         .items_center()
-        .gap_1p5()
-        .on_press(move || switch_active_tab(&switch_props, tab_id))
-        .child(when(
-            move || !is_ro,
-            move || {
-                view().w(px(6.0)).h(px(6.0)).rounded_full().bg(move || {
-                    if active_tab.get() == tab_id {
-                        status_ok_fg()
-                    } else {
-                        fg_muted()
-                    }
-                })
-            },
-        ))
         .child(
-            view()
-                .flex_shrink_0()
-                .tooltip(
-                    tooltip().child(ui_tooltip_surface(
-                        text(move || -> SharedString {
-                            item.with(|tab| {
-                                if tab.read_only {
-                                    tab.name.clone()
-                                } else {
-                                    t(ui_lang(langs), "实时会话", "Live").to_string()
-                                }
-                            })
-                            .into()
-                        })
-                        .text_size(px(TEXT_SM))
-                        .text_color(fg_primary()),
-                    )),
-                )
-                .child(
-                    text(move || -> SharedString {
-                        item.with(|tab| {
-                            let label = if tab.read_only {
-                                tab.name.as_str()
+            tab()
+                .selected(move || active_tab.get() == tab_id)
+                .h_full()
+                .pl_2()
+                .pr(if is_ro { px(4.0) } else { px(8.0) })
+                .rounded(px(RADIUS_MD))
+                .active(|s| s.bg(bg_control_active()))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .focus_visible(apply_focus_ring)
+                .flex_row()
+                .items_center()
+                .gap_1p5()
+                .on_press(move |_: &()| switch_active_tab(&switch_props, tab_id))
+                .child(when(
+                    move || !is_ro,
+                    move || {
+                        view().w(px(6.0)).h(px(6.0)).rounded_full().bg(move || {
+                            if active_tab.get() == tab_id {
+                                status_ok_fg()
                             } else {
-                                t(ui_lang(langs), "实时会话", "Live")
-                            };
-                            format!("{label} ({})", tab.count).into()
+                                fg_muted()
+                            }
                         })
-                    })
-                    .max_w(px(172.0))
-                    .number_of_lines(1)
-                    .text_overflow(EllipsizeMode::Middle)
-                    .text_size(px(TEXT_SM))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(move || {
-                        if active_tab.get() == tab_id {
-                            fg_primary()
-                        } else {
-                            fg_secondary()
-                        }
-                    }),
-                ),
-        )
-        .child(when(
-            move || is_ro,
-            move || {
-                view()
-                    .px_1()
-                    .py_0p5()
-                    .rounded(px(RADIUS_SM))
-                    .bg(bg_control())
-                    .child(
-                        text(tr("只读", "RO"))
-                            .text_size(px(TEXT_XS))
+                    },
+                ))
+                .child(
+                    view()
+                        .flex_shrink_0()
+                        .tooltip(
+                            tooltip().child(ui_tooltip_surface(
+                                text(move || -> SharedString {
+                                    item.with(|tab| {
+                                        if tab.read_only {
+                                            tab.name.clone()
+                                        } else {
+                                            t(ui_lang(langs), "实时会话", "Live").to_string()
+                                        }
+                                    })
+                                    .into()
+                                })
+                                .text_size(px(TEXT_SM))
+                                .text_color(fg_primary()),
+                            )),
+                        )
+                        .child(
+                            text(move || -> SharedString {
+                                item.with(|tab| {
+                                    let label = if tab.read_only {
+                                        tab.name.as_str()
+                                    } else {
+                                        t(ui_lang(langs), "实时会话", "Live")
+                                    };
+                                    format!("{label} ({})", tab.count).into()
+                                })
+                            })
+                            .max_w(px(172.0))
+                            .number_of_lines(1)
+                            .text_overflow(EllipsizeMode::Middle)
+                            .text_size(px(TEXT_SM))
                             .font_weight(FontWeight::MEDIUM)
-                            .text_color(fg_muted()),
-                    )
-            },
-        ))
+                            .text_color(move || {
+                                if active_tab.get() == tab_id {
+                                    fg_primary()
+                                } else {
+                                    fg_secondary()
+                                }
+                            }),
+                        ),
+                )
+                .child(when(
+                    move || is_ro,
+                    move || {
+                        view()
+                            .px_1()
+                            .py_0p5()
+                            .rounded(px(RADIUS_SM))
+                            .bg(bg_control())
+                            .child(
+                                text(tr("只读", "RO"))
+                                    .text_size(px(TEXT_XS))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(fg_muted()),
+                            )
+                    },
+                )),
+        )
         .child(when(
             move || is_ro,
             move || {
                 let close_props = close_props.clone();
                 view()
-                    .role(AccessibilityRole::Button)
-                    .w(px(ControlSize::Xs.height()))
-                    .h(px(ControlSize::Xs.height()))
-                    .rounded(px(RADIUS_SM))
-                    .items_center()
-                    .justify_center()
-                    .hover(|s| s.bg(bg_control_hover()))
-                    .active(|s| s.bg(bg_control_active()))
-                    .transition_colors()
-                    .duration(MOTION_INSTANT_MS)
-                    .ease_out()
-                    .focus_visible(apply_focus_ring)
-                    .label(tr("关闭标签", "Close tab"))
+                    .mr(px(2.0))
                     .tooltip(label_tip("关闭导入标签", "Close imported tab"))
-                    .on_press(move || close_imported_tab(&close_props, tab_id))
-                    .child(glyph_px(10.0, || Glyph::Close, || color(fg_muted())))
+                    .child(
+                        button()
+                            .w(px(ControlSize::Xs.height()))
+                            .h(px(ControlSize::Xs.height()))
+                            .rounded(px(RADIUS_SM))
+                            .flex_row()
+                            .items_center()
+                            .justify_center()
+                            .hover(|s| s.bg(bg_control_hover()))
+                            .active(|s| s.bg(bg_control_active()))
+                            .transition_colors()
+                            .duration(MOTION_INSTANT_MS)
+                            .ease_out()
+                            .focus_visible(apply_focus_ring)
+                            .accessibility_label(tr_opt("关闭标签", "Close tab"))
+                            .on_press(move |_: &()| close_imported_tab(&close_props, tab_id))
+                            .child(glyph_px(10.0, || Glyph::Close, || color(fg_muted()))),
+                    )
             },
         ))
 }

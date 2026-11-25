@@ -26,6 +26,7 @@ struct HeadlessTree {
     children: HashMap<NodeId, Vec<NodeId>>,
     texts: HashMap<NodeId, String>,
     placeholders: HashMap<NodeId, String>,
+    keymap: Option<Arc<nsh_core::keymap::Keymap>>,
 }
 
 impl HeadlessTree {
@@ -89,6 +90,9 @@ impl HeadlessTree {
                             command: nsh_core::Command::ScrollTo { x, y, .. },
                         } => {
                             scroll_echoes.push((*id, Point { x: *x, y: *y }));
+                        }
+                        MountItem::Keymap(km) => {
+                            self.keymap = Some(km.clone());
                         }
                         _ => {}
                     }
@@ -188,6 +192,25 @@ impl HeadlessTree {
             }
         }
         out
+    }
+
+    fn press_escape(&mut self, core: &mut Core<ApproxTextEngine>, editing: bool) -> bool {
+        let Some(km) = self.keymap.as_ref() else {
+            return false;
+        };
+        let stroke = nsh_core::keymap::Keystroke::parse_with("escape", true).unwrap();
+        let mut focus = nsh_core::keymap::KeyFocus::default();
+        focus.editing = editing;
+        let Some(id) = km.find_with(ROOT_ID, stroke, focus, false).fired() else {
+            return false;
+        };
+        core.component_event(
+            ROOT_ID,
+            EventKind::KeyCommand,
+            &EventPayload::Value(nsh_core::PayloadValue::Number(id as f64)),
+        );
+        self.pump(core);
+        true
     }
 }
 
@@ -1559,12 +1582,21 @@ fn e10_session_tabs_switch_close_and_cross_tab_baseline_diff_zh_en() {
             .h(px(120.0))
             .flex_col()
             .child(session_tab_bar())
+            .child(
+                button()
+                    .on_press({
+                        let controls = controls.clone();
+                        move |_: &()| tabs.set(session_tab_summaries(&controls, 1))
+                    })
+                    .child(text("btn_sync_tabs")),
+            )
             .child(text(move || {
                 let active = active_tab.get();
+                let count = tabs.with(Vec::len);
                 let base_host = resolve_baseline_flow(&controls, None, None)
                     .map(|f| f.host)
                     .unwrap_or_default();
-                format!("ACTIVE:{active} BASE:{base_host}")
+                format!("ACTIVE:{active} TABS:{count} BASE:{base_host}")
             }))
     }
 
@@ -1576,11 +1608,43 @@ fn e10_session_tabs_switch_close_and_cross_tab_baseline_diff_zh_en() {
         assert!(tree.has_text_containing(t(lang, "实时会话 (1)", "Live (1)")));
         assert!(tree.has_text_containing("prod.har (1)"));
         assert!(tree.has_text(t(lang, "只读", "RO")));
-        assert!(tree.has_text_containing("ACTIVE:1 BASE:live.example.com"));
+        assert!(tree.has_text_containing("ACTIVE:1 TABS:2 BASE:live.example.com"));
 
         // Click Live tab chip -> switches back to tab 0 while keeping baseline intact.
         assert!(tree.press_matching(&mut core, |s| s.contains(t(lang, "实时会话", "Live"))));
-        assert!(tree.has_text_containing("ACTIVE:0 BASE:live.example.com"));
+        assert!(tree.has_text_containing("ACTIVE:0 TABS:2 BASE:live.example.com"));
+
+        // Click the sibling close button next to the imported Tab: closes prod.har without switching into it.
+        let ro_label_id = tree
+            .live_node_ids()
+            .into_iter()
+            .find(|id| {
+                tree.texts
+                    .get(id)
+                    .is_some_and(|s| s == t(lang, "只读", "RO"))
+            })
+            .expect("RO badge");
+        let mut pill_id = ro_label_id;
+        for _ in 0..3 {
+            pill_id = tree.parent[&pill_id];
+        }
+        let close_wrapper_id = *tree.children[&pill_id]
+            .last()
+            .expect("close wrapper sibling next to tab");
+        let close_btn_id = tree.children[&close_wrapper_id][0];
+        core.component_event(
+            close_btn_id,
+            EventKind::Press,
+            &EventPayload::Press(PressEvent::default()),
+        );
+        tree.pump(&mut core);
+        assert!(tree.press_text(&mut core, "btn_sync_tabs"));
+        assert!(
+            tree.has_text_containing("ACTIVE:0 TABS:1 BASE:live.example.com"),
+            "closing imported tab via sibling button must keep active tab 0 in {lang:?}; texts={:?}",
+            tree.all_live_texts()
+        );
+        assert!(!tree.has_text_containing("prod.har (1)"));
     }
 }
 
@@ -2157,7 +2221,6 @@ fn facet_tab_has_filter_tracks_domain_mute_and_app_tokens() {
 #[test]
 fn facet_drawer_overlay_dismisses_on_press_outside_and_toggles_tabs() {
     use crate::session::{FacetEntry, FacetKind, SessionFacets};
-    use nsh_core::{PointerType, TouchEvent, TouchPhase, TouchPoint};
 
     #[component]
     fn FacetOverlayHarness() -> impl IntoElement {
@@ -2182,35 +2245,129 @@ fn facet_drawer_overlay_dismisses_on_press_outside_and_toggles_tabs() {
         let facets_open = signal(false);
         let facet_tab = signal(0_u8);
         let filter = signal(String::new());
-        let anchor = element_ref();
         view()
             .w(px(520.0))
             .h(px(640.0))
-            .child(facet_quick_bar(
+            .child(facet_quick_bar(facets, facets_open, facet_tab, filter))
+            .child(facet_drawer_overlay(
                 facets,
                 facets_open,
                 facet_tab,
                 filter,
-                anchor,
-            ))
-            .child(when(
                 move || facets_open.get(),
-                move || {
-                    facet_drawer_overlay(facets, facets_open, facet_tab, filter, anchor, || 360.0)
-                },
+                || 360.0,
             ))
     }
 
-    let touch_down = |path: Vec<NodeId>| -> EventPayload {
+    for lang in [Lang::Zh, Lang::En] {
+        TEST_LANG.set(lang);
+        let (mut core, mut tree) = mount::<FacetOverlayHarness>(Size::new(px(520.0), px(640.0)));
+        core.set_environment(nsh_core::element::Environment {
+            reduce_motion: true,
+            ..Default::default()
+        });
+        tree.pump(&mut core);
+        let domains_btn = t(lang, "域名 (1)", "Domains (1)");
+        let sheet_apps_tab = t(lang, "应用", "Apps");
+
+        assert!(!tree.has_text("api.vicanso.dev"));
+        assert!(tree.press_text(&mut core, domains_btn));
+        assert!(tree.has_text("api.vicanso.dev"));
+
+        // Pressing the sheet backdrop closes the left drawer.
+        let modal_id = tree
+            .live_node_ids()
+            .into_iter()
+            .find(|id| tree.kinds.get(id) == Some(&ViewKind::Modal))
+            .expect("sheet modal");
+        let backdrop_id = tree
+            .children
+            .get(&modal_id)
+            .and_then(|kids| kids.first().copied())
+            .expect("sheet backdrop");
+        core.component_event(
+            backdrop_id,
+            EventKind::Press,
+            &EventPayload::Press(PressEvent::default()),
+        );
+        tree.pump(&mut core);
+        assert!(
+            !tree.has_text("api.vicanso.dev"),
+            "backdrop press must dismiss facet sheet in {lang:?}"
+        );
+
+        // Re-open Domains, switch to Apps tab inside the sheet, then dismiss with Escape.
+        assert!(tree.press_text(&mut core, domains_btn));
+        assert!(tree.has_text("api.vicanso.dev"));
+
+        assert!(tree.press_text(&mut core, sheet_apps_tab));
+        assert!(!tree.has_text("api.vicanso.dev"));
+        assert!(tree.has_text("curl"));
+
+        let modal_id = tree
+            .live_node_ids()
+            .into_iter()
+            .find(|id| tree.kinds.get(id) == Some(&ViewKind::Modal))
+            .expect("sheet modal after tab switch");
+        core.component_event(modal_id, EventKind::RequestClose, &EventPayload::None);
+        tree.pump(&mut core);
+        assert!(
+            !tree.has_text("curl"),
+            "Escape/RequestClose must dismiss facet sheet in {lang:?}"
+        );
+    }
+}
+
+#[test]
+fn resize_handles_update_and_clamp_pane_dimensions() {
+    use nsh_core::{PointerType, TouchEvent, TouchPhase, TouchPoint};
+
+    #[component]
+    fn ResizeHarness() -> impl IntoElement {
+        let lang = TEST_LANG.with(Cell::get);
+        provide_base_contexts(lang);
+        let controls = make_controls("resize-handles");
+        let list_width = signal(380.0_f32);
+        let list_height = signal(320.0_f32);
+        let sidebar_width = signal(SIDEBAR_WIDTH_DEFAULT);
+        let layout_mode = signal(config::LayoutMode::Split);
+        let sidebar_collapsed = signal(false);
+
+        view()
+            .w(px(1200.0))
+            .h(px(800.0))
+            .flex_col()
+            .child(row_splitter(list_height, controls.clone()))
+            .child(column_splitter(
+                list_width,
+                layout_mode,
+                sidebar_width,
+                sidebar_collapsed,
+                controls,
+            ))
+            .child(text(move || {
+                format!(
+                    "DIMS|{}|{}",
+                    list_width.get().round() as i32,
+                    list_height.get().round() as i32
+                )
+            }))
+    }
+
+    fn touch_drag(phase: TouchPhase, path: Vec<NodeId>, x: f32, y: f32, ts: f64) -> EventPayload {
         EventPayload::Touch(Box::new(TouchEvent {
-            phase: TouchPhase::Start,
-            timestamp: 0.0,
+            phase,
+            timestamp: ts,
             points: vec![TouchPoint {
                 id: 1,
                 target: path[0],
-                path,
-                page: Point::new(px(120.0), px(220.0)),
-                location: Point::new(px(120.0), px(220.0)),
+                path: if phase == TouchPhase::Start {
+                    path
+                } else {
+                    Vec::new()
+                },
+                page: Point::new(px(x), px(y)),
+                location: Point::new(px(x), px(y)),
                 changed: true,
                 pointer_type: PointerType::Mouse,
                 pressure: 0.5,
@@ -2220,57 +2377,68 @@ fn facet_drawer_overlay_dismisses_on_press_outside_and_toggles_tabs() {
             activated: None,
             modifiers: Default::default(),
         }))
-    };
-
-    for lang in [Lang::Zh, Lang::En] {
-        TEST_LANG.set(lang);
-        let (mut core, mut tree) = mount::<FacetOverlayHarness>(Size::new(px(520.0), px(640.0)));
-        let domains_btn = t(lang, "域名 (1)", "Domains (1)");
-        let apps_btn = t(lang, "应用 (1)", "Apps (1)");
-
-        assert!(!tree.has_text("api.vicanso.dev"));
-        assert!(tree.press_text(&mut core, domains_btn));
-        assert!(tree.has_text("api.vicanso.dev"));
-
-        // Pressing outside the overlay and its tab anchor closes the drawer.
-        core.component_event(ROOT_ID, EventKind::Touch, &touch_down(vec![ROOT_ID]));
-        tree.pump(&mut core);
-        assert!(
-            !tree.has_text("api.vicanso.dev"),
-            "PressOutside on window root must dismiss facet drawer in {lang:?}"
-        );
-
-        // Re-open Domains, then simulate touching & pressing the Apps tab inside the anchor:
-        // anchor exclusion prevents premature dismissal and switches cleanly to Apps.
-        assert!(tree.press_text(&mut core, domains_btn));
-        assert!(tree.has_text("api.vicanso.dev"));
-
-        let apps_text_id = tree
-            .live_node_ids()
-            .into_iter()
-            .find(|id| tree.texts.get(id).is_some_and(|s| s == apps_btn))
-            .expect("Apps button label");
-        let mut anchor_path = Vec::new();
-        let mut cur = Some(apps_text_id);
-        while let Some(node) = cur {
-            anchor_path.push(node);
-            cur = tree.parent.get(&node).copied();
-        }
-        core.component_event(ROOT_ID, EventKind::Touch, &touch_down(anchor_path));
-        tree.pump(&mut core);
-        assert!(
-            tree.has_text("api.vicanso.dev"),
-            "Touch inside tab anchor must not dismiss overlay in {lang:?}"
-        );
-
-        assert!(tree.press_text(&mut core, apps_btn));
-        assert!(!tree.has_text("api.vicanso.dev"));
-        assert!(tree.has_text("curl"));
-
-        // Pressing active Apps tab again toggles the drawer closed.
-        assert!(tree.press_text(&mut core, apps_btn));
-        assert!(!tree.has_text("curl"));
     }
+
+    TEST_LANG.set(Lang::En);
+    let (mut core, mut tree) = mount::<ResizeHarness>(Size::new(px(1200.0), px(800.0)));
+    assert!(tree.has_text("DIMS|380|320"));
+
+    // Column splitter is the second child (after row_splitter wrapper) and holds the horizontal ResizeHandle.
+    let harness_root = tree.children[&ROOT_ID][0];
+    let col_wrapper = tree.children[&harness_root][1];
+    let col_handle = tree.children[&col_wrapper][0];
+    let col_path = vec![col_handle, col_wrapper, harness_root, ROOT_ID];
+    core.component_event(
+        ROOT_ID,
+        EventKind::Touch,
+        &touch_drag(TouchPhase::Start, col_path, 380.0, 200.0, 0.0),
+    );
+    tree.pump(&mut core);
+    core.component_event(
+        ROOT_ID,
+        EventKind::Touch,
+        &touch_drag(TouchPhase::Move, vec![col_handle], 428.0, 200.0, 16.0),
+    );
+    tree.pump(&mut core);
+    core.component_event(
+        ROOT_ID,
+        EventKind::Touch,
+        &touch_drag(TouchPhase::End, vec![col_handle], 428.0, 200.0, 32.0),
+    );
+    tree.pump(&mut core);
+    assert!(
+        tree.has_text("DIMS|428|320"),
+        "expected column resize to apply offset; texts={:?}",
+        tree.all_live_texts()
+    );
+
+    // Row splitter is the first child and holds the vertical ResizeHandle.
+    let row_wrapper = tree.children[&harness_root][0];
+    let row_handle = tree.children[&row_wrapper][0];
+    let row_path = vec![row_handle, row_wrapper, harness_root, ROOT_ID];
+    core.component_event(
+        ROOT_ID,
+        EventKind::Touch,
+        &touch_drag(TouchPhase::Start, row_path, 200.0, 320.0, 48.0),
+    );
+    tree.pump(&mut core);
+    core.component_event(
+        ROOT_ID,
+        EventKind::Touch,
+        &touch_drag(TouchPhase::Move, vec![row_handle], 200.0, 280.0, 64.0),
+    );
+    tree.pump(&mut core);
+    core.component_event(
+        ROOT_ID,
+        EventKind::Touch,
+        &touch_drag(TouchPhase::End, vec![row_handle], 200.0, 280.0, 80.0),
+    );
+    tree.pump(&mut core);
+    assert!(
+        tree.has_text("DIMS|428|280"),
+        "expected row resize to apply offset; texts={:?}",
+        tree.all_live_texts()
+    );
 }
 
 #[test]
@@ -3083,5 +3251,385 @@ async fn popover_trigger_tooltips_stay_suppressed_while_open_and_single_escape_c
                 "single Escape must unmount open {trigger_label} popover in {lang:?}"
             );
         }
+    }
+}
+
+#[test]
+fn batch3_collapsible_headers_and_onboarding_disclosure_toggle_zh_en() {
+    #[component]
+    fn CollapsibleHarness() -> impl IntoElement {
+        let lang = TEST_LANG.with(Cell::get);
+        provide_base_contexts(lang);
+        let controls = make_controls("b3-coll");
+        let profiles = make_profiles();
+        let folded = signal(0_u8);
+        let headers = signal(vec![HeaderLine {
+            key: 1,
+            name: "x-trace-id".into(),
+            value: "val-alpha".into(),
+            hint: None,
+        }]);
+        let props = OnboardingProps {
+            controls: controls.clone(),
+            running: signal(true),
+            listen: signal("127.0.0.1:8877".into()),
+            ca_ui: make_ca_signals(false),
+            use_system_proxy: signal(false),
+            adb_count: signal(0),
+            flow_total: signal(0),
+            onboarding_traffic: signal(OnboardingTraffic::default()),
+            compose: make_compose(),
+            selected: signal(None),
+            profiles,
+            install_ca: Rc::new(|| {}),
+            toggle_system_proxy: Rc::new(|| {}),
+            qr_open: signal(false),
+            pending_qr: signal(false),
+        };
+        let root = view()
+            .w(px(640.0))
+            .h(px(720.0))
+            .flex_col()
+            .gap_2()
+            .child(header_section(HeaderSectionProps {
+                zh: "响应头",
+                en: "Response headers",
+                lines: headers,
+                loading: signal(false),
+                pane_width: signal(520.0),
+                folded,
+                bit: FOLD_RES_HEADERS,
+                controls,
+            }))
+            .child(text(move || format!("FOLDED:{}", folded.get())));
+        #[cfg(not(target_arch = "wasm32"))]
+        let root = root.child(onboarding_more_connection_disclosure(&props));
+        root
+    }
+
+    for lang in [Lang::Zh, Lang::En] {
+        TEST_LANG.set(lang);
+        let (mut core, mut tree) = mount::<CollapsibleHarness>(Size::new(px(640.0), px(720.0)));
+        core.set_environment(nsh_core::element::Environment {
+            reduce_motion: true,
+            ..Default::default()
+        });
+        tree.pump(&mut core);
+
+        assert!(tree.has_text("FOLDED:0"));
+        assert!(tree.has_text("val-alpha"));
+        assert!(!tree.has_text(t(lang, "复制代理环境", "Copy Proxy Env")));
+
+        // Toggle response headers collapsible closed & re-open.
+        assert!(tree.press_text(&mut core, t(lang, "响应头", "Response headers")));
+        assert!(tree.has_text(&format!("FOLDED:{FOLD_RES_HEADERS}")));
+        assert!(
+            !tree.has_text("val-alpha"),
+            "collapsing header_section must unmount header lines in {lang:?}"
+        );
+        assert!(tree.press_text(&mut core, t(lang, "响应头", "Response headers")));
+        assert!(tree.has_text("FOLDED:0"));
+        assert!(tree.has_text("val-alpha"));
+
+        // Toggle onboarding disclosure open & closed.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let toggle = t(lang, "更多连接方式", "More connection options");
+            let utility = t(lang, "复制代理环境", "Copy Proxy Env");
+            assert!(tree.press_text(&mut core, toggle));
+            assert!(
+                tree.has_text(utility),
+                "opening onboarding disclosure must show utility strip in {lang:?}"
+            );
+            assert!(tree.press_text(&mut core, toggle));
+            assert!(
+                !tree.has_text(utility),
+                "closing onboarding disclosure must hide utility strip in {lang:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn batch3_checkbox_redact_toggles_cleanly_zh_en() {
+    #[component]
+    fn CheckboxHarness() -> impl IntoElement {
+        let lang = TEST_LANG.with(Cell::get);
+        provide_base_contexts(lang);
+        let controls = make_controls("b3-chk");
+        let menu_open = signal(true);
+        let rows = signal(Vec::new());
+        let seq_builder = make_seq_builder();
+        let compose = make_compose();
+        let selected = signal(None);
+        let shown_phase = signal(Phase::Empty);
+        view()
+            .w(px(360.0))
+            .h(px(120.0))
+            .flex_col()
+            .child(menu_redact_row(
+                menu_open,
+                controls,
+                rows,
+                seq_builder,
+                compose,
+                selected,
+                shown_phase,
+            ))
+            .child(text(move || {
+                format!("REDACT:{}", seq_builder.redact_export.get())
+            }))
+    }
+
+    for lang in [Lang::Zh, Lang::En] {
+        TEST_LANG.set(lang);
+        let (mut core, mut tree) = mount::<CheckboxHarness>(Size::new(px(360.0), px(120.0)));
+        tree.pump(&mut core);
+        let label = t(lang, "导出/分享脱敏", "Redact exports");
+        assert!(tree.has_text("REDACT:false"));
+        assert!(tree.press_text(&mut core, label));
+        assert!(
+            tree.has_text("REDACT:true"),
+            "pressing redact checkbox must check in {lang:?}"
+        );
+        assert!(tree.press_text(&mut core, label));
+        assert!(
+            tree.has_text("REDACT:false"),
+            "pressing redact checkbox again must uncheck in {lang:?}"
+        );
+    }
+}
+
+#[test]
+fn batch3_radio_groups_switch_layout_theme_and_language_cleanly() {
+    #[component]
+    fn RadioGroupHarness() -> impl IntoElement {
+        let lang = TEST_LANG.with(Cell::get);
+        let (appearance, _) = provide_base_contexts(lang);
+        let controls = make_controls("b3-radio");
+        let profiles = make_profiles();
+        let langs = ui_langs();
+        view()
+            .w(px(480.0))
+            .h(px(240.0))
+            .flex_col()
+            .gap_1()
+            .child(settings_layout_row(profiles.layout_mode, controls.clone()))
+            .child(menu_theme_row(controls.clone()))
+            .child(menu_lang_row(controls))
+            .child(text(move || {
+                format!(
+                    "RADIO|{:?}|{:?}|{:?}",
+                    profiles.layout_mode.get(),
+                    appearance.theme_mode.get(),
+                    langs.get()
+                )
+            }))
+    }
+
+    TEST_LANG.set(Lang::Zh);
+    let (mut core, mut tree) = mount::<RadioGroupHarness>(Size::new(px(480.0), px(240.0)));
+    tree.pump(&mut core);
+    assert!(tree.has_text("RADIO|Split|System|Some(Zh)"));
+
+    // Pressing already-selected radio stays idempotent; pressing sibling selects it exclusively.
+    let _ = tree.press_text(&mut core, "左右分栏");
+    assert!(tree.has_text("RADIO|Split|System|Some(Zh)"));
+    assert!(tree.press_text(&mut core, "上下分栏"));
+    assert!(tree.has_text("RADIO|TopBottom|System|Some(Zh)"));
+
+    assert!(tree.press_text(&mut core, "深色"));
+    assert!(tree.has_text("RADIO|TopBottom|Dark|Some(Zh)"));
+    assert!(tree.press_text(&mut core, "浅色"));
+    assert!(tree.has_text("RADIO|TopBottom|Light|Some(Zh)"));
+
+    assert!(tree.press_text(&mut core, "EN"));
+    assert!(tree.has_text("RADIO|TopBottom|Light|Some(En)"));
+    assert!(tree.has_text("Top / Bottom"));
+    assert!(tree.press_text(&mut core, "中文"));
+    assert!(tree.has_text("RADIO|TopBottom|Light|Some(Zh)"));
+}
+
+#[test]
+fn batch3_link_chip_handles_open_in_both_languages() {
+    #[component]
+    fn LinkHarness() -> impl IntoElement {
+        let lang = TEST_LANG.with(Cell::get);
+        provide_base_contexts(lang);
+        let controls = make_controls("b3-link");
+        let opened = signal(String::new());
+        view()
+            .w(px(360.0))
+            .h(px(120.0))
+            .flex_row()
+            .gap_2()
+            .child(about_link_chip(
+                Glyph::DeviceDesktop,
+                tr("官网", "Website"),
+                "https://vicanso.dev",
+                controls,
+            ))
+            .child(
+                link()
+                    .href("https://vicanso.dev")
+                    .open_with(LinkOpenWith::App)
+                    .on_open(move |href: &SharedString| opened.set(href.to_string()))
+                    .child(text("LINK_OPEN_PROBE")),
+            )
+            .child(text(move || format!("OPENED:{}", opened.get())))
+    }
+
+    for lang in [Lang::Zh, Lang::En] {
+        TEST_LANG.set(lang);
+        let (mut core, mut tree) = mount::<LinkHarness>(Size::new(px(360.0), px(120.0)));
+        tree.pump(&mut core);
+        assert!(tree.has_text(t(lang, "官网", "Website")));
+        assert!(tree.has_text("OPENED:"));
+        assert!(tree.press_text(&mut core, "LINK_OPEN_PROBE"));
+        assert!(
+            tree.has_text("OPENED:https://vicanso.dev"),
+            "nsh_base::link with LinkOpenWith::App must fire on_open with href in {lang:?}"
+        );
+    }
+}
+
+#[test]
+fn facet_drawer_sheet_escape_closes_even_while_editing_zh_en() {
+    use crate::session::{FacetEntry, FacetKind, SessionFacets};
+
+    #[component]
+    fn FacetSheetEscapeHarness() -> impl IntoElement {
+        let lang = TEST_LANG.with(Cell::get);
+        provide_base_contexts(lang);
+        let facets = signal(SessionFacets {
+            domains: vec![FacetEntry {
+                label: "api.vicanso.dev".into(),
+                token: "api.vicanso.dev".into(),
+                kind: FacetKind::Domain,
+                count: 1,
+                error_count: 0,
+            }],
+            apps: vec![],
+        });
+        let facets_open = signal(false);
+        let facet_tab = signal(0_u8);
+        let filter = signal(String::new());
+        on_key("escape", move |_| {
+            if facets_open.get() {
+                facets_open.set(false);
+            }
+        });
+        view()
+            .w(px(520.0))
+            .h(px(640.0))
+            .child(facet_quick_bar(facets, facets_open, facet_tab, filter))
+            .child(facet_drawer_overlay(
+                facets,
+                facets_open,
+                facet_tab,
+                filter,
+                move || facets_open.get(),
+                || 360.0,
+            ))
+    }
+
+    for lang in [Lang::Zh, Lang::En] {
+        TEST_LANG.set(lang);
+        let (mut core, mut tree) =
+            mount::<FacetSheetEscapeHarness>(Size::new(px(520.0), px(640.0)));
+        core.set_environment(nsh_core::element::Environment {
+            reduce_motion: true,
+            ..Default::default()
+        });
+        tree.pump(&mut core);
+        let domains_btn = t(lang, "域名 (1)", "Domains (1)");
+
+        assert!(!tree.has_text("api.vicanso.dev"));
+        assert!(tree.press_text(&mut core, domains_btn));
+        assert!(tree.has_text("api.vicanso.dev"));
+
+        assert!(
+            tree.press_escape(&mut core, true),
+            "Escape while editing must still fire Sheet binding in {lang:?}"
+        );
+        assert!(
+            !tree.has_text("api.vicanso.dev"),
+            "Sheet must close on Escape even when editing in {lang:?}"
+        );
+
+        assert!(tree.press_text(&mut core, domains_btn));
+        assert!(tree.has_text("api.vicanso.dev"));
+        assert!(tree.press_escape(&mut core, false));
+        assert!(
+            !tree.has_text("api.vicanso.dev"),
+            "Sheet must close on normal Escape in {lang:?}"
+        );
+    }
+}
+
+#[test]
+fn rules_select_escape_closes_dropdown_before_parent_modal_zh_en() {
+    #[component]
+    fn SelectEscapeHarness() -> impl IntoElement {
+        let lang = TEST_LANG.with(Cell::get);
+        provide_base_contexts(lang);
+        let panel_open = signal(true);
+        let draft = make_rule_draft();
+        draft.kind.set(6);
+        on_key("escape", move |_| {
+            if panel_open.get() {
+                panel_open.set(false);
+            }
+        });
+        view()
+            .w(px(640.0))
+            .h(px(640.0))
+            .child(when(
+                move || panel_open.get(),
+                move || quick_kind_dropdown(draft),
+            ))
+            .child(text(move || format!("PANEL|{}", panel_open.get())))
+    }
+
+    for lang in [Lang::Zh, Lang::En] {
+        TEST_LANG.set(lang);
+        let (mut core, mut tree) = mount::<SelectEscapeHarness>(Size::new(px(640.0), px(640.0)));
+        core.set_environment(nsh_core::element::Environment {
+            reduce_motion: true,
+            ..Default::default()
+        });
+        tree.pump(&mut core);
+        let (kind_zh, kind_en) = quick_kind(6).label();
+        let trigger_label = match lang {
+            Lang::Zh => kind_zh,
+            Lang::En => kind_en,
+        };
+        let group_label = t(lang, "内容改写", "Content Rewrite");
+
+        assert!(tree.has_text("PANEL|true"));
+        assert!(!tree.has_text(group_label));
+        assert!(tree.press_text(&mut core, trigger_label));
+        assert!(
+            tree.has_text(group_label),
+            "Select dropdown must open on trigger press in {lang:?}"
+        );
+
+        // First Escape closes only the Select dropdown, leaving parent panel open.
+        assert!(tree.press_escape(&mut core, false));
+        assert!(
+            !tree.has_text(group_label),
+            "first Escape must close Select dropdown in {lang:?}"
+        );
+        assert!(
+            tree.has_text("PANEL|true"),
+            "first Escape must not close parent panel in {lang:?}"
+        );
+
+        // Second Escape falls through to the parent panel's Escape handler.
+        assert!(tree.press_escape(&mut core, false));
+        assert!(
+            tree.has_text("PANEL|false"),
+            "second Escape must close parent panel in {lang:?}"
+        );
     }
 }

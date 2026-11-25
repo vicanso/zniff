@@ -321,16 +321,22 @@ fn onboarding_secondary_section(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn onboarding_more_connection_disclosure(props: &OnboardingProps) -> impl IntoElement {
+pub(crate) fn onboarding_more_connection_disclosure(props: &OnboardingProps) -> impl IntoElement {
     let more_open = signal(props.use_system_proxy.get_untracked());
     let strip_props = props.clone();
-    view()
+    collapsible()
         .w_full()
         .flex_col()
-        .gap_2()
-        .child(
+        .open(move || more_open.get())
+        .reveal(true)
+        .content(
             view()
-                .role(AccessibilityRole::Button)
+                .w_full()
+                .pt_2()
+                .child(onboarding_utility_strip(strip_props)),
+        )
+        .child(
+            button()
                 .self_start()
                 .h(px(ControlSize::Xs.height()))
                 .px_1p5()
@@ -344,8 +350,8 @@ fn onboarding_more_connection_disclosure(props: &OnboardingProps) -> impl IntoEl
                 .duration(move || motion_ms(MOTION_INSTANT_MS))
                 .ease_out()
                 .focus_visible(apply_focus_ring)
-                .label(tr("更多连接方式", "More connection options"))
-                .on_press(move || more_open.update(|v| *v = !*v))
+                .accessibility_label(tr_opt("更多连接方式", "More connection options"))
+                .on_press(move |_: &()| more_open.update(|v| *v = !*v))
                 .child(ui_rotating_chevron(
                     10.0,
                     move || more_open.get(),
@@ -358,10 +364,6 @@ fn onboarding_more_connection_disclosure(props: &OnboardingProps) -> impl IntoEl
                         .text_color(fg_muted()),
                 ),
         )
-        .child(when(
-            move || more_open.get(),
-            move || onboarding_utility_strip(strip_props.clone()),
-        ))
 }
 
 #[cfg(not(target_arch = "wasm32"))]

@@ -3358,8 +3358,18 @@ fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
     );
 
     // 5. Pressing Start/Stop button node toggles capture state twice cleanly.
+    let start_press_id = tree
+        .children
+        .get(&start_btn_id)
+        .and_then(|kids| kids.first().copied())
+        .filter(|id| {
+            tree.events
+                .get(id)
+                .is_some_and(|ev| ev.contains(EventKind::Press))
+        })
+        .unwrap_or(start_btn_id);
     assert!(core.component_event(
-        start_btn_id,
+        start_press_id,
         EventKind::Press,
         &EventPayload::Press(PressEvent::default()),
     ));
@@ -3371,7 +3381,7 @@ fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
     });
 
     assert!(core.component_event(
-        start_btn_id,
+        start_press_id,
         EventKind::Press,
         &EventPayload::Press(PressEvent::default()),
     ));

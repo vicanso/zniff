@@ -145,9 +145,27 @@ fn code_snippets_section(
             Snippet::RustStruct,
         ),
     ];
-    view()
+    collapsible()
         .w_full()
-        .gap_0p5()
+        .open(move || code_open.get())
+        .reveal(true)
+        .content({
+            let mut group = view().w_full().pt_0p5().pl_2().gap_0p5();
+            for (localized, raw, snippet) in entries {
+                let cb = controls.clone();
+                group = group.child(match localized {
+                    Some((zh, en)) => action_item(tr(zh, en), move || {
+                        copy_snippet(&cb, selected.get(), snippet);
+                    })
+                    .into_element(),
+                    None => action_item(raw, move || {
+                        copy_snippet(&cb, selected.get(), snippet);
+                    })
+                    .into_element(),
+                });
+            }
+            group
+        })
         .child(
             menu_item()
                 .close_on_select(false)
@@ -177,26 +195,6 @@ fn code_snippets_section(
                     || color(fg_muted()),
                 )),
         )
-        .child(when(
-            move || code_open.get(),
-            move || {
-                let mut group = view().w_full().pl_2().gap_0p5();
-                for (localized, raw, snippet) in entries {
-                    let cb = controls.clone();
-                    group = group.child(match localized {
-                        Some((zh, en)) => action_item(tr(zh, en), move || {
-                            copy_snippet(&cb, selected.get(), snippet);
-                        })
-                        .into_element(),
-                        None => action_item(raw, move || {
-                            copy_snippet(&cb, selected.get(), snippet);
-                        })
-                        .into_element(),
-                    });
-                }
-                group
-            },
-        ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -736,8 +734,7 @@ pub(crate) fn detail_button(
     label: impl IntoReactive<SharedString>,
     on_press: impl Fn() + 'static,
 ) -> impl IntoElement {
-    view()
-        .role(AccessibilityRole::Button)
+    button()
         .h(px(CONTROL_H))
         .px_2()
         .flex_shrink_0()
@@ -753,7 +750,7 @@ pub(crate) fn detail_button(
         .duration(MOTION_INSTANT_MS)
         .ease_out()
         .focus_visible(apply_focus_ring)
-        .on_press(on_press)
+        .on_press(move |_: &()| on_press())
         .child(
             text(label)
                 .number_of_lines(1)

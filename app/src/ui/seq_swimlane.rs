@@ -79,8 +79,7 @@ pub(crate) fn seq_action_button(
     let enabled_active = enabled.clone();
     let enabled_off = enabled.clone();
     let enabled_text = enabled;
-    view()
-        .role(AccessibilityRole::Button)
+    button()
         .h(px(CONTROL_H))
         .px_2p5()
         .rounded(px(RADIUS_MD))
@@ -118,7 +117,7 @@ pub(crate) fn seq_action_button(
         .disabled(move || !enabled_off())
         .flex_row()
         .items_center()
-        .on_press(on_press)
+        .on_press(move |_: &()| on_press())
         .child(control_text(label).text_color(move || {
             if enabled_text() {
                 fg_secondary()
@@ -134,8 +133,8 @@ pub(crate) fn seq_option_toggle(
     en: &'static str,
     on_toggle: impl Fn() + 'static,
 ) -> impl IntoElement {
-    view()
-        .role(AccessibilityRole::Button)
+    button()
+        .selected(move || on.get())
         .h(px(CONTROL_H))
         .px_2p5()
         .rounded(px(RADIUS_MD))
@@ -171,7 +170,8 @@ pub(crate) fn seq_option_toggle(
         .flex_row()
         .items_center()
         .gap_1p5()
-        .on_press(move || {
+        .accessibility_label(tr_opt(zh, en))
+        .on_press(move |_: &()| {
             on.set(!on.get());
             on_toggle();
         })
@@ -256,8 +256,8 @@ pub(crate) fn seq_mode_tab(
     en: &'static str,
 ) -> impl IntoElement {
     let is_active = move || mode.get() == target;
-    view()
-        .role(AccessibilityRole::Tab)
+    tab()
+        .selected(is_active)
         .h(px(24.0))
         .px_2p5()
         .rounded(px(RADIUS_SM))
@@ -286,7 +286,7 @@ pub(crate) fn seq_mode_tab(
         })
         .flex_row()
         .items_center()
-        .on_press(move || {
+        .on_press(move |_: &()| {
             if target == 2 {
                 source_flowchart.set(true);
             } else if target == 0 || target == 1 {
@@ -565,8 +565,7 @@ pub(crate) fn seq_swimlane_row(
             .with(|d| d.steps.get(at.index()).cloned())
             .unwrap_or_default()
     });
-    view()
-        .role(AccessibilityRole::Button)
+    button()
         .w(move || layout.with(|(_, total_w)| px(*total_w)))
         .h(px(SEQ_SWIMLANE_STEP_H))
         .relative()
@@ -576,7 +575,7 @@ pub(crate) fn seq_swimlane_row(
         .duration(MOTION_INSTANT_MS)
         .ease_out()
         .focus_visible(apply_focus_ring)
-        .on_press(move || {
+        .on_press(move |_: &()| {
             jump_to_seq_flow(step.with(|s| s.flow_id), selected, compose, seq_builder);
         })
         .child(

@@ -16,7 +16,11 @@ This skill complements `nsh` (API/build recipes) and `nsh-design-guides` (visual
 
 ## Core Architecture & Quality Gates
 
-1. **Structural Complexity Caps**
+1. **NSH-First Component Reuse & Design Alignment**
+   - Before building or refactoring any UI control, layout primitive, or overlay, check local `nsh-base` / `nsh-core` source or `https://nsh.dev/elements/{name}.md` first and reuse native components (`button`, `tabs`/`tab`, `select`, `sheet`, `resize_handle`, `collapsible`/`accordion`, `checkbox`, `radio_group`/`radio`, `switch`, `link`, `popover`, `menu`, `tooltip`, `data_table`, `command`, etc.) rather than hand-rolling `view().role(...)` or custom drag/overlay engines.
+   - Align layout hierarchy, spacing/density, keyboard roving navigation, focus-visible rings, accessibility semantics, and reduced-motion-aware animations with `nsh-design-guides` and official NSH coding/design guides before layering app-specific tokens.
+
+2. **Structural Complexity Caps**
    - Split new panels, modals, popovers, and domains into single-responsibility modules.
    - **File length**: target `<= 600` lines, soft cap `800`, hard cap `1200` (excluding `#[cfg(test)]`; extract `tests.rs` once tests exceed `400` lines).
    - **Function length**: target `<= 80` lines, hard cap `120`; nesting depth `<= 4` (use early return, `let-else`, `?`, and small helpers); parameters `<= 7` (bundle larger signatures into a `Props` / options struct; never add `#[allow(clippy::too_many_arguments)]`).

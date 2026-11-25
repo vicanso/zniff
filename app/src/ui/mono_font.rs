@@ -240,16 +240,17 @@ pub(crate) fn menu_mono_font_row(controls: Arc<Controls>) -> impl IntoElement {
                 .text_color(fg_secondary()),
         )
         .child(
-            view()
+            radio_group()
                 .flex_row()
                 .items_center()
                 .gap_1()
-                .child(menu_inline_pill(
+                .accessibility_label(tr_opt("等宽字体", "Mono font"))
+                .child(ui_radio_pill(
                     "JetBrains Mono",
                     move || !font.system.get(),
                     move || set_system_mono_font(&c_bundled, false),
                 ))
-                .child(menu_inline_pill(
+                .child(ui_radio_pill(
                     tr("系统", "System"),
                     move || font.system.get(),
                     move || set_system_mono_font(&c_system, true),

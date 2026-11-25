@@ -239,60 +239,64 @@ pub(crate) fn row_copy_button(
     let copied = signal(false);
     let reset_job = stored(None::<Spawned<()>>);
     view()
-        .role(AccessibilityRole::Button)
-        .w(px(ControlSize::Xs.height()))
-        .h(px(ControlSize::Xs.height()))
         .flex_shrink_0()
-        .flex_row()
-        .items_center()
-        .justify_center()
-        .rounded(px(RADIUS_SM))
-        .bg(move || {
-            if copied.get() {
-                status_ok_bg()
-            } else {
-                AdaptiveColor::TRANSPARENT
-            }
-        })
-        .hover(move |style| {
-            style.bg(move || {
-                if copied.get() {
-                    status_ok_bg()
-                } else {
-                    bg_control_hover()
-                }
-            })
-        })
-        .active(|style| style.bg(bg_control_active()))
-        .transition_colors()
-        .duration(move || motion_ms(MOTION_INSTANT_MS))
-        .ease_out()
-        .focus_visible(apply_focus_ring)
-        .label(tr(zh_label, en_label))
         .tooltip(label_tip(zh_tip, en_tip))
-        .on_press(move || {
-            on_copy();
-            copied.set(true);
-            reset_job.replace(Some(set_timeout(Duration::from_millis(1400), move || {
-                copied.set(false)
-            })));
-        })
         .child(
-            canvas(move || {
-                if copied.get() {
-                    Painter::new()
-                        .line_width(1.5)
-                        .stroke_color(color(status_ok_fg()))
-                        .stroke_svg("M2.5 6.8 L5.2 9.4 L10.2 3.8")
-                } else {
-                    Painter::new()
-                        .line_width(1.3)
-                        .stroke_color(color(fg_secondary()))
-                        .stroke_svg("M4.5 4.5 H10.5 V11.0 H4.5 Z M2.5 8.5 H2.0 V2.0 H8.0 V3.0")
-                }
-            })
-            .w(px(12.5))
-            .h(px(12.5)),
+            button()
+                .w(px(ControlSize::Xs.height()))
+                .h(px(ControlSize::Xs.height()))
+                .flex_row()
+                .items_center()
+                .justify_center()
+                .rounded(px(RADIUS_SM))
+                .bg(move || {
+                    if copied.get() {
+                        status_ok_bg()
+                    } else {
+                        AdaptiveColor::TRANSPARENT
+                    }
+                })
+                .hover(move |style| {
+                    style.bg(move || {
+                        if copied.get() {
+                            status_ok_bg()
+                        } else {
+                            bg_control_hover()
+                        }
+                    })
+                })
+                .active(|style| style.bg(bg_control_active()))
+                .transition_colors()
+                .duration(move || motion_ms(MOTION_INSTANT_MS))
+                .ease_out()
+                .focus_visible(apply_focus_ring)
+                .accessibility_label(tr_opt(zh_label, en_label))
+                .on_press(move |_: &()| {
+                    on_copy();
+                    copied.set(true);
+                    reset_job.replace(Some(set_timeout(Duration::from_millis(1400), move || {
+                        copied.set(false)
+                    })));
+                })
+                .child(
+                    canvas(move || {
+                        if copied.get() {
+                            Painter::new()
+                                .line_width(1.5)
+                                .stroke_color(color(status_ok_fg()))
+                                .stroke_svg("M2.5 6.8 L5.2 9.4 L10.2 3.8")
+                        } else {
+                            Painter::new()
+                                .line_width(1.3)
+                                .stroke_color(color(fg_secondary()))
+                                .stroke_svg(
+                                    "M4.5 4.5 H10.5 V11.0 H4.5 Z M2.5 8.5 H2.0 V2.0 H8.0 V3.0",
+                                )
+                        }
+                    })
+                    .w(px(12.5))
+                    .h(px(12.5)),
+                ),
         )
 }
 
@@ -329,12 +333,43 @@ pub(crate) fn header_section(props: HeaderSectionProps) -> impl IntoElement {
     let is_query = bit == FOLD_QUERY;
     let fold_controls = controls.clone();
     let copy_all_controls = controls;
-    view()
+    collapsible()
+        .open(move || !card_folded(folded, bit))
+        .reveal(true)
         .rounded(px(RADIUS_LG))
         .border_1()
         .border_color(border_strong())
         .bg(bg_card())
         .overflow_hidden()
+        .content(
+            when(move || loading.get(), detail_loading_row).otherwise(move || {
+                when(
+                    move || lines.with(Vec::is_empty),
+                    || view().px_3p5().py_2p5().child(muted_line(tr("无", "None"))),
+                )
+                .otherwise(move || {
+                    each(
+                        lines,
+                        |line| line.key,
+                        move |line, index| {
+                            hoverable_kv_row(index)
+                                .child(
+                                    mono(move || line.with(|line| line.name.clone()))
+                                        .w(move || px(kv_key_width(pane_width.get())))
+                                        .flex_shrink_0()
+                                        .selectable(true)
+                                        .number_of_lines(1)
+                                        .text_overflow(EllipsizeMode::Tail)
+                                        .text_size(move || scaled_px(TEXT_SM))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(fg_muted()),
+                                )
+                                .child(kv_value_cell(line))
+                        },
+                    )
+                })
+            }),
+        )
         .child(
             view()
                 .flex_shrink_0()
@@ -353,8 +388,7 @@ pub(crate) fn header_section(props: HeaderSectionProps) -> impl IntoElement {
                 })
                 .border_b_color(border_subtle())
                 .child(
-                    view()
-                        .role(AccessibilityRole::Button)
+                    button()
                         .flex_1()
                         .min_w(px(0.0))
                         .flex_row()
@@ -369,7 +403,10 @@ pub(crate) fn header_section(props: HeaderSectionProps) -> impl IntoElement {
                         .duration(MOTION_INSTANT_MS)
                         .ease_out()
                         .focus_visible(apply_focus_ring)
-                        .on_press(move || toggle_card_and_persist(folded, bit, &fold_controls))
+                        .accessibility_label(tr_opt(zh, en))
+                        .on_press(move |_: &()| {
+                            toggle_card_and_persist(folded, bit, &fold_controls)
+                        })
                         .child(fold_mark(folded, bit))
                         .child(section_title(tr(zh, en)))
                         .child(
@@ -410,38 +447,6 @@ pub(crate) fn header_section(props: HeaderSectionProps) -> impl IntoElement {
                     },
                 )),
         )
-        .child(when(
-            move || !card_folded(folded, bit),
-            move || {
-                when(move || loading.get(), detail_loading_row).otherwise(move || {
-                    when(
-                        move || lines.with(Vec::is_empty),
-                        || view().px_3p5().py_2p5().child(muted_line(tr("无", "None"))),
-                    )
-                    .otherwise(move || {
-                        each(
-                            lines,
-                            |line| line.key,
-                            move |line, index| {
-                                hoverable_kv_row(index)
-                                    .child(
-                                        mono(move || line.with(|line| line.name.clone()))
-                                            .w(move || px(kv_key_width(pane_width.get())))
-                                            .flex_shrink_0()
-                                            .selectable(true)
-                                            .number_of_lines(1)
-                                            .text_overflow(EllipsizeMode::Tail)
-                                            .text_size(move || scaled_px(TEXT_SM))
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(fg_muted()),
-                                    )
-                                    .child(kv_value_cell(line))
-                            },
-                        )
-                    })
-                })
-            },
-        ))
 }
 
 pub(crate) fn filter_message_lines(
@@ -466,14 +471,15 @@ pub(crate) fn llm_mode_chip(
     zh: &'static str,
     en: &'static str,
 ) -> impl IntoElement {
-    view()
-        .role(AccessibilityRole::Button)
+    let active = move || current.get() == target;
+    button()
+        .selected(active)
         .h(px(ControlSize::Xs.height()))
         .px_2()
         .items_center()
         .justify_center()
         .bg(move || {
-            if current.get() == target {
+            if active() {
                 accent_blue_soft()
             } else {
                 bg_control()
@@ -481,7 +487,7 @@ pub(crate) fn llm_mode_chip(
         })
         .hover(|style| {
             style.bg(move || {
-                if current.get() == target {
+                if active() {
                     accent_blue_soft_hover()
                 } else {
                     bg_control_hover()
@@ -493,14 +499,15 @@ pub(crate) fn llm_mode_chip(
         .duration(MOTION_INSTANT_MS)
         .ease_out()
         .focus_visible(apply_focus_ring)
-        .on_press(move || current.set(target))
+        .accessibility_label(tr_opt(zh, en))
+        .on_press(move |_: &()| current.set(target))
         .child(
             text(tr(zh, en))
                 .number_of_lines(1)
                 .text_size(px(TEXT_XS))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(move || {
-                    if current.get() == target {
+                    if active() {
                         accent_blue_text()
                     } else {
                         fg_secondary()
@@ -516,8 +523,8 @@ pub(crate) fn msg_filter_chip(
     en: &'static str,
 ) -> impl IntoElement {
     let active = move || state.get() == val;
-    view()
-        .role(AccessibilityRole::Button)
+    button()
+        .selected(active)
         .h(px(ControlSize::Xs.height()))
         .px_2()
         .flex_row()
@@ -545,7 +552,8 @@ pub(crate) fn msg_filter_chip(
         .duration(MOTION_INSTANT_MS)
         .ease_out()
         .focus_visible(apply_focus_ring)
-        .on_press(move || state.set(val))
+        .accessibility_label(tr_opt(zh, en))
+        .on_press(move |_: &()| state.set(val))
         .child(
             text(tr(zh, en))
                 .number_of_lines(1)
@@ -598,38 +606,41 @@ pub(crate) fn msg_search_box(
             move || !search.get().trim().is_empty(),
             move || {
                 view()
-                    .role(AccessibilityRole::Button)
-                    .h(px(ControlSize::Xs.height()))
-                    .px_1p5()
-                    .rounded(px(RADIUS_MD))
-                    .bg(accent_blue_soft())
-                    .hover(|style| style.bg(accent_blue_soft_hover()))
-                    .active(|style| style.bg(bg_control_active()))
-                    .transition_colors()
-                    .duration(MOTION_INSTANT_MS)
-                    .ease_out()
-                    .focus_visible(apply_focus_ring)
-                    .border_1()
-                    .border_color(accent_blue_border())
-                    .flex_row()
-                    .items_center()
                     .tooltip(label_tip("点击清空搜索", "Click to clear search"))
-                    .on_press(move || search.set(String::new()))
                     .child(
-                        mono(move || {
-                            let matched = filter_message_lines(
-                                &lines.get(),
-                                &search.get(),
-                                dir.get(),
-                                kind.get(),
-                            )
-                            .len();
-                            format!("{} ×", present::format_thousands(matched as u64))
-                        })
-                        .tabular_nums()
-                        .text_size(px(TEXT_XS))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(accent_blue_text()),
+                        button()
+                            .h(px(ControlSize::Xs.height()))
+                            .px_1p5()
+                            .rounded(px(RADIUS_MD))
+                            .bg(accent_blue_soft())
+                            .hover(|style| style.bg(accent_blue_soft_hover()))
+                            .active(|style| style.bg(bg_control_active()))
+                            .transition_colors()
+                            .duration(MOTION_INSTANT_MS)
+                            .ease_out()
+                            .focus_visible(apply_focus_ring)
+                            .accessibility_label(tr_opt("清空搜索", "Clear search"))
+                            .border_1()
+                            .border_color(accent_blue_border())
+                            .flex_row()
+                            .items_center()
+                            .on_press(move |_: &()| search.set(String::new()))
+                            .child(
+                                mono(move || {
+                                    let matched = filter_message_lines(
+                                        &lines.get(),
+                                        &search.get(),
+                                        dir.get(),
+                                        kind.get(),
+                                    )
+                                    .len();
+                                    format!("{} ×", present::format_thousands(matched as u64))
+                                })
+                                .tabular_nums()
+                                .text_size(px(TEXT_XS))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(accent_blue_text()),
+                            ),
                     )
             },
         ))
@@ -654,12 +665,59 @@ pub(crate) fn messages_section(
         move || lines.with(|items| items.iter().any(|line| present::is_ws_message(&line.name)));
     let has_llm_view = move || llm_stream.with(Option::is_some);
     let is_llm_ai_mode = move || has_llm_view() && msg_llm_view.get();
-    view()
+    collapsible()
+        .open(move || !card_folded(folded, FOLD_MESSAGES))
+        .reveal(true)
         .rounded(px(RADIUS_LG))
         .border_1()
         .border_color(border_strong())
         .bg(bg_card())
         .overflow_hidden()
+        .content({
+            let ai_controls = llm_controls.clone();
+            let filtered =
+                move || filter_message_lines(&lines.get(), &search.get(), dir.get(), kind.get());
+            when(move || shown.messages_loading.get(), detail_loading_row).otherwise(move || {
+                let ai_controls = ai_controls.clone();
+                when(is_llm_ai_mode, move || {
+                    llm_stream_panel(llm_stream, ai_controls.clone())
+                })
+                .otherwise(move || {
+                    when(
+                        move || filtered().is_empty(),
+                        || view().px_3p5().py_2p5().child(muted_line(tr("无", "None"))),
+                    )
+                    .otherwise(move || {
+                        each(
+                            filtered,
+                            |line| line.key,
+                            move |line, index| {
+                                hoverable_kv_row(index)
+                                    .child(
+                                        mono(move || line.with(|line| line.name.clone()))
+                                            .w(move || px(kv_key_width(pane_width.get())))
+                                            .flex_shrink_0()
+                                            .selectable(true)
+                                            .number_of_lines(1)
+                                            .text_overflow(EllipsizeMode::Tail)
+                                            .text_size(move || scaled_px(TEXT_SM))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(fg_muted()),
+                                    )
+                                    .child(
+                                        mono(move || line.with(|line| line.value.clone()))
+                                            .flex_1()
+                                            .min_w(px(0.0))
+                                            .selectable(true)
+                                            .text_size(move || scaled_px(TEXT_SM))
+                                            .text_color(fg_primary()),
+                                    )
+                            },
+                        )
+                    })
+                })
+            })
+        })
         .child(
             view()
                 .flex_shrink_0()
@@ -679,8 +737,7 @@ pub(crate) fn messages_section(
                 })
                 .border_b_color(border_subtle())
                 .child(
-                    view()
-                        .role(AccessibilityRole::Button)
+                    button()
                         .flex_row()
                         .items_center()
                         .gap_1p5()
@@ -693,7 +750,8 @@ pub(crate) fn messages_section(
                         .duration(MOTION_INSTANT_MS)
                         .ease_out()
                         .focus_visible(apply_focus_ring)
-                        .on_press(move || {
+                        .accessibility_label(tr_opt("消息", "Messages"))
+                        .on_press(move |_: &()| {
                             toggle_card_and_persist(folded, FOLD_MESSAGES, &fold_controls)
                         })
                         .child(fold_mark(folded, FOLD_MESSAGES))
@@ -835,57 +893,6 @@ pub(crate) fn messages_section(
                     },
                 )),
         )
-        .child(when(
-            move || !card_folded(folded, FOLD_MESSAGES),
-            move || {
-                let ai_controls = llm_controls.clone();
-                let filtered = move || {
-                    filter_message_lines(&lines.get(), &search.get(), dir.get(), kind.get())
-                };
-                when(move || shown.messages_loading.get(), detail_loading_row).otherwise(
-                    move || {
-                        let ai_controls = ai_controls.clone();
-                        when(is_llm_ai_mode, move || {
-                            llm_stream_panel(llm_stream, ai_controls.clone())
-                        })
-                        .otherwise(move || {
-                            when(
-                                move || filtered().is_empty(),
-                                || view().px_3p5().py_2p5().child(muted_line(tr("无", "None"))),
-                            )
-                            .otherwise(move || {
-                                each(
-                                    filtered,
-                                    |line| line.key,
-                                    move |line, index| {
-                                        hoverable_kv_row(index)
-                                            .child(
-                                                mono(move || line.with(|line| line.name.clone()))
-                                                    .w(move || px(kv_key_width(pane_width.get())))
-                                                    .flex_shrink_0()
-                                                    .selectable(true)
-                                                    .number_of_lines(1)
-                                                    .text_overflow(EllipsizeMode::Tail)
-                                                    .text_size(move || scaled_px(TEXT_SM))
-                                                    .font_weight(FontWeight::MEDIUM)
-                                                    .text_color(fg_muted()),
-                                            )
-                                            .child(
-                                                mono(move || line.with(|line| line.value.clone()))
-                                                    .flex_1()
-                                                    .min_w(px(0.0))
-                                                    .selectable(true)
-                                                    .text_size(move || scaled_px(TEXT_SM))
-                                                    .text_color(fg_primary()),
-                                            )
-                                    },
-                                )
-                            })
-                        })
-                    },
-                )
-            },
-        ))
 }
 
 #[cfg(test)]

@@ -450,3 +450,11 @@ pub(crate) fn tr(zh: &'static str, en: &'static str) -> impl Fn() -> String + 's
     let langs = ui_langs();
     move || t(ui_lang(langs), zh, en).to_string()
 }
+
+pub(crate) fn tr_opt(
+    zh: &'static str,
+    en: &'static str,
+) -> impl Fn() -> Option<SharedString> + Copy + 'static {
+    let langs = ui_langs();
+    move || Some(SharedString::from(t(ui_lang(langs), zh, en)))
+}

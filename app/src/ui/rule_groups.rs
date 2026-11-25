@@ -266,31 +266,7 @@ pub(crate) fn rule_groups_bar(target: RuleEditTarget, controls: Arc<Controls>) -
             )
             .otherwise(move || {
                 view()
-                    .role(AccessibilityRole::Button)
-                    .h(px(ControlSize::Xs.height()))
-                    .px_1p5()
                     .flex_shrink_0()
-                    .flex_row()
-                    .items_center()
-                    .gap_1()
-                    .rounded(px(RADIUS_SM))
-                    .bg(AdaptiveColor::TRANSPARENT)
-                    .hover(|s| {
-                        s.bg(move || {
-                            if at_cap() {
-                                AdaptiveColor::TRANSPARENT
-                            } else {
-                                bg_control_hover()
-                            }
-                        })
-                    })
-                    .active(|s| s.bg(bg_control_active()))
-                    .transition_colors()
-                    .duration(MOTION_INSTANT_MS)
-                    .ease_out()
-                    .focus_visible(apply_focus_ring)
-                    .disabled(at_cap)
-                    .disabled_style(|s| s.opacity(0.45))
                     .tooltip(
                         tooltip().child(ui_tooltip_surface(
                             text(move || -> SharedString {
@@ -320,20 +296,47 @@ pub(crate) fn rule_groups_bar(target: RuleEditTarget, controls: Arc<Controls>) -
                             .text_color(fg_primary()),
                         )),
                     )
-                    .on_press(move || {
-                        if at_cap() {
-                            return;
-                        }
-                        confirm_delete.set(None);
-                        draft_name.set(String::new());
-                        creating.set(true);
-                    })
                     .child(
-                        text(tr("+ 分组", "+ Group"))
-                            .number_of_lines(1)
-                            .text_size(px(TEXT_XS))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(fg_muted()),
+                        button()
+                            .h(px(ControlSize::Xs.height()))
+                            .px_1p5()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .rounded(px(RADIUS_SM))
+                            .bg(AdaptiveColor::TRANSPARENT)
+                            .hover(|s| {
+                                s.bg(move || {
+                                    if at_cap() {
+                                        AdaptiveColor::TRANSPARENT
+                                    } else {
+                                        bg_control_hover()
+                                    }
+                                })
+                            })
+                            .active(|s| s.bg(bg_control_active()))
+                            .transition_colors()
+                            .duration(MOTION_INSTANT_MS)
+                            .ease_out()
+                            .focus_visible(apply_focus_ring)
+                            .disabled(at_cap)
+                            .disabled_style(|s| s.opacity(0.45))
+                            .accessibility_label(tr_opt("新建分组", "New group"))
+                            .on_press(move |_: &()| {
+                                if at_cap() {
+                                    return;
+                                }
+                                confirm_delete.set(None);
+                                draft_name.set(String::new());
+                                creating.set(true);
+                            })
+                            .child(
+                                text(tr("+ 分组", "+ Group"))
+                                    .number_of_lines(1)
+                                    .text_size(px(TEXT_XS))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(fg_muted()),
+                            ),
                     )
             }),
         )
@@ -345,8 +348,8 @@ fn workspace_pill(
 ) -> impl IntoElement {
     let is_selected = move || target.editing.get().is_none();
     let has_groups = move || !target.groups.with(Vec::is_empty);
-    view()
-        .role(AccessibilityRole::Button)
+    button()
+        .selected(is_selected)
         .h(px(ControlSize::Xs.height()))
         .px_2()
         .flex_shrink_0()
@@ -383,7 +386,8 @@ fn workspace_pill(
         .duration(MOTION_INSTANT_MS)
         .ease_out()
         .focus_visible(apply_focus_ring)
-        .on_press(move || {
+        .accessibility_label(tr_opt("当前规则", "Workspace"))
+        .on_press(move |_: &()| {
             confirm_delete.set(None);
             target.editing.set(None);
         })
@@ -488,51 +492,57 @@ fn group_pill_rename_input(
         )
         .child(
             view()
-                .role(AccessibilityRole::Button)
-                .w(px(ControlSize::Xs.height()))
-                .h(px(ControlSize::Xs.height()))
-                .rounded(px(RADIUS_SM))
-                .border_1()
-                .border_color(accent_blue_border())
-                .bg(accent_blue_soft())
-                .hover(|s| s.bg(accent_blue_soft_hover()))
-                .active(|s| s.bg(bg_control_active()))
-                .transition_colors()
-                .duration(MOTION_INSTANT_MS)
-                .ease_out()
-                .focus_visible(apply_focus_ring)
-                .items_center()
-                .justify_center()
-                .label(tr("保存名称", "Save group name"))
+                .flex_shrink_0()
                 .tooltip(label_tip("保存分组名称 (Enter)", "Save group name (Enter)"))
-                .on_press(move || commit_btn())
-                .child(glyph_px(
-                    10.0,
-                    || Glyph::Check,
-                    || color(accent_blue_text()),
-                )),
+                .child(
+                    button()
+                        .w(px(ControlSize::Xs.height()))
+                        .h(px(ControlSize::Xs.height()))
+                        .rounded(px(RADIUS_SM))
+                        .border_1()
+                        .border_color(accent_blue_border())
+                        .bg(accent_blue_soft())
+                        .hover(|s| s.bg(accent_blue_soft_hover()))
+                        .active(|s| s.bg(bg_control_active()))
+                        .transition_colors()
+                        .duration(MOTION_INSTANT_MS)
+                        .ease_out()
+                        .focus_visible(apply_focus_ring)
+                        .items_center()
+                        .justify_center()
+                        .accessibility_label(tr_opt("保存名称", "Save group name"))
+                        .on_press(move |_: &()| commit_btn())
+                        .child(glyph_px(
+                            10.0,
+                            || Glyph::Check,
+                            || color(accent_blue_text()),
+                        )),
+                ),
         )
         .child(
             view()
-                .role(AccessibilityRole::Button)
-                .w(px(ControlSize::Xs.height()))
-                .h(px(ControlSize::Xs.height()))
-                .rounded(px(RADIUS_SM))
-                .border_1()
-                .border_color(border_control())
-                .bg(bg_control())
-                .hover(|s| s.bg(bg_control_hover()))
-                .active(|s| s.bg(bg_control_active()))
-                .transition_colors()
-                .duration(MOTION_INSTANT_MS)
-                .ease_out()
-                .focus_visible(apply_focus_ring)
-                .items_center()
-                .justify_center()
-                .label(tr("取消重命名", "Cancel rename"))
+                .flex_shrink_0()
                 .tooltip(label_tip("取消重命名 (Esc)", "Cancel rename (Esc)"))
-                .on_press(move || renaming.set(false))
-                .child(text("×").text_size(px(TEXT_XS)).text_color(fg_muted())),
+                .child(
+                    button()
+                        .w(px(ControlSize::Xs.height()))
+                        .h(px(ControlSize::Xs.height()))
+                        .rounded(px(RADIUS_SM))
+                        .border_1()
+                        .border_color(border_control())
+                        .bg(bg_control())
+                        .hover(|s| s.bg(bg_control_hover()))
+                        .active(|s| s.bg(bg_control_active()))
+                        .transition_colors()
+                        .duration(MOTION_INSTANT_MS)
+                        .ease_out()
+                        .focus_visible(apply_focus_ring)
+                        .items_center()
+                        .justify_center()
+                        .accessibility_label(tr_opt("取消重命名", "Cancel rename"))
+                        .on_press(move |_: &()| renaming.set(false))
+                        .child(text("×").text_size(px(TEXT_XS)).text_color(fg_muted())),
+                ),
         )
 }
 
@@ -598,65 +608,70 @@ fn group_pill(
             })
             .child(
                 view()
-                    .role(AccessibilityRole::Checkbox)
-                    .w(px(18.0))
-                    .h(px(18.0))
                     .flex_shrink_0()
-                    .rounded(px(RADIUS_SM))
-                    .border_1()
-                    .border_color(move || {
-                        if is_enabled() {
-                            accent_blue_border()
-                        } else {
-                            border_control()
-                        }
-                    })
-                    .bg(move || {
-                        if is_enabled() {
-                            accent_blue_soft()
-                        } else {
-                            bg_code()
-                        }
-                    })
-                    .hover(|s| s.bg(bg_control_hover()))
-                    .active(|s| s.bg(bg_control_active()))
-                    .transition_colors()
-                    .duration(MOTION_INSTANT_MS)
-                    .ease_out()
-                    .focus_visible(apply_focus_ring)
-                    .items_center()
-                    .justify_center()
-                    .label(move || -> SharedString {
-                        let name = group.with(|g| g.name.clone());
-                        match (ui_lang(langs), is_enabled()) {
-                            (Lang::Zh, true) => format!("停用规则分组 {name}").into(),
-                            (Lang::Zh, false) => format!("启用规则分组 {name}").into(),
-                            (Lang::En, true) => format!("Disable rule group {name}").into(),
-                            (Lang::En, false) => format!("Enable rule group {name}").into(),
-                        }
-                    })
                     .tooltip(label_tip("启用 / 停用此分组", "Enable / disable group"))
-                    .on_press(move || {
-                        let name = group.with_untracked(|g| g.name.clone());
-                        let next = toggle_rule_group_enabled(&target.groups.get_untracked(), &name);
-                        commit_groups(target, &toggle_controls, next);
-                    })
                     .child(
-                        mono(move || -> SharedString {
-                            if is_enabled() {
-                                "✓".into()
-                            } else {
-                                "".into()
-                            }
-                        })
-                        .text_size(px(TEXT_XS))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(accent_blue_text()),
+                        checkbox()
+                            .checked(is_enabled)
+                            .w(px(18.0))
+                            .h(px(18.0))
+                            .rounded(px(RADIUS_SM))
+                            .hover(|s| s.bg(bg_control_hover()))
+                            .active(|s| s.bg(bg_control_active()))
+                            .transition_colors()
+                            .duration(MOTION_INSTANT_MS)
+                            .ease_out()
+                            .focus_visible(apply_focus_ring)
+                            .accessibility_label(move || -> Option<SharedString> {
+                                let name = group.with(|g| g.name.clone());
+                                Some(
+                                    match (ui_lang(langs), is_enabled()) {
+                                        (Lang::Zh, true) => format!("停用规则分组 {name}"),
+                                        (Lang::Zh, false) => format!("启用规则分组 {name}"),
+                                        (Lang::En, true) => format!("Disable rule group {name}"),
+                                        (Lang::En, false) => format!("Enable rule group {name}"),
+                                    }
+                                    .into(),
+                                )
+                            })
+                            .on_change(move |_: &bool| {
+                                let name = group.with_untracked(|g| g.name.clone());
+                                let next = toggle_rule_group_enabled(
+                                    &target.groups.get_untracked(),
+                                    &name,
+                                );
+                                commit_groups(target, &toggle_controls, next);
+                            })
+                            .indicator_style(|s| {
+                                s.w(px(18.0))
+                                    .h(px(18.0))
+                                    .rounded(px(RADIUS_SM))
+                                    .border_1()
+                                    .border_color(border_control())
+                                    .bg(bg_code())
+                                    .items_center()
+                                    .justify_center()
+                                    .checked(|c| {
+                                        c.border_color(accent_blue_border()).bg(accent_blue_soft())
+                                    })
+                            })
+                            .indicator(
+                                mono(move || -> SharedString {
+                                    if is_enabled() {
+                                        "✓".into()
+                                    } else {
+                                        "".into()
+                                    }
+                                })
+                                .text_size(px(TEXT_XS))
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(accent_blue_text()),
+                            ),
                     ),
             )
             .child(
-                view()
-                    .role(AccessibilityRole::Button)
+                button()
+                    .selected(is_selected)
                     .min_w(px(0.0))
                     .rounded(px(RADIUS_SM))
                     .hover(|s| s.bg(bg_control_hover()))
@@ -665,7 +680,8 @@ fn group_pill(
                     .duration(MOTION_INSTANT_MS)
                     .ease_out()
                     .focus_visible(apply_focus_ring)
-                    .on_press(move || {
+                    .accessibility_label(move || Some(group.with(|g| g.name.clone()).into()))
+                    .on_press(move |_: &()| {
                         confirm_delete.set(None);
                         let name = group.with_untracked(|g| g.name.clone());
                         target.editing.set(Some(name));
@@ -705,27 +721,29 @@ fn group_pill(
             )
             .child(when(is_selected, move || {
                 view()
-                    .role(AccessibilityRole::Button)
-                    .w(px(18.0))
-                    .h(px(18.0))
                     .flex_shrink_0()
-                    .rounded(px(RADIUS_SM))
-                    .items_center()
-                    .justify_center()
-                    .hover(|s| s.bg(bg_control_hover()))
-                    .active(|s| s.bg(bg_control_active()))
-                    .transition_colors()
-                    .duration(MOTION_INSTANT_MS)
-                    .ease_out()
-                    .focus_visible(apply_focus_ring)
-                    .label(tr("重命名分组", "Rename group"))
                     .tooltip(label_tip("重命名此规则分组", "Rename rule group"))
-                    .on_press(move || {
-                        confirm_delete.set(None);
-                        rename_draft.set(group.with_untracked(|g| g.name.clone()));
-                        renaming.set(true);
-                    })
-                    .child(glyph_px(10.0, || Glyph::RuleRewrite, || color(fg_muted())))
+                    .child(
+                        button()
+                            .w(px(18.0))
+                            .h(px(18.0))
+                            .rounded(px(RADIUS_SM))
+                            .items_center()
+                            .justify_center()
+                            .hover(|s| s.bg(bg_control_hover()))
+                            .active(|s| s.bg(bg_control_active()))
+                            .transition_colors()
+                            .duration(MOTION_INSTANT_MS)
+                            .ease_out()
+                            .focus_visible(apply_focus_ring)
+                            .accessibility_label(tr_opt("重命名分组", "Rename group"))
+                            .on_press(move |_: &()| {
+                                confirm_delete.set(None);
+                                rename_draft.set(group.with_untracked(|g| g.name.clone()));
+                                renaming.set(true);
+                            })
+                            .child(glyph_px(10.0, || Glyph::RuleRewrite, || color(fg_muted()))),
+                    )
             }))
             .child(group_delete_button(
                 target,
@@ -754,74 +772,78 @@ fn group_delete_button(
     when(is_confirming, move || {
         let remove_controls = controls.clone();
         view()
-            .role(AccessibilityRole::Button)
-            .h(px(20.0))
-            .px_1()
             .flex_shrink_0()
-            .rounded(px(RADIUS_SM))
-            .items_center()
-            .justify_center()
-            .bg(danger_button_bg())
-            .hover(|s| s.bg(danger_button_hover()))
-            .active(|s| s.bg(danger_button_active()))
-            .transition_colors()
-            .duration(MOTION_INSTANT_MS)
-            .ease_out()
-            .focus_visible(apply_focus_ring)
-            .label(tr(
-                "再次点击确认删除分组",
-                "Click again to delete rule group",
-            ))
             .tooltip(label_tip(
                 "再次点击确认删除此分组",
                 "Click again to delete rule group",
             ))
-            .on_press(move || {
-                let name = group.with_untracked(|g| g.name.clone());
-                confirm_delete.set(None);
-                if target.editing.with_untracked(|sel| {
-                    sel.as_deref()
-                        .is_some_and(|s| s.eq_ignore_ascii_case(&name))
-                }) {
-                    target.editing.set(None);
-                }
-                let next = remove_rule_group(&target.groups.get_untracked(), &name);
-                commit_groups(target, &remove_controls, next);
-                set_status(&remove_controls, StatusMsg::RuleGroupDeleted(name));
-            })
             .child(
-                text(tr("确认？", "Del?"))
-                    .number_of_lines(1)
-                    .text_size(px(TEXT_XS))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(fg_on_accent()),
+                button()
+                    .h(px(20.0))
+                    .px_1()
+                    .rounded(px(RADIUS_SM))
+                    .items_center()
+                    .justify_center()
+                    .bg(danger_button_bg())
+                    .hover(|s| s.bg(danger_button_hover()))
+                    .active(|s| s.bg(danger_button_active()))
+                    .transition_colors()
+                    .duration(MOTION_INSTANT_MS)
+                    .ease_out()
+                    .focus_visible(apply_focus_ring)
+                    .accessibility_label(tr_opt(
+                        "再次点击确认删除分组",
+                        "Click again to delete rule group",
+                    ))
+                    .on_press(move |_: &()| {
+                        let name = group.with_untracked(|g| g.name.clone());
+                        confirm_delete.set(None);
+                        if target.editing.with_untracked(|sel| {
+                            sel.as_deref()
+                                .is_some_and(|s| s.eq_ignore_ascii_case(&name))
+                        }) {
+                            target.editing.set(None);
+                        }
+                        let next = remove_rule_group(&target.groups.get_untracked(), &name);
+                        commit_groups(target, &remove_controls, next);
+                        set_status(&remove_controls, StatusMsg::RuleGroupDeleted(name));
+                    })
+                    .child(
+                        text(tr("确认？", "Del?"))
+                            .number_of_lines(1)
+                            .text_size(px(TEXT_XS))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(fg_on_accent()),
+                    ),
             )
     })
     .otherwise(move || {
         view()
-            .role(AccessibilityRole::Button)
-            .w(px(20.0))
-            .h(px(20.0))
             .flex_shrink_0()
-            .rounded(px(RADIUS_SM))
-            .items_center()
-            .justify_center()
-            .hover(|s| s.bg(bg_control_hover()))
-            .active(|s| s.bg(bg_control_active()))
-            .transition_colors()
-            .duration(MOTION_INSTANT_MS)
-            .ease_out()
-            .focus_visible(apply_focus_ring)
-            .label(tr("删除分组", "Delete rule group"))
             .tooltip(label_tip(
                 "删除此规则分组（点击两次确认）",
                 "Delete rule group (click twice to confirm)",
             ))
-            .on_press(move || {
-                let name = group.with_untracked(|g| g.name.clone());
-                confirm_delete.set(Some(name));
-            })
-            .child(glyph_px(10.0, || Glyph::Close, || color(fg_muted())))
+            .child(
+                button()
+                    .w(px(20.0))
+                    .h(px(20.0))
+                    .rounded(px(RADIUS_SM))
+                    .items_center()
+                    .justify_center()
+                    .hover(|s| s.bg(bg_control_hover()))
+                    .active(|s| s.bg(bg_control_active()))
+                    .transition_colors()
+                    .duration(MOTION_INSTANT_MS)
+                    .ease_out()
+                    .focus_visible(apply_focus_ring)
+                    .accessibility_label(tr_opt("删除分组", "Delete rule group"))
+                    .on_press(move |_: &()| {
+                        let name = group.with_untracked(|g| g.name.clone());
+                        confirm_delete.set(Some(name));
+                    })
+                    .child(glyph_px(10.0, || Glyph::Close, || color(fg_muted()))),
+            )
     })
 }
 
@@ -865,8 +887,7 @@ fn new_group_inline(
                 }),
         )
         .child(
-            view()
-                .role(AccessibilityRole::Button)
+            button()
                 .h(px(ControlSize::Xs.height()))
                 .px_1p5()
                 .rounded(px(RADIUS_SM))
@@ -881,7 +902,8 @@ fn new_group_inline(
                 .focus_visible(apply_focus_ring)
                 .items_center()
                 .justify_center()
-                .on_press(move || confirm_new_group(target, &controls, draft_name, creating))
+                .accessibility_label(tr_opt("创建", "Add"))
+                .on_press(move |_: &()| confirm_new_group(target, &controls, draft_name, creating))
                 .child(
                     text(tr("创建", "Add"))
                         .text_size(px(TEXT_XS))
@@ -891,27 +913,30 @@ fn new_group_inline(
         )
         .child(
             view()
-                .role(AccessibilityRole::Button)
-                .w(px(ControlSize::Xs.height()))
-                .h(px(ControlSize::Xs.height()))
-                .rounded(px(RADIUS_SM))
-                .border_1()
-                .border_color(border_control())
-                .bg(bg_control())
-                .hover(|s| s.bg(bg_control_hover()))
-                .active(|s| s.bg(bg_control_active()))
-                .transition_colors()
-                .duration(MOTION_INSTANT_MS)
-                .ease_out()
-                .focus_visible(apply_focus_ring)
-                .items_center()
-                .justify_center()
-                .label(tr("取消新建分组", "Cancel new group"))
+                .flex_shrink_0()
                 .tooltip(label_tip("取消新建分组 (Esc)", "Cancel new group (Esc)"))
-                .on_press(move || {
-                    draft_name.set(String::new());
-                    creating.set(false);
-                })
-                .child(text("×").text_size(px(TEXT_XS)).text_color(fg_muted())),
+                .child(
+                    button()
+                        .w(px(ControlSize::Xs.height()))
+                        .h(px(ControlSize::Xs.height()))
+                        .rounded(px(RADIUS_SM))
+                        .border_1()
+                        .border_color(border_control())
+                        .bg(bg_control())
+                        .hover(|s| s.bg(bg_control_hover()))
+                        .active(|s| s.bg(bg_control_active()))
+                        .transition_colors()
+                        .duration(MOTION_INSTANT_MS)
+                        .ease_out()
+                        .focus_visible(apply_focus_ring)
+                        .items_center()
+                        .justify_center()
+                        .accessibility_label(tr_opt("取消新建分组", "Cancel new group"))
+                        .on_press(move |_: &()| {
+                            draft_name.set(String::new());
+                            creating.set(false);
+                        })
+                        .child(text("×").text_size(px(TEXT_XS)).text_color(fg_muted())),
+                ),
         )
 }

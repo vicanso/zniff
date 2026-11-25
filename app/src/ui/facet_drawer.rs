@@ -26,68 +26,53 @@ pub(crate) fn pane_splitter(
     })
 }
 
+pub(crate) fn splitter_indicator(
+    axis: Axis,
+    state: Signal<ResizeHandleState>,
+    active_thickness: f32,
+) -> impl IntoElement {
+    let thickness = move || {
+        if state.get() != ResizeHandleState::Idle {
+            px(active_thickness)
+        } else {
+            px(1.0)
+        }
+    };
+    let line_color = move || {
+        if state.get() != ResizeHandleState::Idle {
+            accent_blue()
+        } else {
+            border_strong()
+        }
+    };
+    let base = view().bg(line_color);
+    match axis {
+        Axis::Vertical => base.w_full().h(thickness),
+        Axis::Horizontal => base.w(thickness).h_full(),
+    }
+}
+
 pub(crate) fn row_splitter(height: Signal<f32>, controls: Arc<Controls>) -> impl IntoElement {
     let origin = signal(0.0_f32);
-    let controls_release = controls.clone();
-    let controls_cancel = controls;
-    let hot = signal(false);
-    let dragging = signal(false);
-    view()
-        .w_full()
-        .h(px(6.0))
-        .flex_shrink_0()
-        .flex_col()
-        .justify_center()
-        .cursor(Cursor::RowResize)
-        .claim_touches(TouchClaim::on_start())
-        .keep_touches(true)
-        .on_mouse_enter(move |_: &MouseEvent| hot.set(true))
-        .on_mouse_leave(move |_: &MouseEvent| hot.set(false))
-        .on_responder_grant(move |_event: &ResponderEvent| {
-            dragging.set(true);
-            origin.set(clamp_list_height_for_window(
-                height.get(),
-                window().height.0,
-            ));
-        })
-        .on_responder_move(move |event: &ResponderEvent| {
-            height.set(clamp_list_height_for_window(
-                origin.get() + event.gesture.delta.y.0,
-                window().height.0,
-            ));
-        })
-        .on_responder_release(move |_event: &ResponderEvent| {
-            dragging.set(false);
-            store_list_height(
-                clamp_list_height_for_window(height.get(), window().height.0),
-                &controls_release,
-            );
-        })
-        .on_responder_terminate(move |_event: &ResponderEvent| {
-            dragging.set(false);
-            store_list_height(
-                clamp_list_height_for_window(height.get(), window().height.0),
-                &controls_cancel,
-            );
-        })
-        .child(
-            view()
-                .w_full()
-                .h(move || {
-                    if hot.get() || dragging.get() {
-                        px(3.0)
-                    } else {
-                        px(1.0)
-                    }
-                })
-                .bg(move || {
-                    if hot.get() || dragging.get() {
-                        accent_blue()
-                    } else {
-                        border_strong()
-                    }
-                }),
-        )
+    let state = signal(ResizeHandleState::Idle);
+    let clamp_cur = |target: f32| clamp_list_height_for_window(target, window().height.0);
+    view().relative().w_full().h(px(1.0)).flex_shrink_0().child(
+        resize_handle()
+            .axis(Axis::Vertical)
+            .accessibility_label(tr_opt(
+                "调整列表与详情高度",
+                "Resize list and detail height",
+            ))
+            .on_state_change(move |next: &ResizeHandleState| state.set(*next))
+            .on_drag_start(move || origin.set(clamp_cur(height.get_untracked())))
+            .on_drag_move(move |offset: &Points| height.set(clamp_cur(origin.get() + offset.0)))
+            .on_drag_end(move |offset: &Points| {
+                let next = clamp_cur(origin.get() + offset.0);
+                height.set(next);
+                store_list_height(next, &controls);
+            })
+            .child(splitter_indicator(Axis::Vertical, state, 3.0)),
+    )
 }
 
 pub(crate) fn column_splitter(
@@ -98,10 +83,7 @@ pub(crate) fn column_splitter(
     controls: Arc<Controls>,
 ) -> impl IntoElement {
     let origin = signal(0.0_f32);
-    let controls_release = controls.clone();
-    let controls_cancel = controls;
-    let hot = signal(false);
-    let dragging = signal(false);
+    let state = signal(ResizeHandleState::Idle);
     let clamped_width = move |target: f32| {
         let mode = layout_mode.get();
         let collapsed = sidebar_effectively_collapsed(sidebar_collapsed.get(), window().width.0);
@@ -109,48 +91,25 @@ pub(crate) fn column_splitter(
         clamp_list_px_for_layout(target, window().width.0, mode, side)
     };
     view()
-        .w(px(6.0))
-        .flex_shrink_0()
+        .relative()
+        .w(px(1.0))
         .self_stretch()
-        .flex_row()
-        .justify_center()
-        .cursor(Cursor::ColResize)
-        .claim_touches(TouchClaim::on_start())
-        .keep_touches(true)
-        .on_mouse_enter(move |_: &MouseEvent| hot.set(true))
-        .on_mouse_leave(move |_: &MouseEvent| hot.set(false))
-        .on_responder_grant(move |_event: &ResponderEvent| {
-            dragging.set(true);
-            origin.set(clamped_width(width.get()));
-        })
-        .on_responder_move(move |event: &ResponderEvent| {
-            width.set(clamped_width(origin.get() + event.gesture.delta.x.0));
-        })
-        .on_responder_release(move |_event: &ResponderEvent| {
-            dragging.set(false);
-            store_list_width(clamped_width(width.get()), &controls_release);
-        })
-        .on_responder_terminate(move |_event: &ResponderEvent| {
-            dragging.set(false);
-            store_list_width(clamped_width(width.get()), &controls_cancel);
-        })
+        .flex_shrink_0()
         .child(
-            view()
-                .w(move || {
-                    if hot.get() || dragging.get() {
-                        px(3.0)
-                    } else {
-                        px(1.0)
-                    }
+            resize_handle()
+                .axis(Axis::Horizontal)
+                .accessibility_label(tr_opt("调整列表与详情宽度", "Resize list and detail width"))
+                .on_state_change(move |next: &ResizeHandleState| state.set(*next))
+                .on_drag_start(move || origin.set(clamped_width(width.get_untracked())))
+                .on_drag_move(move |offset: &Points| {
+                    width.set(clamped_width(origin.get() + offset.0));
                 })
-                .h_full()
-                .bg(move || {
-                    if hot.get() || dragging.get() {
-                        accent_blue()
-                    } else {
-                        border_strong()
-                    }
-                }),
+                .on_drag_end(move |offset: &Points| {
+                    let next = clamped_width(origin.get() + offset.0);
+                    width.set(next);
+                    store_list_width(next, &controls);
+                })
+                .child(splitter_indicator(Axis::Horizontal, state, 3.0)),
         )
 }
 
@@ -205,33 +164,7 @@ fn list_clear_button(controls: Arc<Controls>, on_clear: Rc<dyn Fn()>) -> impl In
     let disabled_controls = controls.clone();
     let is_ro = move || is_active_tab_read_only(&guard_controls);
     view()
-        .role(AccessibilityRole::Button)
-        .w(px(CONTROL_H))
-        .h(px(CONTROL_H))
         .flex_shrink_0()
-        .flex_row()
-        .items_center()
-        .justify_center()
-        .rounded(px(RADIUS_MD))
-        .bg(AdaptiveColor::TRANSPARENT)
-        .hover(move |style| {
-            let guard = controls.clone();
-            style.bg(move || {
-                if is_active_tab_read_only(&guard) {
-                    AdaptiveColor::TRANSPARENT
-                } else {
-                    bg_control_hover()
-                }
-            })
-        })
-        .active(|style| style.bg(bg_control_active()))
-        .disabled(move || is_active_tab_read_only(&disabled_controls))
-        .disabled_style(|s| s.opacity(0.4))
-        .transition_colors()
-        .duration(MOTION_INSTANT_MS)
-        .ease_out()
-        .focus_visible(apply_focus_ring)
-        .label(tr("清空会话", "Clear session"))
         .tooltip(
             tooltip().child(ui_tooltip_surface(
                 text(move || -> SharedString {
@@ -251,12 +184,40 @@ fn list_clear_button(controls: Arc<Controls>, on_clear: Rc<dyn Fn()>) -> impl In
                 .text_color(fg_primary()),
             )),
         )
-        .on_press(move || on_clear())
-        .child(glyph_px(
-            ControlSize::Sm.icon_size(),
-            || Glyph::Trash,
-            || color(fg_secondary()),
-        ))
+        .child(
+            button()
+                .w(px(CONTROL_H))
+                .h(px(CONTROL_H))
+                .flex_row()
+                .items_center()
+                .justify_center()
+                .rounded(px(RADIUS_MD))
+                .bg(AdaptiveColor::TRANSPARENT)
+                .hover(move |style| {
+                    let guard = controls.clone();
+                    style.bg(move || {
+                        if is_active_tab_read_only(&guard) {
+                            AdaptiveColor::TRANSPARENT
+                        } else {
+                            bg_control_hover()
+                        }
+                    })
+                })
+                .active(|style| style.bg(bg_control_active()))
+                .disabled(move || is_active_tab_read_only(&disabled_controls))
+                .disabled_style(|s| s.opacity(0.4))
+                .transition_colors()
+                .duration(MOTION_INSTANT_MS)
+                .ease_out()
+                .focus_visible(apply_focus_ring)
+                .accessibility_label(tr_opt("清空会话", "Clear session"))
+                .on_press(move |_: &()| on_clear())
+                .child(glyph_px(
+                    ControlSize::Sm.icon_size(),
+                    || Glyph::Trash,
+                    || color(fg_secondary()),
+                )),
+        )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -295,7 +256,6 @@ pub(crate) fn flow_list(
     let menu_open = signal(false);
     let menu_at = signal(Point::<Points>::default());
     let facet_tab = signal(0_u8);
-    let facet_anchor = element_ref();
     bind_popover_dismiss(facets_open);
     let effective_width = move || {
         let mode = layout_mode.get();
@@ -371,32 +331,9 @@ pub(crate) fn flow_list(
                             move || !list_filter.get().is_empty(),
                             move || {
                                 view()
-                                    .role(AccessibilityRole::Button)
                                     .absolute()
                                     .right(px(4.0))
                                     .top(px(4.0))
-                                    .w(px(ControlSize::Xs.height()))
-                                    .h(px(ControlSize::Xs.height()))
-                                    .flex_shrink_0()
-                                    .flex_row()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded(px(RADIUS_SM))
-                                    .hover(|style| style.bg(bg_control_hover()))
-                                    .active(|style| style.bg(bg_control_active()))
-                                    .transition_colors()
-                                    .duration(move || motion_ms(MOTION_INSTANT_MS))
-                                    .ease_out()
-                                    .focus_visible(apply_focus_ring)
-                                    .label(move || -> SharedString {
-                                        let lang = ui_lang(langs);
-                                        if has_active_main() {
-                                            t(lang, "清空二次过滤", "Clear secondary filter")
-                                        } else {
-                                            t(lang, "清空过滤", "Clear filter")
-                                        }
-                                        .into()
-                                    })
                                     .tooltip(tooltip().child(ui_tooltip_surface(
                                         text(move || -> SharedString {
                                             let lang = ui_lang(langs);
@@ -410,11 +347,42 @@ pub(crate) fn flow_list(
                                         .text_size(move || scaled_px(TEXT_SM))
                                         .text_color(fg_primary()),
                                     )))
-                                    .on_press(move || list_filter.set(String::new()))
                                     .child(
-                                        control_text("×")
-                                            .text_size(px(TEXT_MD))
-                                            .text_color(fg_secondary()),
+                                        button()
+                                            .w(px(ControlSize::Xs.height()))
+                                            .h(px(ControlSize::Xs.height()))
+                                            .flex_shrink_0()
+                                            .flex_row()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded(px(RADIUS_SM))
+                                            .hover(|style| style.bg(bg_control_hover()))
+                                            .active(|style| style.bg(bg_control_active()))
+                                            .transition_colors()
+                                            .duration(move || motion_ms(MOTION_INSTANT_MS))
+                                            .ease_out()
+                                            .focus_visible(apply_focus_ring)
+                                            .accessibility_label(move || -> Option<SharedString> {
+                                                let lang = ui_lang(langs);
+                                                Some(
+                                                    if has_active_main() {
+                                                        t(
+                                                            lang,
+                                                            "清空二次过滤",
+                                                            "Clear secondary filter",
+                                                        )
+                                                    } else {
+                                                        t(lang, "清空过滤", "Clear filter")
+                                                    }
+                                                    .into(),
+                                                )
+                                            })
+                                            .on_press(move |_: &()| list_filter.set(String::new()))
+                                            .child(
+                                                control_text("×")
+                                                    .text_size(px(TEXT_MD))
+                                                    .text_color(fg_secondary()),
+                                            ),
                                     )
                             },
                         )),
@@ -424,32 +392,7 @@ pub(crate) fn flow_list(
                     move || {
                         let merge_controls = merge_controls.clone();
                         view()
-                            .role(AccessibilityRole::Button)
-                            .h(px(CONTROL_H))
-                            .px_2()
                             .flex_shrink_0()
-                            .flex_row()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(RADIUS_MD))
-                            .border_1()
-                            .border_color(accent_blue_border())
-                            .bg(accent_blue_soft())
-                            .hover(|style| style.bg(accent_blue_soft_hover()))
-                            .active(|style| style.bg(bg_control_active()))
-                            .transition_colors()
-                            .duration(move || motion_ms(MOTION_INSTANT_MS))
-                            .ease_out()
-                            .focus_visible(apply_focus_ring)
-                            .label(move || -> SharedString {
-                                let lang = ui_lang(langs);
-                                if has_active_main() {
-                                    t(lang, "并入主过滤", "Merge")
-                                } else {
-                                    t(lang, "设为主过滤", "Pin filter")
-                                }
-                                .into()
-                            })
                             .tooltip(tooltip().child(ui_tooltip_surface(
                                 text(move || -> SharedString {
                                     let lang = ui_lang(langs);
@@ -471,29 +414,62 @@ pub(crate) fn flow_list(
                                 .text_size(move || scaled_px(TEXT_SM))
                                 .text_color(fg_primary()),
                             )))
-                            .on_press(move || {
-                                let merged =
-                                    merge_secondary_filter(&main_filter.get(), &list_filter.get());
-                                main_filter.set(merged.clone());
-                                filter_enabled.set(true);
-                                list_filter.set(String::new());
-                                save_config_or_notify(&merge_controls, PrefName::Filter, |cfg| {
-                                    cfg.filter = merged
-                                });
-                            })
                             .child(
-                                control_text(move || -> SharedString {
-                                    let lang = ui_lang(langs);
-                                    if has_active_main() {
-                                        t(lang, "并入主过滤", "Merge")
-                                    } else {
-                                        t(lang, "设为主过滤", "Pin filter")
-                                    }
-                                    .into()
-                                })
-                                .text_size(px(TEXT_SM))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(accent_blue_text()),
+                                button()
+                                    .h(px(CONTROL_H))
+                                    .px_2()
+                                    .flex_row()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(RADIUS_MD))
+                                    .border_1()
+                                    .border_color(accent_blue_border())
+                                    .bg(accent_blue_soft())
+                                    .hover(|style| style.bg(accent_blue_soft_hover()))
+                                    .active(|style| style.bg(bg_control_active()))
+                                    .transition_colors()
+                                    .duration(move || motion_ms(MOTION_INSTANT_MS))
+                                    .ease_out()
+                                    .focus_visible(apply_focus_ring)
+                                    .accessibility_label(move || -> Option<SharedString> {
+                                        let lang = ui_lang(langs);
+                                        Some(
+                                            if has_active_main() {
+                                                t(lang, "并入主过滤", "Merge")
+                                            } else {
+                                                t(lang, "设为主过滤", "Pin filter")
+                                            }
+                                            .into(),
+                                        )
+                                    })
+                                    .on_press(move |_: &()| {
+                                        let merged = merge_secondary_filter(
+                                            &main_filter.get(),
+                                            &list_filter.get(),
+                                        );
+                                        main_filter.set(merged.clone());
+                                        filter_enabled.set(true);
+                                        list_filter.set(String::new());
+                                        save_config_or_notify(
+                                            &merge_controls,
+                                            PrefName::Filter,
+                                            |cfg| cfg.filter = merged,
+                                        );
+                                    })
+                                    .child(
+                                        control_text(move || -> SharedString {
+                                            let lang = ui_lang(langs);
+                                            if has_active_main() {
+                                                t(lang, "并入主过滤", "Merge")
+                                            } else {
+                                                t(lang, "设为主过滤", "Pin filter")
+                                            }
+                                            .into()
+                                        })
+                                        .text_size(px(TEXT_SM))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(accent_blue_text()),
+                                    ),
                             )
                     },
                 ))
@@ -506,7 +482,7 @@ pub(crate) fn flow_list(
                 layout_mode.get() == config::LayoutMode::TopBottom
                     || sidebar_effectively_collapsed(sidebar_collapsed.get(), window().width.0)
             },
-            move || facet_quick_bar(facets, facets_open, facet_tab, list_filter, facet_anchor),
+            move || facet_quick_bar(facets, facets_open, facet_tab, list_filter),
         ))
         .child(tls_failure_banner_from_context())
         .child(
@@ -530,7 +506,11 @@ pub(crate) fn flow_list(
                     menu_open,
                     menu_at,
                 ))
-                .child(when(
+                .child(facet_drawer_overlay(
+                    facets,
+                    facets_open,
+                    facet_tab,
+                    list_filter,
                     move || {
                         (layout_mode.get() == config::LayoutMode::TopBottom
                             || sidebar_effectively_collapsed(
@@ -540,53 +520,64 @@ pub(crate) fn flow_list(
                             && facets_open.get()
                     },
                     move || {
-                        facet_drawer_overlay(
-                            facets,
-                            facets_open,
-                            facet_tab,
-                            list_filter,
-                            facet_anchor,
-                            move || {
-                                let max_w = (window().width.0 - 16.0).max(240.0);
-                                if is_top_bottom() {
-                                    max_w.min(520.0)
-                                } else {
-                                    (effective_width() - 12.0).clamp(260.0, max_w)
-                                }
-                            },
-                        )
+                        let max_w = (window().width.0 - 24.0).max(240.0);
+                        if is_top_bottom() {
+                            max_w.min(420.0)
+                        } else {
+                            (effective_width().max(280.0) - 12.0).clamp(260.0, max_w.min(420.0))
+                        }
                     },
                 )),
         )
 }
 
-/// Anchored window-level overlay hosting the narrow/top-bottom domain and app filter drawer.
+/// Left-edge Sheet hosting the narrow/top-bottom domain and app filter drawer.
 pub(crate) fn facet_drawer_overlay(
     facets: Signal<session::SessionFacets>,
     facets_open: Signal<bool>,
     facet_tab: Signal<u8>,
     filter: Signal<String>,
-    anchor: ElementRef,
-    popup_width: impl Fn() -> f32 + 'static,
+    open: impl Fn() -> bool + Copy + 'static,
+    popup_width: impl Fn() -> f32 + Copy + 'static,
 ) -> impl IntoElement {
-    overlay()
-        .anchor(&anchor)
-        .placement(Placement::Bottom)
-        .align(Align::Start)
-        .offset(px(6.0))
-        .margin(px(8.0))
-        .on_press_outside(move |_: &Point<Points>| facets_open.set(false))
-        .on_cancel(move || facets_open.set(false))
+    effect(move || {
+        if !open() {
+            return;
+        }
+        on_key_with(
+            "escape",
+            KeyOptions {
+                when: nsh_core::keymap::When::Always,
+                ..KeyOptions::default()
+            },
+            move |_| facets_open.set(false),
+        );
+    });
+    sheet()
+        .open(move || Some(open()))
+        .side(Placement::Left)
+        .close_on_escape(true)
+        .close_on_backdrop_press(true)
+        .on_open_change(move |event: &SheetEvent| {
+            if let SheetEvent::OpenChange(next, _) = event {
+                facets_open.set(*next);
+            }
+        })
+        .backdrop_style(|s| s.bg(backdrop_scrim()))
+        .popup_style(|s| {
+            s.bg(bg_card())
+                .border_r_1()
+                .border_r_color(border_strong())
+                .shadow_lg()
+                .overflow_hidden()
+        })
+        .accessibility_label(tr_opt("域名与应用过滤", "Domains & Apps Filter"))
         .child(
             view()
                 .w(move || px(popup_width()))
-                .max_w(move || px((window().width.0 - 16.0).max(240.0)))
-                .max_h(move || px((window().height.0 - 96.0).max(200.0)))
-                .rounded(px(RADIUS_LG))
-                .border_1()
-                .border_color(border_strong())
-                .bg(bg_card())
-                .shadow_lg()
+                .max_w(move || px((window().width.0 - 24.0).max(240.0)))
+                .h_full()
+                .flex_col()
                 .overflow_hidden()
                 .child(facet_drawer(facets, facets_open, facet_tab, filter)),
         )
@@ -605,7 +596,6 @@ pub(crate) fn facet_quick_bar(
     facets_open: Signal<bool>,
     facet_tab: Signal<u8>,
     filter: Signal<String>,
-    tab_anchor: ElementRef,
 ) -> impl IntoElement {
     let tab_btn = move |idx: u8,
                         zh: &'static str,
@@ -614,8 +604,7 @@ pub(crate) fn facet_quick_bar(
         let langs = ui_langs();
         let open_tab = move || facets_open.get() && facet_tab.get() == idx;
         let highlighted = move || open_tab() || filter.with(|f| facet_tab_has_filter(f, idx));
-        view()
-            .role(AccessibilityRole::Button)
+        button()
             .h(px(ControlSize::Xs.height()))
             .px_2()
             .flex_shrink_0()
@@ -652,7 +641,7 @@ pub(crate) fn facet_quick_bar(
             .duration(MOTION_INSTANT_MS)
             .ease_out()
             .focus_visible(apply_focus_ring)
-            .on_press(move || {
+            .on_press(move |_: &()| {
                 if facets_open.get() && facet_tab.get() == idx {
                     facets_open.set(false);
                 } else {
@@ -709,7 +698,6 @@ pub(crate) fn facet_quick_bar(
         .overflow_hidden()
         .child(
             view()
-                .element_ref(&tab_anchor)
                 .flex_shrink_0()
                 .flex_row()
                 .items_center()
@@ -766,6 +754,78 @@ pub(crate) fn facet_quick_bar(
         )
 }
 
+fn facet_sheet_tab(
+    facet_tab: Signal<u8>,
+    idx: u8,
+    zh: &'static str,
+    en: &'static str,
+    count: impl Fn() -> usize + Copy + 'static,
+) -> impl IntoElement {
+    let selected = move || facet_tab.get() == idx;
+    tab()
+        .selected(selected)
+        .on_press(move |_: &()| facet_tab.set(idx))
+        .h(px(ControlSize::Xs.height()))
+        .px_2()
+        .rounded(px(RADIUS_SM))
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .border_1()
+        .border_color(move || {
+            if selected() {
+                accent_blue_border()
+            } else {
+                AdaptiveColor::TRANSPARENT
+            }
+        })
+        .bg(move || {
+            if selected() {
+                accent_blue_soft()
+            } else {
+                AdaptiveColor::TRANSPARENT
+            }
+        })
+        .hover(|s| {
+            s.bg(move || {
+                if selected() {
+                    accent_blue_soft_hover()
+                } else {
+                    bg_control_hover()
+                }
+            })
+        })
+        .active(|s| s.bg(bg_control_active()))
+        .transition_colors()
+        .duration(MOTION_INSTANT_MS)
+        .ease_out()
+        .focus_visible(apply_focus_ring)
+        .child(
+            control_text(tr(zh, en))
+                .text_size(px(TEXT_XS))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(move || {
+                    if selected() {
+                        accent_blue_text()
+                    } else {
+                        fg_secondary()
+                    }
+                }),
+        )
+        .child(
+            mono(move || -> SharedString { present::format_thousands(count() as u64).into() })
+                .tabular_nums()
+                .text_size(px(TEXT_XS))
+                .text_color(move || {
+                    if selected() {
+                        accent_blue_text()
+                    } else {
+                        fg_muted()
+                    }
+                }),
+        )
+}
+
 pub(crate) fn facet_drawer(
     facets: Signal<session::SessionFacets>,
     facets_open: Signal<bool>,
@@ -808,20 +868,69 @@ pub(crate) fn facet_drawer(
     };
     view()
         .w_full()
+        .flex_1()
+        .min_h(px(0.0))
+        .flex_col()
+        .overflow_hidden()
         .pl(px(LIST_INSET))
-        .py_2()
+        .pt(move || {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let edges = nsh_core::element::desktop::title_bar();
+                if edges.left.0 > 0.0 {
+                    px(edges.top.0.max(36.0))
+                } else {
+                    px(8.0)
+                }
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                px(8.0)
+            }
+        })
+        .pb_2()
         .gap_1p5()
         .child(
             view()
                 .pr(px(LIST_PAD_END))
+                .flex_shrink_0()
                 .flex_row()
                 .items_center()
                 .justify_between()
                 .gap_2()
                 .child(
+                    tabs()
+                        .orientation(Axis::Horizontal)
+                        .accessibility_label(tr_opt("过滤维度", "Filter facets"))
+                        .flex_row()
+                        .items_center()
+                        .gap_1()
+                        .child(facet_sheet_tab(
+                            facet_tab,
+                            0,
+                            "域名",
+                            "Domains",
+                            move || facets.with(|f| f.domains.len()),
+                        ))
+                        .child(facet_sheet_tab(facet_tab, 1, "应用", "Apps", move || {
+                            facets.with(|f| f.apps.len())
+                        })),
+                )
+                .child(
+                    ui_icon_button(ButtonVariant::Ghost, ControlSize::Xs)
+                        .accessibility_label(tr_opt("关闭", "Close"))
+                        .on_press(move |_: &()| facets_open.set(false))
+                        .child(glyph_px(10.0, || Glyph::Close, || color(fg_muted()))),
+                ),
+        )
+        .child(
+            view()
+                .pr(px(LIST_PAD_END))
+                .flex_shrink_0()
+                .gap_1()
+                .child(
                     view()
-                        .flex_1()
-                        .min_w(px(0.0))
+                        .w_full()
                         .relative()
                         .child(
                             input()
@@ -850,8 +959,7 @@ pub(crate) fn facet_drawer(
                         .child(when(
                             move || !drawer_query.get().is_empty(),
                             move || {
-                                view()
-                                    .role(AccessibilityRole::Button)
+                                button()
                                     .absolute()
                                     .right(px(2.0))
                                     .top(px(3.0))
@@ -867,8 +975,8 @@ pub(crate) fn facet_drawer(
                                     .duration(move || motion_ms(MOTION_INSTANT_MS))
                                     .ease_out()
                                     .focus_visible(apply_focus_ring)
-                                    .label(tr("清空搜索", "Clear search"))
-                                    .on_press(move || drawer_query.set(String::new()))
+                                    .accessibility_label(tr_opt("清空搜索", "Clear search"))
+                                    .on_press(move |_: &()| drawer_query.set(String::new()))
                                     .child(text("×").text_size(px(TEXT_SM)).text_color(fg_muted()))
                             },
                         )),
@@ -881,29 +989,8 @@ pub(crate) fn facet_drawer(
                             tr("点击按进程/来源过滤", "Click to filter by app/client")().into()
                         }
                     })
-                    .flex_shrink_0()
                     .text_size(px(TEXT_XS))
                     .text_color(fg_muted()),
-                )
-                .child(
-                    view()
-                        .role(AccessibilityRole::Button)
-                        .w(px(ControlSize::Xs.height()))
-                        .h(px(ControlSize::Xs.height()))
-                        .flex_shrink_0()
-                        .rounded(px(RADIUS_SM))
-                        .flex_row()
-                        .items_center()
-                        .justify_center()
-                        .hover(|s| s.bg(bg_control_hover()))
-                        .active(|s| s.bg(bg_control_active()))
-                        .transition_colors()
-                        .duration(MOTION_INSTANT_MS)
-                        .ease_out()
-                        .focus_visible(apply_focus_ring)
-                        .label(tr("关闭", "Close"))
-                        .on_press(move || facets_open.set(false))
-                        .child(glyph_px(10.0, || Glyph::Close, || color(fg_muted()))),
                 ),
         )
         .child(
@@ -928,41 +1015,45 @@ pub(crate) fn facet_drawer(
                 },
             )
             .otherwise(move || {
-                scroll()
+                view()
+                    .flex_1()
+                    .min_h(px(0.0))
                     .w_full()
-                    .max_h(move || px((window().height.0 * 0.45).round().clamp(160.0, 320.0)))
+                    .overflow_hidden()
                     .child(
-                        view()
-                            .w_full()
-                            .pr(px(LIST_PAD_END))
-                            .gap_0p5()
-                            .child(when(
-                                move || facet_tab.get() == 0,
-                                move || {
-                                    view().w_full().gap_0p5().child(each(
-                                        grouped_domains,
-                                        |group| group.root.clone(),
-                                        move |group, _| {
-                                            sidebar_domain_group_view(
-                                                group,
-                                                filter,
-                                                drawer_query,
-                                                collapsed_roots,
-                                            )
-                                        },
-                                    ))
-                                },
-                            ))
-                            .child(when(
-                                move || facet_tab.get() != 0,
-                                move || {
-                                    view().w_full().gap_0p5().child(each(
-                                        items_list,
-                                        |entry| entry.token.clone(),
-                                        move |entry, _| sidebar_app_row(entry, filter),
-                                    ))
-                                },
-                            )),
+                        scroll().w_full().h_full().child(
+                            view()
+                                .w_full()
+                                .pr(px(LIST_PAD_END))
+                                .gap_0p5()
+                                .child(when(
+                                    move || facet_tab.get() == 0,
+                                    move || {
+                                        view().w_full().gap_0p5().child(each(
+                                            grouped_domains,
+                                            |group| group.root.clone(),
+                                            move |group, _| {
+                                                sidebar_domain_group_view(
+                                                    group,
+                                                    filter,
+                                                    drawer_query,
+                                                    collapsed_roots,
+                                                )
+                                            },
+                                        ))
+                                    },
+                                ))
+                                .child(when(
+                                    move || facet_tab.get() != 0,
+                                    move || {
+                                        view().w_full().gap_0p5().child(each(
+                                            items_list,
+                                            |entry| entry.token.clone(),
+                                            move |entry, _| sidebar_app_row(entry, filter),
+                                        ))
+                                    },
+                                )),
+                        ),
                     )
             }),
         )
@@ -979,62 +1070,63 @@ pub(crate) fn drawer_quick_chip(
     tip_en: &'static str,
 ) -> impl IntoElement {
     let is_active = computed(move || filter_has_token(&filter.get(), aliases));
-    view()
-        .role(AccessibilityRole::Button)
-        .h(px(ControlSize::Xs.height()))
-        .px(px(5.0))
-        .rounded(px(RADIUS_SM))
-        .border_1()
-        .border_color(move || {
-            if is_active.get() {
-                accent_blue_border()
-            } else {
-                border_control()
-            }
-        })
-        .bg(move || {
-            if is_active.get() {
-                accent_blue_soft()
-            } else {
-                bg_control()
-            }
-        })
-        .hover(|style| {
-            style.bg(move || {
+    view().tooltip(label_tip(tip_zh, tip_en)).child(
+        button()
+            .selected(move || is_active.get())
+            .h(px(ControlSize::Xs.height()))
+            .px(px(5.0))
+            .rounded(px(RADIUS_SM))
+            .border_1()
+            .border_color(move || {
                 if is_active.get() {
-                    accent_blue_soft_hover()
+                    accent_blue_border()
                 } else {
-                    bg_control_hover()
+                    border_control()
                 }
             })
-        })
-        .active(|style| style.bg(bg_control_active()))
-        .transition_colors()
-        .duration(MOTION_INSTANT_MS)
-        .ease_out()
-        .focus_visible(apply_focus_ring)
-        .label(tr(zh, en))
-        .tooltip(label_tip(tip_zh, tip_en))
-        .flex_row()
-        .items_center()
-        .gap(px(3.0))
-        .on_press(move || filter.set(toggle_filter_chip(&filter.get(), token, aliases)))
-        .child(view().w(px(4.0)).h(px(4.0)).rounded_full().bg(move || {
-            if is_active.get() {
-                accent_blue()
-            } else {
-                fg_muted()
-            }
-        }))
-        .child(
-            compact_control_text(tr(zh, en), TEXT_XS).text_color(move || {
+            .bg(move || {
                 if is_active.get() {
-                    accent_blue_text()
+                    accent_blue_soft()
                 } else {
-                    fg_secondary()
+                    bg_control()
                 }
-            }),
-        )
+            })
+            .hover(|style| {
+                style.bg(move || {
+                    if is_active.get() {
+                        accent_blue_soft_hover()
+                    } else {
+                        bg_control_hover()
+                    }
+                })
+            })
+            .active(|style| style.bg(bg_control_active()))
+            .transition_colors()
+            .duration(MOTION_INSTANT_MS)
+            .ease_out()
+            .focus_visible(apply_focus_ring)
+            .accessibility_label(tr_opt(zh, en))
+            .flex_row()
+            .items_center()
+            .gap(px(3.0))
+            .on_press(move |_: &()| filter.set(toggle_filter_chip(&filter.get(), token, aliases)))
+            .child(view().w(px(4.0)).h(px(4.0)).rounded_full().bg(move || {
+                if is_active.get() {
+                    accent_blue()
+                } else {
+                    fg_muted()
+                }
+            }))
+            .child(
+                compact_control_text(tr(zh, en), TEXT_XS).text_color(move || {
+                    if is_active.get() {
+                        accent_blue_text()
+                    } else {
+                        fg_secondary()
+                    }
+                }),
+            ),
+    )
 }
 
 pub(crate) const JSON_ALIASES: &[&str] = &["type:json", "ct:json"];

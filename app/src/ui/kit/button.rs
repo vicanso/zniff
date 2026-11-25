@@ -5,7 +5,7 @@ use super::super::*;
 
 use super::tokens::{
     ButtonVariant, ControlSize, MOTION_INSTANT_MS, MOTION_PRESS_MS, PRESS_SCALE, PRESS_SCALE_ICON,
-    motion_ms,
+    RADIUS_SM, TEXT_XS, motion_ms,
 };
 
 fn active_press_scale(scale: f32) -> f32 {
@@ -164,4 +164,63 @@ pub(crate) fn ui_toggle_button(
         .ease_bezier(0.22, 1.0, 0.36, 1.0)
         .focus_visible(apply_focus_ring)
         .disabled_style(|s| s.opacity(0.45))
+}
+
+/// Compact pill-shaped `nsh_base::radio()` option for exclusive single-choice `radio_group()` rows.
+#[allow(dead_code)]
+pub(crate) fn ui_radio_pill(
+    label: impl IntoReactive<SharedString>,
+    checked: impl Fn() -> bool + 'static + Copy,
+    on_select: impl Fn() + 'static,
+) -> impl IntoElement {
+    radio()
+        .checked(checked)
+        .h(px(ControlSize::Xs.height()))
+        .px_2()
+        .rounded(px(RADIUS_SM))
+        .flex_shrink_0()
+        .flex_row()
+        .items_center()
+        .justify_center()
+        .border_1()
+        .border_color(move || {
+            if checked() {
+                accent_blue_border()
+            } else {
+                border_control()
+            }
+        })
+        .bg(move || {
+            if checked() {
+                accent_blue_soft()
+            } else {
+                bg_control()
+            }
+        })
+        .hover(|style| {
+            style.bg(move || {
+                if checked() {
+                    accent_blue_soft_hover()
+                } else {
+                    bg_control_hover()
+                }
+            })
+        })
+        .active(|style| style.bg(bg_control_active()))
+        .transition_colors()
+        .duration(move || motion_ms(MOTION_INSTANT_MS))
+        .ease_out()
+        .focus_visible(apply_focus_ring)
+        .on_change(move |next: &bool| {
+            if *next {
+                on_select();
+            }
+        })
+        .child(compact_control_text(label, TEXT_XS).text_color(move || {
+            if checked() {
+                accent_blue_text()
+            } else {
+                fg_secondary()
+            }
+        }))
 }

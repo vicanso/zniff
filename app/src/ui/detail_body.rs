@@ -97,8 +97,7 @@ pub(crate) fn body_section(
                 })
                 .border_b_color(border_subtle())
                 .child(
-                    view()
-                        .role(AccessibilityRole::Button)
+                    button()
                         .flex_shrink_0()
                         .max_w(relative(1.0))
                         .overflow_hidden()
@@ -114,7 +113,10 @@ pub(crate) fn body_section(
                         .duration(MOTION_INSTANT_MS)
                         .ease_out()
                         .focus_visible(apply_focus_ring)
-                        .on_press(move || toggle_card_and_persist(folded, bit, &fold_controls))
+                        .accessibility_label(tr_opt(zh, en))
+                        .on_press(move |_: &()| {
+                            toggle_card_and_persist(folded, bit, &fold_controls)
+                        })
                         .child(fold_mark(folded, bit))
                         .child(
                             section_title(tr(zh, en))
@@ -770,8 +772,8 @@ pub(crate) fn doc_body(doc: Signal<Option<nsh_base::text_view::Document>>) -> im
 }
 
 pub(crate) fn doc_preview_chip(preview: Signal<bool>) -> impl IntoElement {
-    view()
-        .role(AccessibilityRole::Button)
+    button()
+        .selected(move || preview.get())
         .h(px(ControlSize::Xs.height()))
         .px_2()
         .rounded(px(RADIUS_MD))
@@ -814,7 +816,8 @@ pub(crate) fn doc_preview_chip(preview: Signal<bool>) -> impl IntoElement {
         .focus_visible(apply_focus_ring)
         .flex_row()
         .items_center()
-        .on_press(move || {
+        .accessibility_label(tr_opt("预览", "Preview"))
+        .on_press(move |_: &()| {
             preview.set(!preview.get());
         })
         .child(
@@ -841,7 +844,9 @@ pub(crate) fn pretty_switch(
     selected: Signal<Option<u64>>,
     baseline: Signal<Option<u64>>,
 ) -> impl IntoElement {
-    view()
+    tabs()
+        .orientation(Axis::Horizontal)
+        .accessibility_label(tr_opt("正文视图", "Body view"))
         .flex_row()
         .flex_shrink_0()
         .h(px(ControlSize::Xs.height()))
@@ -876,8 +881,8 @@ fn body_mode_chip(
     is_active: impl Fn() -> bool + Copy + 'static,
     on_press: impl Fn() + 'static,
 ) -> impl IntoElement {
-    view()
-        .role(AccessibilityRole::Button)
+    tab()
+        .selected(is_active)
         .h(px(ControlSize::Xs.height()))
         .px_1p5()
         .flex_row()
@@ -913,7 +918,7 @@ fn body_mode_chip(
         .duration(MOTION_INSTANT_MS)
         .ease_out()
         .focus_visible(apply_focus_ring)
-        .on_press(on_press)
+        .on_press(move |_: &()| on_press())
         .child(
             text(tr(zh, en))
                 .number_of_lines(1)

@@ -122,21 +122,22 @@ pub(crate) fn menu_theme_row(controls: Arc<Controls>) -> impl IntoElement {
                 .text_color(fg_secondary()),
         )
         .child(
-            view()
+            radio_group()
                 .flex_row()
                 .items_center()
                 .gap_1()
-                .child(menu_inline_pill(
+                .accessibility_label(tr_opt("主题", "Theme"))
+                .child(ui_radio_pill(
                     tr("系统", "System"),
                     move || prefs.theme_mode.get() == config::ThemeMode::System,
                     move || set_theme_mode(&c_sys, config::ThemeMode::System),
                 ))
-                .child(menu_inline_pill(
+                .child(ui_radio_pill(
                     tr("浅色", "Light"),
                     move || prefs.theme_mode.get() == config::ThemeMode::Light,
                     move || set_theme_mode(&c_light, config::ThemeMode::Light),
                 ))
-                .child(menu_inline_pill(
+                .child(ui_radio_pill(
                     tr("深色", "Dark"),
                     move || prefs.theme_mode.get() == config::ThemeMode::Dark,
                     move || set_theme_mode(&c_dark, config::ThemeMode::Dark),

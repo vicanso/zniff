@@ -221,14 +221,16 @@ pub(crate) fn about_logo_uri() -> String {
         .clone()
 }
 
-fn about_link_chip(
+pub(crate) fn about_link_chip(
     glyph: Glyph,
     label: impl IntoReactive<SharedString>,
     url: &'static str,
     controls: Arc<Controls>,
 ) -> impl IntoElement {
-    view()
-        .role(AccessibilityRole::Link)
+    link()
+        .href(url)
+        .open_with(LinkOpenWith::App)
+        .on_open(move |_: &SharedString| open_about_link(controls.clone(), url))
         .h(px(ControlSize::Sm.height()))
         .px_2p5()
         .gap_1p5()
@@ -244,8 +246,6 @@ fn about_link_chip(
         .duration(MOTION_INSTANT_MS)
         .ease_out()
         .focus_visible(apply_focus_ring)
-        .cursor(Cursor::Pointer)
-        .on_press(move || open_about_link(controls.clone(), url))
         .child(glyph_px(12.0, move || glyph, || color(fg_muted())))
         .child(control_text(label).text_color(fg_primary()))
 }
@@ -531,8 +531,7 @@ pub(crate) fn about_modal(
                         .text_color(fg_muted()),
                 )
                 .child(
-                    view()
-                        .role(AccessibilityRole::Button)
+                    button()
                         .h(px(24.0))
                         .px_2()
                         .gap_1()
@@ -548,7 +547,8 @@ pub(crate) fn about_modal(
                         .duration(MOTION_INSTANT_MS)
                         .ease_out()
                         .focus_visible(apply_focus_ring)
-                        .on_press(move || {
+                        .accessibility_label(tr_opt("复制环境信息", "Copy System Info"))
+                        .on_press(move |_: &()| {
                             set_clipboard(format_system_info_text(ui_lang(langs)));
                             set_status(&controls_copy, StatusMsg::CopiedSystemInfo);
                         })
@@ -684,8 +684,7 @@ pub(crate) fn about_modal(
                                 },
                                 move || {
                                     let controls_go = controls_up.clone();
-                                    view()
-                                        .role(AccessibilityRole::Button)
+                                    button()
                                         .h(px(24.0))
                                         .px_2p5()
                                         .flex_shrink_0()
@@ -699,7 +698,8 @@ pub(crate) fn about_modal(
                                         .duration(MOTION_INSTANT_MS)
                                         .ease_out()
                                         .focus_visible(apply_focus_ring)
-                                        .on_press(move || {
+                                        .accessibility_label(tr_opt("升级", "Upgrade"))
+                                        .on_press(move |_: &()| {
                                             if let Some(UpdateCheckNotice::Available(ver)) =
                                                 update_state.get().last_check
                                             {
@@ -733,8 +733,7 @@ pub(crate) fn about_modal(
 
             #[cfg(not(target_arch = "wasm32"))]
             let footer = footer.child(
-                view()
-                    .role(AccessibilityRole::Button)
+                button()
                     .h(px(ControlSize::Sm.height()))
                     .px_3()
                     .flex_row()
@@ -768,7 +767,8 @@ pub(crate) fn about_modal(
                     .focus_visible(apply_focus_ring)
                     .disabled(move || update_state.get().is_busy())
                     .disabled_style(|s| s.opacity(0.55))
-                    .on_press(move || {
+                    .accessibility_label(tr_opt("检查更新", "Check for Updates"))
+                    .on_press(move |_: &()| {
                         check_update_manual(controls_check.clone());
                     })
                     .child(
@@ -785,8 +785,7 @@ pub(crate) fn about_modal(
             );
 
             let footer = footer.child(
-                view()
-                    .role(AccessibilityRole::Button)
+                button()
                     .h(px(ControlSize::Sm.height()))
                     .px_3p5()
                     .flex_row()
@@ -802,7 +801,8 @@ pub(crate) fn about_modal(
                     .duration(MOTION_INSTANT_MS)
                     .ease_out()
                     .focus_visible(apply_focus_ring)
-                    .on_press(move || profiles.about_open.set(false))
+                    .accessibility_label(tr_opt("关闭", "Close"))
+                    .on_press(move |_: &()| profiles.about_open.set(false))
                     .child(control_text(tr("关闭", "Close")).text_color(accent_blue_text())),
             );
 

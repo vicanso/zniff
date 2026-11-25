@@ -58,8 +58,7 @@ pub(crate) fn ui_modal_card() -> View {
 /// Shared accessible icon close button for modal dialog headers.
 #[allow(dead_code)]
 pub(crate) fn ui_modal_close_button(on_close: impl Fn() + 'static) -> impl IntoElement {
-    view()
-        .role(AccessibilityRole::Button)
+    button()
         .w(px(24.0))
         .h(px(24.0))
         .rounded(px(RADIUS_MD))
@@ -83,8 +82,8 @@ pub(crate) fn ui_modal_close_button(on_close: impl Fn() + 'static) -> impl IntoE
         .duration(move || motion_ms(MOTION_INSTANT_MS))
         .ease_bezier(0.22, 1.0, 0.36, 1.0)
         .focus_visible(apply_focus_ring)
-        .label(tr("关闭", "Close"))
-        .on_press(on_close)
+        .accessibility_label(tr_opt("关闭", "Close"))
+        .on_press(move |_: &()| on_close())
         .child(glyph_px(12.0, || Glyph::Close, || color(fg_muted())))
 }
 

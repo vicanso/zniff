@@ -91,8 +91,8 @@ pub(crate) fn seq_source_kind_chip(
     label: &'static str,
 ) -> impl IntoElement {
     let is_active = move || source_flowchart.get() == target_flowchart;
-    view()
-        .role(AccessibilityRole::Button)
+    button()
+        .selected(is_active)
         .h(px(20.0))
         .px_2()
         .rounded(px(RADIUS_SM))
@@ -121,7 +121,8 @@ pub(crate) fn seq_source_kind_chip(
         })
         .flex_row()
         .items_center()
-        .on_press(move || source_flowchart.set(target_flowchart))
+        .accessibility_label(Some(SharedString::from(label)))
+        .on_press(move |_: &()| source_flowchart.set(target_flowchart))
         .child(
             mono(label)
                 .number_of_lines(1)
@@ -211,8 +212,7 @@ pub(crate) fn seq_mermaid_source_view(
                         },
                     ))
                     .child(
-                        view()
-                            .role(AccessibilityRole::Button)
+                        button()
                             .h(px(ControlSize::Xs.height()))
                             .px_2()
                             .rounded(px(RADIUS_SM))
@@ -227,7 +227,8 @@ pub(crate) fn seq_mermaid_source_view(
                             .focus_visible(apply_focus_ring)
                             .flex_row()
                             .items_center()
-                            .on_press(move || {
+                            .accessibility_label(tr_opt("复制", "Copy"))
+                            .on_press(move |_: &()| {
                                 set_clipboard(active_seq_mermaid(seq_builder));
                                 set_status(&controls, StatusMsg::CopiedMermaid);
                             })
@@ -273,8 +274,8 @@ pub(crate) fn seq_candidate_row(
             .with(|items| items.get(at.index()).cloned())
             .unwrap_or_default()
     });
-    view()
-        .role(AccessibilityRole::Checkbox)
+    checkbox()
+        .checked(move || item.with(|i| i.checked))
         .w_full()
         .h(px(32.0))
         .px_2p5()
@@ -296,52 +297,40 @@ pub(crate) fn seq_candidate_row(
         .duration(MOTION_INSTANT_MS)
         .ease_out()
         .focus_visible(apply_focus_ring)
-        .on_press(move || {
+        .on_change(move |next: &bool| {
             let index = at.index();
             seq_builder.items.update(|items| {
                 if let Some(target) = items.get_mut(index) {
-                    target.checked = !target.checked;
+                    target.checked = *next;
                 }
             });
             refresh_seq_diagram(&controls, seq_builder);
         })
-        .child(
-            view()
-                .w(px(14.0))
+        .indicator_style(|s| {
+            s.w(px(14.0))
                 .h(px(14.0))
                 .flex_shrink_0()
                 .rounded(px(RADIUS_SM))
                 .border_1()
-                .border_color(move || {
-                    if item.with(|i| i.checked) {
-                        accent_blue()
-                    } else {
-                        border_control()
-                    }
-                })
-                .bg(move || {
-                    if item.with(|i| i.checked) {
-                        accent_blue()
-                    } else {
-                        bg_card()
-                    }
-                })
+                .border_color(border_control())
+                .bg(bg_card())
                 .items_center()
                 .justify_center()
-                .child(when(
-                    move || item.with(|i| i.checked),
-                    || {
-                        canvas(|| {
-                            Painter::new()
-                                .line_width(1.8)
-                                .stroke_color(fg_on_accent().light)
-                                .stroke_svg("M2.2 5.2 L4.4 7.4 L8.0 3.0")
-                        })
-                        .w(px(10.0))
-                        .h(px(10.0))
-                    },
-                )),
-        )
+                .checked(|c| c.border_color(accent_blue()).bg(accent_blue()))
+        })
+        .indicator(when(
+            move || item.with(|i| i.checked),
+            || {
+                canvas(|| {
+                    Painter::new()
+                        .line_width(1.8)
+                        .stroke_color(fg_on_accent().light)
+                        .stroke_svg("M2.2 5.2 L4.4 7.4 L8.0 3.0")
+                })
+                .w(px(10.0))
+                .h(px(10.0))
+            },
+        ))
         .child(
             mono(move || item.with(|i| format!("#{}", i.id)))
                 .tabular_nums()
@@ -594,8 +583,7 @@ pub(crate) fn sequence_diagram_panel(
                                 .items_center()
                                 .gap_1p5()
                                 .child(
-                                    view()
-                                        .role(AccessibilityRole::Button)
+                                    button()
                                         .h(px(CONTROL_H))
                                         .px_3()
                                         .rounded(px(RADIUS_MD))
@@ -631,7 +619,7 @@ pub(crate) fn sequence_diagram_panel(
                                         .disabled(move || !has_checked())
                                         .flex_row()
                                         .items_center()
-                                        .on_press(move || {
+                                        .on_press(move |_: &()| {
                                             let count = seq_builder.items.with(|items| {
                                                 items.iter().filter(|i| i.checked).count()
                                             });
@@ -701,7 +689,9 @@ pub(crate) fn sequence_diagram_panel(
                                 )),
                         )
                         .child(
-                            view()
+                            tabs()
+                                .orientation(Axis::Horizontal)
+                                .accessibility_label(tr_opt("时序视图", "Sequence view"))
                                 .h(px(CONTROL_H))
                                 .px(px(2.0))
                                 .rounded(px(RADIUS_MD))

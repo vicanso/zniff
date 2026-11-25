@@ -457,125 +457,125 @@ fn watch_rule_row(
         .items_center()
         .gap_2()
         .child(
-            view()
-                .role(AccessibilityRole::Checkbox)
+            checkbox()
+                .checked(enabled)
                 .w(px(16.0))
                 .h(px(16.0))
-                .rounded(px(RADIUS_SM))
-                .border_1()
-                .border_color(move || {
-                    if enabled() {
-                        accent_blue()
-                    } else {
-                        border_strong()
-                    }
-                })
-                .bg(move || {
-                    if enabled() {
-                        accent_blue()
-                    } else {
-                        bg_control()
-                    }
-                })
-                .items_center()
-                .justify_center()
                 .flex_shrink_0()
                 .transition_colors()
                 .duration(MOTION_INSTANT_MS)
                 .ease_out()
                 .focus_visible(apply_focus_ring)
-                .label(tr("启用或停用此提醒", "Toggle watch rule"))
-                .on_press(move || {
+                .accessibility_label(tr_opt("启用或停用此提醒", "Toggle watch rule"))
+                .on_change(move |next_checked: &bool| {
                     let target_filter = item.with_untracked(|(_, r)| r.filter.clone());
                     let mut next = rules.get_untracked();
                     if let Some(r) = next
                         .iter_mut()
                         .find(|r| r.filter.eq_ignore_ascii_case(&target_filter))
                     {
-                        r.enabled = !r.enabled;
+                        r.enabled = *next_checked;
                     }
                     persist_watch_rules(&controls_toggle, rules, next);
                 })
-                .child(when(enabled, || {
+                .indicator_style(|s| {
+                    s.w(px(16.0))
+                        .h(px(16.0))
+                        .rounded(px(RADIUS_SM))
+                        .border_1()
+                        .border_color(border_strong())
+                        .bg(bg_control())
+                        .items_center()
+                        .justify_center()
+                        .checked(|c| c.border_color(accent_blue()).bg(accent_blue()))
+                })
+                .indicator(when(enabled, || {
                     glyph_px(10.0, || Glyph::Check, || color(fg_on_accent()))
                 })),
         )
         .child(
             view()
-                .role(AccessibilityRole::Button)
                 .flex_1()
                 .min_w(px(0.0))
-                .px_1()
-                .py_0p5()
-                .rounded(px(RADIUS_SM))
-                .hover(|s| s.bg(bg_control_hover()))
-                .active(|s| s.bg(bg_control_active()))
-                .transition_colors()
-                .duration(MOTION_INSTANT_MS)
-                .ease_out()
-                .focus_visible(apply_focus_ring)
-                .label(move || -> SharedString { filter_str().into() })
                 .tooltip(label_tip(
                     "点击切到实时会话并过滤此提醒",
                     "Filter live flows by this watch rule",
                 ))
-                .gap(px(1.0))
-                .on_press(move || {
-                    let f = item.with_untracked(|(_, r)| r.filter.clone());
-                    let (_, latest_id) = hit_info();
-                    let switched_live = active_tab.get_untracked() != LIVE_TAB_ID;
-                    if switched_live {
-                        switch_tab(&controls_jump, LIVE_TAB_ID);
-                        active_tab.set(LIVE_TAB_ID);
-                        baseline.set(baseline_id_for_active_tab(&controls_jump));
-                    }
-                    let primary = primary_filter.get_untracked();
-                    if filter_enabled.get_untracked() && !primary.trim().is_empty() {
-                        let combined = merge_secondary_filter(&primary, &f);
-                        let blocked = controls_jump.hub.with_session(|s| {
-                            let watch_hits = s.matching_with_previous_start(&f).len();
-                            watch_hits > 0 && s.matching_with_previous_start(&combined).is_empty()
-                        });
-                        if blocked {
-                            filter_enabled.set(false);
-                            set_status(&controls_jump, StatusMsg::PrimaryFilterPausedForWatch);
-                        }
-                    }
-                    list_filter.set(f);
-                    if let Some(id) = latest_id {
-                        selected.set(Some(id));
-                    } else if switched_live {
-                        selected.set(None);
-                    }
-                    open.set(false);
-                })
                 .child(
-                    text(move || -> SharedString {
-                        item.with(|(_, r)| {
-                            if r.name.is_empty() {
-                                r.filter.clone()
-                            } else {
-                                r.name.clone()
+                    button()
+                        .w_full()
+                        .px_1()
+                        .py_0p5()
+                        .rounded(px(RADIUS_SM))
+                        .hover(|s| s.bg(bg_control_hover()))
+                        .active(|s| s.bg(bg_control_active()))
+                        .transition_colors()
+                        .duration(MOTION_INSTANT_MS)
+                        .ease_out()
+                        .focus_visible(apply_focus_ring)
+                        .accessibility_label(move || Some(filter_str().into()))
+                        .gap(px(1.0))
+                        .on_press(move |_: &()| {
+                            let f = item.with_untracked(|(_, r)| r.filter.clone());
+                            let (_, latest_id) = hit_info();
+                            let switched_live = active_tab.get_untracked() != LIVE_TAB_ID;
+                            if switched_live {
+                                switch_tab(&controls_jump, LIVE_TAB_ID);
+                                active_tab.set(LIVE_TAB_ID);
+                                baseline.set(baseline_id_for_active_tab(&controls_jump));
                             }
+                            let primary = primary_filter.get_untracked();
+                            if filter_enabled.get_untracked() && !primary.trim().is_empty() {
+                                let combined = merge_secondary_filter(&primary, &f);
+                                let blocked = controls_jump.hub.with_session(|s| {
+                                    let watch_hits = s.matching_with_previous_start(&f).len();
+                                    watch_hits > 0
+                                        && s.matching_with_previous_start(&combined).is_empty()
+                                });
+                                if blocked {
+                                    filter_enabled.set(false);
+                                    set_status(
+                                        &controls_jump,
+                                        StatusMsg::PrimaryFilterPausedForWatch,
+                                    );
+                                }
+                            }
+                            list_filter.set(f);
+                            if let Some(id) = latest_id {
+                                selected.set(Some(id));
+                            } else if switched_live {
+                                selected.set(None);
+                            }
+                            open.set(false);
                         })
-                        .into()
-                    })
-                    .number_of_lines(1)
-                    .text_overflow(EllipsizeMode::Tail)
-                    .text_size(px(TEXT_SM))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(move || if enabled() { fg_primary() } else { fg_muted() }),
-                )
-                .child(when(
-                    move || item.with(|(_, r)| !r.name.is_empty()),
-                    move || {
-                        mono(move || -> SharedString { filter_str().into() })
+                        .child(
+                            text(move || -> SharedString {
+                                item.with(|(_, r)| {
+                                    if r.name.is_empty() {
+                                        r.filter.clone()
+                                    } else {
+                                        r.name.clone()
+                                    }
+                                })
+                                .into()
+                            })
                             .number_of_lines(1)
                             .text_overflow(EllipsizeMode::Tail)
-                            .text_size(px(TEXT_XS))
-                            .text_color(fg_muted())
-                    },
-                )),
+                            .text_size(px(TEXT_SM))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(move || if enabled() { fg_primary() } else { fg_muted() }),
+                        )
+                        .child(when(
+                            move || item.with(|(_, r)| !r.name.is_empty()),
+                            move || {
+                                mono(move || -> SharedString { filter_str().into() })
+                                    .number_of_lines(1)
+                                    .text_overflow(EllipsizeMode::Tail)
+                                    .text_size(px(TEXT_XS))
+                                    .text_color(fg_muted())
+                            },
+                        )),
+                ),
         )
         .child(
             view()
@@ -610,8 +610,7 @@ fn watch_rule_row(
             let confirm = signal(false);
             let reset_job = stored(None::<Spawned<()>>);
             let langs = ui_langs();
-            view()
-                .role(AccessibilityRole::Button)
+            button()
                 .h(px(ControlSize::Xs.height()))
                 .min_w(px(ControlSize::Xs.height()))
                 .px(move || if confirm.get() { px(6.0) } else { px(0.0) })
@@ -641,14 +640,14 @@ fn watch_rule_row(
                 .duration(MOTION_INSTANT_MS)
                 .ease_out()
                 .focus_visible(apply_focus_ring)
-                .label(move || -> SharedString {
+                .accessibility_label(move || -> Option<SharedString> {
                     if confirm.get() {
-                        tr("确认删除提醒", "Confirm delete watch")().into()
+                        Some(tr("确认删除提醒", "Confirm delete watch")().into())
                     } else {
-                        tr("删除提醒", "Delete watch")().into()
+                        Some(tr("删除提醒", "Delete watch")().into())
                     }
                 })
-                .on_press(move || {
+                .on_press(move |_: &()| {
                     if confirm.get_untracked() {
                         reset_job.replace(None);
                         confirm.set(false);

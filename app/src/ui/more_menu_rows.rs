@@ -192,8 +192,8 @@ pub(crate) fn menu_inline_pill(
     active: impl Fn() -> bool + 'static + Copy,
     on_press: impl Fn() + 'static,
 ) -> impl IntoElement {
-    view()
-        .role(AccessibilityRole::Button)
+    button()
+        .selected(active)
         .h(px(ControlSize::Xs.height()))
         .px_2()
         .rounded(px(RADIUS_SM))
@@ -230,7 +230,7 @@ pub(crate) fn menu_inline_pill(
         .duration(move || motion_ms(MOTION_INSTANT_MS))
         .ease_out()
         .focus_visible(apply_focus_ring)
-        .on_press(on_press)
+        .on_press(move |_: &()| on_press())
         .child(compact_control_text(label, TEXT_XS).text_color(move || {
             if active() {
                 accent_blue_text()
@@ -245,8 +245,7 @@ fn menu_danger_inline_pill(
     label: impl IntoReactive<SharedString>,
     on_press: impl Fn() + 'static,
 ) -> impl IntoElement {
-    view()
-        .role(AccessibilityRole::Button)
+    button()
         .h(px(ControlSize::Xs.height()))
         .px_2()
         .rounded(px(RADIUS_SM))
@@ -261,7 +260,7 @@ fn menu_danger_inline_pill(
         .duration(move || motion_ms(MOTION_INSTANT_MS))
         .ease_out()
         .focus_visible(apply_focus_ring)
-        .on_press(on_press)
+        .on_press(move |_: &()| on_press())
         .child(
             compact_control_text(label, TEXT_XS)
                 .font_weight(FontWeight::SEMIBOLD)
@@ -464,8 +463,8 @@ pub(crate) fn menu_redact_row(
         .flex_row()
         .items_center()
         .child(
-            view()
-                .role(AccessibilityRole::Checkbox)
+            checkbox()
+                .checked(marked)
                 .flex_1()
                 .h_full()
                 .flex_row()
@@ -478,8 +477,9 @@ pub(crate) fn menu_redact_row(
                 .duration(move || motion_ms(MOTION_INSTANT_MS))
                 .ease_out()
                 .focus_visible(apply_focus_ring)
-                .on_press(move || {
-                    let next = !seq_builder.redact_export.get();
+                .accessibility_label(tr_opt("导出/分享脱敏", "Redact exports"))
+                .on_change(move |next: &bool| {
+                    let next = *next;
                     seq_builder.redact_export.set(next);
                     *toggle_controls
                         .redact_export
@@ -489,9 +489,8 @@ pub(crate) fn menu_redact_row(
                         cfg.redact_export = next
                     });
                 })
-                .child(
-                    view()
-                        .w(px(14.0))
+                .indicator_style(|s| {
+                    s.w(px(14.0))
                         .h(px(14.0))
                         .flex_shrink_0()
                         .flex_row()
@@ -499,18 +498,13 @@ pub(crate) fn menu_redact_row(
                         .justify_center()
                         .rounded(px(RADIUS_SM))
                         .border_1()
-                        .border_color(move || {
-                            if marked() {
-                                accent_blue()
-                            } else {
-                                border_control()
-                            }
-                        })
-                        .bg(move || if marked() { accent_blue() } else { bg_card() })
-                        .child(when(marked, move || {
-                            glyph_px(9.0, || Glyph::Check, || color(fg_on_accent()))
-                        })),
-                )
+                        .border_color(border_control())
+                        .bg(bg_card())
+                        .checked(|c| c.border_color(accent_blue()).bg(accent_blue()))
+                })
+                .indicator(when(marked, move || {
+                    glyph_px(9.0, || Glyph::Check, || color(fg_on_accent()))
+                }))
                 .child(
                     control_text(tr("导出/分享脱敏", "Redact exports")).text_color(move || {
                         if marked() {
@@ -587,8 +581,7 @@ pub(crate) fn menu_share_row(
                     move || !share_id.get().is_empty(),
                     move || {
                         let controls = controls.clone();
-                        view()
-                            .role(AccessibilityRole::Button)
+                        button()
                             .h(px(ControlSize::Xs.height()))
                             .px_2()
                             .rounded(px(RADIUS_SM))
@@ -605,7 +598,8 @@ pub(crate) fn menu_share_row(
                             .duration(move || motion_ms(MOTION_INSTANT_MS))
                             .ease_out()
                             .focus_visible(apply_focus_ring)
-                            .on_press(move || {
+                            .accessibility_label(tr_opt("停止", "Stop"))
+                            .on_press(move |_: &()| {
                                 open.set(false);
                                 end_share(&controls, share_id);
                             })
@@ -617,59 +611,65 @@ pub(crate) fn menu_share_row(
                 ))
                 .child(
                     view()
-                        .role(AccessibilityRole::Button)
-                        .w(px(ControlSize::Xs.height()))
-                        .h(px(ControlSize::Xs.height()))
-                        .rounded(px(RADIUS_SM))
                         .flex_shrink_0()
-                        .flex_row()
-                        .items_center()
-                        .justify_center()
-                        .border_1()
-                        .border_color(move || {
-                            if !profiles.relay_url.get().trim().is_empty() {
-                                accent_blue_border()
-                            } else {
-                                border_control()
-                            }
-                        })
-                        .bg(move || {
-                            if !profiles.relay_url.get().trim().is_empty() {
-                                accent_blue_soft()
-                            } else {
-                                bg_control()
-                            }
-                        })
-                        .hover(|style| {
-                            style.bg(move || {
-                                if !profiles.relay_url.get().trim().is_empty() {
-                                    accent_blue_soft_hover()
-                                } else {
-                                    bg_control_hover()
-                                }
-                            })
-                        })
-                        .active(|style| style.bg(bg_control_active()))
-                        .transition_colors()
-                        .duration(move || motion_ms(MOTION_INSTANT_MS))
-                        .ease_out()
-                        .focus_visible(apply_focus_ring)
                         .tooltip(label_tip("配置中继服务器", "Configure relay server"))
-                        .on_press(move || {
-                            open.set(false);
-                            open_settings_tab(profiles, SettingsTab::Relay);
-                        })
-                        .child(glyph_px(
-                            12.0,
-                            || Glyph::Sliders,
-                            move || {
-                                if !profiles.relay_url.get().trim().is_empty() {
-                                    color(accent_blue_text())
-                                } else {
-                                    color(fg_secondary())
-                                }
-                            },
-                        )),
+                        .child(
+                            button()
+                                .w(px(ControlSize::Xs.height()))
+                                .h(px(ControlSize::Xs.height()))
+                                .rounded(px(RADIUS_SM))
+                                .flex_row()
+                                .items_center()
+                                .justify_center()
+                                .border_1()
+                                .border_color(move || {
+                                    if !profiles.relay_url.get().trim().is_empty() {
+                                        accent_blue_border()
+                                    } else {
+                                        border_control()
+                                    }
+                                })
+                                .bg(move || {
+                                    if !profiles.relay_url.get().trim().is_empty() {
+                                        accent_blue_soft()
+                                    } else {
+                                        bg_control()
+                                    }
+                                })
+                                .hover(|style| {
+                                    style.bg(move || {
+                                        if !profiles.relay_url.get().trim().is_empty() {
+                                            accent_blue_soft_hover()
+                                        } else {
+                                            bg_control_hover()
+                                        }
+                                    })
+                                })
+                                .active(|style| style.bg(bg_control_active()))
+                                .transition_colors()
+                                .duration(move || motion_ms(MOTION_INSTANT_MS))
+                                .ease_out()
+                                .focus_visible(apply_focus_ring)
+                                .accessibility_label(tr_opt(
+                                    "配置中继服务器",
+                                    "Configure relay server",
+                                ))
+                                .on_press(move |_: &()| {
+                                    open.set(false);
+                                    open_settings_tab(profiles, SettingsTab::Relay);
+                                })
+                                .child(glyph_px(
+                                    12.0,
+                                    || Glyph::Sliders,
+                                    move || {
+                                        if !profiles.relay_url.get().trim().is_empty() {
+                                            color(accent_blue_text())
+                                        } else {
+                                            color(fg_secondary())
+                                        }
+                                    },
+                                )),
+                        ),
                 ),
         )
 }
@@ -841,21 +841,22 @@ pub(crate) fn menu_lang_row(controls: Arc<Controls>) -> impl IntoElement {
                 .text_color(fg_secondary()),
         )
         .child(
-            view()
+            radio_group()
                 .flex_row()
                 .items_center()
                 .gap_1()
-                .child(menu_inline_pill(
+                .accessibility_label(tr_opt("界面语言", "Language"))
+                .child(ui_radio_pill(
                     tr("系统", "Auto"),
                     move || langs.get().is_none(),
                     move || set_lang(None, c_sys.clone()),
                 ))
-                .child(menu_inline_pill(
+                .child(ui_radio_pill(
                     "中文",
                     move || langs.get() == Some(Lang::Zh),
                     move || set_lang(Some(Lang::Zh), c_zh.clone()),
                 ))
-                .child(menu_inline_pill(
+                .child(ui_radio_pill(
                     "EN",
                     move || langs.get() == Some(Lang::En),
                     move || set_lang(Some(Lang::En), c_en.clone()),
@@ -1104,61 +1105,60 @@ pub(crate) fn primary_button(
     let danger_hover = danger.clone();
     let danger_active = danger.clone();
     let icon_state = danger;
-    view()
-        .window_drag(false)
-        .role(AccessibilityRole::Button)
-        .h(px(ControlSize::Sm.height()))
-        .px(px(ControlSize::Sm.padding_x()))
-        .gap(px(ControlSize::Sm.gap()))
-        .flex_shrink_0()
-        .flex_row()
-        .items_center()
-        .justify_center()
-        .rounded(px(RADIUS_MD))
-        .bg(move || {
-            if danger_bg() {
-                danger_button_bg()
-            } else {
-                accent_blue()
-            }
-        })
-        .hover(|style| {
-            style.bg(move || {
-                if danger_hover() {
-                    danger_button_hover()
+    no_drag(
+        button()
+            .h(px(ControlSize::Sm.height()))
+            .px(px(ControlSize::Sm.padding_x()))
+            .gap(px(ControlSize::Sm.gap()))
+            .flex_row()
+            .items_center()
+            .justify_center()
+            .rounded(px(RADIUS_MD))
+            .bg(move || {
+                if danger_bg() {
+                    danger_button_bg()
                 } else {
-                    accent_blue_hover()
+                    accent_blue()
                 }
             })
-        })
-        .active(|style| {
-            style.bg(move || {
-                if danger_active() {
-                    danger_button_active()
-                } else {
-                    accent_blue_active()
-                }
+            .hover(|style| {
+                style.bg(move || {
+                    if danger_hover() {
+                        danger_button_hover()
+                    } else {
+                        accent_blue_hover()
+                    }
+                })
             })
-        })
-        .transition_colors()
-        .duration(move || motion_ms(MOTION_INSTANT_MS))
-        .ease_out()
-        .focus_visible(apply_focus_ring)
-        .on_press(on_press)
-        .child(glyph_px(
-            ControlSize::Sm.icon_size(),
-            move || {
-                if icon_state() {
-                    Glyph::Stop
-                } else {
-                    Glyph::Play
-                }
-            },
-            || color(fg_on_accent()),
-        ))
-        .child(
-            control_text(label)
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(fg_on_accent()),
-        )
+            .active(|style| {
+                style.bg(move || {
+                    if danger_active() {
+                        danger_button_active()
+                    } else {
+                        accent_blue_active()
+                    }
+                })
+            })
+            .transition_colors()
+            .duration(move || motion_ms(MOTION_INSTANT_MS))
+            .ease_out()
+            .focus_visible(apply_focus_ring)
+            .on_press(move |_: &()| on_press())
+            .child(glyph_px(
+                ControlSize::Sm.icon_size(),
+                move || {
+                    if icon_state() {
+                        Glyph::Stop
+                    } else {
+                        Glyph::Play
+                    }
+                },
+                || color(fg_on_accent()),
+            ))
+            .child(
+                control_text(label)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(fg_on_accent()),
+            ),
+    )
 }

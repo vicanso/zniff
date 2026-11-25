@@ -170,11 +170,34 @@ fn llm_thinking_card(
     controls: Arc<Controls>,
 ) -> impl IntoElement {
     let langs = ui_langs();
-    view()
+    collapsible()
+        .open(move || open.get())
+        .reveal(true)
         .w_full()
         .rounded(px(RADIUS_MD))
         .bg(bg_code())
         .overflow_hidden()
+        .content(
+            view().w_full().child(ui_divider()).child(
+                guard_culled_pointer_events(view()).w_full().child(
+                    scroll().w_full().max_h(px(260.0)).child(
+                        view().w_full().p_2p5().child(
+                            mono(move || -> SharedString {
+                                summary
+                                    .with(|opt| {
+                                        opt.as_ref().map(|s| s.thinking.clone()).unwrap_or_default()
+                                    })
+                                    .into()
+                            })
+                            .selectable(true)
+                            .text_size(move || scaled_px(12.0))
+                            .line_height(move || scaled_px(18.0))
+                            .text_color(fg_muted()),
+                        ),
+                    ),
+                ),
+            ),
+        )
         .child(
             view()
                 .w_full()
@@ -184,8 +207,7 @@ fn llm_thinking_card(
                 .items_center()
                 .justify_between()
                 .child(
-                    view()
-                        .role(AccessibilityRole::Button)
+                    button()
                         .px_1()
                         .py_0p5()
                         .rounded(px(RADIUS_SM))
@@ -198,8 +220,8 @@ fn llm_thinking_card(
                         .duration(move || motion_ms(MOTION_INSTANT_MS))
                         .ease_out()
                         .focus_visible(apply_focus_ring)
-                        .label(tr("展开或收起思考过程", "Toggle thinking"))
-                        .on_press(move || open.update(|v| *v = !*v))
+                        .accessibility_label(tr_opt("展开或收起思考过程", "Toggle thinking"))
+                        .on_press(move |_: &()| open.update(|v| *v = !*v))
                         .child(ui_rotating_chevron(
                             10.0,
                             move || open.get(),
@@ -230,32 +252,6 @@ fn llm_thinking_card(
                     }
                 })),
         )
-        .child(when(
-            move || open.get(),
-            move || {
-                view().w_full().child(ui_divider()).child(
-                    guard_culled_pointer_events(view()).w_full().child(
-                        scroll().w_full().max_h(px(260.0)).child(
-                            view().w_full().p_2p5().child(
-                                mono(move || -> SharedString {
-                                    summary
-                                        .with(|opt| {
-                                            opt.as_ref()
-                                                .map(|s| s.thinking.clone())
-                                                .unwrap_or_default()
-                                        })
-                                        .into()
-                                })
-                                .selectable(true)
-                                .text_size(move || scaled_px(12.0))
-                                .line_height(move || scaled_px(18.0))
-                                .text_color(fg_muted()),
-                            ),
-                        ),
-                    ),
-                )
-            },
-        ))
 }
 
 fn llm_output_card(
