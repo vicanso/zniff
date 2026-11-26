@@ -100,19 +100,6 @@ pub(crate) struct TrayProps {
     pub(crate) on_clear: Rc<dyn Fn()>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn reveal_main_window(
-    main_win: Signal<Option<nsh_core::element::desktop::WindowRef>>,
-    main_open: Signal<bool>,
-) {
-    if !main_open.get_untracked() {
-        main_open.set(true);
-    } else if let Some(win) = main_win.get_untracked() {
-        win.show();
-        win.focus();
-    }
-}
-
 /// Installs the reactive desktop system tray / menu bar icon and lightweight menu.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn install_system_tray(props: TrayProps) {

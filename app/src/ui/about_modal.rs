@@ -275,6 +275,8 @@ fn about_meta_badge(label: impl IntoReactive<SharedString>) -> impl IntoElement 
 pub(crate) fn install_macos_application_menu(
     about_open: Signal<bool>,
     settings_open: Signal<bool>,
+    main_win: Signal<Option<nsh_core::element::desktop::WindowRef>>,
+    main_open: Signal<bool>,
 ) {
     use nsh_core::desktop::MenuRole;
     use nsh_core::element::desktop::{MenuItem, set_application_menu};
@@ -286,11 +288,16 @@ pub(crate) fn install_macos_application_menu(
             MenuItem::submenu(
                 "zniff",
                 [
-                    MenuItem::new(t(lang, "关于 zniff", "About zniff"))
-                        .on_select(move || about_open.set(true)),
+                    MenuItem::new(t(lang, "关于 zniff", "About zniff")).on_select(move || {
+                        about_open.set(true);
+                        reveal_main_window(main_win, main_open);
+                    }),
                     MenuItem::new(t(lang, "设置…", "Settings…"))
                         .shortcut("cmd+,")
-                        .on_select(move || settings_open.set(true)),
+                        .on_select(move || {
+                            settings_open.set(true);
+                            reveal_main_window(main_win, main_open);
+                        }),
                     MenuItem::separator(),
                     MenuItem::role(MenuRole::Hide),
                     MenuItem::role(MenuRole::HideOthers),

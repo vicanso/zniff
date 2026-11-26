@@ -4732,3 +4732,276 @@ fn font_settings_preset_override_partial_preservation_blur_and_escape_zh_en() {
         assert!(saved_reset.mono_font.is_empty());
     }
 }
+
+#[test]
+fn tray_close_destroys_workspace_and_reopen_restores_session_and_live_state() {
+    use std::cell::RefCell;
+
+    type CounterPair = (Rc<Cell<u32>>, Rc<Cell<u32>>);
+
+    thread_local! {
+        static TEST_CONTROLS: RefCell<Option<Arc<Controls>>> = const { RefCell::new(None) };
+        static TEST_COUNTERS: RefCell<CounterPair> =
+            RefCell::new((Rc::new(Cell::new(0)), Rc::new(Cell::new(0))));
+    }
+
+    fn record_flow(controls: &Controls, path: &str) {
+        controls.hub.with_session(|session| {
+            session.open(crate::session::FlowDraft {
+                protocol: crate::session::Protocol::Http2,
+                method: "GET".into(),
+                host: "api.vicanso.dev".into(),
+                path: path.into(),
+                url: format!("https://api.vicanso.dev{path}"),
+                request_headers: Vec::new(),
+            });
+        });
+        controls.hub.touch();
+    }
+
+    fn workspace_body(
+        rt: AppRuntime,
+        mounts: Rc<Cell<u32>>,
+        disposals: Rc<Cell<u32>>,
+    ) -> impl IntoElement {
+        mounts.set(mounts.get() + 1);
+        cleanup(move || disposals.set(disposals.get() + 1));
+
+        let local_cleared = signal(0_u32);
+        let seen_clear = stored(rt.tray_clear_rev.get_untracked());
+        let clear_sig = rt.tray_clear_rev;
+        effect(move || {
+            let rev = clear_sig.get();
+            if seen_clear.replace(rev) != rev {
+                local_cleared.set(local_cleared.get_untracked() + 1);
+            }
+        });
+
+        let open_modals_rt = rt.clone();
+        let controls = rt.controls.clone();
+        let running = rt.running;
+        let listen = rt.listen;
+        view()
+            .flex_col()
+            .child(
+                button()
+                    .on_press(move |_: &()| {
+                        open_modals_rt.settings_open.set(true);
+                        open_modals_rt.about_open.set(true);
+                    })
+                    .child(text("OPEN_MODALS")),
+            )
+            .child(text(move || {
+                let _ = listen.get();
+                let _ = running.get();
+                let paths: Vec<String> = controls
+                    .hub
+                    .with_session(|session| session.iter().map(|flow| flow.path.clone()).collect());
+                format!(
+                    "WORKSPACE_LIVE|flows={}|paths={}|running={}|listen={}|cleared={}",
+                    paths.len(),
+                    paths.join(","),
+                    running.get(),
+                    listen.get(),
+                    local_cleared.get(),
+                )
+            }))
+    }
+
+    #[component]
+    fn TrayLifecycleHarness() -> impl IntoElement {
+        let lang = TEST_LANG.with(Cell::get);
+        provide_base_contexts(lang);
+        let controls = make_controls("tray-lifecycle");
+        *controls.running.lock().unwrap() = true;
+        *controls.listen.lock().unwrap() = "127.0.0.1:8877".into();
+        record_flow(&controls, "/before-close");
+
+        let (mounts, disposals) = TEST_COUNTERS.with(|c| c.borrow().clone());
+        let now = clock::now();
+        let rt = AppRuntime {
+            controls: controls.clone(),
+            langs: signal(Some(lang)),
+            show_tray: signal(true),
+            minimize_to_tray: signal(true),
+            main_open: signal(true),
+            main_win: signal(None),
+            last_placement: stored(None),
+            has_mounted_once: stored(false),
+            running: signal(true),
+            listen: signal("127.0.0.1:8877".into()),
+            use_system_proxy: signal(false),
+            about_open: signal(false),
+            settings_open: signal(false),
+            watch_rules: signal(Vec::new()),
+            watch_eval: signal(crate::watch::WatchEvaluation::default()),
+            watch_tracker: stored(crate::watch::WatchTracker::default()),
+            seen_watch_rules: stored(Vec::new()),
+            seen_watch_gen: stored(u64::MAX),
+            spill_gc_at: stored(now),
+            update_probe_at: stored(now),
+            tray_clear_rev: signal(0),
+        };
+        TEST_CONTROLS.with(|slot| *slot.borrow_mut() = Some(controls));
+
+        let rt_change = rt.clone();
+        let rt_close = rt.clone();
+        let rt_content = rt.clone();
+        let rt_maint = rt.clone();
+        let rt_show = rt.clone();
+        let rt_clear = rt.clone();
+        let rt_tray_close = rt.clone();
+        let root_rt = rt;
+        let m_root = mounts.clone();
+        let d_root = disposals.clone();
+
+        view()
+            .w(px(1200.0))
+            .h(px(760.0))
+            .child(
+                nsh_core::element::desktop::window()
+                    .id("main")
+                    .open(root_rt.main_open)
+                    .on_open_change(move |ev| on_main_window_open_change(&rt_change, ev.open))
+                    .on_close_press(move |_| close_main_window_to_tray(&rt_close))
+                    .content(move || {
+                        rt_content
+                            .main_win
+                            .set(Some(nsh_core::element::desktop::current_window()));
+                        workspace_body(rt_content.clone(), mounts.clone(), disposals.clone())
+                    }),
+            )
+            .child(
+                button()
+                    .on_press(move |_: &()| run_background_maintenance(&rt_maint))
+                    .child(text("DO_MAINTENANCE")),
+            )
+            .child(
+                button()
+                    .on_press(move |_: &()| reveal_main_window(rt_show.main_win, rt_show.main_open))
+                    .child(text("TRAY_SHOW")),
+            )
+            .child(
+                button()
+                    .on_press(move |_: &()| {
+                        if clear_captured_session(&rt_clear.controls) {
+                            rt_clear
+                                .tray_clear_rev
+                                .set(rt_clear.tray_clear_rev.get_untracked().wrapping_add(1));
+                        }
+                    })
+                    .child(text("TRAY_CLEAR")),
+            )
+            .child(
+                button()
+                    .on_press(move |_: &()| close_main_window_to_tray(&rt_tray_close))
+                    .child(text("TRAY_CLOSE")),
+            )
+            .child(text(move || {
+                format!(
+                    "ROOT_STATE|open={}|settings={}|about={}|mounts={}|disposals={}|running={}|listen={}",
+                    root_rt.main_open.get(),
+                    root_rt.settings_open.get(),
+                    root_rt.about_open.get(),
+                    m_root.get(),
+                    d_root.get(),
+                    root_rt.running.get(),
+                    root_rt.listen.get(),
+                )
+            }))
+    }
+
+    for lang in [Lang::Zh, Lang::En] {
+        TEST_LANG.set(lang);
+        let mounts = Rc::new(Cell::new(0_u32));
+        let disposals = Rc::new(Cell::new(0_u32));
+        TEST_COUNTERS.with(|c| *c.borrow_mut() = (mounts.clone(), disposals.clone()));
+
+        let mut core = Core::new(ApproxTextEngine, Size::new(px(1200.0), px(760.0)));
+        let mut registry = Registry::new();
+        registry.register::<TrayLifecycleHarness>();
+        core.set_components(registry);
+        core.set_environment(nsh_core::element::Environment {
+            window: Size::new(px(1200.0), px(760.0)),
+            os: nsh_core::platform::Os::MacOs,
+            idiom: nsh_core::platform::Idiom::Desktop,
+            reduce_motion: true,
+            ..Default::default()
+        });
+        let comp_name = std::any::type_name::<TrayLifecycleHarness>();
+        for op in [
+            Op::Create {
+                id: 2,
+                tag: Tag::View,
+            },
+            Op::SetProp {
+                id: 2,
+                prop: Prop::Component(comp_name.into()),
+            },
+            Op::Insert {
+                parent: ROOT_ID,
+                child: 2,
+                before: None,
+            },
+        ] {
+            core.apply(op).expect("apply root op");
+        }
+        let mut tree = HeadlessTree::default();
+        tree.pump(&mut core);
+
+        assert!(tree.press_text(&mut core, "OPEN_MODALS"));
+        assert!(tree.has_text("ROOT_STATE|open=true|settings=true|about=true|mounts=1|disposals=0|running=true|listen=127.0.0.1:8877"));
+        assert!(tree.has_text(
+            "WORKSPACE_LIVE|flows=1|paths=/before-close|running=true|listen=127.0.0.1:8877|cleared=0"
+        ));
+
+        let controls = TEST_CONTROLS
+            .with(|slot| slot.borrow().clone())
+            .expect("controls");
+
+        // 1. Simulate pressing main window close while minimize_to_tray is enabled -> unmounts workspace cleanly.
+        let modal_id = tree
+            .kinds
+            .iter()
+            .find_map(|(id, kind)| (*kind == ViewKind::Modal).then_some(*id))
+            .expect("main window Modal node");
+        core.component_event(
+            modal_id,
+            EventKind::Window,
+            &EventPayload::Window(Box::new(nsh_core::desktop::WindowEvent::ClosePress {
+                reason: nsh_core::desktop::CloseReason::CloseButton,
+            })),
+        );
+        tree.pump(&mut core);
+
+        assert!(tree.has_text("ROOT_STATE|open=false|settings=false|about=false|mounts=1|disposals=1|running=true|listen=127.0.0.1:8877"));
+        assert!(!tree.has_text_containing("WORKSPACE_LIVE|"));
+
+        // 2. Capture another flow + update listen port while closed in tray, run background maintenance.
+        record_flow(&controls, "/while-in-tray");
+        *controls.listen.lock().unwrap() = "127.0.0.1:19999".into();
+        assert!(tree.press_text(&mut core, "DO_MAINTENANCE"));
+        assert!(tree.has_text("ROOT_STATE|open=false|settings=false|about=false|mounts=1|disposals=1|running=true|listen=127.0.0.1:19999"));
+
+        // 3. Reopen via tray "Show Window" -> mounts new workspace and restores all live session flows & state.
+        assert!(tree.press_text(&mut core, "TRAY_SHOW"));
+        assert!(tree.has_text("ROOT_STATE|open=true|settings=false|about=false|mounts=2|disposals=1|running=true|listen=127.0.0.1:19999"));
+        assert!(tree.has_text("WORKSPACE_LIVE|flows=2|paths=/before-close,/while-in-tray|running=true|listen=127.0.0.1:19999|cleared=0"));
+
+        // 4. Tray "Clear Traffic" while window is open bumps tray_clear_rev and clears live session.
+        assert!(tree.press_text(&mut core, "TRAY_CLEAR"));
+        assert!(tree.has_text(
+            "WORKSPACE_LIVE|flows=0|paths=|running=true|listen=127.0.0.1:19999|cleared=1"
+        ));
+
+        // 5. Close again, record new flow while in tray, reopen again cleanly.
+        assert!(tree.press_text(&mut core, "TRAY_CLOSE"));
+        assert!(tree.has_text("ROOT_STATE|open=false|settings=false|about=false|mounts=2|disposals=2|running=true|listen=127.0.0.1:19999"));
+        record_flow(&controls, "/after-clear");
+        assert!(tree.press_text(&mut core, "TRAY_SHOW"));
+        assert!(tree.has_text("ROOT_STATE|open=true|settings=false|about=false|mounts=3|disposals=2|running=true|listen=127.0.0.1:19999"));
+        assert!(tree.has_text("WORKSPACE_LIVE|flows=1|paths=/after-clear|running=true|listen=127.0.0.1:19999|cleared=0"));
+
+        TEST_CONTROLS.with(|slot| *slot.borrow_mut() = None);
+    }
+}

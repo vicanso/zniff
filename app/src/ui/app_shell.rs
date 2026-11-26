@@ -1,38 +1,61 @@
 #[allow(unused_imports)]
 use super::*;
 
-/// The root view: hosts the NSH 0.7 desktop window (no-op wrapper off desktop) and workspace.
+/// The root view: owns process-lifetime runtime, tray lifecycle, and dynamically mounts/unmounts
+/// the desktop window workspace.
 #[component]
 pub fn App() -> impl IntoElement {
     #[cfg(not(target_arch = "wasm32"))]
     crate::ensure_desktop_runtime_init();
     crate::startup_metrics::mark_app_mount();
     let initial_cfg = saved_config();
-    let main_open = signal(true);
-    let show_tray = signal(initial_cfg.show_tray);
-    let minimize_to_tray = signal(initial_cfg.minimize_to_tray);
-    let main_win = signal(None::<nsh_core::element::desktop::WindowRef>);
+    let rt = init_app_runtime(&initial_cfg);
+    let show_tray = rt.show_tray;
+    let minimize_to_tray = rt.minimize_to_tray;
+    #[cfg(not(target_arch = "wasm32"))]
+    let win_mount_seq = Rc::new(Cell::new(0_u64));
     #[cfg(not(target_arch = "wasm32"))]
     {
         use nsh_core::desktop::QuitMode;
         use nsh_core::element::desktop::{on_reopen, set_quit_mode};
 
+        let show_mode = rt.show_tray;
+        let min_mode = rt.minimize_to_tray;
         effect(move || {
-            let mode = if show_tray.get() && minimize_to_tray.get() {
+            let mode = if show_mode.get() && min_mode.get() {
                 QuitMode::Explicit
             } else {
                 QuitMode::LastWindowClosed
             };
             set_quit_mode(mode);
         });
-        on_reopen(move || {
-            if !main_open.get_untracked() {
-                main_open.set(true);
-            } else if let Some(win) = main_win.get_untracked() {
-                win.show();
-                win.focus();
-            }
+        let reopen_win = rt.main_win;
+        let reopen_open = rt.main_open;
+        on_reopen(move || reveal_main_window(reopen_win, reopen_open));
+
+        let tray_controls = rt.controls.clone();
+        let tray_clear_rev = rt.tray_clear_rev;
+        let tray_win = rt.main_win;
+        let tray_open = rt.main_open;
+        install_system_tray(TrayProps {
+            controls: rt.controls.clone(),
+            langs: rt.langs,
+            show_tray: rt.show_tray,
+            main_win: rt.main_win,
+            main_open: rt.main_open,
+            running: rt.running,
+            listen: rt.listen,
+            use_system_proxy: rt.use_system_proxy,
+            on_clear: Rc::new(move || {
+                if clear_captured_session(&tray_controls) {
+                    tray_clear_rev.set(tray_clear_rev.get_untracked().wrapping_add(1));
+                }
+                reveal_main_window(tray_win, tray_open);
+            }),
         });
+        #[cfg(target_os = "macos")]
+        install_macos_application_menu(rt.about_open, rt.settings_open, rt.main_win, rt.main_open);
+        install_background_maintenance(&rt);
     }
     let mut title_bar = nsh_core::desktop::TitleBarOptions::default();
     title_bar.style = nsh_core::desktop::TitleBarStyle::Hidden;
@@ -43,6 +66,7 @@ pub fn App() -> impl IntoElement {
         width: px(960.0),
         height: px(640.0),
     }));
+    let rt_change = rt.clone();
     #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
     let mut main_window_node = nsh_core::element::desktop::window()
         .id("main")
@@ -57,8 +81,13 @@ pub fn App() -> impl IntoElement {
             attrs.close_on_press = Some(!(show_tray.get() && minimize_to_tray.get()));
             attrs
         })
-        .open(main_open)
-        .on_open_change(move |ev| main_open.set(ev.open));
+        .open(rt.main_open)
+        .on_open_change(move |ev| {
+            #[cfg(not(target_arch = "wasm32"))]
+            on_main_window_open_change(&rt_change, ev.open);
+            #[cfg(target_arch = "wasm32")]
+            rt_change.main_open.set(ev.open);
+        });
     #[cfg(not(target_arch = "wasm32"))]
     {
         use nsh_core::desktop::{DisplayId, WindowMode, WindowPosition};
@@ -83,49 +112,51 @@ pub fn App() -> impl IntoElement {
         } {
             main_window_node = main_window_node.default_mode(mode);
         }
+        let rt_close = rt.clone();
         main_window_node = main_window_node.on_close_press(move |_| {
-            let win = main_win
-                .get_untracked()
-                .unwrap_or_else(nsh_core::element::desktop::current_window);
-            if show_tray.get_untracked() && minimize_to_tray.get_untracked() {
-                win.hide();
+            if rt_close.show_tray.get_untracked() && rt_close.minimize_to_tray.get_untracked() {
+                close_main_window_to_tray(&rt_close);
             } else {
+                let win = rt_close
+                    .main_win
+                    .get_untracked()
+                    .unwrap_or_else(nsh_core::element::desktop::current_window);
                 win.close();
             }
         });
     }
     main_window_node.content(move || {
         #[cfg(not(target_arch = "wasm32"))]
-        main_win.set(Some(nsh_core::element::desktop::current_window()));
-        app_workspace(show_tray, minimize_to_tray, main_win, main_open)
+        {
+            let seq = win_mount_seq.get().wrapping_add(1);
+            win_mount_seq.set(seq);
+            let win = nsh_core::element::desktop::current_window();
+            rt.main_win.set(Some(win.clone()));
+            if rt.has_mounted_once.replace(true) {
+                if let Some(placement) = rt.last_placement.get() {
+                    win.set_placement(placement);
+                }
+                win.focus();
+            }
+            let seq_ref = Rc::clone(&win_mount_seq);
+            let win_sig = rt.main_win;
+            cleanup(move || {
+                if seq_ref.get() == seq {
+                    win_sig.try_set(None);
+                }
+            });
+        }
+        app_workspace(rt.clone())
     })
 }
 
-fn app_workspace(
-    show_tray: Signal<bool>,
-    minimize_to_tray: Signal<bool>,
-    main_win: Signal<Option<nsh_core::element::desktop::WindowRef>>,
-    main_open: Signal<bool>,
-) -> impl IntoElement {
-    #[cfg(target_arch = "wasm32")]
-    let _ = (main_win, main_open);
-    let langs = signal(load_lang_pref());
-    provide_context(langs);
-    hydrate_web_local_prefs();
-    let langs_after_hydrate = load_lang_pref();
-    if langs.get_untracked() != langs_after_hydrate {
-        langs.set(langs_after_hydrate);
-    }
-    let initial_ui_cfg = saved_config();
-    provide_appearance_prefs(initial_ui_cfg.theme_mode, initial_ui_cfg.ui_zoom);
-    provide_font_prefs(
-        initial_ui_cfg.font_preset,
-        initial_ui_cfg.ui_font.clone(),
-        initial_ui_cfg.mono_font.clone(),
-        initial_ui_cfg.system_mono_font,
-    );
+fn app_workspace(rt: AppRuntime) -> impl IntoElement {
+    let controls = rt.controls.clone();
+    let langs = rt.langs;
+    let show_tray = rt.show_tray;
+    let minimize_to_tray = rt.minimize_to_tray;
     let status = signal(StatusMsg::Idle);
-    let running = signal(false);
+    let running = rt.running;
     let ca_status = signal(ca::CaStatus::NotInstalled);
     let active_external_ca = signal(None::<ca::ExternalCaSummary>);
     let detected_external_cas = signal(Vec::<ca::ExternalCaSummary>::new());
@@ -134,7 +165,7 @@ fn app_workspace(
         active_external: active_external_ca,
         detected_external: detected_external_cas,
     };
-    let use_system_proxy = signal(false);
+    let use_system_proxy = rt.use_system_proxy;
     let memory = signal(String::from("0 B"));
     let dropped = signal(0_u64);
     let saved_filter = saved_config();
@@ -340,7 +371,13 @@ fn app_workspace(
         .unwrap_or_default()
     };
     let bypass_text = signal(saved.bypass_hosts);
+    #[cfg(not(target_arch = "wasm32"))]
+    let rules_text = signal(controls.hub.rules_text());
+    #[cfg(target_arch = "wasm32")]
     let rules_text = signal(saved.rules);
+    #[cfg(not(target_arch = "wasm32"))]
+    let rule_groups_sig = signal(controls.hub.rule_groups());
+    #[cfg(target_arch = "wasm32")]
     let rule_groups_sig = signal(saved.rule_groups);
     let editing_group_sig = signal(None::<String>);
     let upstream_text = signal(saved.upstream_proxy);
@@ -387,12 +424,12 @@ fn app_workspace(
         access_open: signal(false),
         quick_rule_prefill: signal(None),
         machine_settings_open: signal(false),
-        settings_open: signal(false),
+        settings_open: rt.settings_open,
         settings_tab: signal(SettingsTab::General),
         shortcuts_open: signal(false),
         marker_modal_open: signal(false),
         watch_open: signal(false),
-        about_open: signal(false),
+        about_open: rt.about_open,
         default_json_tree: shown.default_json_tree,
         show_tray,
         minimize_to_tray,
@@ -424,44 +461,6 @@ fn app_workspace(
     refresh_transparent_proxy_state_async();
     #[cfg(not(target_arch = "wasm32"))]
     let tp_probe_at = Cell::new(clock::now());
-    let controls = open_controls();
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let exit_controls = controls.clone();
-        cleanup(move || {
-            #[cfg(not(test))]
-            {
-                shutdown_capture_for_exit(&exit_controls);
-                crate::cleanup_desktop_runtime();
-            }
-            #[cfg(test)]
-            let _ = &exit_controls;
-        });
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let tray_clear_controls = controls.clone();
-        install_system_tray(TrayProps {
-            controls: controls.clone(),
-            langs,
-            show_tray: profile_signals.show_tray,
-            main_win,
-            main_open,
-            running,
-            listen,
-            use_system_proxy,
-            on_clear: Rc::new(move || {
-                clear_captured(
-                    &tray_clear_controls,
-                    selected,
-                    baseline,
-                    compose,
-                    seq_builder,
-                    shown,
-                );
-            }),
-        });
-    }
     let config_broken = signal(lock_config_error(&controls));
     let default_json_tree_effect = shown.default_json_tree;
     let shown_tree_effect = shown;
@@ -472,40 +471,17 @@ fn app_workspace(
         shown_tree_effect.req_json_tree.set(active);
         shown_tree_effect.res_json_tree.set(active);
     });
-    #[cfg(target_os = "macos")]
-    install_macos_application_menu(profile_signals.about_open, profile_signals.settings_open);
     let config_broken_dismissed = signal(false);
-    if let Some(err) = config_broken.get() {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let cfg_path = lock_string(&controls.config_path);
-            eprintln!("zniff: 配置文件 {cfg_path} 格式错误，已使用默认配置（原文件已保留）: {err}");
-        }
-        set_status(&controls, StatusMsg::ConfigBroken { err });
-    }
     let update_state = signal(lock_update_state(&controls));
     status.set(lock_status(&controls));
+    running.set(lock_bool(&controls.running));
+    listen.set(lock_string(&controls.listen));
     ca_status.set(lock_ca_status(&controls));
     active_external_ca.set(lock_active_external_ca(&controls));
     detected_external_cas.set(lock_external_cas(&controls));
     use_system_proxy.set(lock_bool(&controls.use_system_proxy));
     port_text.set(lock_port(&controls.listen_port).to_string());
     listen_all.set(lock_bool(&controls.listen_all));
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        std::thread::spawn(updater::sweep_installer_mounts);
-        if updater::auto_check_due(clock::now()) {
-            auto_check_update(controls.clone());
-        }
-        if saved_config().capturing {
-            let controls_boot = controls.clone();
-            crate::startup_metrics::mark_auto_capture_start();
-            std::thread::spawn(move || {
-                start_capture(&controls_boot);
-                crate::startup_metrics::mark_auto_capture_finish(lock_bool(&controls_boot.running));
-            });
-        }
-    }
     #[cfg(target_arch = "wasm32")]
     {
         let web_bg = signal(lifecycle() == Lifecycle::Background);
@@ -533,6 +509,20 @@ fn app_workspace(
         start_web_detail_watch(controls.clone(), selected, baseline);
     }
 
+    let seen_tray_clear = stored(rt.tray_clear_rev.get_untracked());
+    let tray_clear_rev = rt.tray_clear_rev;
+    effect(move || {
+        let rev = tray_clear_rev.get();
+        if seen_tray_clear.replace(rev) != rev {
+            selected.set(None);
+            baseline.set(None);
+            reset_compose(compose);
+            close_sequence_diagram(seq_builder);
+            clear_shown(shown);
+        }
+    });
+
+    let rt_tick = rt.clone();
     let controls_tick = controls.clone();
     let filter_tick = filter;
     let list_filter_tick = list_filter;
@@ -580,7 +570,8 @@ fn app_workspace(
     let tls_burst_tick = tls_failure_burst;
     let tls_dismissed_tick = tls_banner_dismissed;
     let shown_tick = shown;
-    let seen_gen = stored(0_u64);
+    let seen_first_sync = stored(false);
+    let seen_gen = stored(u64::MAX);
     let seen_filter = stored(String::new());
     let seen_setup_filter = stored(String::new());
     let seen_selected = stored(None::<u64>);
@@ -632,8 +623,6 @@ fn app_workspace(
     let config_broken_tick = config_broken;
     let config_dismissed_tick = config_broken_dismissed;
     let seen_config_broken = stored(config_broken.get());
-    let update_probe_at = stored(clock::now());
-    let spill_gc_at = stored(clock::now());
     let seen_facets_open = stored(false);
     let detail_hold = stored(SystemTime::UNIX_EPOCH);
     let row_cache_tick = Rc::new(RefCell::new(RowCache::new(ui_lang(langs))));
@@ -646,14 +635,8 @@ fn app_workspace(
     let zoom_toast_id = stored(None::<u64>);
     let toast_manager_tick = toast_manager;
     let toast_shown_tick = toast_shown;
-    let watch_rules = signal(saved_config().watch_rules);
-    let watch_eval = signal(crate::watch::WatchEvaluation::default());
-    let watch_tracker = stored(crate::watch::WatchTracker::default());
-    let seen_watch_rules = stored(Vec::<config::WatchRule>::new());
-    let seen_watch_gen = stored(u64::MAX);
-    let watch_rules_tick = watch_rules;
-    let watch_eval_tick = watch_eval;
-    let watch_tracker_tick = watch_tracker;
+    let watch_rules = rt.watch_rules;
+    let watch_eval = rt.watch_eval;
     let toast_state_tick = toast_state;
     let toast_gen_tick = toast_overlay_gen;
     let clear_toast_tick = clear_toast_id;
@@ -750,15 +733,14 @@ fn app_workspace(
             update_tick.set(update_now);
         }
         #[cfg(not(target_arch = "wasm32"))]
-        if clock::elapsed(update_probe_at.get()) >= Duration::from_secs(3600) {
-            update_probe_at.replace(clock::now());
+        if clock::elapsed(rt_tick.update_probe_at.get()) >= Duration::from_secs(3600) {
+            rt_tick.update_probe_at.replace(clock::now());
             if updater::auto_check_due(clock::now()) {
                 auto_check_update(controls_tick.clone());
             }
         }
         #[cfg(target_arch = "wasm32")]
         {
-            let _ = update_probe_at.get();
             if let Some(err) = proxy::take_save_error() {
                 set_status(&controls_tick, StatusMsg::WebConfigUnsaved(err));
             }
@@ -1000,31 +982,9 @@ fn app_workspace(
                         }
                     }
                 }
-                state_opt.and_then(|st| {
-                    let b = st.placement.bounds;
-                    if b.size.width.0.is_finite()
-                        && b.size.height.0.is_finite()
-                        && b.size.width.0 > 0.0
-                        && b.size.height.0 > 0.0
-                        && b.origin.x.0.is_finite()
-                        && b.origin.y.0.is_finite()
-                    {
-                        let mode = match st.placement.mode {
-                            nsh_core::desktop::WindowMode::Maximized => "maximized".to_string(),
-                            nsh_core::desktop::WindowMode::FullScreen => "fullscreen".to_string(),
-                            nsh_core::desktop::WindowMode::Normal => String::new(),
-                        };
-                        Some(WindowPlacementSnapshot {
-                            width: config::clamp_window_width(b.size.width.0.round() as u32),
-                            height: config::clamp_window_height(b.size.height.0.round() as u32),
-                            x: Some(b.origin.x.0.round() as i32),
-                            y: Some(b.origin.y.0.round() as i32),
-                            display_id: st.display.map(|id| config::format_window_display_id(id.0)),
-                            mode,
-                        })
-                    } else {
-                        None
-                    }
+                capture_placement_snapshot(state_opt).map(|(placement, snapshot)| {
+                    rt_tick.last_placement.replace(Some(placement));
+                    snapshot
                 })
             };
             #[cfg(target_arch = "wasm32")]
@@ -1064,9 +1024,10 @@ fn app_workspace(
             }
         }
         release_sequence_data(seq_builder);
-        let spill_expired = if clock::elapsed(spill_gc_at.get()) >= Duration::from_secs(15) {
+        let spill_expired = if clock::elapsed(rt_tick.spill_gc_at.get()) >= Duration::from_secs(15)
+        {
             let now = clock::now();
-            spill_gc_at.replace(now);
+            rt_tick.spill_gc_at.replace(now);
             controls_tick
                 .hub
                 .with_session(|session| session.gc_spill(now))
@@ -1127,7 +1088,9 @@ fn app_workspace(
         let facets_needed = true;
         let facets_opened = facets_open_now && !seen_facets_open.get();
         seen_facets_open.replace(facets_open_now);
-        let interactive_changed = effective_filter_now != seen_filter.get()
+        let first_sync = !seen_first_sync.replace(true);
+        let interactive_changed = first_sync
+            || effective_filter_now != seen_filter.get()
             || filter_now != seen_setup_filter.get()
             || lang_now != seen_lang.get()
             || sort_now != seen_sort.get()
@@ -1146,29 +1109,7 @@ fn app_workspace(
         let run_secondary = refresh.run_secondary;
         let want_stats = selected_now.is_none();
         let stats_only = !list_changed && want_stats && seen_selected.get().is_some();
-        let watch_rules_now = watch_rules_tick.get_untracked();
-        if generation != seen_watch_gen.get()
-            || seen_watch_rules.with(|prev| prev != &watch_rules_now)
-        {
-            seen_watch_gen.replace(generation);
-            seen_watch_rules.replace(watch_rules_now.clone());
-            let eval = watch_tracker_tick.with(|tracker| {
-                controls_tick
-                    .hub
-                    .with_session(|session| tracker.evaluate(&watch_rules_now, session))
-            });
-            for alert in &eval.new_alerts {
-                set_status(
-                    &controls_tick,
-                    StatusMsg::WatchAlert {
-                        rule: alert.rule_name.clone(),
-                        target: alert.target.clone(),
-                        count: alert.new_count,
-                    },
-                );
-            }
-            watch_eval_tick.set(eval);
-        }
+        run_watch_evaluation(&rt_tick, generation);
         if list_changed {
             seen_gen.replace(generation);
             seen_filter.replace(effective_filter_now.clone());

@@ -1,16 +1,10 @@
 #[allow(unused_imports)]
 use super::*;
 
-pub(crate) fn clear_captured(
-    controls: &Controls,
-    selected: Signal<Option<u64>>,
-    baseline: Signal<Option<u64>>,
-    compose: Compose,
-    seq_builder: SeqBuilder,
-    shown: Shown,
-) {
+/// Clears live session flows and resets tab baseline without requiring workspace UI signals.
+pub(crate) fn clear_captured_session(controls: &Controls) -> bool {
     if guard_read_only_tab(controls) {
-        return;
+        return false;
     }
     let cleared = controls.hub.clear_session_with_undo();
     clear_pending_replay_diff(controls);
@@ -19,16 +13,30 @@ pub(crate) fn clear_captured(
         .lock()
         .unwrap_or_else(|err| err.into_inner())
         .clear_baseline_for_tab(LIVE_TAB_ID);
-    selected.set(None);
-    baseline.set(None);
-    reset_compose(compose);
-    close_sequence_diagram(seq_builder);
-    clear_shown(shown);
     if cleared > 0 {
         set_status(controls, StatusMsg::ClearedFlows { count: cleared });
     } else {
         crate::session::trim_memory();
     }
+    true
+}
+
+pub(crate) fn clear_captured(
+    controls: &Controls,
+    selected: Signal<Option<u64>>,
+    baseline: Signal<Option<u64>>,
+    compose: Compose,
+    seq_builder: SeqBuilder,
+    shown: Shown,
+) {
+    if !clear_captured_session(controls) {
+        return;
+    }
+    selected.set(None);
+    baseline.set(None);
+    reset_compose(compose);
+    close_sequence_diagram(seq_builder);
+    clear_shown(shown);
 }
 
 pub(crate) fn undo_clear_captured(controls: &Controls) -> usize {
