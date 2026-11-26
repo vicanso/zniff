@@ -10,7 +10,18 @@ if [ "$(uname -s)" != "Linux" ]; then
 fi
 
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
-dest=${1:-"$root/linux/ebpf/target/release/zniff-ebpf-helper"}
+if [ -n "${CARGO_TARGET_DIR:-}" ]; then
+  case "$CARGO_TARGET_DIR" in
+    /*) cargo_target_dir="$CARGO_TARGET_DIR" ;;
+    *) cargo_target_dir="$PWD/$CARGO_TARGET_DIR" ;;
+  esac
+  ebpf_target_dir="$cargo_target_dir"
+  helper_target_dir="$cargo_target_dir"
+else
+  ebpf_target_dir="$root/linux/ebpf/zniff-ebpf-prog/target"
+  helper_target_dir="$root/linux/ebpf/target"
+fi
+dest=${1:-"$helper_target_dir/release/zniff-ebpf-helper"}
 
 if ! command -v bpf-linker >/dev/null 2>&1; then
   echo "missing bpf-linker in PATH (install via: cargo install --locked bpf-linker)" >&2
@@ -23,7 +34,7 @@ cargo +nightly build \
   -Z build-std=core \
   --release
 
-ebpf_obj="$root/linux/ebpf/zniff-ebpf-prog/target/bpfel-unknown-none/release/zniff-ebpf-prog"
+ebpf_obj="$ebpf_target_dir/bpfel-unknown-none/release/zniff-ebpf-prog"
 if [ ! -f "$ebpf_obj" ]; then
   echo "missing built eBPF ELF: $ebpf_obj" >&2
   exit 1
@@ -36,7 +47,7 @@ ZNIFF_EBPF_OBJ="$ebpf_obj" \
     -p zniff-ebpf-helper \
     --release
 
-built="$root/linux/ebpf/target/release/zniff-ebpf-helper"
+built="$helper_target_dir/release/zniff-ebpf-helper"
 if [ ! -f "$built" ]; then
   echo "missing built helper binary: $built" >&2
   exit 1
