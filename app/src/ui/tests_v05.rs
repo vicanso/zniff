@@ -4825,6 +4825,12 @@ fn tray_close_destroys_workspace_and_reopen_restores_session_and_live_state() {
             show_tray: signal(true),
             minimize_to_tray: signal(true),
             main_open: signal(true),
+            filter: signal(String::new()),
+            filter_enabled: signal(true),
+            list_filter: signal(String::new()),
+            selected: signal(None),
+            baseline: signal(None),
+            sort: signal(None),
             main_win: signal(None),
             last_placement: stored(None),
             has_mounted_once: stored(false),
@@ -5812,5 +5818,493 @@ export default () => (
         assert!(layouts_dir.join("minimal.tsx").exists());
         assert!(tree.press_text(&mut core, confirm_del_lbl));
         assert!(!layouts_dir.join("minimal.tsx").exists());
+    }
+}
+
+#[test]
+fn tray_close_reopen_restores_real_flow_table_and_dirty_filter_state() {
+    use std::cell::RefCell;
+
+    type IdTriplet = Rc<Cell<(u64, u64, u64)>>;
+
+    thread_local! {
+        static TEST_RT: RefCell<Option<AppRuntime>> = const { RefCell::new(None) };
+        static TEST_IDS: RefCell<Option<IdTriplet>> = const { RefCell::new(None) };
+    }
+
+    fn record_flow_for(controls: &Controls, host: &str, path: &str) -> u64 {
+        let id = controls.hub.with_session(|session| {
+            let id = session.open(crate::session::FlowDraft {
+                protocol: crate::session::Protocol::Http2,
+                method: "GET".into(),
+                host: host.into(),
+                path: path.into(),
+                url: format!("https://{host}{path}"),
+                request_headers: Vec::new(),
+            });
+            session.set_response(
+                id,
+                200,
+                vec![("content-type".into(), "application/json".into())],
+                None,
+            );
+            session.mark_finished(id);
+            id
+        });
+        controls.hub.touch();
+        id
+    }
+
+    fn workspace_with_real_flow_list(rt: AppRuntime) -> impl IntoElement {
+        let controls = rt.controls.clone();
+        let langs = rt.langs;
+        let lang = ui_lang(langs);
+        let saved = saved_config();
+        let filter = rt.filter;
+        let filter_enabled = rt.filter_enabled;
+        let list_filter = rt.list_filter;
+        let initial_filter = filter.get_untracked();
+        let initial_enabled = filter_enabled.get_untracked();
+        let initial_list = list_filter.get_untracked();
+        let initial_effective = session::combine_filters(
+            if initial_enabled { &initial_filter } else { "" },
+            &initial_list,
+        );
+        let effective_filter = signal(initial_effective);
+        effect(move || {
+            let primary = if filter_enabled.get() {
+                filter.get()
+            } else {
+                String::new()
+            };
+            effective_filter.set(session::combine_filters(&primary, &list_filter.get()));
+        });
+        let selected = rt.selected;
+        let baseline = rt.baseline;
+        let sort = rt.sort;
+        let columns = signal(ListColumns::from_config(&saved));
+        let mut cache = RowCache::new(lang);
+        let snap =
+            compute_workspace_initial_snapshot(&rt, columns.get_untracked(), lang, &mut cache);
+
+        let rows = signal(snap.rows);
+        let filtered_stats = signal(snap.filtered_stats);
+        let empty_diagnosis = signal(snap.empty_diagnosis);
+        let facets = signal(snap.facets);
+        let filter_catalog = signal(snap.filter_catalog);
+        let facets_open = signal(false);
+        let paused = signal(snap.paused);
+        let session_tabs_sig = signal(snap.session_tabs);
+        let active_tab_sig = signal(snap.active_tab);
+        let shown = make_shown("", None, "");
+        shown.phase.set(Phase::Empty);
+        if snap.selected.is_some() {
+            publish_detail_for_controls(&shown, &controls, snap.selected, lang, snap.baseline);
+        } else {
+            clear_shown(shown);
+        }
+
+        let mut profiles = make_profiles();
+        profiles.filter = filter;
+        profiles.filter_enabled = filter_enabled;
+        profiles.show_tray = rt.show_tray;
+        profiles.minimize_to_tray = rt.minimize_to_tray;
+        profiles.list_width = signal(660.0);
+        let compose = make_compose();
+        let seq_builder = make_seq_builder();
+
+        let _ = provide_popover_dismiss();
+        provide_context(filter_catalog);
+        provide_context(profiles);
+        provide_context(SessionTabBarProps {
+            tabs: session_tabs_sig,
+            active_tab: active_tab_sig,
+            controls: controls.clone(),
+            selected,
+            baseline,
+            compose,
+            seq_builder,
+        });
+
+        let refresh_controls = controls.clone();
+        let refresh_rt = rt;
+        let refresh_lang = lang;
+
+        view()
+            .flex_1()
+            .w(px(1200.0))
+            .h(px(760.0))
+            .flex_col()
+            .child(
+                button()
+                    .on_press(move |_: &()| {
+                        let mut c = RowCache::new(refresh_lang);
+                        let next = compute_workspace_initial_snapshot(
+                            &refresh_rt,
+                            columns.get_untracked(),
+                            refresh_lang,
+                            &mut c,
+                        );
+                        rows.set(next.rows);
+                        filtered_stats.set(next.filtered_stats);
+                        facets.set(next.facets);
+                        session_tabs_sig.set(next.session_tabs);
+                        active_tab_sig.set(next.active_tab);
+                        if next.selected.is_some() {
+                            publish_detail_for_controls(
+                                &shown,
+                                &refresh_controls,
+                                next.selected,
+                                refresh_lang,
+                                next.baseline,
+                            );
+                        }
+                    })
+                    .child(text("SIMULATE_SAME_SESSION_TICK")),
+            )
+            .child(text(move || {
+                format!(
+                    "DIRTY_STATE|filter={}|enabled={}|list={}|selected={:?}|sort={:?}|tab={}|total={}|shown_url={}",
+                    filter.get(),
+                    filter_enabled.get(),
+                    list_filter.get(),
+                    selected.get(),
+                    sort.get(),
+                    active_tab_sig.get(),
+                    filtered_stats.get().total_count,
+                    shown.url.get(),
+                )
+            }))
+            .child(flow_list(
+                rows,
+                facets,
+                facets_open,
+                selected,
+                paused,
+                compose,
+                EmptyFilterState {
+                    effective_filter,
+                    main_filter: filter,
+                    filter_enabled,
+                    list_filter,
+                    diagnosis: empty_diagnosis,
+                    running: rt_running_sig(false),
+                    on_clear_primary: None,
+                },
+                profiles,
+                columns,
+                sort,
+                controls,
+                shown,
+                baseline,
+                element_ref(),
+                Rc::new(|| {}),
+            ))
+    }
+
+    fn rt_running_sig(v: bool) -> Signal<bool> {
+        signal(v)
+    }
+
+    #[component]
+    fn RealFlowListTrayHarness() -> impl IntoElement {
+        let lang = TEST_LANG.with(Cell::get);
+        provide_base_contexts(lang);
+        let controls = make_controls("tray-real-flow-list");
+        save_config(|cfg| {
+            cfg.filter = "host:api.vicanso.dev".into();
+            cfg.show_tray = true;
+            cfg.minimize_to_tray = true;
+        })
+        .expect("save initial test config");
+
+        let id1 = record_flow_for(&controls, "api.vicanso.dev", "/v1/before-api");
+        let id2 = record_flow_for(&controls, "other.vicanso.dev", "/v1/before-other");
+        let ids = Rc::new(Cell::new((id1, id2, 0_u64)));
+        TEST_IDS.with(|slot| *slot.borrow_mut() = Some(ids.clone()));
+
+        let now = clock::now();
+        let ui_cfg = saved_config();
+        let rt = AppRuntime {
+            controls,
+            langs: signal(Some(lang)),
+            show_tray: signal(ui_cfg.show_tray),
+            minimize_to_tray: signal(ui_cfg.minimize_to_tray),
+            main_open: signal(true),
+            filter: signal(ui_cfg.filter),
+            filter_enabled: signal(true),
+            list_filter: signal(String::new()),
+            selected: signal(None),
+            baseline: signal(None),
+            sort: signal(None),
+            main_win: signal(None),
+            last_placement: stored(None),
+            has_mounted_once: stored(false),
+            running: signal(true),
+            listen: signal("127.0.0.1:8877".into()),
+            use_system_proxy: signal(false),
+            about_open: signal(false),
+            settings_open: signal(false),
+            watch_rules: signal(Vec::new()),
+            watch_eval: signal(crate::watch::WatchEvaluation::default()),
+            watch_tracker: stored(crate::watch::WatchTracker::default()),
+            seen_watch_rules: stored(Vec::new()),
+            seen_watch_gen: stored(u64::MAX),
+            spill_gc_at: stored(now),
+            update_probe_at: stored(now),
+            tray_clear_rev: signal(0),
+        };
+        TEST_RT.with(|slot| *slot.borrow_mut() = Some(rt.clone()));
+
+        let rt_change = rt.clone();
+        let rt_close = rt.clone();
+        let rt_content = rt.clone();
+        let rt_dirty = rt.clone();
+        let rt_show = rt.clone();
+        let rt_clear = rt.clone();
+        let rt_evict = rt.clone();
+        let rt_import = rt.clone();
+        let rt_pending_filter = rt.clone();
+        let root_rt = rt;
+
+        view()
+            .w(px(1200.0))
+            .h(px(760.0))
+            .child(
+                nsh_core::element::desktop::window()
+                    .id("main")
+                    .open(root_rt.main_open)
+                    .on_open_change(move |ev| on_main_window_open_change(&rt_change, ev.open))
+                    .on_close_press(move |_| close_main_window_to_tray(&rt_close))
+                    .content(move || {
+                        rt_content
+                            .main_win
+                            .set(Some(nsh_core::element::desktop::current_window()));
+                        workspace_with_real_flow_list(rt_content.clone())
+                    }),
+            )
+            .child(
+                button()
+                    .on_press(move |_: &()| {
+                        rt_dirty.filter_enabled.set(false);
+                        rt_dirty.list_filter.set("vicanso".into());
+                        rt_dirty.selected.set(Some(id2));
+                        rt_dirty.sort.set(Some(ListSort {
+                            column: ListColumn::Id,
+                            desc: true,
+                        }));
+                    })
+                    .child(text("APPLY_DIRTY_STATE")),
+            )
+            .child(
+                button()
+                    .on_press(move |_: &()| {
+                        rt_pending_filter.filter.set("host:sub.vicanso.dev".into());
+                        close_main_window_to_tray(&rt_pending_filter);
+                    })
+                    .child(text("CLOSE_WITH_PENDING_FILTER")),
+            )
+            .child(
+                button()
+                    .on_press(move |_: &()| reveal_main_window(rt_show.main_win, rt_show.main_open))
+                    .child(text("TRAY_SHOW")),
+            )
+            .child(
+                button()
+                    .on_press(move |_: &()| {
+                        if clear_captured_session(&rt_clear.controls) {
+                            clear_runtime_selection(&rt_clear);
+                            rt_clear
+                                .tray_clear_rev
+                                .set(rt_clear.tray_clear_rev.get_untracked().wrapping_add(1));
+                        }
+                    })
+                    .child(text("TRAY_CLEAR")),
+            )
+            .child(
+                button()
+                    .on_press(move |_: &()| {
+                        let (mut sess, _) = build_imported_session(Vec::new());
+                        let imp_id = sess.open(crate::session::FlowDraft {
+                            protocol: crate::session::Protocol::Http11,
+                            method: "POST".into(),
+                            host: "import.vicanso.dev".into(),
+                            path: "/v1/imported-item".into(),
+                            url: "https://import.vicanso.dev/v1/imported-item".into(),
+                            request_headers: Vec::new(),
+                        });
+                        sess.set_response(imp_id, 201, Vec::new(), None);
+                        sess.mark_finished(imp_id);
+                        rt_import
+                            .controls
+                            .session_tabs
+                            .lock()
+                            .unwrap()
+                            .open_session("vicanso-import.har".into(), sess)
+                            .expect("open imported tab");
+                        rt_import.selected.set(Some(imp_id));
+                        rt_import.filter_enabled.set(false);
+                        rt_import.list_filter.set(String::new());
+                    })
+                    .child(text("OPEN_IMPORTED_AND_SELECT")),
+            )
+            .child(
+                button()
+                    .on_press(move |_: &()| {
+                        rt_evict.selected.set(Some(999_999));
+                    })
+                    .child(text("SET_EVICTED_SELECTION")),
+            )
+            .child(text(move || {
+                format!(
+                    "ROOT_VIS|open={}|selected={:?}",
+                    root_rt.main_open.get(),
+                    root_rt.selected.get(),
+                )
+            }))
+    }
+
+    for lang in [Lang::Zh, Lang::En] {
+        TEST_LANG.set(lang);
+        let mut core = Core::new(ApproxTextEngine, Size::new(px(1200.0), px(760.0)));
+        let mut registry = Registry::new();
+        registry.register::<RealFlowListTrayHarness>();
+        core.set_components(registry);
+        core.set_environment(nsh_core::element::Environment {
+            window: Size::new(px(1200.0), px(760.0)),
+            os: nsh_core::platform::Os::MacOs,
+            idiom: nsh_core::platform::Idiom::Desktop,
+            reduce_motion: true,
+            ..Default::default()
+        });
+        let comp_name = std::any::type_name::<RealFlowListTrayHarness>();
+        for op in [
+            Op::Create {
+                id: 2,
+                tag: Tag::View,
+            },
+            Op::SetProp {
+                id: 2,
+                prop: Prop::Component(comp_name.into()),
+            },
+            Op::Insert {
+                parent: ROOT_ID,
+                child: 2,
+                before: None,
+            },
+        ] {
+            core.apply(op).expect("apply root op");
+        }
+        let mut tree = HeadlessTree::default();
+        tree.pump(&mut core);
+
+        let rt = TEST_RT.with(|slot| slot.borrow().clone()).expect("rt");
+        let ids_cell = TEST_IDS.with(|slot| slot.borrow().clone()).expect("ids");
+        let (_id1, id2, _) = ids_cell.get();
+
+        // 1. Frame 1 immediately renders matching primary-filtered flow in real DataTable.
+        assert!(tree.has_text_containing("/v1/before-api"));
+        assert!(!tree.has_text_containing("/v1/before-other"));
+
+        // 2. Apply dirty state: pause primary filter, set secondary list_filter, select id2, set sort,
+        //    then run one open-window refresh tick (simulating open 16ms sync prior to closing).
+        assert!(tree.press_text(&mut core, "APPLY_DIRTY_STATE"));
+        assert!(tree.press_text(&mut core, "SIMULATE_SAME_SESSION_TICK"));
+        assert!(tree.has_text_containing("/v1/before-api"));
+        assert!(tree.has_text_containing("/v1/before-other"));
+        assert!(tree.has_text_containing(&format!(
+            "DIRTY_STATE|filter=host:api.vicanso.dev|enabled=false|list=vicanso|selected=Some({id2})"
+        )));
+
+        // 3. Close main window via red X -> unmounts DataTable, keeps live session in memory.
+        let modal_id = tree
+            .kinds
+            .iter()
+            .find_map(|(id, kind)| (*kind == ViewKind::Modal).then_some(*id))
+            .expect("main window modal");
+        core.component_event(
+            modal_id,
+            EventKind::Window,
+            &EventPayload::Window(Box::new(nsh_core::desktop::WindowEvent::ClosePress {
+                reason: nsh_core::desktop::CloseReason::CloseButton,
+            })),
+        );
+        tree.pump(&mut core);
+        assert!(tree.has_text_containing("ROOT_VIS|open=false"));
+        assert!(!tree.has_text_containing("/v1/before-api"));
+        assert!(!tree.has_text_containing("/v1/before-other"));
+
+        // 4. Record another flow on other.vicanso.dev while closed, then reopen ->
+        //    must immediately restore paused primary filter, list_filter, sort, selection, detail URL,
+        //    AND show both pre-close and while-closed flows on frame 1 without 16ms timer wait!
+        let _id3 = record_flow_for(&rt.controls, "other.vicanso.dev", "/v1/while-closed-other");
+        assert!(tree.press_text(&mut core, "TRAY_SHOW"));
+        assert!(tree.has_text_containing("ROOT_VIS|open=true"));
+        assert!(tree.has_text_containing("/v1/before-api"));
+        assert!(tree.has_text_containing("/v1/before-other"));
+        assert!(tree.has_text_containing("/v1/while-closed-other"));
+        assert!(tree.has_text_containing(&format!(
+            "DIRTY_STATE|filter=host:api.vicanso.dev|enabled=false|list=vicanso|selected=Some({id2})|sort=Some(ListSort {{ column: Id, desc: true }})|tab=0|total=3|shown_url=https://other.vicanso.dev/v1/before-other"
+        )));
+
+        // 5. Same-session incremental refresh (A -> A') preserves selection & filter state.
+        assert!(tree.press_text(&mut core, "SIMULATE_SAME_SESSION_TICK"));
+        assert!(tree.has_text_containing(&format!(
+            "DIRTY_STATE|filter=host:api.vicanso.dev|enabled=false|list=vicanso|selected=Some({id2})"
+        )));
+
+        // 6. Close with pending primary filter edit flushes `remember_filter` to saved config.
+        assert!(tree.press_text(&mut core, "CLOSE_WITH_PENDING_FILTER"));
+        assert_eq!(saved_config().filter, "host:sub.vicanso.dev");
+
+        // 7. Reopen, switch to imported tab + select imported flow, close & reopen ->
+        //    imported tab, row, and selection restore immediately on frame 1.
+        assert!(tree.press_text(&mut core, "TRAY_SHOW"));
+        assert!(tree.press_text(&mut core, "OPEN_IMPORTED_AND_SELECT"));
+        let modal_id2 = tree
+            .kinds
+            .iter()
+            .find_map(|(id, kind)| (*kind == ViewKind::Modal).then_some(*id))
+            .expect("reopened main window modal");
+        core.component_event(
+            modal_id2,
+            EventKind::Window,
+            &EventPayload::Window(Box::new(nsh_core::desktop::WindowEvent::ClosePress {
+                reason: nsh_core::desktop::CloseReason::CloseButton,
+            })),
+        );
+        tree.pump(&mut core);
+        assert!(tree.press_text(&mut core, "TRAY_SHOW"));
+        assert!(tree.has_text_containing("/v1/imported-item"));
+        assert!(tree.has_text_containing("shown_url=https://import.vicanso.dev/v1/imported-item"));
+
+        // 8. Switch back to live tab via tray clear / evicted selection -> normalized cleanly on reopen.
+        rt.controls
+            .session_tabs
+            .lock()
+            .unwrap()
+            .switch_to(LIVE_TAB_ID);
+        assert!(tree.press_text(&mut core, "TRAY_CLEAR"));
+        assert!(tree.press_text(&mut core, "SET_EVICTED_SELECTION"));
+        let modal_id3 = tree
+            .kinds
+            .iter()
+            .find_map(|(id, kind)| (*kind == ViewKind::Modal).then_some(*id))
+            .expect("reopened main window modal 3");
+        core.component_event(
+            modal_id3,
+            EventKind::Window,
+            &EventPayload::Window(Box::new(nsh_core::desktop::WindowEvent::ClosePress {
+                reason: nsh_core::desktop::CloseReason::CloseButton,
+            })),
+        );
+        tree.pump(&mut core);
+        let _id4 = record_flow_for(&rt.controls, "sub.vicanso.dev", "/v1/fresh-after-clear");
+        assert!(tree.press_text(&mut core, "TRAY_SHOW"));
+        assert!(tree.has_text_containing("/v1/fresh-after-clear"));
+        assert!(tree.has_text_containing("selected=None"));
+
+        TEST_RT.with(|slot| *slot.borrow_mut() = None);
+        TEST_IDS.with(|slot| *slot.borrow_mut() = None);
     }
 }

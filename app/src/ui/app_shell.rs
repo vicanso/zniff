@@ -34,6 +34,7 @@ pub fn App() -> impl IntoElement {
         on_reopen(move || reveal_main_window(reopen_win, reopen_open));
 
         let tray_controls = rt.controls.clone();
+        let tray_rt = rt.clone();
         let tray_clear_rev = rt.tray_clear_rev;
         let tray_win = rt.main_win;
         let tray_open = rt.main_open;
@@ -48,6 +49,7 @@ pub fn App() -> impl IntoElement {
             use_system_proxy: rt.use_system_proxy,
             on_clear: Rc::new(move || {
                 if clear_captured_session(&tray_controls) {
+                    clear_runtime_selection(&tray_rt);
                     tray_clear_rev.set(tray_clear_rev.get_untracked().wrapping_add(1));
                 }
                 reveal_main_window(tray_win, tray_open);
@@ -166,13 +168,22 @@ fn app_workspace(rt: AppRuntime) -> impl IntoElement {
         detected_external: detected_external_cas,
     };
     let use_system_proxy = rt.use_system_proxy;
-    let memory = signal(String::from("0 B"));
-    let dropped = signal(0_u64);
-    let saved_filter = saved_config();
-    let filter = signal(saved_filter.filter.clone());
-    let filter_enabled = signal(true);
-    let list_filter = signal(String::new());
-    let effective_filter = signal(saved_filter.filter);
+    let saved = saved_config();
+    let filter = rt.filter;
+    let filter_enabled = rt.filter_enabled;
+    let list_filter = rt.list_filter;
+    let initial_filter = filter.get_untracked();
+    let initial_filter_enabled = filter_enabled.get_untracked();
+    let initial_list_filter = list_filter.get_untracked();
+    let initial_effective_filter = session::combine_filters(
+        if initial_filter_enabled {
+            &initial_filter
+        } else {
+            ""
+        },
+        &initial_list_filter,
+    );
+    let effective_filter = signal(initial_effective_filter.clone());
     effect(move || {
         let primary = if filter_enabled.get() {
             filter.get()
@@ -181,30 +192,35 @@ fn app_workspace(rt: AppRuntime) -> impl IntoElement {
         };
         effective_filter.set(session::combine_filters(&primary, &list_filter.get()));
     });
-    let saved_profiles = signal(saved_filter.saved_profiles);
-    let profile_history = signal(saved_filter.profile_history);
-    let selected = signal(None::<u64>);
-    let rows = signal(Vec::<Arc<RowLine>>::new());
-    let filtered_stats = signal(session::FilteredStats::default());
-    let empty_diagnosis = signal(EmptyFilterDiagnosis::default());
-    let facets = signal(session::SessionFacets::default());
-    let filter_catalog = signal(FilterSuggestionsCatalog::default());
+    let saved_profiles = signal(saved.saved_profiles.clone());
+    let profile_history = signal(saved.profile_history.clone());
+    let selected = rt.selected;
+    let baseline = rt.baseline;
+    let sort = rt.sort;
+    let columns = signal(ListColumns::from_config(&saved));
+    let initial_lang = ui_lang(langs);
+    let row_cache_tick = Rc::new(RefCell::new(RowCache::new(initial_lang)));
+    let initial_snapshot = {
+        let mut cache = row_cache_tick.borrow_mut();
+        compute_workspace_initial_snapshot(&rt, columns.get_untracked(), initial_lang, &mut cache)
+    };
+    let memory = signal(initial_snapshot.memory);
+    let dropped = signal(initial_snapshot.dropped);
+    let rows = signal(initial_snapshot.rows);
+    let filtered_stats = signal(initial_snapshot.filtered_stats);
+    let empty_diagnosis = signal(initial_snapshot.empty_diagnosis);
+    let facets = signal(initial_snapshot.facets);
+    let filter_catalog = signal(initial_snapshot.filter_catalog);
     provide_context(filter_catalog);
     let popover_dismiss = provide_popover_dismiss();
     let facets_open = signal(false);
-    let flow_total = signal(0_usize);
-    let session_tabs_sig = signal(vec![TabSummary {
-        id: LIVE_TAB_ID,
-        name: String::new(),
-        count: 0,
-        read_only: false,
-    }]);
-    let active_tab_sig = signal(LIVE_TAB_ID);
-    let onboarding_traffic = signal(OnboardingTraffic::default());
-    let tls_failure_burst = signal(TlsFailureBurst::default());
+    let flow_total = signal(initial_snapshot.flow_total);
+    let session_tabs_sig = signal(initial_snapshot.session_tabs);
+    let active_tab_sig = signal(initial_snapshot.active_tab);
+    let onboarding_traffic = signal(initial_snapshot.onboarding_traffic);
+    let tls_failure_burst = signal(initial_snapshot.tls_failure_burst);
     let tls_banner_dismissed = signal(false);
     let listen = signal(String::new());
-    let saved = saved_config();
     let shown = Shown {
         phase: signal(Phase::Empty),
         method: signal(String::new()),
@@ -282,10 +298,9 @@ fn app_workspace(rt: AppRuntime) -> impl IntoElement {
     let port_text = signal(String::new());
     let listen_all = signal(false);
     let web_disconnected = signal(None::<String>);
-    let paused = signal(None::<(u64, BreakSide)>);
-    let paused_count = signal(0_usize);
-    let paused_queue = signal(Vec::<(u64, BreakSide)>::new());
-    let baseline = signal(None::<u64>);
+    let paused = signal(initial_snapshot.paused);
+    let paused_count = signal(initial_snapshot.paused_count);
+    let paused_queue = signal(initial_snapshot.paused_queue);
     let folded = signal(folded_bits_from_config(&saved.folded_cards));
     let compose = Compose {
         composing: signal(false),
@@ -358,8 +373,6 @@ fn app_workspace(rt: AppRuntime) -> impl IntoElement {
     let saved_active_layout = saved.active_layout.clone();
     let saved_layout_pane_sizes = saved.layout_pane_sizes.clone();
     let list_width = signal(saved.list_width as f32);
-    let columns = signal(ListColumns::from_config(&saved));
-    let sort = signal(None::<ListSort>);
     let initial_profile_name = if !saved.active_profile.trim().is_empty() {
         saved.active_profile.clone()
     } else {
@@ -388,7 +401,7 @@ fn app_workspace(rt: AppRuntime) -> impl IntoElement {
     let allow_hosts_sig = signal(allow_runtime.text);
     let allow_hosts_strict_sig = signal(allow_runtime.strict);
     let allow_hosts_locked_sig = signal(allow_runtime.locked);
-    let allow_denied_sig = signal(allow_hosts::AllowDeniedSummary::default());
+    let allow_denied_sig = signal(initial_snapshot.allow_denied);
     let relay_url_sig = signal(saved.relay_url);
     let relay_accept_sig = signal(saved.relay_accept);
     let profile_signals = ProfileSignals {
@@ -572,11 +585,28 @@ fn app_workspace(rt: AppRuntime) -> impl IntoElement {
     let tls_burst_tick = tls_failure_burst;
     let tls_dismissed_tick = tls_banner_dismissed;
     let shown_tick = shown;
-    let seen_first_sync = stored(false);
-    let seen_gen = stored(u64::MAX);
-    let seen_filter = stored(String::new());
-    let seen_setup_filter = stored(String::new());
-    let seen_selected = stored(None::<u64>);
+    if initial_snapshot.selected.is_some() {
+        publish_detail_for_controls(
+            &shown_tick,
+            &controls_tick,
+            initial_snapshot.selected,
+            initial_lang,
+            initial_snapshot.baseline,
+        );
+    }
+    let (initial_detail_stamp, _) = compute_detail_stamp(
+        &controls_tick,
+        initial_snapshot.active_tab,
+        initial_snapshot.selected,
+        initial_snapshot.baseline,
+        shown_tick.pretty.get_untracked(),
+        initial_lang,
+        shown_tick.diff_scope.get_untracked(),
+    );
+    let seen_gen = stored(initial_snapshot.generation);
+    let seen_filter = stored(initial_effective_filter);
+    let seen_setup_filter = stored(initial_filter);
+    let seen_selected = stored(initial_snapshot.selected);
     // One follow-up after the selection frame. Layout can put the previous
     // offset back once; the same flow updating does not scroll.
     let detail_scroll = element_ref();
@@ -584,31 +614,19 @@ fn app_workspace(rt: AppRuntime) -> impl IntoElement {
     let workspace_ref = element_ref();
     provide_context(SidebarLayoutRef(workspace_ref));
     let detail_top_left = stored(false);
-    let seen_detail_stamp = stored((
-        true,
-        LIVE_TAB_ID,
-        None::<u64>,
-        None::<u64>,
-        None::<(u64, u64)>,
-        None::<u64>,
-        shown_tick.pretty.get(),
-        ui_lang(langs),
-        (false, false),
-        (false, false),
-        0_u8,
-    ));
-    let seen_tabs_ver = stored(u64::MAX);
-    let seen_active_tab = stored(LIVE_TAB_ID);
-    let seen_live_count = stored(usize::MAX);
+    let seen_detail_stamp = stored(initial_detail_stamp);
+    let seen_tabs_ver = stored(initial_snapshot.tabs_ver);
+    let seen_active_tab = stored(initial_snapshot.active_tab);
+    let seen_live_count = stored(initial_snapshot.live_count);
     let session_tabs_tick = session_tabs_sig;
     let active_tab_tick = active_tab_sig;
     let seen_listen = stored(String::new());
     #[cfg(target_arch = "wasm32")]
     let seen_lan_rev = stored(u64::MAX);
-    let seen_lang = stored(ui_lang(langs));
+    let seen_lang = stored(initial_lang);
     let baseline_tick = baseline;
     let sort_tick = sort;
-    let seen_sort = stored(None::<ListSort>);
+    let seen_sort = stored(sort.get_untracked());
     let cols_tick = columns;
     let layout_mode_tick = profile_signals.layout_mode;
     let seen_path_display = stored(effective_path_display(
@@ -627,7 +645,6 @@ fn app_workspace(rt: AppRuntime) -> impl IntoElement {
     let seen_config_broken = stored(config_broken.get());
     let seen_facets_open = stored(false);
     let detail_hold = stored(SystemTime::UNIX_EPOCH);
-    let row_cache_tick = Rc::new(RefCell::new(RowCache::new(ui_lang(langs))));
     let refresh_throttle = Rc::new(RefCell::new(RefreshThrottle::default()));
     let toast_manager = stored(ToastManager::<u64, StatusMsg>::new(ToastMotion::sonner()));
     let toast_shown = signal(Vec::<(u64, StatusMsg, ToastTransitionStatus)>::new());
@@ -650,7 +667,7 @@ fn app_workspace(rt: AppRuntime) -> impl IntoElement {
     let pane_px = Rc::new(Cell::new(0.0_f32));
     let pane_tick = pane_px.clone();
     let seen_rules_rev = stored(controls_tick.hub.rules_revision());
-    let seen_denied_gen = stored(0_u64);
+    let seen_denied_gen = stored(initial_snapshot.generation);
     set_interval(Duration::from_millis(16), move || {
         controls_tick.hub.expire_clear_undo();
         let pending_toasts = {
@@ -1090,9 +1107,7 @@ fn app_workspace(rt: AppRuntime) -> impl IntoElement {
         let facets_needed = true;
         let facets_opened = facets_open_now && !seen_facets_open.get();
         seen_facets_open.replace(facets_open_now);
-        let first_sync = !seen_first_sync.replace(true);
-        let interactive_changed = first_sync
-            || effective_filter_now != seen_filter.get()
+        let interactive_changed = effective_filter_now != seen_filter.get()
             || filter_now != seen_setup_filter.get()
             || lang_now != seen_lang.get()
             || sort_now != seen_sort.get()
@@ -1283,53 +1298,16 @@ fn app_workspace(rt: AppRuntime) -> impl IntoElement {
             detail_scroll_tick.scroll_to_offset(px(0.0), false);
             detail_top_left.replace(false);
         }
-        let baseline_key_now = baseline_key_for_controls(&controls_tick)
-            .or_else(|| baseline_now.map(|id| (active_tab_now, id)));
-        let (selected_rev, selected_done, selected_flags) = if let Some(id) = selected_now {
-            with_active_session(&controls_tick, |session| {
-                let selected_flow = session.get(id);
-                (
-                    selected_flow.map(|flow| flow.rev),
-                    selected_flow
-                        .map(|flow| flow.finished_at.is_some())
-                        .unwrap_or(true),
-                    selected_flow
-                        .map(|flow| (flow.detail_unloaded(), flow.detail_pending()))
-                        .unwrap_or((false, false)),
-                )
-            })
-        } else {
-            (None, true, (false, false))
-        };
-        let (baseline_rev, baseline_flags) = match baseline_key_now {
-            Some((tab_id, base_id)) if tab_id == LIVE_TAB_ID => {
-                controls_tick.hub.with_session(|session| {
-                    let base_flow = session.get(base_id);
-                    (
-                        base_flow.map(|flow| flow.rev),
-                        base_flow
-                            .map(|flow| (flow.detail_unloaded(), flow.detail_pending()))
-                            .unwrap_or((false, false)),
-                    )
-                })
-            }
-            Some((_tab_id, base_id)) => (Some(base_id), (false, false)),
-            None => (None, (false, false)),
-        };
-        let diff_scope_now = shown_tick.diff_scope.get();
-        let detail_stamp = (
-            false,
+        let (detail_stamp, selected_done) = compute_detail_stamp(
+            &controls_tick,
             active_tab_now,
             selected_now,
-            selected_rev,
-            baseline_key_now,
-            baseline_rev,
+            baseline_now,
             pretty_now,
             lang_now,
-            selected_flags,
-            baseline_flags,
-            diff_scope_now,
+            shown_tick.diff_scope.get(),
         );
+        let baseline_key_now = detail_stamp.4;
         if detail_stamp != seen_detail_stamp.get() || spill_expired {
             let prev = seen_detail_stamp.get();
             let view_changed = prev.1 != active_tab_now
@@ -1337,8 +1315,8 @@ fn app_workspace(rt: AppRuntime) -> impl IntoElement {
                 || prev.4 != baseline_key_now
                 || prev.6 != pretty_now
                 || prev.7 != lang_now
-                || prev.8 != selected_flags
-                || prev.9 != baseline_flags;
+                || prev.8 != detail_stamp.8
+                || prev.9 != detail_stamp.9;
             let streaming = selected_now.is_some() && !selected_done;
             let due = clock::elapsed(detail_hold.get()) >= Duration::from_millis(200);
             if !streaming || view_changed || spill_expired || due {

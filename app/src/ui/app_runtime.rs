@@ -10,6 +10,12 @@ pub(crate) struct AppRuntime {
     pub(crate) show_tray: Signal<bool>,
     pub(crate) minimize_to_tray: Signal<bool>,
     pub(crate) main_open: Signal<bool>,
+    pub(crate) filter: Signal<String>,
+    pub(crate) filter_enabled: Signal<bool>,
+    pub(crate) list_filter: Signal<String>,
+    pub(crate) selected: Signal<Option<u64>>,
+    pub(crate) baseline: Signal<Option<u64>>,
+    pub(crate) sort: Signal<Option<ListSort>>,
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) main_win: Signal<Option<nsh_core::element::desktop::WindowRef>>,
     #[cfg(not(target_arch = "wasm32"))]
@@ -101,6 +107,12 @@ pub(crate) fn init_app_runtime(initial_cfg: &config::Config) -> AppRuntime {
         show_tray: signal(initial_cfg.show_tray),
         minimize_to_tray: signal(initial_cfg.minimize_to_tray),
         main_open: signal(true),
+        filter: signal(ui_cfg.filter),
+        filter_enabled: signal(true),
+        list_filter: signal(String::new()),
+        selected: signal(None),
+        baseline: signal(None),
+        sort: signal(None),
         #[cfg(not(target_arch = "wasm32"))]
         main_win: signal(None),
         #[cfg(not(target_arch = "wasm32"))]
@@ -177,6 +189,240 @@ fn schedule_tray_memory_trim() {
     });
 }
 
+/// Clears runtime flow selection and diff baseline signals cleanly.
+pub(crate) fn clear_runtime_selection(rt: &AppRuntime) {
+    rt.selected.set(None);
+    rt.baseline.set(None);
+}
+
+#[derive(Clone)]
+pub(crate) struct WorkspaceInitialSnapshot {
+    pub(crate) rows: Vec<Arc<RowLine>>,
+    pub(crate) filtered_stats: session::FilteredStats,
+    pub(crate) empty_diagnosis: EmptyFilterDiagnosis,
+    pub(crate) facets: session::SessionFacets,
+    pub(crate) filter_catalog: FilterSuggestionsCatalog,
+    pub(crate) flow_total: usize,
+    pub(crate) memory: String,
+    pub(crate) dropped: u64,
+    pub(crate) onboarding_traffic: OnboardingTraffic,
+    pub(crate) tls_failure_burst: TlsFailureBurst,
+    pub(crate) session_tabs: Vec<TabSummary>,
+    pub(crate) active_tab: u64,
+    pub(crate) tabs_ver: u64,
+    pub(crate) live_count: usize,
+    pub(crate) generation: u64,
+    pub(crate) selected: Option<u64>,
+    pub(crate) baseline: Option<u64>,
+    pub(crate) paused: Option<(u64, BreakSide)>,
+    pub(crate) paused_count: usize,
+    pub(crate) paused_queue: Vec<(u64, BreakSide)>,
+    pub(crate) allow_denied: allow_hosts::AllowDeniedSummary,
+}
+
+pub(crate) type DetailStamp = (
+    bool,
+    u64,
+    Option<u64>,
+    Option<u64>,
+    Option<(u64, u64)>,
+    Option<u64>,
+    bool,
+    Lang,
+    (bool, bool),
+    (bool, bool),
+    u8,
+);
+
+/// Computes the change-detection stamp for the detail pane and whether `selected_now` is finished.
+pub(crate) fn compute_detail_stamp(
+    controls: &Controls,
+    active_tab_now: u64,
+    selected_now: Option<u64>,
+    baseline_now: Option<u64>,
+    pretty_now: bool,
+    lang_now: Lang,
+    diff_scope_now: u8,
+) -> (DetailStamp, bool) {
+    let baseline_key_now =
+        baseline_key_for_controls(controls).or_else(|| baseline_now.map(|id| (active_tab_now, id)));
+    let (selected_rev, selected_done, selected_flags) = if let Some(id) = selected_now {
+        with_active_session(controls, |session| {
+            let selected_flow = session.get(id);
+            (
+                selected_flow.map(|flow| flow.rev),
+                selected_flow
+                    .map(|flow| flow.finished_at.is_some())
+                    .unwrap_or(true),
+                selected_flow
+                    .map(|flow| (flow.detail_unloaded(), flow.detail_pending()))
+                    .unwrap_or((false, false)),
+            )
+        })
+    } else {
+        (None, true, (false, false))
+    };
+    let (baseline_rev, baseline_flags) = match baseline_key_now {
+        Some((tab_id, base_id)) if tab_id == LIVE_TAB_ID => controls.hub.with_session(|session| {
+            let base_flow = session.get(base_id);
+            (
+                base_flow.map(|flow| flow.rev),
+                base_flow
+                    .map(|flow| (flow.detail_unloaded(), flow.detail_pending()))
+                    .unwrap_or((false, false)),
+            )
+        }),
+        Some((_tab_id, base_id)) => (Some(base_id), (false, false)),
+        None => (None, (false, false)),
+    };
+    (
+        (
+            false,
+            active_tab_now,
+            selected_now,
+            selected_rev,
+            baseline_key_now,
+            baseline_rev,
+            pretty_now,
+            lang_now,
+            selected_flags,
+            baseline_flags,
+            diff_scope_now,
+        ),
+        selected_done,
+    )
+}
+
+fn validate_selection_and_baseline(rt: &AppRuntime) -> (Option<u64>, Option<u64>) {
+    let controls = &rt.controls;
+    let selected = rt
+        .selected
+        .get_untracked()
+        .filter(|id| with_active_session(controls, |session| session.get(*id).is_some()));
+    if rt.selected.get_untracked() != selected {
+        untracked(|| rt.selected.set(selected));
+    }
+    let tab_baseline = baseline_id_for_active_tab(controls);
+    let baseline = tab_baseline.or_else(|| {
+        rt.baseline
+            .get_untracked()
+            .filter(|id| with_active_session(controls, |session| session.get(*id).is_some()))
+    });
+    if rt.baseline.get_untracked() != baseline {
+        untracked(|| rt.baseline.set(baseline));
+    }
+    (selected, baseline)
+}
+
+/// Synchronously projects initial list rows, facets, stats, tabs, and selection state when mounting `app_workspace`.
+pub(crate) fn compute_workspace_initial_snapshot(
+    rt: &AppRuntime,
+    columns: ListColumns,
+    lang: Lang,
+    cache: &mut RowCache,
+) -> WorkspaceInitialSnapshot {
+    let controls = &rt.controls;
+    let active_tab = active_tab_id(controls);
+    let tabs_ver = session_tabs_version(controls);
+    let live_count = controls.hub.with_session(|s| s.len());
+    let generation = controls.hub.generation();
+    let session_tabs = session_tab_summaries(controls, live_count);
+    let (selected, baseline) = validate_selection_and_baseline(rt);
+
+    let filter_now = rt.filter.get_untracked();
+    let filter_enabled_now = rt.filter_enabled.get_untracked();
+    let list_filter_now = rt.list_filter.get_untracked();
+    let active_primary = if filter_enabled_now {
+        filter_now.as_str()
+    } else {
+        ""
+    };
+    let effective_filter_now = session::combine_filters(active_primary, &list_filter_now);
+    let sort_now = rt.sort.get_untracked();
+    let path_display_now = effective_path_display(columns, &effective_filter_now);
+
+    let matched = active_matching_ids(controls, &effective_filter_now);
+    let facet_ids = if active_primary != effective_filter_now {
+        Some(active_matching_ids(controls, active_primary))
+    } else {
+        None
+    };
+
+    let (rows, filtered_stats, facets, filter_catalog, flow_total, memory, dropped, diag_plan) =
+        with_active_session(controls, |session| {
+            let lines = project_rows(session, &matched, lang, sort_now, path_display_now, cache);
+            let stats = session::FilteredStats::from_flows(
+                matched.iter().filter_map(|(id, _)| session.get(*id)),
+            );
+            let ids = facet_ids.as_ref().unwrap_or(&matched);
+            let next_facets = session::SessionFacets::from_flows(
+                ids.iter().filter_map(|(id, _)| session.get(*id)),
+            );
+            let next_catalog = FilterSuggestionsCatalog::from_flows(
+                ids.iter().filter_map(|(id, _)| session.get(*id)),
+                &next_facets,
+            );
+            let diag_plan = (matched.is_empty()
+                && session.len() > 0
+                && !effective_filter_now.trim().is_empty())
+            .then(|| {
+                plan_empty_filter_diagnosis(
+                    session,
+                    &filter_now,
+                    filter_enabled_now,
+                    &list_filter_now,
+                )
+            });
+            (
+                lines,
+                stats,
+                next_facets,
+                next_catalog,
+                session.len(),
+                format_bytes(session.memory_bytes()),
+                session.dropped(),
+                diag_plan,
+            )
+        });
+
+    let empty_diagnosis = diag_plan
+        .map(FilterDiagnosisPlan::finish)
+        .unwrap_or_default();
+    let (onboarding_traffic, tls_failure_burst) = {
+        let burst_now = clock::now();
+        controls.hub.with_session(|live| {
+            (
+                OnboardingTraffic::from_flows(live.iter()),
+                TlsFailureBurst::from_flows(live.iter(), burst_now),
+            )
+        })
+    };
+
+    WorkspaceInitialSnapshot {
+        rows,
+        filtered_stats,
+        empty_diagnosis,
+        facets,
+        filter_catalog,
+        flow_total,
+        memory,
+        dropped,
+        onboarding_traffic,
+        tls_failure_burst,
+        session_tabs,
+        active_tab,
+        tabs_ver,
+        live_count,
+        generation,
+        selected,
+        baseline,
+        paused: controls.hub.paused(),
+        paused_count: controls.hub.paused_queue_len(),
+        paused_queue: controls.hub.paused_queue(),
+        allow_denied: controls.hub.allow_denied_summary(),
+    }
+}
+
 /// Closes and unmounts the main window to minimize to tray while keeping background capture & tray alive.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn close_main_window_to_tray(rt: &AppRuntime) {
@@ -189,6 +435,7 @@ pub(crate) fn close_main_window_to_tray(rt: &AppRuntime) {
         rt.last_placement.replace(Some(placement));
         remember_window_placement(&rt.controls, &snapshot);
     }
+    remember_filter(&rt.controls, &rt.filter.get_untracked());
     rt.settings_open.set(false);
     rt.about_open.set(false);
     rt.main_win.set(None);
@@ -200,6 +447,7 @@ pub(crate) fn close_main_window_to_tray(rt: &AppRuntime) {
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn on_main_window_open_change(rt: &AppRuntime, open: bool) {
     if !open {
+        remember_filter(&rt.controls, &rt.filter.get_untracked());
         rt.settings_open.set(false);
         rt.about_open.set(false);
         rt.main_win.set(None);

@@ -370,7 +370,15 @@ pub(crate) fn flow_table(
             }
         })));
     });
-    let follow = stored(true);
+    let initial_follow = match selected.get_untracked() {
+        None => true,
+        Some(id) => rows.with_untracked(|rows| {
+            rows.iter()
+                .position(|row| row.id == id)
+                .is_none_or(|idx| idx.saturating_add(1) >= rows.len())
+        }),
+    };
+    let follow = stored(initial_follow);
     let followed_count = stored(0_u32);
     let hover = CellHover {
         text: signal(None::<String>),
