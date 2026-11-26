@@ -2,7 +2,7 @@
 //! own file: a failed write while restoring the proxy must not take the port
 //! and rules with it.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{ErrorKind, Result};
 use std::path::{Path, PathBuf};
@@ -186,6 +186,64 @@ pub fn parse_window_display_id(raw: &str) -> Option<u64> {
         return None;
     }
     u64::from_str_radix(trimmed, 16).ok()
+}
+
+pub const LAYOUT_PANE_SIZE_MIN: u32 = 120;
+pub const LAYOUT_PANE_SIZE_MAX: u32 = 4096;
+
+pub fn clamp_layout_pane_size(size: u32) -> u32 {
+    size.clamp(LAYOUT_PANE_SIZE_MIN, LAYOUT_PANE_SIZE_MAX)
+}
+
+/// Normalizes `Config::active_layout` (empty string selects built-in `layout_mode`).
+pub fn sanitize_layout_id_pref(raw: &str) -> String {
+    let trimmed = raw
+        .trim()
+        .strip_suffix(".tsx")
+        .or_else(|| raw.trim().strip_suffix(".ts"))
+        .unwrap_or_else(|| raw.trim());
+    if trimmed.is_empty()
+        || trimmed.len() > 48
+        || trimmed.contains("..")
+        || !trimmed
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return String::new();
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "split" | "top_bottom" | "default" | "zniff-layout"
+    ) {
+        return String::new();
+    }
+    trimmed.to_string()
+}
+
+/// Sanitizes persisted per-layout splitter pixel sizes (`layout_id -> node_path -> px`).
+pub fn sanitize_layout_pane_sizes(
+    raw: BTreeMap<String, BTreeMap<String, u32>>,
+) -> BTreeMap<String, BTreeMap<String, u32>> {
+    let mut out = BTreeMap::new();
+    for (layout_id, panes) in raw.into_iter().take(64) {
+        let id = sanitize_layout_id_pref(&layout_id);
+        if id.is_empty() {
+            continue;
+        }
+        let mut clean_panes = BTreeMap::new();
+        for (path, size) in panes.into_iter().take(32) {
+            let trimmed = path.trim();
+            if trimmed.is_empty() || trimmed.len() > 64 {
+                continue;
+            }
+            clean_panes.insert(trimmed.to_string(), clamp_layout_pane_size(size));
+        }
+        if !clean_panes.is_empty() {
+            out.insert(id, clean_panes);
+        }
+    }
+    out
 }
 
 pub fn format_window_display_id(id: u64) -> String {
@@ -826,6 +884,8 @@ pub struct Config {
     /// UI and monospace font zoom percentage (`80..=150`, default `100`).
     pub ui_zoom: u16,
     pub layout_mode: LayoutMode,
+    pub active_layout: String,
+    pub layout_pane_sizes: BTreeMap<String, BTreeMap<String, u32>>,
     pub sidebar_collapsed: bool,
     pub sidebar_width: u32,
     pub list_width: u32,
@@ -984,6 +1044,10 @@ struct RawConfig {
     ui_zoom: u16,
     #[serde(default, skip_serializing_if = "LayoutMode::is_default")]
     layout_mode: LayoutMode,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    active_layout: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    layout_pane_sizes: BTreeMap<String, BTreeMap<String, u32>>,
     #[serde(default, skip_serializing_if = "is_false")]
     sidebar_collapsed: bool,
     #[serde(
@@ -1240,6 +1304,8 @@ impl From<RawConfig> for Config {
             theme_mode: raw.theme_mode,
             ui_zoom: clamp_ui_zoom(raw.ui_zoom),
             layout_mode: raw.layout_mode,
+            active_layout: sanitize_layout_id_pref(&raw.active_layout),
+            layout_pane_sizes: sanitize_layout_pane_sizes(raw.layout_pane_sizes),
             sidebar_collapsed: raw.sidebar_collapsed,
             sidebar_width: raw.sidebar_width,
             list_width: raw.list_width,
@@ -1367,6 +1433,8 @@ impl From<Config> for RawConfig {
             theme_mode: config.theme_mode,
             ui_zoom: clamp_ui_zoom(config.ui_zoom),
             layout_mode: config.layout_mode,
+            active_layout: sanitize_layout_id_pref(&config.active_layout),
+            layout_pane_sizes: sanitize_layout_pane_sizes(config.layout_pane_sizes),
             sidebar_collapsed: config.sidebar_collapsed,
             sidebar_width: clamp_sidebar_width(config.sidebar_width),
             list_width: config.list_width,
@@ -1450,6 +1518,8 @@ impl Default for Config {
             theme_mode: ThemeMode::System,
             ui_zoom: UI_ZOOM_DEFAULT,
             layout_mode: LayoutMode::Split,
+            active_layout: String::new(),
+            layout_pane_sizes: BTreeMap::new(),
             sidebar_collapsed: false,
             sidebar_width: default_sidebar_width(),
             list_width: default_list_width(),
@@ -1950,6 +2020,9 @@ fn normalize_for(mut config: Config, dev: bool) -> Config {
     config.ui_font = sanitize_font_family(&config.ui_font);
     config.mono_font = sanitize_font_family(&config.mono_font);
     config.ui_zoom = clamp_ui_zoom(config.ui_zoom);
+    config.active_layout = sanitize_layout_id_pref(&config.active_layout);
+    let clean_panes = sanitize_layout_pane_sizes(std::mem::take(&mut config.layout_pane_sizes));
+    config.layout_pane_sizes = clean_panes;
     config.sidebar_width = clamp_sidebar_width(config.sidebar_width);
     config.list_width = clamp_list_width(config.list_width);
     config.window_width = clamp_window_width(config.window_width);
@@ -3484,5 +3557,43 @@ mod tests {
         assert!(!load(dir.path()).onboarding_strip_dismissed);
         update(dir.path(), |cfg| cfg.onboarding_strip_dismissed = true).unwrap();
         assert!(load(dir.path()).onboarding_strip_dismissed);
+    }
+
+    #[test]
+    fn active_layout_and_pane_sizes_roundtrip_and_sanitize() {
+        let dir = Scratch::new();
+
+        update(dir.path(), |cfg| {
+            cfg.active_layout = "  focus.tsx ".to_string();
+            let mut panes = BTreeMap::new();
+            panes.insert("root[0]".to_string(), 40);
+            panes.insert("root[1]".to_string(), 9999);
+            panes.insert("  ".to_string(), 300);
+            cfg.layout_pane_sizes.insert("focus".to_string(), panes);
+
+            let mut invalid = BTreeMap::new();
+            invalid.insert("root[0]".to_string(), 240);
+            cfg.layout_pane_sizes.insert("../bad".to_string(), invalid);
+            cfg.layout_pane_sizes.insert(
+                "split".to_string(),
+                BTreeMap::from([("root[0]".to_string(), 250)]),
+            );
+        })
+        .unwrap();
+
+        let reloaded = load(dir.path());
+        assert_eq!(reloaded.active_layout, "focus");
+        assert_eq!(reloaded.layout_pane_sizes.len(), 1);
+        let focus = reloaded
+            .layout_pane_sizes
+            .get("focus")
+            .expect("focus panes");
+        assert_eq!(focus.get("root[0]"), Some(&LAYOUT_PANE_SIZE_MIN));
+        assert_eq!(focus.get("root[1]"), Some(&LAYOUT_PANE_SIZE_MAX));
+        assert!(!focus.contains_key("  "));
+
+        assert_eq!(sanitize_layout_id_pref("../escape"), "");
+        assert_eq!(sanitize_layout_id_pref("split"), "");
+        assert_eq!(sanitize_layout_id_pref("top_bottom"), "");
     }
 }

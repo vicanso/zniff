@@ -37,6 +37,11 @@ mod ios_guide;
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
 mod launcher;
+mod layout_jsx;
+#[cfg(not(target_arch = "wasm32"))]
+mod layout_runtime;
+mod layout_spec;
+mod layout_tsx;
 mod llm_stream;
 #[cfg(not(target_arch = "wasm32"))]
 mod local_proc;

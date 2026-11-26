@@ -5005,3 +5005,812 @@ fn tray_close_destroys_workspace_and_reopen_restores_session_and_live_state() {
         TEST_CONTROLS.with(|slot| *slot.borrow_mut() = None);
     }
 }
+
+#[test]
+fn layout_render_switches_builtin_and_custom_trees_with_standalone_summary_and_footer_dock() {
+    #[component]
+    fn LayoutRenderHarness() -> impl IntoElement {
+        use crate::layout_spec::{FooterDock, LayoutNode, LayoutSize, LayoutSpec, ViewModule};
+
+        let lang = TEST_LANG.with(Cell::get);
+        provide_base_contexts(lang);
+        let controls = make_controls("layout-render");
+        let profiles = make_profiles();
+        let compose = make_compose();
+        let seq_builder = make_seq_builder();
+        let shown = make_shown("https://api.vicanso.dev/v1/health", None, "");
+        shown.phase.set(Phase::Empty);
+        let rows = signal(Vec::<Arc<RowLine>>::new());
+        let selected = signal(None::<u64>);
+        let paused = signal(None::<(u64, BreakSide)>);
+        let baseline = signal(None::<u64>);
+        let folded = signal(0_u8);
+        let facets = signal(session::SessionFacets::default());
+        let facets_open = signal(false);
+        let columns = signal(ListColumns::from_config(&config::Config::default()));
+        let sort = signal(None::<ListSort>);
+        let list_filter = signal(String::new());
+        let effective_filter = signal(String::new());
+        let empty_diagnosis = signal(EmptyFilterDiagnosis::default());
+        let filter_focus = element_ref();
+        let detail_scroll = element_ref();
+        let workspace_ref = element_ref();
+        let pane_px = Rc::new(Cell::new(500.0_f32));
+        let filtered_stats = signal(session::FilteredStats {
+            total_count: 3,
+            s2xx: 3,
+            total_req_bytes: 120,
+            total_res_bytes: 480,
+            total_bytes: 600,
+            avg_elapsed_ms: Some(42),
+            ..Default::default()
+        });
+        let standalone_summary = signal(false);
+        let active_layout = signal(LayoutSpec::builtin_split());
+
+        provide_context(profiles);
+        provide_context(StandaloneSummaryContext(standalone_summary));
+        provide_context(SessionTabBarProps {
+            controls: controls.clone(),
+            tabs: signal(session_tab_summaries(&controls, 3)),
+            active_tab: signal(LIVE_TAB_ID),
+            selected,
+            baseline,
+            compose,
+            seq_builder,
+        });
+        provide_context(seq_builder);
+        provide_context(DiagramResumeRows(rows));
+
+        let onboarding = OnboardingProps {
+            controls: controls.clone(),
+            running: signal(false),
+            listen: signal("127.0.0.1:8877".into()),
+            ca_ui: make_ca_signals(false),
+            use_system_proxy: signal(false),
+            adb_count: signal(0),
+            flow_total: signal(3),
+            onboarding_traffic: signal(OnboardingTraffic {
+                total_flows: 3,
+                has_decrypted_https: false,
+                has_tls_error: false,
+            }),
+            compose,
+            selected,
+            profiles,
+            install_ca: Rc::new(|| {}),
+            toggle_system_proxy: Rc::new(|| {}),
+            qr_open: signal(false),
+            pending_qr: signal(false),
+        };
+
+        let workspace_host = WorkspaceLayoutHost {
+            workspace_ref,
+            profiles,
+            list_width: profiles.list_width,
+            controls: controls.clone(),
+            pane_overrides: signal(std::collections::BTreeMap::new()),
+            on_save_pane_size: Rc::new(|_, _| {}),
+            modules: WorkspaceModules {
+                sidebar: Rc::new(move || {
+                    facet_sidebar(
+                        facets,
+                        list_filter,
+                        profiles.sidebar_width,
+                        profiles.sidebar_collapsed,
+                    )
+                    .into_element()
+                }),
+                flow_list: Rc::new({
+                    let c = controls.clone();
+                    move || {
+                        flow_list(
+                            rows,
+                            facets,
+                            facets_open,
+                            selected,
+                            paused,
+                            compose,
+                            EmptyFilterState {
+                                effective_filter,
+                                main_filter: profiles.filter,
+                                filter_enabled: profiles.filter_enabled,
+                                list_filter,
+                                diagnosis: empty_diagnosis,
+                                running: signal(false),
+                                on_clear_primary: None,
+                            },
+                            profiles,
+                            columns,
+                            sort,
+                            c.clone(),
+                            shown,
+                            baseline,
+                            filter_focus,
+                            Rc::new(|| {}),
+                        )
+                        .into_element()
+                    }
+                }),
+                detail: Rc::new({
+                    let c = controls.clone();
+                    let onb = onboarding.clone();
+                    move || {
+                        detail_pane(
+                            shown,
+                            c.clone(),
+                            selected,
+                            paused,
+                            compose,
+                            seq_builder,
+                            rows,
+                            list_filter,
+                            effective_filter,
+                            baseline,
+                            folded,
+                            Rc::clone(&pane_px),
+                            filtered_stats,
+                            detail_scroll,
+                            profiles.layout_mode,
+                            onb.clone(),
+                        )
+                        .into_element()
+                    }
+                }),
+                summary: Rc::new({
+                    let c = controls.clone();
+                    move || {
+                        view()
+                            .flex_1()
+                            .w_full()
+                            .h_full()
+                            .min_w(px(0.0))
+                            .min_h(px(0.0))
+                            .child(text("STANDALONE_SUMMARY_SLOT"))
+                            .child(summary_pane(
+                                filtered_stats,
+                                selected,
+                                c.clone(),
+                                rows,
+                                seq_builder,
+                                compose,
+                                shown.phase,
+                            ))
+                            .into_element()
+                    }
+                }),
+            },
+        };
+
+        let set_spec = move |spec: LayoutSpec| {
+            standalone_summary.set(spec.has_standalone_summary());
+            active_layout.set(spec);
+        };
+
+        view()
+            .w(px(1200.0))
+            .h(px(760.0))
+            .flex_col()
+            .child(
+                view()
+                    .flex_row()
+                    .child(
+                        button()
+                            .on_press(move |_: &()| {
+                                set_spec(LayoutSpec {
+                                    name: "custom-top".into(),
+                                    footer: FooterDock::Top,
+                                    root: LayoutNode::row(vec![
+                                        LayoutNode::pane(ViewModule::Detail, LayoutSize::Fr(1.0)),
+                                        LayoutNode::col(vec![
+                                            LayoutNode::pane(
+                                                ViewModule::FlowList,
+                                                LayoutSize::Fr(1.0),
+                                            ),
+                                            LayoutNode::pane(
+                                                ViewModule::Summary,
+                                                LayoutSize::Px(140.0),
+                                            ),
+                                        ]),
+                                        LayoutNode::pane(
+                                            ViewModule::Sidebar,
+                                            LayoutSize::Px(220.0),
+                                        ),
+                                    ]),
+                                });
+                            })
+                            .child(text("TO_CUSTOM_TOP")),
+                    )
+                    .child(
+                        button()
+                            .on_press(move |_: &()| {
+                                set_spec(LayoutSpec {
+                                    name: "list-only".into(),
+                                    footer: FooterDock::Hidden,
+                                    root: LayoutNode::row(vec![LayoutNode::pane(
+                                        ViewModule::FlowList,
+                                        LayoutSize::Fr(1.0),
+                                    )]),
+                                });
+                            })
+                            .child(text("TO_LIST_ONLY")),
+                    )
+                    .child(
+                        button()
+                            .on_press(move |_: &()| {
+                                profiles.layout_mode.set(config::LayoutMode::TopBottom);
+                                set_spec(LayoutSpec::builtin_top_bottom());
+                            })
+                            .child(text("TO_TOP_BOTTOM")),
+                    )
+                    .child(
+                        button()
+                            .on_press(move |_: &()| {
+                                profiles.layout_mode.set(config::LayoutMode::Split);
+                                set_spec(LayoutSpec::builtin_split());
+                            })
+                            .child(text("TO_SPLIT")),
+                    ),
+            )
+            .child(when(
+                move || active_layout.with(|s| s.footer) == FooterDock::Top,
+                move || view().child(text("FOOTER_TOP_SLOT")),
+            ))
+            .child(render_workspace_layout(active_layout, workspace_host))
+            .child(when(
+                move || active_layout.with(|s| s.footer) == FooterDock::Bottom,
+                move || view().child(text("FOOTER_BOTTOM_SLOT")),
+            ))
+    }
+
+    for lang in [Lang::Zh, Lang::En] {
+        TEST_LANG.set(lang);
+        let (apps_title, summary_title, empty_detail_title, clear_label) = match lang {
+            Lang::Zh => ("应用 / 来源", "当前列表统计", "还没有选择", "清空会话"),
+            Lang::En => (
+                "Apps",
+                "Filtered summary",
+                "Nothing selected",
+                "Clear session",
+            ),
+        };
+        let mut core = Core::new(ApproxTextEngine, Size::new(px(1200.0), px(760.0)));
+        let mut registry = Registry::new();
+        registry.register::<LayoutRenderHarness>();
+        core.set_components(registry);
+        core.set_environment(nsh_core::element::Environment {
+            window: Size::new(px(1200.0), px(760.0)),
+            os: nsh_core::platform::Os::MacOs,
+            idiom: nsh_core::platform::Idiom::Desktop,
+            reduce_motion: true,
+            ..Default::default()
+        });
+        let comp_name = std::any::type_name::<LayoutRenderHarness>();
+        for op in [
+            Op::Create {
+                id: 2,
+                tag: Tag::View,
+            },
+            Op::SetProp {
+                id: 2,
+                prop: Prop::Component(comp_name.into()),
+            },
+            Op::Insert {
+                parent: ROOT_ID,
+                child: 2,
+                before: None,
+            },
+        ] {
+            core.apply(op).expect("apply harness root");
+        }
+        let mut tree = HeadlessTree::default();
+        tree.pump(&mut core);
+
+        let count_summary = |tree: &HeadlessTree| -> usize {
+            tree.all_live_texts()
+                .iter()
+                .filter(|t| t.as_str() == summary_title)
+                .count()
+        };
+        let has_flow_list = |tree: &HeadlessTree| -> bool {
+            tree.labels
+                .values()
+                .any(|label| label.as_deref() == Some(clear_label))
+        };
+
+        // 1. Initial built-in Split: sidebar, flow_list, detail, inline summary, bottom footer.
+        assert!(
+            tree.has_text(apps_title),
+            "step1 missing apps_title={apps_title}; live_texts={:?}",
+            tree.all_live_texts()
+        );
+        assert!(has_flow_list(&tree));
+        assert!(tree.has_text(empty_detail_title));
+        assert!(!tree.has_text("STANDALONE_SUMMARY_SLOT"));
+        assert_eq!(count_summary(&tree), 1);
+        assert!(tree.has_text("FOOTER_BOTTOM_SLOT"));
+        assert!(!tree.has_text("FOOTER_TOP_SLOT"));
+
+        // 2. Custom nested tree with standalone Summary + FooterDock::Top (no duplicate summary).
+        assert!(tree.press_text(&mut core, "TO_CUSTOM_TOP"));
+        assert!(
+            tree.has_text(apps_title),
+            "step2 missing apps_title={apps_title}; live_texts={:?}",
+            tree.all_live_texts()
+        );
+        assert!(has_flow_list(&tree));
+        assert!(
+            tree.has_text(empty_detail_title),
+            "step2 missing detail; live_texts={:?}",
+            tree.all_live_texts()
+        );
+        assert!(tree.has_text("STANDALONE_SUMMARY_SLOT"));
+        assert_eq!(count_summary(&tree), 1);
+        assert!(tree.has_text("FOOTER_TOP_SLOT"));
+        assert!(!tree.has_text("FOOTER_BOTTOM_SLOT"));
+
+        // 3. List-only tree + FooterDock::Hidden unmounts sidebar, detail, summary, and footer.
+        assert!(tree.press_text(&mut core, "TO_LIST_ONLY"));
+        assert!(has_flow_list(&tree));
+        assert!(!tree.has_text(apps_title));
+        assert!(!tree.has_text(empty_detail_title));
+        assert!(!tree.has_text("STANDALONE_SUMMARY_SLOT"));
+        assert_eq!(count_summary(&tree), 0);
+        assert!(!tree.has_text("FOOTER_TOP_SLOT"));
+        assert!(!tree.has_text("FOOTER_BOTTOM_SLOT"));
+
+        // 4. Built-in Top/Bottom and back to Split restore cleanly.
+        assert!(tree.press_text(&mut core, "TO_TOP_BOTTOM"));
+        assert!(has_flow_list(&tree));
+        assert!(tree.has_text(empty_detail_title));
+        assert!(!tree.has_text(apps_title));
+        assert_eq!(count_summary(&tree), 1);
+        assert!(tree.has_text("FOOTER_BOTTOM_SLOT"));
+
+        assert!(tree.press_text(&mut core, "TO_SPLIT"));
+        assert!(
+            tree.has_text(apps_title),
+            "step5 missing apps_title={apps_title}; live_texts={:?}",
+            tree.all_live_texts()
+        );
+        assert!(has_flow_list(&tree));
+        assert!(tree.has_text(empty_detail_title));
+        assert_eq!(count_summary(&tree), 1);
+        assert!(tree.has_text("FOOTER_BOTTOM_SLOT"));
+    }
+}
+
+#[test]
+fn custom_tsx_layout_switch_editor_save_and_error_fallback_zh_en() {
+    struct TempLayoutDirGuard(std::path::PathBuf);
+    impl Drop for TempLayoutDirGuard {
+        fn drop(&mut self) {
+            set_test_layout_data_dir(None);
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    for lang in [Lang::Zh, Lang::En] {
+        TEST_LANG.set(lang);
+        let dir = std::env::temp_dir().join(format!(
+            "zniff-v05-tsx-layout-{}-{}",
+            std::process::id(),
+            TEST_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let layouts_dir = dir.join("layouts");
+        std::fs::create_dir_all(&layouts_dir).unwrap();
+        let _guard = TempLayoutDirGuard(dir.clone());
+
+        std::fs::write(
+            layouts_dir.join("focus.tsx"),
+            r#"import { Layout, Row, Col, Pane } from "zniff/layout";
+export default () => (
+  <Layout name="Focus QA" footer="top">
+    <Row>
+      <Pane name="sidebar" size={220} />
+      <Col>
+        <Pane name="flow_list" size="1fr" />
+        <Pane name="summary" size={140} />
+      </Col>
+      <Pane name="detail" size="48%" />
+    </Row>
+  </Layout>
+);
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            layouts_dir.join("broken.tsx"),
+            "export default () => (<Layout><Row></Layout>);",
+        )
+        .unwrap();
+        set_test_layout_data_dir(Some(dir.clone()));
+
+        #[component]
+        fn CustomTsxLayoutHarness() -> impl IntoElement {
+            const MINIMAL_TSX: &str = r#"import { Layout, Row, Pane } from "zniff/layout";
+export default () => (
+  <Layout name="Minimal QA" footer="bottom">
+    <Row>
+      <Pane name="flow_list" size="42%" />
+      <Pane name="detail" size="1fr" />
+    </Row>
+  </Layout>
+);
+"#;
+            let lang = TEST_LANG.with(Cell::get);
+            provide_base_contexts(lang);
+            let controls = make_controls("tsx-layout");
+            let profiles = make_profiles();
+            let compose = make_compose();
+            let seq_builder = make_seq_builder();
+            let shown = make_shown("https://api.vicanso.dev/v1/items", None, "");
+            shown.phase.set(Phase::Empty);
+            let rows = signal(Vec::<Arc<RowLine>>::new());
+            let selected = signal(None::<u64>);
+            let paused = signal(None::<(u64, BreakSide)>);
+            let baseline = signal(None::<u64>);
+            let folded = signal(0_u8);
+            let facets = signal(session::SessionFacets::default());
+            let facets_open = signal(false);
+            let columns = signal(ListColumns::from_config(&config::Config::default()));
+            let sort = signal(None::<ListSort>);
+            let list_filter = signal(String::new());
+            let effective_filter = signal(String::new());
+            let empty_diagnosis = signal(EmptyFilterDiagnosis::default());
+            let filter_focus = element_ref();
+            let detail_scroll = element_ref();
+            let workspace_ref = element_ref();
+            let pane_px = Rc::new(Cell::new(500.0_f32));
+            let filtered_stats = signal(session::FilteredStats::default());
+            let layout_ui = init_layout_ui_state(
+                "",
+                &std::collections::BTreeMap::new(),
+                profiles.layout_mode.get_untracked(),
+            );
+            let active_layout = layout_ui.active_spec;
+            let standalone_summary = signal(active_layout.get_untracked().has_standalone_summary());
+            effect(move || {
+                let id = layout_ui.active_id.get();
+                let mode = profiles.layout_mode.get();
+                let rev = layout_ui.reload_rev.get();
+                let _ = (id, mode, rev);
+                evaluate_active_layout(layout_ui, mode, current_layout_context());
+                standalone_summary
+                    .set(active_layout.with_untracked(|s| s.has_standalone_summary()));
+            });
+
+            provide_context(profiles);
+            provide_context(layout_ui);
+            provide_context(StandaloneSummaryContext(standalone_summary));
+            provide_context(SessionTabBarProps {
+                controls: controls.clone(),
+                tabs: signal(session_tab_summaries(&controls, 1)),
+                active_tab: signal(LIVE_TAB_ID),
+                selected,
+                baseline,
+                compose,
+                seq_builder,
+            });
+            provide_context(seq_builder);
+            provide_context(DiagramResumeRows(rows));
+
+            let onboarding = OnboardingProps {
+                controls: controls.clone(),
+                running: signal(false),
+                listen: signal("127.0.0.1:8877".into()),
+                ca_ui: make_ca_signals(false),
+                use_system_proxy: signal(false),
+                adb_count: signal(0),
+                flow_total: signal(0),
+                onboarding_traffic: signal(OnboardingTraffic::default()),
+                compose,
+                selected,
+                profiles,
+                install_ca: Rc::new(|| {}),
+                toggle_system_proxy: Rc::new(|| {}),
+                qr_open: signal(false),
+                pending_qr: signal(false),
+            };
+
+            let controls_pane = controls.clone();
+            let workspace_host = WorkspaceLayoutHost {
+                workspace_ref,
+                profiles,
+                list_width: profiles.list_width,
+                controls: controls.clone(),
+                pane_overrides: layout_ui.active_pane_overrides,
+                on_save_pane_size: Rc::new(move |path, px_val| {
+                    save_pane_size_override(layout_ui, path, px_val, &controls_pane);
+                }),
+                modules: WorkspaceModules {
+                    sidebar: Rc::new(move || {
+                        facet_sidebar(
+                            facets,
+                            list_filter,
+                            profiles.sidebar_width,
+                            profiles.sidebar_collapsed,
+                        )
+                        .into_element()
+                    }),
+                    flow_list: Rc::new({
+                        let c = controls.clone();
+                        move || {
+                            flow_list(
+                                rows,
+                                facets,
+                                facets_open,
+                                selected,
+                                paused,
+                                compose,
+                                EmptyFilterState {
+                                    effective_filter,
+                                    main_filter: profiles.filter,
+                                    filter_enabled: profiles.filter_enabled,
+                                    list_filter,
+                                    diagnosis: empty_diagnosis,
+                                    running: signal(false),
+                                    on_clear_primary: None,
+                                },
+                                profiles,
+                                columns,
+                                sort,
+                                c.clone(),
+                                shown,
+                                baseline,
+                                filter_focus,
+                                Rc::new(|| {}),
+                            )
+                            .into_element()
+                        }
+                    }),
+                    detail: Rc::new({
+                        let c = controls.clone();
+                        let onb = onboarding.clone();
+                        move || {
+                            detail_pane(
+                                shown,
+                                c.clone(),
+                                selected,
+                                paused,
+                                compose,
+                                seq_builder,
+                                rows,
+                                list_filter,
+                                effective_filter,
+                                baseline,
+                                folded,
+                                Rc::clone(&pane_px),
+                                filtered_stats,
+                                detail_scroll,
+                                profiles.layout_mode,
+                                onb.clone(),
+                            )
+                            .into_element()
+                        }
+                    }),
+                    summary: Rc::new({
+                        let c = controls.clone();
+                        move || {
+                            view()
+                                .flex_1()
+                                .w_full()
+                                .h_full()
+                                .min_w(px(0.0))
+                                .min_h(px(0.0))
+                                .child(text("STANDALONE_SUMMARY_SLOT"))
+                                .child(summary_pane(
+                                    filtered_stats,
+                                    selected,
+                                    c.clone(),
+                                    rows,
+                                    seq_builder,
+                                    compose,
+                                    shown.phase,
+                                ))
+                                .into_element()
+                        }
+                    }),
+                },
+            };
+
+            let draft_controls = controls.clone();
+            view()
+                .w(px(1200.0))
+                .h(px(760.0))
+                .flex_col()
+                .child(
+                    view()
+                        .flex_row()
+                        .gap_1()
+                        .child(toolbar_sidebar_toggle(
+                            profiles.layout_mode,
+                            profiles.sidebar_collapsed,
+                            draft_controls.clone(),
+                        ))
+                        .child(toolbar_layout_switcher(
+                            profiles.layout_mode,
+                            draft_controls.clone(),
+                        ))
+                        .child(
+                            button()
+                                .on_press(move |_: &()| {
+                                    layout_ui.draft_source.set(MINIMAL_TSX.to_string());
+                                    validate_draft_layout(layout_ui, current_layout_context());
+                                })
+                                .child(text("FILL_MINIMAL_TSX")),
+                        ),
+                )
+                .child(layout_error_banner(
+                    layout_ui,
+                    profiles,
+                    draft_controls.clone(),
+                ))
+                .child(when(
+                    move || active_layout.with(|s| s.footer) == crate::layout_spec::FooterDock::Top,
+                    move || view().child(text("FOOTER_TOP_SLOT")),
+                ))
+                .child(render_workspace_layout(active_layout, workspace_host))
+                .child(when(
+                    move || {
+                        active_layout.with(|s| s.footer) == crate::layout_spec::FooterDock::Bottom
+                    },
+                    move || view().child(text("FOOTER_BOTTOM_SLOT")),
+                ))
+                .child(settings_custom_layouts_section(
+                    layout_ui,
+                    profiles.layout_mode,
+                    draft_controls,
+                ))
+        }
+
+        let (
+            switcher_lbl,
+            collapse_lbl,
+            expand_lbl,
+            custom_menu_lbl,
+            id_lbl,
+            new_lbl,
+            validate_lbl,
+            save_lbl,
+            del_lbl,
+            confirm_del_lbl,
+            fallback_lbl,
+            err_prefix,
+        ) = match lang {
+            Lang::Zh => (
+                "分栏布局",
+                "收起域名与应用栏",
+                "展开域名与应用栏",
+                "自定义布局…",
+                "布局 ID",
+                "新建",
+                "校验",
+                "保存并应用",
+                "删除",
+                "再次点击确认删除",
+                "切回默认",
+                "自定义布局出错",
+            ),
+            Lang::En => (
+                "Split layout",
+                "Collapse Domains & Apps sidebar",
+                "Expand Domains & Apps sidebar",
+                "Custom layouts…",
+                "Layout ID",
+                "New",
+                "Validate",
+                "Save & Apply",
+                "Delete",
+                "Confirm delete",
+                "Use built-in",
+                "Custom layout error",
+            ),
+        };
+
+        let mut core = Core::new(ApproxTextEngine, Size::new(px(1200.0), px(760.0)));
+        let mut registry = Registry::new();
+        registry.register::<CustomTsxLayoutHarness>();
+        core.set_components(registry);
+        core.set_environment(nsh_core::element::Environment {
+            window: Size::new(px(1200.0), px(760.0)),
+            os: nsh_core::platform::Os::MacOs,
+            idiom: nsh_core::platform::Idiom::Desktop,
+            reduce_motion: true,
+            ..Default::default()
+        });
+        let comp_name = std::any::type_name::<CustomTsxLayoutHarness>();
+        for op in [
+            Op::Create {
+                id: 2,
+                tag: Tag::View,
+            },
+            Op::SetProp {
+                id: 2,
+                prop: Prop::Component(comp_name.into()),
+            },
+            Op::Insert {
+                parent: ROOT_ID,
+                child: 2,
+                before: None,
+            },
+        ] {
+            core.apply(op).expect("apply harness");
+        }
+        let mut tree = HeadlessTree::default();
+        tree.pump(&mut core);
+
+        let has_sidebar_toggle = |tree: &HeadlessTree| -> bool {
+            tree.labels.values().any(|l| {
+                matches!(
+                    l.as_deref(),
+                    Some(lbl) if lbl == collapse_lbl || lbl == expand_lbl
+                )
+            })
+        };
+
+        // Initial built-in split shows sidebar toggle and bottom footer.
+        assert!(has_sidebar_toggle(&tree));
+        assert!(tree.has_text("FOOTER_BOTTOM_SLOT"));
+        assert!(!tree.has_text("STANDALONE_SUMMARY_SLOT"));
+
+        // 1. Open toolbar layout popover and switch to pre-populated `focus.tsx` (`Focus QA`).
+        assert!(tree.press_label(&mut core, switcher_lbl));
+        assert!(tree.has_text(custom_menu_lbl));
+        assert!(tree.press_text(&mut core, "Focus QA"));
+        assert!(has_sidebar_toggle(&tree));
+        assert!(tree.has_text("STANDALONE_SUMMARY_SLOT"));
+        assert!(tree.has_text("FOOTER_TOP_SLOT"));
+        assert!(!tree.has_text("FOOTER_BOTTOM_SLOT"));
+
+        // 2. Open editor via Settings "New", type `minimal` ID, load `minimal.tsx` without sidebar, validate + save.
+        assert!(tree.press_text(&mut core, new_lbl));
+        let input_id = tree
+            .live_node_ids()
+            .into_iter()
+            .find(|id| {
+                tree.kinds.get(id) == Some(&ViewKind::Input)
+                    && tree.labels.get(id).and_then(|l| l.as_deref()) == Some(id_lbl)
+            })
+            .expect("layout id input mounted");
+        core.component_event(
+            input_id,
+            EventKind::ChangeText,
+            &EventPayload::Text {
+                text: "minimal".into(),
+                count: 1,
+            },
+        );
+        tree.pump(&mut core);
+        assert!(tree.press_text(&mut core, "FILL_MINIMAL_TSX"));
+        assert!(tree.press_text(&mut core, validate_lbl));
+        assert!(tree.has_text_containing("Minimal QA"));
+        assert!(tree.press_text(&mut core, save_lbl));
+
+        assert!(layouts_dir.join("minimal.tsx").exists());
+        assert!(layouts_dir.join("zniff-layout.d.ts").exists());
+        assert!(!has_sidebar_toggle(&tree), "minimal layout has no sidebar");
+        assert!(tree.has_text("FOOTER_BOTTOM_SLOT"));
+
+        // 3. Switch to `broken.tsx` via toolbar popover -> falls back to built-in Split + banner -> Use built-in clears it.
+        assert!(tree.press_label(&mut core, switcher_lbl));
+        assert!(tree.press_text(&mut core, "broken"));
+        assert!(
+            tree.has_text_containing(err_prefix),
+            "expected error banner `{err_prefix}`; texts={:?}",
+            tree.all_live_texts()
+        );
+        assert!(has_sidebar_toggle(&tree));
+        assert!(tree.press_text(&mut core, fallback_lbl));
+        assert!(!tree.has_text_containing(err_prefix));
+
+        // 4. Two-click 3.5s delete confirmation for `minimal`: first click arms without deleting, second deletes.
+        assert!(tree.has_text("Minimal QA"));
+        assert!(tree.press_text(&mut core, del_lbl));
+        assert!(tree.has_text(confirm_del_lbl));
+        assert!(layouts_dir.join("minimal.tsx").exists());
+        assert!(tree.press_text(&mut core, confirm_del_lbl));
+        assert!(!layouts_dir.join("minimal.tsx").exists());
+    }
+}

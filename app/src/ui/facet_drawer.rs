@@ -264,6 +264,7 @@ pub(crate) fn flow_list(
     let menu_at = signal(Point::<Points>::default());
     let facet_tab = signal(0_u8);
     bind_popover_dismiss(facets_open);
+    let slot_managed = use_context::<FlowListSlotSizing>().is_some();
     let effective_width = move || {
         let mode = layout_mode.get();
         let collapsed = sidebar_effectively_collapsed(sidebar_collapsed.get(), window().width.0);
@@ -272,22 +273,32 @@ pub(crate) fn flow_list(
     };
     let effective_height = move || clamp_list_height_for_window(height.get(), window().height.0);
     let is_top_bottom = move || layout_mode.get() == config::LayoutMode::TopBottom;
-    view()
-        .w(move || -> DefiniteLength {
-            if is_top_bottom() {
-                relative(1.0)
-            } else {
-                px(effective_width()).into()
-            }
-        })
-        .h(move || -> DefiniteLength {
-            if is_top_bottom() {
-                px(effective_height()).into()
-            } else {
-                relative(1.0)
-            }
-        })
-        .flex_shrink_0()
+    let list_root = if slot_managed {
+        view()
+            .flex_1()
+            .w_full()
+            .h_full()
+            .min_w(px(0.0))
+            .min_h(px(0.0))
+    } else {
+        view()
+            .w(move || -> DefiniteLength {
+                if is_top_bottom() {
+                    relative(1.0)
+                } else {
+                    px(effective_width()).into()
+                }
+            })
+            .h(move || -> DefiniteLength {
+                if is_top_bottom() {
+                    px(effective_height()).into()
+                } else {
+                    relative(1.0)
+                }
+            })
+            .flex_shrink_0()
+    };
+    list_root
         .overflow_hidden()
         .bg(bg_list())
         .child(session_tab_bar())

@@ -1297,6 +1297,9 @@ struct WebLocalPrefs {
     theme_mode: Option<config::ThemeMode>,
     ui_zoom: Option<u16>,
     layout_mode: Option<config::LayoutMode>,
+    active_layout: Option<String>,
+    layout_pane_sizes:
+        Option<std::collections::BTreeMap<String, std::collections::BTreeMap<String, u32>>>,
     sidebar_collapsed: Option<bool>,
     sidebar_width: Option<u32>,
     list_width: Option<u32>,
@@ -1333,6 +1336,8 @@ impl WebLocalPrefs {
             theme_mode: Some(cfg.theme_mode),
             ui_zoom: Some(cfg.ui_zoom),
             layout_mode: Some(cfg.layout_mode),
+            active_layout: Some(cfg.active_layout.clone()),
+            layout_pane_sizes: Some(cfg.layout_pane_sizes.clone()),
             sidebar_collapsed: Some(cfg.sidebar_collapsed),
             sidebar_width: Some(cfg.sidebar_width),
             list_width: Some(cfg.list_width),
@@ -1371,6 +1376,12 @@ impl WebLocalPrefs {
         }
         if let Some(v) = self.layout_mode {
             cfg.layout_mode = v;
+        }
+        if let Some(v) = self.active_layout {
+            cfg.active_layout = config::sanitize_layout_id_pref(&v);
+        }
+        if let Some(v) = self.layout_pane_sizes {
+            cfg.layout_pane_sizes = config::sanitize_layout_pane_sizes(v);
         }
         if let Some(v) = self.sidebar_collapsed {
             cfg.sidebar_collapsed = v;

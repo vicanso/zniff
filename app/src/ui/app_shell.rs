@@ -355,6 +355,8 @@ fn app_workspace(rt: AppRuntime) -> impl IntoElement {
             close_sequence_diagram(seq_builder);
         }
     });
+    let saved_active_layout = saved.active_layout.clone();
+    let saved_layout_pane_sizes = saved.layout_pane_sizes.clone();
     let list_width = signal(saved.list_width as f32);
     let columns = signal(ListColumns::from_config(&saved));
     let sort = signal(None::<ListSort>);
@@ -1552,6 +1554,14 @@ fn app_workspace(rt: AppRuntime) -> impl IntoElement {
         }
     });
 
+    let layout_ui = init_layout_ui_state(
+        &saved_active_layout,
+        &saved_layout_pane_sizes,
+        profile_signals.layout_mode.get_untracked(),
+    );
+    provide_context(profile_signals);
+    provide_context(layout_ui);
+
     view()
         .flex_1()
         .bg(bg_canvas())
@@ -1624,6 +1634,47 @@ fn app_workspace(rt: AppRuntime) -> impl IntoElement {
                 let c = controls.clone();
                 Rc::new(move || install_ca(c.clone()))
             };
+            let active_layout = layout_ui.active_spec;
+            let standalone_summary = signal(active_layout.get_untracked().has_standalone_summary());
+            let seen_layout_key = stored((
+                String::new(),
+                profile_signals.layout_mode.get_untracked(),
+                0_i32,
+                0_i32,
+                u64::MAX,
+            ));
+            effect(move || {
+                let bounds = window();
+                let w_bucket = (bounds.width.0 / 20.0).round() as i32;
+                let h_bucket = (bounds.height.0 / 20.0).round() as i32;
+                let id = layout_ui.active_id.get();
+                let mode = profile_signals.layout_mode.get();
+                let rev = layout_ui.reload_rev.get();
+                let key = (id, mode, w_bucket, h_bucket, rev);
+                if seen_layout_key.with(|cur| *cur != key) {
+                    seen_layout_key.replace(key);
+                    evaluate_active_layout(
+                        layout_ui,
+                        mode,
+                        crate::layout_spec::LayoutContext {
+                            width: bounds.width.0.max(320.0),
+                            height: bounds.height.0.max(240.0),
+                            target: if cfg!(target_arch = "wasm32") {
+                                crate::layout_spec::LayoutTarget::Web
+                            } else {
+                                crate::layout_spec::LayoutTarget::Desktop
+                            },
+                        },
+                    );
+                }
+            });
+            effect(move || {
+                let has_summary = active_layout.with(|s| s.has_standalone_summary());
+                if standalone_summary.get_untracked() != has_summary {
+                    standalone_summary.set(has_summary);
+                }
+            });
+            provide_context(StandaloneSummaryContext(standalone_summary));
             provide_context(TlsFailureBannerSignals {
                 burst: tls_failure_burst,
                 dismissed: tls_banner_dismissed,
@@ -1632,7 +1683,6 @@ fn app_workspace(rt: AppRuntime) -> impl IntoElement {
                 selected,
                 install_ca: Rc::clone(&install_ca_cb),
             });
-            provide_context(profile_signals);
             provide_context(SessionTabBarProps {
                 tabs: session_tabs_sig,
                 active_tab: active_tab_sig,
@@ -1677,44 +1727,27 @@ fn app_workspace(rt: AppRuntime) -> impl IntoElement {
                     shown,
                 );
             });
-            let build_split: Rc<dyn Fn(bool) -> View> = Rc::new(move |vertical: bool| {
-                let controls_list = controls_list.clone();
-                let controls_split = controls_split.clone();
-                let controls_detail = controls_detail.clone();
-                let onboarding_now = onboarding_base.clone();
-                let on_clear_list = Rc::clone(&on_clear);
-                let container = if vertical {
-                    view()
-                        .element_ref(&workspace_ref)
-                        .flex_1()
-                        .min_h(px(0.0))
-                        .flex_col()
-                } else {
-                    view()
-                        .element_ref(&workspace_ref)
-                        .flex_1()
-                        .min_h(px(0.0))
-                        .flex_row()
-                };
-                container
-                    .child(when(
-                        move || {
-                            profile_signals.layout_mode.get() == config::LayoutMode::Split
-                                && !sidebar_effectively_collapsed(
-                                    profile_signals.sidebar_collapsed.get(),
-                                    window().width.0,
-                                )
-                        },
-                        move || {
-                            facet_sidebar(
-                                facets,
-                                list_filter,
-                                profile_signals.sidebar_width,
-                                profile_signals.sidebar_collapsed,
-                            )
-                        },
-                    ))
-                    .child({
+            let controls_summary = controls.clone();
+            let workspace_host = WorkspaceLayoutHost {
+                workspace_ref,
+                profiles: profile_signals,
+                list_width,
+                controls: controls_split.clone(),
+                pane_overrides: layout_ui.active_pane_overrides,
+                on_save_pane_size: Rc::new(move |path, size| {
+                    save_pane_size_override(layout_ui, path, size, &controls_split);
+                }),
+                modules: WorkspaceModules {
+                    sidebar: Rc::new(move || {
+                        facet_sidebar(
+                            facets,
+                            list_filter,
+                            profile_signals.sidebar_width,
+                            profile_signals.sidebar_collapsed,
+                        )
+                        .into_element()
+                    }),
+                    flow_list: Rc::new(move || {
                         let clear_controls = controls_list.clone();
                         let empty_state = EmptyFilterState {
                             effective_filter,
@@ -1740,163 +1773,144 @@ fn app_workspace(rt: AppRuntime) -> impl IntoElement {
                             profile_signals,
                             columns,
                             sort,
-                            controls_list,
+                            controls_list.clone(),
                             shown,
                             baseline,
                             filter_focus,
-                            on_clear_list,
+                            Rc::clone(&on_clear),
                         )
-                    })
-                    .child(pane_splitter(
-                        list_width,
-                        profile_signals.list_height,
-                        profile_signals.layout_mode,
-                        profile_signals.sidebar_width,
-                        profile_signals.sidebar_collapsed,
-                        controls_split,
-                    ))
-                    .child(detail_pane(
-                        shown,
-                        controls_detail,
-                        selected,
-                        paused,
-                        compose,
-                        seq_builder,
-                        rows,
-                        list_filter,
-                        effective_filter,
-                        baseline,
-                        folded,
-                        Rc::clone(&pane_px),
-                        filtered_stats,
-                        detail_scroll,
-                        profile_signals.layout_mode,
-                        onboarding_now,
-                    ))
-            });
-            let build_col = Rc::clone(&build_split);
-            let build_row = build_split;
+                        .into_element()
+                    }),
+                    detail: Rc::new(move || {
+                        detail_pane(
+                            shown,
+                            controls_detail.clone(),
+                            selected,
+                            paused,
+                            compose,
+                            seq_builder,
+                            rows,
+                            list_filter,
+                            effective_filter,
+                            baseline,
+                            folded,
+                            Rc::clone(&pane_px),
+                            filtered_stats,
+                            detail_scroll,
+                            profile_signals.layout_mode,
+                            onboarding_base.clone(),
+                        )
+                        .into_element()
+                    }),
+                    summary: Rc::new(move || {
+                        summary_pane(
+                            filtered_stats,
+                            selected,
+                            controls_summary.clone(),
+                            rows,
+                            seq_builder,
+                            compose,
+                            shown.phase,
+                        )
+                        .into_element()
+                    }),
+                },
+            };
+            let build_footer: Rc<dyn Fn() -> AnyElement> = {
+                let controls = controls.clone();
+                Rc::new(move || {
+                    footer(
+                        listen,
+                        running,
+                        memory,
+                        dropped,
+                        port_text,
+                        lan_url,
+                        lan_choice,
+                        lan_addrs,
+                        qr_path,
+                        listen_all,
+                        AccessControlProps {
+                            open: profile_signals.access_open,
+                            proxy_auth: profile_signals.proxy_auth,
+                            allow_hosts: profile_signals.allow_hosts,
+                            allow_hosts_strict: profile_signals.allow_hosts_strict,
+                            allow_hosts_locked: profile_signals.allow_hosts_locked,
+                            allow_denied: profile_signals.allow_denied,
+                            controls: controls.clone(),
+                        },
+                        config_broken,
+                        config_broken_dismissed,
+                        ConnectHubProps {
+                            controls: controls.clone(),
+                            running,
+                            listen,
+                            ca_ui,
+                            use_system_proxy,
+                            adb_count,
+                            tp_active,
+                            #[cfg(not(target_arch = "wasm32"))]
+                            tp_status,
+                            #[cfg(not(target_arch = "wasm32"))]
+                            tp_apps,
+                            selected,
+                            install_ca: {
+                                let c = controls.clone();
+                                Rc::new(move || install_ca(c.clone()))
+                            },
+                            toggle_system_proxy: {
+                                let c = controls.clone();
+                                Rc::new(move || toggle_system_proxy(c.clone()))
+                            },
+                            qr_open,
+                            pending_qr,
+                        },
+                        WatchPopoverProps {
+                            open: profile_signals.watch_open,
+                            rules: watch_rules,
+                            eval: watch_eval,
+                            effective_filter,
+                            list_filter,
+                            selected,
+                            active_tab: active_tab_sig,
+                            baseline,
+                            primary_filter: filter,
+                            filter_enabled: profile_signals.filter_enabled,
+                            controls: controls.clone(),
+                        },
+                        controls.clone(),
+                    )
+                    .into_element()
+                })
+            };
+            let build_footer_top = Rc::clone(&build_footer);
+            let build_footer_bottom = build_footer;
             view()
                 .flex_1()
                 .min_h(px(0.0))
                 .flex_col()
                 .child(when(
-                    move || web_disconnected.get().is_some(),
-                    move || {
-                        let langs = ui_langs();
-                        view()
-                            .w_full()
-                            .min_h(px(32.0))
-                            .px_3()
-                            .py_1()
-                            .flex_shrink_0()
-                            .flex_row()
-                            .items_center()
-                            .gap_2()
-                            .bg(status_err_bg())
-                            .border_b_1()
-                            .border_b_color(status_err_fg())
-                            .child(glyph_px(13.0, || Glyph::Alert, || color(status_err_fg())))
-                            .child(
-                                text(move || -> SharedString {
-                                    let lang = ui_lang(langs);
-                                    if web_disconnected.get().as_deref() == Some("auth") {
-                                        t(
-                                            lang,
-                                            "操作台认证已失效或权限受限（HTTP 401/403），请重新验证或刷新页面。",
-                                            "Web console authorization failed (HTTP 401/403); re-authenticate or reload.",
-                                        )
-                                        .into()
-                                    } else {
-                                        t(
-                                            lang,
-                                            "与 zniff Web 后端连接已断开，正在自动重连…（当前显示为上次同步的缓存数据）",
-                                            "Disconnected from zniff web backend, reconnecting… (showing last synced state)",
-                                        )
-                                        .into()
-                                    }
-                                })
-                                .flex_1()
-                                .min_w(px(0.0))
-                                .text_size(px(TEXT_XS))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(status_err_fg()),
-                            )
-                    },
+                    move || active_layout.with(|s| s.footer) == crate::layout_spec::FooterDock::Top,
+                    move || (build_footer_top)(),
+                ))
+                .child(web_disconnected_banner(web_disconnected))
+                .child(layout_error_banner(
+                    layout_ui,
+                    profile_signals,
+                    controls.clone(),
                 ))
                 .child(onboarding_progress_strip(
                     onboarding_strip_props,
                     shown.phase,
                 ))
-                .child(
-                    when(
-                        move || profile_signals.layout_mode.get() == config::LayoutMode::TopBottom,
-                        move || build_col(true),
-                    )
-                    .otherwise(move || build_row(false)),
-                )
+                .child(render_workspace_layout(active_layout, workspace_host))
+                .child(when(
+                    move || {
+                        active_layout.with(|s| s.footer) == crate::layout_spec::FooterDock::Bottom
+                    },
+                    move || (build_footer_bottom)(),
+                ))
         })
-        .child(footer(
-            listen,
-            running,
-            memory,
-            dropped,
-            port_text,
-            lan_url,
-            lan_choice,
-            lan_addrs,
-            qr_path,
-            listen_all,
-            AccessControlProps {
-                open: profile_signals.access_open,
-                proxy_auth: profile_signals.proxy_auth,
-                allow_hosts: profile_signals.allow_hosts,
-                allow_hosts_strict: profile_signals.allow_hosts_strict,
-                allow_hosts_locked: profile_signals.allow_hosts_locked,
-                allow_denied: profile_signals.allow_denied,
-                controls: controls.clone(),
-            },
-            config_broken,
-            config_broken_dismissed,
-            ConnectHubProps {
-                controls: controls.clone(),
-                running,
-                listen,
-                ca_ui,
-                use_system_proxy,
-                adb_count,
-                tp_active,
-                #[cfg(not(target_arch = "wasm32"))]
-                tp_status,
-                #[cfg(not(target_arch = "wasm32"))]
-                tp_apps,
-                selected,
-                install_ca: {
-                    let c = controls.clone();
-                    Rc::new(move || install_ca(c.clone()))
-                },
-                toggle_system_proxy: {
-                    let c = controls.clone();
-                    Rc::new(move || toggle_system_proxy(c.clone()))
-                },
-                qr_open,
-                pending_qr,
-            },
-            WatchPopoverProps {
-                open: profile_signals.watch_open,
-                rules: watch_rules,
-                eval: watch_eval,
-                effective_filter,
-                list_filter,
-                selected,
-                active_tab: active_tab_sig,
-                baseline,
-                primary_filter: filter,
-                filter_enabled: profile_signals.filter_enabled,
-                controls: controls.clone(),
-            },
-            controls.clone(),
-        ))
         .child(machine_settings_modal(profile_signals, controls.clone()))
         .child(settings_window(SettingsWindowProps {
             profiles: profile_signals,

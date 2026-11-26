@@ -123,6 +123,7 @@ pub(crate) fn detail_pane(
 ) -> impl IntoElement {
     let ready_controls = controls.clone();
     let ready_profiles = onboarding.profiles;
+    let standalone_summary = use_context::<StandaloneSummaryContext>().map(|ctx| ctx.0);
     let _ = layout_mode;
     scroll()
         .element_ref(&detail_scroll)
@@ -243,7 +244,10 @@ pub(crate) fn detail_pane(
                                 .py_3p5()
                                 .gap_3p5()
                                 .child(when(
-                                    move || filtered_stats.with(|s| s.total_count > 0),
+                                    move || {
+                                        !standalone_summary.is_some_and(|s| s.get())
+                                            && filtered_stats.with(|s| s.total_count > 0)
+                                    },
                                     move || {
                                         let controls = summary_controls.clone();
                                         filtered_summary_card(filtered_stats, selected, move || {

@@ -1062,6 +1062,9 @@ async fn route(
                 return (reply, clean_nobody);
             }
         }
+        if path == "/api/layouts" {
+            return (web_layouts_get(slot), clean_nobody);
+        }
         if let Some(file) = static_reply(path, web_root.as_deref(), header(head, "accept-encoding"))
         {
             return (file, clean_nobody);
@@ -1069,7 +1072,7 @@ async fn route(
         return (text(404, "Not Found", "not found"), clean_nobody);
     }
     if method.eq_ignore_ascii_case("POST") {
-        let cap = if path == "/api/hub" {
+        let cap = if path == "/api/hub" || path == "/api/layouts" {
             HUB_BODY_CAP
         } else {
             BODY_CAP
@@ -1117,6 +1120,13 @@ async fn route(
                 Err(_) => return (text(400, "Bad Request", "need JSON"), true),
             };
             return (hub_dispatch(slot, head, value).await, true);
+        }
+        if path == "/api/layouts" {
+            let value = match serde_json::from_slice::<Value>(&body) {
+                Ok(value) => value,
+                Err(_) => return (text(400, "Bad Request", "need JSON"), true),
+            };
+            return (web_layouts_post(slot, value), true);
         }
         return (text(404, "Not Found", "not found"), true);
     }
@@ -1693,6 +1703,96 @@ fn preview(bytes: &[u8]) -> (String, Option<String>, bool, bool) {
             Some(session::base64_encode(slice)),
             truncated,
             true,
+        ),
+    }
+}
+
+fn web_layouts_data_dir(slot: &Mutex<Slot>) -> PathBuf {
+    lock(slot)
+        .prefs
+        .config_dir
+        .clone()
+        .unwrap_or_else(crate::ca::data_dir)
+}
+
+fn parse_web_layout_context(value: &Value) -> crate::layout_spec::LayoutContext {
+    let width = value
+        .get("width")
+        .and_then(Value::as_f64)
+        .map(|v| v as f32)
+        .unwrap_or(1280.0);
+    let height = value
+        .get("height")
+        .and_then(Value::as_f64)
+        .map(|v| v as f32)
+        .unwrap_or(760.0);
+    let target = match value.get("target").and_then(Value::as_str).unwrap_or("web") {
+        "desktop" => crate::layout_spec::LayoutTarget::Desktop,
+        _ => crate::layout_spec::LayoutTarget::Web,
+    };
+    crate::layout_spec::LayoutContext {
+        width,
+        height,
+        target,
+    }
+}
+
+fn web_layouts_get(slot: &Mutex<Slot>) -> Reply {
+    let dir = web_layouts_data_dir(slot);
+    let _ = crate::layout_runtime::ensure_layout_types(&dir);
+    let layouts = crate::layout_runtime::list_custom_layouts(&dir);
+    json_reply(
+        200,
+        "OK",
+        &json!({
+            "layouts": layouts,
+            "default_template": crate::layout_runtime::default_custom_layout_template("custom"),
+        }),
+    )
+}
+
+fn web_layouts_post(slot: &Mutex<Slot>, value: Value) -> Reply {
+    let dir = web_layouts_data_dir(slot);
+    let op = value.get("op").and_then(Value::as_str).unwrap_or("");
+    match op {
+        "eval" => {
+            let source = value.get("source").and_then(Value::as_str).unwrap_or("");
+            let ctx = parse_web_layout_context(&value);
+            match crate::layout_runtime::eval_layout_tsx(source, ctx) {
+                Ok(spec) => json_reply(200, "OK", &json!({ "ok": true, "spec": spec })),
+                Err(err) => json_reply(200, "OK", &json!({ "ok": false, "error": err })),
+            }
+        }
+        "save" => {
+            let id = value.get("id").and_then(Value::as_str).unwrap_or("");
+            let source = value.get("source").and_then(Value::as_str).unwrap_or("");
+            if source.trim().is_empty() {
+                return json_reply(
+                    400,
+                    "Bad Request",
+                    &json!({ "error": "layout script is empty" }),
+                );
+            }
+            let ctx = parse_web_layout_context(&value);
+            if let Err(err) = crate::layout_runtime::eval_layout_tsx(source, ctx) {
+                return json_reply(400, "Bad Request", &json!({ "error": err }));
+            }
+            match crate::layout_runtime::save_custom_layout(&dir, id, source) {
+                Ok(entry) => json_reply(200, "OK", &json!({ "ok": true, "layout": entry })),
+                Err(err) => json_reply(400, "Bad Request", &json!({ "error": err })),
+            }
+        }
+        "delete" => {
+            let id = value.get("id").and_then(Value::as_str).unwrap_or("");
+            match crate::layout_runtime::delete_custom_layout(&dir, id) {
+                Ok(()) => json_reply(200, "OK", &json!({ "ok": true })),
+                Err(err) => json_reply(400, "Bad Request", &json!({ "error": err })),
+            }
+        }
+        _ => json_reply(
+            400,
+            "Bad Request",
+            &json!({ "error": "unknown /api/layouts op" }),
         ),
     }
 }
@@ -4744,6 +4844,146 @@ mod tests {
             hub.rules_text()
         );
         assert!(hub.rules_enabled());
+
+        drop(server);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn web_layouts_api_saves_evaluates_and_deletes_tsx_layouts() {
+        let dir = std::env::temp_dir().join(format!(
+            "zniff-web-layouts-api-{}-{}",
+            std::process::id(),
+            unix_millis(SystemTime::now())
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let ca = Arc::new(Ca::open(&dir).unwrap());
+        let hub = Arc::new(Hub::new(ca).unwrap());
+        let capture_port = reserve_port();
+        let prefs = WebPrefs {
+            config_dir: Some(dir.clone()),
+            dev_mode: false,
+            ..WebPrefs::default()
+        };
+        let server = WebServer::start_with_prefs(
+            "127.0.0.1:0".parse().unwrap(),
+            hub,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            capture_port,
+            None,
+            prefs,
+        )
+        .unwrap();
+        let web = server.addr();
+
+        // Initially empty, generates zniff-layout.d.ts and returns default_template.
+        let (status, raw_get) = exchange(
+            web,
+            "GET /api/layouts HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert_eq!(status, 200, "{raw_get}");
+        let listed: Value = serde_json::from_str(body_of(&raw_get)).unwrap();
+        assert_eq!(listed["layouts"].as_array().unwrap().len(), 0);
+        assert!(
+            listed["default_template"]
+                .as_str()
+                .unwrap()
+                .contains("<Layout")
+        );
+        assert!(dir.join("layouts").join("zniff-layout.d.ts").exists());
+
+        // Evaluate valid TSX for web target.
+        let script = r#"
+import { Layout, Row, Col, Pane } from "zniff/layout";
+export default (ctx: LayoutContext) => (
+  <Layout name="Web QA" footer="top">
+    {ctx.width < 900 ? (
+      <Col>
+        <Pane name="flow_list" size="50%" />
+        <Pane name="detail" size="1fr" />
+      </Col>
+    ) : (
+      <Row>
+        <Pane name="flow_list" size="45%" />
+        <Pane name="detail" size="1fr" />
+      </Row>
+    )}
+  </Layout>
+);
+"#;
+        let eval_req = json!({
+            "op": "eval",
+            "source": script,
+            "width": 1200,
+            "height": 800,
+            "target": "web",
+        });
+        let (status, raw_eval) = post(web, "/api/layouts", &eval_req.to_string()).await;
+        assert_eq!(status, 200, "{raw_eval}");
+        let eval_val: Value = serde_json::from_str(body_of(&raw_eval)).unwrap();
+        assert_eq!(eval_val["ok"], Value::Bool(true), "{eval_val}");
+        assert_eq!(eval_val["spec"]["name"], "Web QA");
+        assert_eq!(eval_val["spec"]["footer"], "top");
+
+        // Invalid syntax returns ok=false with error message.
+        let bad_eval = json!({
+            "op": "eval",
+            "source": "export default () => (<Layout><Row></Layout>);",
+        });
+        let (status, raw_bad) = post(web, "/api/layouts", &bad_eval.to_string()).await;
+        assert_eq!(status, 200, "{raw_bad}");
+        let bad_val: Value = serde_json::from_str(body_of(&raw_bad)).unwrap();
+        assert_eq!(bad_val["ok"], Value::Bool(false), "{bad_val}");
+        assert!(!bad_val["error"].as_str().unwrap().is_empty());
+
+        // Reject invalid ID / path traversal cleanly.
+        let save_bad_id = json!({
+            "op": "save",
+            "id": "../escape",
+            "source": script,
+        });
+        let (status, _) = post(web, "/api/layouts", &save_bad_id.to_string()).await;
+        assert_eq!(status, 400);
+
+        // Save valid custom layout and list it back.
+        let save_req = json!({
+            "op": "save",
+            "id": "web_qa",
+            "source": script,
+            "width": 1200,
+            "height": 800,
+            "target": "web",
+        });
+        let (status, raw_save) = post(web, "/api/layouts", &save_req.to_string()).await;
+        assert_eq!(status, 200, "{raw_save}");
+        let save_val: Value = serde_json::from_str(body_of(&raw_save)).unwrap();
+        assert_eq!(save_val["layout"]["id"], "web_qa");
+
+        let (status, raw_get2) = exchange(
+            web,
+            "GET /api/layouts HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert_eq!(status, 200, "{raw_get2}");
+        let listed2: Value = serde_json::from_str(body_of(&raw_get2)).unwrap();
+        assert_eq!(listed2["layouts"].as_array().unwrap().len(), 1);
+        assert_eq!(listed2["layouts"][0]["label"], "Web QA");
+
+        // Delete and confirm removal.
+        let del_req = json!({ "op": "delete", "id": "web_qa" });
+        let (status, raw_del) = post(web, "/api/layouts", &del_req.to_string()).await;
+        assert_eq!(status, 200, "{raw_del}");
+        let (status, raw_get3) = exchange(
+            web,
+            "GET /api/layouts HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert_eq!(status, 200, "{raw_get3}");
+        let listed3: Value = serde_json::from_str(body_of(&raw_get3)).unwrap();
+        assert_eq!(listed3["layouts"].as_array().unwrap().len(), 0);
 
         drop(server);
         let _ = std::fs::remove_dir_all(&dir);

@@ -378,48 +378,50 @@ fn settings_general_tab(props: SettingsWindowProps) -> impl IntoElement {
         settings_font_section(controls.clone()),
     );
 
-    let reading = settings_card(
-        "阅读与布局",
-        "Reading & Layout",
-        view()
-            .w_full()
-            .gap_1()
-            .flex_col()
-            .child(settings_toggle_row(
-                "默认美化",
-                "Pretty by default",
-                move || pretty.get(),
-                {
-                    let c = controls.clone();
-                    move || {
-                        let next = !pretty.get();
-                        pretty.set(next);
-                        save_config_or_notify(&c, PrefName::Pretty, |cfg| {
-                            cfg.default_pretty = next
-                        });
+    let reading_body = view()
+        .w_full()
+        .gap_1()
+        .flex_col()
+        .child(settings_toggle_row(
+            "默认美化",
+            "Pretty by default",
+            move || pretty.get(),
+            {
+                let c = controls.clone();
+                move || {
+                    let next = !pretty.get();
+                    pretty.set(next);
+                    save_config_or_notify(&c, PrefName::Pretty, |cfg| cfg.default_pretty = next);
+                }
+            },
+        ))
+        .child(settings_toggle_row(
+            "JSON 默认树形",
+            "JSON tree by default",
+            move || profiles.default_json_tree.get(),
+            {
+                let c = controls.clone();
+                move || {
+                    let next = !profiles.default_json_tree.get();
+                    profiles.default_json_tree.set(next);
+                    if next && !pretty.get() {
+                        pretty.set(true);
                     }
-                },
-            ))
-            .child(settings_toggle_row(
-                "JSON 默认树形",
-                "JSON tree by default",
-                move || profiles.default_json_tree.get(),
-                {
-                    let c = controls.clone();
-                    move || {
-                        let next = !profiles.default_json_tree.get();
-                        profiles.default_json_tree.set(next);
-                        if next && !pretty.get() {
-                            pretty.set(true);
-                        }
-                        save_config_or_notify(&c, PrefName::Pretty, |cfg| {
-                            cfg.default_json_tree = next
-                        });
-                    }
-                },
-            ))
-            .child(settings_layout_row(profiles.layout_mode, controls.clone())),
-    );
+                    save_config_or_notify(&c, PrefName::Pretty, |cfg| cfg.default_json_tree = next);
+                }
+            },
+        ))
+        .child(settings_layout_row(profiles.layout_mode, controls.clone()));
+    let reading_body = if let Some(layout_ui) = use_context::<LayoutUiState>() {
+        reading_body.child(settings_custom_layouts_section(
+            layout_ui,
+            profiles.layout_mode,
+            controls.clone(),
+        ))
+    } else {
+        reading_body
+    };
+    let reading = settings_card("阅读与布局", "Reading & Layout", reading_body);
 
     let root = view()
         .w_full()
@@ -498,8 +500,17 @@ pub(crate) fn settings_layout_row(
     layout_mode: Signal<config::LayoutMode>,
     controls: Arc<Controls>,
 ) -> impl IntoElement {
+    let layout_ui = use_context::<LayoutUiState>();
     let c_split = controls.clone();
     let c_tb = controls;
+    let is_split = move || {
+        layout_mode.get() == config::LayoutMode::Split
+            && layout_ui.is_none_or(|ui| ui.active_id.with(String::is_empty))
+    };
+    let is_top_bottom = move || {
+        layout_mode.get() == config::LayoutMode::TopBottom
+            && layout_ui.is_none_or(|ui| ui.active_id.with(String::is_empty))
+    };
     view()
         .h(px(ControlSize::Md.height()))
         .px_2p5()
@@ -520,22 +531,40 @@ pub(crate) fn settings_layout_row(
                 .accessibility_label(tr_opt("主界面布局", "Layout"))
                 .child(ui_radio_pill(
                     tr("左右分栏", "Split"),
-                    move || layout_mode.get() == config::LayoutMode::Split,
+                    is_split,
                     move || {
-                        layout_mode.set(config::LayoutMode::Split);
-                        save_config_or_notify(&c_split, PrefName::List, |cfg| {
-                            cfg.layout_mode = config::LayoutMode::Split;
-                        });
+                        if let Some(ui) = layout_ui {
+                            select_builtin_layout(
+                                ui,
+                                layout_mode,
+                                config::LayoutMode::Split,
+                                &c_split,
+                            );
+                        } else {
+                            layout_mode.set(config::LayoutMode::Split);
+                            save_config_or_notify(&c_split, PrefName::List, |cfg| {
+                                cfg.layout_mode = config::LayoutMode::Split;
+                            });
+                        }
                     },
                 ))
                 .child(ui_radio_pill(
                     tr("上下分栏", "Top / Bottom"),
-                    move || layout_mode.get() == config::LayoutMode::TopBottom,
+                    is_top_bottom,
                     move || {
-                        layout_mode.set(config::LayoutMode::TopBottom);
-                        save_config_or_notify(&c_tb, PrefName::List, |cfg| {
-                            cfg.layout_mode = config::LayoutMode::TopBottom;
-                        });
+                        if let Some(ui) = layout_ui {
+                            select_builtin_layout(
+                                ui,
+                                layout_mode,
+                                config::LayoutMode::TopBottom,
+                                &c_tb,
+                            );
+                        } else {
+                            layout_mode.set(config::LayoutMode::TopBottom);
+                            save_config_or_notify(&c_tb, PrefName::List, |cfg| {
+                                cfg.layout_mode = config::LayoutMode::TopBottom;
+                            });
+                        }
                     },
                 )),
         )

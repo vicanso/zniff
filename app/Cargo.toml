@@ -29,6 +29,7 @@ qrcode = { version = "0.15.0", default-features = false }
 
 # The browser build is the same view. It does not link the proxy, TLS, or CA stack.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rquickjs = { package = "quickjs-jit", version = "=0.14.2", default-features = false, features = ["std"] }
 env_logger = { version = "0.11.12", default-features = false, features = ["auto-color"] }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal"] }
 hyper = { version = "1.13.0", features = ["client", "server", "http1", "http2"] }

@@ -33,6 +33,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "allocator-api2"
+version = "0.2.22"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57b212daf2e827b1ccdd778b7eb48ba433e58cb0e4f27b43cd6b7a608425a014"
+
+[[package]]
 name = "ambient-authority"
 version = "0.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1293,6 +1299,11 @@ name = "hashbrown"
 version = "0.17.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "735eaa21a6a5ffb2e84362faaeb90c05ba8e19797ca30428478cb6ea3a4921bc"
+dependencies = [
+ "allocator-api2",
+ "equivalent",
+ "foldhash 0.2.0",
+]
 
 [[package]]
 name = "heck"
@@ -2515,6 +2526,35 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a993555f31e5a609f617c12db6250dedcac1b0a85076912c436e6fc9b2c8e6a3"
 
 [[package]]
+name = "quickjs-jit"
+version = "0.14.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5f4423709e8709eb3ee02d23b30fba4cc6f3ab0ee90c3fc08edfb968b3c8b73"
+dependencies = [
+ "quickjs-jit-core",
+]
+
+[[package]]
+name = "quickjs-jit-core"
+version = "0.14.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3dbd3a4da98e06d0bbc0f65a4719155b7923461194c3b26860b87e1568aff09"
+dependencies = [
+ "hashbrown 0.17.2",
+ "quickjs-jit-sys",
+ "relative-path",
+]
+
+[[package]]
+name = "quickjs-jit-sys"
+version = "0.14.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "44983d24261238e3db9f543729c1ec806dc199f7dd360560699498608ff7cfb8"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2598,6 +2638,15 @@ name = "regex-syntax"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d902046e6a28a1e4c3cab97258a0ce11e994903f01c2d97a9447a0b3df85f4f6"
+
+[[package]]
+name = "relative-path"
+version = "2.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38540a682c6e9bca04a8bca9e5ec5a6ba168dfbb04c9998fe517a9befb92eb68"
+dependencies = [
+ "serde_core",
+]
 
 [[package]]
 name = "ring"
@@ -4104,6 +4153,7 @@ dependencies = [
  "nsh-platform-macos",
  "nsh-platform-windows",
  "qrcode",
+ "quickjs-jit",
  "rcgen",
  "ring",
  "rustls",

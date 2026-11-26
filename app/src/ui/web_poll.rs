@@ -1,6 +1,55 @@
 #[allow(unused_imports)]
 use super::*;
 
+pub(crate) fn web_disconnected_banner(
+    web_disconnected: Signal<Option<String>>,
+) -> impl IntoElement {
+    when(
+        move || web_disconnected.get().is_some(),
+        move || {
+            let langs = ui_langs();
+            view()
+                .w_full()
+                .min_h(px(32.0))
+                .px_3()
+                .py_1()
+                .flex_shrink_0()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .bg(status_err_bg())
+                .border_b_1()
+                .border_b_color(status_err_fg())
+                .child(glyph_px(13.0, || Glyph::Alert, || color(status_err_fg())))
+                .child(
+                    text(move || -> SharedString {
+                        let lang = ui_lang(langs);
+                        if web_disconnected.get().as_deref() == Some("auth") {
+                            t(
+                                lang,
+                                "操作台认证已失效或权限受限（HTTP 401/403），请重新验证或刷新页面。",
+                                "Web console authorization failed (HTTP 401/403); re-authenticate or reload.",
+                            )
+                            .into()
+                        } else {
+                            t(
+                                lang,
+                                "与 zniff Web 后端连接已断开，正在自动重连…（当前显示为上次同步的缓存数据）",
+                                "Disconnected from zniff web backend, reconnecting… (showing last synced state)",
+                            )
+                            .into()
+                        }
+                    })
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .text_size(px(TEXT_XS))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(status_err_fg()),
+                )
+        },
+    )
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub(crate) const WEB_LONG_POLL_WAIT_MS: u64 = 8_000;
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]

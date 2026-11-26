@@ -1365,3 +1365,103 @@ fn text_field(value: &Value, key: &str) -> String {
 fn millis_time(millis: u64) -> SystemTime {
     UNIX_EPOCH + Duration::from_millis(millis)
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct WebLayoutEntry {
+    pub id: String,
+    pub label: String,
+    pub file_name: String,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct WebLayoutsPayload {
+    pub layouts: Vec<WebLayoutEntry>,
+    pub default_template: String,
+}
+
+async fn post_layouts_json(payload: Value) -> anyhow::Result<Value> {
+    let bytes = serde_json::to_vec(&payload)?;
+    let request = nsh_core::prelude::HttpRequest::post("api/layouts", bytes)
+        .header("content-type", "application/json");
+    let response = nsh_core::prelude::fetch(request)
+        .await
+        .map_err(|err| anyhow!(err))?;
+    let value: Value = serde_json::from_str(&response.text()).unwrap_or(json!({}));
+    if !response.ok() {
+        return Err(anyhow!(json_error(&value, "布局请求失败")));
+    }
+    Ok(value)
+}
+
+pub async fn fetch_web_layouts() -> anyhow::Result<WebLayoutsPayload> {
+    let request = nsh_core::prelude::HttpRequest::get("api/layouts");
+    let response = nsh_core::prelude::fetch(request)
+        .await
+        .map_err(|err| anyhow!(err))?;
+    if !response.ok() {
+        return Err(anyhow!("加载布局失败 (HTTP {})", response.head.status));
+    }
+    serde_json::from_str::<WebLayoutsPayload>(&response.text()).map_err(|err| anyhow!(err))
+}
+
+pub async fn eval_web_layout(
+    source: &str,
+    ctx: crate::layout_spec::LayoutContext,
+) -> anyhow::Result<crate::layout_spec::LayoutSpec> {
+    let target = match ctx.target {
+        crate::layout_spec::LayoutTarget::Desktop => "desktop",
+        crate::layout_spec::LayoutTarget::Web => "web",
+    };
+    let value = post_layouts_json(json!({
+        "op": "eval",
+        "source": source,
+        "width": ctx.width,
+        "height": ctx.height,
+        "target": target,
+    }))
+    .await?;
+    if value.get("ok").and_then(Value::as_bool) != Some(true) {
+        let err = value
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("布局脚本校验失败");
+        return Err(anyhow!(err.to_string()));
+    }
+    let spec_val = value.get("spec").cloned().unwrap_or(Value::Null);
+    let spec: crate::layout_spec::LayoutSpec =
+        serde_json::from_value(spec_val).map_err(|err| anyhow!(err))?;
+    spec.validate().map_err(|err| anyhow!(err))?;
+    Ok(spec)
+}
+
+pub async fn save_web_layout(
+    id: &str,
+    source: &str,
+    ctx: crate::layout_spec::LayoutContext,
+) -> anyhow::Result<WebLayoutEntry> {
+    let target = match ctx.target {
+        crate::layout_spec::LayoutTarget::Desktop => "desktop",
+        crate::layout_spec::LayoutTarget::Web => "web",
+    };
+    let value = post_layouts_json(json!({
+        "op": "save",
+        "id": id,
+        "source": source,
+        "width": ctx.width,
+        "height": ctx.height,
+        "target": target,
+    }))
+    .await?;
+    let entry_val = value.get("layout").cloned().unwrap_or(Value::Null);
+    serde_json::from_value(entry_val).map_err(|err| anyhow!(err))
+}
+
+pub async fn delete_web_layout(id: &str) -> anyhow::Result<()> {
+    let _ = post_layouts_json(json!({
+        "op": "delete",
+        "id": id,
+    }))
+    .await?;
+    Ok(())
+}

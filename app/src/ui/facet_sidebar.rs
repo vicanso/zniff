@@ -112,17 +112,21 @@ pub(crate) fn facet_sidebar(
         facets.with(|f| group_domains_by_root(&f.domains, &q))
     });
 
+    let slot_managed = use_context::<SidebarSlotSizing>().is_some();
+
     when(
         move || !sidebar_collapsed.get(),
         move || {
-            view()
-                .relative()
-                .w(move || px(clamp_sidebar_px(sidebar_width.get())))
-                .h_full()
-                .flex_shrink_0()
-                .flex_row()
-                .bg(bg_chrome())
-            .child(
+            let root = if slot_managed {
+                view().relative().flex_1().w_full().h_full().min_w(px(0.0))
+            } else {
+                view()
+                    .relative()
+                    .w(move || px(clamp_sidebar_px(sidebar_width.get())))
+                    .h_full()
+                    .flex_shrink_0()
+            };
+            let panel = root.flex_row().bg(bg_chrome()).child(
                 view()
                     .flex_1()
                     .min_w(px(0.0))
@@ -147,31 +151,31 @@ pub(crate) fn facet_sidebar(
                                                 tr("过滤域名或应用", "Filter domains or apps"),
                                             )
                                             .value(side_query)
-                                                .placeholder(tr(
-                                                    "过滤域名或应用…",
-                                                    "Filter domains / apps…",
-                                                ))
-                                                .placeholder_color(move || color(fg_muted()))
-                                                .w_full()
-                                                .h(px(CONTROL_H))
-                                                .pl_2()
-                                                .pr(move || {
-                                                    if side_query.get().is_empty() {
-                                                        px(8.0)
-                                                    } else {
-                                                        px(24.0)
-                                                    }
-                                                })
-                                                .rounded(px(RADIUS_MD))
-                                                .bg(bg_code())
-                                                .border_1()
-                                                .border_color(border_control())
-                                                .focus(|style| style.border_color(accent_blue()))
-                                                .text_size(px(TEXT_SM))
-                                                .text_color(fg_primary())
-                                                .on_change(move |text: &str| {
-                                                    side_query.set(text.to_string())
-                                                }),
+                                            .placeholder(tr(
+                                                "过滤域名或应用…",
+                                                "Filter domains / apps…",
+                                            ))
+                                            .placeholder_color(move || color(fg_muted()))
+                                            .w_full()
+                                            .h(px(CONTROL_H))
+                                            .pl_2()
+                                            .pr(move || {
+                                                if side_query.get().is_empty() {
+                                                    px(8.0)
+                                                } else {
+                                                    px(24.0)
+                                                }
+                                            })
+                                            .rounded(px(RADIUS_MD))
+                                            .bg(bg_code())
+                                            .border_1()
+                                            .border_color(border_control())
+                                            .focus(|style| style.border_color(accent_blue()))
+                                            .text_size(px(TEXT_SM))
+                                            .text_color(fg_primary())
+                                            .on_change(move |text: &str| {
+                                                side_query.set(text.to_string())
+                                            }),
                                         )
                                         .child(when(
                                             move || !side_query.get().is_empty(),
@@ -192,7 +196,10 @@ pub(crate) fn facet_sidebar(
                                                     .duration(move || motion_ms(MOTION_INSTANT_MS))
                                                     .ease_out()
                                                     .focus_visible(apply_focus_ring)
-                                                    .accessibility_label(tr_opt("清空过滤", "Clear filter"))
+                                                    .accessibility_label(tr_opt(
+                                                        "清空过滤",
+                                                        "Clear filter",
+                                                    ))
                                                     .on_press(move |_: &()| {
                                                         side_query.set(String::new())
                                                     })
@@ -357,27 +364,31 @@ pub(crate) fn facet_sidebar(
                                 ),
                         ),
                     ),
-            )
-            .child(
-                resize_handle()
-                    .axis(Axis::Horizontal)
-                    .edge(HandleEdge::Trailing)
-                    .accessibility_label(tr_opt("调整侧栏宽度", "Resize sidebar width"))
-                    .on_state_change(move |next: &ResizeHandleState| resize_state.set(*next))
-                    .on_drag_start(move || {
-                        resize_origin.set(clamp_sidebar_px(sidebar_width.get_untracked()));
-                    })
-                    .on_drag_move(move |offset: &Points| {
-                        sidebar_width.set(clamp_sidebar_px(resize_origin.get() + offset.0));
-                    })
-                    .on_drag_end(move |offset: &Points| {
-                        let next = clamp_sidebar_px(resize_origin.get() + offset.0);
-                        sidebar_width.set(next);
-                        let width_u32 = next.round() as u32;
-                        let _ = save_config(|cfg| cfg.sidebar_width = width_u32);
-                    })
-                    .child(splitter_indicator(Axis::Horizontal, resize_state, 2.5)),
-            )
+            );
+            if slot_managed {
+                panel
+            } else {
+                panel.child(
+                    resize_handle()
+                        .axis(Axis::Horizontal)
+                        .edge(HandleEdge::Trailing)
+                        .accessibility_label(tr_opt("调整侧栏宽度", "Resize sidebar width"))
+                        .on_state_change(move |next: &ResizeHandleState| resize_state.set(*next))
+                        .on_drag_start(move || {
+                            resize_origin.set(clamp_sidebar_px(sidebar_width.get_untracked()));
+                        })
+                        .on_drag_move(move |offset: &Points| {
+                            sidebar_width.set(clamp_sidebar_px(resize_origin.get() + offset.0));
+                        })
+                        .on_drag_end(move |offset: &Points| {
+                            let next = clamp_sidebar_px(resize_origin.get() + offset.0);
+                            sidebar_width.set(next);
+                            let width_u32 = next.round() as u32;
+                            let _ = save_config(|cfg| cfg.sidebar_width = width_u32);
+                        })
+                        .child(splitter_indicator(Axis::Horizontal, resize_state, 2.5)),
+                )
+            }
         },
     )
 }

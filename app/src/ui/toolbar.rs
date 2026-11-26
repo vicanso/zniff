@@ -35,8 +35,15 @@ pub(crate) fn toolbar_sidebar_toggle(
     sidebar_collapsed: Signal<bool>,
     controls: Arc<Controls>,
 ) -> impl IntoElement {
+    let layout_ui = use_context::<LayoutUiState>();
     when(
-        move || layout_mode.get() == config::LayoutMode::Split,
+        move || match layout_ui {
+            Some(ui) => ui.active_spec.with(|spec| {
+                spec.root
+                    .contains_module(crate::layout_spec::ViewModule::Sidebar)
+            }),
+            None => layout_mode.get() == config::LayoutMode::Split,
+        },
         move || {
             let controls = controls.clone();
             view()
@@ -712,6 +719,8 @@ pub(crate) fn toolbar_layout_switcher(
     layout_mode: Signal<config::LayoutMode>,
     controls: Arc<Controls>,
 ) -> impl IntoElement {
+    let layout_ui = use_context::<LayoutUiState>();
+    let profiles = use_context::<ProfileSignals>();
     let open = signal(false);
     let modes = [
         (
@@ -727,16 +736,25 @@ pub(crate) fn toolbar_layout_switcher(
             "Top / Bottom split",
         ),
     ];
-    let current_icon = move || match layout_mode.get() {
-        config::LayoutMode::Split => Glyph::LayoutSplit,
-        config::LayoutMode::TopBottom => Glyph::LayoutTopBottom,
+    let current_icon = move || {
+        if layout_ui.is_some_and(|ui| !ui.active_id.with(String::is_empty)) {
+            return Glyph::Columns;
+        }
+        match layout_mode.get() {
+            config::LayoutMode::Split => Glyph::LayoutSplit,
+            config::LayoutMode::TopBottom => Glyph::LayoutTopBottom,
+        }
     };
-    let mut menu = view().w(px(164.0)).p_1().gap_0p5().flex_col();
+    let mut menu = view().w(px(196.0)).p_1().gap_0p5().flex_col();
     for (mode, icon, zh, en) in modes {
         let mode_controls = controls.clone();
+        let is_active = move || {
+            layout_mode.get() == mode
+                && layout_ui.is_none_or(|ui| ui.active_id.with(String::is_empty))
+        };
         menu = menu.child(
             button()
-                .selected(move || layout_mode.get() == mode)
+                .selected(is_active)
                 .w_full()
                 .h(px(ControlSize::Sm.height()))
                 .px_2()
@@ -745,7 +763,7 @@ pub(crate) fn toolbar_layout_switcher(
                 .items_center()
                 .gap_2()
                 .bg(move || {
-                    if layout_mode.get() == mode {
+                    if is_active() {
                         accent_blue_soft()
                     } else {
                         AdaptiveColor::TRANSPARENT
@@ -753,7 +771,7 @@ pub(crate) fn toolbar_layout_switcher(
                 })
                 .hover(|style| {
                     style.bg(move || {
-                        if layout_mode.get() == mode {
+                        if is_active() {
                             accent_blue_soft_hover()
                         } else {
                             bg_control_hover()
@@ -768,6 +786,13 @@ pub(crate) fn toolbar_layout_switcher(
                 .accessibility_label(tr_opt(zh, en))
                 .on_press(move |_: &()| {
                     open.set(false);
+                    if let Some(ui) = layout_ui {
+                        if is_active() {
+                            return;
+                        }
+                        select_builtin_layout(ui, layout_mode, mode, &mode_controls);
+                        return;
+                    }
                     if layout_mode.get() == mode {
                         return;
                     }
@@ -786,7 +811,7 @@ pub(crate) fn toolbar_layout_switcher(
                     ControlSize::Sm.icon_size(),
                     move || icon,
                     move || {
-                        if layout_mode.get() == mode {
+                        if is_active() {
                             color(accent_blue_text())
                         } else {
                             color(fg_muted())
@@ -799,7 +824,7 @@ pub(crate) fn toolbar_layout_switcher(
                         .text_size(px(TEXT_SM))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(move || {
-                            if layout_mode.get() == mode {
+                            if is_active() {
                                 accent_blue_text()
                             } else {
                                 fg_primary()
@@ -807,6 +832,137 @@ pub(crate) fn toolbar_layout_switcher(
                         }),
                 ),
         );
+    }
+    if let Some(ui) = layout_ui {
+        let custom_controls = controls.clone();
+        menu = menu.child(when(
+            move || !ui.custom_layouts.with(Vec::is_empty),
+            move || {
+                let c_inner = custom_controls.clone();
+                view()
+                    .w_full()
+                    .gap_0p5()
+                    .flex_col()
+                    .child(view().w_full().h(px(1.0)).my_0p5().bg(border_subtle()))
+                    .child(scroll().w_full().max_h(px(216.0)).child(
+                        view().w_full().gap_0p5().flex_col().child(each(
+                            move || ui.custom_layouts.get(),
+                            |item| (item.id.clone(), item.label.clone()),
+                            move |item, _| {
+                                let (item_id, label) =
+                                    item.with_untracked(|it| (it.id.clone(), it.label.clone()));
+                                let select_id = item_id;
+                                let c = c_inner.clone();
+                                let is_selected =
+                                    move || item.with(|it| ui.active_id.with(|cur| *cur == it.id));
+                                button()
+                                    .selected(is_selected)
+                                    .w_full()
+                                    .h(px(ControlSize::Sm.height()))
+                                    .px_2()
+                                    .rounded(px(RADIUS_MD))
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_2()
+                                    .bg(move || {
+                                        if is_selected() {
+                                            accent_blue_soft()
+                                        } else {
+                                            AdaptiveColor::TRANSPARENT
+                                        }
+                                    })
+                                    .hover(|style| {
+                                        style.bg(move || {
+                                            if is_selected() {
+                                                accent_blue_soft_hover()
+                                            } else {
+                                                bg_control_hover()
+                                            }
+                                        })
+                                    })
+                                    .active(|style| style.bg(bg_control_active()))
+                                    .transition_colors()
+                                    .duration(MOTION_INSTANT_MS)
+                                    .ease_out()
+                                    .focus_visible(apply_focus_ring)
+                                    .accessibility_label(label.clone())
+                                    .on_press(move |_: &()| {
+                                        open.set(false);
+                                        select_custom_layout(ui, &select_id, &c);
+                                    })
+                                    .child(glyph_px(
+                                        ControlSize::Sm.icon_size(),
+                                        || Glyph::Columns,
+                                        move || {
+                                            if is_selected() {
+                                                color(accent_blue_text())
+                                            } else {
+                                                color(fg_muted())
+                                            }
+                                        },
+                                    ))
+                                    .child(
+                                        text(label)
+                                            .flex_1()
+                                            .min_w(px(0.0))
+                                            .number_of_lines(1)
+                                            .text_overflow(EllipsizeMode::Tail)
+                                            .text_size(px(TEXT_SM))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(move || {
+                                                if is_selected() {
+                                                    accent_blue_text()
+                                                } else {
+                                                    fg_primary()
+                                                }
+                                            }),
+                                    )
+                            },
+                        )),
+                    ))
+            },
+        ));
+        menu = menu
+            .child(view().w_full().h(px(1.0)).my_0p5().bg(border_subtle()))
+            .child(
+                button()
+                    .w_full()
+                    .h(px(ControlSize::Sm.height()))
+                    .px_2()
+                    .rounded(px(RADIUS_MD))
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .hover(|style| style.bg(bg_control_hover()))
+                    .active(|style| style.bg(bg_control_active()))
+                    .transition_colors()
+                    .duration(MOTION_INSTANT_MS)
+                    .ease_out()
+                    .focus_visible(apply_focus_ring)
+                    .accessibility_label(tr_opt("自定义布局…", "Custom layouts…"))
+                    .on_press(move |_: &()| {
+                        open.set(false);
+                        let cur = ui.active_id.get_untracked();
+                        let target = (!cur.is_empty()).then_some(cur);
+                        open_custom_layout_in_editor(ui, target.as_deref());
+                        if let Some(p) = profiles {
+                            p.settings_tab.set(SettingsTab::General);
+                            p.settings_open.set(true);
+                        }
+                    })
+                    .child(glyph_px(
+                        ControlSize::Sm.icon_size(),
+                        || Glyph::RuleRewrite,
+                        || color(fg_muted()),
+                    ))
+                    .child(
+                        text(tr("自定义布局…", "Custom layouts…"))
+                            .flex_1()
+                            .text_size(px(TEXT_SM))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(fg_secondary()),
+                    ),
+            );
     }
     bind_popover_dismiss(open);
     popover()
@@ -884,7 +1040,24 @@ pub(crate) fn toolbar_layout_switcher(
                 .child(when(
                     move || window().width.0 >= 860.0,
                     move || {
-                        control_text(tr("分栏", "Layout")).text_color(move || {
+                        control_text(move || -> SharedString {
+                            if let Some(ui) = layout_ui {
+                                let id = ui.active_id.get();
+                                if !id.is_empty() {
+                                    let label = ui.custom_layouts.with(|list| {
+                                        list.iter()
+                                            .find(|e| e.id == id)
+                                            .map(|e| e.label.clone())
+                                            .unwrap_or_else(|| id.clone())
+                                    });
+                                    return label.into();
+                                }
+                            }
+                            tr("分栏", "Layout")().into()
+                        })
+                        .max_w(px(110.0))
+                        .text_overflow(EllipsizeMode::Tail)
+                        .text_color(move || {
                             if open.get() {
                                 accent_blue_text()
                             } else {

@@ -197,6 +197,7 @@ pub(crate) struct FlowTableLayout {
     pub(crate) list_width: Signal<f32>,
     pub(crate) sidebar_width: Signal<f32>,
     pub(crate) sidebar_collapsed: Signal<bool>,
+    pub(crate) slot_width: Option<Signal<f32>>,
 }
 
 impl FlowTableLayout {
@@ -206,10 +207,17 @@ impl FlowTableLayout {
             list_width: profiles.list_width,
             sidebar_width: profiles.sidebar_width,
             sidebar_collapsed: profiles.sidebar_collapsed,
+            slot_width: use_context::<FlowListSlotSizing>().map(|s| s.slot_width),
         }
     }
 
     pub(crate) fn available_width(self, window_w: f32) -> f32 {
+        if let Some(sig) = self.slot_width {
+            let w = sig.get();
+            if w > 0.0 {
+                return w;
+            }
+        }
         match self.mode.get() {
             config::LayoutMode::TopBottom => window_w,
             config::LayoutMode::Split => {

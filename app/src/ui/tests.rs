@@ -1715,6 +1715,9 @@ fn auto_height_popover_scroll_containers_never_use_flex_1() {
         include_str!("footer_qr.rs"),
         include_str!("json_tree.rs"),
         include_str!("lan_qr.rs"),
+        include_str!("layout_render.rs"),
+        include_str!("layout_settings.rs"),
+        include_str!("layout_settings_editor.rs"),
         include_str!("list_columns.rs"),
         include_str!("machine_settings.rs"),
         include_str!("more_menu.rs"),
@@ -4817,6 +4820,7 @@ fn keyboard_step_selected_auto_scrolls_row_into_viewport() {
             list_width: signal(crate::config::LIST_WIDTH_DEFAULT as f32),
             sidebar_width: signal(crate::config::SIDEBAR_WIDTH_DEFAULT as f32),
             sidebar_collapsed: signal(false),
+            slot_width: None,
         };
         let picked = signal(None::<u64>);
         let menu_open = signal(false);
