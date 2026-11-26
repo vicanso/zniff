@@ -36,6 +36,7 @@ pub(crate) struct AppRuntime {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) update_probe_at: Stored<SystemTime>,
     pub(crate) tray_clear_rev: Signal<u64>,
+    pub(crate) cached_active_layout: Stored<Option<(String, crate::layout_spec::LayoutSpec)>>,
 }
 
 /// Initializes process-lifetime contexts, `Controls`/`Hub`, startup tasks, and root tray signals once.
@@ -133,6 +134,7 @@ pub(crate) fn init_app_runtime(initial_cfg: &config::Config) -> AppRuntime {
         #[cfg(not(target_arch = "wasm32"))]
         update_probe_at: stored(now),
         tray_clear_rev: signal(0),
+        cached_active_layout: stored(None),
     }
 }
 
@@ -440,6 +442,7 @@ pub(crate) fn close_main_window_to_tray(rt: &AppRuntime) {
     rt.about_open.set(false);
     rt.main_win.set(None);
     rt.main_open.set(false);
+    crate::script_worker::shutdown_script_worker();
     schedule_tray_memory_trim();
 }
 
@@ -451,6 +454,7 @@ pub(crate) fn on_main_window_open_change(rt: &AppRuntime, open: bool) {
         rt.settings_open.set(false);
         rt.about_open.set(false);
         rt.main_win.set(None);
+        crate::script_worker::shutdown_script_worker();
         schedule_tray_memory_trim();
     }
     rt.main_open.set(open);

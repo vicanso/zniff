@@ -6,6 +6,7 @@
 use std::time::Instant;
 
 use crate::i18n::Lang;
+use crate::layout_spec::{LayoutContext, LayoutSpec, LayoutTarget};
 use crate::session::{Direction, FilteredStats, FlowDraft, Protocol, Session};
 use crate::ui::{EffectivePathDisplay, RowCache, project_rows};
 
@@ -27,6 +28,17 @@ pub struct BenchReport {
     pub matched_structured: usize,
     pub matched_body: usize,
     pub facet_hosts: usize,
+}
+
+/// Latency metrics for TSX transpilation, cold vs. warm QuickJS evaluation, and layout fast paths.
+#[derive(Debug, Clone)]
+pub struct ScriptBenchReport {
+    pub tsx_transpile_us: f64,
+    pub qjs_cold_eval_ms: f64,
+    pub qjs_warm_eval_ms: f64,
+    pub topology_diff_us: f64,
+    pub active_cache_hit_us: f64,
+    pub warm_speedup: f64,
 }
 
 const METHODS: [&str; 4] = ["GET", "POST", "PUT", "DELETE"];
@@ -267,6 +279,153 @@ pub fn format_report_table(reports: &[BenchReport]) -> String {
     out
 }
 
+const BENCH_LAYOUT_TSX: &str = r#"
+import { Layout, Row, Col, Pane } from "zniff/layout";
+import type { LayoutContext } from "zniff/layout";
+
+export default ({ width, target }: LayoutContext) => (
+  <Layout name="Bench Focus" footer={target === "web" ? "hidden" : "bottom"}>
+    {width < 920 ? (
+      <Col>
+        <Pane name="flow_list" size="46%" />
+        <Pane name="detail" size="1fr" />
+      </Col>
+    ) : (
+      <Row>
+        <Pane name="sidebar" size={220} />
+        <Col>
+          <Pane name="flow_list" size="1fr" />
+          <Pane name="summary" size={156} />
+        </Col>
+        <Pane name="detail" size={width >= 1280 ? "52%" : "45%"} />
+      </Row>
+    )}
+  </Layout>
+);
+"#;
+
+/// Benchmarks TSX transpilation, uncached cold QuickJS startup, warm worker reuse,
+/// topology equality fast-path, and `.active-cache.json` cold-boot loading.
+pub fn run_script_benchmark(iterations: usize) -> ScriptBenchReport {
+    let iters = iterations.max(1);
+    let inner_micro_loops = 200usize;
+    let wide_ctx = LayoutContext {
+        width: 1360.0,
+        height: 840.0,
+        target: LayoutTarget::Desktop,
+    };
+    let resize_ctx = LayoutContext {
+        width: 1120.0,
+        height: 840.0,
+        target: LayoutTarget::Desktop,
+    };
+
+    let (tsx_ms_batch, _) = measure_median(iters, || {
+        let mut bytes = 0usize;
+        for _ in 0..inner_micro_loops {
+            let js = crate::layout_tsx::transpile_layout_tsx(BENCH_LAYOUT_TSX)
+                .expect("bench TSX transpile");
+            bytes ^= js.len();
+        }
+        bytes
+    });
+    let tsx_transpile_us = (tsx_ms_batch * 1000.0) / inner_micro_loops as f64;
+
+    let (qjs_cold_eval_ms, spec_wide) = measure_median(iters, || {
+        crate::layout_runtime::eval_layout_tsx_cold_ephemeral(BENCH_LAYOUT_TSX, wide_ctx)
+            .expect("cold QuickJS eval")
+    });
+
+    // Prime the warm worker once before measuring warm steady-state evals.
+    let spec_resized =
+        crate::layout_runtime::eval_layout_tsx(BENCH_LAYOUT_TSX, resize_ctx).expect("warm prime");
+    let (qjs_warm_eval_ms, _) = measure_median(iters, || {
+        crate::layout_runtime::eval_layout_tsx(BENCH_LAYOUT_TSX, resize_ctx)
+            .expect("warm QuickJS eval")
+    });
+
+    let (topo_ms_batch, _) = measure_median(iters, || {
+        let mut same_count = 0usize;
+        for _ in 0..inner_micro_loops {
+            let t1 = LayoutSpec::topology(&spec_wide);
+            let t2 = LayoutSpec::topology(&spec_resized);
+            if t1 == t2 {
+                same_count += 1;
+            }
+        }
+        same_count
+    });
+    let topology_diff_us = (topo_ms_batch * 1000.0) / inner_micro_loops as f64;
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "zniff-script-bench-{}-{}",
+        std::process::id(),
+        crate::clock::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    let _ = crate::layout_runtime::save_custom_layout(&tmp_dir, "bench-focus", BENCH_LAYOUT_TSX);
+    crate::layout_runtime::store_cached_layout_spec(&tmp_dir, "bench-focus", wide_ctx, &spec_wide);
+
+    let (cache_ms_batch, _) = measure_median(iters, || {
+        let mut hits = 0usize;
+        for _ in 0..inner_micro_loops {
+            if crate::layout_runtime::try_load_cached_layout_spec(&tmp_dir, "bench-focus", wide_ctx)
+                .is_some()
+            {
+                hits += 1;
+            }
+        }
+        hits
+    });
+    let active_cache_hit_us = (cache_ms_batch * 1000.0) / inner_micro_loops as f64;
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    let warm_speedup = if qjs_warm_eval_ms > 0.0 {
+        qjs_cold_eval_ms / qjs_warm_eval_ms
+    } else {
+        0.0
+    };
+
+    ScriptBenchReport {
+        tsx_transpile_us,
+        qjs_cold_eval_ms,
+        qjs_warm_eval_ms,
+        topology_diff_us,
+        active_cache_hit_us,
+        warm_speedup,
+    }
+}
+
+/// Formats script runtime benchmark results as a monospace summary table.
+pub fn format_script_report_table(r: &ScriptBenchReport) -> String {
+    let mut out = String::new();
+    out.push_str("\nzniff script & layout benchmark (median)\n");
+    out.push_str("=========================================================================================\n");
+    out.push_str(&format!(
+        "{:>12} | {:>12} | {:>12} | {:>10} | {:>12} | {:>14}\n",
+        "transpile(us)",
+        "qjs:cold(ms)",
+        "qjs:warm(ms)",
+        "speedup",
+        "topo_cmp(us)",
+        "boot_cache(us)"
+    ));
+    out.push_str("-----------------------------------------------------------------------------------------\n");
+    out.push_str(&format!(
+        "{:>12.2} | {:>12.3} | {:>12.3} | {:>9.1}x | {:>12.2} | {:>14.2}\n",
+        r.tsx_transpile_us,
+        r.qjs_cold_eval_ms,
+        r.qjs_warm_eval_ms,
+        r.warm_speedup,
+        r.topology_diff_us,
+        r.active_cache_hit_us
+    ));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,5 +443,17 @@ mod tests {
         assert!(table.contains("zniff large-session benchmark"));
         assert!(table.contains("1000"));
         assert!(table.contains("proj:+1"));
+    }
+
+    #[test]
+    fn smoke_script_benchmark_collects_cold_warm_and_cache_metrics() {
+        let report = run_script_benchmark(2);
+        assert!(report.tsx_transpile_us >= 0.0);
+        assert!(report.qjs_cold_eval_ms > 0.0);
+        assert!(report.qjs_warm_eval_ms > 0.0);
+        assert!(report.warm_speedup > 0.0);
+        let table = format_script_report_table(&report);
+        assert!(table.contains("zniff script & layout benchmark"));
+        assert!(table.contains("qjs:warm(ms)"));
     }
 }

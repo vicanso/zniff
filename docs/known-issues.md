@@ -14,7 +14,7 @@
 - **透明代理（TUN/TAP）与网卡级随机丢包模拟**：保持显式代理模型；应用层带宽限流已由 `throttle` 规则覆盖，不做内核层丢包/乱序模拟。
 - **Firefox 证书库**：Firefox 默认不代理 `localhost` 且使用独立证书库；验收浏览器为 Chrome、Safari、Edge（及免证书隔离 Chromium）。
 - **SQLite 持久化会话与 cyberapi**：会话为内存 + 临时环形分片，重启清空。
-- **内嵌重度 C/C++ 脚本运行时（Node / Python / C 版 QuickJS）**：动态扩展采用纯 Rust 模板变量（`rule_vars.rs`）+ 本机回环 HTTP `hook`（`webhook.rs`），不破坏跨平台与 `wasm32` 编译轻量性。
+- **重型脚本运行时与抓包热路径内嵌脚本（Node / Python / `nsh-engine/js` / `swc` / `oxc`）**：代理转发与 10k/100k 列表热路径不跑脚本（动态改写继续使用纯 Rust `rule_vars.rs` + 本机回环 `hook`）；仅在非 `wasm32` 服务端/桌面端内置轻量沙箱 `quickjs-jit` 懒加载后台池（布局限 `8 MiB / 25 ms`，按需包转换限 `16 MiB / 80 ms`，连续超时 3 次自动熔断，闲置 60s 或最小化到托盘回收），保持桌面体积极轻且 `wasm32` 零 JS VM 膨胀。
 - **正则（Regex）过滤与正则替换**：多域名 OR、多 Path 前缀 OR 与 `*` 通配已覆盖绝大多数场景，避免正则转义负担与全量流量匹配开销。
 - **JSON 树级 Diff 与非 JSON 类型推导**：详情正文支持交互式 JSON 树形视图，但**基准对比（Diff）**固定为 URL / 请求头 / 请求体 / 响应头 / 响应体的行级对比（每边上限 200 行）；非 JSON 响应不推导 TypeScript / Rust 类型。
 - **超过 `1 MB` 的正文改写与断点缓冲**：响应断点、`replace` / `json` 改写与 `hook` 载荷统一受 `BODY_CAP = 1 MB` 约束，超大响应保持流式转发。

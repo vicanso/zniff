@@ -12,6 +12,7 @@
   - `.agents/rules/ui-ux.md`：UI 组件、NSH 0.7 陷阱、动效与文案、性能、`ui_zoom` 与 `/zniff` / `/s/{uuid}` 移动端规范
   - `.agents/rules/proxy-core.md`：代理内核、TLS/ALPN、内存与盘溢环、准入/规则、`zniff CA` 与系统代理保护
   - `.agents/rules/web-wasm.md`：`zniff --web` / `--relay` 端口与鉴权隔离、`wasm32` 禁区与测试约束
+  - `.agents/rules/scripting-perf.md`：NSH 脚本性能、QuickJS 懒加载池/配额/熔断、热路径隔离与体积红线
 - **可迁移通用技能（跨 NSH 项目复用）**：
   - `.agents/skills/nsh-app-craft/SKILL.md`：通用 NSH 应用工程规范、UX 8 原则、Apple 级动效与 `reduce_motion()` 体系、`nsh 0.7 + wasm32` 避坑手册（可经 `npx skills add <repo> --skill nsh-app-craft -g` 安装到任何机器）
   - `.agents/skills/zniff-regression/SKILL.md`：3 层发布与合入前回归流程（Tier 1 静态/单测、Tier 2 实机代理 + MCP 冒烟、Tier 3 桌面 Retina 截图巡检）
@@ -31,6 +32,7 @@
   - `app/src/proxy/`（`mod.rs`, `hub.rs`, `hub_session.rs`, `tls_mitm.rs`, `plain_http.rs`, `upstream_io.rs`, `local_routes.rs`, `replay.rs`, `wire.rs`, `hyper_forward.rs`, `hyper_helpers.rs`, `tests.rs`）与 `app/src/local_proc.rs`：抓包代理内核与回环进程识别
   - `macos/transparent-proxy/`、`linux/ebpf/`、`app/src/transparent_proxy*.rs`：桌面按进程透明抓包后端
   - `app/src/session.rs`、`ca.rs`、`sysproxy.rs`、`client_hello.rs`、`decompress.rs`：会话、CA 证书、系统代理、ClientHello 与解压
+  - `app/src/script_worker.rs`、`layout_runtime.rs`、`layout_spec.rs`、`layout_tsx.rs`、`layout_jsx.rs`：沙箱化 QuickJS 懒加载后台工作池、布局 IR 与轻量 TSX 转译器（仅非 `wasm32` 链接 QuickJS）
   - `app/src/web.rs`、`allow_hosts.rs`、`external_ca.rs`、`bypass.rs`、`rules.rs`、`rule_vars.rs`、`webhook.rs`、`proto_schema.rs`、`har.rs`、`share.rs`、`relay.rs`、`present.rs`、`openapi.rs`、`mock_gen.rs`、`launcher.rs`、`mcp.rs`、`ws.rs`、`updater.rs`、`ios_guide.rs`、`android_guide.rs`
   - `app/src/hub_web.rs`、`app/src/ca_web.rs`：仅 `wasm32` 替代本地 `proxy`/`ca`，经 `/api` 读写服务端
   - `app/src/config.rs`、`i18n.rs`、`icon.rs`：正式版读 `config.toml`，开发模式（`debug_assertions` 或 `ZNIFF_DEV=1`）隔离读写 `config.dev.toml`（默认端口 `8878`）与 `proxy-snapshot.dev.toml`；CA 共用

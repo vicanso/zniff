@@ -28,6 +28,11 @@ fn main() {
         .map(|&count| zniff::perf_bench::run_benchmark(count, iterations))
         .collect();
     print!("{}", zniff::perf_bench::format_report_table(&reports));
+    let script_report = zniff::perf_bench::run_script_benchmark(iterations);
+    print!(
+        "{}",
+        zniff::perf_bench::format_script_report_table(&script_report)
+    );
 }
 
 #[cfg(target_arch = "wasm32")]

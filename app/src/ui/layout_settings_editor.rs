@@ -8,6 +8,9 @@ use std::collections::BTreeMap;
 use crate::layout_spec::LayoutContext;
 
 pub(crate) fn validate_draft_layout(state: LayoutUiState, ctx: LayoutContext) {
+    state.draft_pending_at.replace(None);
+    let seq = state.draft_eval_seq.get().wrapping_add(1);
+    state.draft_eval_seq.replace(seq);
     let raw_id = state.draft_id.get_untracked();
     if let Err(err) = validate_layout_id_syntax(&raw_id) {
         state.preview_status.set(Err(err));
@@ -25,9 +28,12 @@ pub(crate) fn validate_draft_layout(state: LayoutUiState, ctx: LayoutContext) {
     {
         state.busy.set(true);
         spawn_detached(async move {
-            match proxy::eval_web_layout(&source, ctx).await {
-                Ok(spec) => state.preview_status.set(Ok(format_spec_summary(&spec))),
-                Err(err) => state.preview_status.set(Err(err.to_string())),
+            let outcome = proxy::eval_web_layout(&source, ctx).await;
+            if state.draft_eval_seq.get() == seq {
+                match outcome {
+                    Ok(spec) => state.preview_status.set(Ok(format_spec_summary(&spec))),
+                    Err(err) => state.preview_status.set(Err(err.to_string())),
+                }
             }
             state.busy.set(false);
         });
@@ -35,6 +41,7 @@ pub(crate) fn validate_draft_layout(state: LayoutUiState, ctx: LayoutContext) {
 }
 
 pub(crate) fn save_draft_layout(state: LayoutUiState, ctx: LayoutContext, controls: Arc<Controls>) {
+    state.draft_pending_at.replace(None);
     let id = match validate_layout_id_syntax(&state.draft_id.get_untracked()) {
         Ok(id) => id,
         Err(err) => {
@@ -62,6 +69,7 @@ pub(crate) fn save_draft_layout(state: LayoutUiState, ctx: LayoutContext, contro
                 return;
             }
         };
+        crate::layout_runtime::store_cached_layout_spec(&dir, &entry.id, ctx, &spec);
         let list: Vec<CustomLayoutMeta> = crate::layout_runtime::list_custom_layouts(&dir)
             .into_iter()
             .map(|e| CustomLayoutMeta {
@@ -72,6 +80,11 @@ pub(crate) fn save_draft_layout(state: LayoutUiState, ctx: LayoutContext, contro
             })
             .collect();
         state.custom_layouts.set(list);
+        state.layouts_loaded.set(true);
+        state
+            .active_source
+            .set(Some((entry.id.clone(), entry.source.clone())));
+        state.circuit_tripped.set(false);
         state.preview_status.set(Ok(format_spec_summary(&spec)));
         if state.active_spec.with_untracked(|cur| *cur != spec) {
             state.active_spec.set(spec);
@@ -217,6 +230,7 @@ pub(crate) fn settings_custom_layouts_section(
     layout_mode: Signal<config::LayoutMode>,
     controls: Arc<Controls>,
 ) -> impl IntoElement {
+    ensure_custom_layouts_loaded(state);
     let controls_chips = controls.clone();
     let controls_reset = controls.clone();
     let header_actions = view()
@@ -443,8 +457,7 @@ fn custom_layout_editor_card(
                         .scroll_beyond_last_line(false)
                         .on_change(move |next: &SharedString| {
                             draft_source.set(next.to_string());
-                            #[cfg(not(target_arch = "wasm32"))]
-                            validate_draft_layout(state, current_layout_context());
+                            schedule_debounced_draft_validation(state);
                         })
                         .size_full(),
                 ),

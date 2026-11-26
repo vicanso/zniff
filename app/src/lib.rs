@@ -72,6 +72,8 @@ mod relay;
 mod rule_vars;
 mod rules;
 mod sample_har;
+#[cfg(not(target_arch = "wasm32"))]
+mod script_worker;
 mod session;
 #[cfg(not(target_arch = "wasm32"))]
 mod share;
@@ -129,6 +131,7 @@ pub fn cleanup_desktop_runtime() {
         cleanup_launchers();
         cleanup_transparent_proxy();
         shutdown_relay_push();
+        script_worker::shutdown_script_worker();
     }
 }
 
@@ -162,6 +165,7 @@ pub fn ensure_desktop_runtime_init() {
                 cleanup_launchers();
                 cleanup_transparent_proxy();
                 shutdown_relay_push();
+                script_worker::shutdown_script_worker();
                 DESKTOP_CLEANED.store(true, std::sync::atomic::Ordering::SeqCst);
                 previous(info);
             }));

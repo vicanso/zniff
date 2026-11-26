@@ -6,6 +6,8 @@ pub(crate) fn clear_captured_session(controls: &Controls) -> bool {
     if guard_read_only_tab(controls) {
         return false;
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::script_worker::clear_script_caches();
     let cleared = controls.hub.clear_session_with_undo();
     clear_pending_replay_diff(controls);
     controls

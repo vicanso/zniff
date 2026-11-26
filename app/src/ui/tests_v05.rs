@@ -4847,6 +4847,7 @@ fn tray_close_destroys_workspace_and_reopen_restores_session_and_live_state() {
             spill_gc_at: stored(now),
             update_probe_at: stored(now),
             tray_clear_rev: signal(0),
+            cached_active_layout: stored(None),
         };
         TEST_CONTROLS.with(|slot| *slot.borrow_mut() = Some(controls));
 
@@ -6053,6 +6054,7 @@ fn tray_close_reopen_restores_real_flow_table_and_dirty_filter_state() {
             spill_gc_at: stored(now),
             update_probe_at: stored(now),
             tray_clear_rev: signal(0),
+            cached_active_layout: stored(None),
         };
         TEST_RT.with(|slot| *slot.borrow_mut() = Some(rt.clone()));
 
@@ -6306,5 +6308,303 @@ fn tray_close_reopen_restores_real_flow_table_and_dirty_filter_state() {
 
         TEST_RT.with(|slot| *slot.borrow_mut() = None);
         TEST_IDS.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+#[test]
+fn built_in_layout_skips_disk_scan_until_switcher_opened() {
+    struct TempDirGuard(std::path::PathBuf);
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            set_test_layout_data_dir(None);
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    let dir = std::env::temp_dir().join(format!(
+        "zniff-v05-lazy-layouts-{}-{}",
+        std::process::id(),
+        TEST_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let layouts_dir = dir.join("layouts");
+    std::fs::create_dir_all(&layouts_dir).unwrap();
+    std::fs::write(
+        layouts_dir.join("lazy_focus.tsx"),
+        r#"import { Layout, Row, Pane } from "zniff/layout";
+export default () => (
+  <Layout name="Lazy Focus" footer="bottom">
+    <Row>
+      <Pane name="flow_list" size="45%" />
+      <Pane name="detail" size="1fr" />
+    </Row>
+  </Layout>
+);
+"#,
+    )
+    .unwrap();
+    let _guard = TempDirGuard(dir.clone());
+    set_test_layout_data_dir(Some(dir));
+
+    #[component]
+    fn LazySwitcherHarness() -> impl IntoElement {
+        provide_base_contexts(Lang::En);
+        let controls = make_controls("lazy-switcher");
+        let profiles = make_profiles();
+        let layout_ui = init_layout_ui_state(
+            "",
+            &std::collections::BTreeMap::new(),
+            profiles.layout_mode.get_untracked(),
+        );
+        provide_context(profiles);
+        provide_context(layout_ui);
+        let _ = provide_popover_dismiss();
+        view()
+            .w(px(1200.0))
+            .h(px(760.0))
+            .child(toolbar_layout_switcher(profiles.layout_mode, controls))
+            .child(text(move || {
+                format!(
+                    "LAZY_STATE|loaded={}|count={}",
+                    layout_ui.layouts_loaded.get(),
+                    layout_ui.custom_layouts.with(Vec::len),
+                )
+            }))
+    }
+
+    let (mut core, mut tree) = mount::<LazySwitcherHarness>(Size::new(px(1200.0), px(760.0)));
+
+    // Built-in boot must NOT touch `zniff-layout.d.ts` or scan `layouts/`.
+    assert!(!layouts_dir.join("zniff-layout.d.ts").exists());
+    assert!(tree.has_text("LAZY_STATE|loaded=false|count=0"));
+
+    // Opening the toolbar layout switcher lazily loads custom layouts and generates `.d.ts`.
+    assert!(tree.press_label(&mut core, "Split layout"));
+    assert!(tree.has_text("LAZY_STATE|loaded=true|count=1"));
+    assert!(layouts_dir.join("zniff-layout.d.ts").exists());
+    assert!(tree.has_text("Lazy Focus"));
+}
+
+#[test]
+fn custom_layout_size_only_change_preserves_mounted_flow_list_and_selection() {
+    use crate::layout_spec::{FooterDock, LayoutNode, LayoutSize, LayoutSpec, ViewModule};
+
+    thread_local! {
+        static MOUNT_COUNT: Cell<u32> = const { Cell::new(0) };
+    }
+    MOUNT_COUNT.set(0);
+
+    #[component]
+    fn SizeOnlyPreserveHarness() -> impl IntoElement {
+        provide_base_contexts(Lang::En);
+        let controls = make_controls("size-only-preserve");
+        let profiles = make_profiles();
+        let selected = signal(Some(77_u64));
+        let workspace_ref = element_ref();
+        provide_context(SidebarLayoutRef(workspace_ref));
+
+        let initial_spec = LayoutSpec {
+            name: "Size Test".into(),
+            footer: FooterDock::Bottom,
+            root: LayoutNode::row(vec![
+                LayoutNode::pane(ViewModule::FlowList, LayoutSize::Percent(45.0)),
+                LayoutNode::pane(ViewModule::Detail, LayoutSize::Fr(1.0)),
+            ]),
+        };
+        let active_spec = signal(initial_spec);
+        let host = WorkspaceLayoutHost {
+            workspace_ref,
+            profiles,
+            list_width: profiles.list_width,
+            controls,
+            pane_overrides: signal(std::collections::BTreeMap::new()),
+            on_save_pane_size: Rc::new(|_, _| {}),
+            modules: WorkspaceModules {
+                sidebar: Rc::new(|| view().child(text("SIDEBAR")).into_element()),
+                flow_list: Rc::new(move || {
+                    MOUNT_COUNT.set(MOUNT_COUNT.get() + 1);
+                    view()
+                        .child(text("FLOW_LIST_MOUNTED"))
+                        .child(text(move || format!("SEL={:?}", selected.get())))
+                        .into_element()
+                }),
+                detail: Rc::new(|| view().child(text("DETAIL_PANE")).into_element()),
+                summary: Rc::new(|| view().child(text("SUMMARY_PANE")).into_element()),
+            },
+        };
+
+        view()
+            .w(px(1200.0))
+            .h(px(760.0))
+            .flex_col()
+            .child(
+                button()
+                    .on_press(move |_: &()| {
+                        // A -> A': same Row topology, only percentage width changes.
+                        active_spec.set(LayoutSpec {
+                            name: "Size Test".into(),
+                            footer: FooterDock::Bottom,
+                            root: LayoutNode::row(vec![
+                                LayoutNode::pane(ViewModule::FlowList, LayoutSize::Percent(58.0)),
+                                LayoutNode::pane(ViewModule::Detail, LayoutSize::Fr(1.0)),
+                            ]),
+                        });
+                    })
+                    .child(text("RESIZE_PANE_ONLY")),
+            )
+            .child(
+                button()
+                    .on_press(move |_: &()| {
+                        // A -> B: topology flips from Row to Col.
+                        active_spec.set(LayoutSpec {
+                            name: "Size Test".into(),
+                            footer: FooterDock::Bottom,
+                            root: LayoutNode::col(vec![
+                                LayoutNode::pane(ViewModule::FlowList, LayoutSize::Percent(50.0)),
+                                LayoutNode::pane(ViewModule::Detail, LayoutSize::Fr(1.0)),
+                            ]),
+                        });
+                    })
+                    .child(text("FLIP_TOPOLOGY_COL")),
+            )
+            .child(render_workspace_layout(active_spec, host))
+    }
+
+    let (mut core, mut tree) = mount::<SizeOnlyPreserveHarness>(Size::new(px(1200.0), px(760.0)));
+    assert_eq!(MOUNT_COUNT.get(), 1);
+    assert!(tree.has_text("FLOW_LIST_MOUNTED"));
+    assert!(tree.has_text("SEL=Some(77)"));
+
+    // Size-only change must NOT unmount/remount flow_list.
+    assert!(tree.press_text(&mut core, "RESIZE_PANE_ONLY"));
+    assert_eq!(
+        MOUNT_COUNT.get(),
+        1,
+        "size-only layout change must preserve mounted flow_list without rebuild"
+    );
+    assert!(tree.has_text("SEL=Some(77)"));
+
+    // Topology change rebuilds cleanly once while keeping shared selection intact.
+    assert!(tree.press_text(&mut core, "FLIP_TOPOLOGY_COL"));
+    assert_eq!(MOUNT_COUNT.get(), 2);
+    assert!(tree.has_text("SEL=Some(77)"));
+}
+
+#[test]
+fn circuit_breaker_banner_trips_and_recovers_via_retry_button_zh_en() {
+    struct TempDirGuard(std::path::PathBuf, String);
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            crate::script_worker::reset_script_circuit(&self.1);
+            set_test_layout_data_dir(None);
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    for lang in [Lang::Zh, Lang::En] {
+        TEST_LANG.set(lang);
+        let script_id = format!(
+            "flaky_ui_{}",
+            TEST_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        crate::script_worker::reset_script_circuit(&script_id);
+
+        let dir = std::env::temp_dir().join(format!(
+            "zniff-v05-breaker-{}-{}",
+            std::process::id(),
+            TEST_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let layouts_dir = dir.join("layouts");
+        std::fs::create_dir_all(&layouts_dir).unwrap();
+        let script_path = layouts_dir.join(format!("{script_id}.tsx"));
+        std::fs::write(&script_path, "export default () => { while (true) {} };").unwrap();
+        let _guard = TempDirGuard(dir.clone(), script_id.clone());
+        set_test_layout_data_dir(Some(dir.clone()));
+
+        thread_local! {
+            static BREAKER_ID: RefCell<String> = const { RefCell::new(String::new()) };
+        }
+        BREAKER_ID.with(|slot| *slot.borrow_mut() = script_id.clone());
+
+        #[component]
+        fn BreakerBannerHarness() -> impl IntoElement {
+            let lang = TEST_LANG.with(Cell::get);
+            provide_base_contexts(lang);
+            let controls = make_controls("breaker-banner");
+            let profiles = make_profiles();
+            let id = BREAKER_ID.with(|slot| slot.borrow().clone());
+            let layout_ui = init_layout_ui_state(
+                &id,
+                &std::collections::BTreeMap::new(),
+                profiles.layout_mode.get_untracked(),
+            );
+            let active_spec = layout_ui.active_spec;
+            view()
+                .w(px(1200.0))
+                .h(px(760.0))
+                .flex_col()
+                .child(
+                    button()
+                        .on_press(move |_: &()| {
+                            evaluate_active_layout(
+                                layout_ui,
+                                profiles.layout_mode.get_untracked(),
+                                current_layout_context(),
+                            );
+                        })
+                        .child(text("REEVAL_ACTIVE")),
+                )
+                .child(layout_error_banner(layout_ui, profiles, controls))
+                .child(text(move || {
+                    format!(
+                        "ACTIVE_SPEC|name={}|tripped={}|footer={:?}",
+                        active_spec.with(|s| s.name.clone()),
+                        layout_ui.circuit_tripped.get(),
+                        active_spec.with(|s| s.footer),
+                    )
+                }))
+        }
+
+        let (mut core, mut tree) = mount::<BreakerBannerHarness>(Size::new(px(1200.0), px(760.0)));
+        // 1 timeout during init + 2 more explicit evaluations = 3 strikes -> trips breaker.
+        assert!(tree.has_text_containing("tripped=false"));
+        assert!(tree.press_text(&mut core, "REEVAL_ACTIVE"));
+        assert!(tree.has_text_containing("tripped=false"));
+        assert!(tree.press_text(&mut core, "REEVAL_ACTIVE"));
+        assert!(tree.has_text_containing("tripped=true"));
+        assert!(crate::script_worker::is_circuit_tripped(&script_id));
+
+        let retry_lbl = match lang {
+            Lang::Zh => "重试启用",
+            Lang::En => "Retry script",
+        };
+        let paused_prefix = match lang {
+            Lang::Zh => "自定义布局连续超时已自动熔断",
+            Lang::En => "Custom layout auto-paused after repeated timeouts",
+        };
+        assert!(tree.has_text_containing(paused_prefix));
+        assert!(tree.has_text(retry_lbl));
+
+        // Fix the script on disk and recover via the Retry button in the banner.
+        std::fs::write(
+            &script_path,
+            r#"import { Layout, Row, Pane } from "zniff/layout";
+export default () => (
+  <Layout name="Recovered QA" footer="top">
+    <Row>
+      <Pane name="flow_list" size="48%" />
+      <Pane name="detail" size="1fr" />
+    </Row>
+  </Layout>
+);
+"#,
+        )
+        .unwrap();
+
+        assert!(tree.press_text(&mut core, retry_lbl));
+        assert!(!crate::script_worker::is_circuit_tripped(&script_id));
+        assert!(!tree.has_text_containing(paused_prefix));
+        assert!(tree.has_text("ACTIVE_SPEC|name=Recovered QA|tripped=false|footer=Top"));
     }
 }

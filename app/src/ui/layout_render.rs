@@ -3,7 +3,9 @@
 #[allow(unused_imports)]
 use super::*;
 
-use crate::layout_spec::{LayoutNode, LayoutSize, LayoutSpec, ViewModule};
+use std::collections::BTreeMap;
+
+use crate::layout_spec::{LayoutNode, LayoutSize, LayoutSpec, LayoutTopology, ViewModule};
 
 const MIN_CUSTOM_PANE_PX: f32 = 120.0;
 
@@ -60,7 +62,7 @@ struct SlotTrack {
     drag_px: Signal<Option<f32>>,
     slot_width: Option<Signal<f32>>,
     is_sidebar: bool,
-    spec_size: LayoutSize,
+    spec_size: Memo<LayoutSize>,
 }
 
 /// Standalone scrollable card pane for `ViewModule::Summary`.
@@ -135,20 +137,21 @@ pub(crate) fn summary_pane(
         )
 }
 
-/// Renders the active [`LayoutSpec`], rebuilding only when the spec itself changes.
+/// Renders the active [`LayoutSpec`], rebuilding only when its structural topology changes.
+/// Pure pane-size updates flow reactively through `slot_sizes` without remounting heavy panes.
 pub(crate) fn render_workspace_layout(spec: Signal<LayoutSpec>, host: WorkspaceLayoutHost) -> View {
+    let topology = computed(move || spec.with(LayoutSpec::topology));
+    let slot_sizes = computed(move || spec.with(LayoutSpec::slot_sizes));
     view()
         .flex_1()
         .min_h(px(0.0))
         .flex_col()
-        .child(dynamic(move || {
-            let current = spec.get();
-            if current.is_builtin_split() {
-                render_builtin_split(&host).into_element()
-            } else if current.is_builtin_top_bottom() {
-                render_builtin_top_bottom(&host).into_element()
-            } else {
-                render_custom_root(&current.root, &host).into_element()
+        .child(dynamic(move || match topology.get() {
+            LayoutTopology::BuiltinSplit => render_builtin_split(&host).into_element(),
+            LayoutTopology::BuiltinTopBottom => render_builtin_top_bottom(&host).into_element(),
+            _ => {
+                let current = spec.get_untracked();
+                render_custom_root(&current.root, slot_sizes, &host).into_element()
             }
         }))
 }
@@ -195,7 +198,11 @@ fn render_builtin_top_bottom(host: &WorkspaceLayoutHost) -> View {
         .child((host.modules.detail)())
 }
 
-fn render_custom_root(root: &LayoutNode, host: &WorkspaceLayoutHost) -> View {
+fn render_custom_root(
+    root: &LayoutNode,
+    slot_sizes: Memo<BTreeMap<String, LayoutSize>>,
+    host: &WorkspaceLayoutHost,
+) -> View {
     if root.contains_module(ViewModule::Sidebar) {
         provide_context(SidebarSlotSizing);
     }
@@ -219,6 +226,7 @@ fn render_custom_root(root: &LayoutNode, host: &WorkspaceLayoutHost) -> View {
             Axis::Horizontal,
             "root",
             children,
+            slot_sizes,
             flow_slot_width,
             host,
         ),
@@ -227,6 +235,7 @@ fn render_custom_root(root: &LayoutNode, host: &WorkspaceLayoutHost) -> View {
             Axis::Vertical,
             "root",
             children,
+            slot_sizes,
             flow_slot_width,
             host,
         ),
@@ -252,6 +261,7 @@ fn render_custom_child(
     parent_axis: Axis,
     node_path: &str,
     track: SlotTrack,
+    slot_sizes: Memo<BTreeMap<String, LayoutSize>>,
     flow_slot_width: Option<Signal<f32>>,
     host: &WorkspaceLayoutHost,
 ) -> View {
@@ -261,6 +271,7 @@ fn render_custom_child(
             Axis::Horizontal,
             node_path,
             children,
+            slot_sizes,
             flow_slot_width,
             host,
         ),
@@ -269,6 +280,7 @@ fn render_custom_child(
             Axis::Vertical,
             node_path,
             children,
+            slot_sizes,
             flow_slot_width,
             host,
         ),
@@ -307,6 +319,7 @@ fn populate_custom_container(
     axis: Axis,
     parent_path: &str,
     children: &[LayoutNode],
+    slot_sizes: Memo<BTreeMap<String, LayoutSize>>,
     flow_slot_width: Option<Signal<f32>>,
     host: &WorkspaceLayoutHost,
 ) -> View {
@@ -318,6 +331,11 @@ fn populate_custom_container(
             let init_drag = host
                 .pane_overrides
                 .with_untracked(|map| map.get(&child_path).copied().map(|v| v as f32));
+            let fallback_size = child.size();
+            let lookup_path = child_path.clone();
+            let spec_size = computed(move || {
+                slot_sizes.with(|map| map.get(&lookup_path).copied().unwrap_or(fallback_size))
+            });
             let track = SlotTrack {
                 measured: signal(0.0_f32),
                 drag_px: signal(init_drag),
@@ -337,7 +355,7 @@ fn populate_custom_container(
                         ..
                     }
                 ),
-                spec_size: child.size(),
+                spec_size,
             };
             (child_path, track)
         })
@@ -407,6 +425,7 @@ fn populate_custom_container(
                         axis,
                         &child_path_owned,
                         track,
+                        slot_sizes,
                         flow_slot_width,
                         &host_clone,
                     )
@@ -418,6 +437,7 @@ fn populate_custom_container(
                 axis,
                 child_path,
                 track,
+                slot_sizes,
                 flow_slot_width,
                 host,
             ));
@@ -429,7 +449,7 @@ fn populate_custom_container(
 fn apply_slot_layout(
     slot: View,
     axis: Axis,
-    spec_size: LayoutSize,
+    spec_size: Memo<LayoutSize>,
     drag_override: Signal<Option<f32>>,
 ) -> View {
     let cross_full = match axis {
@@ -448,7 +468,7 @@ fn apply_slot_layout(
                     Axis::Vertical => s.h(px(px_val)),
                 };
             }
-            match spec_size {
+            match spec_size.get() {
                 LayoutSize::Px(v) => {
                     let s = s.flex_grow(0.0).flex_shrink(0.0).basis(px(v));
                     match axis {
@@ -478,12 +498,7 @@ fn custom_splitter(
     trailing_path: String,
     on_save: Rc<dyn Fn(String, u32)>,
 ) -> impl IntoElement {
-    let resize_trailing = is_fixed_size(trailing.spec_size) && !is_fixed_size(leading.spec_size);
-    let (target_drag, target_path) = if resize_trailing {
-        (trailing.drag_px, trailing_path)
-    } else {
-        (leading.drag_px, leading_path)
-    };
+    let resize_trailing = signal(false);
     let origin = signal(0.0_f32);
     let max_extent = signal(MIN_CUSTOM_PANE_PX);
     let state = signal(ResizeHandleState::Idle);
@@ -497,21 +512,35 @@ fn custom_splitter(
         .on_drag_start(move || {
             let lead_px = leading.measured.get_untracked().max(MIN_CUSTOM_PANE_PX);
             let trail_px = trailing.measured.get_untracked().max(MIN_CUSTOM_PANE_PX);
+            let trail_mode = is_fixed_size(trailing.spec_size.get_untracked())
+                && !is_fixed_size(leading.spec_size.get_untracked());
+            resize_trailing.set(trail_mode);
             let total = (lead_px + trail_px - MIN_CUSTOM_PANE_PX).max(MIN_CUSTOM_PANE_PX);
             max_extent.set(total);
-            origin.set(if resize_trailing { trail_px } else { lead_px });
+            origin.set(if trail_mode { trail_px } else { lead_px });
         })
         .on_drag_move(move |offset: &Points| {
-            let delta = if resize_trailing { -offset.0 } else { offset.0 };
+            let trail_mode = resize_trailing.get_untracked();
+            let delta = if trail_mode { -offset.0 } else { offset.0 };
             let next = (origin.get() + delta).clamp(MIN_CUSTOM_PANE_PX, max_extent.get());
-            target_drag.set(Some(next));
+            if trail_mode {
+                trailing.drag_px.set(Some(next));
+            } else {
+                leading.drag_px.set(Some(next));
+            }
         })
         .on_drag_end(move |offset: &Points| {
-            let delta = if resize_trailing { -offset.0 } else { offset.0 };
+            let trail_mode = resize_trailing.get_untracked();
+            let delta = if trail_mode { -offset.0 } else { offset.0 };
             let next = (origin.get() + delta).clamp(MIN_CUSTOM_PANE_PX, max_extent.get());
             let clamped = config::clamp_layout_pane_size(next.round() as u32);
-            target_drag.set(Some(clamped as f32));
-            (on_save)(target_path.clone(), clamped);
+            if trail_mode {
+                trailing.drag_px.set(Some(clamped as f32));
+                (on_save)(trailing_path.clone(), clamped);
+            } else {
+                leading.drag_px.set(Some(clamped as f32));
+                (on_save)(leading_path.clone(), clamped);
+            }
         })
         .child(splitter_indicator(axis, state, 3.0));
 

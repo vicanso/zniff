@@ -668,7 +668,30 @@ fn app_workspace(rt: AppRuntime) -> impl IntoElement {
     let pane_tick = pane_px.clone();
     let seen_rules_rev = stored(controls_tick.hub.rules_revision());
     let seen_denied_gen = stored(initial_snapshot.generation);
+    let layout_ui = init_layout_ui_state_cached(
+        &saved_active_layout,
+        &saved_layout_pane_sizes,
+        profile_signals.layout_mode.get_untracked(),
+        rt.cached_active_layout.get().as_ref(),
+    );
+    let rt_layout_cache = rt.clone();
+    effect(move || {
+        let id = layout_ui.active_id.get();
+        let spec = layout_ui.active_spec.get();
+        if id.is_empty() {
+            rt_layout_cache.cached_active_layout.replace(None);
+        } else {
+            rt_layout_cache
+                .cached_active_layout
+                .replace(Some((id, spec)));
+        }
+    });
     set_interval(Duration::from_millis(16), move || {
+        tick_layout_async_tasks(
+            layout_ui,
+            profile_tick.layout_mode.get_untracked(),
+            clock::now(),
+        );
         controls_tick.hub.expire_clear_undo();
         let pending_toasts = {
             let mut q = controls_tick
@@ -1532,11 +1555,6 @@ fn app_workspace(rt: AppRuntime) -> impl IntoElement {
         }
     });
 
-    let layout_ui = init_layout_ui_state(
-        &saved_active_layout,
-        &saved_layout_pane_sizes,
-        profile_signals.layout_mode.get_untracked(),
-    );
     provide_context(profile_signals);
     provide_context(layout_ui);
 
@@ -1614,36 +1632,56 @@ fn app_workspace(rt: AppRuntime) -> impl IntoElement {
             };
             let active_layout = layout_ui.active_spec;
             let standalone_summary = signal(active_layout.get_untracked().has_standalone_summary());
-            let seen_layout_key = stored((
-                String::new(),
+            let initial_bounds = window();
+            let initial_wb = (initial_bounds.width.0.max(320.0) / 20.0).round() as i32;
+            let initial_hb = (initial_bounds.height.0.max(240.0) / 20.0).round() as i32;
+            let seen_layout_spec_key = stored((
+                saved_active_layout.clone(),
                 profile_signals.layout_mode.get_untracked(),
-                0_i32,
-                0_i32,
-                u64::MAX,
+                0_u64,
             ));
+            let seen_layout_size_key = stored((initial_wb, initial_hb));
+            let layout_boot_checked = stored(false);
             effect(move || {
                 let bounds = window();
-                let w_bucket = (bounds.width.0 / 20.0).round() as i32;
-                let h_bucket = (bounds.height.0 / 20.0).round() as i32;
+                let w = bounds.width.0.max(320.0);
+                let h = bounds.height.0.max(240.0);
+                let w_bucket = (w / 20.0).round() as i32;
+                let h_bucket = (h / 20.0).round() as i32;
                 let id = layout_ui.active_id.get();
                 let mode = profile_signals.layout_mode.get();
                 let rev = layout_ui.reload_rev.get();
-                let key = (id, mode, w_bucket, h_bucket, rev);
-                if seen_layout_key.with(|cur| *cur != key) {
-                    seen_layout_key.replace(key);
-                    evaluate_active_layout(
-                        layout_ui,
-                        mode,
-                        crate::layout_spec::LayoutContext {
-                            width: bounds.width.0.max(320.0),
-                            height: bounds.height.0.max(240.0),
-                            target: if cfg!(target_arch = "wasm32") {
-                                crate::layout_spec::LayoutTarget::Web
-                            } else {
-                                crate::layout_spec::LayoutTarget::Desktop
-                            },
-                        },
-                    );
+                let ctx = crate::layout_spec::LayoutContext {
+                    width: w,
+                    height: h,
+                    target: if cfg!(target_arch = "wasm32") {
+                        crate::layout_spec::LayoutTarget::Web
+                    } else {
+                        crate::layout_spec::LayoutTarget::Desktop
+                    },
+                };
+                let spec_key = (id.clone(), mode, rev);
+                let size_key = (w_bucket, h_bucket);
+                if !layout_boot_checked.replace(true) {
+                    seen_layout_spec_key.replace(spec_key);
+                    seen_layout_size_key.replace(size_key);
+                    if !id.is_empty()
+                        && ((w - config::WINDOW_WIDTH_DEFAULT as f32).abs() > 20.0
+                            || (h - config::WINDOW_HEIGHT_DEFAULT as f32).abs() > 20.0)
+                    {
+                        schedule_debounced_layout_resize(layout_ui, ctx);
+                    }
+                    return;
+                }
+                if seen_layout_spec_key.with(|cur| *cur != spec_key) {
+                    seen_layout_spec_key.replace(spec_key);
+                    seen_layout_size_key.replace(size_key);
+                    evaluate_active_layout(layout_ui, mode, ctx);
+                } else if seen_layout_size_key.with(|cur| *cur != size_key) {
+                    seen_layout_size_key.replace(size_key);
+                    if !id.is_empty() {
+                        schedule_debounced_layout_resize(layout_ui, ctx);
+                    }
                 }
             });
             effect(move || {

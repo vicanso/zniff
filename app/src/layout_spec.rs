@@ -6,7 +6,7 @@
 
 #![cfg_attr(not(test), allow(dead_code))]
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 
 use serde::de::{self, Visitor};
@@ -93,6 +93,28 @@ pub struct LayoutContext {
     pub width: f32,
     pub height: f32,
     pub target: LayoutTarget,
+}
+
+/// Quantizes `LayoutContext` dimensions into 20 px resize buckets for evaluation debouncing & caching.
+pub fn layout_context_bucket(ctx: LayoutContext) -> (i32, i32) {
+    (
+        (ctx.width / 20.0).round() as i32,
+        (ctx.height / 20.0).round() as i32,
+    )
+}
+
+/// Structural shape of a [`LayoutSpec`] stripped of [`LayoutSize`] values.
+///
+/// Comparing `LayoutTopology` instead of full `LayoutSpec` lets the UI shell
+/// update pane dimensions reactively in-place without unmounting heavy views
+/// (`DataTable`, `Editor`) during window resizing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LayoutTopology {
+    BuiltinSplit,
+    BuiltinTopBottom,
+    CustomRow(Vec<LayoutTopology>),
+    CustomCol(Vec<LayoutTopology>),
+    CustomPane(ViewModule),
 }
 
 /// Primary-axis size constraint for a container or leaf pane node.
@@ -321,6 +343,30 @@ impl LayoutNode {
             }
         }
     }
+
+    /// Extracts the size-independent structural topology of this layout node.
+    pub fn topology(&self) -> LayoutTopology {
+        match self {
+            Self::Pane { module, .. } => LayoutTopology::CustomPane(*module),
+            Self::Row { children, .. } => {
+                LayoutTopology::CustomRow(children.iter().map(Self::topology).collect())
+            }
+            Self::Col { children, .. } => {
+                LayoutTopology::CustomCol(children.iter().map(Self::topology).collect())
+            }
+        }
+    }
+
+    /// Collects every child slot's canonical path (e.g. `"root[0]"`, `"root[1][0]"`) to its [`LayoutSize`].
+    pub fn collect_slot_sizes(&self, parent_path: &str, out: &mut BTreeMap<String, LayoutSize>) {
+        if let Self::Row { children, .. } | Self::Col { children, .. } = self {
+            for (idx, child) in children.iter().enumerate() {
+                let child_path = format!("{parent_path}[{idx}]");
+                out.insert(child_path.clone(), child.size());
+                child.collect_slot_sizes(&child_path, out);
+            }
+        }
+    }
 }
 
 /// Validation or parse failure returned when inspecting a `LayoutSpec`.
@@ -435,6 +481,24 @@ impl LayoutSpec {
     /// Returns true if `summary` is placed directly inside the workspace split tree.
     pub fn has_standalone_summary(&self) -> bool {
         self.root.contains_module(ViewModule::Summary)
+    }
+
+    /// Returns the size-independent workspace topology used to gate full tree rebuilds.
+    pub fn topology(&self) -> LayoutTopology {
+        if self.is_builtin_split() {
+            LayoutTopology::BuiltinSplit
+        } else if self.is_builtin_top_bottom() {
+            LayoutTopology::BuiltinTopBottom
+        } else {
+            self.root.topology()
+        }
+    }
+
+    /// Collects a flat path -> [`LayoutSize`] map for all split slots in this specification.
+    pub fn slot_sizes(&self) -> BTreeMap<String, LayoutSize> {
+        let mut out = BTreeMap::new();
+        self.root.collect_slot_sizes("root", &mut out);
+        out
     }
 
     /// Validates tree depth, container children, size ranges, uniqueness, and required modules.

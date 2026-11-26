@@ -977,6 +977,9 @@ pub(crate) fn toolbar_layout_switcher(
         .on_open_change(move |event: &nsh_base::PopoverEvent| {
             if let nsh_base::PopoverEvent::OpenChange(next, _) = event {
                 open.set(*next);
+                if *next && let Some(ui) = layout_ui {
+                    ensure_custom_layouts_loaded(ui);
+                }
             }
         })
         .trigger(
@@ -1048,7 +1051,16 @@ pub(crate) fn toolbar_layout_switcher(
                                         list.iter()
                                             .find(|e| e.id == id)
                                             .map(|e| e.label.clone())
-                                            .unwrap_or_else(|| id.clone())
+                                            .unwrap_or_else(|| {
+                                                ui.active_spec.with(|spec| {
+                                                    let name = spec.name.trim();
+                                                    if name.is_empty() {
+                                                        id.clone()
+                                                    } else {
+                                                        name.to_string()
+                                                    }
+                                                })
+                                            })
                                     });
                                     return label.into();
                                 }

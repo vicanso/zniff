@@ -1126,7 +1126,7 @@ async fn route(
                 Ok(value) => value,
                 Err(_) => return (text(400, "Bad Request", "need JSON"), true),
             };
-            return (web_layouts_post(slot, value), true);
+            return (web_layouts_post(slot, value).await, true);
         }
         return (text(404, "Not Found", "not found"), true);
     }
@@ -1751,14 +1751,18 @@ fn web_layouts_get(slot: &Mutex<Slot>) -> Reply {
     )
 }
 
-fn web_layouts_post(slot: &Mutex<Slot>, value: Value) -> Reply {
+async fn web_layouts_post(slot: &Mutex<Slot>, value: Value) -> Reply {
     let dir = web_layouts_data_dir(slot);
     let op = value.get("op").and_then(Value::as_str).unwrap_or("");
     match op {
         "eval" => {
-            let source = value.get("source").and_then(Value::as_str).unwrap_or("");
+            let source = value
+                .get("source")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
             let ctx = parse_web_layout_context(&value);
-            match crate::layout_runtime::eval_layout_tsx(source, ctx) {
+            match crate::script_worker::eval_layout_async(None, source, ctx).await {
                 Ok(spec) => json_reply(200, "OK", &json!({ "ok": true, "spec": spec })),
                 Err(err) => json_reply(200, "OK", &json!({ "ok": false, "error": err })),
             }
@@ -1774,7 +1778,13 @@ fn web_layouts_post(slot: &Mutex<Slot>, value: Value) -> Reply {
                 );
             }
             let ctx = parse_web_layout_context(&value);
-            if let Err(err) = crate::layout_runtime::eval_layout_tsx(source, ctx) {
+            if let Err(err) = crate::script_worker::eval_layout_async(
+                Some(id.to_string()),
+                source.to_string(),
+                ctx,
+            )
+            .await
+            {
                 return json_reply(400, "Bad Request", &json!({ "error": err }));
             }
             match crate::layout_runtime::save_custom_layout(&dir, id, source) {

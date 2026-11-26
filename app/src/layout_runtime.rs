@@ -1,27 +1,26 @@
-//! Sandboxed QuickJS evaluator and `<data_dir>/layouts/*.tsx` persistence.
+//! Sandboxed QuickJS layout evaluator adapter and `<data_dir>/layouts/*.tsx` persistence.
+//!
+//! Execution delegates to the lazy background worker in [`crate::script_worker`]
+//! and pairs with a small `<data_dir>/layouts/.active-cache.json` snapshot so
+//! unchanged custom layouts restore on Frame 1 with zero QuickJS startup cost.
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::UNIX_EPOCH;
 
-use rquickjs::{CaughtError, Context, Runtime};
 use serde::{Deserialize, Serialize};
 
 use crate::config::LayoutMode;
-use crate::layout_spec::{LayoutContext, LayoutSpec};
-use crate::layout_tsx::{ZNIFF_LAYOUT_DTS, transpile_layout_tsx};
-
-/// Maximum QuickJS heap memory allowed for evaluating a layout script (8 MiB).
-pub const LAYOUT_MEM_LIMIT_BYTES: usize = 8 * 1024 * 1024;
-
-/// Maximum QuickJS call stack allowed for a layout script (256 KiB).
-pub const LAYOUT_STACK_LIMIT_BYTES: usize = 256 * 1024;
-
-/// Maximum wall-clock duration allowed per layout script evaluation (50 ms).
-pub const LAYOUT_TIMEOUT_MS: u64 = 50;
+use crate::layout_spec::{LayoutContext, LayoutSpec, LayoutTarget, layout_context_bucket};
+use crate::layout_tsx::ZNIFF_LAYOUT_DTS;
+use crate::script_worker::{
+    LayoutEvalReport, eval_layout_cold_ephemeral, eval_layout_on_worker_blocking,
+    eval_layout_report_blocking, reset_script_circuit,
+};
 
 /// Maximum file size read from disk for a single layout script (128 KiB).
 const MAX_LAYOUT_FILE_BYTES: u64 = crate::layout_tsx::MAX_LAYOUT_SCRIPT_BYTES as u64;
+const ACTIVE_CACHE_FILE: &str = ".active-cache.json";
 
 /// Persisted custom TSX/TS layout metadata discovered in `<data_dir>/layouts/`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,169 +31,42 @@ pub struct CustomLayoutEntry {
     pub source: String,
 }
 
-const SANDBOX_PRELUDE: &str = r#"
-const __zniff_fragment = Symbol("fragment");
-function __zniff_push_child(out, child) {
-  if (child === null || child === undefined || typeof child === "boolean") return;
-  if (Array.isArray(child)) {
-    for (let i = 0; i < child.length; i++) __zniff_push_child(out, child[i]);
-  } else {
-    out.push(child);
-  }
+/// Resolution result for an active layout, carrying source, error, and circuit-breaker status.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ActiveLayoutResolution {
+    pub spec: LayoutSpec,
+    pub source: Option<String>,
+    pub error: Option<String>,
+    pub circuit_tripped: bool,
 }
-function pane(name, size) {
-  const node = { type: "pane", name };
-  if (size !== undefined && size !== null) node.size = size;
-  return node;
-}
-function row(...args) {
-  let size;
-  let items = args;
-  if (
-    args.length > 0 &&
-    args[0] &&
-    typeof args[0] === "object" &&
-    !Array.isArray(args[0]) &&
-    typeof args[0].type !== "string" &&
-    ("size" in args[0] || "children" in args[0])
-  ) {
-    size = args[0].size;
-    items = args.slice(1);
-  }
-  const children = [];
-  __zniff_push_child(children, items);
-  const node = { type: "row", children };
-  if (size !== undefined && size !== null) node.size = size;
-  return node;
-}
-function col(...args) {
-  let size;
-  let items = args;
-  if (
-    args.length > 0 &&
-    args[0] &&
-    typeof args[0] === "object" &&
-    !Array.isArray(args[0]) &&
-    typeof args[0].type !== "string" &&
-    ("size" in args[0] || "children" in args[0])
-  ) {
-    size = args[0].size;
-    items = args.slice(1);
-  }
-  const children = [];
-  __zniff_push_child(children, items);
-  const node = { type: "col", children };
-  if (size !== undefined && size !== null) node.size = size;
-  return node;
-}
-function Layout(props) {
-  const kids = [];
-  __zniff_push_child(kids, props && props.children);
-  if (kids.length !== 1) {
-    throw new Error("<Layout> must contain exactly one root node (<Row>, <Col>, or <Pane>)");
-  }
-  const out = { root: kids[0] };
-  if (props && typeof props.name === "string") out.name = props.name;
-  if (props && typeof props.footer === "string") out.footer = props.footer;
-  return out;
-}
-function Row(props) {
-  const kids = [];
-  __zniff_push_child(kids, props && props.children);
-  const node = { type: "row", children: kids };
-  if (props && props.size !== undefined && props.size !== null) node.size = props.size;
-  return node;
-}
-function Col(props) {
-  const kids = [];
-  __zniff_push_child(kids, props && props.children);
-  const node = { type: "col", children: kids };
-  if (props && props.size !== undefined && props.size !== null) node.size = props.size;
-  return node;
-}
-function Pane(props) {
-  if (!props || typeof props.name !== "string") {
-    throw new Error("<Pane> requires a string `name` prop");
-  }
-  const node = { type: "pane", name: props.name };
-  if (props.size !== undefined && props.size !== null) node.size = props.size;
-  return node;
-}
-function __zniff_h(tag, props, ...children) {
-  if (tag === __zniff_fragment) {
-    const flat = [];
-    __zniff_push_child(flat, children);
-    return flat;
-  }
-  const merged = Object.assign({}, props || {});
-  if (children.length > 0) merged.children = children;
-  if (typeof tag === "function") return tag(merged);
-  throw new Error("Unsupported TSX tag `" + String(tag) + "`: expected Layout, Row, Col, or Pane");
-}
-(() => {
-  const deny = (label) => function () {
-    throw new TypeError(label + " is disabled inside zniff layout scripts");
-  };
-  const replace = (fn, value) => {
-    Object.defineProperty(Object.getPrototypeOf(fn), "constructor", {
-      value, writable: false, enumerable: false, configurable: false,
-    });
-  };
-  const blocked = deny("the Function constructor");
-  blocked.prototype = Function.prototype;
-  replace(function () {}, blocked);
-  replace(async function () {}, deny("the AsyncFunction constructor"));
-  replace(function* () {}, deny("the GeneratorFunction constructor"));
-  replace(async function* () {}, deny("the AsyncGeneratorFunction constructor"));
-  Object.defineProperty(globalThis, "Function", { value: blocked, writable: false, configurable: false });
-  delete globalThis.eval;
-  for (const proto of [
-    Object.prototype, Array.prototype, Function.prototype, String.prototype,
-    Number.prototype, Boolean.prototype, RegExp.prototype, Map.prototype, Set.prototype,
-  ]) {
-    Object.freeze(proto);
-  }
-})();
-"#;
 
-/// Evaluates a user TSX/TS layout script in an isolated, time- and memory-bounded QuickJS sandbox.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ActiveLayoutDiskCache {
+    id: String,
+    file_len: u64,
+    mtime_nanos: u128,
+    width_bucket: i32,
+    height_bucket: i32,
+    target: LayoutTarget,
+    spec: LayoutSpec,
+}
+
+/// Evaluates an anonymous TSX/TS layout script on the lazy QuickJS worker.
 pub fn eval_layout_tsx(source: &str, ctx: LayoutContext) -> Result<LayoutSpec, String> {
-    let transpiled = transpile_layout_tsx(source)?;
-    let ctx_json = serde_json::to_string(&ctx).map_err(|err| err.to_string())?;
-
-    let rt = Runtime::new().map_err(|err| format!("failed to init QuickJS runtime: {err}"))?;
-    rt.set_memory_limit(LAYOUT_MEM_LIMIT_BYTES);
-    rt.set_max_stack_size(LAYOUT_STACK_LIMIT_BYTES);
-    let started = Instant::now();
-    let timeout = Duration::from_millis(LAYOUT_TIMEOUT_MS);
-    rt.set_interrupt_handler(Some(Box::new(move || started.elapsed() >= timeout)));
-
-    let context =
-        Context::full(&rt).map_err(|err| format!("failed to create QuickJS context: {err}"))?;
-    let json = context.with(|cx| -> Result<String, String> {
-        cx.eval::<(), _>(SANDBOX_PRELUDE)
-            .map_err(|err| format_js_error(&cx, err))?;
-        cx.eval::<(), _>(transpiled.as_str())
-            .map_err(|err| format_js_error(&cx, err))?;
-        let invoke = format!(
-            "(() => {{\n\
-             const __exp = globalThis.__zniff_layout_export;\n\
-             if (__exp === undefined || __exp === null) throw new Error('layout script exported nothing');\n\
-             const __ctx = Object.freeze({ctx_json});\n\
-             const __res = typeof __exp === 'function' ? __exp(__ctx) : __exp;\n\
-             if (!__res || typeof __res !== 'object') throw new Error('layout script must return a LayoutSpec object');\n\
-             return JSON.stringify(__res);\n\
-             }})()"
-        );
-        cx.eval::<String, _>(invoke.as_str())
-            .map_err(|err| format_js_error(&cx, err))
-    })?;
-
-    LayoutSpec::parse_json(&json).map_err(|err| err.to_string())
+    eval_layout_on_worker_blocking(None, source, ctx)
 }
 
-fn format_js_error(cx: &rquickjs::Ctx<'_>, err: rquickjs::Error) -> String {
-    CaughtError::from_error(cx, err).to_string()
+/// Evaluates a named layout script on the lazy QuickJS worker with 3-strike circuit protection.
+pub fn eval_named_layout_tsx(id: &str, source: &str, ctx: LayoutContext) -> LayoutEvalReport {
+    eval_layout_report_blocking(Some(id), source, ctx)
+}
+
+/// Evaluates an uncached, single-use ephemeral QuickJS `Runtime` (used only by `perf_bench`).
+pub fn eval_layout_tsx_cold_ephemeral(
+    source: &str,
+    ctx: LayoutContext,
+) -> Result<LayoutSpec, String> {
+    eval_layout_cold_ephemeral(source, ctx)
 }
 
 /// Returns `<data_dir>/layouts`.
@@ -284,7 +156,7 @@ pub fn list_custom_layouts(data_dir: &Path) -> Vec<CustomLayoutEntry> {
     out
 }
 
-/// Loads one custom layout script by sanitized ID.
+/// Loads one custom layout script by sanitized ID without scanning the whole directory.
 pub fn load_custom_layout(data_dir: &Path, raw_id: &str) -> Result<CustomLayoutEntry, String> {
     let id = sanitize_layout_id(raw_id)?;
     let dir = layouts_dir(data_dir);
@@ -312,6 +184,100 @@ pub fn load_custom_layout(data_dir: &Path, raw_id: &str) -> Result<CustomLayoutE
     Err(format!("custom layout `{id}` not found"))
 }
 
+fn file_mtime_nanos(meta: &fs::Metadata) -> u128 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+}
+
+fn active_layout_meta(data_dir: &Path, clean_id: &str) -> Option<(u64, u128)> {
+    let dir = layouts_dir(data_dir);
+    for ext in ["tsx", "ts"] {
+        let path = dir.join(format!("{clean_id}.{ext}"));
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !meta.file_type().is_symlink() && meta.is_file() && meta.len() <= MAX_LAYOUT_FILE_BYTES {
+            return Some((meta.len(), file_mtime_nanos(&meta)));
+        }
+        return None;
+    }
+    None
+}
+
+/// Loads the cached `LayoutSpec` snapshot when source metadata and context bucket match.
+pub fn try_load_cached_layout_spec(
+    data_dir: &Path,
+    raw_id: &str,
+    ctx: LayoutContext,
+) -> Option<LayoutSpec> {
+    let id = sanitize_layout_id(raw_id).ok()?;
+    let (file_len, mtime_nanos) = active_layout_meta(data_dir, &id)?;
+    let cache_path = layouts_dir(data_dir).join(ACTIVE_CACHE_FILE);
+    let raw = fs::read_to_string(cache_path).ok()?;
+    let cache: ActiveLayoutDiskCache = serde_json::from_str(&raw).ok()?;
+    let (wb, hb) = layout_context_bucket(ctx);
+    if cache.id == id
+        && cache.file_len == file_len
+        && cache.mtime_nanos == mtime_nanos
+        && cache.width_bucket == wb
+        && cache.height_bucket == hb
+        && cache.target == ctx.target
+        && cache.spec.validate().is_ok()
+    {
+        Some(cache.spec)
+    } else {
+        None
+    }
+}
+
+/// Persists the evaluated `LayoutSpec` snapshot for zero-VM Frame 1 cold boot.
+pub fn store_cached_layout_spec(
+    data_dir: &Path,
+    raw_id: &str,
+    ctx: LayoutContext,
+    spec: &LayoutSpec,
+) {
+    let Ok(id) = sanitize_layout_id(raw_id) else {
+        return;
+    };
+    let Some((file_len, mtime_nanos)) = active_layout_meta(data_dir, &id) else {
+        return;
+    };
+    let (width_bucket, height_bucket) = layout_context_bucket(ctx);
+    let payload = ActiveLayoutDiskCache {
+        id,
+        file_len,
+        mtime_nanos,
+        width_bucket,
+        height_bucket,
+        target: ctx.target,
+        spec: spec.clone(),
+    };
+    if let Ok(json) = serde_json::to_string(&payload) {
+        let dir = layouts_dir(data_dir);
+        let tmp = dir.join(".active-cache.json.tmp");
+        let dst = dir.join(ACTIVE_CACHE_FILE);
+        if fs::write(&tmp, json).is_ok() && fs::rename(&tmp, &dst).is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+    }
+}
+
+fn clear_cached_layout_spec(data_dir: &Path, id: Option<&str>) {
+    let cache_path = layouts_dir(data_dir).join(ACTIVE_CACHE_FILE);
+    if let Some(target_id) = id
+        && let Ok(raw) = fs::read_to_string(&cache_path)
+        && let Ok(cache) = serde_json::from_str::<ActiveLayoutDiskCache>(&raw)
+        && cache.id != target_id
+    {
+        return;
+    }
+    let _ = fs::remove_file(cache_path);
+}
+
 /// Saves a custom TSX layout script atomically as `<data_dir>/layouts/<id>.tsx`.
 pub fn save_custom_layout(
     data_dir: &Path,
@@ -332,11 +298,12 @@ pub fn save_custom_layout(
         let _ = fs::remove_file(&tmp_path);
         return Err(err.to_string());
     }
-    // Remove legacy `<id>.ts` if user migrated to `<id>.tsx`.
     let legacy_ts = dir.join(format!("{id}.ts"));
     if legacy_ts.exists() {
         let _ = fs::remove_file(legacy_ts);
     }
+    reset_script_circuit(&id);
+    clear_cached_layout_spec(data_dir, Some(&id));
     let label = extract_layout_label(source).unwrap_or_else(|| id.clone());
     Ok(CustomLayoutEntry {
         id,
@@ -358,6 +325,8 @@ pub fn delete_custom_layout(data_dir: &Path, raw_id: &str) -> Result<(), String>
             removed = true;
         }
     }
+    reset_script_circuit(&id);
+    clear_cached_layout_spec(data_dir, Some(&id));
     if removed {
         Ok(())
     } else {
@@ -411,25 +380,72 @@ export default ({{ width, target }}: LayoutContext) => (
     )
 }
 
+/// Resolves the active custom layout (or built-in fallback), using `.active-cache.json`
+/// when available to avoid starting QuickJS on cold boot.
+pub fn resolve_active_layout_with_cache(
+    data_dir: &Path,
+    active_id: &str,
+    fallback_mode: LayoutMode,
+    ctx: LayoutContext,
+) -> ActiveLayoutResolution {
+    let trimmed = active_id.trim();
+    if trimmed.is_empty() {
+        return ActiveLayoutResolution {
+            spec: LayoutSpec::for_layout_mode(fallback_mode),
+            source: None,
+            error: None,
+            circuit_tripped: false,
+        };
+    }
+    let entry = match load_custom_layout(data_dir, trimmed) {
+        Ok(entry) => entry,
+        Err(err) => {
+            return ActiveLayoutResolution {
+                spec: LayoutSpec::for_layout_mode(fallback_mode),
+                source: None,
+                error: Some(err),
+                circuit_tripped: false,
+            };
+        }
+    };
+    if let Some(cached) = try_load_cached_layout_spec(data_dir, &entry.id, ctx) {
+        return ActiveLayoutResolution {
+            spec: cached,
+            source: Some(entry.source),
+            error: None,
+            circuit_tripped: false,
+        };
+    }
+    let report = eval_named_layout_tsx(&entry.id, &entry.source, ctx);
+    match report.result {
+        Ok(spec) => {
+            store_cached_layout_spec(data_dir, &entry.id, ctx, &spec);
+            ActiveLayoutResolution {
+                spec,
+                source: Some(entry.source),
+                error: None,
+                circuit_tripped: false,
+            }
+        }
+        Err(err) => ActiveLayoutResolution {
+            spec: LayoutSpec::for_layout_mode(fallback_mode),
+            source: Some(entry.source),
+            error: Some(err),
+            circuit_tripped: report.circuit_tripped,
+        },
+    }
+}
+
 /// Evaluates the active custom layout (or built-in fallback), returning any load/eval error.
+#[cfg(test)]
 pub fn resolve_active_layout(
     data_dir: &Path,
     active_id: &str,
     fallback_mode: LayoutMode,
     ctx: LayoutContext,
 ) -> (LayoutSpec, Option<String>) {
-    let trimmed = active_id.trim();
-    if trimmed.is_empty() {
-        return (LayoutSpec::for_layout_mode(fallback_mode), None);
-    }
-    let entry = match load_custom_layout(data_dir, trimmed) {
-        Ok(entry) => entry,
-        Err(err) => return (LayoutSpec::for_layout_mode(fallback_mode), Some(err)),
-    };
-    match eval_layout_tsx(&entry.source, ctx) {
-        Ok(spec) => (spec, None),
-        Err(err) => (LayoutSpec::for_layout_mode(fallback_mode), Some(err)),
-    }
+    let resolved = resolve_active_layout_with_cache(data_dir, active_id, fallback_mode, ctx);
+    (resolved.spec, resolved.error)
 }
 
 fn extract_layout_label(source: &str) -> Option<String> {
@@ -458,7 +474,7 @@ fn extract_quoted_after_key(haystack: &str, key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout_spec::{FooterDock, LayoutNode, LayoutSize, LayoutTarget, ViewModule};
+    use crate::layout_spec::{FooterDock, LayoutNode, LayoutSize, ViewModule};
 
     #[test]
     fn evaluates_tsx_responsive_breakpoints_and_conditional_sidebar() {
@@ -618,35 +634,33 @@ export default ({ width }: LayoutContext) => ({
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].id, "my-focus");
 
-        let (resolved, err) = resolve_active_layout(
-            &dir,
-            "my-focus",
-            LayoutMode::Split,
-            LayoutContext {
-                width: 1280.0,
-                height: 800.0,
-                target: LayoutTarget::Desktop,
-            },
-        );
+        let ctx = LayoutContext {
+            width: 1280.0,
+            height: 800.0,
+            target: LayoutTarget::Desktop,
+        };
+        let (resolved, err) = resolve_active_layout(&dir, "my-focus", LayoutMode::Split, ctx);
         assert_eq!(err, None);
         assert_eq!(resolved.name, "My Focus");
         assert!(resolved.has_standalone_summary());
+        assert!(try_load_cached_layout_spec(&dir, "my-focus", ctx).is_some());
 
-        let (fallback, missing_err) = resolve_active_layout(
-            &dir,
-            "missing-id",
-            LayoutMode::TopBottom,
-            LayoutContext {
-                width: 1280.0,
-                height: 800.0,
-                target: LayoutTarget::Desktop,
-            },
-        );
+        // Built-in empty ID returns immediately without writing layouts/ in a clean dir.
+        let clean_dir = dir.join("clean-sub");
+        fs::create_dir_all(&clean_dir).unwrap();
+        let (builtin, builtin_err) = resolve_active_layout(&clean_dir, "", LayoutMode::Split, ctx);
+        assert!(builtin.is_builtin_split());
+        assert_eq!(builtin_err, None);
+        assert!(!layouts_dir(&clean_dir).exists());
+
+        let (fallback, missing_err) =
+            resolve_active_layout(&dir, "missing-id", LayoutMode::TopBottom, ctx);
         assert!(fallback.is_builtin_top_bottom());
         assert!(missing_err.is_some());
 
         delete_custom_layout(&dir, "my-focus").expect("delete");
         assert!(list_custom_layouts(&dir).is_empty());
+        assert!(try_load_cached_layout_spec(&dir, "my-focus", ctx).is_none());
         let _ = fs::remove_dir_all(&dir);
     }
 }
