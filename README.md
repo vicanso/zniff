@@ -45,7 +45,7 @@ https://github.com/user-attachments/assets/19339425-f1df-47fe-ab8a-88bb586fd4a1
 
 ### Install
 
-- **Desktop (macOS / Linux / Windows)**: download from [GitHub Releases](https://github.com/vicanso/zniff/releases) — signed universal `.dmg` (and `.tar.gz`) for macOS, `.tar.gz` for Linux, and `.zip` for Windows. Standalone headless CLI binaries (`zniff-cli-*`, for `--web`, `--relay`, and `--mcp`) are published alongside. Homebrew / Scoop / Winget templates live in [`packaging/`](./packaging/README.md).
+- **Desktop (macOS / Linux / Windows)**: download from [GitHub Releases](https://github.com/vicanso/zniff/releases) — signed universal `.dmg` (and `.tar.gz`) for macOS, `.tar.gz` for Linux, and `.zip` for Windows. macOS/Windows desktop binaries also support `--web`, `--relay`, and `--mcp` directly, while standalone Linux headless CLI binaries (`zniff-cli-linux-*`) are published alongside for server environments without desktop libraries. Homebrew / Scoop / Winget templates live in [`packaging/`](./packaging/README.md).
 - **Linux (user-level install via [`scripts/install-linux.sh`](./scripts/install-linux.sh))**:
   ```bash
   curl -fsSLO https://raw.githubusercontent.com/vicanso/zniff/main/scripts/install-linux.sh

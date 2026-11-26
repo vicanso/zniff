@@ -3,9 +3,9 @@ name: Publish
 # Tagged releases. The version lives in app/Cargo.toml (mirrored in
 # app/nsh.json), and the tag must match it (v0.1.0 for version 0.1.0).
 # Desktop apps are packaged with `nsh package` (`zniff-macos-universal.dmg` +
-# `.tar.gz`, `zniff-linux-*.tar.gz`, `zniff-windows-*.zip`); standalone headless
-# CLI binaries (`--no-default-features` for `--web`, `--relay`, `--mcp`) ship
-# alongside them as `zniff-cli-*`.
+# `.tar.gz`, `zniff-linux-*.tar.gz`, `zniff-windows-*.zip`); standalone Linux
+# headless CLI binaries (`--no-default-features` for `--web`, `--relay`, `--mcp`)
+# ship alongside them as `zniff-cli-linux-*`.
 # The same tag publishes `vicanso/zniff-web:<version>` and, for a stable
 # version, `vicanso/zniff-web:latest` (docker.yml).
 
@@ -456,40 +456,6 @@ jobs:
             throw "gh release upload failed with exit code $LASTEXITCODE"
           }
 
-  cli-macos:
-    needs: prepare
-    timeout-minutes: 60
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: app
-          shared-key: publish-cli-macos
-          cache-on-failure: true
-      - name: Build headless CLI binaries (macOS aarch64 + x86_64)
-        run: |
-          set -euo pipefail
-          cargo_home="${CARGO_HOME:-${USERPROFILE:-$HOME}/.cargo}"
-          rustup_home="${RUSTUP_HOME:-${USERPROFILE:-$HOME}/.rustup}"
-          export RUSTFLAGS="--remap-path-prefix=${GITHUB_WORKSPACE}=. --remap-path-prefix=${cargo_home}=/cargo --remap-path-prefix=${rustup_home}=/rustup ${RUSTFLAGS:-}"
-          mkdir -p dist
-          cargo build --manifest-path app/Cargo.toml --release --locked --no-default-features --target aarch64-apple-darwin
-          cp app/target/aarch64-apple-darwin/release/zniff dist/zniff-cli-darwin-aarch64
-          cargo build --manifest-path app/Cargo.toml --release --locked --no-default-features --target x86_64-apple-darwin
-          cp app/target/x86_64-apple-darwin/release/zniff dist/zniff-cli-darwin-x86_64
-      - name: Upload CLI binaries (tag)
-        if: startsWith(github.ref, 'refs/tags/')
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          gh release upload "$GITHUB_REF_NAME" dist/* -R "$GITHUB_REPOSITORY" --clobber
-
   cli-linux:
     needs: prepare
     timeout-minutes: 60
@@ -538,79 +504,6 @@ jobs:
           set -euo pipefail
           gh release upload "$GITHUB_REF_NAME" dist/* -R "$GITHUB_REPOSITORY" --clobber
 
-  cli-windows:
-    needs: prepare
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        platform:
-          - arch: x86_64
-            runs_on: windows-latest
-          - arch: aarch64
-            runs_on: windows-11-arm
-    runs-on: ${{ matrix.platform.runs_on }}
-    defaults:
-      run:
-        shell: pwsh
-    steps:
-      - uses: actions/checkout@v4
-      - name: Ensure Clang for ring (Windows ARM64)
-        if: matrix.platform.runs_on == 'windows-11-arm'
-        run: |
-          if (-not (Get-Command clang -ErrorAction SilentlyContinue)) {
-            $candidates = @("C:\Program Files\LLVM\bin")
-            $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-            if (Test-Path $vswhere) {
-              $vsPath = & $vswhere -latest -products * -property installationPath
-              if ($vsPath) {
-                $candidates += (Join-Path $vsPath "VC\Tools\Llvm\ARM64\bin")
-                $candidates += (Join-Path $vsPath "VC\Tools\Llvm\x64\bin")
-              }
-            }
-            $found = $candidates | Where-Object { Test-Path (Join-Path $_ "clang.exe") } | Select-Object -First 1
-            if ($found) {
-              Add-Content -Path $env:GITHUB_PATH -Value $found
-              $env:PATH = "$found;$env:PATH"
-            } else {
-              winget install --id LLVM.LLVM -e --silent --accept-package-agreements --accept-source-agreements
-              $llvmBin = "C:\Program Files\LLVM\bin"
-              if (-not (Test-Path (Join-Path $llvmBin "clang.exe"))) {
-                choco install llvm -y --no-progress
-              }
-              Add-Content -Path $env:GITHUB_PATH -Value $llvmBin
-              $env:PATH = "$llvmBin;$env:PATH"
-            }
-          }
-          clang --version
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: app
-          shared-key: publish-cli-windows-${{ matrix.platform.arch }}
-          cache-on-failure: true
-      - name: Build headless CLI binary (Windows ${{ matrix.platform.arch }})
-        run: |
-          $ErrorActionPreference = 'Stop'
-          & cargo build --manifest-path app/Cargo.toml --release --locked --no-default-features
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item 'app/target/release/zniff.exe' "dist/zniff-cli-windows-$($env:TARGET_ARCH).exe"
-        env:
-          TARGET_ARCH: ${{ matrix.platform.arch }}
-      - name: Upload CLI binary (tag)
-        if: startsWith(github.ref, 'refs/tags/')
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $files = Get-ChildItem -Path dist -File | ForEach-Object { $_.FullName }
-          & gh release upload $env:GITHUB_REF_NAME @files -R $env:GITHUB_REPOSITORY --clobber
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
   docker:
     needs: prepare
     if: startsWith(github.ref, 'refs/tags/')
@@ -620,7 +513,7 @@ jobs:
     secrets: inherit
 
   checksums:
-    needs: [app-macos, app-linux, app-windows, cli-macos, cli-linux, cli-windows]
+    needs: [app-macos, app-linux, app-windows, cli-linux]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
     steps:

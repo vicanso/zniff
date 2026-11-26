@@ -1,6 +1,9 @@
 //! Runs zniff on the machine's native nsh backend.
 
-#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+#![cfg_attr(
+    all(target_os = "windows", feature = "desktop"),
+    windows_subsystem = "windows"
+)]
 
 #[cfg(all(feature = "desktop", target_os = "linux"))]
 use nsh_platform_linux as platform;
