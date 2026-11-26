@@ -57,14 +57,17 @@ impl EbpfController {
         attach_tracepoint(&mut ebpf, "zniff_sched_exec", "sched", "sched_process_exec")?;
         attach_tracepoint(&mut ebpf, "zniff_sched_exit", "sched", "sched_process_exit")?;
         let fork_child_pid_offset = match detect_fork_child_pid_offset() {
-            Some(off) if off > 0 => {
-                if attach_tracepoint(&mut ebpf, "zniff_sched_fork", "sched", "sched_process_fork")
-                    .is_ok()
-                {
-                    off
-                } else {
-                    0
-                }
+            Some(off)
+                if off > 0
+                    && attach_tracepoint(
+                        &mut ebpf,
+                        "zniff_sched_fork",
+                        "sched",
+                        "sched_process_fork",
+                    )
+                    .is_ok() =>
+            {
+                off
             }
             _ => 0,
         };
