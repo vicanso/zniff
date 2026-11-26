@@ -17,8 +17,8 @@ mod tests {
 
     use super::*;
     use crate::ui::theme::{
-        accent_blue, bg_canvas, bg_card, build_nsh_theme, danger_button_bg, fg_on_accent,
-        fg_primary, focus_ring,
+        accent_blue, bg_canvas, bg_card, build_nsh_theme, build_nsh_theme_with_fonts,
+        danger_button_bg, fg_on_accent, fg_primary, focus_ring,
     };
 
     #[test]
@@ -61,7 +61,12 @@ mod tests {
         assert_eq!(base_theme.font_mono, None);
 
         let mono_theme = build_nsh_theme(Some("Menlo"));
+        assert_eq!(mono_theme.font_sans, None);
         assert_eq!(mono_theme.font_mono.as_deref(), Some("Menlo"));
         assert_eq!(mono_theme.radius, px(RADIUS_MD));
+
+        let both_theme = build_nsh_theme_with_fonts(Some("Inter"), Some("Fira Code"));
+        assert_eq!(both_theme.font_sans.as_deref(), Some("Inter"));
+        assert_eq!(both_theme.font_mono.as_deref(), Some("Fira Code"));
     }
 }

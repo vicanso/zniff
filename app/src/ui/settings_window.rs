@@ -369,8 +369,13 @@ fn settings_general_tab(props: SettingsWindowProps) -> impl IntoElement {
             .flex_col()
             .child(menu_lang_row(controls.clone()))
             .child(menu_theme_row(controls.clone()))
-            .child(menu_zoom_row(controls.clone()))
-            .child(menu_mono_font_row(controls.clone())),
+            .child(menu_zoom_row(controls.clone())),
+    );
+
+    let fonts = settings_card(
+        "字体与字体集",
+        "Fonts & Font Sets",
+        settings_font_section(controls.clone()),
     );
 
     let reading = settings_card(
@@ -421,6 +426,7 @@ fn settings_general_tab(props: SettingsWindowProps) -> impl IntoElement {
         .gap_3()
         .flex_col()
         .child(appearance)
+        .child(fonts)
         .child(reading);
 
     let root = desktop_child!(

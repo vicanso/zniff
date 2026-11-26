@@ -51,7 +51,7 @@ pub enum PrefName {
     Redact,
     Language,
     Window,
-    MonoFont,
+    Font,
     Theme,
     UiZoom,
     TransparentProxy,
@@ -452,7 +452,7 @@ impl StatusMsg {
                         t(lang, "界面语言没有记住:", "Language setting was not saved:")
                     }
                     PrefName::Window => t(lang, "窗口尺寸没有记住:", "Window size was not saved:"),
-                    PrefName::MonoFont => t(lang, "等宽字体没有记住:", "Mono font was not saved:"),
+                    PrefName::Font => t(lang, "字体设置没有记住：", "Font settings were not saved:"),
                     PrefName::Theme => t(lang, "主题模式没有记住:", "Theme mode was not saved:"),
                     PrefName::UiZoom => t(lang, "界面缩放没有记住:", "UI zoom was not saved:"),
                     PrefName::TransparentProxy => t(

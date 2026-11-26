@@ -118,7 +118,12 @@ fn app_workspace(
     }
     let initial_ui_cfg = saved_config();
     provide_appearance_prefs(initial_ui_cfg.theme_mode, initial_ui_cfg.ui_zoom);
-    provide_mono_font(initial_ui_cfg.system_mono_font);
+    provide_font_prefs(
+        initial_ui_cfg.font_preset,
+        initial_ui_cfg.ui_font.clone(),
+        initial_ui_cfg.mono_font.clone(),
+        initial_ui_cfg.system_mono_font,
+    );
     let status = signal(StatusMsg::Idle);
     let running = signal(false);
     let ca_status = signal(ca::CaStatus::NotInstalled);

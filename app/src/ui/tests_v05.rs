@@ -4587,3 +4587,148 @@ fn config_broken_bar_dismiss_reopen_and_backup_reset_clears_error_zh_en() {
         );
     }
 }
+
+#[test]
+fn font_settings_preset_override_partial_preservation_blur_and_escape_zh_en() {
+    #[component]
+    fn FontSettingsHarness() -> impl IntoElement {
+        let lang = TEST_LANG.with(Cell::get);
+        provide_base_contexts(lang);
+        let font = mono_font();
+        let controls = make_controls("font-settings");
+        view()
+            .w(px(760.0))
+            .h(px(720.0))
+            .flex_col()
+            .child(settings_font_section(controls))
+            .child(text(move || {
+                let current = theme();
+                format!(
+                    "FONT_STATE|preset={}|ui={}|mono={}|sans_tok={}|mono_tok={}",
+                    font.preset.get().as_str(),
+                    font.ui_font.get(),
+                    font.mono_font.get(),
+                    current.font_sans.as_deref().unwrap_or("<none>"),
+                    current.font_mono.as_deref().unwrap_or("<none>"),
+                )
+            }))
+    }
+
+    let find_input_by_placeholder = |tree: &HeadlessTree, needle: &str| -> NodeId {
+        tree.kinds
+            .iter()
+            .find_map(|(id, kind)| {
+                (*kind == nsh_core::ViewKind::Input
+                    && tree
+                        .placeholders
+                        .get(id)
+                        .is_some_and(|p| p.contains(needle)))
+                .then_some(*id)
+            })
+            .unwrap_or_else(|| panic!("missing input with placeholder `{needle}`"))
+    };
+
+    for lang in [Lang::Zh, Lang::En] {
+        TEST_LANG.set(lang);
+        let (mut core, mut tree) = mount::<FontSettingsHarness>(Size::new(px(760.0), px(720.0)));
+        core.set_environment(nsh_core::element::Environment {
+            window: Size::new(px(760.0), px(720.0)),
+            os: nsh_core::platform::Os::MacOs,
+            idiom: nsh_core::platform::Idiom::Desktop,
+            reduce_motion: true,
+            ..Default::default()
+        });
+        tree.pump(&mut core);
+
+        let customized_badge = t(lang, "已自定义", "Customized");
+        let dev_pill = t(lang, "开发者", "Developer");
+        let select_ui_label = t(lang, "选择界面字体", "Select UI font");
+        let reset_label = t(lang, "恢复默认", "Reset");
+        let ui_input_id = find_input_by_placeholder(&tree, "Inter");
+        let mono_input_id = find_input_by_placeholder(&tree, "Fira Code");
+
+        assert!(tree.has_text_containing("FONT_STATE|preset=default|ui=|mono=|sans_tok=<none>|"));
+        assert!(!tree.has_text(customized_badge));
+
+        // 1. Enter custom UI and Mono stacks and submit both.
+        let custom_ui = "Inter, PingFang SC, sans-serif";
+        let custom_mono = "Fira Code, Menlo, monospace";
+        core.component_event(
+            ui_input_id,
+            EventKind::SubmitEditing,
+            &EventPayload::Text {
+                text: custom_ui.into(),
+                count: 1,
+            },
+        );
+        core.component_event(
+            mono_input_id,
+            EventKind::SubmitEditing,
+            &EventPayload::Text {
+                text: custom_mono.into(),
+                count: 1,
+            },
+        );
+        tree.pump(&mut core);
+        assert!(tree.has_text(customized_badge));
+        assert!(tree.has_text_containing(&format!(
+            "ui={custom_ui}|mono={custom_mono}|sans_tok={custom_ui}|mono_tok={custom_mono}"
+        )));
+
+        // 2. Dirty A -> B + late blur guard: type uncommitted text into mono input,
+        // click Developer preset, then emit a late Blur on mono input.
+        core.component_event(
+            mono_input_id,
+            EventKind::ChangeText,
+            &EventPayload::Text {
+                text: "Cascadia Mono".into(),
+                count: 2,
+            },
+        );
+        tree.pump(&mut core);
+        assert!(tree.press_text(&mut core, dev_pill));
+        core.component_event(mono_input_id, EventKind::Blur, &EventPayload::None);
+        tree.pump(&mut core);
+
+        assert!(!tree.has_text(customized_badge));
+        assert!(tree.has_text_containing("FONT_STATE|preset=developer|ui=|mono=|"));
+        assert!(tree.has_text_containing("sans_tok=Inter, SF Pro Text,"));
+        assert!(tree.has_text_containing("mono_tok=Fira Code, JetBrains Mono NL,"));
+        let saved_after_dev = saved_config();
+        assert_eq!(saved_after_dev.font_preset, config::FontPreset::Developer);
+        assert!(saved_after_dev.ui_font.is_empty());
+        assert!(saved_after_dev.mono_font.is_empty());
+
+        // 3. Partial override A -> A' via Blur: set UI font only, keep Developer mono stack intact.
+        core.component_event(
+            ui_input_id,
+            EventKind::ChangeText,
+            &EventPayload::Text {
+                text: "Georgia".into(),
+                count: 3,
+            },
+        );
+        core.component_event(ui_input_id, EventKind::Blur, &EventPayload::None);
+        tree.pump(&mut core);
+        assert!(tree.has_text(customized_badge));
+        assert!(tree.has_text_containing("FONT_STATE|preset=developer|ui=Georgia|mono=|"));
+        assert!(tree.has_text_containing("sans_tok=Georgia, "));
+        assert!(tree.has_text_containing("mono_tok=Fira Code, JetBrains Mono NL,"));
+
+        // 4. Open UI font select dropdown and close it with Escape even while editing=true.
+        assert!(tree.press_label(&mut core, select_ui_label));
+        let dropdown_item = t(lang, "微软雅黑 UI", "Microsoft YaHei UI");
+        assert!(tree.has_text(dropdown_item));
+        assert!(tree.press_escape(&mut core, true));
+        assert!(!tree.has_text(dropdown_item));
+
+        // 5. Reset restores Default preset and clears overrides.
+        assert!(tree.press_text(&mut core, reset_label));
+        assert!(!tree.has_text(customized_badge));
+        assert!(tree.has_text_containing("FONT_STATE|preset=default|ui=|mono=|sans_tok=<none>|"));
+        let saved_reset = saved_config();
+        assert_eq!(saved_reset.font_preset, config::FontPreset::Default);
+        assert!(saved_reset.ui_font.is_empty());
+        assert!(saved_reset.mono_font.is_empty());
+    }
+}

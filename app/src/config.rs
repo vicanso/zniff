@@ -259,6 +259,110 @@ impl<'de> Deserialize<'de> for ThemeMode {
     }
 }
 
+/// Curated UI + monospace font sets persisted in `config.toml`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FontPreset {
+    #[default]
+    Default,
+    System,
+    ModernSans,
+    Developer,
+    CjkReading,
+    Classic,
+}
+
+impl FontPreset {
+    pub const ALL: [Self; 6] = [
+        Self::Default,
+        Self::System,
+        Self::ModernSans,
+        Self::Developer,
+        Self::CjkReading,
+        Self::Classic,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::System => "system",
+            Self::ModernSans => "modern_sans",
+            Self::Developer => "developer",
+            Self::CjkReading => "cjk_reading",
+            Self::Classic => "classic",
+        }
+    }
+
+    pub fn parse(text: &str) -> Self {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "system" => Self::System,
+            "modern_sans" => Self::ModernSans,
+            "developer" => Self::Developer,
+            "cjk_reading" => Self::CjkReading,
+            "classic" => Self::Classic,
+            _ => Self::Default,
+        }
+    }
+
+    pub fn is_default(&self) -> bool {
+        *self == Self::Default
+    }
+}
+
+impl Serialize for FontPreset {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for FontPreset {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        Ok(Self::parse(&text))
+    }
+}
+
+/// Normalizes a user-configured font family or comma-separated fallback stack:
+/// collapses `\r`/`\n`/`\t` whitespace, strips control characters, trims
+/// outer whitespace and commas, and caps length at 256 Unicode scalar values.
+pub fn sanitize_font_family(raw: &str) -> String {
+    let mut out = String::new();
+    let mut pending_space = false;
+    for ch in raw.chars() {
+        if matches!(ch, '\r' | '\n' | '\t' | ' ') {
+            if !out.is_empty() {
+                pending_space = true;
+            }
+            continue;
+        }
+        if ch.is_control() {
+            continue;
+        }
+        if pending_space {
+            out.push(' ');
+            pending_space = false;
+        }
+        out.push(ch);
+    }
+    let trimmed = out.trim().trim_matches(',').trim();
+    if trimmed.chars().count() <= 256 {
+        trimmed.to_string()
+    } else {
+        trimmed
+            .chars()
+            .take(256)
+            .collect::<String>()
+            .trim()
+            .trim_end_matches(',')
+            .trim()
+            .to_string()
+    }
+}
+
 pub const UI_ZOOM_MIN: u16 = 80;
 pub const UI_ZOOM_MAX: u16 = 150;
 pub const UI_ZOOM_STEP: u16 = 10;
@@ -711,6 +815,12 @@ pub struct Config {
     pub ellipsize: ListEllipsize,
     /// False draws monospaced text in the bundled JetBrains Mono; true uses the system's.
     pub system_mono_font: bool,
+    /// Curated UI + monospace font set preset (`default`, `system`, `modern_sans`, `developer`, `cjk_reading`, `classic`).
+    pub font_preset: FontPreset,
+    /// Custom UI font family or comma-separated fallback stack (`""` uses the preset).
+    pub ui_font: String,
+    /// Custom monospaced font family or fallback stack (`""` uses the preset, `"bundled"`, or `"system"`).
+    pub mono_font: String,
     /// Color scheme preference (`system`, `light`, `dark`).
     pub theme_mode: ThemeMode,
     /// UI and monospace font zoom percentage (`80..=150`, default `100`).
@@ -859,6 +969,12 @@ struct RawConfig {
     ellipsize: ListEllipsize,
     #[serde(default, skip_serializing_if = "is_false")]
     system_mono_font: bool,
+    #[serde(default, skip_serializing_if = "FontPreset::is_default")]
+    font_preset: FontPreset,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    ui_font: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    mono_font: String,
     #[serde(default, skip_serializing_if = "ThemeMode::is_default")]
     theme_mode: ThemeMode,
     #[serde(
@@ -1077,6 +1193,18 @@ impl From<RawConfig> for Config {
             )
         };
 
+        let ui_font = sanitize_font_family(&raw.ui_font);
+        let mono_font = sanitize_font_family(&raw.mono_font);
+        let font_preset = if raw.font_preset == FontPreset::Default
+            && ui_font.is_empty()
+            && mono_font.is_empty()
+            && raw.system_mono_font
+        {
+            FontPreset::System
+        } else {
+            raw.font_preset
+        };
+
         Self {
             listen_port: raw.listen_port,
             listen_all: raw.listen_all,
@@ -1106,6 +1234,9 @@ impl From<RawConfig> for Config {
             }),
             ellipsize: raw.ellipsize,
             system_mono_font: raw.system_mono_font,
+            font_preset,
+            ui_font,
+            mono_font,
             theme_mode: raw.theme_mode,
             ui_zoom: clamp_ui_zoom(raw.ui_zoom),
             layout_mode: raw.layout_mode,
@@ -1230,6 +1361,9 @@ impl From<Config> for RawConfig {
             path_display: (!config.path_display.is_default()).then_some(config.path_display),
             ellipsize: config.ellipsize,
             system_mono_font: config.system_mono_font,
+            font_preset: config.font_preset,
+            ui_font: sanitize_font_family(&config.ui_font),
+            mono_font: sanitize_font_family(&config.mono_font),
             theme_mode: config.theme_mode,
             ui_zoom: clamp_ui_zoom(config.ui_zoom),
             layout_mode: config.layout_mode,
@@ -1310,6 +1444,9 @@ impl Default for Config {
             path_display: PathDisplay::Auto,
             ellipsize: ListEllipsize::Middle,
             system_mono_font: false,
+            font_preset: FontPreset::Default,
+            ui_font: String::new(),
+            mono_font: String::new(),
             theme_mode: ThemeMode::System,
             ui_zoom: UI_ZOOM_DEFAULT,
             layout_mode: LayoutMode::Split,
@@ -1810,6 +1947,8 @@ fn normalize_for(mut config: Config, dev: bool) -> Config {
         config.listen_port = default_listen_port(dev);
     }
     config.language = language_name(config.language.as_deref().and_then(parse_pref));
+    config.ui_font = sanitize_font_family(&config.ui_font);
+    config.mono_font = sanitize_font_family(&config.mono_font);
     config.ui_zoom = clamp_ui_zoom(config.ui_zoom);
     config.sidebar_width = clamp_sidebar_width(config.sidebar_width);
     config.list_width = clamp_list_width(config.list_width);
@@ -2438,6 +2577,53 @@ mod tests {
         update(dir.path(), |config| config.system_mono_font = false).unwrap();
         let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
         assert!(!text.contains("system_mono_font"), "{text}");
+    }
+
+    #[test]
+    fn font_preset_and_custom_fonts_round_trip_and_sanitize() {
+        let dir = Scratch::new();
+        let initial = load(dir.path());
+        assert_eq!(initial.font_preset, FontPreset::Default);
+        assert!(initial.ui_font.is_empty());
+        assert!(initial.mono_font.is_empty());
+
+        // Legacy `system_mono_font = true` promotes Default preset to System.
+        fs::write(dir.path().join("config.toml"), "system_mono_font = true\n").unwrap();
+        let promoted = load(dir.path());
+        assert_eq!(promoted.font_preset, FontPreset::System);
+        assert!(promoted.system_mono_font);
+
+        // Save custom preset + sanitized UI/Mono fonts.
+        update(dir.path(), |config| {
+            config.font_preset = FontPreset::Developer;
+            config.system_mono_font = false;
+            config.ui_font = "  Inter,\n PingFang SC\x07, sans-serif , ".to_string();
+            config.mono_font = "  Fira Code\t, Menlo ".to_string();
+        })
+        .unwrap();
+        let reloaded = load(dir.path());
+        assert_eq!(reloaded.font_preset, FontPreset::Developer);
+        assert_eq!(reloaded.ui_font, "Inter, PingFang SC, sans-serif");
+        assert_eq!(reloaded.mono_font, "Fira Code , Menlo");
+
+        // Unknown font_preset falls back cleanly and length caps at 256.
+        let too_long = "A".repeat(300);
+        let capped = sanitize_font_family(&too_long);
+        assert_eq!(capped.len(), 256);
+        assert_eq!(FontPreset::parse("unknown_preset"), FontPreset::Default);
+
+        // Resetting to defaults omits font keys from config.toml.
+        update(dir.path(), |config| {
+            config.font_preset = FontPreset::Default;
+            config.ui_font.clear();
+            config.mono_font.clear();
+            config.system_mono_font = false;
+        })
+        .unwrap();
+        let text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(!text.contains("font_preset"), "{text}");
+        assert!(!text.contains("ui_font"), "{text}");
+        assert!(!text.contains("mono_font"), "{text}");
     }
 
     #[test]

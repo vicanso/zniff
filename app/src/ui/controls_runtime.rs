@@ -1301,6 +1301,10 @@ struct WebLocalPrefs {
     sidebar_width: Option<u32>,
     list_width: Option<u32>,
     list_height: Option<u32>,
+    font_preset: Option<config::FontPreset>,
+    ui_font: Option<String>,
+    mono_font: Option<String>,
+    system_mono_font: Option<bool>,
     default_pretty: Option<bool>,
     default_json_tree: Option<bool>,
     onboarding_strip_dismissed: Option<bool>,
@@ -1333,6 +1337,10 @@ impl WebLocalPrefs {
             sidebar_width: Some(cfg.sidebar_width),
             list_width: Some(cfg.list_width),
             list_height: Some(cfg.list_height),
+            font_preset: Some(cfg.font_preset),
+            ui_font: Some(cfg.ui_font.clone()),
+            mono_font: Some(cfg.mono_font.clone()),
+            system_mono_font: Some(cfg.system_mono_font),
             default_pretty: Some(cfg.default_pretty),
             default_json_tree: Some(cfg.default_json_tree),
             onboarding_strip_dismissed: Some(cfg.onboarding_strip_dismissed),
@@ -1375,6 +1383,20 @@ impl WebLocalPrefs {
         }
         if let Some(v) = self.list_height {
             cfg.list_height = v;
+        }
+        if let Some(v) = self.system_mono_font {
+            cfg.system_mono_font = v;
+        }
+        if let Some(v) = self.ui_font {
+            cfg.ui_font = config::sanitize_font_family(&v);
+        }
+        if let Some(v) = self.mono_font {
+            cfg.mono_font = config::sanitize_font_family(&v);
+        }
+        if let Some(v) = self.font_preset {
+            cfg.font_preset = v;
+        } else if cfg.system_mono_font && cfg.ui_font.is_empty() && cfg.mono_font.is_empty() {
+            cfg.font_preset = config::FontPreset::System;
         }
         if let Some(v) = self.default_pretty {
             cfg.default_pretty = v;

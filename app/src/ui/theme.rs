@@ -246,8 +246,11 @@ pub(crate) fn qr_surface() -> AdaptiveColor {
     AdaptiveColor::rgb(0xffffff, 0xffffff)
 }
 
-/// Builds an `nsh_base::Theme` synchronized with zniff's semantic tokens and radius scale.
-pub(crate) fn build_nsh_theme(mono_family: Option<&str>) -> nsh_base::Theme {
+/// Builds an `nsh_base::Theme` synchronized with zniff's semantic tokens and optional font overrides.
+pub(crate) fn build_nsh_theme_with_fonts(
+    ui_family: Option<&str>,
+    mono_family: Option<&str>,
+) -> nsh_base::Theme {
     let mut theme = nsh_base::Theme::default();
     theme.set_color("background", bg_canvas());
     theme.set_color("foreground", fg_primary());
@@ -276,10 +279,19 @@ pub(crate) fn build_nsh_theme(mono_family: Option<&str>) -> nsh_base::Theme {
     theme.set_color("sidebar-border", border_strong());
     theme.set_color("sidebar-ring", focus_ring());
     theme.set_number("radius", RADIUS_MD);
+    if let Some(family) = ui_family {
+        theme.set_font(nsh_core::element::FONT_SANS, family);
+    }
     if let Some(family) = mono_family {
         theme.set_font(nsh_core::element::FONT_MONO, family);
     }
     theme
+}
+
+/// Builds an `nsh_base::Theme` synchronized with zniff's semantic tokens and radius scale.
+#[allow(dead_code)]
+pub(crate) fn build_nsh_theme(mono_family: Option<&str>) -> nsh_base::Theme {
+    build_nsh_theme_with_fonts(None, mono_family)
 }
 
 /// Flow DataTable Tailwind utility classes aligned with the semantic surface/border/accent tokens.
