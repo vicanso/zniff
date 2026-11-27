@@ -485,45 +485,132 @@ export interface ZniffFlowsApi {
   setPinned(id: number, pinned: boolean): boolean;
 }
 
+export interface JwtDecoded {
+  readonly header: Record<string, unknown>;
+  readonly payload: Record<string, unknown>;
+  readonly signingInput: string;
+  readonly signatureHex: string;
+}
+
 export interface ZniffCodecApi {
   utf8Encode(text: string): Uint8Array;
   utf8Decode(bytes: Uint8Array | ArrayBuffer): string;
-  base64Encode(bytes: Uint8Array | ArrayBuffer): string;
+  base64Encode(input: BodyInput): string;
   base64Decode(text: string): Uint8Array;
-  hexEncode(bytes: Uint8Array | ArrayBuffer): string;
+  base64UrlEncode(input: BodyInput): string;
+  base64UrlDecode(text: string): Uint8Array;
+  hexEncode(input: BodyInput): string;
   hexDecode(text: string): Uint8Array;
-  gzip(bytes: Uint8Array | ArrayBuffer): Uint8Array;
+  gzip(input: BodyInput): Uint8Array;
   gunzip(bytes: Uint8Array | ArrayBuffer): Uint8Array;
+  deflate(input: BodyInput): Uint8Array;
+  inflate(bytes: Uint8Array | ArrayBuffer): Uint8Array;
+  zlibCompress(input: BodyInput): Uint8Array;
+  zlibDecompress(bytes: Uint8Array | ArrayBuffer): Uint8Array;
+  zstdCompress(input: BodyInput, level?: number): Uint8Array;
   zstdDecompress(bytes: Uint8Array | ArrayBuffer): Uint8Array;
+  brotliDecompress(bytes: Uint8Array | ArrayBuffer): Uint8Array;
+  urlEncode(text: string): string;
+  urlDecode(text: string): string;
+  formUrlEncode(entries: [string, string][] | Record<string, string>): string;
+  formUrlDecode(query: string): [string, string][];
+  crc32(input: BodyInput): number;
+  jwtDecode(token: string): JwtDecoded | null;
+  protobufDecodeWire(bytes: Uint8Array | ArrayBuffer): Record<string, unknown>;
 }
 
 export interface ZniffCryptoApi {
-  sha256(bytes: Uint8Array | ArrayBuffer): Uint8Array;
-  hmacSha256(key: Uint8Array | ArrayBuffer, data: Uint8Array | ArrayBuffer): Uint8Array;
+  md5(input: BodyInput): Uint8Array;
+  md5Hex(input: BodyInput): string;
+  sha1(input: BodyInput): Uint8Array;
+  sha1Hex(input: BodyInput): string;
+  sha256(input: BodyInput): Uint8Array;
+  sha256Hex(input: BodyInput): string;
+  sha384(input: BodyInput): Uint8Array;
+  sha384Hex(input: BodyInput): string;
+  sha512(input: BodyInput): Uint8Array;
+  sha512Hex(input: BodyInput): string;
+  hmacMd5(key: BodyInput, data: BodyInput): Uint8Array;
+  hmacMd5Hex(key: BodyInput, data: BodyInput): string;
+  hmacSha1(key: BodyInput, data: BodyInput): Uint8Array;
+  hmacSha1Hex(key: BodyInput, data: BodyInput): string;
+  hmacSha256(key: BodyInput, data: BodyInput): Uint8Array;
+  hmacSha256Hex(key: BodyInput, data: BodyInput): string;
+  hmacSha384(key: BodyInput, data: BodyInput): Uint8Array;
+  hmacSha384Hex(key: BodyInput, data: BodyInput): string;
+  hmacSha512(key: BodyInput, data: BodyInput): Uint8Array;
+  hmacSha512Hex(key: BodyInput, data: BodyInput): string;
   aes128GcmEncrypt(
-    key16: Uint8Array | ArrayBuffer,
-    nonce12: Uint8Array | ArrayBuffer,
-    plaintext: Uint8Array | ArrayBuffer,
-    aad?: Uint8Array | ArrayBuffer,
+    key16: BodyInput,
+    nonce12: BodyInput,
+    plaintext: BodyInput,
+    aad?: BodyInput,
   ): Uint8Array;
   aes128GcmDecrypt(
-    key16: Uint8Array | ArrayBuffer,
-    nonce12: Uint8Array | ArrayBuffer,
+    key16: BodyInput,
+    nonce12: BodyInput,
     ciphertextWithTag: Uint8Array | ArrayBuffer,
-    aad?: Uint8Array | ArrayBuffer,
+    aad?: BodyInput,
   ): Uint8Array;
   aes256GcmEncrypt(
-    key32: Uint8Array | ArrayBuffer,
-    nonce12: Uint8Array | ArrayBuffer,
-    plaintext: Uint8Array | ArrayBuffer,
-    aad?: Uint8Array | ArrayBuffer,
+    key32: BodyInput,
+    nonce12: BodyInput,
+    plaintext: BodyInput,
+    aad?: BodyInput,
   ): Uint8Array;
   aes256GcmDecrypt(
-    key32: Uint8Array | ArrayBuffer,
-    nonce12: Uint8Array | ArrayBuffer,
+    key32: BodyInput,
+    nonce12: BodyInput,
     ciphertextWithTag: Uint8Array | ArrayBuffer,
-    aad?: Uint8Array | ArrayBuffer,
+    aad?: BodyInput,
   ): Uint8Array;
+  chacha20Poly1305Encrypt(
+    key32: BodyInput,
+    nonce12: BodyInput,
+    plaintext: BodyInput,
+    aad?: BodyInput,
+  ): Uint8Array;
+  chacha20Poly1305Decrypt(
+    key32: BodyInput,
+    nonce12: BodyInput,
+    ciphertextWithTag: Uint8Array | ArrayBuffer,
+    aad?: BodyInput,
+  ): Uint8Array;
+  aes128CbcEncrypt(
+    key16: BodyInput,
+    iv16: BodyInput,
+    plaintext: BodyInput,
+  ): Uint8Array;
+  aes128CbcDecrypt(
+    key16: BodyInput,
+    iv16: BodyInput,
+    ciphertext: Uint8Array | ArrayBuffer,
+  ): Uint8Array;
+  aes256CbcEncrypt(
+    key32: BodyInput,
+    iv16: BodyInput,
+    plaintext: BodyInput,
+  ): Uint8Array;
+  aes256CbcDecrypt(
+    key32: BodyInput,
+    iv16: BodyInput,
+    ciphertext: Uint8Array | ArrayBuffer,
+  ): Uint8Array;
+  pbkdf2Sha256(
+    password: BodyInput,
+    salt: BodyInput,
+    iterations: number,
+    keyLen: number,
+  ): Uint8Array;
+  hkdfSha256(
+    secret: BodyInput,
+    salt: BodyInput,
+    info: BodyInput,
+    keyLen: number,
+  ): Uint8Array;
+  timingSafeEqual(a: BodyInput, b: BodyInput): boolean;
+  randomBytes(len: number): Uint8Array;
+  uuidV4(): string;
 }
 
 export interface ZniffHookSdk {
@@ -570,6 +657,7 @@ declare module "zniff/hook" {
     RunHookContext,
     RunHookResult,
     ZniffFlowsApi,
+    JwtDecoded,
     ZniffCodecApi,
     ZniffCryptoApi,
     ZniffHookSdk,

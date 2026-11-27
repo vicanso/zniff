@@ -33,11 +33,19 @@ mod hook_action;
 #[cfg(not(target_arch = "wasm32"))]
 mod hook_bridge;
 #[cfg(not(target_arch = "wasm32"))]
+mod hook_codec;
+#[cfg(not(target_arch = "wasm32"))]
 mod hook_codec_crypto;
+#[cfg(not(target_arch = "wasm32"))]
+mod hook_crypto;
+#[cfg(not(target_arch = "wasm32"))]
+mod hook_crypto_algs;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod hook_e2e_tests;
 #[cfg(not(target_arch = "wasm32"))]
 mod hook_runtime;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod hook_sdk_tests;
 mod hook_spec;
 mod i18n;
 mod icon;

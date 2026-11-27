@@ -68,6 +68,7 @@
   - `bypass` 支持 `*` 与 `only:`；`allow_hosts` 支持 `--strict-allow-hosts` / `ZNIFF_STRICT_ALLOW_HOSTS=1`（Docker 默认开启），优先级 `--allow-hosts` > 非空环境变量 > `config.toml`（CLI/Env 锁定只读，拦截 `CONNECT`/SNI/HTTP/`map-remote`/重放及 `/proxy.pac`，豁免 `/zniff` 等本地路由）。
   - `upstream_proxy` 支持凭据自动注入 `Proxy-Authorization`；HTTP/1 明文 & HTTP/2（每源站最多 16 条缓存，45s 空闲过期）连接池；重放独立建连，支持按源协议或构造请求 ALPN 协商 H2/H1。
   - 终点规则（`map-local`、`map-remote`、`break`、`break-res`、`block`）按首次命中执行；叠加规则（`delay`、`<30s>`、`throttle`、`cert`、`client-cert`、`resolve`/`dns`/`hosts`、`header`、`query`、`cors`、`no-cache`、`replace`、`json`、`hook`、`proto`）可累加；支持 `op=` GraphQL 操作名过滤与 `{{...}}` 动态模板变量（含 `HMAC-SHA256` 等）；支持目录静态 `map-local` + `fallback`、本机回环 `hook`（`mutate`/`preview`）、零依赖 `.proto` 解码与 OpenAPI 3.0.3 导出。
+  - **TypeScript / TSX 报文勾子（`[[script_hooks]]` / `hook <host[/path]> @<id>`）**：按需在后台沙箱化 QuickJS 工作池执行 `onRequest` / `onResponse` / `onPreview` / `onRun` 四阶段脚本（支持 `zniff-hook.d.ts` 类型声明与 `<Section>/<KeyValue>/<Badge>/<Code>` 预览卡片）；内置冻结对象 `zniff.flows.*`（ID-first 读写与 `zniff-spill` 按需 `pread`）、`zniff.codec.*`（UTF-8 / Base64 / Base64URL / Hex / URL / Form-URL / `gzip` / `deflate` / `zlib` / `zstd` / `brotliDecompress` / `crc32` / `jwtDecode` / `protobufDecodeWire`）与 `zniff.crypto.*`（MD5/SHA-1/256/384/512 及 HMAC `*Hex`、AES-GCM / ChaCha20-Poly1305、AES-CBC PKCS#7、PBKDF2 / HKDF、`timingSafeEqual` / `randomBytes` / `uuidV4`）。
 
 ---
 

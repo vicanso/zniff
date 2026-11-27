@@ -63,7 +63,7 @@
 ## 5. 零 I/O 纯函数与原生编解码桥接
 
 - **单文件隔离沙箱**：严禁网络、任意文件系统读写、环境变量、异步定时器、`eval` / `Function` 构造器与外部包导入；初始化时冻结 `globalThis` 与全量内置原型（`Object` / `Array` / `Function` / `String` / `Number` / `Boolean` / `RegExp` / `Map` / `Set`），用户脚本在 `"use strict"` IIFE 中求值，杜绝跨次运行污染全局状态。
-- **重 CPU 字节操作与会话读取桥接 Rust**：自定义勾子中的 UTF-8/Hex/Base64、内层 `gzip`/`zstd` 加解压与 SHA-256/HMAC/AES-GCM 统一走 `zniff.codec.*` / `zniff.crypto.*`（复用 `ring`/`flate2`/`zstd` 0 新增依赖体积）；遍历会话抓包统一使用 **ID-first** 模式（`zniff.flows.ids(filter?, limit?)` 先取序号再按需读 `url` / `requestHeaders` / `requestBody` / `responseHeaders` / `responseBody`）。
+- **重 CPU 字节操作与会话读取桥接 Rust**：自定义勾子中的编解码与密码学操作统一走 `zniff.codec.*`（UTF-8 / Base64 / Base64URL / Hex / URL / Form-URL / `gzip` / `deflate` / `zlib` / `zstd` / `brotliDecompress` / `crc32` / `jwtDecode` / `protobufDecodeWire`，全解压口强制 `2 MiB` 炸弹上限）与 `zniff.crypto.*`（MD5 / SHA-1 / SHA-256 / SHA-384 / SHA-512 + `*Hex`、HMAC-MD5/SHA-1/256/384/512 + `*Hex`、AES-128/256-GCM & ChaCha20-Poly1305 AEAD、AES-128/256-CBC PKCS#7、PBKDF2-SHA256 `[1..=600_000]` / HKDF-SHA256、`timingSafeEqual` / `randomBytes` / `uuidV4`），全部复用 `ring` / `flate2` / `zstd` / `brotli-decompressor` / `serde_json` 与纯 Rust MD5/AES-CBC 实现（**0 新增 Cargo 依赖**）；遍历会话抓包统一使用 **ID-first** 模式（`zniff.flows.ids(filter?, limit?)` 先取序号再按需读 `url` / `requestHeaders` / `requestBody` / `responseHeaders` / `responseBody`）。
 
 ---
 
