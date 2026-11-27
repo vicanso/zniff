@@ -46,6 +46,7 @@ DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/$APP"
 DESKTOP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 ICON_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/512x512/apps"
 AUTOSTART_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/autostart"
+EBPF_CAPS="cap_bpf,cap_net_admin,cap_perfmon,cap_dac_read_search,cap_sys_resource+ep"
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'install-linux.sh: %s\n' "$*" >&2; exit 1; }
@@ -251,7 +252,7 @@ configure_ebpf_caps() {
 
     [ "$do_apply" = 1 ] || return 1
 
-    caps="cap_bpf,cap_net_admin,cap_sys_resource+ep"
+    caps="$EBPF_CAPS"
     if [ "$(id -u)" = 0 ]; then
         if "$setcap_bin" "$caps" "$helper_path"; then
             say "granted eBPF capabilities ($caps) to $helper_path"
@@ -451,6 +452,6 @@ if [ -n "$helper_installed" ]; then
         say "Passwordless eBPF transparent proxy is ready (rerun setcap after upgrading $APP-ebpf-helper)."
     else
         say "Optional passwordless eBPF transparent proxy (otherwise pkexec prompts on start):"
-        say "  sudo setcap cap_bpf,cap_net_admin,cap_sys_resource+ep \"$BIN_DIR/$APP-ebpf-helper\""
+        say "  sudo setcap $EBPF_CAPS \"$BIN_DIR/$APP-ebpf-helper\""
     fi
 fi

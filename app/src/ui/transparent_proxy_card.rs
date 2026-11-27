@@ -3,7 +3,57 @@ use super::*;
 
 use crate::transparent_proxy::{self, RunningApp, TpState, TransparentProxyStatus};
 
-/// Expandable Connect Hub card for macOS `NETransparentProxyProvider` per-process capture.
+#[derive(Clone, Copy)]
+struct TpCardState {
+    tp_status: Signal<TransparentProxyStatus>,
+    tp_apps: Signal<Vec<RunningApp>>,
+    expanded: Signal<bool>,
+    capture_all: Signal<bool>,
+    targets: Signal<String>,
+    block_quic: Signal<bool>,
+    needs_target_prompt: Signal<bool>,
+}
+
+fn tp_has_no_effective_targets(capture_all: bool, raw_targets: &str) -> bool {
+    !capture_all && transparent_proxy::parse_targets(raw_targets).is_empty()
+}
+
+fn tp_shows_empty_target_notice(
+    st: &TransparentProxyStatus,
+    no_targets: bool,
+    prompt: bool,
+) -> bool {
+    st.in_applications
+        && st.error.is_empty()
+        && no_targets
+        && (st.state == TpState::Running || (!st.is_on_or_starting() && prompt))
+}
+
+/// Single state-transition gateway for toggling Transparent Proxy / Linux eBPF.
+fn handle_tp_toggle_press(controls: &Arc<Controls>, state: TpCardState) {
+    let st = state.tp_status.get_untracked();
+    if !st.is_on_or_starting() {
+        if !st.in_applications {
+            state.expanded.set(true);
+            toggle_transparent_proxy(controls.clone());
+            return;
+        }
+        if tp_has_no_effective_targets(
+            state.capture_all.get_untracked(),
+            &state.targets.get_untracked(),
+        ) {
+            state.needs_target_prompt.set(true);
+            state.expanded.set(true);
+            refresh_transparent_proxy_state_async();
+            set_status(controls, StatusMsg::TransparentProxyNeedsTargets);
+            return;
+        }
+    }
+    state.needs_target_prompt.set(false);
+    toggle_transparent_proxy(controls.clone());
+}
+
+/// Expandable Connect Hub card for macOS `NETransparentProxyProvider` / Linux eBPF capture.
 pub(crate) fn transparent_proxy_card(
     controls: Arc<Controls>,
     tp_status: Signal<TransparentProxyStatus>,
@@ -11,10 +61,15 @@ pub(crate) fn transparent_proxy_card(
     open_popover: Signal<bool>,
 ) -> impl IntoElement {
     let saved = saved_config();
-    let expanded = signal(false);
-    let capture_all = signal(saved.tp_capture_all);
-    let targets = signal(saved.tp_targets);
-    let block_quic = signal(saved.tp_block_quic);
+    let state = TpCardState {
+        tp_status,
+        tp_apps,
+        expanded: signal(false),
+        capture_all: signal(saved.tp_capture_all),
+        targets: signal(saved.tp_targets),
+        block_quic: signal(saved.tp_block_quic),
+        needs_target_prompt: signal(false),
+    };
 
     view()
         .w_full()
@@ -22,7 +77,7 @@ pub(crate) fn transparent_proxy_card(
         .rounded(px(RADIUS_MD))
         .border_1()
         .border_color(move || {
-            if tp_status.with(|st| st.is_on_or_starting()) {
+            if state.tp_status.with(|st| st.is_on_or_starting()) {
                 accent_blue_border()
             } else {
                 border_subtle()
@@ -30,32 +85,17 @@ pub(crate) fn transparent_proxy_card(
         })
         .bg(bg_code())
         .overflow_hidden()
-        .child(tp_header_row(
-            controls.clone(),
-            tp_status,
-            expanded,
-            open_popover,
-        ))
-        .child(tp_inline_notice(tp_status))
+        .child(tp_header_row(controls.clone(), state, open_popover))
+        .child(tp_inline_notice(state))
         .child(when(
-            move || expanded.get(),
-            move || {
-                tp_expanded_body(
-                    controls.clone(),
-                    tp_status,
-                    tp_apps,
-                    capture_all,
-                    targets,
-                    block_quic,
-                )
-            },
+            move || state.expanded.get(),
+            move || tp_expanded_body(controls.clone(), state),
         ))
 }
 
 fn tp_header_row(
     controls: Arc<Controls>,
-    tp_status: Signal<TransparentProxyStatus>,
-    expanded: Signal<bool>,
+    state: TpCardState,
     open_popover: Signal<bool>,
 ) -> impl IntoElement {
     let langs = ui_langs();
@@ -75,8 +115,8 @@ fn tp_header_row(
         .ease_out()
         .focus_visible(apply_focus_ring)
         .on_press(move |_: &()| {
-            let next = !expanded.get_untracked();
-            expanded.set(next);
+            let next = !state.expanded.get_untracked();
+            state.expanded.set(next);
             if next {
                 refresh_transparent_proxy_state_async();
             }
@@ -92,7 +132,7 @@ fn tp_header_row(
                     12.0,
                     || Glyph::Shield,
                     move || {
-                        color(if tp_status.with(|st| st.is_on_or_starting()) {
+                        color(if state.tp_status.with(|st| st.is_on_or_starting()) {
                             accent_blue_text()
                         } else {
                             fg_secondary()
@@ -115,18 +155,36 @@ fn tp_header_row(
                         )
                         .child(
                             text(move || -> SharedString {
-                                tp_status_subtitle(ui_lang(langs), &tp_status.get()).into()
+                                let no_targets = tp_has_no_effective_targets(
+                                    state.capture_all.get(),
+                                    &state.targets.get(),
+                                );
+                                let prompt = state.needs_target_prompt.get();
+                                tp_status_subtitle(
+                                    ui_lang(langs),
+                                    &state.tp_status.get(),
+                                    no_targets,
+                                    prompt,
+                                )
+                                .into()
                             })
                             .number_of_lines(1)
                             .text_overflow(EllipsizeMode::Tail)
                             .text_size(px(TEXT_XS))
                             .text_color(move || {
-                                tp_status.with(|st| {
+                                let no_targets = tp_has_no_effective_targets(
+                                    state.capture_all.get(),
+                                    &state.targets.get(),
+                                );
+                                let prompt = state.needs_target_prompt.get();
+                                state.tp_status.with(|st| {
                                     if !st.in_applications
                                         || matches!(
                                             st.state,
                                             TpState::NeedsApproval | TpState::Error
                                         )
+                                        || (st.state == TpState::Running && no_targets)
+                                        || (!st.is_on_or_starting() && prompt && no_targets)
                                     {
                                         status_warn_fg()
                                     } else if st.is_on_or_starting() {
@@ -148,26 +206,22 @@ fn tp_header_row(
                 .child(menu_inline_pill(
                     move || {
                         let lang = ui_lang(langs);
-                        SharedString::from(if tp_status.with(|st| st.is_on_or_starting()) {
+                        SharedString::from(if state.tp_status.with(|st| st.is_on_or_starting()) {
                             t(lang, "停止", "Stop")
                         } else {
                             t(lang, "开启", "Start")
                         })
                     },
-                    move || tp_status.with(|st| st.is_on_or_starting()),
+                    move || state.tp_status.with(|st| st.is_on_or_starting()),
                     move || {
-                        let st = tp_status.get_untracked();
-                        if !st.in_applications && !st.is_on_or_starting() {
-                            expanded.set(true);
-                        }
                         let _ = open_popover;
-                        toggle_transparent_proxy(toggle_controls.clone());
+                        handle_tp_toggle_press(&toggle_controls, state);
                     },
                 ))
                 .child(glyph_px(
                     11.0,
                     move || {
-                        if expanded.get() {
+                        if state.expanded.get() {
                             Glyph::ChevronUp
                         } else {
                             Glyph::Chevron
@@ -178,7 +232,12 @@ fn tp_header_row(
         )
 }
 
-fn tp_status_subtitle(lang: Lang, st: &TransparentProxyStatus) -> String {
+fn tp_status_subtitle(
+    lang: Lang,
+    st: &TransparentProxyStatus,
+    no_effective_targets: bool,
+    needs_target_prompt: bool,
+) -> String {
     if !st.in_applications {
         #[cfg(target_os = "linux")]
         return t(
@@ -196,12 +255,23 @@ fn tp_status_subtitle(lang: Lang, st: &TransparentProxyStatus) -> String {
         .to_string();
     }
     match st.state {
-        TpState::Running => t(
-            lang,
-            "运行中 · 不改系统代理",
-            "Running · No OS proxy change",
-        )
-        .into(),
+        TpState::Running => {
+            if no_effective_targets {
+                t(
+                    lang,
+                    "运行中 · 未选择应用（暂不拦截）",
+                    "Running · No app selected (idle)",
+                )
+                .into()
+            } else {
+                t(
+                    lang,
+                    "运行中 · 不改系统代理",
+                    "Running · No OS proxy change",
+                )
+                .into()
+            }
+        }
         TpState::Starting => {
             #[cfg(target_os = "linux")]
             {
@@ -228,20 +298,88 @@ fn tp_status_subtitle(lang: Lang, st: &TransparentProxyStatus) -> String {
                 st.error.clone()
             }
         }
-        TpState::Idle => t(
-            lang,
-            "按应用直连抓包，不改系统代理",
-            "Per-app capture, no OS proxy",
-        )
-        .into(),
+        TpState::Idle => {
+            if needs_target_prompt && no_effective_targets {
+                t(
+                    lang,
+                    "请先选择目标应用或切为「全部应用」",
+                    "Select target apps or switch to All Apps",
+                )
+                .into()
+            } else {
+                t(
+                    lang,
+                    "按应用直连抓包，不改系统代理",
+                    "Per-app capture, no OS proxy",
+                )
+                .into()
+            }
+        }
     }
 }
 
-fn tp_inline_notice(tp_status: Signal<TransparentProxyStatus>) -> impl IntoElement {
+fn tp_inline_notice_text(lang: Lang, state: TpCardState) -> SharedString {
+    let no_targets = tp_has_no_effective_targets(state.capture_all.get(), &state.targets.get());
+    let prompt = state.needs_target_prompt.get();
+    state.tp_status.with(|st| {
+        if !st.in_applications {
+            #[cfg(target_os = "linux")]
+            return t(
+                lang,
+                "需要 Linux 5.12+ 内核并挂载 cgroup v2（/sys/fs/cgroup/cgroup.controllers）才能启用 eBPF 透明代理。",
+                "Requires Linux 5.12+ kernel and cgroup v2 (/sys/fs/cgroup/cgroup.controllers) for eBPF transparent proxy.",
+            )
+            .into();
+            #[cfg(not(target_os = "linux"))]
+            return t(
+                lang,
+                "请先将 zniff.app 移至 /Applications 目录再激活系统扩展。",
+                "Move zniff.app into /Applications first to activate the system extension.",
+            )
+            .into();
+        }
+        if st.state == TpState::NeedsApproval {
+            return t(
+                lang,
+                "请在系统设置 → 隐私与安全性 / 登录项与扩展中点击「允许」以启用 zniff 网络扩展。",
+                "Open System Settings → Privacy & Security / Login Items & Extensions and click Allow.",
+            )
+            .into();
+        }
+        if !st.error.is_empty() {
+            return st.error.clone().into();
+        }
+        if st.state == TpState::Running && no_targets {
+            return t(
+                lang,
+                "当前为「指定应用」但未选择任何应用，暂不会拦截流量；请在下方点选应用或切换为「全部应用」。",
+                "Selected Apps mode has no apps chosen, so no traffic is intercepted yet. Pick an app below or switch to All Apps.",
+            )
+            .into();
+        }
+        if !st.is_on_or_starting() && prompt && no_targets {
+            return t(
+                lang,
+                "请先在下方点选或输入至少一个目标应用（或切换为「全部应用」），再点击「开启」。",
+                "Pick or enter at least one target app below (or switch to All Apps), then click Start.",
+            )
+            .into();
+        }
+        SharedString::from("")
+    })
+}
+
+fn tp_inline_notice(state: TpCardState) -> impl IntoElement {
     when(
         move || {
-            tp_status.with(|st| {
-                !st.in_applications || st.state == TpState::NeedsApproval || !st.error.is_empty()
+            let no_targets =
+                tp_has_no_effective_targets(state.capture_all.get(), &state.targets.get());
+            let prompt = state.needs_target_prompt.get();
+            state.tp_status.with(|st| {
+                !st.in_applications
+                    || st.state == TpState::NeedsApproval
+                    || !st.error.is_empty()
+                    || tp_shows_empty_target_notice(st, no_targets, prompt)
             })
         },
         move || {
@@ -256,97 +394,108 @@ fn tp_inline_notice(tp_status: Signal<TransparentProxyStatus>) -> impl IntoEleme
                 .border_color(border_subtle())
                 .bg(status_warn_bg())
                 .child(
-                    text(move || -> SharedString {
-                        let lang = ui_lang(langs);
-                        tp_status.with(|st| {
-                            if !st.in_applications {
-                                #[cfg(target_os = "linux")]
-                                return t(
-                                    lang,
-                                    "需要 Linux 5.12+ 内核并挂载 cgroup v2（/sys/fs/cgroup/cgroup.controllers）才能启用 eBPF 透明代理。",
-                                    "Requires Linux 5.12+ kernel and cgroup v2 (/sys/fs/cgroup/cgroup.controllers) for eBPF transparent proxy.",
-                                )
-                                .into();
-                                #[cfg(not(target_os = "linux"))]
-                                return t(
-                                    lang,
-                                    "请先将 zniff.app 移至 /Applications 目录再激活系统扩展。",
-                                    "Move zniff.app into /Applications first to activate the system extension.",
-                                )
-                                .into();
-                            } else if st.state == TpState::NeedsApproval {
-                                t(
-                                    lang,
-                                    "请在系统设置 → 隐私与安全性 / 登录项与扩展中点击「允许」以启用 zniff 网络扩展。",
-                                    "Open System Settings → Privacy & Security / Login Items & Extensions and click Allow.",
-                                )
-                                .into()
-                            } else {
-                                st.error.clone().into()
-                            }
-                        })
-                    })
-                    .text_size(px(TEXT_XS))
-                    .line_height(Points(15.0))
-                    .text_color(status_warn_fg()),
+                    text(move || tp_inline_notice_text(ui_lang(langs), state))
+                        .text_size(px(TEXT_XS))
+                        .line_height(Points(15.0))
+                        .text_color(status_warn_fg()),
                 )
                 .child(when(
                     move || {
                         cfg!(target_os = "macos")
-                            && tp_status.with(|st| st.state == TpState::NeedsApproval)
+                            && state
+                                .tp_status
+                                .with(|st| st.state == TpState::NeedsApproval)
                     },
                     move || {
-                        view().w_full().flex_row().justify_end().child(menu_inline_pill(
-                            tr("打开系统设置", "Open System Settings"),
-                            || true,
-                            transparent_proxy::open_system_settings,
-                        ))
+                        view()
+                            .w_full()
+                            .flex_row()
+                            .justify_end()
+                            .child(menu_inline_pill(
+                                tr("打开系统设置", "Open System Settings"),
+                                || true,
+                                transparent_proxy::open_system_settings,
+                            ))
                     },
                 ))
                 .child(when(
                     move || {
-                        tp_status.with(|st| {
-                            st.state == TpState::Error && !st.setcap_command.is_empty()
-                        })
+                        state
+                            .tp_status
+                            .with(|st| st.state == TpState::Error && !st.setcap_command.is_empty())
                     },
                     move || {
                         let copied = signal(false);
-                        view().w_full().flex_row().justify_end().child(menu_inline_pill(
-                            move || {
-                                let lang = ui_lang(langs);
-                                SharedString::from(if copied.get() {
-                                    t(lang, "已复制", "Copied")
-                                } else {
-                                    t(lang, "复制免密命令", "Copy setcap cmd")
-                                })
-                            },
-                            || true,
-                            move || {
-                                let cmd = tp_status.with_untracked(|st| st.setcap_command.clone());
-                                if !cmd.is_empty() {
-                                    set_clipboard(cmd);
-                                    copied.set(true);
-                                }
-                            },
-                        ))
+                        view()
+                            .w_full()
+                            .flex_row()
+                            .justify_end()
+                            .child(menu_inline_pill(
+                                move || {
+                                    let lang = ui_lang(langs);
+                                    SharedString::from(if copied.get() {
+                                        t(lang, "已复制", "Copied")
+                                    } else {
+                                        t(lang, "复制免密命令", "Copy setcap cmd")
+                                    })
+                                },
+                                || true,
+                                move || {
+                                    let cmd = state
+                                        .tp_status
+                                        .with_untracked(|st| st.setcap_command.clone());
+                                    if !cmd.is_empty() {
+                                        set_clipboard(cmd);
+                                        copied.set(true);
+                                    }
+                                },
+                            ))
                     },
                 ))
         },
     )
 }
 
-fn tp_expanded_body(
-    controls: Arc<Controls>,
-    tp_status: Signal<TransparentProxyStatus>,
-    tp_apps: Signal<Vec<RunningApp>>,
-    capture_all: Signal<bool>,
-    targets: Signal<String>,
-    block_quic: Signal<bool>,
-) -> impl IntoElement {
+fn tp_scope_row(controls: Arc<Controls>, state: TpCardState) -> impl IntoElement {
     let mode_controls_sel = controls.clone();
-    let mode_controls_all = controls.clone();
-    let input_controls = controls.clone();
-    let chip_controls = controls.clone();
+    let mode_controls_all = controls;
+    view()
+        .w_full()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap_1p5()
+        .child(
+            text(tr("拦截范围", "Capture Scope"))
+                .text_size(px(11.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(fg_secondary()),
+        )
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .child(menu_inline_pill(
+                    tr("指定应用", "Selected Apps"),
+                    move || !state.capture_all.get(),
+                    move || {
+                        set_tp_capture_all(&mode_controls_sel, state, false);
+                    },
+                ))
+                .child(menu_inline_pill(
+                    tr("全部应用", "All Apps"),
+                    move || state.capture_all.get(),
+                    move || {
+                        set_tp_capture_all(&mode_controls_all, state, true);
+                    },
+                )),
+        )
+}
+
+fn tp_expanded_body(controls: Arc<Controls>, state: TpCardState) -> impl IntoElement {
+    let scope_controls = controls.clone();
+    let target_controls = controls.clone();
     let quic_controls = controls;
     let langs = ui_langs();
 
@@ -359,50 +508,10 @@ fn tp_expanded_body(
         .flex_col()
         .border_t_1()
         .border_color(border_subtle())
-        .child(
-            view()
-                .w_full()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .gap_1p5()
-                .child(
-                    text(tr("拦截范围", "Capture Scope"))
-                        .text_size(px(11.0))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(fg_secondary()),
-                )
-                .child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .gap_1()
-                        .child(menu_inline_pill(
-                            tr("指定应用", "Selected Apps"),
-                            move || !capture_all.get(),
-                            move || {
-                                set_tp_capture_all(&mode_controls_sel, capture_all, false);
-                            },
-                        ))
-                        .child(menu_inline_pill(
-                            tr("全部应用", "All Apps"),
-                            move || capture_all.get(),
-                            move || {
-                                set_tp_capture_all(&mode_controls_all, capture_all, true);
-                            },
-                        )),
-                ),
-        )
+        .child(tp_scope_row(scope_controls, state))
         .child(when(
-            move || !capture_all.get(),
-            move || {
-                tp_targets_section(
-                    chip_controls.clone(),
-                    input_controls.clone(),
-                    tp_apps,
-                    targets,
-                )
-            },
+            move || !state.capture_all.get(),
+            move || tp_targets_section(target_controls.clone(), state),
         ))
         .child(
             view()
@@ -424,16 +533,16 @@ fn tp_expanded_body(
                 .child(menu_inline_pill(
                     move || {
                         let lang = ui_lang(langs);
-                        SharedString::from(if block_quic.get() {
+                        SharedString::from(if state.block_quic.get() {
                             t(lang, "已开启", "On")
                         } else {
                             t(lang, "已关闭", "Off")
                         })
                     },
-                    move || block_quic.get(),
+                    move || state.block_quic.get(),
                     move || {
-                        let next = !block_quic.get_untracked();
-                        block_quic.set(next);
+                        let next = !state.block_quic.get_untracked();
+                        state.block_quic.set(next);
                         save_config_or_notify(&quic_controls, PrefName::TransparentProxy, |cfg| {
                             cfg.tp_block_quic = next;
                         });
@@ -459,11 +568,11 @@ fn tp_expanded_body(
         })
         .child(when(
             move || {
-                tp_status.with(|st| {
+                state.tp_status.with(|st| {
                     st.in_applications && (st.passwordless_ready || !st.setcap_command.is_empty())
                 })
             },
-            move || tp_linux_auth_section(tp_status),
+            move || tp_linux_auth_section(state.tp_status),
         ))
 }
 
@@ -546,12 +655,9 @@ fn tp_linux_auth_section(tp_status: Signal<TransparentProxyStatus>) -> impl Into
         ))
 }
 
-fn tp_targets_section(
-    chip_controls: Arc<Controls>,
-    input_controls: Arc<Controls>,
-    tp_apps: Signal<Vec<RunningApp>>,
-    targets: Signal<String>,
-) -> impl IntoElement {
+fn tp_targets_section(controls: Arc<Controls>, state: TpCardState) -> impl IntoElement {
+    let chip_controls = controls.clone();
+    let input_controls = controls;
     view()
         .w_full()
         .gap_1p5()
@@ -577,7 +683,7 @@ fn tp_targets_section(
                 )),
         )
         .child(view().w_full().flex_row().flex_wrap().gap_1().child(each(
-            move || tp_apps.get(),
+            move || state.tp_apps.get(),
             |app| {
                 if app.bundle_id.is_empty() {
                     app.name.clone()
@@ -590,7 +696,7 @@ fn tp_targets_section(
                 menu_inline_pill(
                     move || SharedString::from(app.with(|a| a.name.clone())),
                     move || {
-                        let raw = targets.get();
+                        let raw = state.targets.get();
                         app.with(|a| {
                             transparent_proxy::has_target(&raw, &a.name)
                                 || transparent_proxy::has_target(&raw, &a.exec_name)
@@ -601,12 +707,12 @@ fn tp_targets_section(
                     move || {
                         let next = app.with_untracked(|a| {
                             transparent_proxy::toggle_target_aliases(
-                                &targets.get_untracked(),
+                                &state.targets.get_untracked(),
                                 &a.name,
                                 &[&a.name, &a.bundle_id, &a.exec_name],
                             )
                         });
-                        set_tp_targets(&controls, targets, &next);
+                        set_tp_targets(&controls, state, &next);
                     },
                 )
             },
@@ -616,7 +722,7 @@ fn tp_targets_section(
                 input(),
                 tr("透明抓包目标进程", "Transparent proxy target apps"),
             )
-            .value(targets)
+            .value(state.targets)
             .placeholder({
                 #[cfg(target_os = "linux")]
                 let ph = tr(
@@ -637,26 +743,42 @@ fn tp_targets_section(
             .rounded(px(6.0))
             .bg(bg_card())
             .border_1()
-            .border_color(border_control())
+            .border_color(move || {
+                let empty = tp_has_no_effective_targets(false, &state.targets.get());
+                let warn = empty
+                    && (state.needs_target_prompt.get()
+                        || state.tp_status.with(|st| st.state == TpState::Running));
+                if warn {
+                    status_warn_fg()
+                } else {
+                    border_control()
+                }
+            })
             .focus(|style| style.border_color(accent_blue()))
             .text_size(px(11.5))
             .text_color(fg_primary())
             .on_change(move |text: &str| {
-                set_tp_targets(&input_controls, targets, text);
+                set_tp_targets(&input_controls, state, text);
             }),
         )
 }
 
-fn set_tp_capture_all(controls: &Controls, capture_all: Signal<bool>, next: bool) {
-    capture_all.set(next);
+fn set_tp_capture_all(controls: &Controls, state: TpCardState, next: bool) {
+    state.capture_all.set(next);
+    if next {
+        state.needs_target_prompt.set(false);
+    }
     save_config_or_notify(controls, PrefName::TransparentProxy, |cfg| {
         cfg.tp_capture_all = next;
     });
     sync_transparent_proxy_config(controls);
 }
 
-fn set_tp_targets(controls: &Controls, targets: Signal<String>, raw: &str) {
-    targets.set(raw.to_string());
+fn set_tp_targets(controls: &Controls, state: TpCardState, raw: &str) {
+    state.targets.set(raw.to_string());
+    if !transparent_proxy::parse_targets(raw).is_empty() {
+        state.needs_target_prompt.set(false);
+    }
     let stored = raw.trim().to_string();
     save_config_or_notify(controls, PrefName::TransparentProxy, |cfg| {
         cfg.tp_targets = stored;

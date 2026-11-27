@@ -6757,3 +6757,173 @@ export function onPreview(ctx) {
     assert!(!tree.has_text("解密摘要"));
     assert!(!tree.has_text("AES-256-GCM"));
 }
+
+#[test]
+fn transparent_proxy_empty_targets_blocks_start_expands_and_warns_when_cleared_zh_en() {
+    #[derive(Clone)]
+    struct TpHarnessState {
+        controls: Arc<Controls>,
+    }
+
+    thread_local! {
+        static TP_HARNESS: RefCell<Option<TpHarnessState>> = const { RefCell::new(None) };
+    }
+
+    #[component]
+    fn TpCardHarness() -> impl IntoElement {
+        let lang = TEST_LANG.get();
+        provide_base_contexts(lang);
+        let controls = make_controls("tp-empty-targets");
+        let tp_status = signal(crate::transparent_proxy::TransparentProxyStatus {
+            embedded: true,
+            in_applications: true,
+            state: crate::transparent_proxy::TpState::Idle,
+            active: false,
+            error: String::new(),
+            passwordless_ready: false,
+            setcap_command: String::new(),
+        });
+        let tp_apps = signal(vec![
+            crate::transparent_proxy::RunningApp {
+                name: "Firefox".into(),
+                bundle_id: "org.mozilla.firefox".into(),
+                exec_name: "firefox".into(),
+            },
+            crate::transparent_proxy::RunningApp {
+                name: "curl".into(),
+                bundle_id: String::new(),
+                exec_name: "curl".into(),
+            },
+        ]);
+        let open_popover = signal(true);
+        TP_HARNESS.with(|slot| {
+            *slot.borrow_mut() = Some(TpHarnessState {
+                controls: controls.clone(),
+            });
+        });
+
+        let set_running_sig = tp_status;
+        view()
+            .w(px(520.0))
+            .h(px(640.0))
+            .flex_col()
+            .child(
+                button()
+                    .on_press(move |_: &()| {
+                        set_running_sig.update(|st| {
+                            st.state = crate::transparent_proxy::TpState::Running;
+                            st.active = true;
+                        });
+                    })
+                    .child(text("SET_RUNNING")),
+            )
+            .child(text(move || {
+                format!("TP_ON={}", tp_status.with(|s| s.is_on_or_starting()))
+            }))
+            .child(transparent_proxy_card(
+                controls,
+                tp_status,
+                tp_apps,
+                open_popover,
+            ))
+    }
+
+    for lang in [Lang::Zh, Lang::En] {
+        TEST_LANG.set(lang);
+        let (mut core, mut tree) = mount::<TpCardHarness>(Size::new(px(520.0), px(640.0)));
+        let st = TP_HARNESS
+            .with(|slot| slot.borrow().clone())
+            .expect("tp harness");
+
+        let (
+            start_btn,
+            stop_btn,
+            scope_lbl,
+            sel_apps,
+            all_apps,
+            idle_sub,
+            prompt_sub,
+            prompt_banner,
+            run_ok_sub,
+            run_idle_sub,
+            run_idle_banner,
+        ) = match lang {
+            Lang::Zh => (
+                "开启",
+                "停止",
+                "拦截范围",
+                "指定应用",
+                "全部应用",
+                "按应用直连抓包，不改系统代理",
+                "请先选择目标应用或切为「全部应用」",
+                "再点击「开启」",
+                "运行中 · 不改系统代理",
+                "运行中 · 未选择应用（暂不拦截）",
+                "暂不会拦截流量",
+            ),
+            Lang::En => (
+                "Start",
+                "Stop",
+                "Capture Scope",
+                "Selected Apps",
+                "All Apps",
+                "Per-app capture, no OS proxy",
+                "Select target apps or switch to All Apps",
+                "then click Start",
+                "Running · No OS proxy change",
+                "Running · No app selected (idle)",
+                "no traffic is intercepted yet",
+            ),
+        };
+
+        // Initial collapsed idle state with no targets shows normal idle subtitle & no warning.
+        assert!(tree.has_text("TP_ON=false"));
+        assert!(tree.has_text(idle_sub));
+        assert!(!tree.has_text(scope_lbl));
+        assert!(!tree.has_text_containing(prompt_banner));
+
+        // 1. Clicking Start with empty targets blocks helper startup, auto-expands card, and prompts user.
+        assert!(tree.press_text(&mut core, start_btn));
+        assert!(matches!(
+            *st.controls.status.lock().unwrap(),
+            StatusMsg::TransparentProxyNeedsTargets
+        ));
+        assert!(tree.has_text("TP_ON=false"));
+        assert!(tree.has_text(scope_lbl));
+        assert!(tree.has_text("Firefox"));
+        assert!(tree.has_text(prompt_sub));
+        assert!(tree.has_text_containing(prompt_banner));
+
+        // 2. A -> B: selecting a target chip persists config and clears the pre-start warning.
+        assert!(tree.press_text(&mut core, "Firefox"));
+        assert_eq!(saved_config().tp_targets, "Firefox");
+        assert!(tree.has_text(idle_sub));
+        assert!(!tree.has_text(prompt_sub));
+        assert!(!tree.has_text_containing(prompt_banner));
+
+        // 3. B -> C: transition to Running, then clear targets while running -> stays Running with warning.
+        assert!(tree.press_text(&mut core, "SET_RUNNING"));
+        assert!(tree.has_text("TP_ON=true"));
+        assert!(tree.has_text(stop_btn));
+        assert!(tree.has_text(run_ok_sub));
+        assert!(!tree.has_text_containing(run_idle_banner));
+
+        assert!(tree.press_text(&mut core, "Firefox"));
+        assert_eq!(saved_config().tp_targets, "");
+        assert!(tree.has_text("TP_ON=true"));
+        assert!(tree.has_text(stop_btn));
+        assert!(tree.has_text(run_idle_sub));
+        assert!(tree.has_text_containing(run_idle_banner));
+
+        // 4. C -> D: switching to All Apps clears warning; switching back to Selected Apps restores warning.
+        assert!(tree.press_text(&mut core, all_apps));
+        assert!(saved_config().tp_capture_all);
+        assert!(tree.has_text(run_ok_sub));
+        assert!(!tree.has_text_containing(run_idle_banner));
+
+        assert!(tree.press_text(&mut core, sel_apps));
+        assert!(!saved_config().tp_capture_all);
+        assert!(tree.has_text(run_idle_sub));
+        assert!(tree.has_text_containing(run_idle_banner));
+    }
+}

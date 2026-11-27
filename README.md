@@ -52,7 +52,7 @@ https://github.com/user-attachments/assets/19339425-f1df-47fe-ab8a-88bb586fd4a1
   sh install-linux.sh
   ```
   Downloads the matching `x86_64` / `aarch64` release (verified with `SHA256SUMS`, falling back to Gitee if GitHub is unreachable), checks GTK 4.14+ / `glibc 2.39` dependencies, and installs the binary, `zniff-ebpf-helper`, icon, desktop entry, and autostart under `~/.local` and `~/.config` without root (or run `./install-linux.sh` from an unpacked Linux `.tar.gz`). Supports `--no-autostart`, `--ebpf-caps`, `--no-ebpf-caps`, `--tag vX.Y.Z`, and `--uninstall`.
-  - **Linux eBPF transparent proxy**: requires Linux 5.12+ and cgroup v2. Starting it from the **Connect** popover prompts via `pkexec` by default; pass `--ebpf-caps` during install (or confirm the prompt / run `sudo setcap cap_bpf,cap_net_admin,cap_sys_resource+ep ~/.local/bin/zniff-ebpf-helper`) for passwordless start, and re-run `setcap` after upgrading `zniff-ebpf-helper`.
+  - **Linux eBPF transparent proxy**: requires Linux 5.12+ and cgroup v2. Starting it from the **Connect** popover prompts via `pkexec` by default; pass `--ebpf-caps` during install (or confirm the prompt / run `sudo setcap cap_bpf,cap_net_admin,cap_perfmon,cap_dac_read_search,cap_sys_resource+ep ~/.local/bin/zniff-ebpf-helper`) for passwordless start, and re-run `setcap` after upgrading `zniff-ebpf-helper`.
 - **From source**:
   ```bash
   cargo install --git https://github.com/vicanso/zniff

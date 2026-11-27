@@ -24,7 +24,7 @@ fi
 dest=${1:-"$helper_target_dir/release/zniff-ebpf-helper"}
 
 if ! command -v bpf-linker >/dev/null 2>&1; then
-  echo "missing bpf-linker in PATH (install via: cargo install --locked bpf-linker)" >&2
+  echo "missing bpf-linker in PATH (install prebuilt static binary via: cargo binstall --no-confirm --disable-strategies compile bpf-linker, or from https://github.com/aya-rs/bpf-linker/releases)" >&2
   exit 1
 fi
 

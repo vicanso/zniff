@@ -2,7 +2,7 @@
 #![no_main]
 
 use aya_ebpf::{
-    helpers::{bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_get_socket_cookie},
+    helpers::{bpf_get_current_pid_tgid, bpf_get_socket_cookie, generated},
     macros::{cgroup_sock_addr, map, sock_ops, tracepoint},
     maps::{Array, HashMap, LruHashMap},
     programs::{SockAddrContext, SockOpsContext, TracePointContext},
@@ -33,15 +33,8 @@ static ORIG_DST_BY_SRC_PORT: LruHashMap<SrcPortKey, OrigDst> =
     LruHashMap::with_max_entries(16_384, 0);
 
 #[inline(always)]
-fn current_tgid_and_tid() -> (u32, u32) {
-    let pid_tgid = bpf_get_current_pid_tgid();
-    ((pid_tgid >> 32) as u32, pid_tgid as u32)
-}
-
-#[inline(always)]
-fn load_active_config() -> Option<Config> {
-    let ptr = CONFIG.get_ptr(0)?;
-    let cfg = unsafe { *ptr };
+fn load_active_config() -> Option<&'static Config> {
+    let cfg = CONFIG.get(0)?;
     if cfg.enabled == 0 {
         None
     } else {
@@ -50,24 +43,58 @@ fn load_active_config() -> Option<Config> {
 }
 
 #[inline(always)]
-fn should_intercept_current(cfg: &Config) -> Option<(u32, CommKey)> {
-    let (tgid, _) = current_tgid_and_tid();
-    if tgid == 0 || tgid == cfg.zniff_pid || tgid == cfg.helper_pid {
-        return None;
-    }
-    if EXCLUDED_PIDS.get_ptr(&tgid).is_some() {
-        return None;
-    }
-    let raw_comm = bpf_get_current_comm().unwrap_or([0; 16]);
-    let comm_key = CommKey::from_bytes_lowercased(&raw_comm);
-    if cfg.capture_all != 0
-        || TARGET_PIDS.get_ptr(&tgid).is_some()
-        || TARGET_COMMS.get_ptr(&comm_key).is_some()
-    {
-        Some((tgid, comm_key))
+fn read_current_comm_lowercased(out: &mut CommKey) {
+    let mut raw = [0u8; 16];
+    let ret = unsafe { generated::bpf_get_current_comm(raw.as_mut_ptr().cast(), 16) };
+    if ret == 0 {
+        out.init_from_comm(&raw);
     } else {
-        None
+        out.bytes = [0; 16];
     }
+}
+
+#[inline(always)]
+fn should_intercept_current(cfg: &Config, comm_key: &mut CommKey) -> u32 {
+    let tgid = (bpf_get_current_pid_tgid() >> 32) as u32;
+    if tgid == 0 || tgid == cfg.zniff_pid || tgid == cfg.helper_pid {
+        return 0;
+    }
+    if unsafe { EXCLUDED_PIDS.get(&tgid) }.is_some() {
+        return 0;
+    }
+    read_current_comm_lowercased(comm_key);
+    if cfg.capture_all != 0
+        || unsafe { TARGET_PIDS.get(&tgid) }.is_some()
+        || unsafe { TARGET_COMMS.get(comm_key) }.is_some()
+    {
+        tgid
+    } else {
+        0
+    }
+}
+
+#[inline(always)]
+fn write_ipv6_octets(words: &[u32; 4], out: &mut [u8; 16]) {
+    let b0 = words[0].to_ne_bytes();
+    let b1 = words[1].to_ne_bytes();
+    let b2 = words[2].to_ne_bytes();
+    let b3 = words[3].to_ne_bytes();
+    out[0] = b0[0];
+    out[1] = b0[1];
+    out[2] = b0[2];
+    out[3] = b0[3];
+    out[4] = b1[0];
+    out[5] = b1[1];
+    out[6] = b1[2];
+    out[7] = b1[3];
+    out[8] = b2[0];
+    out[9] = b2[1];
+    out[10] = b2[2];
+    out[11] = b2[3];
+    out[12] = b3[0];
+    out[13] = b3[1];
+    out[14] = b3[2];
+    out[15] = b3[3];
 }
 
 #[cgroup_sock_addr(connect4)]
@@ -89,9 +116,11 @@ fn try_connect4(ctx: &SockAddrContext) -> i32 {
     if is_bypassed_ipv4(ip_host) {
         return 1;
     }
-    let Some((tgid, comm_key)) = should_intercept_current(&cfg) else {
+    let mut comm_key = CommKey { bytes: [0; 16] };
+    let tgid = should_intercept_current(cfg, &mut comm_key);
+    if tgid == 0 {
         return 1;
-    };
+    }
     if sa.protocol == IPPROTO_UDP {
         if cfg.block_quic != 0 && dst_port == 443 {
             return 0;
@@ -134,20 +163,6 @@ pub fn zniff_connect6(ctx: SockAddrContext) -> i32 {
 }
 
 #[inline(always)]
-fn ipv6_words_to_octets(words: [u32; 4]) -> [u8; 16] {
-    let mut out = [0u8; 16];
-    let b0 = words[0].to_ne_bytes();
-    let b1 = words[1].to_ne_bytes();
-    let b2 = words[2].to_ne_bytes();
-    let b3 = words[3].to_ne_bytes();
-    out[0..4].copy_from_slice(&b0);
-    out[4..8].copy_from_slice(&b1);
-    out[8..12].copy_from_slice(&b2);
-    out[12..16].copy_from_slice(&b3);
-    out
-}
-
-#[inline(always)]
 fn try_connect6(ctx: &SockAddrContext) -> i32 {
     let Some(cfg) = load_active_config() else {
         return 1;
@@ -157,13 +172,16 @@ fn try_connect6(ctx: &SockAddrContext) -> i32 {
     if dst_port == 0 || dst_port == 53 {
         return 1;
     }
-    let dst_addr = ipv6_words_to_octets(sa.user_ip6);
-    if is_bypassed_ipv6(dst_addr) {
+    let mut dst_addr = [0u8; 16];
+    write_ipv6_octets(&sa.user_ip6, &mut dst_addr);
+    if is_bypassed_ipv6(&dst_addr) {
         return 1;
     }
-    let Some((tgid, comm_key)) = should_intercept_current(&cfg) else {
+    let mut comm_key = CommKey { bytes: [0; 16] };
+    let tgid = should_intercept_current(cfg, &mut comm_key);
+    if tgid == 0 {
         return 1;
-    };
+    }
     if sa.protocol == IPPROTO_UDP {
         if cfg.block_quic != 0 && dst_port == 443 {
             return 0;
@@ -206,7 +224,8 @@ pub fn zniff_sendmsg4(ctx: SockAddrContext) -> i32 {
     if dst_port != 443 || is_bypassed_ipv4(u32::from_be(sa.user_ip4)) {
         return 1;
     }
-    if should_intercept_current(&cfg).is_some() {
+    let mut comm_key = CommKey { bytes: [0; 16] };
+    if should_intercept_current(cfg, &mut comm_key) != 0 {
         0
     } else {
         1
@@ -223,10 +242,16 @@ pub fn zniff_sendmsg6(ctx: SockAddrContext) -> i32 {
     }
     let sa = unsafe { &*ctx.sock_addr };
     let dst_port = u16::from_be(sa.user_port as u16);
-    if dst_port != 443 || is_bypassed_ipv6(ipv6_words_to_octets(sa.user_ip6)) {
+    if dst_port != 443 {
         return 1;
     }
-    if should_intercept_current(&cfg).is_some() {
+    let mut dst_addr = [0u8; 16];
+    write_ipv6_octets(&sa.user_ip6, &mut dst_addr);
+    if is_bypassed_ipv6(&dst_addr) {
+        return 1;
+    }
+    let mut comm_key = CommKey { bytes: [0; 16] };
+    if should_intercept_current(cfg, &mut comm_key) != 0 {
         0
     } else {
         1
@@ -242,10 +267,10 @@ pub fn zniff_sockops(ctx: SockOpsContext) -> u32 {
     if cookie == 0 {
         return 1;
     }
-    let Some(orig_ptr) = ORIG_DST_BY_COOKIE.get_ptr(&cookie) else {
+    let Some(orig_ref) = (unsafe { ORIG_DST_BY_COOKIE.get(&cookie) }) else {
         return 1;
     };
-    let orig = unsafe { *orig_ptr };
+    let orig = *orig_ref;
     let _ = ORIG_DST_BY_COOKIE.remove(&cookie);
 
     let key = SrcPortKey {
@@ -262,16 +287,16 @@ pub fn zniff_sched_exec(_ctx: TracePointContext) -> u32 {
     let Some(cfg) = load_active_config() else {
         return 0;
     };
-    let (tgid, _) = current_tgid_and_tid();
+    let tgid = (bpf_get_current_pid_tgid() >> 32) as u32;
     if tgid == 0 || tgid == cfg.zniff_pid || tgid == cfg.helper_pid {
         return 0;
     }
-    if EXCLUDED_PIDS.get_ptr(&tgid).is_some() {
+    if unsafe { EXCLUDED_PIDS.get(&tgid) }.is_some() {
         return 0;
     }
-    let raw_comm = bpf_get_current_comm().unwrap_or([0; 16]);
-    let key = CommKey::from_bytes_lowercased(&raw_comm);
-    if TARGET_COMMS.get_ptr(&key).is_some() {
+    let mut key = CommKey { bytes: [0; 16] };
+    read_current_comm_lowercased(&mut key);
+    if unsafe { TARGET_COMMS.get(&key) }.is_some() {
         let _ = TARGET_PIDS.insert(&tgid, &1u8, 0);
     }
     0
@@ -285,22 +310,33 @@ pub fn zniff_sched_fork(ctx: TracePointContext) -> u32 {
     if cfg.fork_child_pid_offset == 0 {
         return 0;
     }
-    let (parent_tgid, _) = current_tgid_and_tid();
-    if TARGET_PIDS.get_ptr(&parent_tgid).is_none() {
+    let parent_tgid = (bpf_get_current_pid_tgid() >> 32) as u32;
+    if unsafe { TARGET_PIDS.get(&parent_tgid) }.is_none() {
         return 0;
     }
-    if let Ok(child_pid) = unsafe { ctx.read_at::<i32>(cfg.fork_child_pid_offset as usize) } {
-        if child_pid > 0 {
-            let pid_u32 = child_pid as u32;
-            let _ = TARGET_PIDS.insert(&pid_u32, &1u8, 0);
-        }
+    let mut child_pid: i32 = 0;
+    let ret = unsafe {
+        generated::bpf_probe_read_kernel(
+            (&mut child_pid as *mut i32).cast(),
+            core::mem::size_of::<i32>() as u32,
+            ctx.as_ptr()
+                .cast::<u8>()
+                .add(cfg.fork_child_pid_offset as usize)
+                .cast(),
+        )
+    };
+    if ret == 0 && child_pid > 0 {
+        let pid_u32 = child_pid as u32;
+        let _ = TARGET_PIDS.insert(&pid_u32, &1u8, 0);
     }
     0
 }
 
 #[tracepoint]
 pub fn zniff_sched_exit(_ctx: TracePointContext) -> u32 {
-    let (tgid, tid) = current_tgid_and_tid();
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let tgid = (pid_tgid >> 32) as u32;
+    let tid = pid_tgid as u32;
     if tgid != 0 && tgid == tid {
         let _ = TARGET_PIDS.remove(&tgid);
         let _ = EXCLUDED_PIDS.remove(&tgid);

@@ -52,7 +52,7 @@ https://github.com/user-attachments/assets/19339425-f1df-47fe-ab8a-88bb586fd4a1
   sh install-linux.sh
   ```
   无需 `root`，自动下载对应 `x86_64` / `aarch64` 发行包并通过 `SHA256SUMS` 校验（GitHub 不可达时自动回落 Gitee 镜像），检查 GTK 4.14+ / `glibc 2.39` 运行依赖，并将主程序、`zniff-ebpf-helper`、图标、启动器项与开机自启安装到 `~/.local` 和 `~/.config`（也可解压 Linux `.tar.gz` 后直接运行包内 `./install-linux.sh`）。支持 `--no-autostart`、`--ebpf-caps`、`--no-ebpf-caps`、`--tag vX.Y.Z` 与 `--uninstall`。
-  - **Linux eBPF 透明代理**：需要 Linux 5.12+ 与 cgroup v2。默认在 **「接入」** 面板点击开启时通过 `pkexec` 弹窗授权；安装时加 `--ebpf-caps`（或在交互式安装确认提示中输入 `y`，或手动执行 `sudo setcap cap_bpf,cap_net_admin,cap_sys_resource+ep ~/.local/bin/zniff-ebpf-helper`）即可免密开启，原地更新替换 `zniff-ebpf-helper` 后需重新执行一次 `setcap`。
+  - **Linux eBPF 透明代理**：需要 Linux 5.12+ 与 cgroup v2。默认在 **「接入」** 面板点击开启时通过 `pkexec` 弹窗授权；安装时加 `--ebpf-caps`（或在交互式安装确认提示中输入 `y`，或手动执行 `sudo setcap cap_bpf,cap_net_admin,cap_perfmon,cap_dac_read_search,cap_sys_resource+ep ~/.local/bin/zniff-ebpf-helper`）即可免密开启，原地更新替换 `zniff-ebpf-helper` 后需重新执行一次 `setcap`。
 - **源码安装**：
   ```bash
   cargo install --git https://github.com/vicanso/zniff

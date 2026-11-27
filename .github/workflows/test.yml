@@ -126,13 +126,15 @@ jobs:
         if: matrix.name == 'linux'
       - name: test linux eBPF workspace & build helper
         if: matrix.name == 'linux'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           cargo fmt --manifest-path linux/ebpf/Cargo.toml --all -- --check
           cargo fmt --manifest-path linux/ebpf/zniff-ebpf-prog/Cargo.toml -- --check
           cargo clippy --manifest-path linux/ebpf/Cargo.toml --workspace --all-targets -- -D warnings
           cargo test --manifest-path linux/ebpf/Cargo.toml --workspace
-          cargo binstall --no-confirm bpf-linker || cargo install --locked bpf-linker
+          cargo binstall --no-confirm --disable-strategies compile bpf-linker
           ./scripts/build-linux-ebpf.sh
       - name: nsh check (macOS & Linux)
         if: matrix.name == 'macos' || matrix.name == 'linux'

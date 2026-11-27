@@ -27,17 +27,31 @@ pub struct CommKey {
 }
 
 impl CommKey {
-    pub fn from_bytes_lowercased(raw: &[u8]) -> Self {
-        let mut bytes = [0u8; 16];
-        for (idx, &b) in raw.iter().take(15).enumerate() {
+    #[inline(always)]
+    pub fn init_from_comm(&mut self, raw: &[u8; 16]) {
+        self.bytes = [0; 16];
+        let mut idx = 0;
+        while idx < 15 {
+            let b = raw[idx];
             if b == 0 {
                 break;
             }
-            bytes[idx] = b.to_ascii_lowercase();
+            self.bytes[idx] = b.to_ascii_lowercase();
+            idx += 1;
         }
-        Self { bytes }
     }
 
+    #[cfg(not(target_arch = "bpf"))]
+    pub fn from_bytes_lowercased(raw: &[u8]) -> Self {
+        let mut buf = [0u8; 16];
+        let len = raw.len().min(15);
+        buf[..len].copy_from_slice(&raw[..len]);
+        let mut key = Self::default();
+        key.init_from_comm(&buf);
+        key
+    }
+
+    #[cfg(not(target_arch = "bpf"))]
     pub fn from_str_lowercased(s: &str) -> Self {
         Self::from_bytes_lowercased(s.trim().as_bytes())
     }
@@ -73,6 +87,7 @@ unsafe impl aya::Pod for SrcPortKey {}
 
 /// Returns `true` for non-routable / loopback / link-local / multicast IPv4 targets
 /// that transparent proxying must never hijack (host-byte-order `ip`).
+#[inline(always)]
 pub const fn is_bypassed_ipv4(ip_host_order: u32) -> bool {
     let first = (ip_host_order >> 24) as u8;
     let second = ((ip_host_order >> 16) & 0xff) as u8;
@@ -83,7 +98,8 @@ pub const fn is_bypassed_ipv4(ip_host_order: u32) -> bool {
 
 /// Returns `true` for unspecified (`::`), loopback (`::1`), link-local (`fe80::/10`),
 /// multicast (`ff00::/8`), or bypassed IPv4-mapped (`::ffff:a.b.c.d`) addresses.
-pub const fn is_bypassed_ipv6(octets: [u8; 16]) -> bool {
+#[inline(always)]
+pub const fn is_bypassed_ipv6(octets: &[u8; 16]) -> bool {
     let is_zero_prefix = octets[0] == 0
         && octets[1] == 0
         && octets[2] == 0
@@ -126,6 +142,11 @@ mod tests {
 
     #[test]
     fn comm_key_lowercases_and_truncates_at_15_bytes() {
+        let mut direct = CommKey { bytes: [0xff; 16] };
+        direct.init_from_comm(b"CuRl\0garbage1234");
+        assert_eq!(&direct.bytes[..4], b"curl");
+        assert_eq!(&direct.bytes[4..], &[0; 12]);
+
         let key = CommKey::from_str_lowercased("Chrome_IOThreadExtra");
         assert_eq!(&key.bytes[..15], b"chrome_iothread");
         assert_eq!(key.bytes[15], 0);
@@ -148,23 +169,23 @@ mod tests {
 
     #[test]
     fn bypassed_ipv6_covers_loopback_link_local_multicast_and_v4_mapped() {
-        assert!(is_bypassed_ipv6([0; 16]));
+        assert!(is_bypassed_ipv6(&[0; 16]));
         let mut loopback = [0u8; 16];
         loopback[15] = 1;
-        assert!(is_bypassed_ipv6(loopback));
-        assert!(is_bypassed_ipv6([
+        assert!(is_bypassed_ipv6(&loopback));
+        assert!(is_bypassed_ipv6(&[
             0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1
         ]));
-        assert!(is_bypassed_ipv6([
+        assert!(is_bypassed_ipv6(&[
             0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1
         ]));
-        assert!(is_bypassed_ipv6([
+        assert!(is_bypassed_ipv6(&[
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 127, 0, 0, 1
         ]));
-        assert!(!is_bypassed_ipv6([
+        assert!(!is_bypassed_ipv6(&[
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 8, 8, 8, 8
         ]));
-        assert!(!is_bypassed_ipv6([
+        assert!(!is_bypassed_ipv6(&[
             0x26, 0x06, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11, 0x11
         ]));
     }

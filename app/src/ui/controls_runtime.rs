@@ -1596,10 +1596,14 @@ pub(crate) fn toggle_transparent_proxy(controls: Arc<Controls>) {
             set_status(&controls, StatusMsg::TransparentProxyNeedsApplications);
             return;
         }
+        let tp_cfg = transparent_proxy_config_from(&controls);
+        if !tp_cfg.capture_all && tp_cfg.targets.is_empty() {
+            set_status(&controls, StatusMsg::TransparentProxyNeedsTargets);
+            return;
+        }
         if ensure_capture_port_for_launcher(&controls).is_none() {
             return;
         }
-        let tp_cfg = transparent_proxy_config_from(&controls);
         match transparent_proxy::start(&tp_cfg) {
             Ok(transparent_proxy::StartOutcome::Started) => {
                 set_status(&controls, StatusMsg::TransparentProxyStarted);

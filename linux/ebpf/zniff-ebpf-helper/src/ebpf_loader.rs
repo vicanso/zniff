@@ -54,8 +54,8 @@ impl EbpfController {
         attach_cgroup_sock_addr(&mut ebpf, "zniff_sendmsg6")?;
         attach_sockops(&mut ebpf, "zniff_sockops")?;
 
-        attach_tracepoint(&mut ebpf, "zniff_sched_exec", "sched", "sched_process_exec")?;
-        attach_tracepoint(&mut ebpf, "zniff_sched_exit", "sched", "sched_process_exit")?;
+        let _ = attach_tracepoint(&mut ebpf, "zniff_sched_exec", "sched", "sched_process_exec");
+        let _ = attach_tracepoint(&mut ebpf, "zniff_sched_exit", "sched", "sched_process_exit");
         let fork_child_pid_offset = match detect_fork_child_pid_offset() {
             Some(off)
                 if off > 0

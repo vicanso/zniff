@@ -223,7 +223,9 @@ jobs:
       - uses: cargo-bins/cargo-binstall@main
 
       - name: Install bpf-linker
-        run: cargo binstall --no-confirm bpf-linker || cargo install --locked bpf-linker
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: cargo binstall --no-confirm --disable-strategies compile bpf-linker
 
       - uses: Swatinem/rust-cache@v2
         with:

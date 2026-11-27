@@ -306,6 +306,7 @@ pub enum StatusMsg {
     TransparentProxyStopped,
     TransparentProxyFailed(String),
     TransparentProxyNeedsApplications,
+    TransparentProxyNeedsTargets,
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     ScriptHooksInitialized {
         path: String,
@@ -1091,6 +1092,12 @@ impl StatusMsg {
                 )
             }
             .into(),
+            Self::TransparentProxyNeedsTargets => t(
+                lang,
+                "请先选择至少一个目标应用，或切换为「全部应用」后再开启透明抓包",
+                "Select at least one target app or switch to All Apps before starting Transparent Proxy",
+            )
+            .into(),
             Self::ScriptHooksInitialized { path } => match lang {
                 Lang::Zh => format!("已初始化脚本勾子目录并复制路径 · {path}"),
                 Lang::En => format!("Initialized hooks dir & copied path · {path}"),
@@ -1245,6 +1252,7 @@ impl StatusMsg {
             | Self::TransparentProxyNeedsApproval
             | Self::TransparentProxyFailed(_)
             | Self::TransparentProxyNeedsApplications
+            | Self::TransparentProxyNeedsTargets
             | Self::CaInstalledNeedsTrust
             | Self::ProtoEditInEditor
             | Self::RuleGroupLimitReached(_)

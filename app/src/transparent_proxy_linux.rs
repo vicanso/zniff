@@ -1,7 +1,8 @@
 //! Linux cgroup v2 + `aya` eBPF transparent proxy host controller.
 //!
-//! Launches and drives `zniff-ebpf-helper` (either directly when `cap_bpf` +
-//! `cap_net_admin` are granted or running as root, or via `pkexec`), keeps
+//! Launches and drives `zniff-ebpf-helper` (either directly when `cap_bpf`,
+//! `cap_net_admin`, `cap_perfmon`, and `cap_dac_read_search` are granted or
+//! running as root, or via `pkexec`), keeps
 //! `/proc` running applications synchronized, and forwards live config updates
 //! over a JSON-RPC stdin/stdout control pipe.
 
@@ -109,10 +110,22 @@ pub fn parse_desktop_entry_name_and_exec(content: &str) -> Option<(String, Strin
     (!basename.is_empty()).then(|| (name, basename.to_string()))
 }
 
-/// Checks `getcap` output for both `cap_bpf` and `cap_net_admin`.
-pub fn has_cap_bpf_and_net_admin(getcap_output: &str) -> bool {
+pub const EBPF_SETCAP_SPEC: &str =
+    "cap_bpf,cap_net_admin,cap_perfmon,cap_dac_read_search,cap_sys_resource+ep";
+
+/// Checks `getcap` output for all capabilities required to load cgroup hooks and
+/// tracepoints without root (`cap_bpf`, `cap_net_admin`, `cap_perfmon`,
+/// `cap_dac_read_search`).
+pub fn has_required_ebpf_caps(getcap_output: &str) -> bool {
     let lower = getcap_output.to_ascii_lowercase();
-    lower.contains("cap_bpf") && lower.contains("cap_net_admin")
+    [
+        "cap_bpf",
+        "cap_net_admin",
+        "cap_perfmon",
+        "cap_dac_read_search",
+    ]
+    .iter()
+    .all(|cap| lower.contains(cap))
 }
 
 /// Formats the `sudo setcap` command for granting passwordless eBPF capabilities
@@ -129,7 +142,7 @@ pub fn format_setcap_command(helper_path: &std::path::Path) -> String {
         let escaped = raw.replace('\'', "'\\''");
         format!("'{escaped}'")
     };
-    format!("sudo setcap cap_bpf,cap_net_admin,cap_sys_resource+ep {arg}")
+    format!("sudo setcap {EBPF_SETCAP_SPEC} {arg}")
 }
 
 #[allow(dead_code)]
@@ -159,7 +172,7 @@ pub mod native {
     use std::time::{Duration, Instant};
 
     use super::{
-        HelperEvent, format_setcap_command, has_cap_bpf_and_net_admin, helper_command_json_update,
+        HelperEvent, format_setcap_command, has_required_ebpf_caps, helper_command_json_update,
         kernel_supports_ebpf, parse_desktop_entry_name_and_exec, parse_helper_event,
         runtime_state_slot,
     };
@@ -228,7 +241,7 @@ pub mod native {
                 && out.status.success()
             {
                 let stdout = String::from_utf8_lossy(&out.stdout);
-                if has_cap_bpf_and_net_admin(&stdout) {
+                if has_required_ebpf_caps(&stdout) {
                     return true;
                 }
             }
@@ -314,7 +327,7 @@ pub mod native {
         };
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::null());
 
         let mut child = match cmd.spawn() {
             Ok(c) => c,
@@ -606,10 +619,13 @@ mod tests {
             "[Desktop Entry]\nName=Firefox\nExec=env MOZ_ENABLE_WAYLAND=1 /usr/bin/firefox %u\n",
         );
         assert_eq!(parsed, Some(("Firefox".into(), "firefox".into())));
-        assert!(has_cap_bpf_and_net_admin(
+        assert!(has_required_ebpf_caps(
+            "/home/u/.local/bin/zniff-ebpf-helper cap_dac_read_search,cap_net_admin,cap_sys_resource,cap_perfmon,cap_bpf=ep"
+        ));
+        assert!(!has_required_ebpf_caps(
             "/home/u/.local/bin/zniff-ebpf-helper cap_net_admin,cap_bpf,cap_sys_resource=ep"
         ));
-        assert!(!has_cap_bpf_and_net_admin(
+        assert!(!has_required_ebpf_caps(
             "/home/u/.local/bin/zniff-ebpf-helper cap_net_admin=ep"
         ));
     }
@@ -618,11 +634,11 @@ mod tests {
     fn setcap_command_formatting_quotes_when_needed() {
         assert_eq!(
             format_setcap_command(std::path::Path::new("/home/u/.local/bin/zniff-ebpf-helper")),
-            "sudo setcap cap_bpf,cap_net_admin,cap_sys_resource+ep /home/u/.local/bin/zniff-ebpf-helper"
+            "sudo setcap cap_bpf,cap_net_admin,cap_perfmon,cap_dac_read_search,cap_sys_resource+ep /home/u/.local/bin/zniff-ebpf-helper"
         );
         assert_eq!(
             format_setcap_command(std::path::Path::new("/tmp/my 'dir'/zniff-ebpf-helper")),
-            "sudo setcap cap_bpf,cap_net_admin,cap_sys_resource+ep '/tmp/my '\\''dir'\\''/zniff-ebpf-helper'"
+            "sudo setcap cap_bpf,cap_net_admin,cap_perfmon,cap_dac_read_search,cap_sys_resource+ep '/tmp/my '\\''dir'\\''/zniff-ebpf-helper'"
         );
     }
 
