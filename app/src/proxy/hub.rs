@@ -12,7 +12,7 @@ pub(super) struct PooledH2 {
 pub(super) type PlainPoolMap = HashMap<(String, u16), Vec<(u64, TcpStream)>>;
 
 pub struct Hub {
-    pub(super) session: Mutex<Session>,
+    pub(super) session: Arc<Mutex<Session>>,
     pub(super) generation: Arc<AtomicU64>,
     pub(super) state_tx: watch::Sender<u64>,
     /// Milliseconds since [`body_clock`] of the last streaming UI bump.
@@ -26,6 +26,7 @@ pub struct Hub {
     pub(super) attributed_rules: Mutex<Vec<rules::AttributedRule>>,
     pub(super) rules_text: Mutex<String>,
     pub(super) rule_groups: Mutex<Vec<crate::config::RuleGroup>>,
+    pub(super) script_hooks: Mutex<Vec<crate::hook_spec::ScriptHookConfig>>,
     pub(super) rules_rev: AtomicU64,
     /// Session-only. Off skips every rule without rewriting the text.
     pub(super) apply_rules: AtomicBool,
@@ -171,7 +172,7 @@ impl Hub {
             .with_no_client_auth();
         let (state_tx, _) = watch::channel(0_u64);
         Ok(Self {
-            session: Mutex::new(Session::default()),
+            session: Arc::new(Mutex::new(Session::default())),
             generation: Arc::new(AtomicU64::new(1)),
             state_tx,
             body_touch_ms: AtomicU64::new(0),
@@ -184,6 +185,7 @@ impl Hub {
             attributed_rules: Mutex::new(Vec::new()),
             rules_text: Mutex::new(String::new()),
             rule_groups: Mutex::new(Vec::new()),
+            script_hooks: Mutex::new(Vec::new()),
             rules_rev: AtomicU64::new(0),
             apply_rules: AtomicBool::new(true),
             apply_breaks: AtomicBool::new(true),
@@ -608,7 +610,13 @@ impl Hub {
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .clone();
-        let attributed = rules::parse_rules_attributed(&groups, &workspace);
+        let script_hooks = self
+            .script_hooks
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone();
+        let mut attributed = rules::parse_rules_attributed(&groups, &workspace);
+        attributed.extend(rules::compile_script_hook_rules(&script_hooks));
         let next_rules: Vec<Rule> = attributed.iter().map(|entry| entry.rule.clone()).collect();
         let origin_rules_changed = {
             let mut guard = self.rules.lock().unwrap_or_else(|err| err.into_inner());
@@ -645,6 +653,22 @@ impl Hub {
 
     pub fn rule_groups(&self) -> Vec<crate::config::RuleGroup> {
         self.rule_groups
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+    }
+
+    pub fn set_script_hooks(&self, hooks: &[crate::hook_spec::ScriptHookConfig]) {
+        *self
+            .script_hooks
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) =
+            crate::hook_spec::sanitize_script_hooks(hooks.to_vec());
+        self.rebuild_rules();
+    }
+
+    pub fn script_hooks(&self) -> Vec<crate::hook_spec::ScriptHookConfig> {
+        self.script_hooks
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .clone()

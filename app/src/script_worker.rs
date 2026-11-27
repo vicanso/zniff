@@ -153,6 +153,41 @@ function Pane(props) {
   if (props.size !== undefined && props.size !== null) node.size = props.size;
   return node;
 }
+function __zniff_text_children(children) {
+  if (children === null || children === undefined || typeof children === "boolean") return "";
+  if (Array.isArray(children)) {
+    let out = "";
+    for (let i = 0; i < children.length; i++) out += __zniff_text_children(children[i]);
+    return out;
+  }
+  return String(children);
+}
+function Section(props) {
+  const kids = [];
+  __zniff_push_child(kids, props && props.children);
+  return { type: "section", title: props && props.title !== undefined && props.title !== null ? String(props.title) : "", children: kids };
+}
+function KeyValue(props) {
+  const value = props && props.value !== undefined && props.value !== null
+    ? String(props.value)
+    : __zniff_text_children(props && props.children);
+  return { type: "key_value", label: props && props.label !== undefined && props.label !== null ? String(props.label) : "", value };
+}
+function Badge(props) {
+  const text = props && props.text !== undefined && props.text !== null
+    ? String(props.text)
+    : __zniff_text_children(props && props.children);
+  const tone = props && typeof props.tone === "string" ? props.tone : "neutral";
+  return { type: "badge", tone, text };
+}
+function Code(props) {
+  const code = props && props.code !== undefined && props.code !== null
+    ? String(props.code)
+    : __zniff_text_children(props && props.children);
+  const out = { type: "code", code };
+  if (props && typeof props.language === "string" && props.language.length > 0) out.language = props.language;
+  return out;
+}
 function __zniff_h(tag, props, ...children) {
   if (tag === __zniff_fragment) {
     const flat = [];
@@ -162,11 +197,11 @@ function __zniff_h(tag, props, ...children) {
   const merged = Object.assign({}, props || {});
   if (children.length > 0) merged.children = children;
   if (typeof tag === "function") return tag(merged);
-  throw new Error("Unsupported TSX tag `" + String(tag) + "`: expected Layout, Row, Col, or Pane");
+  throw new Error("Unsupported TSX tag `" + String(tag) + "`: expected Layout, Row, Col, Pane, Section, KeyValue, Badge, or Code");
 }
 (() => {
   const deny = (label) => function () {
-    throw new TypeError(label + " is disabled inside zniff layout scripts");
+    throw new TypeError(label + " is disabled inside zniff scripts");
   };
   const replace = (fn, value) => {
     Object.defineProperty(Object.getPrototypeOf(fn), "constructor", {
@@ -181,13 +216,25 @@ function __zniff_h(tag, props, ...children) {
   replace(async function* () {}, deny("the AsyncGeneratorFunction constructor"));
   Object.defineProperty(globalThis, "Function", { value: blocked, writable: false, configurable: false });
   delete globalThis.eval;
-  let __zniff_export_slot = undefined;
-  Object.defineProperty(globalThis, "__zniff_layout_export", {
-    get() { return __zniff_export_slot; },
-    set(v) { __zniff_export_slot = v; },
-    enumerable: false,
-    configurable: false,
-  });
+  const defineSlot = (name) => {
+    let slot = undefined;
+    Object.defineProperty(globalThis, name, {
+      get() { return slot; },
+      set(v) { slot = v; },
+      enumerable: false,
+      configurable: false,
+    });
+  };
+  defineSlot("__zniff_layout_export");
+  defineSlot("__zniff_hook_default");
+  defineSlot("__zniff_hook_exports");
+  defineSlot("__zniff_hook_input");
+  if (globalThis.zniff && typeof globalThis.zniff === "object") {
+    Object.freeze(globalThis.zniff.flows);
+    Object.freeze(globalThis.zniff.codec);
+    Object.freeze(globalThis.zniff.crypto);
+    Object.freeze(globalThis.zniff);
+  }
   for (const proto of [
     Object.prototype, Array.prototype, Function.prototype, String.prototype,
     Number.prototype, Boolean.prototype, RegExp.prototype, Map.prototype, Set.prototype,
@@ -314,6 +361,9 @@ struct UiScriptMailbox {
     wake_pending: AtomicBool,
 }
 
+type WorkerCustomJob =
+    Box<dyn FnOnce(&mut Option<WarmLayoutVm>, &mut ByteBoundedLru<String, Arc<String>>) + Send>;
+
 enum WorkerCmd {
     WakeUi,
     ClearCaches,
@@ -330,6 +380,7 @@ enum WorkerCmd {
         ctx: LayoutContext,
         reply: tokio::sync::oneshot::Sender<LayoutEvalReport>,
     },
+    CustomJob(WorkerCustomJob),
 }
 
 struct ActiveWorker {
@@ -457,6 +508,7 @@ pub fn packet_cache_stats() -> (usize, usize) {
 
 /// Clears packet transform caches and, if the worker is alive, clears its transpiler cache.
 pub fn clear_script_caches() {
+    crate::webhook::clear_preview_cache();
     packet_cache()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -508,7 +560,7 @@ pub(crate) fn shutdown_script_worker_blocking() {
     }
 }
 
-struct WarmLayoutVm {
+pub(crate) struct WarmLayoutVm {
     rt: Runtime,
     ctx: Context,
     created_at: Instant,
@@ -517,7 +569,7 @@ struct WarmLayoutVm {
 }
 
 impl WarmLayoutVm {
-    fn new() -> Result<Self, String> {
+    pub(crate) fn new() -> Result<Self, String> {
         let rt = Runtime::new().map_err(|err| format!("failed to init QuickJS runtime: {err}"))?;
         rt.set_memory_limit(LAYOUT_MEM_LIMIT_BYTES);
         rt.set_max_stack_size(LAYOUT_STACK_LIMIT_BYTES);
@@ -542,6 +594,8 @@ impl WarmLayoutVm {
         let ctx =
             Context::full(&rt).map_err(|err| format!("failed to create QuickJS context: {err}"))?;
         ctx.with(|cx| -> Result<(), String> {
+            crate::hook_bridge::install_zniff_globals(&cx)
+                .map_err(|err| format_js_error(&cx, err))?;
             cx.eval::<(), _>(SANDBOX_PRELUDE)
                 .map_err(|err| format_js_error(&cx, err))
         })?;
@@ -608,13 +662,59 @@ impl WarmLayoutVm {
         (parsed, false)
     }
 
-    fn maintain_memory(&self) -> bool {
+    pub(crate) fn maintain_memory(&self) -> bool {
         let usage = self.rt.memory_usage();
         if usage.memory_used_size > VM_GC_THRESHOLD_BYTES {
             self.rt.run_gc();
         }
         self.rt.memory_usage().memory_used_size <= VM_RECYCLE_THRESHOLD_BYTES
     }
+
+    /// Runs a scoped JS evaluation inside the warm VM under a custom memory & wall-clock budget.
+    pub(crate) fn with_budget<R>(
+        &self,
+        mem_limit: usize,
+        timeout_ms: u64,
+        f: impl FnOnce(&Context) -> Result<R, String>,
+    ) -> (Result<R, String>, bool) {
+        let clamped_ms = timeout_ms.clamp(
+            crate::hook_spec::MIN_HOOK_TIMEOUT_MS,
+            crate::hook_spec::MAX_HOOK_TIMEOUT_MS,
+        );
+        self.rt.set_memory_limit(mem_limit);
+        let timeout_ns = clamped_ms.saturating_mul(1_000_000);
+        let now_ns = self
+            .created_at
+            .elapsed()
+            .as_nanos()
+            .min(u128::from(u64::MAX - timeout_ns - 1)) as u64;
+        self.timed_out.store(false, Ordering::Release);
+        self.deadline_ns
+            .store(now_ns.saturating_add(timeout_ns).max(1), Ordering::Release);
+
+        let result = f(&self.ctx);
+
+        self.deadline_ns.store(0, Ordering::Release);
+        self.rt.set_memory_limit(LAYOUT_MEM_LIMIT_BYTES);
+        let did_timeout = self.timed_out.load(Ordering::Acquire);
+        if did_timeout {
+            (Err(format!("script timed out after {clamped_ms} ms")), true)
+        } else {
+            (result, false)
+        }
+    }
+}
+
+pub(crate) fn format_js_err(cx: &rquickjs::Ctx<'_>, err: rquickjs::Error) -> String {
+    format_js_error(cx, err)
+}
+
+pub(crate) fn note_warm_eval() {
+    WARM_EVAL_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn record_hook_eval_outcome(circuit_key: &str, timed_out: bool) -> bool {
+    record_eval_outcome(Some(circuit_key), timed_out)
 }
 
 fn format_js_error(cx: &rquickjs::Ctx<'_>, err: rquickjs::Error) -> String {
@@ -819,6 +919,9 @@ fn worker_loop(epoch: u64, rx: mpsc::Receiver<WorkerCmd>, mb: Arc<UiScriptMailbo
                 );
                 let _ = reply.send(report);
             }
+            WorkerCmd::CustomJob(job) => {
+                job(&mut vm, &mut transpiled_cache);
+            }
         }
     }
 
@@ -994,6 +1097,59 @@ pub fn eval_layout_cold_ephemeral(source: &str, ctx: LayoutContext) -> Result<La
     let transpiled = transpile_layout_tsx(source)?;
     let vm = WarmLayoutVm::new()?;
     vm.eval_transpiled(&transpiled, ctx).0
+}
+
+/// Runs a packet/hook job asynchronously on the warm worker VM without blocking Tokio.
+pub(crate) async fn run_vm_task_async<F, R>(wait_timeout_ms: u64, job: F) -> Result<R, String>
+where
+    F: FnOnce(
+            &mut Option<WarmLayoutVm>,
+            &mut ByteBoundedLru<String, Arc<String>>,
+        ) -> Result<R, String>
+        + Send
+        + 'static,
+    R: Send + 'static,
+{
+    let tx = ensure_worker_sender()?;
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let cmd = WorkerCmd::CustomJob(Box::new(move |vm, cache| {
+        let _ = reply_tx.send(job(vm, cache));
+    }));
+    if tx.try_send(cmd).is_err() {
+        return Err("script worker queue is busy".to_string());
+    }
+    let budget = wait_timeout_ms.saturating_add(150).max(WORKER_SYNC_WAIT_MS);
+    match tokio::time::timeout(Duration::from_millis(budget), reply_rx).await {
+        Ok(Ok(res)) => res,
+        Ok(Err(_)) => Err("script worker exited before replying".to_string()),
+        Err(_) => Err("script worker timed out waiting for result".to_string()),
+    }
+}
+
+/// Runs a packet/hook job synchronously via the warm worker VM with a bounded wait.
+pub(crate) fn run_vm_task_blocking<F, R>(wait_timeout_ms: u64, job: F) -> Result<R, String>
+where
+    F: FnOnce(
+            &mut Option<WarmLayoutVm>,
+            &mut ByteBoundedLru<String, Arc<String>>,
+        ) -> Result<R, String>
+        + Send
+        + 'static,
+    R: Send + 'static,
+{
+    let tx = ensure_worker_sender()?;
+    let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+    let cmd = WorkerCmd::CustomJob(Box::new(move |vm, cache| {
+        let _ = reply_tx.send(job(vm, cache));
+    }));
+    if tx.try_send(cmd).is_err() {
+        return Err("script worker queue is busy".to_string());
+    }
+    let budget = wait_timeout_ms.saturating_add(150).max(WORKER_SYNC_WAIT_MS);
+    match reply_rx.recv_timeout(Duration::from_millis(budget)) {
+        Ok(res) => res,
+        Err(_) => Err("script worker timed out waiting for result".to_string()),
+    }
 }
 
 #[cfg(test)]

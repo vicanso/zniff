@@ -82,6 +82,14 @@ impl Hub {
         ok
     }
 
+    pub(crate) fn set_method(&self, id: u64, method: impl Into<String>) -> bool {
+        let ok = self.with_session(|session| session.set_method(id, method));
+        if ok {
+            self.touch();
+        }
+        ok
+    }
+
     pub fn append_comment(&self, id: u64, note: &str) {
         let changed = self.with_session(|session| {
             let Some(flow) = session.get(id) else {
@@ -414,6 +422,29 @@ impl Hub {
         self.state_tx.send_modify(|v| *v = v.wrapping_add(1));
     }
 
+    pub(crate) fn hook_session_host(&self) -> crate::hook_bridge::HookSessionHost {
+        crate::hook_bridge::HookSessionHost::new(
+            Arc::clone(&self.session),
+            Arc::clone(&self.generation),
+            self.state_tx.clone(),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn append_body_bytes_for_test(&self, id: u64, dir: Direction, data: &[u8]) {
+        self.append_body(id, dir, data);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_response_for_test(
+        &self,
+        id: u64,
+        status: u16,
+        headers: Vec<(String, String)>,
+    ) {
+        self.set_response(id, status, headers, None);
+    }
+
     #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
     pub(crate) fn preview_hook_body(
         &self,
@@ -428,9 +459,6 @@ impl Hub {
         } else {
             &flow.request_body
         };
-        if body.is_empty() {
-            return None;
-        }
         let ops = crate::present::graphql_operations(&flow.path, &flow.request_body);
         let specs = {
             let guard = self.rules.lock().unwrap_or_else(|err| err.into_inner());
@@ -439,29 +467,44 @@ impl Hub {
         if specs.is_empty() {
             return None;
         }
-        let rev = self.rules_revision();
-        let headers = if is_response {
-            flow.response_headers.clone()
+        let has_script = specs
+            .iter()
+            .any(|s| matches!(s.target, rules::HookTarget::Script { .. }));
+        let skip_empty = if is_response {
+            body.is_empty()
+                && (!has_script || (flow.status.is_none() && flow.response_headers.is_empty()))
         } else {
-            flow.request_headers.clone()
+            body.is_empty()
+                && (!has_script || flow.status.is_some() || !flow.response_headers.is_empty())
         };
+        if skip_empty {
+            return None;
+        }
+        let rev = self.rules_revision();
         let gen_arc = Arc::clone(&self.generation);
         let tx = self.state_tx.clone();
-        Some(crate::webhook::lookup_or_spawn_preview(
-            (flow.id, is_response, rev, body.len()),
+        let input = crate::webhook::PreviewSpawnInput {
+            cache_key: (flow.id, is_response, rev, body.len()),
             specs,
-            flow.id,
+            flow_id: flow.id,
             is_response,
-            flow.method.clone(),
-            flow.url.clone(),
-            flow.status,
-            headers,
-            body.clone(),
-            move || {
-                gen_arc.fetch_add(1, Ordering::Relaxed);
-                tx.send_modify(|v| *v = v.wrapping_add(1));
-            },
-        ))
+            method: flow.method.clone(),
+            host: flow.host.clone(),
+            path: flow.path.clone(),
+            url: flow.url.clone(),
+            status: flow.status,
+            req_headers: flow.request_headers.clone(),
+            req_body: flow.request_body.clone(),
+            res_headers: flow.response_headers.clone(),
+            res_body: flow.response_body.clone(),
+            data_dir: self.ca.dir().to_path_buf(),
+            configured_hooks: self.script_hooks(),
+            host_session: self.hook_session_host(),
+        };
+        Some(crate::webhook::lookup_or_spawn_preview(input, move || {
+            gen_arc.fetch_add(1, Ordering::Relaxed);
+            tx.send_modify(|v| *v = v.wrapping_add(1));
+        }))
     }
 
     #[cfg_attr(not(feature = "desktop"), allow(dead_code))]

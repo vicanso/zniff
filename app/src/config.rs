@@ -924,6 +924,8 @@ pub struct Config {
     pub profile_history: Vec<SavedProfile>,
     /// Named rule groups stacked alongside workspace `rules`.
     pub rule_groups: Vec<RuleGroup>,
+    /// Configured NSH/TSX script hooks (`[[script_hooks]]`).
+    pub script_hooks: Vec<crate::hook_spec::ScriptHookConfig>,
     /// Saved filter expressions watched for live hit counts and toast alerts (E6).
     pub watch_rules: Vec<WatchRule>,
     /// Persisted recent Compose requests (up to [`COMPOSE_HISTORY_CAP`], newest first).
@@ -1142,6 +1144,8 @@ struct RawConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     rule_groups: Vec<RuleGroup>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    script_hooks: Vec<crate::hook_spec::ScriptHookConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     watch_rules: Vec<WatchRule>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     compose_history: Vec<ComposeHistoryItem>,
@@ -1158,6 +1162,7 @@ impl From<RawConfig> for Config {
         let mut saved_profiles = raw.saved_profiles;
         let mut profile_history = raw.profile_history;
         let rule_groups = sanitize_rule_groups(raw.rule_groups);
+        let script_hooks = crate::hook_spec::sanitize_script_hooks(raw.script_hooks);
         let watch_rules = sanitize_watch_rules(raw.watch_rules);
         let compose_history = sanitize_compose_history(raw.compose_history);
         clamp_saved_filters(&mut saved_filters);
@@ -1330,6 +1335,7 @@ impl From<RawConfig> for Config {
             saved_profiles,
             profile_history,
             rule_groups,
+            script_hooks,
             watch_rules,
             compose_history,
             column_widths: raw.column_widths,
@@ -1477,6 +1483,7 @@ impl From<Config> for RawConfig {
             saved_profiles: config.saved_profiles,
             profile_history: config.profile_history,
             rule_groups: sanitize_rule_groups(config.rule_groups),
+            script_hooks: crate::hook_spec::sanitize_script_hooks(config.script_hooks),
             watch_rules: sanitize_watch_rules(config.watch_rules),
             compose_history: sanitize_compose_history(config.compose_history),
             column_widths: config.column_widths,
@@ -1544,6 +1551,7 @@ impl Default for Config {
             saved_profiles: Vec::new(),
             profile_history: Vec::new(),
             rule_groups: Vec::new(),
+            script_hooks: Vec::new(),
             watch_rules: Vec::new(),
             compose_history: Vec::new(),
             column_widths: HashMap::new(),
@@ -3595,5 +3603,39 @@ mod tests {
         assert_eq!(sanitize_layout_id_pref("../escape"), "");
         assert_eq!(sanitize_layout_id_pref("split"), "");
         assert_eq!(sanitize_layout_id_pref("top_bottom"), "");
+    }
+
+    #[test]
+    fn script_hooks_roundtrip_and_sanitize_in_toml() {
+        let dir = Scratch::new();
+        assert!(load(dir.path()).script_hooks.is_empty());
+
+        update(dir.path(), |cfg| {
+            cfg.script_hooks = vec![crate::hook_spec::ScriptHookConfig {
+                id: "biz-crypto".into(),
+                name: "API Decrypt".into(),
+                script: "biz-crypto".into(),
+                enabled: true,
+                match_pattern: "api.vicanso.dev/v1".into(),
+                stages: vec![
+                    crate::hook_spec::HookStage::Request,
+                    crate::hook_spec::HookStage::Response,
+                    crate::hook_spec::HookStage::Preview,
+                    crate::hook_spec::HookStage::Run,
+                ],
+                timeout_ms: 80,
+                vars: BTreeMap::from([("env".into(), "staging".into())]),
+            }];
+        })
+        .unwrap();
+
+        let reloaded = load(dir.path());
+        assert_eq!(reloaded.script_hooks.len(), 1);
+        let hook = &reloaded.script_hooks[0];
+        assert_eq!(hook.id, "biz-crypto");
+        assert_eq!(hook.script, "biz-crypto.tsx");
+        assert_eq!(hook.match_pattern, "api.vicanso.dev/v1");
+        assert_eq!(hook.timeout_ms, 80);
+        assert_eq!(hook.vars.get("env").map(String::as_str), Some("staging"));
     }
 }

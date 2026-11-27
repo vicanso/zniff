@@ -18,11 +18,15 @@
 
 ## 2. 抓包与大列表热路径绝对禁区
 
-- **代理转发链路禁区**：脚本**严禁**进入 `app/src/proxy/*`（HTTP/1.1、HTTP/2、TLS MITM、WebSocket/SSE）转发路径与连接管理；若需要改包/断点/拦截，继续使用纯 Rust 规则引擎（`rules.rs` / `rule_vars.rs`）与本机回环 HTTP `hook`（`webhook.rs`）。
-- **入库与列表投影禁区**：脚本**严禁**在 `Session` 写入、`matching_with_previous_start` 全量过滤扫描、`FilteredStats` / `SessionFacets` 聚合或 `row_projection::project_rows`（10k/100k 流列表）中执行。
-- **仅允许两个旁路场景**：
+- **未命中即 0 开销（严格规则作用域限定）**：
+  - 实时脚本勾子（`onRequest` / `onResponse`）**必须**受 `[[script_hooks]]`（`match` 字段）或规则语法 `hook <host[/path]> @<id>` 的域名/路径/操作精确门控；**未命中规则的流量严禁缓冲 Body 或唤醒 `zniff-script-worker`**，保持零拷贝透传/盘溢。
+  - **异步派发 + 快速 Fail-Open**：命中的 `onRequest` / `onResponse` 必须通过 `oneshot` 异步交由 `zniff-script-worker` 执行（严禁阻塞 Tokio 工作线程）；超时、脚本异常或队列满一律 **Fail-Open 放行原包**并在流备注记录失败原因，绝不拖死代理连接。
+- **入库与列表投影禁区**：脚本**严禁**在 `Session` 写入、`matching_with_previous_start` 全量过滤扫描、`FilteredStats` / `SessionFacets` 聚合或 `row_projection::project_rows`（10k/100k 流列表）中执行；若脚本通过 `zniff.flows.*` 读取历史包，读取 `zniff-spill/` 溢写正文时必须先退出 `Session` 互斥锁再 `pread`。
+- **允许的四个触发场景**：
   1. **工作区布局**：低频切换或窗口尺寸越过断点时产出 `LayoutSpec`。
-  2. **自定义包转换展示**：仅在用户点选某条流（`selected` 或对比 `baseline`）检视详情时，于后台线程按需异步解码。
+  2. **实时规则勾子（`onRequest` / `onResponse`）**：仅在匹配 `host[/path]` 的流上做改包、短路本地 `respondWith` 或跨包取动态凭据/密钥。
+  3. **详情解码与卡片渲染（`onPreview`）**：仅在用户点选某条流检视详情时于后台异步解码（支持 `{ req, res }` 与 TSX `<Section>/<KeyValue>/<Badge>/<Code>`）。
+  4. **手动/MCP 批处理（`onRun`）**：用户主动触发或经 MCP 调用时遍历当前会话包批量分析或打标。
 
 ---
 
@@ -42,10 +46,11 @@
 
 ## 4. 分级沙箱配额、字节缓存与熔断
 
-| 脚本类型 | 内存上限 | 栈上限 | 超时上限 | I/O 负载与缓存边界 |
+| 脚本类型 | 内存上限 | 栈上限 | 超时上限 | I/O 负载、宿主读取配额与缓存边界 |
 | :--- | :--- | :--- | :--- | :--- |
 | **布局脚本** | `8 MiB`（`LAYOUT_MEM_LIMIT_BYTES`） | `256 KiB` | `25 ms`（`LAYOUT_TIMEOUT_MS`） | 源码 `<= 128 KiB`；Worker 堆超 `4 MiB` 或超时即重建 VM |
-| **包转换脚本** | `16 MiB`（`PACKET_MEM_LIMIT_BYTES`） | `256 KiB` | `80 ms`（`PACKET_TIMEOUT_MS`） | **原生 `Uint8Array` 直传**（禁 Base64 膨胀）；输入 `<= 1 MiB`、输出 IR `<= 512 KiB` |
+| **实时勾子（`onRequest` / `onResponse`）** | `16 MiB`（`PACKET_MEM_LIMIT_BYTES`） | `256 KiB` | 默认 `80 ms`（硬上限 `500 ms`） | 原生 `Uint8Array` 直传 `<= 1 MiB`；`zniff.flows.*` 限 `16` 次历史 Body 读取 / `4 MiB`；Fail-Open 放行 |
+| **离线勾子（`onPreview` / `onRun`）** | `16 MiB`（`PACKET_MEM_LIMIT_BYTES`） | `256 KiB` | 默认 `2000 ms`（上限 `10 s`） | 输出卡片 IR `<= 512 KiB`；`zniff.flows.*` 限 `500` 次历史 Body 读取 / `64 MiB` |
 
 - **字节上限 LRU 缓存（`ByteBoundedLru`）**：包转换结果缓存必须同时受**总字节 `<= 8 MiB`（`PACKET_CACHE_MAX_BYTES`）与条目 `<= 64`（`PACKET_CACHE_MAX_ENTRIES`）**双约束；清屏或进入托盘立即清空。
 - **连续超时自动熔断（`CIRCUIT_BREAKER_TRIP_COUNT = 3`）**：同一脚本连续超时 `3` 次自动熔断停用并降级回默认布局或原始报文，后续调用不触发 VM 直接返回错误；界面须提供非阻塞提示条与一键「重试启用 / Retry script」恢复入口（保存编辑后亦自动复位）。
@@ -58,13 +63,13 @@
 ## 5. 零 I/O 纯函数与原生编解码桥接
 
 - **单文件隔离沙箱**：严禁网络、任意文件系统读写、环境变量、异步定时器、`eval` / `Function` 构造器与外部包导入；初始化时冻结 `globalThis` 与全量内置原型（`Object` / `Array` / `Function` / `String` / `Number` / `Boolean` / `RegExp` / `Map` / `Set`），用户脚本在 `"use strict"` IIFE 中求值，杜绝跨次运行污染全局状态。
-- **重 CPU 字节操作桥接 Rust**：后续自定义包转换中涉及 UTF-8/Hex/Base64 编解码、内层 `gzip`/`zstd`/`brotli` 解压或 Protobuf/MsgPack 辅助解析时，必须通过 `zniff/*` 宿主函数直接桥接至 `zniff` 既有 Rust 依赖执行，禁止在 JS 循环里手写慢速解压或引入重复第三方 crate。
+- **重 CPU 字节操作与会话读取桥接 Rust**：自定义勾子中的 UTF-8/Hex/Base64、内层 `gzip`/`zstd` 加解压与 SHA-256/HMAC/AES-GCM 统一走 `zniff.codec.*` / `zniff.crypto.*`（复用 `ring`/`flate2`/`zstd` 0 新增依赖体积）；遍历会话抓包统一使用 **ID-first** 模式（`zniff.flows.ids(filter?, limit?)` 先取序号再按需读 `url` / `requestHeaders` / `requestBody` / `responseHeaders` / `responseBody`）。
 
 ---
 
 ## 6. 性能基准与回归门禁
 
-每次修改 `script_worker.rs`、`layout_runtime.rs`、`layout_tsx.rs`、`layout_spec.rs`、`layout_render.rs`、`layout_settings*.rs` 或未来包转换脚本引擎后，必须执行并核对：
+每次修改 `script_worker.rs`、`layout_runtime.rs`、`hook_spec.rs`、`hook_codec_crypto.rs`、`hook_bridge.rs`、`hook_runtime.rs`、`layout_tsx.rs`、`layout_spec.rs`、`layout_render.rs` 或相关面板后，必须执行并核对：
 
 1. `make bench`（`app/benches/large_session.rs`）：确认 `10k` 流会话指标未回退，且 `qjs:warm` 显著低于 `qjs:cold`（热复用通常 `< 0.5 ms`）。
 2. `make test`：通过全部脚本生命周期、熔断、原型隔离、无扫盘启动、`DataTable` 零重建与依赖树防膨胀单测（含 `cargo_manifest_and_lockfile_guard_against_heavy_js_deps`）。

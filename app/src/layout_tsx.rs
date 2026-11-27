@@ -84,6 +84,13 @@ declare module "zniff/layout" {
 }
 "#;
 
+/// Script category controlling allowed `import` modules and `export default` emission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TsxScriptKind {
+    Layout,
+    Hook,
+}
+
 /// Transpiles a user TSX/TS layout script into plain JavaScript assigning
 /// `globalThis.__zniff_layout_export`.
 pub fn transpile_layout_tsx(source: &str) -> Result<String, String> {
@@ -95,34 +102,45 @@ pub fn transpile_layout_tsx(source: &str) -> Result<String, String> {
     if source.trim().is_empty() {
         return Err("layout script is empty".to_string());
     }
-    let mut compiler = TsxCompiler::new(source);
-    let body = compiler.compile_program()?;
+    let body = compile_tsx_program(source, TsxScriptKind::Layout)?;
     if !body.contains("__zniff_layout_export") {
         return Err("layout script must have an `export default` layout".to_string());
     }
     Ok(body)
 }
 
+pub(crate) fn compile_tsx_program(source: &str, kind: TsxScriptKind) -> Result<String, String> {
+    TsxCompiler::new(source, kind).compile_program()
+}
+
 pub(crate) fn transpile_expr(source: &str) -> Result<String, String> {
-    TsxCompiler::new(source).compile_program()
+    TsxCompiler::new(source, TsxScriptKind::Hook).compile_program()
 }
 
 pub(crate) struct TsxCompiler<'a> {
     bytes: &'a [u8],
     src: &'a str,
     pos: usize,
+    kind: TsxScriptKind,
     expect_expr: bool,
+    stmt_boundary: bool,
+    after_dot: bool,
     after_decl_keyword: bool,
+    decl_saw_binding: bool,
 }
 
 impl<'a> TsxCompiler<'a> {
-    fn new(source: &'a str) -> Self {
+    fn new(source: &'a str, kind: TsxScriptKind) -> Self {
         Self {
             bytes: source.as_bytes(),
             src: source,
             pos: 0,
+            kind,
             expect_expr: true,
+            stmt_boundary: true,
+            after_dot: false,
             after_decl_keyword: false,
+            decl_saw_binding: false,
         }
     }
 
@@ -159,7 +177,11 @@ impl<'a> TsxCompiler<'a> {
                 while !self.is_eof() && self.bytes[self.pos].is_ascii_whitespace() {
                     self.pos += 1;
                 }
-                out.push_str(&self.src[start..self.pos]);
+                let slice = &self.src[start..self.pos];
+                if !self.after_dot && slice.contains('\n') {
+                    self.stmt_boundary = true;
+                }
+                out.push_str(slice);
             } else if self.starts_with("//") {
                 let start = self.pos;
                 while !self.is_eof() && self.bytes[self.pos] != b'\n' {
@@ -173,7 +195,11 @@ impl<'a> TsxCompiler<'a> {
                     .map(|idx| self.pos + 2 + idx + 2)
                     .ok_or_else(|| "unterminated block comment".to_string())?;
                 self.pos = end;
-                out.push_str(&self.src[start..self.pos]);
+                let slice = &self.src[start..self.pos];
+                if !self.after_dot && slice.contains('\n') {
+                    self.stmt_boundary = true;
+                }
+                out.push_str(slice);
             } else {
                 break;
             }
@@ -198,32 +224,53 @@ impl<'a> TsxCompiler<'a> {
                 let jsx = parse_jsx_element(self)?;
                 out.push_str(&jsx);
                 self.expect_expr = false;
+                self.stmt_boundary = false;
+                self.after_dot = false;
                 self.after_decl_keyword = false;
             } else if is_ident_start(b) {
                 self.handle_identifier(out)?;
             } else if b == b'\'' || b == b'"' {
                 self.copy_string(out)?;
                 self.expect_expr = false;
+                self.stmt_boundary = false;
+                self.after_dot = false;
                 self.after_decl_keyword = false;
             } else if b == b'`' {
                 self.copy_template(out)?;
                 self.expect_expr = false;
+                self.stmt_boundary = false;
+                self.after_dot = false;
                 self.after_decl_keyword = false;
             } else if b == b'/' && self.expect_expr {
                 self.copy_regex(out)?;
                 self.expect_expr = false;
+                self.stmt_boundary = false;
+                self.after_dot = false;
                 self.after_decl_keyword = false;
             } else if b == b'(' {
                 self.handle_paren(out)?;
+            } else if (b == b'{' || b == b'[') && self.after_decl_keyword && !self.decl_saw_binding
+            {
+                let close = if b == b'{' { b'}' } else { b']' };
+                self.copy_balanced_destructure(out, close)?;
+                self.decl_saw_binding = true;
+                self.expect_expr = false;
+                self.stmt_boundary = false;
+                self.after_dot = false;
             } else if b == b':' && self.after_decl_keyword {
                 self.skip_type_until(b"=,;\n", false)?;
                 if self.peek() == Some(b'=') {
                     out.push(' ');
                 }
                 self.after_decl_keyword = false;
+                self.decl_saw_binding = false;
+                self.stmt_boundary = false;
+                self.after_dot = false;
             } else if b.is_ascii_digit() {
                 self.copy_number(out);
                 self.expect_expr = false;
+                self.stmt_boundary = false;
+                self.after_dot = false;
                 self.after_decl_keyword = false;
             } else {
                 self.copy_operator_or_punct(out)?;
@@ -235,38 +282,63 @@ impl<'a> TsxCompiler<'a> {
     fn handle_identifier(&mut self, out: &mut String) -> Result<(), String> {
         let start = self.pos;
         let ident = self.read_ident();
-        let stmt_boundary = self.expect_expr;
+        let expr_boundary = self.expect_expr;
+        let at_stmt_start = self.stmt_boundary && !self.after_dot;
+        let next_same_line = self.next_same_line_byte();
 
-        if stmt_boundary && ident == "import" {
+        if at_stmt_start
+            && ident == "import"
+            && !matches!(next_same_line, Some(b':' | b'(' | b',' | b'}' | b'.'))
+        {
             return self.handle_import(out);
         }
-        if stmt_boundary && ident == "export" {
+        if at_stmt_start
+            && ident == "export"
+            && !matches!(next_same_line, Some(b':' | b'(' | b',' | b'}' | b'.'))
+        {
             return self.handle_export(out);
         }
-        if stmt_boundary && ident == "interface" && self.next_word_like() {
+        if at_stmt_start && ident == "interface" && self.same_line_word_like() {
             self.skip_interface_decl()?;
             self.expect_expr = true;
+            self.stmt_boundary = true;
+            self.after_dot = false;
             return Ok(());
         }
-        if stmt_boundary && ident == "type" && self.next_word_like() {
+        if at_stmt_start && ident == "type" && self.same_line_word_like() {
             self.skip_type_until(b";", false)?;
             if self.peek() == Some(b';') {
                 self.pos += 1;
             }
             self.expect_expr = true;
+            self.stmt_boundary = true;
+            self.after_dot = false;
             return Ok(());
         }
-        if !stmt_boundary && (ident == "as" || ident == "satisfies") {
+        if !expr_boundary && (ident == "as" || ident == "satisfies") {
             self.skip_type_until(b",;)]}?:&|+-*/<>=\n", false)?;
             self.expect_expr = false;
+            self.stmt_boundary = false;
+            self.after_dot = false;
             return Ok(());
         }
 
+        self.stmt_boundary = false;
+        self.after_dot = false;
         out.push_str(&self.src[start..self.pos]);
         if matches!(ident, "const" | "let" | "var") {
             self.after_decl_keyword = true;
+            self.decl_saw_binding = false;
             self.expect_expr = true;
             return Ok(());
+        }
+        if self.after_decl_keyword {
+            if !self.decl_saw_binding && ident != "of" && ident != "in" {
+                self.decl_saw_binding = true;
+            } else {
+                self.after_decl_keyword = false;
+                self.decl_saw_binding = false;
+            }
         }
         if ident == "function" {
             self.copy_ws_and_comments(out)?;
@@ -310,12 +382,16 @@ impl<'a> TsxCompiler<'a> {
         self.pos += 1;
         out.push('(');
         self.expect_expr = true;
+        self.stmt_boundary = false;
+        self.after_dot = false;
         self.compile_until(out, b")")?;
         if self.peek() == Some(b')') {
             self.pos += 1;
             out.push(')');
         }
         self.expect_expr = false;
+        self.stmt_boundary = false;
+        self.after_dot = false;
         Ok(())
     }
 
@@ -385,8 +461,12 @@ impl<'a> TsxCompiler<'a> {
             self.pos += 2;
             out.push_str("=>");
             self.expect_expr = true;
+            self.stmt_boundary = false;
+            self.after_dot = false;
         } else {
             self.expect_expr = false;
+            self.stmt_boundary = false;
+            self.after_dot = false;
         }
         Ok(())
     }
@@ -451,28 +531,44 @@ impl<'a> TsxCompiler<'a> {
         }
         let stmt = self.src[stmt_start..self.pos].trim();
         let is_type_only = stmt.starts_with("type ") || stmt.starts_with("type{");
-        if !is_type_only
-            && let Some(spec) = extract_import_specifier(stmt)
-            && spec != "zniff/layout"
-        {
-            return Err(format!(
-                "unsupported import `{spec}`: only `\"zniff/layout\"` is available in layout scripts"
-            ));
+        if !is_type_only && let Some(spec) = extract_import_specifier(stmt) {
+            let allowed = match self.kind {
+                TsxScriptKind::Layout => spec == "zniff/layout",
+                TsxScriptKind::Hook => spec == "zniff/hook",
+            };
+            if !allowed {
+                let expected = match self.kind {
+                    TsxScriptKind::Layout => "\"zniff/layout\"",
+                    TsxScriptKind::Hook => "\"zniff/hook\"",
+                };
+                return Err(format!(
+                    "unsupported import `{spec}`: only `{expected}` is available"
+                ));
+            }
         }
         for _ in 0..self.src[stmt_start..self.pos].matches('\n').count() {
             out.push('\n');
         }
         self.expect_expr = true;
+        self.stmt_boundary = true;
+        self.after_dot = false;
         Ok(())
     }
 
     fn handle_export(&mut self, out: &mut String) -> Result<(), String> {
         self.copy_ws_and_comments(out)?;
+        self.after_dot = false;
         match self.peek_ident() {
             Some("default") => {
                 let _ = self.read_ident();
-                out.push_str("globalThis.__zniff_layout_export =");
+                let target = match self.kind {
+                    TsxScriptKind::Layout => "globalThis.__zniff_layout_export =",
+                    TsxScriptKind::Hook => "globalThis.__zniff_hook_default =",
+                };
+                out.push_str(target);
                 self.after_decl_keyword = false;
+                self.decl_saw_binding = false;
+                self.stmt_boundary = false;
             }
             Some("type") => {
                 let _ = self.read_ident();
@@ -480,12 +576,47 @@ impl<'a> TsxCompiler<'a> {
                 if self.peek() == Some(b';') {
                     self.pos += 1;
                 }
+                self.stmt_boundary = true;
             }
             Some("interface") => {
                 let _ = self.read_ident();
                 self.skip_interface_decl()?;
+                self.stmt_boundary = true;
             }
-            _ => {}
+            None if self.peek() == Some(b'{') => {
+                let inner = self.read_braced_inner()?;
+                self.skip_ws_and_comments()?;
+                if self.peek() == Some(b';') {
+                    self.pos += 1;
+                }
+                if self.kind == TsxScriptKind::Hook {
+                    out.push_str(
+                        "(globalThis.__zniff_hook_exports = globalThis.__zniff_hook_exports || {}",
+                    );
+                    for part in inner.split(',') {
+                        let clean = part.trim();
+                        if clean.is_empty() {
+                            continue;
+                        }
+                        if let Some((local, alias)) = clean.split_once(" as ") {
+                            out.push_str(&format!(
+                                ", globalThis.__zniff_hook_exports[{:?}] = {}",
+                                alias.trim(),
+                                local.trim()
+                            ));
+                        } else {
+                            out.push_str(&format!(
+                                ", globalThis.__zniff_hook_exports[{clean:?}] = {clean}"
+                            ));
+                        }
+                    }
+                    out.push_str(");");
+                }
+                self.stmt_boundary = true;
+            }
+            _ => {
+                self.stmt_boundary = true;
+            }
         }
         self.expect_expr = true;
         Ok(())
@@ -496,7 +627,10 @@ impl<'a> TsxCompiler<'a> {
             self.pos += 2;
             out.push_str("=>");
             self.expect_expr = true;
+            self.stmt_boundary = false;
+            self.after_dot = false;
             self.after_decl_keyword = false;
+            self.decl_saw_binding = false;
             return Ok(());
         }
         for op in ["===", "!==", "..."] {
@@ -504,6 +638,8 @@ impl<'a> TsxCompiler<'a> {
                 out.push_str(op);
                 self.pos += 3;
                 self.expect_expr = true;
+                self.stmt_boundary = false;
+                self.after_dot = false;
                 return Ok(());
             }
         }
@@ -512,6 +648,8 @@ impl<'a> TsxCompiler<'a> {
                 out.push_str(op);
                 self.pos += 2;
                 self.expect_expr = !matches!(op, "++" | "--");
+                self.stmt_boundary = false;
+                self.after_dot = false;
                 return Ok(());
             }
         }
@@ -539,8 +677,11 @@ impl<'a> TsxCompiler<'a> {
                 | '<'
                 | '>'
         );
-        if matches!(ch, ';' | ',' | '=') {
+        self.stmt_boundary = matches!(ch, ';' | '{' | '}');
+        self.after_dot = ch == '.';
+        if matches!(ch, ';' | ',' | '=' | '?' | '(' | ')') {
             self.after_decl_keyword = false;
+            self.decl_saw_binding = false;
         }
         Ok(())
     }
@@ -883,13 +1024,15 @@ impl<'a> TsxCompiler<'a> {
         Some(&self.src[self.pos..end])
     }
 
-    fn next_word_like(&self) -> bool {
-        self.src[self.pos..]
-            .trim_start()
-            .as_bytes()
-            .first()
+    fn next_same_line_byte(&self) -> Option<u8> {
+        self.bytes[self.pos..]
+            .iter()
             .copied()
-            .is_some_and(is_ident_start)
+            .find(|b| !matches!(b, b' ' | b'\t'))
+    }
+
+    fn same_line_word_like(&self) -> bool {
+        self.next_same_line_byte().is_some_and(is_ident_start)
     }
 
     fn next_char(&mut self) -> char {

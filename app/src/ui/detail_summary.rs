@@ -50,6 +50,7 @@ pub(crate) struct Shown {
     pub(crate) request_form: Signal<Vec<HeaderLine>>,
     pub(crate) request_note: Signal<String>,
     pub(crate) response_note: Signal<String>,
+    pub(crate) hook_cards: Signal<Vec<crate::hook_spec::PreviewCardNode>>,
     pub(crate) metrics: Signal<String>,
     pub(crate) timing_bar: Signal<present::TimingBreakdown>,
     pub(crate) query: Signal<Vec<HeaderLine>>,
@@ -440,6 +441,7 @@ pub(crate) fn ready_detail(
             let controls = controls.clone();
             move || inline_mock_box(compose, controls.clone(), profiles)
         }))
+        .child(hook_preview_cards(shown.hook_cards))
         .child(
             when(side_by_side, move || {
                 view()

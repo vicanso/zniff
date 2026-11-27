@@ -253,6 +253,7 @@ fn app_workspace(rt: AppRuntime) -> impl IntoElement {
         request_form: signal(Vec::new()),
         request_note: signal(String::new()),
         response_note: signal(String::new()),
+        hook_cards: signal(Vec::new()),
         metrics: signal(String::new()),
         timing_bar: signal(present::TimingBreakdown::default()),
         query: signal(Vec::new()),

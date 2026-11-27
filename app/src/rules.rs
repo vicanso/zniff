@@ -27,6 +27,7 @@
 
 #![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -199,13 +200,13 @@ pub enum Rule {
         target_host: String,
         port: Option<u16>,
     },
-    /// Loopback HTTP webhook extension (`http://127.0.0.1:...` / `http://localhost:...` /
-    /// `http://[::1]:...`) that can mutate request/response metadata & body or run in read-only
-    /// `mode=preview` during detail inspection.
+    /// Loopback HTTP webhook (`http://127.0.0.1:...`) or bundled TSX script hook
+    /// (`@<id_or_file>`) that can mutate request/response metadata & body or run
+    /// in read-only `mode=preview` during detail inspection.
     Hook {
         host: String,
         path_prefix: String,
-        url: String,
+        target: HookTarget,
         phase: HookPhase,
         mode: HookMode,
         timeout: Duration,
@@ -253,9 +254,29 @@ impl HookPhase {
     }
 }
 
+/// Target endpoint for a `hook` rule or configured `[[script_hooks]]` entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HookTarget {
+    Http(String),
+    Script {
+        id_or_file: String,
+        vars: BTreeMap<String, String>,
+    },
+}
+
+impl HookTarget {
+    /// Human-readable representation used by quick-rule editors and comments.
+    pub fn display_target(&self) -> String {
+        match self {
+            Self::Http(url) => url.clone(),
+            Self::Script { id_or_file, .. } => format!("@{id_or_file}"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookSpec {
-    pub url: String,
+    pub target: HookTarget,
     pub phase: HookPhase,
     pub mode: HookMode,
     pub timeout: Duration,
@@ -551,7 +572,7 @@ pub fn preview_hooks_with_ops(
     let mut out = Vec::new();
     for rule in rules {
         let Rule::Hook {
-            url,
+            target,
             phase,
             mode: HookMode::Preview,
             timeout,
@@ -567,7 +588,7 @@ pub fn preview_hooks_with_ops(
         };
         if phase_ok && rule.matches_with_ops(host, path, ops) {
             out.push(HookSpec {
-                url: url.clone(),
+                target: target.clone(),
                 phase: *phase,
                 mode: HookMode::Preview,
                 timeout: *timeout,
@@ -1009,14 +1030,14 @@ pub fn effect_with_ops(rules: &[Rule], host: &str, path: &str, ops: &[String]) -
                 });
             }
             Rule::Hook {
-                url,
+                target,
                 phase,
                 mode: HookMode::Mutate,
                 timeout,
                 ..
             } => {
                 effect.hooks.push(HookSpec {
-                    url: url.clone(),
+                    target: target.clone(),
                     phase: *phase,
                     mode: HookMode::Mutate,
                     timeout: *timeout,
@@ -1649,12 +1670,13 @@ fn parse_line(line: &str) -> Option<Rule> {
             if tokens.is_empty() {
                 return None;
             }
-            let url = parse_loopback_hook_url(&tokens[0])?;
-            let (phase, mode, timeout, rule_op) = parse_hook_options(&tokens[1..])?;
+            let target = parse_hook_target(&tokens[0])?;
+            let is_script = matches!(target, HookTarget::Script { .. });
+            let (phase, mode, timeout, rule_op) = parse_hook_options(&tokens[1..], is_script)?;
             Some(Rule::Hook {
                 host,
                 path_prefix,
-                url,
+                target,
                 phase,
                 mode,
                 timeout,
@@ -2753,7 +2775,9 @@ pub fn append_quick_rule_with_op(
             if from.is_empty() || from.contains('\n') || to.contains('\n') {
                 return None;
             }
-            let url = parse_loopback_hook_url(from)?;
+            let target = parse_hook_target(from)?;
+            let is_script = matches!(target, HookTarget::Script { .. });
+            let min_timeout = if is_script { 10 } else { 50 };
             let mut phase = if response { "res" } else { "req" };
             let mut preview = false;
             let mut timeout_ms: Option<u128> = None;
@@ -2780,12 +2804,15 @@ pub fn append_quick_rule_with_op(
                     let parsed = parse_delay(raw)?;
                     timeout_ms = Some(
                         parsed
-                            .clamp(Duration::from_millis(50), DELAY_CAP)
+                            .clamp(Duration::from_millis(min_timeout), DELAY_CAP)
                             .as_millis(),
                     );
                 }
             }
-            let mut line = format!("hook {pattern} {} {phase}", quote_rule_token(&url));
+            let mut line = format!(
+                "hook {pattern} {} {phase}",
+                quote_rule_token(&target.display_target())
+            );
             if preview {
                 line.push_str(" mode=preview");
             }
@@ -2902,14 +2929,103 @@ pub fn parse_loopback_hook_url(raw: &str) -> Option<String> {
     Some(format!("http://{authority}{path_part}"))
 }
 
+pub fn parse_hook_target(raw: &str) -> Option<HookTarget> {
+    if let Some(script_ref) = crate::hook_spec::sanitize_hook_reference(raw) {
+        return Some(HookTarget::Script {
+            id_or_file: script_ref,
+            vars: BTreeMap::new(),
+        });
+    }
+    parse_loopback_hook_url(raw).map(HookTarget::Http)
+}
+
+/// Compiles enabled `[[script_hooks]]` with non-empty `match` patterns into
+/// attributed rules evaluated alongside workspace rules.
+pub fn compile_script_hook_rules(
+    hooks: &[crate::hook_spec::ScriptHookConfig],
+) -> Vec<AttributedRule> {
+    use crate::hook_spec::{DEFAULT_HOOK_TIMEOUT_MS, HookStage, MAX_LIVE_HOOK_TIMEOUT_MS};
+    let mut out = Vec::new();
+    for hook in hooks {
+        if !hook.enabled {
+            continue;
+        }
+        let pat = hook.match_pattern.trim();
+        if pat.is_empty() {
+            continue;
+        }
+        let (host, path_prefix) = split_pattern(pat);
+        if host.is_empty() {
+            continue;
+        }
+        let has_req = hook.stages.contains(&HookStage::Request);
+        let has_res = hook.stages.contains(&HookStage::Response);
+        let has_preview = hook.stages.contains(&HookStage::Preview);
+        let target = HookTarget::Script {
+            id_or_file: hook.id.clone(),
+            vars: hook.vars.clone(),
+        };
+        let group_name = Some(format!("hook:{}", hook.id));
+        if has_req || has_res {
+            let phase = match (has_req, has_res) {
+                (true, true) => HookPhase::Both,
+                (true, false) => HookPhase::Request,
+                (false, true) => HookPhase::Response,
+                (false, false) => unreachable!(),
+            };
+            let live_ms = if hook.timeout_ms == 0 {
+                DEFAULT_HOOK_TIMEOUT_MS
+            } else {
+                hook.timeout_ms.min(MAX_LIVE_HOOK_TIMEOUT_MS)
+            };
+            out.push(AttributedRule {
+                group_name: group_name.clone(),
+                line_no: 0,
+                rule: Rule::Hook {
+                    host: host.clone(),
+                    path_prefix: path_prefix.clone(),
+                    target: target.clone(),
+                    phase,
+                    mode: HookMode::Mutate,
+                    timeout: Duration::from_millis(live_ms),
+                    op: None,
+                },
+            });
+        }
+        if has_preview {
+            let preview_ms = hook.timeout_ms.clamp(200, 5_000).max(2_000);
+            out.push(AttributedRule {
+                group_name,
+                line_no: 0,
+                rule: Rule::Hook {
+                    host,
+                    path_prefix,
+                    target,
+                    phase: HookPhase::Both,
+                    mode: HookMode::Preview,
+                    timeout: Duration::from_millis(preview_ms),
+                    op: None,
+                },
+            });
+        }
+    }
+    out
+}
+
 fn parse_hook_options(
     tokens: &[String],
+    is_script: bool,
 ) -> Option<(HookPhase, HookMode, Duration, Option<String>)> {
     let mut phase = HookPhase::Both;
     let mut seen_phase = false;
     let mut mode = HookMode::Mutate;
     let mut seen_mode = false;
-    let mut timeout = Duration::from_secs(2);
+    let mut timeout = if is_script {
+        Duration::from_millis(crate::hook_spec::DEFAULT_HOOK_TIMEOUT_MS)
+    } else {
+        Duration::from_secs(2)
+    };
+    let min_ms = if is_script { 10 } else { 50 };
     let mut seen_timeout = false;
     let mut op = None;
     for token in tokens {
@@ -2937,7 +3053,7 @@ fn parse_hook_options(
             t if (t.starts_with("timeout=") || t.starts_with("delay=")) && !seen_timeout => {
                 let raw = t.split_once('=').map(|(_, v)| v)?;
                 let parsed = parse_delay(raw)?;
-                timeout = parsed.clamp(Duration::from_millis(50), DELAY_CAP);
+                timeout = parsed.clamp(Duration::from_millis(min_ms), DELAY_CAP);
                 seen_timeout = true;
             }
             t if (t.starts_with("op=") || t.starts_with("operation=")) && op.is_none() => {
@@ -4975,7 +5091,7 @@ resolve a.com *
             Rule::Hook {
                 host: "api.vicanso.dev".into(),
                 path_prefix: "/v1".into(),
-                url: "http://127.0.0.1:9100/mutate".into(),
+                target: HookTarget::Http("http://127.0.0.1:9100/mutate".into()),
                 phase: HookPhase::Request,
                 mode: HookMode::Mutate,
                 timeout: Duration::from_millis(750),
@@ -4987,7 +5103,7 @@ resolve a.com *
             Rule::Hook {
                 host: "api.vicanso.dev".into(),
                 path_prefix: "/v2".into(),
-                url: "http://localhost:9200/".into(),
+                target: HookTarget::Http("http://localhost:9200/".into()),
                 phase: HookPhase::Response,
                 mode: HookMode::Mutate,
                 timeout: Duration::from_secs(2),
@@ -4999,7 +5115,7 @@ resolve a.com *
             Rule::Hook {
                 host: "api.vicanso.dev".into(),
                 path_prefix: "/v3".into(),
-                url: "http://[::1]:9300/decode".into(),
+                target: HookTarget::Http("http://[::1]:9300/decode".into()),
                 phase: HookPhase::Both,
                 mode: HookMode::Mutate,
                 timeout: Duration::from_secs(2),
@@ -5012,6 +5128,44 @@ resolve a.com *
         );
         assert!(has_request_hooks(&parsed, "api.vicanso.dev", "/v1/auth"));
         assert!(!has_request_hooks(&parsed, "api.vicanso.dev", "/v2/auth"));
+
+        let script_parsed = parse_rules("hook api.vicanso.dev/v1 @biz-crypto both timeout=60ms");
+        assert_eq!(script_parsed.len(), 1);
+        assert_eq!(
+            script_parsed[0],
+            Rule::Hook {
+                host: "api.vicanso.dev".into(),
+                path_prefix: "/v1".into(),
+                target: HookTarget::Script {
+                    id_or_file: "biz-crypto.tsx".into(),
+                    vars: BTreeMap::new(),
+                },
+                phase: HookPhase::Both,
+                mode: HookMode::Mutate,
+                timeout: Duration::from_millis(60),
+                op: None,
+            }
+        );
+        assert!(parse_rules("hook api.vicanso.dev/v1 @../evil").is_empty());
+
+        let compiled_hooks = compile_script_hook_rules(&[crate::hook_spec::ScriptHookConfig {
+            id: "biz-crypto".into(),
+            name: "Decrypt".into(),
+            script: "biz-crypto.tsx".into(),
+            enabled: true,
+            match_pattern: "api.vicanso.dev/v1".into(),
+            stages: vec![
+                crate::hook_spec::HookStage::Request,
+                crate::hook_spec::HookStage::Preview,
+            ],
+            timeout_ms: 75,
+            vars: BTreeMap::from([("key".into(), "k1".into())]),
+        }]);
+        assert_eq!(compiled_hooks.len(), 2);
+        assert_eq!(
+            compiled_hooks[0].group_name.as_deref(),
+            Some("hook:biz-crypto")
+        );
 
         let preview_rules = parse_rules(
             "hook api.vicanso.dev/v1/enc http://127.0.0.1:9300/dec res mode=preview timeout=1500ms",

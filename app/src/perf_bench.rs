@@ -36,6 +36,7 @@ pub struct ScriptBenchReport {
     pub tsx_transpile_us: f64,
     pub qjs_cold_eval_ms: f64,
     pub qjs_warm_eval_ms: f64,
+    pub qjs_hook_warm_us: f64,
     pub topology_diff_us: f64,
     pub active_cache_hit_us: f64,
     pub warm_speedup: f64,
@@ -381,18 +382,79 @@ pub fn run_script_benchmark(iterations: usize) -> ScriptBenchReport {
         hits
     });
     let active_cache_hit_us = (cache_ms_batch * 1000.0) / inner_micro_loops as f64;
-    let _ = std::fs::remove_dir_all(&tmp_dir);
-
     let warm_speedup = if qjs_warm_eval_ms > 0.0 {
         qjs_cold_eval_ms / qjs_warm_eval_ms
     } else {
         0.0
     };
 
+    // Measure warm onRequest hook evaluation with `zniff.flows.ids` + `responseHeader` lookup.
+    let ca = std::sync::Arc::new(crate::ca::Ca::open(&tmp_dir).expect("bench ca"));
+    let hub = std::sync::Arc::new(crate::proxy::Hub::new(ca).expect("bench hub"));
+    let seed_id = hub.open(FlowDraft {
+        protocol: Protocol::Http11,
+        method: "POST".into(),
+        host: "api.vicanso.dev".into(),
+        path: "/v1/auth".into(),
+        url: "https://api.vicanso.dev/v1/auth".into(),
+        request_headers: vec![],
+    });
+    hub.mark_finished(seed_id);
+    let hooks_dir = crate::hook_runtime::hooks_dir(&tmp_dir);
+    let _ = std::fs::create_dir_all(&hooks_dir);
+    let _ = std::fs::write(
+        hooks_dir.join("bench-hook.tsx"),
+        r#"
+export function onRequest(ctx) {
+  const ids = zniff.flows.ids("host:api.vicanso.dev", 5);
+  return { headers: [...ctx.headers, ["x-seen", String(ids.length)]] };
+}
+"#,
+    );
+    let resolved_hook = crate::hook_runtime::resolve_script_hook(
+        &tmp_dir,
+        &[],
+        "bench-hook",
+        &std::collections::BTreeMap::new(),
+        80,
+    )
+    .expect("resolve bench hook");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("bench tokio rt");
+    let hook_in = crate::hook_runtime::HookRequestInputOwned {
+        flow_id: 99,
+        method: "GET".into(),
+        scheme: "https".into(),
+        host: "api.vicanso.dev".into(),
+        url: "https://api.vicanso.dev/v1/items".into(),
+        path: "/v1/items".into(),
+        headers: vec![("Accept".into(), "application/json".into())],
+        body: Vec::new(),
+    };
+    let _ = rt.block_on(crate::hook_runtime::eval_request_hook_async(
+        hub.hook_session_host(),
+        resolved_hook.clone(),
+        hook_in.clone(),
+    ));
+    let (hook_warm_ms, _) = measure_median(iters, || {
+        rt.block_on(crate::hook_runtime::eval_request_hook_async(
+            hub.hook_session_host(),
+            resolved_hook.clone(),
+            hook_in.clone(),
+        ))
+        .expect("bench warm hook")
+    });
+    let qjs_hook_warm_us = hook_warm_ms * 1000.0;
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
     ScriptBenchReport {
         tsx_transpile_us,
         qjs_cold_eval_ms,
         qjs_warm_eval_ms,
+        qjs_hook_warm_us,
         topology_diff_us,
         active_cache_hit_us,
         warm_speedup,
@@ -402,23 +464,25 @@ pub fn run_script_benchmark(iterations: usize) -> ScriptBenchReport {
 /// Formats script runtime benchmark results as a monospace summary table.
 pub fn format_script_report_table(r: &ScriptBenchReport) -> String {
     let mut out = String::new();
-    out.push_str("\nzniff script & layout benchmark (median)\n");
-    out.push_str("=========================================================================================\n");
+    out.push_str("\nzniff script, layout & hook benchmark (median)\n");
+    out.push_str("===========================================================================================================\n");
     out.push_str(&format!(
-        "{:>12} | {:>12} | {:>12} | {:>10} | {:>12} | {:>14}\n",
+        "{:>12} | {:>12} | {:>12} | {:>12} | {:>10} | {:>12} | {:>14}\n",
         "transpile(us)",
         "qjs:cold(ms)",
         "qjs:warm(ms)",
+        "hook:warm(us)",
         "speedup",
         "topo_cmp(us)",
         "boot_cache(us)"
     ));
-    out.push_str("-----------------------------------------------------------------------------------------\n");
+    out.push_str("-----------------------------------------------------------------------------------------------------------\n");
     out.push_str(&format!(
-        "{:>12.2} | {:>12.3} | {:>12.3} | {:>9.1}x | {:>12.2} | {:>14.2}\n",
+        "{:>12.2} | {:>12.3} | {:>12.3} | {:>12.2} | {:>9.1}x | {:>12.2} | {:>14.2}\n",
         r.tsx_transpile_us,
         r.qjs_cold_eval_ms,
         r.qjs_warm_eval_ms,
+        r.qjs_hook_warm_us,
         r.warm_speedup,
         r.topology_diff_us,
         r.active_cache_hit_us
@@ -451,9 +515,10 @@ mod tests {
         assert!(report.tsx_transpile_us >= 0.0);
         assert!(report.qjs_cold_eval_ms > 0.0);
         assert!(report.qjs_warm_eval_ms > 0.0);
+        assert!(report.qjs_hook_warm_us > 0.0);
         assert!(report.warm_speedup > 0.0);
         let table = format_script_report_table(&report);
-        assert!(table.contains("zniff script & layout benchmark"));
-        assert!(table.contains("qjs:warm(ms)"));
+        assert!(table.contains("zniff script, layout & hook benchmark"));
+        assert!(table.contains("hook:warm(us)"));
     }
 }

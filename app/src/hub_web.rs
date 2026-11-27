@@ -56,6 +56,7 @@ pub struct Hub {
     bypass_text: Mutex<String>,
     rules_text: Mutex<String>,
     rule_groups: Mutex<Vec<crate::config::RuleGroup>>,
+    script_hooks: Mutex<Vec<crate::hook_spec::ScriptHookConfig>>,
     rules_rev: AtomicU64,
     upstream_text: Mutex<String>,
     proxy_auth: Mutex<String>,
@@ -82,6 +83,7 @@ impl Hub {
             bypass_text: Mutex::new(String::new()),
             rules_text: Mutex::new(String::new()),
             rule_groups: Mutex::new(Vec::new()),
+            script_hooks: Mutex::new(Vec::new()),
             rules_rev: AtomicU64::new(0),
             upstream_text: Mutex::new(String::new()),
             proxy_auth: Mutex::new(String::new()),
@@ -375,6 +377,22 @@ impl Hub {
 
     pub fn rule_groups(&self) -> Vec<crate::config::RuleGroup> {
         self.rule_groups
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+    }
+
+    pub fn set_script_hooks(&self, hooks: &[crate::hook_spec::ScriptHookConfig]) {
+        *self
+            .script_hooks
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) =
+            crate::hook_spec::sanitize_script_hooks(hooks.to_vec());
+        self.rules_rev.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn script_hooks(&self) -> Vec<crate::hook_spec::ScriptHookConfig> {
+        self.script_hooks
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .clone()

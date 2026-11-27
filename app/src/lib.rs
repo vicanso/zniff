@@ -28,6 +28,17 @@ mod diagnostics;
 mod external_ca;
 #[cfg(not(target_arch = "wasm32"))]
 mod har;
+#[cfg(not(target_arch = "wasm32"))]
+mod hook_action;
+#[cfg(not(target_arch = "wasm32"))]
+mod hook_bridge;
+#[cfg(not(target_arch = "wasm32"))]
+mod hook_codec_crypto;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod hook_e2e_tests;
+#[cfg(not(target_arch = "wasm32"))]
+mod hook_runtime;
+mod hook_spec;
 mod i18n;
 mod icon;
 mod import_charles;

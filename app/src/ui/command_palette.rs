@@ -16,6 +16,7 @@ pub(crate) struct CommandPaletteState {
     pub(crate) adb_count: usize,
     pub(crate) network_preset: Option<NetworkPreset>,
     pub(crate) theme_mode: config::ThemeMode,
+    pub(crate) run_hooks: Vec<crate::hook_spec::ScriptHookConfig>,
 }
 
 pub(crate) fn build_command_items(state: CommandPaletteState) -> Vec<CommandItem> {
@@ -32,6 +33,7 @@ pub(crate) fn build_command_items(state: CommandPaletteState) -> Vec<CommandItem
         adb_count,
         network_preset,
         theme_mode,
+        run_hooks,
     } = state;
     let g_capture = t(lang, "抓包", "Capture");
     let g_network = t(lang, "网络条件", "Network");
@@ -163,9 +165,45 @@ pub(crate) fn build_command_items(state: CommandPaletteState) -> Vec<CommandItem
                 .group(g_launch)
                 .keywords(["mcp", "ai", "claude", "cursor", "配置"]),
         );
+        items.push(
+            CommandItem::new(
+                "init_script_hooks",
+                t(
+                    lang,
+                    "初始化脚本勾子目录（zniff-hook.d.ts）",
+                    "Initialize script hooks dir (zniff-hook.d.ts)",
+                ),
+            )
+            .group(g_export)
+            .keywords(["hook", "script", "tsx", "dts", "脚本", "勾子"]),
+        );
+        for hook in &run_hooks {
+            if hook.enabled && hook.stages.contains(&crate::hook_spec::HookStage::Run) {
+                let title = if hook.name.is_empty() {
+                    hook.id.as_str()
+                } else {
+                    hook.name.as_str()
+                };
+                items.push(
+                    CommandItem::new(
+                        format!("run_script_hook:{}", hook.id),
+                        format!("{}: {title}", t(lang, "执行脚本勾子", "Run script hook")),
+                    )
+                    .group(g_export)
+                    .keywords([
+                        SharedString::from("hook"),
+                        SharedString::from("script"),
+                        SharedString::from("run"),
+                        SharedString::from(hook.id.clone()),
+                        SharedString::from("脚本"),
+                        SharedString::from("勾子"),
+                    ]),
+                );
+            }
+        }
     }
     #[cfg(target_arch = "wasm32")]
-    let _ = (proxy_on, adb_count);
+    let _ = (proxy_on, adb_count, run_hooks);
 
     for &preset in NetworkPreset::ALL {
         let label = format!("{}: {}", t(lang, "网络条件", "Network"), preset.label(lang));
@@ -583,6 +621,8 @@ pub(crate) fn command_palette_modal(
         move || {
             let langs = ui_langs();
             let exec_controls = controls.clone();
+            #[cfg(not(target_arch = "wasm32"))]
+            let items_controls = controls.clone();
             let backdrop = ui_modal_backdrop(move || open.set(false));
 
             let palette = nsh_base::command()
@@ -603,6 +643,10 @@ pub(crate) fn command_palette_modal(
                     let theme_mode = appearance_prefs()
                         .map(|p| p.theme_mode.get())
                         .unwrap_or(config::ThemeMode::System);
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let run_hooks = items_controls.hub.script_hooks();
+                    #[cfg(target_arch = "wasm32")]
+                    let run_hooks = Vec::new();
                     build_command_items(CommandPaletteState {
                         lang,
                         running: running.get(),
@@ -616,6 +660,7 @@ pub(crate) fn command_palette_modal(
                         adb_count,
                         network_preset,
                         theme_mode,
+                        run_hooks,
                     })
                 })
                 .placeholder(move || {
@@ -876,7 +921,64 @@ pub(crate) fn command_palette_modal(
                         "add_marker" => profiles.marker_modal_open.set(true),
                         "open_watch" => profiles.watch_open.set(true),
                         "open_about" => profiles.about_open.set(true),
+                        #[cfg(not(target_arch = "wasm32"))]
+                        "init_script_hooks" => {
+                            let dir = controls.hub.ca.dir().to_path_buf();
+                            match crate::hook_runtime::ensure_hook_types(&dir) {
+                                Ok(dts) => {
+                                    let hooks_path = dts
+                                        .parent()
+                                        .map(|p| p.display().to_string())
+                                        .unwrap_or_else(|| dts.display().to_string());
+                                    set_clipboard(hooks_path.clone());
+                                    set_status(
+                                        &controls,
+                                        StatusMsg::ScriptHooksInitialized { path: hooks_path },
+                                    );
+                                }
+                                Err(err) => {
+                                    set_status(
+                                        &controls,
+                                        StatusMsg::ScriptHookFailed(err.to_string()),
+                                    );
+                                }
+                            }
+                        }
                         other => {
+                            #[cfg(not(target_arch = "wasm32"))]
+                            if let Some(hook_id) = other.strip_prefix("run_script_hook:") {
+                                let controls_run = controls.clone();
+                                let id_owned = hook_id.to_string();
+                                let cur_filter = filter.get_untracked();
+                                let cur_selected = selected.get_untracked();
+                                std::thread::spawn(move || {
+                                    let configured = controls_run.hub.script_hooks();
+                                    let res = crate::hook_runtime::eval_run_hook_blocking(
+                                        controls_run.hub.ca.dir(),
+                                        &configured,
+                                        controls_run.hub.hook_session_host(),
+                                        &id_owned,
+                                        &cur_filter,
+                                        cur_selected,
+                                    );
+                                    match res {
+                                        Ok(report) => set_status(
+                                            &controls_run,
+                                            StatusMsg::ScriptHookCompleted {
+                                                id: report.hook_id,
+                                                summary: report.summary,
+                                            },
+                                        ),
+                                        Err(err) => {
+                                            set_status(
+                                                &controls_run,
+                                                StatusMsg::ScriptHookFailed(err),
+                                            );
+                                        }
+                                    }
+                                });
+                                return;
+                            }
                             if let Some(preset) = NetworkPreset::from_command_id(other) {
                                 apply_network_preset(profiles, &controls, preset);
                             }
@@ -929,6 +1031,7 @@ mod tests {
             adb_count: 2,
             network_preset: Some(NetworkPreset::Slow3g),
             theme_mode: config::ThemeMode::Dark,
+            run_hooks: Vec::new(),
         });
         let ids: HashSet<&str> = items.iter().map(|it| it.id.as_str()).collect();
         assert!(

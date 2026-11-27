@@ -4,6 +4,7 @@
 //! direct TCP + HTTP/1.1 connection (bypassing the zniff proxy) with bounded
 //! payloads (`<= BODY_CAP`) and per-hook timeouts, failing open on errors.
 
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -16,15 +17,36 @@ use serde_json::{Value, json};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 
+use crate::hook_bridge::HookSessionHost;
+use crate::hook_runtime::{
+    HookPreviewInputOwned, HookRequestInputOwned, HookResponseInputOwned, ScriptRequestAction,
+    eval_preview_hook_async, eval_request_hook_async, eval_response_hook_async,
+    resolve_script_hook,
+};
+use crate::hook_spec::{PreviewCardNode, ScriptHookConfig};
 use crate::proxy::Hub;
-use crate::rules::{HookMode, HookSpec, parse_loopback_hook_url};
+use crate::rules::{HookMode, HookSpec, HookTarget, parse_loopback_hook_url};
 use crate::session::{BODY_CAP, base64_decode, base64_encode};
 
 #[derive(Debug, Clone)]
 pub struct RequestHookMutation {
+    pub method: Option<String>,
     pub path: Option<String>,
     pub headers: Option<Vec<(String, String)>>,
     pub body: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SyntheticHookResponse {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub enum RequestHookOutcome {
+    Mutate(RequestHookMutation),
+    RespondWith(SyntheticHookResponse),
 }
 
 #[derive(Debug, Clone)]
@@ -215,8 +237,8 @@ fn header_pairs_json(headers: &[(String, String)]) -> Value {
     )
 }
 
-/// Runs matching request-phase `hook` specs in order, chaining mutations and
-/// failing open (appending a flow comment) if any hook fails.
+/// Runs matching request-phase `hook` specs in order, chaining mutations or
+/// returning a short-circuit `RespondWith` response, failing open if any hook fails.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_request_hooks(
     hub: &Hub,
@@ -229,83 +251,169 @@ pub async fn run_request_hooks(
     initial_path: &str,
     initial_headers: &[(String, String)],
     initial_body: &[u8],
-) -> Option<RequestHookMutation> {
+) -> Option<RequestHookOutcome> {
     if !specs.iter().any(|s| s.phase.runs_request()) {
         return None;
     }
+    let mut cur_method = method.to_string();
     let mut cur_path = initial_path.to_string();
     let mut cur_headers = initial_headers.to_vec();
     let mut cur_body = initial_body.to_vec();
+    let mut changed_method = false;
     let mut changed_path = false;
     let mut changed_headers = false;
     let mut changed_body = false;
     let mut last_comment = None;
+    let configured_hooks = hub.script_hooks();
+    let data_dir = hub.ca.dir().to_path_buf();
 
     for spec in specs.iter().filter(|s| s.phase.runs_request()) {
-        let (body_b64, body_utf8) = encode_body_fields(&cur_body);
-        let payload = json!({
-            "id": id,
-            "phase": "request",
-            "method": method,
-            "url": format!("{scheme}://{authority}{cur_path}"),
-            "host": host,
-            "path": cur_path,
-            "headers": header_pairs_json(&cur_headers),
-            "body_base64": body_b64,
-            "body_utf8": body_utf8,
-        });
-        let Ok(bytes) = serde_json::to_vec(&payload) else {
-            continue;
-        };
-        match post_hook_json(&spec.url, bytes, spec.timeout).await {
-            Ok(Some(Value::Object(map))) => {
-                if let Some(next_path) = map.get("path").and_then(Value::as_str)
-                    && next_path.starts_with('/')
-                {
-                    cur_path = next_path.to_string();
-                    changed_path = true;
-                }
-                if let Some(hdr_val) = map.get("headers") {
-                    match parse_headers_override(hdr_val) {
-                        Ok(next_hdrs) => {
-                            cur_headers = next_hdrs;
-                            changed_headers = true;
+        match &spec.target {
+            HookTarget::Http(url) => {
+                let (body_b64, body_utf8) = encode_body_fields(&cur_body);
+                let payload = json!({
+                    "id": id,
+                    "phase": "request",
+                    "method": cur_method,
+                    "url": format!("{scheme}://{authority}{cur_path}"),
+                    "host": host,
+                    "path": cur_path,
+                    "headers": header_pairs_json(&cur_headers),
+                    "body_base64": body_b64,
+                    "body_utf8": body_utf8,
+                });
+                let Ok(bytes) = serde_json::to_vec(&payload) else {
+                    continue;
+                };
+                match post_hook_json(url, bytes, spec.timeout).await {
+                    Ok(Some(Value::Object(map))) => {
+                        if let Some(next_path) = map.get("path").and_then(Value::as_str)
+                            && next_path.starts_with('/')
+                        {
+                            cur_path = next_path.to_string();
+                            changed_path = true;
                         }
-                        Err(err) => {
-                            hub.append_comment(id, &format!("[hook failed: {err}]"));
+                        if let Some(hdr_val) = map.get("headers") {
+                            match parse_headers_override(hdr_val) {
+                                Ok(next_hdrs) => {
+                                    cur_headers = next_hdrs;
+                                    changed_headers = true;
+                                }
+                                Err(err) => {
+                                    hub.append_comment(id, &format!("[hook failed: {err}]"));
+                                }
+                            }
+                        }
+                        match parse_body_override(&map) {
+                            Ok(Some(next_body)) => {
+                                cur_body = next_body;
+                                changed_body = true;
+                            }
+                            Ok(None) => {}
+                            Err(err) => {
+                                hub.append_comment(id, &format!("[hook failed: {err}]"));
+                            }
+                        }
+                        if let Some(comment) = map.get("comment").and_then(Value::as_str)
+                            && !comment.trim().is_empty()
+                        {
+                            last_comment = Some(comment.trim().to_string());
                         }
                     }
-                }
-                match parse_body_override(&map) {
-                    Ok(Some(next_body)) => {
-                        cur_body = next_body;
-                        changed_body = true;
-                    }
-                    Ok(None) => {}
-                    Err(err) => {
-                        hub.append_comment(id, &format!("[hook failed: {err}]"));
-                    }
-                }
-                if let Some(comment) = map.get("comment").and_then(Value::as_str)
-                    && !comment.trim().is_empty()
-                {
-                    last_comment = Some(comment.trim().to_string());
+                    Ok(_) => {}
+                    Err(err) => hub.append_comment(id, &format!("[hook failed: {err}]")),
                 }
             }
-            Ok(_) => {}
-            Err(err) => hub.append_comment(id, &format!("[hook failed: {err}]")),
+            HookTarget::Script { id_or_file, vars } => {
+                let timeout_ms = spec.timeout.as_millis().max(10) as u64;
+                let resolved = match resolve_script_hook(
+                    &data_dir,
+                    &configured_hooks,
+                    id_or_file,
+                    vars,
+                    timeout_ms,
+                ) {
+                    Ok(r) => r,
+                    Err(err) => {
+                        hub.append_comment(id, &format!("[script hook failed: {err}]"));
+                        continue;
+                    }
+                };
+                let url = format!("{scheme}://{authority}{cur_path}");
+                let input = HookRequestInputOwned {
+                    flow_id: id,
+                    method: cur_method.clone(),
+                    scheme: scheme.to_string(),
+                    host: host.to_string(),
+                    url,
+                    path: cur_path.clone(),
+                    headers: cur_headers.clone(),
+                    body: cur_body.clone(),
+                };
+                match eval_request_hook_async(hub.hook_session_host(), resolved, input).await {
+                    Ok(ScriptRequestAction::Pass { comment }) => {
+                        if let Some(c) = comment {
+                            last_comment = Some(c);
+                        }
+                    }
+                    Ok(ScriptRequestAction::RespondWith {
+                        status,
+                        headers,
+                        body,
+                        comment,
+                    }) => {
+                        if let Some(c) = comment.or(last_comment) {
+                            hub.append_comment(id, &c);
+                        }
+                        return Some(RequestHookOutcome::RespondWith(SyntheticHookResponse {
+                            status,
+                            headers,
+                            body,
+                        }));
+                    }
+                    Ok(ScriptRequestAction::Mutate {
+                        method: next_method,
+                        path: next_path,
+                        headers: next_headers,
+                        body: next_body,
+                        comment,
+                    }) => {
+                        if let Some(m) = next_method {
+                            cur_method = m;
+                            changed_method = true;
+                        }
+                        if let Some(p) = next_path {
+                            cur_path = p;
+                            changed_path = true;
+                        }
+                        if let Some(h) = next_headers {
+                            cur_headers = h;
+                            changed_headers = true;
+                        }
+                        if let Some(b) = next_body {
+                            cur_body = b;
+                            changed_body = true;
+                        }
+                        if let Some(c) = comment {
+                            last_comment = Some(c);
+                        }
+                    }
+                    Err(err) => hub.append_comment(id, &format!("[script hook failed: {err}]")),
+                }
+            }
         }
     }
 
     if let Some(ref comment) = last_comment {
         hub.append_comment(id, comment);
     }
-    if changed_path || changed_headers || changed_body {
-        Some(RequestHookMutation {
+    if changed_method || changed_path || changed_headers || changed_body {
+        Some(RequestHookOutcome::Mutate(RequestHookMutation {
+            method: changed_method.then_some(cur_method),
             path: changed_path.then_some(cur_path),
             headers: changed_headers.then_some(cur_headers),
             body: changed_body.then_some(cur_body),
-        })
+        }))
     } else {
         None
     }
@@ -334,59 +442,112 @@ pub async fn run_response_hooks(
     let mut changed_headers = false;
     let mut changed_body = false;
     let mut last_comment = None;
+    let configured_hooks = hub.script_hooks();
+    let data_dir = hub.ca.dir().to_path_buf();
+    let (host, path) = split_url_host_path(url);
 
     for spec in specs.iter().filter(|s| s.phase.runs_response()) {
-        let (body_b64, body_utf8) = encode_body_fields(&cur_body);
-        let payload = json!({
-            "id": id,
-            "phase": "response",
-            "method": method,
-            "url": url,
-            "status": cur_status,
-            "headers": header_pairs_json(&cur_headers),
-            "body_base64": body_b64,
-            "body_utf8": body_utf8,
-        });
-        let Ok(bytes) = serde_json::to_vec(&payload) else {
-            continue;
-        };
-        match post_hook_json(&spec.url, bytes, spec.timeout).await {
-            Ok(Some(Value::Object(map))) => {
-                if let Some(code) = map.get("status").and_then(Value::as_u64)
-                    && (100..600).contains(&code)
-                {
-                    cur_status = code as u16;
-                    changed_status = true;
-                }
-                if let Some(hdr_val) = map.get("headers") {
-                    match parse_headers_override(hdr_val) {
-                        Ok(next_hdrs) => {
-                            cur_headers = next_hdrs;
-                            changed_headers = true;
+        match &spec.target {
+            HookTarget::Http(hook_url) => {
+                let (body_b64, body_utf8) = encode_body_fields(&cur_body);
+                let payload = json!({
+                    "id": id,
+                    "phase": "response",
+                    "method": method,
+                    "url": url,
+                    "status": cur_status,
+                    "headers": header_pairs_json(&cur_headers),
+                    "body_base64": body_b64,
+                    "body_utf8": body_utf8,
+                });
+                let Ok(bytes) = serde_json::to_vec(&payload) else {
+                    continue;
+                };
+                match post_hook_json(hook_url, bytes, spec.timeout).await {
+                    Ok(Some(Value::Object(map))) => {
+                        if let Some(code) = map.get("status").and_then(Value::as_u64)
+                            && (100..600).contains(&code)
+                        {
+                            cur_status = code as u16;
+                            changed_status = true;
                         }
-                        Err(err) => {
-                            hub.append_comment(id, &format!("[hook failed: {err}]"));
+                        if let Some(hdr_val) = map.get("headers") {
+                            match parse_headers_override(hdr_val) {
+                                Ok(next_hdrs) => {
+                                    cur_headers = next_hdrs;
+                                    changed_headers = true;
+                                }
+                                Err(err) => {
+                                    hub.append_comment(id, &format!("[hook failed: {err}]"));
+                                }
+                            }
+                        }
+                        match parse_body_override(&map) {
+                            Ok(Some(next_body)) => {
+                                cur_body = next_body;
+                                changed_body = true;
+                            }
+                            Ok(None) => {}
+                            Err(err) => {
+                                hub.append_comment(id, &format!("[hook failed: {err}]"));
+                            }
+                        }
+                        if let Some(comment) = map.get("comment").and_then(Value::as_str)
+                            && !comment.trim().is_empty()
+                        {
+                            last_comment = Some(comment.trim().to_string());
                         }
                     }
-                }
-                match parse_body_override(&map) {
-                    Ok(Some(next_body)) => {
-                        cur_body = next_body;
-                        changed_body = true;
-                    }
-                    Ok(None) => {}
-                    Err(err) => {
-                        hub.append_comment(id, &format!("[hook failed: {err}]"));
-                    }
-                }
-                if let Some(comment) = map.get("comment").and_then(Value::as_str)
-                    && !comment.trim().is_empty()
-                {
-                    last_comment = Some(comment.trim().to_string());
+                    Ok(_) => {}
+                    Err(err) => hub.append_comment(id, &format!("[hook failed: {err}]")),
                 }
             }
-            Ok(_) => {}
-            Err(err) => hub.append_comment(id, &format!("[hook failed: {err}]")),
+            HookTarget::Script { id_or_file, vars } => {
+                let timeout_ms = spec.timeout.as_millis().max(10) as u64;
+                let resolved = match resolve_script_hook(
+                    &data_dir,
+                    &configured_hooks,
+                    id_or_file,
+                    vars,
+                    timeout_ms,
+                ) {
+                    Ok(r) => r,
+                    Err(err) => {
+                        hub.append_comment(id, &format!("[script hook failed: {err}]"));
+                        continue;
+                    }
+                };
+                let input = HookResponseInputOwned {
+                    flow_id: id,
+                    method: method.to_string(),
+                    host: host.clone(),
+                    path: path.clone(),
+                    url: url.to_string(),
+                    status: cur_status,
+                    headers: cur_headers.clone(),
+                    body: cur_body.clone(),
+                };
+                match eval_response_hook_async(hub.hook_session_host(), resolved, input).await {
+                    Ok(res) => {
+                        if let Some(code) = res.status {
+                            cur_status = code;
+                            changed_status = true;
+                        }
+                        if let Some(hdrs) = res.headers {
+                            cur_headers = hdrs;
+                            changed_headers = true;
+                        }
+                        if let Some(body) = res.body {
+                            cur_body = body;
+                            changed_body = true;
+                        }
+                        if let Some(c) = res.comment {
+                            last_comment = Some(c);
+                        }
+                    }
+                    Err(err) => hub.append_comment(id, &format!("[script hook failed: {err}]")),
+                }
+            }
         }
     }
 
@@ -404,11 +565,31 @@ pub async fn run_response_hooks(
     }
 }
 
+fn split_url_host_path(url: &str) -> (String, String) {
+    let rest = url.split_once("://").map(|(_, after)| after).unwrap_or(url);
+    match rest.find(['/', '?']) {
+        Some(idx) => {
+            let auth = &rest[..idx];
+            let host = auth
+                .strip_prefix('[')
+                .and_then(|s| s.split_once(']'))
+                .map(|(h, _)| h)
+                .unwrap_or_else(|| auth.split(':').next().unwrap_or(auth));
+            (host.to_string(), rest[idx..].to_string())
+        }
+        None => {
+            let host = rest.split(':').next().unwrap_or(rest);
+            (host.to_string(), "/".to_string())
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreviewHookResult {
     pub body: Vec<u8>,
     pub content_type: Option<String>,
     pub note: Option<String>,
+    pub cards: Vec<PreviewCardNode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -424,6 +605,32 @@ type PreviewCacheKey = (u64, bool, u64, usize);
 fn preview_cache() -> &'static Mutex<Vec<(PreviewCacheKey, PreviewLookup)>> {
     static CACHE: OnceLock<Mutex<Vec<(PreviewCacheKey, PreviewLookup)>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+pub(crate) fn clear_preview_cache() {
+    preview_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+}
+
+pub(crate) struct PreviewSpawnInput {
+    pub cache_key: PreviewCacheKey,
+    pub specs: Vec<HookSpec>,
+    pub flow_id: u64,
+    pub is_response: bool,
+    pub method: String,
+    pub host: String,
+    pub path: String,
+    pub url: String,
+    pub status: Option<u16>,
+    pub req_headers: Vec<(String, String)>,
+    pub req_body: Vec<u8>,
+    pub res_headers: Vec<(String, String)>,
+    pub res_body: Vec<u8>,
+    pub data_dir: PathBuf,
+    pub configured_hooks: Vec<ScriptHookConfig>,
+    pub host_session: HookSessionHost,
 }
 
 fn preview_runtime() -> Option<&'static tokio::runtime::Runtime> {
@@ -477,8 +684,20 @@ fn parse_preview_body_override(
     Ok((None, explicit_ct))
 }
 
+pub(crate) struct PreviewScriptEnv<'a> {
+    pub data_dir: &'a Path,
+    pub configured_hooks: &'a [ScriptHookConfig],
+    pub host_session: &'a HookSessionHost,
+    pub host: &'a str,
+    pub path: &'a str,
+    pub req_headers: &'a [(String, String)],
+    pub req_body: &'a [u8],
+    pub res_headers: &'a [(String, String)],
+    pub res_body: &'a [u8],
+}
+
 /// Runs all matching read-only `mode=preview` hooks sequentially without mutating proxied traffic.
-pub async fn run_preview_hooks(
+pub(crate) async fn run_preview_hooks(
     specs: &[HookSpec],
     id: u64,
     is_response: bool,
@@ -487,11 +706,13 @@ pub async fn run_preview_hooks(
     status: Option<u16>,
     headers: &[(String, String)],
     body: &[u8],
+    script_env: Option<PreviewScriptEnv<'_>>,
 ) -> Option<PreviewHookResult> {
     let mut cur_body = body.to_vec();
     let mut cur_ct: Option<String> = None;
     let mut last_note: Option<String> = None;
-    let mut changed = false;
+    let mut cards: Vec<PreviewCardNode> = Vec::new();
+    let mut changed_body = false;
 
     for spec in specs {
         if spec.mode != HookMode::Preview {
@@ -505,44 +726,106 @@ pub async fn run_preview_hooks(
         if !phase_ok {
             continue;
         }
-        let payload = json!({
-            "id": id,
-            "phase": if is_response { "res" } else { "req" },
-            "mode": "preview",
-            "method": method,
-            "url": url,
-            "status": status,
-            "headers": headers.iter().map(|(k, v)| json!([k, v])).collect::<Vec<_>>(),
-            "body_b64": base64_encode(&cur_body),
-        });
-        let Ok(bytes) = serde_json::to_vec(&payload) else {
-            continue;
-        };
-        if let Ok(Some(Value::Object(map))) = post_hook_json(&spec.url, bytes, spec.timeout).await {
-            if let Ok((Some(next_body), next_ct)) = parse_preview_body_override(&map) {
-                cur_body = next_body;
-                if next_ct.is_some() {
-                    cur_ct = next_ct;
+        match &spec.target {
+            HookTarget::Http(hook_url) => {
+                let payload = json!({
+                    "id": id,
+                    "phase": if is_response { "res" } else { "req" },
+                    "mode": "preview",
+                    "method": method,
+                    "url": url,
+                    "status": status,
+                    "headers": headers.iter().map(|(k, v)| json!([k, v])).collect::<Vec<_>>(),
+                    "body_b64": base64_encode(&cur_body),
+                });
+                let Ok(bytes) = serde_json::to_vec(&payload) else {
+                    continue;
+                };
+                if let Ok(Some(Value::Object(map))) =
+                    post_hook_json(hook_url, bytes, spec.timeout).await
+                {
+                    if let Ok((Some(next_body), next_ct)) = parse_preview_body_override(&map) {
+                        cur_body = next_body;
+                        if next_ct.is_some() {
+                            cur_ct = next_ct;
+                        }
+                        changed_body = true;
+                    }
+                    if let Some(note) = map
+                        .get("note")
+                        .or_else(|| map.get("comment"))
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                    {
+                        last_note = Some(note.to_string());
+                    }
                 }
-                changed = true;
             }
-            if let Some(note) = map
-                .get("note")
-                .or_else(|| map.get("comment"))
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-            {
-                last_note = Some(note.to_string());
+            HookTarget::Script { id_or_file, vars } => {
+                let Some(ref env) = script_env else {
+                    continue;
+                };
+                let timeout_ms = spec.timeout.as_millis().max(200) as u64;
+                let Ok(resolved) = resolve_script_hook(
+                    env.data_dir,
+                    env.configured_hooks,
+                    id_or_file,
+                    vars,
+                    timeout_ms,
+                ) else {
+                    continue;
+                };
+                let input = HookPreviewInputOwned {
+                    flow_id: id,
+                    is_response,
+                    method: method.to_string(),
+                    host: env.host.to_string(),
+                    path: env.path.to_string(),
+                    url: url.to_string(),
+                    status,
+                    req_headers: env.req_headers.to_vec(),
+                    req_body: if is_response {
+                        env.req_body.to_vec()
+                    } else {
+                        cur_body.clone()
+                    },
+                    res_headers: env.res_headers.to_vec(),
+                    res_body: if is_response {
+                        cur_body.clone()
+                    } else {
+                        env.res_body.to_vec()
+                    },
+                };
+                if let Ok(res) =
+                    eval_preview_hook_async(env.host_session.clone(), resolved, input).await
+                {
+                    if let Some(next_body) = res.side.body {
+                        cur_body = next_body;
+                        changed_body = true;
+                    }
+                    if let Some(next_ct) = res.side.content_type {
+                        cur_ct = Some(next_ct);
+                    }
+                    if let Some(note) = res.side.note {
+                        last_note = Some(note);
+                    }
+                    for card in res.cards {
+                        if !cards.contains(&card) {
+                            cards.push(card);
+                        }
+                    }
+                }
             }
         }
     }
 
-    if changed {
+    if changed_body || !cards.is_empty() {
         Some(PreviewHookResult {
-            body: cur_body,
+            body: if changed_body { cur_body } else { Vec::new() },
             content_type: cur_ct,
             note: last_note,
+            cards,
         })
     } else {
         None
@@ -550,19 +833,11 @@ pub async fn run_preview_hooks(
 }
 
 /// Looks up cached preview-hook output or spawns a background request on the preview runtime.
-#[allow(clippy::too_many_arguments)]
-pub fn lookup_or_spawn_preview(
-    cache_key: PreviewCacheKey,
-    specs: Vec<HookSpec>,
-    id: u64,
-    is_response: bool,
-    method: String,
-    url: String,
-    status: Option<u16>,
-    headers: Vec<(String, String)>,
-    body: Vec<u8>,
+pub(crate) fn lookup_or_spawn_preview(
+    input: PreviewSpawnInput,
     on_done: impl FnOnce() + Send + 'static,
 ) -> PreviewLookup {
+    let cache_key = input.cache_key;
     {
         let mut cache = preview_cache().lock().unwrap_or_else(|e| e.into_inner());
         if let Some((_, entry)) = cache.iter().find(|(k, _)| *k == cache_key) {
@@ -578,15 +853,37 @@ pub fn lookup_or_spawn_preview(
         return PreviewLookup::Ready(None);
     };
     rt.spawn(async move {
+        let headers = if input.is_response {
+            &input.res_headers
+        } else {
+            &input.req_headers
+        };
+        let body = if input.is_response {
+            &input.res_body
+        } else {
+            &input.req_body
+        };
+        let env = PreviewScriptEnv {
+            data_dir: &input.data_dir,
+            configured_hooks: &input.configured_hooks,
+            host_session: &input.host_session,
+            host: &input.host,
+            path: &input.path,
+            req_headers: &input.req_headers,
+            req_body: &input.req_body,
+            res_headers: &input.res_headers,
+            res_body: &input.res_body,
+        };
         let result = run_preview_hooks(
-            &specs,
-            id,
-            is_response,
-            &method,
-            &url,
-            status,
-            &headers,
-            &body,
+            &input.specs,
+            input.flow_id,
+            input.is_response,
+            &input.method,
+            &input.url,
+            input.status,
+            headers,
+            body,
+            Some(env),
         )
         .await;
         {
@@ -652,7 +949,7 @@ mod tests {
         });
 
         let spec = HookSpec {
-            url: format!("http://127.0.0.1:{port}/preview"),
+            target: HookTarget::Http(format!("http://127.0.0.1:{port}/preview")),
             phase: crate::rules::HookPhase::Response,
             mode: HookMode::Preview,
             timeout: Duration::from_secs(2),
@@ -666,6 +963,7 @@ mod tests {
             Some(200),
             &[("Content-Type".into(), "application/octet-stream".into())],
             b"\x01\x02\x03ciphertext",
+            None,
         )
         .await
         .expect("preview hook should return decoded body");

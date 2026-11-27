@@ -476,6 +476,7 @@ fn make_shown(url: &str, status: Option<u16>, error: &str) -> Shown {
         request_form: signal(Vec::new()),
         request_note: signal(String::new()),
         response_note: signal(String::new()),
+        hook_cards: signal(Vec::new()),
         metrics: signal(String::new()),
         timing_bar: signal(present::TimingBreakdown::default()),
         query: signal(Vec::new()),
@@ -6607,4 +6608,152 @@ export default () => (
         assert!(!tree.has_text_containing(paused_prefix));
         assert!(tree.has_text("ACTIVE_SPEC|name=Recovered QA|tripped=false|footer=Top"));
     }
+}
+
+#[test]
+fn hook_preview_cards_transition_from_hook_flow_to_plain_flow_resets_cards() {
+    struct TempCleanup(std::path::PathBuf);
+    impl Drop for TempCleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    let controls = make_controls("hook-preview-cards");
+    let dir = controls.hub.ca.dir().to_path_buf();
+    let _cleanup = TempCleanup(dir.clone());
+    let hooks_dir = dir.join("hooks");
+    std::fs::create_dir_all(&hooks_dir).unwrap();
+    std::fs::write(
+        hooks_dir.join("dec.tsx"),
+        r#"
+import { Section, Badge, KeyValue, Code } from "zniff/hook";
+export function onPreview(ctx) {
+  return {
+    res: { body: '{"plain":"ok"}', contentType: "application/json", note: "Decrypted" },
+    cards: (
+      <Section title="解密摘要">
+        <Badge tone="ok">AES-256-GCM</Badge>
+        <KeyValue label="Host" value={ctx.host} />
+        <Code language="json">{'{"plain":"ok"}'}</Code>
+      </Section>
+    ),
+  };
+}
+"#,
+    )
+    .unwrap();
+
+    controls
+        .hub
+        .set_script_hooks(&[crate::hook_spec::ScriptHookConfig {
+            id: "dec".into(),
+            name: "Decrypt".into(),
+            script: "dec.tsx".into(),
+            enabled: true,
+            match_pattern: "api.vicanso.dev".into(),
+            stages: vec![crate::hook_spec::HookStage::Preview],
+            timeout_ms: 500,
+            vars: std::collections::BTreeMap::new(),
+        }]);
+    controls.hub.set_rules_enabled(true);
+
+    let id_a = seed_http_flow(
+        &controls,
+        "api.vicanso.dev",
+        "/v1/cipher",
+        200,
+        b"\x01\x02encrypted",
+    );
+    let id_b = seed_http_flow(
+        &controls,
+        "cdn.vicanso.dev",
+        "/plain",
+        200,
+        br#"{"plain_flow":true}"#,
+    );
+
+    #[derive(Clone)]
+    struct HookPreviewHarnessState {
+        controls: Arc<Controls>,
+        id_a: u64,
+        id_b: u64,
+    }
+
+    thread_local! {
+        static HOOK_HARNESS: RefCell<Option<HookPreviewHarnessState>> = const { RefCell::new(None) };
+    }
+    HOOK_HARNESS.with(|slot| {
+        *slot.borrow_mut() = Some(HookPreviewHarnessState {
+            controls: controls.clone(),
+            id_a,
+            id_b,
+        });
+    });
+
+    #[component]
+    fn PreviewCardHarness() -> impl IntoElement {
+        provide_base_contexts(Lang::Zh);
+        provide_mono_font(false);
+        let st = HOOK_HARNESS.with(|slot| slot.borrow().as_ref().unwrap().clone());
+        let shown = make_shown("", Some(200), "");
+        let c1 = st.controls.clone();
+        let s1 = shown;
+        let id_a = st.id_a;
+        let c2 = st.controls.clone();
+        let s2 = shown;
+        let id_b = st.id_b;
+        view()
+            .w(px(900.0))
+            .h(px(700.0))
+            .flex_col()
+            .child(
+                button()
+                    .on_press(move |_: &()| {
+                        publish_detail_for_controls(&s1, &c1, Some(id_a), Lang::Zh, None);
+                    })
+                    .child(text("SELECT_A")),
+            )
+            .child(
+                button()
+                    .on_press(move |_: &()| {
+                        publish_detail_for_controls(&s2, &c2, Some(id_b), Lang::Zh, None);
+                    })
+                    .child(text("SELECT_B")),
+            )
+            .child(hook_preview_cards(shown.hook_cards))
+            .child(text(move || {
+                format!(
+                    "STATE|pretty={}|cards={}|note={}",
+                    shown.pretty.get(),
+                    shown.hook_cards.with(Vec::len),
+                    shown.response_note.get(),
+                )
+            }))
+    }
+
+    let (mut core, mut tree) = mount::<PreviewCardHarness>(Size::new(px(900.0), px(700.0)));
+    assert!(tree.press_text(&mut core, "SELECT_A"));
+    // Poll briefly until async preview worker caches the result for flow A.
+    let flow_a = controls.hub.with_session(|s| s.hydrated(id_a)).unwrap();
+    for _ in 0..80 {
+        if matches!(
+            controls.hub.preview_hook_body(&flow_a, true),
+            Some(crate::webhook::PreviewLookup::Ready(_))
+        ) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(tree.press_text(&mut core, "SELECT_A"));
+    assert!(tree.has_text("STATE|pretty=true|cards=1|note=hook 预览解码 · Decrypted"));
+    assert!(tree.has_text("解密摘要"));
+    assert!(tree.has_text("AES-256-GCM"));
+    assert!(tree.has_text("api.vicanso.dev"));
+
+    // Transition A -> B (plain flow without hook): pretty stays preserved, cards and hook note reset.
+    assert!(tree.press_text(&mut core, "SELECT_B"));
+    assert!(tree.has_text("STATE|pretty=true|cards=0|note="));
+    assert!(!tree.has_text("解密摘要"));
+    assert!(!tree.has_text("AES-256-GCM"));
 }

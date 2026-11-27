@@ -920,6 +920,7 @@ pub(crate) fn apply_saved_prefs(hub: &Hub) {
     hub.set_bypass(&saved.bypass_hosts);
     hub.set_rules(&saved.rules);
     hub.set_rule_groups(&saved.rule_groups);
+    hub.set_script_hooks(&saved.script_hooks);
     hub.set_upstream(&saved.upstream_proxy);
     hub.set_proxy_auth(&config::runtime_proxy_auth(&saved.proxy_auth));
     let allow = config::runtime_allow_hosts(&saved.allow_hosts);

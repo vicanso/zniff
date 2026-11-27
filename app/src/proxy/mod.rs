@@ -200,6 +200,18 @@ pub async fn listen() -> Result<TcpListener> {
     Ok(TcpListener::bind("127.0.0.1:0").await?)
 }
 
+#[cfg(test)]
+pub(crate) fn spawn_test_serve(listener: TcpListener, hub: Arc<Hub>) {
+    tokio::spawn(async move {
+        while let Ok((socket, _)) = listener.accept().await {
+            let hub = Arc::clone(&hub);
+            tokio::spawn(async move {
+                let _ = handle_conn(socket, hub).await;
+            });
+        }
+    });
+}
+
 fn sanitize_source_app(raw: &str) -> String {
     raw.trim()
         .chars()

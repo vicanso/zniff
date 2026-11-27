@@ -59,7 +59,7 @@ pub(super) async fn plain_http_inner<S>(
     head: &Head,
     hub: Arc<Hub>,
     id: u64,
-    method: String,
+    mut method: String,
     mut host: String,
     mut port: u16,
     mut path: String,
@@ -531,7 +531,7 @@ where
             body_override.as_deref(),
             break_overrode_body || strip_request_encoding,
         );
-        if let Some(hook_mut) = crate::webhook::run_request_hooks(
+        if let Some(outcome) = crate::webhook::run_request_hooks(
             &hub,
             id,
             &plan.hooks,
@@ -545,29 +545,74 @@ where
         )
         .await
         {
-            if let Some(next_path) = hook_mut.path {
-                path = next_path;
-                hub.retarget(
-                    id,
-                    host.clone(),
-                    path.clone(),
-                    format!("{scheme}://{authority}{path}"),
-                );
+            match outcome {
+                crate::webhook::RequestHookOutcome::RespondWith(resp) => {
+                    if !request_taken {
+                        let _ = drain_request(&mut client, &headers, &hub, id).await;
+                    }
+                    let mut resp_headers = resp.headers;
+                    let expanded_res = expand_header_ops_for_flow(
+                        &response_ops,
+                        &method,
+                        &host,
+                        &path,
+                        &resp_headers,
+                        &resp.body,
+                        Some(resp.status),
+                        flow_now_ms,
+                        false,
+                    );
+                    rules::apply_header_ops(&mut resp_headers, &expanded_res);
+                    if cors {
+                        rules::ensure_cors(&mut resp_headers);
+                    }
+                    resp_headers.retain(|(name, _)| {
+                        !name.eq_ignore_ascii_case("transfer-encoding")
+                            && !name.eq_ignore_ascii_case("content-length")
+                    });
+                    write_static_throttled(
+                        &mut client,
+                        &hub,
+                        id,
+                        resp.status,
+                        reason_phrase(resp.status),
+                        &resp_headers,
+                        &resp.body,
+                        throttle_down_bps,
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                crate::webhook::RequestHookOutcome::Mutate(hook_mut) => {
+                    if let Some(next_method) = hook_mut.method {
+                        method = next_method;
+                        hub.set_method(id, method.clone());
+                    }
+                    if let Some(next_path) = hook_mut.path {
+                        path = next_path;
+                        hub.retarget(
+                            id,
+                            host.clone(),
+                            path.clone(),
+                            format!("{scheme}://{authority}{path}"),
+                        );
+                    }
+                    if let Some(next_headers) = hook_mut.headers {
+                        headers = next_headers;
+                    }
+                    if let Some(next_body) = hook_mut.body {
+                        body_override = Some(next_body);
+                        strip_request_encoding = true;
+                    }
+                    let synced_body = current_decoded_request_body(
+                        &hub,
+                        id,
+                        body_override.as_deref(),
+                        strip_request_encoding,
+                    );
+                    hub.replace_request(id, headers.clone(), synced_body);
+                }
             }
-            if let Some(next_headers) = hook_mut.headers {
-                headers = next_headers;
-            }
-            if let Some(next_body) = hook_mut.body {
-                body_override = Some(next_body);
-                strip_request_encoding = true;
-            }
-            let synced_body = current_decoded_request_body(
-                &hub,
-                id,
-                body_override.as_deref(),
-                strip_request_encoding,
-            );
-            hub.replace_request(id, headers.clone(), synced_body);
         }
     }
     if crate::rule_vars::header_ops_use_req_context(&plan.request_headers) {

@@ -294,6 +294,7 @@ pub fn run_cli(args: &[String], config_port: u16) -> i32 {
     hub.set_bypass(&loaded.bypass_hosts);
     hub.set_rules(&loaded.rules);
     hub.set_rule_groups(&loaded.rule_groups);
+    hub.set_script_hooks(&loaded.script_hooks);
     hub.set_upstream(&loaded.upstream_proxy);
     let allow = crate::config::runtime_allow_hosts(&loaded.allow_hosts);
     hub.configure_allow_hosts(&allow.text, allow.strict, allow.locked);

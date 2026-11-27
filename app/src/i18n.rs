@@ -306,6 +306,17 @@ pub enum StatusMsg {
     TransparentProxyStopped,
     TransparentProxyFailed(String),
     TransparentProxyNeedsApplications,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    ScriptHooksInitialized {
+        path: String,
+    },
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    ScriptHookCompleted {
+        id: String,
+        summary: String,
+    },
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    ScriptHookFailed(String),
 }
 
 fn port_in_use(err: &str) -> bool {
@@ -1080,6 +1091,24 @@ impl StatusMsg {
                 )
             }
             .into(),
+            Self::ScriptHooksInitialized { path } => match lang {
+                Lang::Zh => format!("已初始化脚本勾子目录并复制路径 · {path}"),
+                Lang::En => format!("Initialized hooks dir & copied path · {path}"),
+            },
+            Self::ScriptHookCompleted { id, summary } => {
+                if summary.trim().is_empty() {
+                    match lang {
+                        Lang::Zh => format!("脚本勾子 @{id} 执行完成"),
+                        Lang::En => format!("Script hook @{id} completed"),
+                    }
+                } else {
+                    format!("@{id} · {summary}")
+                }
+            }
+            Self::ScriptHookFailed(err) => match lang {
+                Lang::Zh => format!("脚本勾子执行失败: {err}"),
+                Lang::En => format!("Script hook failed: {err}"),
+            },
         }
     }
 
@@ -1165,7 +1194,9 @@ impl StatusMsg {
             | Self::UiZoomChanged(_)
             | Self::UpdateOpenedInstaller(_)
             | Self::TransparentProxyStarted
-            | Self::TransparentProxyStopped => Some(false),
+            | Self::TransparentProxyStopped
+            | Self::ScriptHooksInitialized { .. }
+            | Self::ScriptHookCompleted { .. } => Some(false),
             Self::ExportFailed(_)
             | Self::ImportFailed(_)
             | Self::SaveFailed(_)
@@ -1218,7 +1249,8 @@ impl StatusMsg {
             | Self::ProtoEditInEditor
             | Self::RuleGroupLimitReached(_)
             | Self::RuleGroupMissing(_)
-            | Self::TemplateRuleAlreadyPresent(_) => Some(true),
+            | Self::TemplateRuleAlreadyPresent(_)
+            | Self::ScriptHookFailed(_) => Some(true),
             _ => None,
         }
     }
@@ -1305,7 +1337,8 @@ impl StatusMsg {
             | Self::UpdateCheckFailed(_)
             | Self::UpdateFailed { .. }
             | Self::TransparentProxyFailed(_)
-            | Self::WebOpFailed(_) => t(lang, "操作失败", "Action Failed"),
+            | Self::WebOpFailed(_)
+            | Self::ScriptHookFailed(_) => t(lang, "操作失败", "Action Failed"),
             Self::ConfigBroken { .. } => t(lang, "配置错误", "Configuration Error"),
             _ if self.toast_kind() == Some(true) => t(lang, "操作提示", "Notice"),
             _ => t(lang, "操作成功", "Action Completed"),

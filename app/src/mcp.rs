@@ -382,6 +382,8 @@ async fn call_tool(hub: Arc<Hub>, name: &str, args: &Value) -> Value {
         "wait_for_flow" => crate::mcp_tools::tool_wait_for_flow(hub, args).await,
         "mock_flow" | "add_rule_from_flow" => crate::mcp_tools::tool_mock_flow(&hub, args),
         "diff_flows" => crate::mcp_tools::tool_diff_flows(&hub, args),
+        "list_script_hooks" => crate::mcp_tools::tool_list_script_hooks(&hub),
+        "run_script_hook" => crate::mcp_tools::tool_run_script_hook(hub, args).await,
         _ => tool_error(format!("Unknown tool: {name}")),
     }
 }

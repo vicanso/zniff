@@ -27,9 +27,14 @@ fn resolve_preview_hook_override(
     is_response: bool,
     pretty: bool,
     lang: Lang,
-) -> (Option<Vec<u8>>, Option<String>, Option<String>) {
+) -> (
+    Option<Vec<u8>>,
+    Option<String>,
+    Option<String>,
+    Vec<crate::hook_spec::PreviewCardNode>,
+) {
     if !pretty {
-        return (None, None, None);
+        return (None, None, None, Vec::new());
     }
     match hub.preview_hook_body(flow, is_response) {
         Some(crate::webhook::PreviewLookup::Ready(Some(res))) => {
@@ -40,7 +45,13 @@ fn resolve_preview_hook_override(
                 ),
                 None => t(lang, "hook 预览解码", "Decoded by hook preview").to_string(),
             };
-            (Some(res.body), res.content_type, Some(label))
+            let body = (!res.body.is_empty()).then_some(res.body);
+            let note_out = if res.note.is_some() || body.is_some() {
+                Some(label)
+            } else {
+                None
+            };
+            (body, res.content_type, note_out, res.cards)
         }
         Some(crate::webhook::PreviewLookup::Pending) => (
             None,
@@ -53,6 +64,7 @@ fn resolve_preview_hook_override(
                 )
                 .to_string(),
             ),
+            Vec::new(),
         ),
         _ => {
             if let Some(decoded) = hub.decode_proto_body(flow, is_response) {
@@ -65,9 +77,10 @@ fn resolve_preview_hook_override(
                     Some(decoded.json_bytes),
                     Some("application/json".to_string()),
                     Some(label),
+                    Vec::new(),
                 );
             }
-            (None, None, None)
+            (None, None, None, Vec::new())
         }
     }
 }
@@ -79,8 +92,13 @@ fn resolve_preview_hook_override(
     _is_response: bool,
     _pretty: bool,
     _lang: Lang,
-) -> (Option<Vec<u8>>, Option<String>, Option<String>) {
-    (None, None, None)
+) -> (
+    Option<Vec<u8>>,
+    Option<String>,
+    Option<String>,
+    Vec<crate::hook_spec::PreviewCardNode>,
+) {
+    (None, None, None, Vec::new())
 }
 
 #[cfg(test)]
@@ -193,10 +211,17 @@ fn publish_detail_with_flows(
     let pretty = shown.pretty.get();
     let request_type = present::content_type(&flow.request_headers);
     let response_type = present::content_type(&flow.response_headers);
-    let (req_preview_body, req_preview_ct, req_preview_note) =
+    let (req_preview_body, req_preview_ct, req_preview_note, req_preview_cards) =
         resolve_preview_hook_override(hub, &flow, false, pretty, lang);
-    let (res_preview_body, res_preview_ct, res_preview_note) =
+    let (res_preview_body, res_preview_ct, res_preview_note, res_preview_cards) =
         resolve_preview_hook_override(hub, &flow, true, pretty, lang);
+    let mut combined_cards = Vec::new();
+    for card in req_preview_cards.into_iter().chain(res_preview_cards) {
+        if !combined_cards.contains(&card) {
+            combined_cards.push(card);
+        }
+    }
+    shown.hook_cards.set(combined_cards);
     let req_body_bytes = req_preview_body.as_deref().unwrap_or(&flow.request_body);
     let res_body_bytes = res_preview_body.as_deref().unwrap_or(&flow.response_body);
     let req_display_bytes = effective_body_bytes(

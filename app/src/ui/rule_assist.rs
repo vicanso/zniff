@@ -359,13 +359,13 @@ pub(crate) fn fill_draft_from_rule_line(
         Rule::Hook {
             host,
             path_prefix,
-            url,
+            target,
             phase,
             mode,
             timeout,
             op,
         } => {
-            use crate::rules::{HookMode, HookPhase};
+            use crate::rules::{HookMode, HookPhase, HookTarget};
             draft_kind.set(15);
             draft_modes
                 .req_res
@@ -373,7 +373,7 @@ pub(crate) fn fill_draft_from_rule_line(
             draft_host.set(host);
             draft_path.set(clean_draft_path(&path_prefix));
             draft_op.set(op.unwrap_or_default());
-            draft_from.set(url);
+            draft_from.set(target.display_target());
             let mut to_parts = Vec::new();
             if matches!(phase, HookPhase::Both) {
                 to_parts.push("both".to_string());
@@ -381,8 +381,12 @@ pub(crate) fn fill_draft_from_rule_line(
             if matches!(mode, HookMode::Preview) {
                 to_parts.push("preview".to_string());
             }
+            let default_ms = match target {
+                HookTarget::Http(_) => 2000,
+                HookTarget::Script { .. } => u128::from(crate::hook_spec::DEFAULT_HOOK_TIMEOUT_MS),
+            };
             let ms = timeout.as_millis();
-            if ms != 2000 {
+            if ms != default_ms {
                 to_parts.push(format!("{ms}ms"));
             }
             draft_to.set(to_parts.join(" "));

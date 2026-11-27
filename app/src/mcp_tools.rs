@@ -95,6 +95,36 @@ pub(crate) fn extra_tool_schemas() -> Vec<Value> {
                 }
             }
         }),
+        json!({
+            "name": "list_script_hooks",
+            "description": "List configured [[script_hooks]] entries and <data_dir>/hooks/*.tsx|*.ts scripts (also initializes zniff-hook.d.ts TypeScript definitions) along with stage bindings and circuit-breaker states.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        }),
+        json!({
+            "name": "run_script_hook",
+            "description": "Execute an <data_dir>/hooks/*.tsx script's `onRun(ctx)` entrypoint on captured flows using `zniff.flows.*`, `zniff.codec.*`, and `zniff.crypto.*`.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["id"],
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "Configured hook ID or filename in <data_dir>/hooks/ (with or without leading `@`)."
+                    },
+                    "filter": {
+                        "type": "string",
+                        "description": "Optional zniff filter expression passed as `ctx.filter`."
+                    },
+                    "selected_id": {
+                        "type": "integer",
+                        "description": "Optional focused flow ID passed as `ctx.selectedId`."
+                    }
+                }
+            }
+        }),
     ]
 }
 
@@ -666,4 +696,56 @@ pub(crate) fn format_body_preview(
         obj["expired_bytes"] = json!(exp);
     }
     obj
+}
+
+pub(crate) fn tool_list_script_hooks(hub: &Hub) -> Value {
+    let data_dir = hub.ca.dir();
+    let dts_error = crate::hook_runtime::ensure_hook_types(data_dir)
+        .err()
+        .map(|err| err.to_string());
+    let configured = hub.script_hooks();
+    let hooks = crate::hook_runtime::list_script_hooks(data_dir, &configured);
+    let mut out = json!({
+        "hooks_dir": crate::hook_runtime::hooks_dir(data_dir).display().to_string(),
+        "dts_file": crate::hook_runtime::hooks_dir(data_dir).join("zniff-hook.d.ts").display().to_string(),
+        "count": hooks.len(),
+        "hooks": hooks,
+    });
+    if let Some(err) = dts_error {
+        out["warning"] = json!(err);
+    }
+    tool_json(&out)
+}
+
+pub(crate) async fn tool_run_script_hook(hub: Arc<Hub>, args: &Value) -> Value {
+    let Some(id) = args
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return tool_error("Missing required parameter: id");
+    };
+    let filter = args.get("filter").and_then(Value::as_str).unwrap_or("");
+    let selected_id = args.get("selected_id").and_then(Value::as_u64);
+    let configured = hub.script_hooks();
+    match crate::hook_runtime::eval_run_hook_async(
+        hub.ca.dir(),
+        &configured,
+        hub.hook_session_host(),
+        id,
+        filter,
+        selected_id,
+    )
+    .await
+    {
+        Ok(report) => tool_json(&json!({
+            "ok": true,
+            "id": report.hook_id,
+            "summary": report.summary,
+            "cards": report.cards,
+            "duration_ms": report.duration_ms,
+        })),
+        Err(err) => tool_error(err),
+    }
 }

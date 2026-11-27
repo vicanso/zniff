@@ -50,19 +50,34 @@ struct ReservedSpill {
     segment_id: u32,
 }
 
-struct SpillIo {
+pub(crate) struct SpillIo {
     file: File,
     offset: u64,
     len: u32,
 }
 
 impl SpillIo {
-    fn read(&self) -> Vec<u8> {
+    pub(crate) fn read(&self) -> Vec<u8> {
         let mut buf = vec![0u8; self.len as usize];
         if read_at(&self.file, &mut buf, self.offset).is_err() {
             return Vec::new();
         }
         buf
+    }
+}
+
+/// Snapshot plan for reading one flow body without holding the [`Session`] lock during spill `pread`.
+pub(crate) enum BodyReadPlan {
+    Inline(Vec<u8>),
+    Spill(SpillIo),
+}
+
+impl BodyReadPlan {
+    pub(crate) fn finish(self) -> Vec<u8> {
+        match self {
+            Self::Inline(bytes) => bytes,
+            Self::Spill(io) => io.read(),
+        }
     }
 }
 
@@ -2480,6 +2495,42 @@ impl Session {
             }
         }
         Some(flow)
+    }
+
+    /// Clones inline bytes or prepares an unlocked spill descriptor for one flow direction.
+    pub(crate) fn plan_body_read(&self, id: u64, direction: Direction) -> Option<BodyReadPlan> {
+        let flow = self.flows.get(&id)?;
+        if flow.is_marker() {
+            return None;
+        }
+        let (inline, spill) = match direction {
+            Direction::Request => (&flow.request_body, flow.request_spill),
+            Direction::Response => (&flow.response_body, flow.response_spill),
+        };
+        if !inline.is_empty() {
+            return Some(BodyReadPlan::Inline(inline.clone()));
+        }
+        if let Some(sref) = spill {
+            return match self.spill.reader(sref) {
+                Some(io) => Some(BodyReadPlan::Spill(io)),
+                None => Some(BodyReadPlan::Inline(Vec::new())),
+            };
+        }
+        Some(BodyReadPlan::Inline(Vec::new()))
+    }
+
+    pub fn set_method(&mut self, id: u64, method: impl Into<String>) -> bool {
+        let Some(flow) = self.flows.get_mut(&id) else {
+            return false;
+        };
+        let next = method.into().trim().to_ascii_uppercase();
+        if next.is_empty() || flow.method == next {
+            return false;
+        }
+        self.next_rev += 1;
+        flow.method = next;
+        flow.rev = self.next_rev;
+        true
     }
 
     /// Replaces the rows the web view is showing. A summary does not erase a

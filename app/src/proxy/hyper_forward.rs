@@ -230,7 +230,7 @@ pub(super) async fn forward_request(
         url: format!("{scheme}://{authority}{path}"),
         request_headers: header_pairs(&parts.headers),
     });
-    let req_method = parts.method.clone();
+    let mut req_method = parts.method.clone();
     let mut body_override: Option<Vec<u8>> = None;
     let mut request_prefixed: Option<Bytes> = None;
     let mut request_prefix_recorded = true;
@@ -683,7 +683,7 @@ pub(super) async fn forward_request(
             body_override.as_deref(),
             break_overrode_body || strip_request_encoding,
         );
-        if let Some(hook_mut) = crate::webhook::run_request_hooks(
+        if let Some(outcome) = crate::webhook::run_request_hooks(
             &hub,
             id,
             &req_hooks,
@@ -697,32 +697,72 @@ pub(super) async fn forward_request(
         )
         .await
         {
-            if let Some(next_path) = hook_mut.path {
-                path = next_path;
-                hub.retarget(
-                    id,
-                    host.clone(),
-                    path.clone(),
-                    format!("{scheme}://{authority}{path}"),
-                );
-            }
-            if let Some(next_headers) = hook_mut.headers {
-                pairs = next_headers;
-                replace_header_map(&mut parts.headers, &pairs);
-                headers_replaced = true;
-            }
-            if let Some(next_body) = hook_mut.body {
-                body_override = Some(next_body);
-                strip_request_encoding = true;
-            }
-            if headers_replaced || strip_request_encoding {
-                let synced = current_decoded_request_body(
-                    &hub,
-                    id,
-                    body_override.as_deref(),
-                    strip_request_encoding,
-                );
-                hub.replace_request(id, pairs, synced);
+            match outcome {
+                crate::webhook::RequestHookOutcome::RespondWith(resp) => {
+                    if let Some(left) = incoming.take() {
+                        drain_incoming(left).await?;
+                    }
+                    let code = StatusCode::from_u16(resp.status).unwrap_or(StatusCode::OK);
+                    let mut resp_headers = resp.headers;
+                    let expanded_res = expand_header_ops_for_flow(
+                        &response_ops,
+                        req_method.as_str(),
+                        &host,
+                        &path,
+                        &resp_headers,
+                        &resp.body,
+                        Some(code.as_u16()),
+                        flow_now_ms,
+                        false,
+                    );
+                    rules::apply_header_ops(&mut resp_headers, &expanded_res);
+                    if cors {
+                        rules::ensure_cors(&mut resp_headers);
+                    }
+                    resp_headers.retain(|(name, _)| {
+                        !name.eq_ignore_ascii_case("transfer-encoding")
+                            && !name.eq_ignore_ascii_case("content-length")
+                    });
+                    resp_headers.push(("Content-Length".into(), resp.body.len().to_string()));
+                    return synthetic_headers(&hub, id, code, resp_headers, resp.body)
+                        .map(|res| res.map(|b| b.with_throttle(throttle_down_bps)));
+                }
+                crate::webhook::RequestHookOutcome::Mutate(hook_mut) => {
+                    if let Some(next_method) = hook_mut.method
+                        && let Ok(parsed) = Method::from_bytes(next_method.as_bytes())
+                    {
+                        req_method = parsed.clone();
+                        parts.method = parsed;
+                        hub.set_method(id, next_method);
+                    }
+                    if let Some(next_path) = hook_mut.path {
+                        path = next_path;
+                        hub.retarget(
+                            id,
+                            host.clone(),
+                            path.clone(),
+                            format!("{scheme}://{authority}{path}"),
+                        );
+                    }
+                    if let Some(next_headers) = hook_mut.headers {
+                        pairs = next_headers;
+                        replace_header_map(&mut parts.headers, &pairs);
+                        headers_replaced = true;
+                    }
+                    if let Some(next_body) = hook_mut.body {
+                        body_override = Some(next_body);
+                        strip_request_encoding = true;
+                    }
+                    if headers_replaced || strip_request_encoding {
+                        let synced = current_decoded_request_body(
+                            &hub,
+                            id,
+                            body_override.as_deref(),
+                            strip_request_encoding,
+                        );
+                        hub.replace_request(id, pairs, synced);
+                    }
+                }
             }
         }
     }

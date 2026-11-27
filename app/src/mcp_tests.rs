@@ -339,7 +339,9 @@ resolve api.example.com 127.0.0.1:8443";
     assert!(names.contains(&"wait_for_flow"));
     assert!(names.contains(&"mock_flow"));
     assert!(names.contains(&"diff_flows"));
-    assert_eq!(names.len(), 13);
+    assert!(names.contains(&"list_script_hooks"));
+    assert!(names.contains(&"run_script_hook"));
+    assert_eq!(names.len(), 15);
 
     let openapi_res = parse_tool_payload(&tool_generate_openapi(&hub, &json!({ "filter": "" })));
     assert_eq!(openapi_res["spec"]["openapi"], "3.0.3");
