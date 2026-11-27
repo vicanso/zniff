@@ -361,14 +361,17 @@ export function onPreview(ctx: PreviewHookContext): PreviewHookResult {
     assert_eq!(body["2"], 2026);
     assert_eq!(body["3"]["1"], "auth-ok");
     assert_eq!(body["4"], serde_json::json!(["alpha", "beta"]));
-    let PreviewCardNode::Section { title, children } = &preview.cards[0] else {
+    let PreviewCardNode::Section {
+        title, children, ..
+    } = &preview.cards[0]
+    else {
         panic!("expected Section")
     };
     assert_eq!(title, "Protobuf 载荷");
     assert!(
-        matches!(&children[0], PreviewCardNode::Badge { tone: PreviewTone::Ok, text } if text == "SDK FROZEN")
+        matches!(&children[0], PreviewCardNode::Badge { tone: PreviewTone::Ok, text, .. } if text == "SDK FROZEN")
     );
     assert!(
-        matches!(&children[1], PreviewCardNode::KeyValue { label, value } if label == "Service" && value == "rpc.vicanso.dev")
+        matches!(&children[1], PreviewCardNode::KeyValue { label, value, .. } if label == "Service" && value == "rpc.vicanso.dev")
     );
 }

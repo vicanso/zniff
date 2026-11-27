@@ -27,6 +27,7 @@ pub struct Hub {
     pub(super) rules_text: Mutex<String>,
     pub(super) rule_groups: Mutex<Vec<crate::config::RuleGroup>>,
     pub(super) script_hooks: Mutex<Vec<crate::hook_spec::ScriptHookConfig>>,
+    pub(super) hook_views: crate::hook_view_store::HookViewStore,
     pub(super) rules_rev: AtomicU64,
     /// Session-only. Off skips every rule without rewriting the text.
     pub(super) apply_rules: AtomicBool,
@@ -186,6 +187,7 @@ impl Hub {
             rules_text: Mutex::new(String::new()),
             rule_groups: Mutex::new(Vec::new()),
             script_hooks: Mutex::new(Vec::new()),
+            hook_views: crate::hook_view_store::HookViewStore::new(),
             rules_rev: AtomicU64::new(0),
             apply_rules: AtomicBool::new(true),
             apply_breaks: AtomicBool::new(true),
@@ -672,6 +674,29 @@ impl Hub {
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .clone()
+    }
+
+    pub fn live_hook_views(&self, id: u64) -> crate::hook_view_store::FlowHookViews {
+        self.hook_views.get(id)
+    }
+
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub fn append_live_hook_view(
+        &self,
+        id: u64,
+        is_response: bool,
+        nodes: Vec<crate::hook_spec::PreviewCardNode>,
+    ) {
+        if nodes.is_empty() {
+            return;
+        }
+        self.hook_views.append_side(id, is_response, nodes);
+        self.touch();
+    }
+
+    #[allow(dead_code)]
+    pub fn clear_hook_views(&self) {
+        self.hook_views.clear();
     }
 
     pub fn effective_rules_count(&self) -> usize {

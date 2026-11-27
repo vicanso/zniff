@@ -321,6 +321,7 @@ fn make_controls(tag: &str) -> Arc<Controls> {
         config_error: Mutex::new(None),
         config_path: Mutex::new(String::new()),
         pending_replay_diff: Mutex::new(None),
+        pending_hook_run: Mutex::new(None),
         session_tabs: Mutex::new(SessionTabsStore::new()),
     })
 }
@@ -477,6 +478,8 @@ fn make_shown(url: &str, status: Option<u16>, error: &str) -> Shown {
         request_note: signal(String::new()),
         response_note: signal(String::new()),
         hook_cards: signal(Vec::new()),
+        req_hook_cards: signal(Vec::new()),
+        res_hook_cards: signal(Vec::new()),
         metrics: signal(String::new()),
         timing_bar: signal(present::TimingBreakdown::default()),
         query: signal(Vec::new()),
@@ -6756,6 +6759,301 @@ export function onPreview(ctx) {
     assert!(tree.has_text("STATE|pretty=true|cards=0|note="));
     assert!(!tree.has_text("解密摘要"));
     assert!(!tree.has_text("AES-256-GCM"));
+}
+
+#[test]
+fn hook_pure_insertion_components_actions_and_modal_transitions() {
+    use crate::hook_spec::{
+        HookViewAction, HookViewTabItem, PreviewCardNode, PreviewTone, TextSizeTier,
+    };
+
+    struct TempCleanup(std::path::PathBuf);
+    impl Drop for TempCleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    let controls = make_controls("hook-pure-insert");
+    let dir = controls.hub.ca.dir().to_path_buf();
+    let _cleanup = TempCleanup(dir.clone());
+    let hooks_dir = dir.join("hooks");
+    std::fs::create_dir_all(&hooks_dir).unwrap();
+    std::fs::write(
+        hooks_dir.join("ins.tsx"),
+        r#"
+import { Badge } from "zniff/hook";
+export function onPreview(ctx) {
+  return {
+    view: <Badge tone="accent" setFilter="host:api.vicanso.dev">FILTER_V</Badge>,
+    req: { view: <Badge tone="neutral">REQ_PREVIEW_SIDE</Badge> },
+    res: { view: <Badge tone="ok">RES_PREVIEW_SIDE</Badge> },
+  };
+}
+"#,
+    )
+    .unwrap();
+    controls
+        .hub
+        .set_script_hooks(&[crate::hook_spec::ScriptHookConfig {
+            id: "ins".into(),
+            name: "Insert Preview".into(),
+            script: "ins.tsx".into(),
+            enabled: true,
+            match_pattern: "api.vicanso.dev".into(),
+            stages: vec![crate::hook_spec::HookStage::Preview],
+            timeout_ms: 500,
+            vars: std::collections::BTreeMap::new(),
+        }]);
+    controls.hub.set_rules_enabled(true);
+
+    let id_a = controls.hub.open(crate::session::FlowDraft {
+        protocol: crate::session::Protocol::Http11,
+        method: "POST".into(),
+        host: "api.vicanso.dev".into(),
+        path: "/v1/orders?page=1".into(),
+        url: "https://api.vicanso.dev/v1/orders?page=1".into(),
+        request_headers: vec![("X-Origin-Hdr".into(), "kept".into())],
+    });
+    controls.hub.append_body_bytes_for_test(
+        id_a,
+        crate::session::Direction::Request,
+        b"{\"req\":1}",
+    );
+    controls.hub.set_response_for_test(
+        id_a,
+        200,
+        vec![("Content-Type".into(), "application/json".into())],
+    );
+    controls.hub.append_body_bytes_for_test(
+        id_a,
+        crate::session::Direction::Response,
+        b"{\"res\":2}",
+    );
+    controls.hub.mark_finished(id_a);
+
+    let id_b = seed_http_flow(
+        &controls,
+        "cdn.vicanso.dev",
+        "/plain",
+        200,
+        br#"{"plain":true}"#,
+    );
+
+    // Live views from onRequest / onResponse stages stored in Hub's sidecar store.
+    controls.hub.append_live_hook_view(
+        id_a,
+        false,
+        vec![PreviewCardNode::Callout {
+            tone: PreviewTone::Warn,
+            title: Some("Req Live Callout".into()),
+            text: "Kept alongside original body".into(),
+            children: vec![PreviewCardNode::Badge {
+                tone: PreviewTone::Accent,
+                text: "JUMP_B".into(),
+                action: HookViewAction {
+                    select_flow_id: Some(id_b),
+                    ..Default::default()
+                },
+            }],
+            action: HookViewAction::default(),
+        }],
+    );
+    controls.hub.append_live_hook_view(
+        id_a,
+        true,
+        vec![
+            PreviewCardNode::Collapsible {
+                title: "细节折叠".into(),
+                default_open: false,
+                children: vec![PreviewCardNode::Text {
+                    text: "隐藏详细字段".into(),
+                    tone: PreviewTone::Ok,
+                    mono: false,
+                    bold: false,
+                    size: Some(TextSizeTier::Sm),
+                    action: HookViewAction::default(),
+                }],
+            },
+            PreviewCardNode::Tabs {
+                items: vec![
+                    HookViewTabItem {
+                        label: "概要".into(),
+                        children: vec![PreviewCardNode::Badge {
+                            tone: PreviewTone::Ok,
+                            text: "TAB1_ACTIVE".into(),
+                            action: HookViewAction::default(),
+                        }],
+                    },
+                    HookViewTabItem {
+                        label: "表格".into(),
+                        children: vec![PreviewCardNode::Table {
+                            columns: vec!["Field".into(), "Val".into()],
+                            rows: vec![vec!["env".into(), "vicanso-prod".into()]],
+                        }],
+                    },
+                ],
+            },
+        ],
+    );
+
+    #[derive(Clone)]
+    struct PureInsertState {
+        controls: Arc<Controls>,
+        id_a: u64,
+        id_b: u64,
+    }
+    thread_local! {
+        static PURE_INSERT_ST: RefCell<Option<PureInsertState>> = const { RefCell::new(None) };
+    }
+    PURE_INSERT_ST.with(|slot| {
+        *slot.borrow_mut() = Some(PureInsertState {
+            controls: controls.clone(),
+            id_a,
+            id_b,
+        });
+    });
+
+    #[component]
+    fn PureInsertHarness() -> impl IntoElement {
+        provide_base_contexts(Lang::Zh);
+        provide_mono_font(false);
+        let st = PURE_INSERT_ST.with(|slot| slot.borrow().as_ref().unwrap().clone());
+        let profiles = make_profiles();
+        let selected = signal(None::<u64>);
+        let modal_open = signal(None::<HookRunModalData>);
+        let shown = make_shown("", Some(200), "");
+        let ctx = HookViewActionCtx::for_inspector(
+            selected,
+            profiles.filter,
+            Some(profiles.filter_enabled),
+        );
+        let c1 = st.controls.clone();
+        let c2 = st.controls.clone();
+        let id_a = st.id_a;
+        let id_b = st.id_b;
+        view()
+            .w(px(960.0))
+            .h(px(760.0))
+            .flex_col()
+            .child(
+                button()
+                    .on_press(move |_: &()| {
+                        selected.set(Some(id_a));
+                        publish_detail_for_controls(&shown, &c1, Some(id_a), Lang::Zh, None);
+                    })
+                    .child(text("LOAD_A")),
+            )
+            .child(
+                button()
+                    .on_press(move |_: &()| {
+                        selected.set(Some(id_b));
+                        publish_detail_for_controls(&shown, &c2, Some(id_b), Lang::Zh, None);
+                    })
+                    .child(text("LOAD_B")),
+            )
+            .child(
+                button()
+                    .on_press(move |_: &()| {
+                        modal_open.set(Some(HookRunModalData {
+                            hook_id: "audit".into(),
+                            summary: "Modal summary ok".into(),
+                            cards: vec![PreviewCardNode::Badge {
+                                tone: PreviewTone::Ok,
+                                text: "MODAL_BADGE".into(),
+                                action: HookViewAction::default(),
+                            }],
+                            duration_ms: 12,
+                        }));
+                    })
+                    .child(text("OPEN_RUN_MODAL")),
+            )
+            .child(hook_preview_cards_with_actions(
+                shown.hook_cards,
+                ctx.clone(),
+            ))
+            .child(hook_preview_cards_with_actions(
+                shown.req_hook_cards,
+                ctx.clone(),
+            ))
+            .child(text(move || {
+                format!("ORIG_REQ={}", shown.request_body.get())
+            }))
+            .child(hook_preview_cards_with_actions(shown.res_hook_cards, ctx))
+            .child(text(move || {
+                format!("ORIG_RES={}", shown.response_body.get())
+            }))
+            .child(text(move || {
+                format!(
+                    "HUD|sel={:?}|filter={}|pretty={}|ov={}|req={}|res={}",
+                    selected.get(),
+                    profiles.filter.get(),
+                    shown.pretty.get(),
+                    shown.hook_cards.with(Vec::len),
+                    shown.req_hook_cards.with(Vec::len),
+                    shown.res_hook_cards.with(Vec::len),
+                )
+            }))
+            .child(hook_run_modal(modal_open, selected, profiles))
+    }
+
+    let (mut core, mut tree) = mount::<PureInsertHarness>(Size::new(px(960.0), px(760.0)));
+    assert!(tree.press_text(&mut core, "LOAD_A"));
+    let flow_a = controls.hub.with_session(|s| s.hydrated(id_a)).unwrap();
+    for _ in 0..80 {
+        let req_ready = matches!(
+            controls.hub.preview_hook_body(&flow_a, false),
+            Some(crate::webhook::PreviewLookup::Ready(_))
+        );
+        let res_ready = matches!(
+            controls.hub.preview_hook_body(&flow_a, true),
+            Some(crate::webhook::PreviewLookup::Ready(_))
+        );
+        if req_ready && res_ready {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(tree.press_text(&mut core, "LOAD_A"));
+
+    // Pure insertion: inserted stage views AND original bodies coexist cleanly.
+    assert!(tree.has_text("FILTER_V"));
+    assert!(tree.has_text("REQ_PREVIEW_SIDE"));
+    assert!(tree.has_text("RES_PREVIEW_SIDE"));
+    assert!(tree.has_text("Req Live Callout"));
+    assert!(tree.has_text_containing("\"req\": 1"));
+    assert!(tree.has_text_containing("\"res\": 2"));
+    assert!(tree.has_text("TAB1_ACTIVE"));
+    assert!(!tree.has_text("vicanso-prod"));
+    assert!(!tree.has_text("隐藏详细字段"));
+
+    // Interactive Tabs + Collapsible + Host Actions (`setFilter`, `selectFlowId`).
+    assert!(tree.press_text(&mut core, "表格"));
+    assert!(tree.has_text("vicanso-prod"));
+    assert!(tree.press_text(&mut core, "细节折叠"));
+    assert!(tree.has_text("隐藏详细字段"));
+
+    assert!(tree.press_text(&mut core, "FILTER_V"));
+    assert!(tree.has_text(&format!(
+        "HUD|sel=Some({id_a})|filter=host:api.vicanso.dev|pretty=true|ov=1|req=2|res=3"
+    )));
+
+    assert!(tree.press_text(&mut core, "JUMP_B"));
+    assert!(tree.has_text_containing(&format!("HUD|sel=Some({id_b})|")));
+
+    // A -> B transition clears all 3 view signals while keeping pretty and showing plain B.
+    assert!(tree.press_text(&mut core, "LOAD_B"));
+    assert!(tree.has_text(&format!(
+        "HUD|sel=Some({id_b})|filter=host:api.vicanso.dev|pretty=true|ov=0|req=0|res=0"
+    )));
+    assert!(!tree.has_text("Req Live Callout"));
+
+    // onRun modal opens cleanly and closes on Escape.
+    assert!(tree.press_text(&mut core, "OPEN_RUN_MODAL"));
+    assert!(tree.has_text("MODAL_BADGE"));
+    assert!(tree.has_text("Modal summary ok"));
+    assert!(tree.press_escape(&mut core, false));
+    assert!(!tree.has_text("MODAL_BADGE"));
 }
 
 #[test]

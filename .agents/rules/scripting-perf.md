@@ -24,9 +24,9 @@
 - **入库与列表投影禁区**：脚本**严禁**在 `Session` 写入、`matching_with_previous_start` 全量过滤扫描、`FilteredStats` / `SessionFacets` 聚合或 `row_projection::project_rows`（10k/100k 流列表）中执行；若脚本通过 `zniff.flows.*` 读取历史包，读取 `zniff-spill/` 溢写正文时必须先退出 `Session` 互斥锁再 `pread`。
 - **允许的四个触发场景**：
   1. **工作区布局**：低频切换或窗口尺寸越过断点时产出 `LayoutSpec`。
-  2. **实时规则勾子（`onRequest` / `onResponse`）**：仅在匹配 `host[/path]` 的流上做改包、短路本地 `respondWith` 或跨包取动态凭据/密钥。
-  3. **详情解码与卡片渲染（`onPreview`）**：仅在用户点选某条流检视详情时于后台异步解码（支持 `{ req, res }` 与 TSX `<Section>/<KeyValue>/<Badge>/<Code>`）。
-  4. **手动/MCP 批处理（`onRun`）**：用户主动触发或经 MCP 调用时遍历当前会话包批量分析或打标。
+  2. **实时规则勾子（`onRequest` / `onResponse`）**：仅在匹配 `host[/path]` 的流上做改包（支持 `ctx.query` / `.text()` / `.json()` / `.form()` 与 `query` / `setHeaders` / `json` / `form` 增量修改）、短路本地 `respondWith`、跨包取动态凭据，或返回纯插入式 `view`（仅写入旁路有界 LRU [`hook_view_store.rs`](../../app/src/hook_view_store.rs) `<= 256 条流 / 4 MiB`，保持 `Flow` 结构体 `0 B` 增量）。
+  3. **详情解码与卡片渲染（`onPreview`）**：仅在用户点选某条流检视详情时于后台异步解码（支持 `req`/`res` 各自 `.text()`/`.json()`/`.form()`、`view` 概览插入以及 `req.view`/`res.view` 分侧顶部纯插入，兼容 `14` 个声明式 TSX 组件 `<Section>/<KeyValue>/<Badge>/<Code>/<View>/<Row>/<Col>/<Text>/<Divider>/<Callout>/<Table>/<Collapsible>/<Tabs>/<Tab>` 与零 JS 常驻交互 `copyValue`/`selectFlowId`/`setFilter`）；`zniff --web` 经 `GET /api/flows/{id}` 服务端异步附带 `hook.views`/`hook.preview`，`wasm32` 端保持 `0 B` JS 引擎增量。
+  4. **手动/MCP 批处理（`onRun`）**：用户经命令面板或 MCP 调用时遍历当前会话包批量分析或打标，并复用同一声明式 TSX 视图通过原生 `dialog()` 弹框或 MCP `view`/`cards` 字段输出。
 
 ---
 

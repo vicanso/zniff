@@ -100,7 +100,7 @@ pub(crate) fn zstd_decompress(bytes: &[u8]) -> Result<Vec<u8>, String> {
     read_capped(dec, "zstdDecompress")
 }
 
-fn pct_encode(out: &mut String, text: &str, form_mode: bool) {
+pub(crate) fn pct_encode(out: &mut String, text: &str, form_mode: bool) {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     for &b in text.as_bytes() {
         let safe = b.is_ascii_alphanumeric()
@@ -120,7 +120,7 @@ fn pct_encode(out: &mut String, text: &str, form_mode: bool) {
     }
 }
 
-fn pct_decode(text: &str, plus_as_space: bool) -> String {
+pub(crate) fn pct_decode(text: &str, plus_as_space: bool) -> String {
     let bytes = text.as_bytes();
     let (mut out, mut i) = (Vec::with_capacity(bytes.len()), 0usize);
     while i < bytes.len() {
@@ -142,7 +142,41 @@ fn pct_decode(text: &str, plus_as_space: bool) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn extract_form_entries<'js>(cx: &Ctx<'js>, val: Value<'js>) -> JsResult<Vec<(String, String)>> {
+pub(crate) fn parse_query_pairs_str(query: &str, plus_as_space: bool) -> Vec<(String, String)> {
+    let trimmed = query.strip_prefix('?').unwrap_or(query);
+    trimmed
+        .split('&')
+        .filter(|s| !s.is_empty())
+        .map(|seg| {
+            let (k, v) = seg.split_once('=').unwrap_or((seg, ""));
+            (pct_decode(k, plus_as_space), pct_decode(v, plus_as_space))
+        })
+        .collect()
+}
+
+pub(crate) fn encode_form_pairs(
+    pairs: &[(String, String)],
+    form_mode: bool,
+) -> Result<String, String> {
+    let mut out = String::new();
+    for (idx, (k, v)) in pairs.iter().enumerate() {
+        if idx > 0 {
+            out.push('&');
+        }
+        pct_encode(&mut out, k, form_mode);
+        out.push('=');
+        pct_encode(&mut out, v, form_mode);
+        if out.len() > crate::session::BODY_CAP {
+            return Err("encoded form/query exceeds 1 MB limit".to_string());
+        }
+    }
+    Ok(out)
+}
+
+pub(crate) fn extract_form_entries<'js>(
+    cx: &Ctx<'js>,
+    val: Value<'js>,
+) -> JsResult<Vec<(String, String)>> {
     let err_t = |msg: &str| Exception::throw_type(cx, msg);
     if val.is_array() {
         let arr = Array::from_value(val)?;
@@ -406,28 +440,19 @@ fn zstd_compress_js<'js>(
 }
 
 fn form_encode_js<'js>(cx: Ctx<'js>, val: Value<'js>) -> JsResult<String> {
-    let mut out = String::new();
-    for (idx, (k, v)) in extract_form_entries(&cx, val)?.iter().enumerate() {
-        if idx > 0 {
-            out.push('&');
-        }
-        pct_encode(&mut out, k, true);
-        out.push('=');
-        pct_encode(&mut out, v, true);
-        check_codec_input_cap(&cx, out.len())?;
-    }
-    Ok(out)
+    let entries = extract_form_entries(&cx, val)?;
+    let encoded = encode_form_pairs(&entries, true).map_err(|e| Exception::throw_range(&cx, &e))?;
+    check_codec_input_cap(&cx, encoded.len())?;
+    Ok(encoded)
 }
 
 fn form_decode_js<'js>(cx: Ctx<'js>, query: String) -> JsResult<Array<'js>> {
     check_codec_input_cap(&cx, query.len())?;
-    let trimmed = query.strip_prefix('?').unwrap_or(&query);
     let arr = Array::new(cx.clone())?;
-    for (idx, seg) in trimmed.split('&').filter(|s| !s.is_empty()).enumerate() {
-        let (k, v) = seg.split_once('=').unwrap_or((seg, ""));
+    for (idx, (k, v)) in parse_query_pairs_str(&query, true).into_iter().enumerate() {
         let pair = Array::new(cx.clone())?;
-        pair.set(0, pct_decode(k, true))?;
-        pair.set(1, pct_decode(v, true))?;
+        pair.set(0, k)?;
+        pair.set(1, v)?;
         arr.set(idx, pair)?;
     }
     Ok(arr)

@@ -355,3 +355,202 @@ export function onRun(ctx) {
         assert_eq!(s.get(flow_id).unwrap().comment, "mcp-audited");
     });
 }
+
+#[tokio::test]
+async fn live_proxy_param_mutations_stage_views_and_web_flow_detail_sync() {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    // Guard zero Flow struct bloat invariant explicitly.
+    assert!(
+        std::mem::size_of::<crate::session::Flow>() <= 768,
+        "Flow struct grew unexpectedly: {} bytes",
+        std::mem::size_of::<crate::session::Flow>()
+    );
+
+    let dir = ScratchDir::new("views-web");
+    let ca = Arc::new(Ca::open(&dir.path).unwrap());
+    let hub = Arc::new(Hub::new(ca).unwrap());
+
+    let origin_seen = Arc::new(std::sync::Mutex::new(String::new()));
+    let origin_seen_bg = Arc::clone(&origin_seen);
+    let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin_addr = origin.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = origin.accept().await {
+            let seen = Arc::clone(&origin_seen_bg);
+            tokio::spawn(async move {
+                let mut buf = [0_u8; 8192];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                *seen.lock().unwrap() = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let resp_body = r#"{"upstream":"ok","tag":"vicanso"}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{resp_body}",
+                    resp_body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+
+    let hooks_dir = dir.path.join("hooks");
+    std::fs::create_dir_all(&hooks_dir).unwrap();
+    std::fs::write(
+        hooks_dir.join("live-mut.tsx"),
+        r#"
+import { Section, KeyValue, Badge, Callout } from "zniff/hook";
+
+export function onRequest(ctx) {
+  return {
+    query: { drop: null, token: "xyz" },
+    setHeaders: { authorization: "Bearer secret", "x-remove": null },
+    json: { ok: true, count: ctx.query.length },
+    view: (
+      <Section title="Req Live View">
+        <KeyValue label="Host" value={ctx.host} copyValue={ctx.host} />
+      </Section>
+    ),
+  };
+}
+
+export function onResponse(ctx) {
+  return {
+    setHeaders: { "X-Res-Hook": "applied" },
+    json: { wrapped: ctx.json(), tag: "vicanso" },
+    view: <Badge tone="ok" setFilter="host:api.vicanso.dev">RES-VERIFIED</Badge>,
+  };
+}
+
+export function onPreview() {
+  return {
+    view: <Callout tone="accent" title="Preview Overview">Both sides intact</Callout>,
+    req: { view: <Badge tone="neutral">REQ-SIDE</Badge> },
+    res: { view: <Badge tone="ok">RES-SIDE</Badge> },
+  };
+}
+"#,
+    )
+    .unwrap();
+
+    hub.set_rules(&format!(
+        "resolve api.vicanso.dev {origin_addr}\n\
+         hook api.vicanso.dev/v1 @live-mut both\n\
+         hook api.vicanso.dev/v1 @live-mut preview\n"
+    ));
+    hub.set_script_hooks(&[ScriptHookConfig {
+        id: "live-mut".into(),
+        name: "Live Mut".into(),
+        script: "live-mut.tsx".into(),
+        enabled: true,
+        match_pattern: String::new(),
+        stages: vec![HookStage::Request, HookStage::Response, HookStage::Preview],
+        timeout_ms: 500,
+        vars: BTreeMap::new(),
+    }]);
+    hub.set_rules_enabled(true);
+
+    let listener = proxy::listen().await.unwrap();
+    let proxy_addr = listener.local_addr().unwrap();
+    proxy::spawn_test_serve(listener, Arc::clone(&hub));
+
+    let resp = send_proxy_request(
+        proxy_addr,
+        "POST http://api.vicanso.dev/v1/orders?drop=1&keep=yes HTTP/1.1\r\nHost: api.vicanso.dev\r\nX-Remove: gone\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+    )
+    .await;
+    assert!(resp.contains("X-Res-Hook: applied"), "{resp}");
+    assert!(resp.contains(r#""tag":"vicanso""#), "{resp}");
+
+    let upstream_raw = origin_seen.lock().unwrap().clone();
+    assert!(
+        upstream_raw.contains("keep=yes&token=xyz"),
+        "{upstream_raw}"
+    );
+    assert!(!upstream_raw.contains("drop=1"), "{upstream_raw}");
+    assert!(!upstream_raw.contains("X-Remove"), "{upstream_raw}");
+    assert!(
+        upstream_raw
+            .to_ascii_lowercase()
+            .contains("authorization: bearer secret"),
+        "{upstream_raw}"
+    );
+    assert!(
+        upstream_raw
+            .to_ascii_lowercase()
+            .contains("content-type: application/json"),
+        "{upstream_raw}"
+    );
+
+    let flow_id = hub.with_session(|s| s.iter().next().unwrap().id);
+    let live_views = hub.live_hook_views(flow_id);
+    assert_eq!(live_views.req.len(), 1);
+    assert_eq!(live_views.res.len(), 1);
+
+    // Web console detail endpoint returns both raw data and stage views + preview overrides.
+    let server = crate::web::WebServer::start(
+        "127.0.0.1:0".parse().unwrap(),
+        Arc::clone(&hub),
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        proxy_addr.port(),
+    )
+    .unwrap();
+    let web_addr = server.addr();
+    let web_resp = send_proxy_request(
+        web_addr,
+        &format!(
+            "GET /api/flows/{flow_id} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+        ),
+    )
+    .await;
+    let body_json: Value =
+        serde_json::from_str(web_resp.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(
+        body_json["hook"]["views"]["req"][0]["title"],
+        "Req Live View"
+    );
+    assert_eq!(body_json["hook"]["views"]["res"][0]["text"], "RES-VERIFIED");
+    assert_eq!(
+        body_json["hook"]["preview"]["pending"],
+        serde_json::json!(false)
+    );
+    assert_eq!(
+        body_json["hook"]["preview"]["overview"][0]["title"],
+        "Preview Overview"
+    );
+    assert_eq!(
+        body_json["hook"]["preview"]["req"]["cards"][0]["text"],
+        "REQ-SIDE"
+    );
+    assert_eq!(
+        body_json["hook"]["preview"]["res"]["cards"][0]["text"],
+        "RES-SIDE"
+    );
+    assert!(
+        body_json["response_body"]
+            .as_str()
+            .unwrap()
+            .contains("vicanso")
+    );
+
+    // HookViewStore cleanup respects pinned flows on clear_unpinned and clears on clear_session.
+    let unpinned_id = hub.open(crate::session::FlowDraft {
+        protocol: crate::session::Protocol::Http11,
+        method: "GET".into(),
+        host: "cdn.vicanso.dev".into(),
+        path: "/tmp".into(),
+        url: "https://cdn.vicanso.dev/tmp".into(),
+        request_headers: vec![],
+    });
+    hub.append_live_hook_view(
+        unpinned_id,
+        false,
+        vec![crate::hook_spec::PreviewCardNode::Divider],
+    );
+    hub.set_pinned(flow_id, true);
+    hub.clear_unpinned();
+    assert!(hub.live_hook_views(unpinned_id).is_empty());
+    assert_eq!(hub.live_hook_views(flow_id).req.len(), 1);
+    hub.clear_session();
+    assert!(hub.live_hook_views(flow_id).is_empty());
+
+    drop(server);
+}

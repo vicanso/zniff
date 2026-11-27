@@ -20,6 +20,15 @@ pub(crate) fn effective_body_bytes(raw_len: usize, flow_bytes: usize, truncated:
     }
 }
 
+#[derive(Default)]
+struct PreviewHookOverride {
+    body: Option<Vec<u8>>,
+    content_type: Option<String>,
+    note: Option<String>,
+    overview_cards: Vec<crate::hook_spec::PreviewCardNode>,
+    side_cards: Vec<crate::hook_spec::PreviewCardNode>,
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn resolve_preview_hook_override(
     hub: &Hub,
@@ -27,14 +36,9 @@ fn resolve_preview_hook_override(
     is_response: bool,
     pretty: bool,
     lang: Lang,
-) -> (
-    Option<Vec<u8>>,
-    Option<String>,
-    Option<String>,
-    Vec<crate::hook_spec::PreviewCardNode>,
-) {
+) -> PreviewHookOverride {
     if !pretty {
-        return (None, None, None, Vec::new());
+        return PreviewHookOverride::default();
     }
     match hub.preview_hook_body(flow, is_response) {
         Some(crate::webhook::PreviewLookup::Ready(Some(res))) => {
@@ -51,12 +55,16 @@ fn resolve_preview_hook_override(
             } else {
                 None
             };
-            (body, res.content_type, note_out, res.cards)
+            PreviewHookOverride {
+                body,
+                content_type: res.content_type,
+                note: note_out,
+                overview_cards: res.cards,
+                side_cards: res.side_cards,
+            }
         }
-        Some(crate::webhook::PreviewLookup::Pending) => (
-            None,
-            None,
-            Some(
+        Some(crate::webhook::PreviewLookup::Pending) => PreviewHookOverride {
+            note: Some(
                 t(
                     lang,
                     "正在执行 hook 预览解码…",
@@ -64,8 +72,8 @@ fn resolve_preview_hook_override(
                 )
                 .to_string(),
             ),
-            Vec::new(),
-        ),
+            ..Default::default()
+        },
         _ => {
             if let Some(decoded) = hub.decode_proto_body(flow, is_response) {
                 let label = format!(
@@ -73,32 +81,58 @@ fn resolve_preview_hook_override(
                     t(lang, ".proto 解码", "Decoded via .proto"),
                     decoded.message_name
                 );
-                return (
-                    Some(decoded.json_bytes),
-                    Some("application/json".to_string()),
-                    Some(label),
-                    Vec::new(),
-                );
+                return PreviewHookOverride {
+                    body: Some(decoded.json_bytes),
+                    content_type: Some("application/json".to_string()),
+                    note: Some(label),
+                    ..Default::default()
+                };
             }
-            (None, None, None, Vec::new())
+            PreviewHookOverride::default()
         }
     }
 }
 
 #[cfg(target_arch = "wasm32")]
 fn resolve_preview_hook_override(
-    _hub: &Hub,
-    _flow: &session::Flow,
-    _is_response: bool,
-    _pretty: bool,
-    _lang: Lang,
-) -> (
-    Option<Vec<u8>>,
-    Option<String>,
-    Option<String>,
-    Vec<crate::hook_spec::PreviewCardNode>,
-) {
-    (None, None, None, Vec::new())
+    hub: &Hub,
+    flow: &session::Flow,
+    is_response: bool,
+    pretty: bool,
+    lang: Lang,
+) -> PreviewHookOverride {
+    if !pretty {
+        return PreviewHookOverride::default();
+    }
+    let Some(ov) = hub.preview_overrides(flow.id) else {
+        return PreviewHookOverride::default();
+    };
+    let overview_cards = if is_response { Vec::new() } else { ov.overview };
+    let Some(side) = (if is_response { ov.res } else { ov.req }) else {
+        return PreviewHookOverride {
+            overview_cards,
+            ..Default::default()
+        };
+    };
+    let body = side.body_bytes().filter(|b| !b.is_empty());
+    let note = if side.note.is_some() || body.is_some() {
+        Some(match side.note {
+            Some(ref detail) => format!(
+                "{} · {detail}",
+                t(lang, "hook 预览解码", "Decoded by hook preview")
+            ),
+            None => t(lang, "hook 预览解码", "Decoded by hook preview").to_string(),
+        })
+    } else {
+        None
+    };
+    PreviewHookOverride {
+        body,
+        content_type: side.content_type,
+        note,
+        overview_cards,
+        side_cards: side.cards,
+    }
 }
 
 #[cfg(test)]
@@ -211,17 +245,30 @@ fn publish_detail_with_flows(
     let pretty = shown.pretty.get();
     let request_type = present::content_type(&flow.request_headers);
     let response_type = present::content_type(&flow.response_headers);
-    let (req_preview_body, req_preview_ct, req_preview_note, req_preview_cards) =
-        resolve_preview_hook_override(hub, &flow, false, pretty, lang);
-    let (res_preview_body, res_preview_ct, res_preview_note, res_preview_cards) =
-        resolve_preview_hook_override(hub, &flow, true, pretty, lang);
-    let mut combined_cards = Vec::new();
-    for card in req_preview_cards.into_iter().chain(res_preview_cards) {
-        if !combined_cards.contains(&card) {
-            combined_cards.push(card);
-        }
+    let req_ov = resolve_preview_hook_override(hub, &flow, false, pretty, lang);
+    let res_ov = resolve_preview_hook_override(hub, &flow, true, pretty, lang);
+    let live_views = hub.live_hook_views(flow.id);
+    let mut combined_cards =
+        crate::hook_view_store::merge_view_nodes(&live_views.overview, &req_ov.overview_cards);
+    combined_cards =
+        crate::hook_view_store::merge_view_nodes(&combined_cards, &res_ov.overview_cards);
+    let req_hook_cards =
+        crate::hook_view_store::merge_view_nodes(&live_views.req, &req_ov.side_cards);
+    let res_hook_cards =
+        crate::hook_view_store::merge_view_nodes(&live_views.res, &res_ov.side_cards);
+    if shown.hook_cards.with(|cur| *cur != combined_cards) {
+        shown.hook_cards.set(combined_cards);
     }
-    shown.hook_cards.set(combined_cards);
+    if shown.req_hook_cards.with(|cur| *cur != req_hook_cards) {
+        shown.req_hook_cards.set(req_hook_cards);
+    }
+    if shown.res_hook_cards.with(|cur| *cur != res_hook_cards) {
+        shown.res_hook_cards.set(res_hook_cards);
+    }
+    let (req_preview_body, req_preview_ct, req_preview_note) =
+        (req_ov.body, req_ov.content_type, req_ov.note);
+    let (res_preview_body, res_preview_ct, res_preview_note) =
+        (res_ov.body, res_ov.content_type, res_ov.note);
     let req_body_bytes = req_preview_body.as_deref().unwrap_or(&flow.request_body);
     let res_body_bytes = res_preview_body.as_deref().unwrap_or(&flow.response_body);
     let req_display_bytes = effective_body_bytes(

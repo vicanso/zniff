@@ -131,20 +131,6 @@ function Layout(props) {
   if (props && typeof props.footer === "string") out.footer = props.footer;
   return out;
 }
-function Row(props) {
-  const kids = [];
-  __zniff_push_child(kids, props && props.children);
-  const node = { type: "row", children: kids };
-  if (props && props.size !== undefined && props.size !== null) node.size = props.size;
-  return node;
-}
-function Col(props) {
-  const kids = [];
-  __zniff_push_child(kids, props && props.children);
-  const node = { type: "col", children: kids };
-  if (props && props.size !== undefined && props.size !== null) node.size = props.size;
-  return node;
-}
 function Pane(props) {
   if (!props || typeof props.name !== "string") {
     throw new Error("<Pane> requires a string `name` prop");
@@ -162,43 +148,9 @@ function __zniff_text_children(children) {
   }
   return String(children);
 }
-function Section(props) {
-  const kids = [];
-  __zniff_push_child(kids, props && props.children);
-  return { type: "section", title: props && props.title !== undefined && props.title !== null ? String(props.title) : "", children: kids };
-}
-function KeyValue(props) {
-  const value = props && props.value !== undefined && props.value !== null
-    ? String(props.value)
-    : __zniff_text_children(props && props.children);
-  return { type: "key_value", label: props && props.label !== undefined && props.label !== null ? String(props.label) : "", value };
-}
-function Badge(props) {
-  const text = props && props.text !== undefined && props.text !== null
-    ? String(props.text)
-    : __zniff_text_children(props && props.children);
-  const tone = props && typeof props.tone === "string" ? props.tone : "neutral";
-  return { type: "badge", tone, text };
-}
-function Code(props) {
-  const code = props && props.code !== undefined && props.code !== null
-    ? String(props.code)
-    : __zniff_text_children(props && props.children);
-  const out = { type: "code", code };
-  if (props && typeof props.language === "string" && props.language.length > 0) out.language = props.language;
-  return out;
-}
-function __zniff_h(tag, props, ...children) {
-  if (tag === __zniff_fragment) {
-    const flat = [];
-    __zniff_push_child(flat, children);
-    return flat;
-  }
-  const merged = Object.assign({}, props || {});
-  if (children.length > 0) merged.children = children;
-  if (typeof tag === "function") return tag(merged);
-  throw new Error("Unsupported TSX tag `" + String(tag) + "`: expected Layout, Row, Col, Pane, Section, KeyValue, Badge, or Code");
-}
+"#;
+
+const SANDBOX_PRELUDE_LOCKDOWN: &str = r#"
 (() => {
   const deny = (label) => function () {
     throw new TypeError(label + " is disabled inside zniff scripts");
@@ -597,6 +549,10 @@ impl WarmLayoutVm {
             crate::hook_bridge::install_zniff_globals(&cx)
                 .map_err(|err| format_js_error(&cx, err))?;
             cx.eval::<(), _>(SANDBOX_PRELUDE)
+                .map_err(|err| format_js_error(&cx, err))?;
+            cx.eval::<(), _>(crate::hook_view_spec::HOOK_VIEW_JS_PRELUDE)
+                .map_err(|err| format_js_error(&cx, err))?;
+            cx.eval::<(), _>(SANDBOX_PRELUDE_LOCKDOWN)
                 .map_err(|err| format_js_error(&cx, err))
         })?;
         VM_INIT_COUNT.fetch_add(1, Ordering::Relaxed);

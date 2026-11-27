@@ -2696,6 +2696,8 @@ fn web_cached_flow_detail_publishes_loading_then_hydrates_cleanly() {
             request_note: signal(String::new()),
             response_note: signal(String::new()),
             hook_cards: signal(Vec::new()),
+            req_hook_cards: signal(Vec::new()),
+            res_hook_cards: signal(Vec::new()),
             metrics: signal(String::new()),
             timing_bar: signal(crate::present::TimingBreakdown::default()),
             query: signal(Vec::new()),
@@ -2974,6 +2976,7 @@ fn toolbar_start_stop_clears_right_and_left_title_bar_controls() {
             config_error: Mutex::new(None),
             config_path: Mutex::new(String::new()),
             pending_replay_diff: Mutex::new(None),
+            pending_hook_run: Mutex::new(None),
             session_tabs: Mutex::new(SessionTabsStore::new()),
         });
 
@@ -5222,6 +5225,7 @@ fn make_test_controls(tag: &str) -> Arc<Controls> {
         config_error: Mutex::new(None),
         config_path: Mutex::new(String::new()),
         pending_replay_diff: Mutex::new(None),
+        pending_hook_run: Mutex::new(None),
         session_tabs: Mutex::new(SessionTabsStore::new()),
     })
 }
@@ -5264,6 +5268,8 @@ fn make_test_json_shown(pane_w: f32) -> super::Shown {
         request_note: signal(String::new()),
         response_note: signal(String::new()),
         hook_cards: signal(Vec::new()),
+        req_hook_cards: signal(Vec::new()),
+        res_hook_cards: signal(Vec::new()),
         metrics: signal(String::new()),
         timing_bar: signal(crate::present::TimingBreakdown::default()),
         query: signal(Vec::new()),

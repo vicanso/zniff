@@ -3,6 +3,10 @@
 use rquickjs::{Ctx, FromJs, Object, Result as JsResult, Value};
 
 use crate::hook_codec_crypto::extract_bytes_arg;
+use crate::hook_params::{
+    ExtractedHookBody, apply_query_mutation, apply_set_headers, ensure_default_content_type,
+    extract_body_or_structured,
+};
 use crate::hook_spec::{PreviewCardNode, validate_preview_cards};
 use crate::script_worker::{PACKET_MAX_OUTPUT_BYTES, format_js_err};
 use crate::session::BODY_CAP;
@@ -52,6 +56,7 @@ pub(crate) struct HookPreviewInputOwned {
 pub(crate) enum ScriptRequestAction {
     Pass {
         comment: Option<String>,
+        view: Vec<PreviewCardNode>,
     },
     Mutate {
         method: Option<String>,
@@ -59,12 +64,15 @@ pub(crate) enum ScriptRequestAction {
         headers: Option<Vec<(String, String)>>,
         body: Option<Vec<u8>>,
         comment: Option<String>,
+        view: Vec<PreviewCardNode>,
     },
     RespondWith {
         status: u16,
         headers: Vec<(String, String)>,
         body: Vec<u8>,
         comment: Option<String>,
+        view: Vec<PreviewCardNode>,
+        res_view: Vec<PreviewCardNode>,
     },
 }
 
@@ -74,6 +82,7 @@ pub(crate) struct ScriptResponseAction {
     pub headers: Option<Vec<(String, String)>>,
     pub body: Option<Vec<u8>>,
     pub comment: Option<String>,
+    pub view: Vec<PreviewCardNode>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -81,6 +90,7 @@ pub(crate) struct ScriptPreviewSide {
     pub body: Option<Vec<u8>>,
     pub content_type: Option<String>,
     pub note: Option<String>,
+    pub view: Vec<PreviewCardNode>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -155,7 +165,7 @@ pub(crate) fn js_to_headers<'js>(
     Err("headers must be [[name, value]] array or object".to_string())
 }
 
-fn extract_hook_body<'js>(
+pub(crate) fn extract_hook_body<'js>(
     cx: &Ctx<'js>,
     val: Value<'js>,
     allow_json_obj: bool,
@@ -204,11 +214,12 @@ fn optional_str_prop<'js>(
     Ok(Some(s))
 }
 
-fn parse_preview_cards<'js>(
+fn parse_view_prop<'js>(
     cx: &Ctx<'js>,
     obj: &Object<'js>,
+    key: &str,
 ) -> Result<Vec<PreviewCardNode>, String> {
-    let val: Value<'js> = obj.get("cards").map_err(|e| format_js_err(cx, e))?;
+    let val: Value<'js> = obj.get(key).map_err(|e| format_js_err(cx, e))?;
     if val.is_undefined() || val.is_null() {
         return Ok(Vec::new());
     }
@@ -224,26 +235,94 @@ fn parse_preview_cards<'js>(
     if json_str.len() > PACKET_MAX_OUTPUT_BYTES {
         return Err("hook preview cards exceed IR size budget".to_string());
     }
-    let cards: Vec<PreviewCardNode> = if json_str.trim_start().starts_with('[') {
-        serde_json::from_str(&json_str).map_err(|e| format!("invalid preview cards IR: {e}"))?
+    if json_str.trim_start().starts_with('[') {
+        serde_json::from_str(&json_str).map_err(|e| format!("invalid preview cards IR: {e}"))
     } else {
-        vec![serde_json::from_str(&json_str).map_err(|e| format!("invalid preview card IR: {e}"))?]
+        Ok(vec![
+            serde_json::from_str(&json_str).map_err(|e| format!("invalid preview card IR: {e}"))?,
+        ])
+    }
+}
+
+fn parse_preview_cards<'js>(
+    cx: &Ctx<'js>,
+    obj: &Object<'js>,
+) -> Result<Vec<PreviewCardNode>, String> {
+    let mut nodes = parse_view_prop(cx, obj, "view")?;
+    for extra in parse_view_prop(cx, obj, "cards")? {
+        if nodes.last() != Some(&extra) {
+            nodes.push(extra);
+        }
+    }
+    if !nodes.is_empty() {
+        validate_preview_cards(&nodes)?;
+    }
+    Ok(nodes)
+}
+
+fn resolve_headers_update<'js>(
+    cx: &Ctx<'js>,
+    obj: &Object<'js>,
+    base_headers: &[(String, String)],
+    structured: Option<&ExtractedHookBody>,
+) -> Result<Option<Vec<(String, String)>>, String> {
+    let hdr_val: Value<'js> = obj.get("headers").map_err(|e| format_js_err(cx, e))?;
+    let has_headers = !hdr_val.is_undefined() && !hdr_val.is_null();
+    let mut next = if has_headers {
+        js_to_headers(cx, hdr_val)?
+    } else {
+        base_headers.to_vec()
     };
-    validate_preview_cards(&cards)?;
-    Ok(cards)
+    let explicit_hdr_ct = has_headers
+        && next
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
+
+    let set_val: Value<'js> = obj.get("setHeaders").map_err(|e| format_js_err(cx, e))?;
+    let has_set_headers = !set_val.is_undefined() && !set_val.is_null();
+    let explicit_set_ct = if has_set_headers {
+        let (patched, touched_ct) = apply_set_headers(cx, &next, set_val)?;
+        next = patched;
+        touched_ct
+    } else {
+        false
+    };
+
+    if let Some(ExtractedHookBody {
+        default_content_type: Some(ct),
+        expected_ct_prefix: Some(prefix),
+        ..
+    }) = structured
+        && !explicit_hdr_ct
+        && !explicit_set_ct
+    {
+        ensure_default_content_type(&mut next, ct, prefix);
+    }
+
+    if has_headers || (has_set_headers && next != base_headers) || next != base_headers {
+        Ok(Some(next))
+    } else {
+        Ok(None)
+    }
 }
 
 pub(crate) fn parse_request_action<'js>(
     cx: &Ctx<'js>,
     val: Value<'js>,
+    input_path: &str,
+    input_headers: &[(String, String)],
 ) -> Result<ScriptRequestAction, String> {
     if val.is_undefined() || val.is_null() {
-        return Ok(ScriptRequestAction::Pass { comment: None });
+        return Ok(ScriptRequestAction::Pass {
+            comment: None,
+            view: Vec::new(),
+        });
     }
     let Some(obj) = val.into_object() else {
         return Err("onRequest must return an object or void".to_string());
     };
     let comment = optional_str_prop(cx, &obj, "comment")?.and_then(clean_nonempty);
+    let view = parse_preview_cards(cx, &obj)?;
     let rw_val: Value<'js> = obj.get("respondWith").map_err(|e| format_js_err(cx, e))?;
     if !rw_val.is_undefined() && !rw_val.is_null() {
         let Some(rw) = rw_val.into_object() else {
@@ -254,34 +333,17 @@ pub(crate) fn parse_request_action<'js>(
             .and_then(|s| u16::try_from(s).ok())
             .filter(|s| (100..600).contains(s))
             .ok_or_else(|| "respondWith.status must be 100..599".to_string())?;
-        let hdr_val: Value<'js> = rw.get("headers").map_err(|e| format_js_err(cx, e))?;
-        let mut headers = if hdr_val.is_undefined() || hdr_val.is_null() {
-            Vec::new()
-        } else {
-            js_to_headers(cx, hdr_val)?
-        };
-        let body_val: Value<'js> = rw.get("body").map_err(|e| format_js_err(cx, e))?;
-        let body = if body_val.is_undefined() || body_val.is_null() {
-            Vec::new()
-        } else {
-            let (bytes, is_json) = extract_hook_body(cx, body_val, true)?;
-            if is_json
-                && !headers
-                    .iter()
-                    .any(|(k, _)| k.eq_ignore_ascii_case("content-type"))
-            {
-                headers.push((
-                    "Content-Type".into(),
-                    "application/json; charset=utf-8".into(),
-                ));
-            }
-            bytes
-        };
+        let extracted = extract_body_or_structured(cx, &rw, true)?;
+        let headers = resolve_headers_update(cx, &rw, &[], extracted.as_ref())?.unwrap_or_default();
+        let body = extracted.map_or_else(Vec::new, |b| b.bytes);
+        let res_view = parse_preview_cards(cx, &rw)?;
         return Ok(ScriptRequestAction::RespondWith {
             status,
             headers,
             body,
             comment,
+            view,
+            res_view,
         });
     }
 
@@ -289,28 +351,30 @@ pub(crate) fn parse_request_action<'js>(
         let trimmed = m.trim().to_ascii_uppercase();
         (!trimmed.is_empty()).then_some(trimmed)
     });
-    let path = optional_str_prop(cx, &obj, "path")?.filter(|p| p.starts_with('/'));
-    let hdr_val: Value<'js> = obj.get("headers").map_err(|e| format_js_err(cx, e))?;
-    let headers = if hdr_val.is_undefined() || hdr_val.is_null() {
-        None
-    } else {
-        Some(js_to_headers(cx, hdr_val)?)
-    };
-    let body_val: Value<'js> = obj.get("body").map_err(|e| format_js_err(cx, e))?;
-    let body = if body_val.is_undefined() || body_val.is_null() {
-        None
-    } else {
-        Some(extract_hook_body(cx, body_val, false)?.0)
-    };
-    if method.is_none() && path.is_none() && headers.is_none() && body.is_none() {
-        Ok(ScriptRequestAction::Pass { comment })
+    let mut next_path = optional_str_prop(cx, &obj, "path")?.filter(|p| p.starts_with('/'));
+    let query_val: Value<'js> = obj.get("query").map_err(|e| format_js_err(cx, e))?;
+    if !query_val.is_undefined() && !query_val.is_null() {
+        let base = next_path.as_deref().unwrap_or(input_path);
+        let patched = apply_query_mutation(cx, base, query_val)?;
+        if patched != input_path {
+            next_path = Some(patched);
+        }
+    }
+
+    let extracted = extract_body_or_structured(cx, &obj, false)?;
+    let headers = resolve_headers_update(cx, &obj, input_headers, extracted.as_ref())?;
+    let body = extracted.map(|b| b.bytes);
+
+    if method.is_none() && next_path.is_none() && headers.is_none() && body.is_none() {
+        Ok(ScriptRequestAction::Pass { comment, view })
     } else {
         Ok(ScriptRequestAction::Mutate {
             method,
-            path,
+            path: next_path,
             headers,
             body,
             comment,
+            view,
         })
     }
 }
@@ -318,6 +382,7 @@ pub(crate) fn parse_request_action<'js>(
 pub(crate) fn parse_response_action<'js>(
     cx: &Ctx<'js>,
     val: Value<'js>,
+    input_headers: &[(String, String)],
 ) -> Result<ScriptResponseAction, String> {
     if val.is_undefined() || val.is_null() {
         return Ok(ScriptResponseAction {
@@ -325,6 +390,7 @@ pub(crate) fn parse_response_action<'js>(
             headers: None,
             body: None,
             comment: None,
+            view: Vec::new(),
         });
     }
     let Some(obj) = val.into_object() else {
@@ -341,49 +407,49 @@ pub(crate) fn parse_response_action<'js>(
             .ok_or_else(|| "response status must be 100..599".to_string())?;
         Some(parsed)
     };
-    let hdr_val: Value<'js> = obj.get("headers").map_err(|e| format_js_err(cx, e))?;
-    let headers = if hdr_val.is_undefined() || hdr_val.is_null() {
-        None
-    } else {
-        Some(js_to_headers(cx, hdr_val)?)
-    };
-    let body_val: Value<'js> = obj.get("body").map_err(|e| format_js_err(cx, e))?;
-    let body = if body_val.is_undefined() || body_val.is_null() {
-        None
-    } else {
-        Some(extract_hook_body(cx, body_val, false)?.0)
-    };
+    let extracted = extract_body_or_structured(cx, &obj, false)?;
+    let headers = resolve_headers_update(cx, &obj, input_headers, extracted.as_ref())?;
+    let body = extracted.map(|b| b.bytes);
     let comment = optional_str_prop(cx, &obj, "comment")?.and_then(clean_nonempty);
+    let view = parse_preview_cards(cx, &obj)?;
     Ok(ScriptResponseAction {
         status,
         headers,
         body,
         comment,
+        view,
     })
 }
 
 fn parse_preview_side_obj<'js>(
     cx: &Ctx<'js>,
     obj: &Object<'js>,
+    allow_view: bool,
 ) -> Result<ScriptPreviewSide, String> {
     let mut ct = optional_str_prop(cx, obj, "contentType")?.and_then(clean_nonempty);
     let note = optional_str_prop(cx, obj, "note")?
         .or(optional_str_prop(cx, obj, "comment")?)
         .and_then(clean_nonempty);
-    let body_val: Value<'js> = obj.get("body").map_err(|e| format_js_err(cx, e))?;
-    let body = if body_val.is_undefined() || body_val.is_null() {
-        None
-    } else {
-        let (bytes, inferred_json) = extract_hook_body(cx, body_val, true)?;
-        if inferred_json && ct.is_none() {
-            ct = Some("application/json".to_string());
+    let extracted = extract_body_or_structured(cx, obj, true)?;
+    let body = match extracted {
+        Some(ext) => {
+            if ct.is_none() {
+                ct = ext.expected_ct_prefix.map(str::to_string);
+            }
+            Some(ext.bytes)
         }
-        Some(bytes)
+        None => None,
+    };
+    let view = if allow_view {
+        parse_preview_cards(cx, obj)?
+    } else {
+        Vec::new()
     };
     Ok(ScriptPreviewSide {
         body,
         content_type: ct,
         note,
+        view,
     })
 }
 
@@ -402,9 +468,9 @@ pub(crate) fn parse_preview_action<'js>(
     let side_key = if is_response { "res" } else { "req" };
     let side_val: Value<'js> = obj.get(side_key).map_err(|e| format_js_err(cx, e))?;
     let side = if let Some(side_obj) = side_val.into_object() {
-        parse_preview_side_obj(cx, &side_obj)?
+        parse_preview_side_obj(cx, &side_obj, true)?
     } else {
-        parse_preview_side_obj(cx, &obj)?
+        parse_preview_side_obj(cx, &obj, false)?
     };
     Ok(ScriptPreviewAction { side, cards })
 }

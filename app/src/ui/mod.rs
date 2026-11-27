@@ -124,6 +124,7 @@ mod flow_quick_rules;
 mod flow_table;
 mod font_settings;
 mod footer_qr;
+mod hook_run_modal;
 mod inline_mock;
 mod json_tree;
 mod kit;
@@ -220,6 +221,7 @@ pub(crate) use self::flow_quick_rules::*;
 pub(crate) use self::flow_table::*;
 pub(crate) use self::font_settings::*;
 pub(crate) use self::footer_qr::*;
+pub(crate) use self::hook_run_modal::*;
 pub(crate) use self::inline_mock::*;
 pub(crate) use self::json_tree::*;
 #[allow(unused_imports)]

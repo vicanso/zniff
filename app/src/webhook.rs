@@ -351,7 +351,10 @@ pub async fn run_request_hooks(
                     body: cur_body.clone(),
                 };
                 match eval_request_hook_async(hub.hook_session_host(), resolved, input).await {
-                    Ok(ScriptRequestAction::Pass { comment }) => {
+                    Ok(ScriptRequestAction::Pass { comment, view }) => {
+                        if !view.is_empty() {
+                            hub.append_live_hook_view(id, false, view);
+                        }
                         if let Some(c) = comment {
                             last_comment = Some(c);
                         }
@@ -361,7 +364,15 @@ pub async fn run_request_hooks(
                         headers,
                         body,
                         comment,
+                        view,
+                        res_view,
                     }) => {
+                        if !view.is_empty() {
+                            hub.append_live_hook_view(id, false, view);
+                        }
+                        if !res_view.is_empty() {
+                            hub.append_live_hook_view(id, true, res_view);
+                        }
                         if let Some(c) = comment.or(last_comment) {
                             hub.append_comment(id, &c);
                         }
@@ -377,7 +388,11 @@ pub async fn run_request_hooks(
                         headers: next_headers,
                         body: next_body,
                         comment,
+                        view,
                     }) => {
+                        if !view.is_empty() {
+                            hub.append_live_hook_view(id, false, view);
+                        }
                         if let Some(m) = next_method {
                             cur_method = m;
                             changed_method = true;
@@ -529,6 +544,9 @@ pub async fn run_response_hooks(
                 };
                 match eval_response_hook_async(hub.hook_session_host(), resolved, input).await {
                     Ok(res) => {
+                        if !res.view.is_empty() {
+                            hub.append_live_hook_view(id, true, res.view);
+                        }
                         if let Some(code) = res.status {
                             cur_status = code;
                             changed_status = true;
@@ -590,6 +608,7 @@ pub struct PreviewHookResult {
     pub content_type: Option<String>,
     pub note: Option<String>,
     pub cards: Vec<PreviewCardNode>,
+    pub side_cards: Vec<PreviewCardNode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -712,6 +731,7 @@ pub(crate) async fn run_preview_hooks(
     let mut cur_ct: Option<String> = None;
     let mut last_note: Option<String> = None;
     let mut cards: Vec<PreviewCardNode> = Vec::new();
+    let mut side_cards: Vec<PreviewCardNode> = Vec::new();
     let mut changed_body = false;
 
     for spec in specs {
@@ -815,21 +835,123 @@ pub(crate) async fn run_preview_hooks(
                             cards.push(card);
                         }
                     }
+                    for card in res.side.view {
+                        if !side_cards.contains(&card) {
+                            side_cards.push(card);
+                        }
+                    }
                 }
             }
         }
     }
 
-    if changed_body || !cards.is_empty() {
+    if changed_body || last_note.is_some() || !cards.is_empty() || !side_cards.is_empty() {
         Some(PreviewHookResult {
             body: if changed_body { cur_body } else { Vec::new() },
             content_type: cur_ct,
             note: last_note,
             cards,
+            side_cards,
         })
     } else {
         None
     }
+}
+
+async fn resolve_preview_for_web(input: Option<PreviewSpawnInput>) -> Option<PreviewHookResult> {
+    let input = input?;
+    let cache_key = input.cache_key;
+    {
+        let cache = preview_cache().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, PreviewLookup::Ready(res))) = cache.iter().find(|(k, _)| *k == cache_key) {
+            return res.clone();
+        }
+    }
+    let headers = if input.is_response {
+        &input.res_headers
+    } else {
+        &input.req_headers
+    };
+    let body = if input.is_response {
+        &input.res_body
+    } else {
+        &input.req_body
+    };
+    let env = PreviewScriptEnv {
+        data_dir: &input.data_dir,
+        configured_hooks: &input.configured_hooks,
+        host_session: &input.host_session,
+        host: &input.host,
+        path: &input.path,
+        req_headers: &input.req_headers,
+        req_body: &input.req_body,
+        res_headers: &input.res_headers,
+        res_body: &input.res_body,
+    };
+    let result = run_preview_hooks(
+        &input.specs,
+        input.flow_id,
+        input.is_response,
+        &input.method,
+        &input.url,
+        input.status,
+        headers,
+        body,
+        Some(env),
+    )
+    .await;
+    {
+        let mut cache = preview_cache().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, entry)) = cache.iter_mut().find(|(k, _)| *k == cache_key) {
+            *entry = PreviewLookup::Ready(result.clone());
+        } else {
+            if cache.len() >= PREVIEW_CACHE_CAP {
+                cache.remove(0);
+            }
+            cache.push((cache_key, PreviewLookup::Ready(result.clone())));
+        }
+    }
+    result
+}
+
+fn preview_side_to_json(res: &PreviewHookResult) -> Value {
+    let body_b64 = (!res.body.is_empty()).then(|| base64_encode(&res.body));
+    json!({
+        "body_b64": body_b64,
+        "content_type": res.content_type,
+        "note": res.note,
+        "cards": res.side_cards,
+    })
+}
+
+/// Computes live stage views and preview hook overrides for `/api/flows/{id}` (`zniff --web`).
+pub(crate) async fn web_flow_hook_json(hub: &Hub, flow: &crate::session::Flow) -> Value {
+    let views = hub.live_hook_views(flow.id);
+    let req_input = hub.preview_spawn_input(flow, false);
+    let res_input = hub.preview_spawn_input(flow, true);
+    let (req_res, res_res) = tokio::join!(
+        resolve_preview_for_web(req_input),
+        resolve_preview_for_web(res_input)
+    );
+    let mut overview = Vec::new();
+    for card in req_res
+        .iter()
+        .flat_map(|r| r.cards.iter())
+        .chain(res_res.iter().flat_map(|r| r.cards.iter()))
+    {
+        if !overview.contains(card) {
+            overview.push(card.clone());
+        }
+    }
+    json!({
+        "views": views,
+        "preview": {
+            "pending": false,
+            "overview": overview,
+            "req": req_res.as_ref().map(preview_side_to_json),
+            "res": res_res.as_ref().map(preview_side_to_json),
+        }
+    })
 }
 
 /// Looks up cached preview-hook output or spawns a background request on the preview runtime.

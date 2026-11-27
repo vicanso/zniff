@@ -235,6 +235,8 @@ pub(crate) struct Controls {
     pub(crate) config_path: Mutex<String>,
     /// Pending `(source_id, replayed_id)` pair for automatic post-replay diffing (E2).
     pub(crate) pending_replay_diff: Mutex<Option<(u64, u64)>>,
+    /// Pending `onRun` report waiting for modal presentation in the UI frame tick.
+    pub(crate) pending_hook_run: Mutex<Option<HookRunModalData>>,
     /// Session tabs (Live + read-only imported `.har`/`.chlsj` tabs) and cross-tab baseline (E10).
     pub(crate) session_tabs: Mutex<SessionTabsStore>,
 }

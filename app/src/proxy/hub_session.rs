@@ -445,12 +445,11 @@ impl Hub {
         self.set_response(id, status, headers, None);
     }
 
-    #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
-    pub(crate) fn preview_hook_body(
+    pub(crate) fn preview_spawn_input(
         &self,
         flow: &crate::session::Flow,
         is_response: bool,
-    ) -> Option<crate::webhook::PreviewLookup> {
+    ) -> Option<crate::webhook::PreviewSpawnInput> {
         if !self.rules_enabled() {
             return None;
         }
@@ -474,16 +473,13 @@ impl Hub {
             body.is_empty()
                 && (!has_script || (flow.status.is_none() && flow.response_headers.is_empty()))
         } else {
-            body.is_empty()
-                && (!has_script || flow.status.is_some() || !flow.response_headers.is_empty())
+            body.is_empty() && (!has_script || flow.request_headers.is_empty())
         };
         if skip_empty {
             return None;
         }
         let rev = self.rules_revision();
-        let gen_arc = Arc::clone(&self.generation);
-        let tx = self.state_tx.clone();
-        let input = crate::webhook::PreviewSpawnInput {
+        Some(crate::webhook::PreviewSpawnInput {
             cache_key: (flow.id, is_response, rev, body.len()),
             specs,
             flow_id: flow.id,
@@ -500,7 +496,18 @@ impl Hub {
             data_dir: self.ca.dir().to_path_buf(),
             configured_hooks: self.script_hooks(),
             host_session: self.hook_session_host(),
-        };
+        })
+    }
+
+    #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+    pub(crate) fn preview_hook_body(
+        &self,
+        flow: &crate::session::Flow,
+        is_response: bool,
+    ) -> Option<crate::webhook::PreviewLookup> {
+        let input = self.preview_spawn_input(flow, is_response)?;
+        let gen_arc = Arc::clone(&self.generation);
+        let tx = self.state_tx.clone();
         Some(crate::webhook::lookup_or_spawn_preview(input, move || {
             gen_arc.fetch_add(1, Ordering::Relaxed);
             tx.send_modify(|v| *v = v.wrapping_add(1));
@@ -660,12 +667,14 @@ impl Hub {
 
     pub fn clear_session(&self) {
         self.with_session(|session| session.clear());
+        self.hook_views.clear();
         self.touch();
     }
 
     pub fn clear_session_with_undo(&self) -> usize {
         let cleared = self.with_session(|session| session.clear_with_undo());
         if cleared > 0 {
+            self.hook_views.clear();
             self.touch();
         }
         cleared
@@ -684,8 +693,14 @@ impl Hub {
     }
 
     pub fn clear_unpinned(&self) -> usize {
-        let removed = self.with_session(|session| session.clear_unpinned());
-        if removed > 0 {
+        let (removed, keep) = self.with_session(|session| {
+            let removed = session.clear_unpinned();
+            let keep: Option<std::collections::HashSet<u64>> =
+                (removed > 0).then(|| session.iter().map(|f| f.id).collect());
+            (removed, keep)
+        });
+        if let Some(keep) = keep {
+            self.hook_views.retain_ids(&keep);
             self.touch();
         }
         removed

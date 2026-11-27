@@ -4,7 +4,7 @@
 //! which is the only place `Capture` listens. Reads use a session cache that
 //! the view fills from `/api/state` and `/api/flows`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -49,6 +49,41 @@ impl Capture {
     pub fn stop(self) {}
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+pub(crate) struct WebPreviewSide {
+    #[serde(default)]
+    pub body_b64: Option<String>,
+    #[serde(default)]
+    pub body: Option<String>,
+    #[serde(default)]
+    pub content_type: Option<String>,
+    #[serde(default)]
+    pub note: Option<String>,
+    #[serde(default)]
+    pub cards: Vec<crate::hook_spec::PreviewCardNode>,
+}
+
+impl WebPreviewSide {
+    pub(crate) fn body_bytes(&self) -> Option<Vec<u8>> {
+        if let Some(ref b64) = self.body_b64 {
+            return crate::session::base64_decode(b64);
+        }
+        self.body.as_ref().map(|s| s.as_bytes().to_vec())
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+pub(crate) struct WebPreviewOverrides {
+    #[serde(default)]
+    pub pending: bool,
+    #[serde(default)]
+    pub overview: Vec<crate::hook_spec::PreviewCardNode>,
+    #[serde(default)]
+    pub req: Option<WebPreviewSide>,
+    #[serde(default)]
+    pub res: Option<WebPreviewSide>,
+}
+
 pub struct Hub {
     session: Mutex<Session>,
     generation: AtomicU64,
@@ -57,6 +92,8 @@ pub struct Hub {
     rules_text: Mutex<String>,
     rule_groups: Mutex<Vec<crate::config::RuleGroup>>,
     script_hooks: Mutex<Vec<crate::hook_spec::ScriptHookConfig>>,
+    hook_views: crate::hook_view_store::HookViewStore,
+    preview_overrides: Mutex<HashMap<u64, WebPreviewOverrides>>,
     rules_rev: AtomicU64,
     upstream_text: Mutex<String>,
     proxy_auth: Mutex<String>,
@@ -84,6 +121,8 @@ impl Hub {
             rules_text: Mutex::new(String::new()),
             rule_groups: Mutex::new(Vec::new()),
             script_hooks: Mutex::new(Vec::new()),
+            hook_views: crate::hook_view_store::HookViewStore::new(),
+            preview_overrides: Mutex::new(HashMap::new()),
             rules_rev: AtomicU64::new(0),
             upstream_text: Mutex::new(String::new()),
             proxy_auth: Mutex::new(String::new()),
@@ -275,6 +314,30 @@ impl Hub {
     pub fn fill_detail(&self, value: &Value) -> Option<u64> {
         let detail = parse_detail(value)?;
         let rev = self.with_session(|session| session.fill_cached_detail(detail))?;
+        if let Some(id) = value.get("id").and_then(Value::as_u64)
+            && let Some(hook) = value.get("hook")
+        {
+            if let Some(views_val) = hook.get("views")
+                && let Ok(views) = serde_json::from_value::<crate::hook_view_store::FlowHookViews>(
+                    views_val.clone(),
+                )
+            {
+                self.hook_views.set_all(id, views);
+            }
+            if let Some(preview_val) = hook.get("preview")
+                && let Ok(parsed) =
+                    serde_json::from_value::<WebPreviewOverrides>(preview_val.clone())
+            {
+                let mut guard = self
+                    .preview_overrides
+                    .lock()
+                    .unwrap_or_else(|err| err.into_inner());
+                if guard.len() >= 256 && !guard.contains_key(&id) {
+                    guard.clear();
+                }
+                guard.insert(id, parsed);
+            }
+        }
         self.bump();
         Some(rev)
     }
@@ -296,6 +359,11 @@ impl Hub {
     pub fn drop_cached_flow(&self, id: u64) -> bool {
         let dropped = self.with_session(|session| session.drop_cached_flow(id));
         if dropped {
+            self.hook_views.drop_flow(id);
+            self.preview_overrides
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .remove(&id);
             self.bump();
         }
         dropped
@@ -396,6 +464,41 @@ impl Hub {
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .clone()
+    }
+
+    pub fn live_hook_views(&self, id: u64) -> crate::hook_view_store::FlowHookViews {
+        self.hook_views.get(id)
+    }
+
+    #[allow(dead_code)]
+    pub fn append_live_hook_view(
+        &self,
+        id: u64,
+        is_response: bool,
+        nodes: Vec<crate::hook_spec::PreviewCardNode>,
+    ) {
+        if nodes.is_empty() {
+            return;
+        }
+        self.hook_views.append_side(id, is_response, nodes);
+        self.bump();
+    }
+
+    #[allow(dead_code)]
+    pub fn clear_hook_views(&self) {
+        self.hook_views.clear();
+        self.preview_overrides
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clear();
+    }
+
+    pub(crate) fn preview_overrides(&self, id: u64) -> Option<WebPreviewOverrides> {
+        self.preview_overrides
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .get(&id)
+            .cloned()
     }
 
     pub fn effective_rules_count(&self) -> usize {
@@ -635,6 +738,11 @@ impl Hub {
 
     pub fn clear_session(&self) {
         self.with_session(|session| session.clear());
+        self.hook_views.clear();
+        self.preview_overrides
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clear();
         self.in_flight_details
             .lock()
             .unwrap_or_else(|err| err.into_inner())
@@ -646,6 +754,11 @@ impl Hub {
     pub fn clear_session_with_undo(&self) -> usize {
         let cleared = self.with_session(|session| session.clear_with_undo());
         if cleared > 0 {
+            self.hook_views.clear();
+            self.preview_overrides
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .clear();
             self.in_flight_details
                 .lock()
                 .unwrap_or_else(|err| err.into_inner())
@@ -684,8 +797,18 @@ impl Hub {
     }
 
     pub fn clear_unpinned(&self) -> usize {
-        let removed = self.with_session(|session| session.clear_unpinned());
-        if removed > 0 {
+        let (removed, keep) = self.with_session(|session| {
+            let removed = session.clear_unpinned();
+            let keep: Option<HashSet<u64>> =
+                (removed > 0).then(|| session.iter().map(|f| f.id).collect());
+            (removed, keep)
+        });
+        if let Some(keep) = keep {
+            self.hook_views.retain_ids(&keep);
+            self.preview_overrides
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .retain(|id, _| keep.contains(id));
             self.bump();
             post_op(json!({"op": "clear_unpinned"}));
         }

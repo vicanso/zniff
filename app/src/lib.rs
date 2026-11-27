@@ -43,10 +43,14 @@ mod hook_crypto_algs;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod hook_e2e_tests;
 #[cfg(not(target_arch = "wasm32"))]
+mod hook_params;
+#[cfg(not(target_arch = "wasm32"))]
 mod hook_runtime;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod hook_sdk_tests;
 mod hook_spec;
+mod hook_view_spec;
+mod hook_view_store;
 mod i18n;
 mod icon;
 mod import_charles;

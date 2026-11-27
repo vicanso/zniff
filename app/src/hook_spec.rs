@@ -23,19 +23,17 @@ pub const MAX_HOOK_TIMEOUT_MS: u64 = 10_000;
 /// Maximum wall-clock budget allowed on live proxy `onRequest` / `onResponse` stages.
 pub const MAX_LIVE_HOOK_TIMEOUT_MS: u64 = 500;
 
+#[allow(unused_imports)]
+pub use crate::hook_view_spec::{
+    HookViewAction, HookViewNode, HookViewTabItem, MAX_PREVIEW_CARD_DEPTH, MAX_PREVIEW_CARD_NODES,
+    MAX_PREVIEW_CARD_TEXT_BYTES, PreviewCardNode, PreviewTone, TextSizeTier,
+    validate_preview_cards,
+};
+
 /// Maximum `vars` entries allowed per configured script hook.
 pub const MAX_HOOK_VARS: usize = 32;
 const MAX_VAR_KEY_BYTES: usize = 64;
 const MAX_VAR_VAL_BYTES: usize = 4096;
-
-/// Maximum recursion depth for declarative TSX preview cards.
-pub const MAX_PREVIEW_CARD_DEPTH: usize = 6;
-
-/// Maximum node count in one preview/run card tree.
-pub const MAX_PREVIEW_CARD_NODES: usize = 64;
-
-/// Maximum aggregate UTF-8 text bytes across one preview/run card tree.
-pub const MAX_PREVIEW_CARD_TEXT_BYTES: usize = 64 * 1024;
 
 /// Execution stages supported by a `zniff` TSX/TS hook script.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -94,48 +92,6 @@ pub struct ScriptHookConfig {
     pub timeout_ms: u64,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub vars: BTreeMap<String, String>,
-}
-
-/// Semantic tone for declarative TSX `<Badge>` preview elements.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PreviewTone {
-    #[default]
-    Neutral,
-    Ok,
-    Warn,
-    Danger,
-    Accent,
-}
-
-/// Declarative preview card IR returned by `onPreview` / `onRun` TSX scripts.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum PreviewCardNode {
-    Section {
-        #[serde(default)]
-        title: String,
-        #[serde(default)]
-        children: Vec<PreviewCardNode>,
-    },
-    KeyValue {
-        #[serde(default)]
-        label: String,
-        #[serde(default)]
-        value: String,
-    },
-    Badge {
-        #[serde(default)]
-        tone: PreviewTone,
-        #[serde(default)]
-        text: String,
-    },
-    Code {
-        #[serde(default)]
-        language: Option<String>,
-        #[serde(default)]
-        code: String,
-    },
 }
 
 /// Summary metadata for a discovered or configured script hook.
@@ -256,68 +212,6 @@ pub fn sanitize_script_hooks(items: Vec<ScriptHookConfig>) -> Vec<ScriptHookConf
     out
 }
 
-/// Validates structural depth, node count, and text size bounds on a preview card tree.
-pub fn validate_preview_cards(nodes: &[PreviewCardNode]) -> Result<(), String> {
-    let mut total_nodes = 0usize;
-    let mut total_bytes = 0usize;
-    for node in nodes {
-        validate_card_node(node, 1, &mut total_nodes, &mut total_bytes)?;
-    }
-    Ok(())
-}
-
-fn validate_card_node(
-    node: &PreviewCardNode,
-    depth: usize,
-    total_nodes: &mut usize,
-    total_bytes: &mut usize,
-) -> Result<(), String> {
-    if depth > MAX_PREVIEW_CARD_DEPTH {
-        return Err(format!(
-            "preview card nesting exceeds max depth ({MAX_PREVIEW_CARD_DEPTH})"
-        ));
-    }
-    *total_nodes += 1;
-    if *total_nodes > MAX_PREVIEW_CARD_NODES {
-        return Err(format!(
-            "preview cards exceed max nodes ({MAX_PREVIEW_CARD_NODES})"
-        ));
-    }
-    match node {
-        PreviewCardNode::Section { title, children } => {
-            *total_bytes = total_bytes.saturating_add(title.len());
-            check_text_budget(*total_bytes)?;
-            for child in children {
-                validate_card_node(child, depth + 1, total_nodes, total_bytes)?;
-            }
-        }
-        PreviewCardNode::KeyValue { label, value } => {
-            *total_bytes = total_bytes.saturating_add(label.len() + value.len());
-            check_text_budget(*total_bytes)?;
-        }
-        PreviewCardNode::Badge { text, .. } => {
-            *total_bytes = total_bytes.saturating_add(text.len());
-            check_text_budget(*total_bytes)?;
-        }
-        PreviewCardNode::Code { language, code } => {
-            let lang_len = language.as_ref().map_or(0, String::len);
-            *total_bytes = total_bytes.saturating_add(lang_len + code.len());
-            check_text_budget(*total_bytes)?;
-        }
-    }
-    Ok(())
-}
-
-fn check_text_budget(bytes: usize) -> Result<(), String> {
-    if bytes > MAX_PREVIEW_CARD_TEXT_BYTES {
-        Err(format!(
-            "preview card text exceeds budget ({MAX_PREVIEW_CARD_TEXT_BYTES} bytes)"
-        ))
-    } else {
-        Ok(())
-    }
-}
-
 /// Transpiles a `<data_dir>/hooks/*.tsx` script into plain JavaScript runnable on QuickJS.
 pub fn transpile_hook_tsx(source: &str) -> Result<String, String> {
     if source.len() > MAX_LAYOUT_SCRIPT_BYTES {
@@ -355,21 +249,54 @@ export interface FlowInfo {
   readonly pinned: boolean;
 }
 
-export interface PreviewCardNode {
-  readonly type: "section" | "key_value" | "badge" | "code";
+export interface HookActionProps {
+  copyValue?: string;
+  selectFlowId?: number;
+  setFilter?: string;
 }
 
-export type PreviewCardChild =
-  | PreviewCardNode
-  | PreviewCardNode[]
+export type TextSizeTier = "xs" | "sm" | "base";
+
+export interface HookViewNode {
+  readonly type:
+    | "section"
+    | "key_value"
+    | "badge"
+    | "code"
+    | "view"
+    | "row"
+    | "col"
+    | "text"
+    | "divider"
+    | "callout"
+    | "table"
+    | "collapsible"
+    | "tabs";
+}
+export type PreviewCardNode = HookViewNode;
+
+export type HookViewChild =
+  | HookViewNode
+  | HookViewNode[]
   | false
   | null
   | undefined;
+export type PreviewCardChild = HookViewChild;
 
-export function Section(props: { title: string; children?: PreviewCardChild }): PreviewCardNode;
-export function KeyValue(props: { label: string; value?: string; children?: string }): PreviewCardNode;
-export function Badge(props: { tone?: PreviewTone; text?: string; children?: string }): PreviewCardNode;
-export function Code(props: { language?: string; code?: string; children?: string }): PreviewCardNode;
+export function Section(props: HookActionProps & { title?: string; children?: HookViewChild }): HookViewNode;
+export function KeyValue(props: HookActionProps & { label?: string; value?: string; children?: string }): HookViewNode;
+export function Badge(props: HookActionProps & { tone?: PreviewTone; text?: string; children?: string }): HookViewNode;
+export function Code(props: HookActionProps & { language?: string; code?: string; children?: string }): HookViewNode;
+export function View(props: HookActionProps & { gap?: number; padding?: number; bordered?: boolean; children?: HookViewChild }): HookViewNode;
+export function Row(props: HookActionProps & { gap?: number; wrap?: boolean; align?: "start" | "center" | "end"; justify?: "start" | "center" | "end" | "between"; children?: HookViewChild }): HookViewNode;
+export function Col(props: HookActionProps & { gap?: number; children?: HookViewChild }): HookViewNode;
+export function Text(props: HookActionProps & { tone?: PreviewTone; mono?: boolean; bold?: boolean; size?: TextSizeTier; text?: string; children?: string }): HookViewNode;
+export function Divider(): HookViewNode;
+export function Callout(props: HookActionProps & { tone?: PreviewTone; title?: string; text?: string; children?: HookViewChild | string }): HookViewNode;
+export function Table(props: { columns: string[]; rows: (string | number | boolean | null | undefined)[][] }): HookViewNode;
+export function Collapsible(props: { title: string; defaultOpen?: boolean; children?: HookViewChild }): HookViewNode;
+export function Tabs(props: { children?: HookViewChild }): HookViewNode;
+export function Tab(props: { label: string; children?: HookViewChild }): HookViewNode;
 
 export interface RequestHookContext {
   readonly id: number;
@@ -379,23 +306,38 @@ export interface RequestHookContext {
   readonly scheme: string;
   readonly host: string;
   readonly path: string;
+  readonly query: HeaderPair[];
   readonly headers: HeaderPair[];
   readonly body: Uint8Array;
   readonly vars: Readonly<Record<string, string>>;
+  text(): string;
+  json<T = unknown>(): T | null;
+  form(): HeaderPair[];
 }
 
 export interface RequestShortCircuitResponse {
   status: number;
   headers?: HeaderPair[] | Record<string, string>;
+  setHeaders?: Record<string, string | number | boolean | null | undefined>;
   body?: BodyInput | Record<string, unknown> | unknown[];
+  json?: unknown;
+  form?: HeaderPair[] | Record<string, string>;
+  view?: HookViewChild;
+  cards?: HookViewChild;
 }
 
 export interface RequestHookResult {
   method?: string;
   path?: string;
+  query?: HeaderPair[] | Record<string, string | number | boolean | null | undefined>;
   headers?: HeaderPair[] | Record<string, string>;
+  setHeaders?: Record<string, string | number | boolean | null | undefined>;
   body?: BodyInput;
+  json?: unknown;
+  form?: HeaderPair[] | Record<string, string>;
   comment?: string;
+  view?: HookViewChild;
+  cards?: HookViewChild;
   respondWith?: RequestShortCircuitResponse;
 }
 
@@ -406,23 +348,35 @@ export interface ResponseHookContext {
   readonly url: string;
   readonly host: string;
   readonly path: string;
+  readonly query: HeaderPair[];
   readonly status: number;
   readonly headers: HeaderPair[];
   readonly body: Uint8Array;
   readonly vars: Readonly<Record<string, string>>;
+  text(): string;
+  json<T = unknown>(): T | null;
+  form(): HeaderPair[];
 }
 
 export interface ResponseHookResult {
   status?: number;
   headers?: HeaderPair[] | Record<string, string>;
+  setHeaders?: Record<string, string | number | boolean | null | undefined>;
   body?: BodyInput;
+  json?: unknown;
+  form?: HeaderPair[] | Record<string, string>;
   comment?: string;
+  view?: HookViewChild;
+  cards?: HookViewChild;
 }
 
 export interface PreviewHookSide {
   readonly headers: HeaderPair[];
   readonly body: Uint8Array;
   readonly contentType: string | null;
+  text(): string;
+  json<T = unknown>(): T | null;
+  form(): HeaderPair[];
 }
 
 export interface PreviewHookContext {
@@ -433,27 +387,38 @@ export interface PreviewHookContext {
   readonly url: string;
   readonly host: string;
   readonly path: string;
+  readonly query: HeaderPair[];
   readonly status: number | null;
   readonly headers: HeaderPair[];
   readonly body: Uint8Array;
   readonly req: PreviewHookSide;
   readonly res: PreviewHookSide;
   readonly vars: Readonly<Record<string, string>>;
+  text(): string;
+  json<T = unknown>(): T | null;
+  form(): HeaderPair[];
 }
 
 export interface PreviewSideOverride {
   body?: BodyInput | Record<string, unknown> | unknown[];
+  json?: unknown;
+  form?: HeaderPair[] | Record<string, string>;
   contentType?: string;
   note?: string;
+  view?: HookViewChild;
+  cards?: HookViewChild;
 }
 
 export interface PreviewHookResult {
   req?: PreviewSideOverride;
   res?: PreviewSideOverride;
   body?: BodyInput | Record<string, unknown> | unknown[];
+  json?: unknown;
+  form?: HeaderPair[] | Record<string, string>;
   contentType?: string;
   note?: string;
-  cards?: PreviewCardChild;
+  view?: HookViewChild;
+  cards?: HookViewChild;
 }
 
 export interface RunHookContext {
@@ -465,7 +430,8 @@ export interface RunHookContext {
 
 export interface RunHookResult {
   summary?: string;
-  cards?: PreviewCardChild;
+  view?: HookViewChild;
+  cards?: HookViewChild;
 }
 
 export interface ZniffFlowsApi {
@@ -621,13 +587,23 @@ export interface ZniffHookSdk {
 
 declare global {
   const zniff: ZniffHookSdk;
-  function Section(props: { title: string; children?: PreviewCardChild }): PreviewCardNode;
-  function KeyValue(props: { label: string; value?: string; children?: string }): PreviewCardNode;
-  function Badge(props: { tone?: PreviewTone; text?: string; children?: string }): PreviewCardNode;
-  function Code(props: { language?: string; code?: string; children?: string }): PreviewCardNode;
+  function Section(props: HookActionProps & { title?: string; children?: HookViewChild }): HookViewNode;
+  function KeyValue(props: HookActionProps & { label?: string; value?: string; children?: string }): HookViewNode;
+  function Badge(props: HookActionProps & { tone?: PreviewTone; text?: string; children?: string }): HookViewNode;
+  function Code(props: HookActionProps & { language?: string; code?: string; children?: string }): HookViewNode;
+  function View(props: HookActionProps & { gap?: number; padding?: number; bordered?: boolean; children?: HookViewChild }): HookViewNode;
+  function Row(props: HookActionProps & { gap?: number; wrap?: boolean; align?: "start" | "center" | "end"; justify?: "start" | "center" | "end" | "between"; children?: HookViewChild }): HookViewNode;
+  function Col(props: HookActionProps & { gap?: number; children?: HookViewChild }): HookViewNode;
+  function Text(props: HookActionProps & { tone?: PreviewTone; mono?: boolean; bold?: boolean; size?: TextSizeTier; text?: string; children?: string }): HookViewNode;
+  function Divider(): HookViewNode;
+  function Callout(props: HookActionProps & { tone?: PreviewTone; title?: string; text?: string; children?: HookViewChild | string }): HookViewNode;
+  function Table(props: { columns: string[]; rows: (string | number | boolean | null | undefined)[][] }): HookViewNode;
+  function Collapsible(props: { title: string; defaultOpen?: boolean; children?: HookViewChild }): HookViewNode;
+  function Tabs(props: { children?: HookViewChild }): HookViewNode;
+  function Tab(props: { label: string; children?: HookViewChild }): HookViewNode;
 
   namespace JSX {
-    type Element = PreviewCardNode;
+    type Element = HookViewNode;
     interface IntrinsicElements {}
   }
 }
@@ -637,14 +613,28 @@ declare module "zniff/hook" {
     HookStage,
     HeaderPair,
     PreviewTone,
+    TextSizeTier,
+    HookActionProps,
     BodyInput,
     FlowInfo,
+    HookViewNode,
+    HookViewChild,
     PreviewCardNode,
     PreviewCardChild,
     Section,
     KeyValue,
     Badge,
     Code,
+    View,
+    Row,
+    Col,
+    Text,
+    Divider,
+    Callout,
+    Table,
+    Collapsible,
+    Tabs,
+    Tab,
     RequestHookContext,
     RequestShortCircuitResponse,
     RequestHookResult,
@@ -754,27 +744,33 @@ mod tests {
                 PreviewCardNode::Badge {
                     tone: PreviewTone::Ok,
                     text: "AES-256-GCM".into(),
+                    action: HookViewAction::default(),
                 },
                 PreviewCardNode::KeyValue {
                     label: "Host".into(),
                     value: "api.vicanso.dev".into(),
+                    action: HookViewAction::default(),
                 },
                 PreviewCardNode::Code {
                     language: Some("json".into()),
                     code: r#"{"ok":true}"#.into(),
+                    action: HookViewAction::default(),
                 },
             ],
+            action: HookViewAction::default(),
         }];
         assert!(validate_preview_cards(&valid).is_ok());
 
         let mut deep = PreviewCardNode::Badge {
             tone: PreviewTone::Neutral,
             text: "leaf".into(),
+            action: HookViewAction::default(),
         };
         for d in 0..MAX_PREVIEW_CARD_DEPTH {
             deep = PreviewCardNode::Section {
                 title: format!("d{d}"),
                 children: vec![deep],
+                action: HookViewAction::default(),
             };
         }
         assert!(validate_preview_cards(&[deep]).is_err());
@@ -782,6 +778,7 @@ mod tests {
         let huge_text = vec![PreviewCardNode::Code {
             language: None,
             code: "a".repeat(MAX_PREVIEW_CARD_TEXT_BYTES + 1),
+            action: HookViewAction::default(),
         }];
         assert!(validate_preview_cards(&huge_text).is_err());
     }

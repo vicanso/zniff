@@ -264,7 +264,9 @@ export function onPreview(ctx: PreviewHookContext) {
     assert_eq!(preview.side.note.as_deref(), Some("AES-256-GCM decrypted"));
     assert_eq!(preview.cards.len(), 1);
     match &preview.cards[0] {
-        PreviewCardNode::Section { title, children } => {
+        PreviewCardNode::Section {
+            title, children, ..
+        } => {
             assert_eq!(title, "解密详情");
             assert_eq!(children.len(), 3);
             assert!(matches!(
@@ -382,4 +384,312 @@ export function onRequest() {
         &resolved_spin.circuit_key
     ));
     crate::script_worker::reset_script_circuit(&resolved_spin.circuit_key);
+}
+
+#[tokio::test]
+async fn structured_param_helpers_and_four_stage_views_work_end_to_end() {
+    use crate::hook_spec::{HookViewAction, PreviewCardNode, PreviewTone, TextSizeTier};
+
+    let dir = TempHookDir::new("params-views");
+    let hub = open_test_hub(&dir.path);
+    ensure_hook_types(&dir.path).expect("sync zniff-hook.d.ts");
+
+    dir.write_hook(
+        "full.tsx",
+        r#"
+import { Section, KeyValue, Badge, Text, Divider, Callout, Table, Collapsible, Tabs, Tab, Row, Col, View } from "zniff/hook";
+
+export function onRequest(ctx) {
+  if (ctx.path.startsWith("/v1/mock")) {
+    return {
+      respondWith: {
+        status: 201,
+        setHeaders: { "X-Mock": "true", "X-Num": 7 },
+        form: { status: "created", q: ctx.query.find(([k]) => k === "k")?.[1] ?? "" },
+        view: <Badge tone="accent" copyValue="mock-copy">RES-MOCK</Badge>,
+      },
+      view: <Callout tone="warn" title="Short-Circuit">Intercepted</Callout>,
+      comment: "mock-hit",
+    };
+  }
+  const incoming = ctx.json();
+  return {
+    query: { page: 2, remove_me: null },
+    setHeaders: { authorization: "Bearer next", "x-drop": null },
+    json: { wrapped: incoming, rawLen: ctx.text().length, tag: ctx.form().length },
+    comment: "req-patched",
+    view: (
+      <Section title="Req Stage" copyValue="sig-1" selectFlowId={42} setFilter="host:api.vicanso.dev">
+        <KeyValue label="FirstQuery" value={ctx.query.map(([k, v]) => `${k}=${v}`).join(",")} />
+        <Badge tone="ok">REQ-BADGE</Badge>
+      </Section>
+    ),
+  };
+}
+
+export function onResponse(ctx) {
+  const parsed = ctx.json();
+  return {
+    status: 202,
+    setHeaders: { "X-Signed": "yes", "x-drop": null },
+    json: { ok: parsed?.ok ?? false, qCount: ctx.query.length },
+    view: <Divider />,
+  };
+}
+
+export function onPreview(ctx) {
+  const reqObj = ctx.req.json();
+  return {
+    view: (
+      <Row gap={8} wrap justify="between">
+        <Text tone="accent" bold size="base">Overview</Text>
+        <Badge tone="ok" selectFlowId={ctx.id}>SELF</Badge>
+      </Row>
+    ),
+    req: {
+      json: { decReq: reqObj?.hello ?? "none" },
+      note: "ReqDec",
+      view: (
+        <Collapsible title="ReqTree" defaultOpen={false}>
+          <KeyValue label="Q" value={String(ctx.query.length)} />
+        </Collapsible>
+      ),
+    },
+    res: {
+      form: [["resKey", ctx.res.text().slice(0, 8)]],
+      note: "ResDec",
+      view: (
+        <Tabs>
+          <Tab label="Metrics">
+            <Table columns={["ColA", "ColB"]} rows={[["k", "v"]]} />
+          </Tab>
+          <Tab label="Raw">
+            <Col gap={4}><View bordered padding={4}><Text mono size="xs">cell</Text></View></Col>
+          </Tab>
+        </Tabs>
+      ),
+    },
+  };
+}
+"#,
+    );
+
+    let resolved = resolve_script_hook(&dir.path, &[], "@full", &BTreeMap::new(), 500).unwrap();
+
+    // 1. onRequest incremental mutation + ctx.query/text()/json()/form() + view
+    let req_out = eval_request_hook_async(
+        hub.hook_session_host(),
+        resolved.clone(),
+        HookRequestInputOwned {
+            flow_id: 1,
+            method: "POST".into(),
+            scheme: "https".into(),
+            host: "api.vicanso.dev".into(),
+            url: "https://api.vicanso.dev/v1/items?remove_me=1&page=1".into(),
+            path: "/v1/items?remove_me=1&page=1".into(),
+            headers: vec![
+                ("Authorization".into(), "Bearer old".into()),
+                ("X-Drop".into(), "gone".into()),
+                ("Content-Type".into(), "text/plain".into()),
+            ],
+            body: br#"{"ok":true}"#.to_vec(),
+        },
+    )
+    .await
+    .expect("onRequest succeeds");
+
+    match req_out {
+        ScriptRequestAction::Mutate {
+            path,
+            headers,
+            body,
+            comment,
+            view,
+            ..
+        } => {
+            assert_eq!(path.as_deref(), Some("/v1/items?page=2"));
+            let hdrs = headers.unwrap();
+            assert!(!hdrs.iter().any(|(k, _)| k.eq_ignore_ascii_case("x-drop")));
+            assert!(
+                hdrs.iter()
+                    .any(|(k, v)| k.eq_ignore_ascii_case("authorization") && v == "Bearer next")
+            );
+            assert!(
+                hdrs.iter()
+                    .any(|(k, v)| k.eq_ignore_ascii_case("content-type")
+                        && v == "application/json; charset=utf-8")
+            );
+            let parsed: serde_json::Value = serde_json::from_slice(&body.unwrap()).unwrap();
+            assert_eq!(parsed["wrapped"]["ok"], true);
+            assert_eq!(parsed["rawLen"], 11);
+            assert_eq!(comment.as_deref(), Some("req-patched"));
+            assert!(matches!(
+                &view[0],
+                PreviewCardNode::Section {
+                    title,
+                    action: HookViewAction {
+                        copy_value: Some(c),
+                        select_flow_id: Some(42),
+                        set_filter: Some(f),
+                    },
+                    ..
+                } if title == "Req Stage" && c == "sig-1" && f == "host:api.vicanso.dev"
+            ));
+        }
+        other => panic!("expected Mutate, got {other:?}"),
+    }
+
+    // 2. onRequest respondWith with form + setHeaders + outer/inner views
+    let mock_out = eval_request_hook_async(
+        hub.hook_session_host(),
+        resolved.clone(),
+        HookRequestInputOwned {
+            flow_id: 2,
+            method: "GET".into(),
+            scheme: "https".into(),
+            host: "api.vicanso.dev".into(),
+            url: "https://api.vicanso.dev/v1/mock?k=alpha".into(),
+            path: "/v1/mock?k=alpha".into(),
+            headers: vec![],
+            body: vec![],
+        },
+    )
+    .await
+    .expect("respondWith succeeds");
+    match mock_out {
+        ScriptRequestAction::RespondWith {
+            status,
+            headers,
+            body,
+            view,
+            res_view,
+            ..
+        } => {
+            assert_eq!(status, 201);
+            assert_eq!(body, b"status=created&q=alpha");
+            assert!(headers.iter().any(|(k, v)| k == "X-Num" && v == "7"));
+            assert!(headers.iter().any(|(k, v)| {
+                k.eq_ignore_ascii_case("content-type")
+                    && v == "application/x-www-form-urlencoded; charset=utf-8"
+            }));
+            assert!(matches!(&view[0], PreviewCardNode::Callout { .. }));
+            assert!(matches!(
+                &res_view[0],
+                PreviewCardNode::Badge {
+                    tone: PreviewTone::Accent,
+                    text,
+                    ..
+                } if text == "RES-MOCK"
+            ));
+        }
+        other => panic!("expected RespondWith, got {other:?}"),
+    }
+
+    // 3. onResponse incremental mutation + view
+    let res_out = eval_response_hook_async(
+        hub.hook_session_host(),
+        resolved.clone(),
+        HookResponseInputOwned {
+            flow_id: 3,
+            method: "POST".into(),
+            host: "api.vicanso.dev".into(),
+            path: "/v1/items?a=1&b=2".into(),
+            url: "https://api.vicanso.dev/v1/items?a=1&b=2".into(),
+            status: 200,
+            headers: vec![
+                ("Content-Type".into(), "text/plain".into()),
+                ("X-Drop".into(), "stale".into()),
+            ],
+            body: br#"{"ok":true}"#.to_vec(),
+        },
+    )
+    .await
+    .expect("onResponse succeeds");
+    assert_eq!(res_out.status, Some(202));
+    assert!(matches!(
+        res_out.view.as_slice(),
+        [PreviewCardNode::Divider]
+    ));
+    let res_hdrs = res_out.headers.unwrap();
+    assert!(
+        !res_hdrs
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("x-drop"))
+    );
+    assert!(res_hdrs.iter().any(|(k, v)| k == "X-Signed" && v == "yes"));
+    assert!(
+        res_hdrs
+            .iter()
+            .any(|(k, v)| k.eq_ignore_ascii_case("content-type")
+                && v == "application/json; charset=utf-8")
+    );
+
+    // 4. onPreview both sides (req.view, res.view, overview view)
+    let prev_req = eval_preview_hook_async(
+        hub.hook_session_host(),
+        resolved.clone(),
+        HookPreviewInputOwned {
+            flow_id: 4,
+            is_response: false,
+            method: "POST".into(),
+            host: "api.vicanso.dev".into(),
+            path: "/v1/preview?x=9".into(),
+            url: "https://api.vicanso.dev/v1/preview?x=9".into(),
+            status: Some(200),
+            req_headers: vec![("Content-Type".into(), "application/json".into())],
+            req_body: br#"{"hello":"zniff"}"#.to_vec(),
+            res_headers: vec![],
+            res_body: b"abcdefghi".to_vec(),
+        },
+    )
+    .await
+    .expect("preview req succeeds");
+    assert_eq!(prev_req.side.note.as_deref(), Some("ReqDec"));
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(prev_req.side.body.as_deref().unwrap())
+            .unwrap()["decReq"],
+        "zniff"
+    );
+    assert!(matches!(
+        &prev_req.cards[0],
+        PreviewCardNode::Row { children, .. }
+            if matches!(&children[0], PreviewCardNode::Text { size: Some(TextSizeTier::Base), bold: true, .. })
+    ));
+    assert!(matches!(
+        &prev_req.side.view[0],
+        PreviewCardNode::Collapsible {
+            title,
+            default_open: false,
+            ..
+        } if title == "ReqTree"
+    ));
+
+    let prev_res = eval_preview_hook_async(
+        hub.hook_session_host(),
+        resolved,
+        HookPreviewInputOwned {
+            flow_id: 4,
+            is_response: true,
+            method: "POST".into(),
+            host: "api.vicanso.dev".into(),
+            path: "/v1/preview?x=9".into(),
+            url: "https://api.vicanso.dev/v1/preview?x=9".into(),
+            status: Some(200),
+            req_headers: vec![],
+            req_body: vec![],
+            res_headers: vec![],
+            res_body: b"abcdefghijkl".to_vec(),
+        },
+    )
+    .await
+    .expect("preview res succeeds");
+    assert_eq!(
+        prev_res.side.body.as_deref(),
+        Some(b"resKey=abcdefgh".as_slice())
+    );
+    assert!(matches!(
+        &prev_res.side.view[0],
+        PreviewCardNode::Tabs { items }
+            if items.len() == 2 && items[0].label == "Metrics" && items[1].label == "Raw"
+    ));
 }

@@ -164,6 +164,8 @@ pub(crate) fn clear_shown(shown: Shown) {
     shown.request_note.set(String::new());
     shown.response_note.set(String::new());
     shown.hook_cards.set(Vec::new());
+    shown.req_hook_cards.set(Vec::new());
+    shown.res_hook_cards.set(Vec::new());
     shown.req_search.set(String::new());
     shown.res_search.set(String::new());
     reset_body_offsets(shown);

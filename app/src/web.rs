@@ -1056,7 +1056,7 @@ async fn route(
             }
             if let Ok(id) = rest_flow.parse::<u64>() {
                 let hub = Arc::clone(&lock(slot).hub);
-                let reply = match flow_detail(&hub, id) {
+                let reply = match flow_detail(&hub, id).await {
                     Some(value) => json_reply(200, "OK", &value),
                     None => json_reply(404, "Not Found", &json!({"error": "not found"})),
                 };
@@ -1412,14 +1412,14 @@ fn unix_millis(time: SystemTime) -> u64 {
         .unwrap_or(0)
 }
 
-fn flow_detail(hub: &Hub, id: u64) -> Option<Value> {
-    hub.with_session(|session| {
+async fn flow_detail(hub: &Hub, id: u64) -> Option<Value> {
+    let (flow, mut detail) = hub.with_session(|session| {
         let flow = session.hydrated(id)?;
         let (request_body, request_body_b64, request_truncated, request_binary) =
             preview(&flow.request_body);
         let (response_body, response_body_b64, response_truncated, response_binary) =
             preview(&flow.response_body);
-        Some(json!({
+        let detail = json!({
             "id": flow.id,
             "rev": flow.rev,
             "method": flow.method,
@@ -1457,8 +1457,14 @@ fn flow_detail(hub: &Hub, id: u64) -> Option<Value> {
                 "kind": message.kind,
                 "text": message.text,
             })).collect::<Vec<_>>(),
-        }))
-    })
+        });
+        Some((flow, detail))
+    })?;
+    let hook = crate::webhook::web_flow_hook_json(hub, &flow).await;
+    if let Some(obj) = detail.as_object_mut() {
+        obj.insert("hook".to_string(), hook);
+    }
+    Some(detail)
 }
 
 fn redact_options_for_target(prefs: &WebPrefs, target: &str) -> crate::share::RedactOptions {

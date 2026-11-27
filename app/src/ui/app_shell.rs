@@ -254,6 +254,8 @@ fn app_workspace(rt: AppRuntime) -> impl IntoElement {
         request_note: signal(String::new()),
         response_note: signal(String::new()),
         hook_cards: signal(Vec::new()),
+        req_hook_cards: signal(Vec::new()),
+        res_hook_cards: signal(Vec::new()),
         metrics: signal(String::new()),
         timing_bar: signal(present::TimingBreakdown::default()),
         query: signal(Vec::new()),
@@ -488,6 +490,8 @@ fn app_workspace(rt: AppRuntime) -> impl IntoElement {
         shown_tree_effect.res_json_tree.set(active);
     });
     let config_broken_dismissed = signal(false);
+    let hook_run_open = signal(None::<HookRunModalData>);
+    let hook_run_open_tick = hook_run_open;
     let update_state = signal(lock_update_state(&controls));
     status.set(lock_status(&controls));
     running.set(lock_bool(&controls.running));
@@ -1119,6 +1123,14 @@ fn app_workspace(rt: AppRuntime) -> impl IntoElement {
             } else {
                 queue_pending_replay_diff(&controls_tick, source_id, replayed_id);
             }
+        }
+        if let Some(modal) = controls_tick
+            .pending_hook_run
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .take()
+        {
+            hook_run_open_tick.set(Some(modal));
         }
         let selected_now = selected_tick.get();
         let lang_now = ui_lang(langs);
@@ -1992,6 +2004,7 @@ fn app_workspace(rt: AppRuntime) -> impl IntoElement {
             shown,
         ))
         .child(shortcuts_modal(shortcuts_open))
+        .child(hook_run_modal(hook_run_open, selected, profile_signals))
         .child(marker_modal(
             profile_signals.marker_modal_open,
             controls.clone(),

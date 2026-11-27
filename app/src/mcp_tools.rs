@@ -743,6 +743,7 @@ pub(crate) async fn tool_run_script_hook(hub: Arc<Hub>, args: &Value) -> Value {
             "ok": true,
             "id": report.hook_id,
             "summary": report.summary,
+            "view": report.cards,
             "cards": report.cards,
             "duration_ms": report.duration_ms,
         })),

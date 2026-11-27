@@ -800,6 +800,7 @@ mod tests {
             config_error: Mutex::new(None),
             config_path: Mutex::new(String::new()),
             pending_replay_diff: Mutex::new(None),
+            pending_hook_run: Mutex::new(None),
             session_tabs: Mutex::new(SessionTabsStore::new()),
         });
 

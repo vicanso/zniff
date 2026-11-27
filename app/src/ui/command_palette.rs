@@ -962,13 +962,27 @@ pub(crate) fn command_palette_modal(
                                         cur_selected,
                                     );
                                     match res {
-                                        Ok(report) => set_status(
-                                            &controls_run,
-                                            StatusMsg::ScriptHookCompleted {
-                                                id: report.hook_id,
-                                                summary: report.summary,
-                                            },
-                                        ),
+                                        Ok(report) => {
+                                            if !report.cards.is_empty() {
+                                                *controls_run
+                                                    .pending_hook_run
+                                                    .lock()
+                                                    .unwrap_or_else(|err| err.into_inner()) =
+                                                    Some(HookRunModalData {
+                                                        hook_id: report.hook_id.clone(),
+                                                        summary: report.summary.clone(),
+                                                        cards: report.cards,
+                                                        duration_ms: report.duration_ms,
+                                                    });
+                                            }
+                                            set_status(
+                                                &controls_run,
+                                                StatusMsg::ScriptHookCompleted {
+                                                    id: report.hook_id,
+                                                    summary: report.summary,
+                                                },
+                                            );
+                                        }
                                         Err(err) => {
                                             set_status(
                                                 &controls_run,

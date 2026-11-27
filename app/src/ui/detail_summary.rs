@@ -51,6 +51,8 @@ pub(crate) struct Shown {
     pub(crate) request_note: Signal<String>,
     pub(crate) response_note: Signal<String>,
     pub(crate) hook_cards: Signal<Vec<crate::hook_spec::PreviewCardNode>>,
+    pub(crate) req_hook_cards: Signal<Vec<crate::hook_spec::PreviewCardNode>>,
+    pub(crate) res_hook_cards: Signal<Vec<crate::hook_spec::PreviewCardNode>>,
     pub(crate) metrics: Signal<String>,
     pub(crate) timing_bar: Signal<present::TimingBreakdown>,
     pub(crate) query: Signal<Vec<HeaderLine>>,
@@ -418,6 +420,13 @@ pub(crate) fn ready_detail(
     let res_controls_split = controls.clone();
     let req_controls_stack = controls.clone();
     let res_controls_stack = controls.clone();
+    let hook_view_ctx =
+        HookViewActionCtx::for_inspector(selected, filter, Some(profiles.filter_enabled));
+    let overview_hook_ctx = hook_view_ctx.clone();
+    let req_split_hook_ctx = hook_view_ctx.clone();
+    let res_split_hook_ctx = hook_view_ctx.clone();
+    let req_stack_hook_ctx = hook_view_ctx.clone();
+    let res_stack_hook_ctx = hook_view_ctx;
     uncull_nested_scroll(view())
         .pl_3p5()
         .pr_5()
@@ -441,7 +450,10 @@ pub(crate) fn ready_detail(
             let controls = controls.clone();
             move || inline_mock_box(compose, controls.clone(), profiles)
         }))
-        .child(hook_preview_cards(shown.hook_cards))
+        .child(hook_preview_cards_with_actions(
+            shown.hook_cards,
+            overview_hook_ctx,
+        ))
         .child(
             when(side_by_side, move || {
                 view()
@@ -460,6 +472,7 @@ pub(crate) fn ready_detail(
                                 selected,
                                 baseline,
                                 folded,
+                                req_split_hook_ctx.clone(),
                             )),
                     )
                     .child(
@@ -473,6 +486,7 @@ pub(crate) fn ready_detail(
                                 selected,
                                 baseline,
                                 folded,
+                                res_split_hook_ctx.clone(),
                             )),
                     )
             })
@@ -486,6 +500,7 @@ pub(crate) fn ready_detail(
                         selected,
                         baseline,
                         folded,
+                        res_stack_hook_ctx.clone(),
                     ))
                     .child(request_cards(
                         shown,
@@ -493,6 +508,7 @@ pub(crate) fn ready_detail(
                         selected,
                         baseline,
                         folded,
+                        req_stack_hook_ctx.clone(),
                     ))
             }),
         )
@@ -519,11 +535,16 @@ fn response_cards(
     selected: Signal<Option<u64>>,
     baseline: Signal<Option<u64>>,
     folded: Signal<u8>,
+    hook_view_ctx: HookViewActionCtx,
 ) -> impl IntoElement {
     let no_form = signal(Vec::<HeaderLine>::new());
     view()
         .w_full()
         .gap_3p5()
+        .child(hook_preview_cards_with_actions(
+            shown.res_hook_cards,
+            hook_view_ctx,
+        ))
         .child(when(
             move || {
                 shown.res_body_loading.get()
@@ -575,11 +596,16 @@ fn request_cards(
     selected: Signal<Option<u64>>,
     baseline: Signal<Option<u64>>,
     folded: Signal<u8>,
+    hook_view_ctx: HookViewActionCtx,
 ) -> impl IntoElement {
     let no_loading = signal(false);
     view()
         .w_full()
         .gap_3p5()
+        .child(hook_preview_cards_with_actions(
+            shown.req_hook_cards,
+            hook_view_ctx,
+        ))
         .child(when(
             move || {
                 shown.req_body_loading.get()

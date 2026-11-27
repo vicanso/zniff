@@ -18,6 +18,7 @@ use crate::hook_action::{
     parse_run_report,
 };
 use crate::hook_bridge::{HookCallGuard, HookSessionHost};
+use crate::hook_params::query_to_js;
 use crate::hook_spec::{
     DEFAULT_HOOK_TIMEOUT_MS, HookStage, MAX_HOOK_TIMEOUT_MS, MIN_HOOK_TIMEOUT_MS, ScriptHookConfig,
     ScriptHookSummary, ZNIFF_HOOK_DTS, sanitize_hook_id, sanitize_hook_script_file,
@@ -323,6 +324,7 @@ where
            else if (__def && typeof __def === \"object\" && typeof __def[\"{fn_name}\"] === \"function\") __fn = __def[\"{fn_name}\"];\n\
            else if (typeof __def === \"function\" && (!__def.name || __def.name === \"{fn_name}\")) __fn = __def;\n\
            if (!__fn) return undefined;\n\
+           if (typeof __zniff_enrich_ctx === \"function\") __zniff_enrich_ctx(__in);\n\
            if (__in && typeof __in === \"object\") {{ if (__in.vars) Object.freeze(__in.vars); Object.freeze(__in); }}\n\
            return __fn(__in);\n\
          }} finally {{\n\
@@ -367,11 +369,12 @@ pub(crate) async fn eval_request_hook_async(
                             obj.set("host", input.host.as_str())?;
                             obj.set("url", input.url.as_str())?;
                             obj.set("path", input.path.as_str())?;
+                            obj.set("query", query_to_js(cx, &input.path)?)?;
                             obj.set("headers", headers_to_js(cx, &input.headers)?)?;
                             obj.set("body", TypedArray::<u8>::new_copy(cx.clone(), &input.body)?)?;
                             Ok(())
                         },
-                        parse_request_action,
+                        |cx, val| parse_request_action(cx, val, &input.path, &input.headers),
                     )
                 })
             },
@@ -407,12 +410,13 @@ pub(crate) async fn eval_response_hook_async(
                             obj.set("host", input.host.as_str())?;
                             obj.set("path", input.path.as_str())?;
                             obj.set("url", input.url.as_str())?;
+                            obj.set("query", query_to_js(cx, &input.path)?)?;
                             obj.set("status", input.status as u32)?;
                             obj.set("headers", headers_to_js(cx, &input.headers)?)?;
                             obj.set("body", TypedArray::<u8>::new_copy(cx.clone(), &input.body)?)?;
                             Ok(())
                         },
-                        parse_response_action,
+                        |cx, val| parse_response_action(cx, val, &input.headers),
                     )
                 })
             },
@@ -478,6 +482,7 @@ pub(crate) async fn eval_preview_hook_async(
                             obj.set("host", input.host.as_str())?;
                             obj.set("path", input.path.as_str())?;
                             obj.set("url", input.url.as_str())?;
+                            obj.set("query", query_to_js(cx, &input.path)?)?;
                             obj.set("status", input.status.map(u16::into) as Option<u32>)?;
                             obj.set("req", req_side)?;
                             obj.set("res", res_side)?;
