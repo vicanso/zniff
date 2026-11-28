@@ -585,7 +585,11 @@ export interface ZniffHookSdk {
   readonly crypto: ZniffCryptoApi;
 }
 
+export const $: ZniffHookSdk;
+export const zniff: ZniffHookSdk;
+
 declare global {
+  const $: ZniffHookSdk;
   const zniff: ZniffHookSdk;
   function Section(props: HookActionProps & { title?: string; children?: HookViewChild }): HookViewNode;
   function KeyValue(props: HookActionProps & { label?: string; value?: string; children?: string }): HookViewNode;
@@ -610,6 +614,8 @@ declare global {
 
 declare module "zniff/hook" {
   export {
+    $,
+    zniff,
     HookStage,
     HeaderPair,
     PreviewTone,

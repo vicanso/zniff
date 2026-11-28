@@ -105,7 +105,7 @@ pub(crate) fn extra_tool_schemas() -> Vec<Value> {
         }),
         json!({
             "name": "run_script_hook",
-            "description": "Execute an <data_dir>/hooks/*.tsx script's `onRun(ctx)` entrypoint on captured flows using `zniff.flows.*`, `zniff.codec.*`, and `zniff.crypto.*`.",
+            "description": "Execute an <data_dir>/hooks/*.tsx script's `onRun(ctx)` entrypoint on captured flows using `$.flows.*` / `$.codec.*` / `$.crypto.*` (`$` alias of `zniff`).",
             "inputSchema": {
                 "type": "object",
                 "required": ["id"],

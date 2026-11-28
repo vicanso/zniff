@@ -132,14 +132,16 @@ impl Drop for HookCallGuard {
     }
 }
 
-/// Installs the global `zniff` SDK object (`flows`, `codec`, `crypto`) before
-/// `SANDBOX_PRELUDE` freezes prototypes and `globalThis`.
+/// Installs the global `$` and `zniff` SDK bindings (`flows`, `codec`, `crypto`)
+/// pointing to the same object before `SANDBOX_PRELUDE_LOCKDOWN` freezes it.
 pub(crate) fn install_zniff_globals<'js>(cx: &Ctx<'js>) -> JsResult<()> {
-    let zniff = Object::new(cx.clone())?;
-    zniff.set("flows", build_flows_object(cx)?)?;
-    zniff.set("codec", build_codec_object(cx)?)?;
-    zniff.set("crypto", build_crypto_object(cx)?)?;
-    cx.globals().set("zniff", zniff)
+    let sdk = Object::new(cx.clone())?;
+    sdk.set("flows", build_flows_object(cx)?)?;
+    sdk.set("codec", build_codec_object(cx)?)?;
+    sdk.set("crypto", build_crypto_object(cx)?)?;
+    let globals = cx.globals();
+    globals.set("zniff", sdk.clone())?;
+    globals.set("$", sdk)
 }
 
 fn require_host<'js>(cx: &Ctx<'js>) -> JsResult<HookSessionHost> {

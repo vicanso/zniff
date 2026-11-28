@@ -2,7 +2,7 @@
 
 > 返回 [文档索引](./README.md) · 常规行为边界另见 [已知限制与行为边界](known-issues.md) · v0.5 规划见 [易用性与功能增强规划](usability-roadmap-v0.5.md)
 
-本文档记录涉及**用户习惯、协议语义边界与产品复杂度取舍**的问题。第 1–23 项均已决策并落地（E7、E9 明确暂缓）。
+本文档记录涉及**用户习惯、协议语义边界与产品复杂度取舍**的问题。第 1–23 项均已决策并落地（E7、E9 明确暂缓），第 24 项已记录纳入下一版本规划。
 
 ---
 
@@ -208,3 +208,18 @@
 - **技术核对**：`nsh-core 0.6.1` 已原生提供 `desktop::tray()`、`desktop::set_tray()` 与 `main_window().on_close_press(...)`，无需另写平台实现。
 - **决策结论**：采用轻量托盘菜单（显示窗口、开始/停止、系统代理开关、退出）；「关闭窗口时最小化到托盘」默认关闭（维持关窗即停抓包的安全默认，在设置窗口中按需开启）。
 - **落地说明**（`d09f48e`）：新增 `app/src/ui/tray.rs` 实现桌面端响应式双语系统托盘菜单与 `on_close_press` 隐藏至托盘生命周期，并在 `config.rs` 与设置「通用」页新增默认关闭的 `minimize_to_tray` 开关（wasm32 编译无侵入）。
+
+---
+
+## 五、下一版本规划待办
+
+### 24. 脚本勾子（`Script Hooks`）界面点击入口与内置 TSX 编辑面板 — 📋 已记录待下一版本实现
+
+- **关联模块**：`app/src/hook_spec.rs`、`app/src/hook_runtime.rs`、`app/src/ui/command_palette.rs`、`app/src/ui/hook_run_modal.rs`、`app/src/ui/rules_panel.rs`、`app/src/ui/more_menu.rs`（交互与编辑器可复用现有自定义详情布局管理面板 `app/src/ui/layout_settings.rs`、`app/src/ui/layout_settings_editor.rs`）
+- **当前现状**：
+  - 脚本文件存放在 `<data_dir>/hooks/<id>.tsx`（或 `.ts`），目前依赖外部编辑器编写；
+  - 初始化示例脚本（`init_script_hooks`）与触发 `onRun` 主动勾子（`run_script_hook`）仅提供 `Cmd/Ctrl+Shift+P` 全局命令面板入口，顶栏「更多」菜单与「规则」弹出层暂无鼠标点击入口，也尚未提供应用内 TSX 代码与 `[[script_hooks]]` 可视化管理编辑面板。
+- **下一版本规划方案**：
+  1. **可点击界面入口**：在顶栏「规则」弹出层（新增「脚本勾子 / Hooks」管理入口或页签）及「更多 → 工具」菜单补齐鼠标可点击入口（同时在「更多 → 工具」补上打开全局命令面板 `Cmd/Ctrl+Shift+P` 的菜单项）。
+  2. **内置 TSX 编辑与配置管理面板**：复用 `nsh_base::editor()` 与 `zniff-script-worker` 编译/导出校验能力（对齐 `layout_settings_editor.rs` 体验），支持在应用内直接新建/重命名/编辑/删除 `<data_dir>/hooks/*.tsx`，可视化勾选 `stages`（`request` / `response` / `preview` / `run`）、配置 `match` 匹配模式、`timeout_ms`、`vars` 键值变量与 `enabled` 开关，展示熔断状态并支持一键重置熔断与试跑 `onRun`。
+  3. **Web 操作台对齐**：在 `zniff --web`（`web.rs` / `hub_web.rs`）同步评估补齐受 `web_auth` 保护的脚本列表与编辑接口，或显式维持服务端只读安全边界。

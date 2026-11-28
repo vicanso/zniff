@@ -375,3 +375,199 @@ export function onPreview(ctx: PreviewHookContext): PreviewHookResult {
         matches!(&children[1], PreviewCardNode::KeyValue { label, value, .. } if label == "Service" && value == "rpc.vicanso.dev")
     );
 }
+
+#[tokio::test]
+async fn dollar_shorthand_aliases_frozen_zniff_sdk_across_stages() {
+    use crate::session::{Direction, FlowDraft, Protocol};
+
+    let dir = TempSdkDir::new("dollar-sdk");
+    let hub = dir.hub();
+    let dts_path = ensure_hook_types(&dir.0).expect("write zniff-hook.d.ts");
+    let dts = fs::read_to_string(dts_path).expect("read zniff-hook.d.ts");
+    assert!(dts.contains("export const $: ZniffHookSdk;"));
+    assert!(dts.contains("  const $: ZniffHookSdk;\n  const zniff: ZniffHookSdk;"));
+    assert!(dts.contains("declare module \"zniff/hook\" {\n  export {\n    $,\n    zniff,"));
+
+    let flow_id = hub.open(FlowDraft {
+        protocol: Protocol::Http11,
+        method: "POST".into(),
+        host: "api.vicanso.dev".into(),
+        path: "/v1/items".into(),
+        url: "https://api.vicanso.dev/v1/items".into(),
+        request_headers: vec![("X-Origin".into(), "sdk-test".into())],
+    });
+    hub.append_body_bytes_for_test(flow_id, Direction::Request, br#"{"item":"tea"}"#);
+    hub.set_response_for_test(
+        flow_id,
+        200,
+        vec![("Content-Type".into(), "application/json".into())],
+    );
+    hub.append_body_bytes_for_test(flow_id, Direction::Response, br#"{"ok":true}"#);
+    hub.mark_finished(flow_id);
+
+    dir.write(
+        "dollar-alias.tsx",
+        r#"import type {
+  PreviewHookContext,
+  PreviewHookResult,
+  RequestHookContext,
+  RequestHookResult,
+  ResponseHookContext,
+  ResponseHookResult,
+  RunHookContext,
+  RunHookResult,
+} from "zniff/hook";
+import { $, Badge, Section } from "zniff/hook";
+
+function checkDollarLockdown() {
+  const same = $ === zniff
+    && $.flows === zniff.flows
+    && $.codec === zniff.codec
+    && $.crypto === zniff.crypto;
+  const frozen = Object.isFrozen($) && Object.isFrozen($.flows)
+    && Object.isFrozen($.codec) && Object.isFrozen($.crypto);
+  let globalBlocked = false;
+  let propBlocked = false;
+  const g: any = globalThis;
+  try { g.$ = 1; } catch { globalBlocked = true; }
+  const m: any = $;
+  try { m.codec = null; } catch { propBlocked = true; }
+  const innerShadow = () => {
+    const $ = "shadow";
+    return $ === "shadow" && zniff.codec.hexEncode("a") === "61";
+  };
+  return {
+    same,
+    frozen,
+    blocked: globalBlocked && propBlocked,
+    shadowOk: innerShadow() && $.codec.hexEncode("a") === "61",
+  };
+}
+
+export function onRequest(ctx: RequestHookContext): RequestHookResult {
+  const st = checkDollarLockdown();
+  const sig = $.crypto.hmacSha256Hex(ctx.vars.secret, ctx.body);
+  return {
+    setHeaders: {
+      "X-Dollar-Same": String(st.same && st.frozen && st.blocked && st.shadowOk),
+      "X-Dollar-Sig": sig,
+    },
+  };
+}
+
+export function onResponse(ctx: ResponseHookContext): ResponseHookResult {
+  const same = $ === zniff;
+  const hash = $.crypto.sha256Hex(ctx.body);
+  return {
+    setHeaders: {
+      "X-Dollar-Res": `${same}:${hash.slice(0, 8)}`,
+    },
+  };
+}
+
+export function onPreview(ctx: PreviewHookContext): PreviewHookResult {
+  const same = $ === zniff;
+  const encoded = $.codec.base64Encode(ctx.res.body);
+  return {
+    view: (
+      <Section title="Dollar SDK">
+        <Badge tone={same ? "ok" : "danger"}>{`${same}:${encoded}`}</Badge>
+      </Section>
+    ),
+  };
+}
+
+export function onRun(ctx: RunHookContext): RunHookResult {
+  const ids = $.flows.ids("host:api.vicanso.dev");
+  const hdr = $.flows.requestHeader(ids[0], "x-origin");
+  return {
+    summary: `${ctx.stage}:${$ === zniff}:${ids.length}:${hdr}`,
+  };
+}
+"#,
+    );
+
+    let vars = BTreeMap::from([("secret".into(), "s3cr3t".into())]);
+    let req_hdrs = run_req(
+        &dir,
+        &hub,
+        "@dollar-alias",
+        vars.clone(),
+        vec![],
+        b"payload".to_vec(),
+    )
+    .await;
+    assert_eq!(hdr(&req_hdrs, "x-dollar-same"), Some("true"));
+    assert_eq!(hdr(&req_hdrs, "x-dollar-sig").map(str::len), Some(64));
+
+    let resolved_res = resolve_script_hook(&dir.0, &[], "@dollar-alias", &vars, 500).unwrap();
+    let res_action = eval_response_hook_async(
+        hub.hook_session_host(),
+        resolved_res,
+        HookResponseInputOwned {
+            flow_id,
+            method: "POST".into(),
+            host: "api.vicanso.dev".into(),
+            path: "/v1/items".into(),
+            url: "https://api.vicanso.dev/v1/items".into(),
+            status: 200,
+            headers: vec![],
+            body: b"pong".to_vec(),
+        },
+    )
+    .await
+    .expect("onResponse with $ succeeds");
+    let res_hdrs = res_action.headers.expect("expected response headers");
+    assert!(hdr(&res_hdrs, "x-dollar-res").unwrap().starts_with("true:"));
+
+    let resolved_prev = resolve_script_hook(&dir.0, &[], "@dollar-alias", &vars, 500).unwrap();
+    let prev = eval_preview_hook_async(
+        hub.hook_session_host(),
+        resolved_prev,
+        HookPreviewInputOwned {
+            flow_id,
+            is_response: true,
+            method: "POST".into(),
+            host: "api.vicanso.dev".into(),
+            path: "/v1/items".into(),
+            url: "https://api.vicanso.dev/v1/items".into(),
+            status: Some(200),
+            req_headers: vec![],
+            req_body: vec![],
+            res_body: b"abc".to_vec(),
+            res_headers: vec![],
+        },
+    )
+    .await
+    .expect("onPreview with $ succeeds");
+    let PreviewCardNode::Section { children, .. } = &prev.cards[0] else {
+        panic!("expected Section");
+    };
+    assert!(
+        matches!(&children[0], PreviewCardNode::Badge { tone: PreviewTone::Ok, text, .. } if text == "true:YWJj")
+    );
+
+    let report = eval_run_hook_async(
+        &dir.0,
+        &[],
+        hub.hook_session_host(),
+        "@dollar-alias",
+        "",
+        None,
+    )
+    .await
+    .expect("onRun with $ succeeds");
+    assert_eq!(report.summary, "run:true:1:sdk-test");
+
+    // Re-running onRequest confirms inner local `$` shadowing never leaked into subsequent calls.
+    let req_hdrs_again = run_req(
+        &dir,
+        &hub,
+        "@dollar-alias",
+        vars,
+        vec![],
+        b"payload".to_vec(),
+    )
+    .await;
+    assert_eq!(hdr(&req_hdrs_again, "x-dollar-same"), Some("true"));
+}

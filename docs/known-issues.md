@@ -112,6 +112,7 @@
   - 路径显示模式（`path_display`）支持 `auto`（默认：未开主机列且无生效正向 `host:`/`domain:` 过滤时显示域名+路径，否则仅显示路径）、`path_only`、`host_and_path`、`full_url`（兼容旧 `show_full_url`）；省略模式（`ellipsize`）支持 `head` / `middle`（默认） / `tail`。
   - `host:` / `domain:` 过滤为**精确（忽略大小写）或通配符（`*.` / `*`）匹配**，非子串匹配；子串查找请用裸词。
   - 方向键 `↑` / `↓` 切换选中行时自动将选中行滚入列表可见视口；`make dev` 热重载可能拦截 `Cmd+R`；全局命令面板快捷键为 `Cmd/Ctrl+Shift+P`（基于 `nsh_base::command`）。
+  - 脚本勾子（`<data_dir>/hooks/*.tsx` 与 `[[script_hooks]]`）当前版本通过外部编辑器编写脚本，配合 `Cmd/Ctrl+Shift+P` 命令面板（初始化示例与触发 `onRun`）及「规则」面板 `hook <host/path> @<id>` 绑定；界面点击入口与内置 TSX 编辑管理面板已纳入下一版本规划（见 [`open-questions.md` #24](./open-questions.md)）。
 - **字体与编码**：
   - 代码与表格等宽列默认使用随包压缩的 `JetBrains Mono NL`（可在「更多」切回系统等宽）；该字体无中文字形，中文回落系统字体。HTML 快照与 Web 端不内嵌字体。
 - **详情预览与图片**：
